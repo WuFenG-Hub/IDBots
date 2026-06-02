@@ -43,6 +43,7 @@ test('private chat prompt injects allowed local chat skills without the no-tools
   assert.match(prompt, /<available_skills>/);
   assert.match(prompt, /weather-skill/);
   assert.match(prompt, /only the local skills listed/i);
+  assert.match(prompt, /brief wait notice/i);
   assert.doesNotMatch(prompt, /Do not claim local tool access or execute local skills/i);
 });
 
@@ -53,6 +54,7 @@ test('private chat prompt without skills keeps the no-tools rule', () => {
   });
 
   assert.doesNotMatch(prompt, /<available_skills>/);
+  assert.doesNotMatch(prompt, /brief wait notice/i);
   assert.match(prompt, /Do not claim local tool access or execute local skills/i);
 });
 
@@ -69,4 +71,5 @@ test('private chat force-bye prompt does not inject chat skills', () => {
   assert.match(prompt, /Reply exactly "bye" now/);
   assert.doesNotMatch(prompt, /<available_skills>/);
   assert.doesNotMatch(prompt, /weather-skill/);
+  assert.doesNotMatch(prompt, /brief wait notice/i);
 });

@@ -189,10 +189,11 @@ async function waitFor(predicate, timeoutMs = 15_000) {
 
 test('regular private chat skill failures keep the inbound message retryable until a reply is sent', async () => {
   const { db, row } = createPrivateChatDbHarness();
-  const { store: coworkStore } = createCoworkStoreHarness();
-  const { store: metabotStore } = createMetabotStoreHarness();
+  const { store: coworkStore, session } = createCoworkStoreHarness();
+  const { metabot, store: metabotStore } = createMetabotStoreHarness();
   const logs = [];
   let saveCount = 0;
+  let createPinCount = 0;
 
   startPrivateChatDaemon(
     db,
@@ -205,8 +206,12 @@ test('regular private chat skill failures keep the inbound message retryable unt
       on() {},
       off() {},
     },
-    async () => {
-      throw new Error('createPin should not be called when the skill turn fails');
+    async (_metabotStore, metabotId, payload) => {
+      assert.equal(metabotId, metabot.id);
+      createPinCount += 1;
+      assert.equal(payload.path, '/protocols/simplemsg');
+      const txid = 'c'.repeat(64);
+      return { txids: [txid], pinId: `${txid}i0` };
     },
     (message) => logs.push(message),
     null,
@@ -223,6 +228,7 @@ test('regular private chat skill failures keep the inbound message retryable unt
     async () => {
       throw new Error('Skill turn timed out after 120s');
     },
+    async () => '我需要查询一下，请稍等。',
   );
 
   try {
@@ -233,6 +239,10 @@ test('regular private chat skill failures keep the inbound message retryable unt
 
   assert.equal(row.is_processed, 0);
   assert.equal(saveCount, 0);
+  assert.equal(createPinCount, 1);
+  const waitNotice = session.messages.find((message) => message.metadata?.privateChatSkillWaitNotice === true);
+  assert.equal(waitNotice?.content, '我需要查询一下，请稍等。');
+  assert.equal(waitNotice?.metadata?.privateChatDeliveryStatus, 'sent');
 });
 
 test('regular private chat broadcast failures keep the inbound skill reply retryable', async () => {
@@ -241,6 +251,7 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
   const { store: metabotStore } = createMetabotStoreHarness();
   const logs = [];
   let saveCount = 0;
+  let createPinCount = 0;
 
   startPrivateChatDaemon(
     db,
@@ -254,6 +265,11 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
       off() {},
     },
     async () => {
+      createPinCount += 1;
+      if (createPinCount === 1) {
+        const txid = 'd'.repeat(64);
+        return { txids: [txid], pinId: `${txid}i0` };
+      }
       throw new Error('simulated broadcast failure');
     },
     (message) => logs.push(message),
@@ -272,6 +288,7 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
       replyText: 'PoP 的全称是 Proof of PIN',
       assistantMessageId: null,
     }),
+    async () => '我需要查询一下，请稍等。',
   );
 
   try {
@@ -280,9 +297,15 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
     await stopPrivateChatDaemon({ waitForTick: true });
   }
 
-  const assistantMessage = session.messages.find((message) => message.type === 'assistant');
+  const assistantMessage = session.messages.find((message) => (
+    message.type === 'assistant'
+    && message.metadata?.privateChatSkillWaitNotice !== true
+  ));
   assert.equal(row.is_processed, 0);
   assert.equal(saveCount, 0);
+  assert.equal(createPinCount, 2);
+  const waitNotice = session.messages.find((message) => message.metadata?.privateChatSkillWaitNotice === true);
+  assert.equal(waitNotice?.metadata?.privateChatDeliveryStatus, 'sent');
   assert.equal(assistantMessage?.metadata?.privateChatDeliveryStatus, 'failed');
   assert.match(String(assistantMessage?.metadata?.privateChatDeliveryError || ''), /simulated broadcast failure/);
 });
@@ -353,4 +376,76 @@ test('regular private chat replies emit markdown simplemsg payloads without chan
   assert.equal(simplemsgPayload.contentType, 'text/markdown');
   assert.equal(simplemsgPayload.encrypt, 'ecdh');
   assert.equal(simplemsgPayload.replyPin, '');
+});
+
+test('regular private chat sends a wait notice before running a local chat skill', async () => {
+  const { db, row } = createPrivateChatDbHarness();
+  const { store: coworkStore, session } = createCoworkStoreHarness();
+  const { metabot, store: metabotStore } = createMetabotStoreHarness();
+  const logs = [];
+  const events = [];
+  const capturedCreatePinPayloads = [];
+  let saveCount = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {
+      saveCount += 1;
+    },
+    coworkStore,
+    metabotStore,
+    {
+      on() {},
+      off() {},
+    },
+    async (_metabotStore, metabotId, payload) => {
+      assert.equal(metabotId, metabot.id);
+      events.push('createPin');
+      capturedCreatePinPayloads.push(payload);
+      const txid = `${capturedCreatePinPayloads.length}`.repeat(64).slice(0, 64);
+      return { txids: [txid], pinId: `${txid}i0` };
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async () => {
+      events.push('skill-start');
+      return {
+        replyText: 'PoP 的全称是 Proof of PIN',
+        assistantMessageId: null,
+      };
+    },
+    async () => {
+      events.push('notice-generated');
+      return '我需要查询一下，请稍等。';
+    },
+  );
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('Replied to')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1);
+  assert.equal(saveCount, 1);
+  assert.deepEqual(events, ['notice-generated', 'createPin', 'skill-start', 'createPin']);
+  assert.equal(capturedCreatePinPayloads.length, 2);
+  assert.ok(capturedCreatePinPayloads.every((payload) => payload.path === '/protocols/simplemsg'));
+
+  const assistantMessages = session.messages.filter((message) => message.type === 'assistant');
+  assert.equal(assistantMessages.length, 2);
+  assert.equal(assistantMessages[0].content, '我需要查询一下，请稍等。');
+  assert.equal(assistantMessages[0].metadata?.privateChatSkillWaitNotice, true);
+  assert.equal(assistantMessages[0].metadata?.privateChatDeliveryStatus, 'sent');
+  assert.equal(assistantMessages[1].content, 'PoP 的全称是 Proof of PIN');
 });
