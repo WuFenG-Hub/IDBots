@@ -326,6 +326,7 @@ export function resolveBuyerOrderProtocolMapping(
   }
 ): CoworkConversationMapping | null {
   const delivery = parseDeliveryMessage(input.plaintext);
+  const orderStatus = parseOrderStatusMessage(input.plaintext);
   const isNeedsRating = isNeedsRatingMessage(input.plaintext);
   const orderEnd = parseOrderEndMessage(input.plaintext);
   const explicitOrderPinId = resolveOrderProtocolPinId(input.plaintext);
@@ -348,7 +349,7 @@ export function resolveBuyerOrderProtocolMapping(
     );
   }
 
-  if (delivery || isNeedsRating || orderEnd) {
+  if (delivery || orderStatus || isNeedsRating || orderEnd) {
     return coworkStore.findOrderSessionByPeer(input.localMetabotId, input.peerGlobalMetaId);
   }
   return null;

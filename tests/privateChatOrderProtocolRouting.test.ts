@@ -91,6 +91,16 @@ test('buyer order protocol routing keeps txid and peer fallback only for legacy 
 
   assert.equal(legacyMapping, legacy.second);
   assert.deepEqual(legacy.calls, ['peer']);
+
+  const legacyStatus = createRoutingStore();
+  const legacyStatusMapping = resolveBuyerOrderProtocolMapping(legacyStatus.store, {
+    localMetabotId: 1,
+    peerGlobalMetaId: 'seller-global-metaid',
+    plaintext: buildOrderStatusMessage('', 'legacy status update'),
+  });
+
+  assert.equal(legacyStatusMapping, legacyStatus.second);
+  assert.deepEqual(legacyStatus.calls, ['peer']);
 });
 
 test('seller order skill scope rejects unresolved v1.1 allowed skills instead of running unrestricted', async () => {
