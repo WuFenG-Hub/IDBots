@@ -4,13 +4,22 @@ import assert from 'node:assert/strict';
 let buildPrivateReplyMemoryPromptBlocks;
 let buildOrderPrompts;
 let sendSellerOrderAcknowledgement;
+let sendSellerOrderImmediateAcknowledgement;
 let CoworkRunner;
 try {
-  ({ buildPrivateReplyMemoryPromptBlocks, sendSellerOrderAcknowledgement } = await import('../dist-electron/main/services/privateChatDaemon.js'));
+  ({
+    buildPrivateReplyMemoryPromptBlocks,
+    sendSellerOrderAcknowledgement,
+    sendSellerOrderImmediateAcknowledgement,
+  } = await import('../dist-electron/main/services/privateChatDaemon.js'));
   ({ buildOrderPrompts } = await import('../dist-electron/main/services/orderPromptBuilder.js'));
   ({ CoworkRunner } = await import('../dist-electron/main/libs/coworkRunner.js'));
 } catch {
-  ({ buildPrivateReplyMemoryPromptBlocks, sendSellerOrderAcknowledgement } = await import('../dist-electron/services/privateChatDaemon.js'));
+  ({
+    buildPrivateReplyMemoryPromptBlocks,
+    sendSellerOrderAcknowledgement,
+    sendSellerOrderImmediateAcknowledgement,
+  } = await import('../dist-electron/services/privateChatDaemon.js'));
   ({ buildOrderPrompts } = await import('../dist-electron/services/orderPromptBuilder.js'));
   ({ CoworkRunner } = await import('../dist-electron/libs/coworkRunner.js'));
 }
@@ -301,6 +310,59 @@ test('sendSellerOrderAcknowledgement fallback asks the buyer to wait patiently w
   assert.match(result.text, /技能执行可能需要一些时间/);
   assert.match(result.text, /耐心等待/);
   assert.deepEqual(sentMessages, [result.text]);
+});
+
+test('sendSellerOrderImmediateAcknowledgement sends deterministic private order receipt without LLM', async () => {
+  const sentMessages = [];
+  const lifecycleCalls = [];
+  const orderTxid = 'c'.repeat(64);
+  const orderPinId = `${'d'.repeat(64)}i0`;
+  const paymentTxid = 'e'.repeat(64);
+
+  const result = await sendSellerOrderImmediateAcknowledgement({
+    metabot: {
+      id: 7,
+      name: 'SellerBot',
+      llm_id: 'llm-1',
+    },
+    peerGlobalMetaId: 'buyer-global-metaid',
+    peerName: 'Client',
+    orderPinId,
+    orderTxid,
+    paymentTxid,
+    now: () => 1_770_123_456_000,
+    sendEncryptedMsg: async (text) => {
+      sentMessages.push(text);
+      return {
+        pinId: 'ack-pin-id',
+        txids: ['f'.repeat(64)],
+      };
+    },
+    serviceOrderLifecycle: {
+      markSellerOrderFirstResponseSent(input) {
+        lifecycleCalls.push(input);
+        return { id: 'seller-order-id' };
+      },
+    },
+    emitLog: () => {},
+  });
+
+  assert.equal(sentMessages.length, 1);
+  assert.equal(result.text, sentMessages[0]);
+  assert.equal(result.pinId, 'ack-pin-id');
+  assert.deepEqual(result.txids, ['f'.repeat(64)]);
+  assert.match(sentMessages[0], new RegExp(`^\\[ORDER_STATUS:${orderTxid}\\]`));
+  assert.match(sentMessages[0], /已收到/);
+  assert.match(sentMessages[0], /技能执行可能需要一些时间/);
+  assert.match(sentMessages[0], /请稍等/);
+  assert.match(sentMessages[0], new RegExp(`order pin id: ${orderPinId}`));
+  assert.deepEqual(lifecycleCalls, [{
+    localMetabotId: 7,
+    counterpartyGlobalMetaId: 'buyer-global-metaid',
+    orderPinId,
+    paymentTxid,
+    sentAt: 1_770_123_456_000,
+  }]);
 });
 
 test('CoworkRunner uses a compact outer prompt profile for seller metaweb_order a2a sessions', () => {

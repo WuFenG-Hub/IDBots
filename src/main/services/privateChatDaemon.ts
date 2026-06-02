@@ -874,6 +874,30 @@ function normalizeSellerOrderAcknowledgementText(text: string): string {
   return compact || '已收到你的需求，技能执行可能需要一些时间，我正在处理，请耐心等待最终结果。';
 }
 
+function buildImmediateSellerOrderAcknowledgementText(peerName?: string | null): string {
+  const name = peerName?.trim();
+  const prefix = name ? `${name}，` : '';
+  return `${prefix}已收到你的服务请求，我会马上开始处理；技能执行可能需要一些时间，请稍等。`;
+}
+
+function markSellerOrderFirstResponseSent(params: {
+  serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFirstResponseSent'> | null;
+  metabotId: number;
+  peerGlobalMetaId: string;
+  orderPinId?: string | null;
+  paymentTxid?: string | null;
+  sentAt: number;
+}): void {
+  if (!params.serviceOrderLifecycle || (!params.orderPinId && !params.paymentTxid)) return;
+  params.serviceOrderLifecycle.markSellerOrderFirstResponseSent({
+    localMetabotId: params.metabotId,
+    counterpartyGlobalMetaId: params.peerGlobalMetaId,
+    ...(params.orderPinId ? { orderPinId: params.orderPinId } : {}),
+    ...(params.paymentTxid ? { paymentTxid: params.paymentTxid } : {}),
+    sentAt: params.sentAt,
+  });
+}
+
 function buildOrderExecutionFailureNotice(error: unknown): string {
   const rawReason = error instanceof Error ? error.message : String(error || '');
   const reason = rawReason.replace(/\s+/g, ' ').trim();
@@ -955,16 +979,58 @@ export async function sendSellerOrderAcknowledgement(params: {
     : acknowledgementText;
   const result = await params.sendEncryptedMsg(transmittedText);
   const sentAt = params.now ? params.now() : Date.now();
-  if (params.serviceOrderLifecycle && (params.orderPinId || params.paymentTxid)) {
-    params.serviceOrderLifecycle.markSellerOrderFirstResponseSent({
-      localMetabotId: params.metabot.id,
-      counterpartyGlobalMetaId: params.peerGlobalMetaId,
-      orderPinId: params.orderPinId,
-      paymentTxid: params.paymentTxid,
-      sentAt,
-    });
-  }
+  markSellerOrderFirstResponseSent({
+    serviceOrderLifecycle: params.serviceOrderLifecycle,
+    metabotId: params.metabot.id,
+    peerGlobalMetaId: params.peerGlobalMetaId,
+    orderPinId: params.orderPinId,
+    paymentTxid: params.paymentTxid,
+    sentAt,
+  });
   params.emitLog?.(`[Order] Acknowledgement sent to ${params.peerGlobalMetaId.slice(0, 12)}…`);
+
+  return {
+    text: transmittedText,
+    pinId: result.pinId ?? null,
+    txids: Array.isArray(result.txids) ? result.txids : [],
+  };
+}
+
+export async function sendSellerOrderImmediateAcknowledgement(params: {
+  metabot: {
+    id: number;
+    name: string;
+    role?: string | null;
+    soul?: string | null;
+    goal?: string | null;
+    background?: string | null;
+    llm_id?: string | null;
+  };
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+  paymentTxid?: string | null;
+  orderPinId?: string | null;
+  orderTxid?: string | null;
+  sendEncryptedMsg: (text: string) => Promise<{ pinId?: string | null; txids?: string[] | null }>;
+  serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFirstResponseSent'> | null;
+  emitLog?: (msg: string) => void;
+  now?: () => number;
+}): Promise<{ text: string; pinId: string | null; txids: string[] }> {
+  const acknowledgementText = buildImmediateSellerOrderAcknowledgementText(params.peerName);
+  const transmittedText = params.orderTxid || params.orderPinId
+    ? buildOrderStatusMessage(params.orderTxid, acknowledgementText, params.orderPinId)
+    : acknowledgementText;
+  const result = await params.sendEncryptedMsg(transmittedText);
+  const sentAt = params.now ? params.now() : Date.now();
+  markSellerOrderFirstResponseSent({
+    serviceOrderLifecycle: params.serviceOrderLifecycle,
+    metabotId: params.metabot.id,
+    peerGlobalMetaId: params.peerGlobalMetaId,
+    orderPinId: params.orderPinId,
+    paymentTxid: params.paymentTxid,
+    sentAt,
+  });
+  params.emitLog?.(`[Order] Immediate acknowledgement sent to ${params.peerGlobalMetaId.slice(0, 12)}...`);
 
   return {
     text: transmittedText,
@@ -2520,6 +2586,33 @@ async function processOne(
         return await createSimpleMsgPin(payloadStr);
       };
 
+      let processingNotice: OrderCoworkRequest['processingNotice'] | undefined;
+      if (source === 'metaweb_private' && fromGlobalMetaId) {
+        try {
+          const acknowledgement = await sendSellerOrderImmediateAcknowledgement({
+            metabot,
+            peerGlobalMetaId: fromGlobalMetaId,
+            peerName: (row.from_name as string | null) ?? null,
+            paymentTxid,
+            orderPinId,
+            orderTxid: orderMessageTxid,
+            sendEncryptedMsg,
+            serviceOrderLifecycle,
+            emitLog,
+          });
+          processingNotice = {
+            content: acknowledgement.text,
+            metadata: buildPrivateChatA2AChainMetadata({
+              txids: acknowledgement.txids,
+              pinId: acknowledgement.pinId,
+            }),
+          };
+        } catch (error) {
+          rethrowSqliteWasmBoundsError(error);
+          emitLog(`[Order] Immediate acknowledgement broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
       const skillScope = await resolveSellerOrderSkillScopePrompt({
         skillId: serviceId,
         skillName: serviceName,
@@ -2583,36 +2676,6 @@ async function processOne(
         });
         markProcessed(db, row.id, saveDb);
         return;
-      }
-
-      let processingNotice: OrderCoworkRequest['processingNotice'] | undefined;
-      if (source === 'metaweb_private' && fromGlobalMetaId) {
-        try {
-          const acknowledgement = await sendSellerOrderAcknowledgement({
-            metabot,
-            peerGlobalMetaId: fromGlobalMetaId,
-            peerName: (row.from_name as string | null) ?? null,
-            plaintext,
-            skillName: serviceName,
-            paymentTxid,
-            orderPinId,
-            orderTxid: orderMessageTxid,
-            performChat,
-            sendEncryptedMsg,
-            serviceOrderLifecycle,
-            emitLog,
-          });
-          processingNotice = {
-            content: acknowledgement.text,
-            metadata: buildPrivateChatA2AChainMetadata({
-              txids: acknowledgement.txids,
-              pinId: acknowledgement.pinId,
-            }),
-          };
-        } catch (error) {
-          rethrowSqliteWasmBoundsError(error);
-          emitLog(`[Order] Acknowledgement broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
-        }
       }
 
       const prompts = buildOrderPrompts({
