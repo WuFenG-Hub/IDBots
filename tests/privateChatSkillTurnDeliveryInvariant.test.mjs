@@ -24,7 +24,7 @@ function createPeerPublicKey() {
   return ecdh.getPublicKey('hex', 'uncompressed');
 }
 
-function createPrivateChatDbHarness() {
+function createPrivateChatDbHarness(overrides = {}) {
   const row = {
     id: 1,
     pin_id: 'incoming-pin-1',
@@ -41,6 +41,7 @@ function createPrivateChatDbHarness() {
     reply_pin: '',
     raw_data: null,
     is_processed: 0,
+    ...overrides,
   };
   const columns = [
     'id',
@@ -58,8 +59,6 @@ function createPrivateChatDbHarness() {
     'reply_pin',
     'raw_data',
   ];
-  const values = columns.map((column) => row[column]);
-
   return {
     row,
     db: {
@@ -67,7 +66,7 @@ function createPrivateChatDbHarness() {
         if (/FROM private_chat_messages WHERE is_processed = 0/i.test(sql)) {
           return row.is_processed
             ? []
-            : [{ columns, values: [values] }];
+            : [{ columns, values: [columns.map((column) => row[column])] }];
         }
         return [{ columns: ['found'], values: [] }];
       },
@@ -225,7 +224,9 @@ test('regular private chat skill failures keep the inbound message retryable unt
       prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
       activeSkillIds: ['metaid-master-wiki'],
     }),
-    async () => {
+    async (params) => {
+      assert.equal(typeof params.onSkillExecutionStart, 'function');
+      await params.onSkillExecutionStart();
       throw new Error('Skill turn timed out after 120s');
     },
     async () => '我需要查询一下，请稍等。',
@@ -284,10 +285,14 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
       prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
       activeSkillIds: ['metaid-master-wiki'],
     }),
-    async () => ({
-      replyText: 'PoP 的全称是 Proof of PIN',
-      assistantMessageId: null,
-    }),
+    async (params) => {
+      assert.equal(typeof params.onSkillExecutionStart, 'function');
+      await params.onSkillExecutionStart();
+      return {
+        replyText: 'PoP 的全称是 Proof of PIN',
+        assistantMessageId: null,
+      };
+    },
     async () => '我需要查询一下，请稍等。',
   );
 
@@ -378,6 +383,79 @@ test('regular private chat replies emit markdown simplemsg payloads without chan
   assert.equal(simplemsgPayload.replyPin, '');
 });
 
+test('regular private chat does not send a wait notice when no local skill actually runs', async () => {
+  const { db, row } = createPrivateChatDbHarness({
+    pin_id: 'incoming-pin-gm',
+    tx_id: '9'.repeat(64),
+    content: 'gm',
+  });
+  const { store: coworkStore, session } = createCoworkStoreHarness();
+  const { metabot, store: metabotStore } = createMetabotStoreHarness();
+  const logs = [];
+  const events = [];
+  const capturedCreatePinPayloads = [];
+  let saveCount = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {
+      saveCount += 1;
+    },
+    coworkStore,
+    metabotStore,
+    {
+      on() {},
+      off() {},
+    },
+    async (_metabotStore, metabotId, payload) => {
+      assert.equal(metabotId, metabot.id);
+      events.push('createPin');
+      capturedCreatePinPayloads.push(payload);
+      const txid = `${capturedCreatePinPayloads.length}`.repeat(64).slice(0, 64);
+      return { txids: [txid], pinId: `${txid}i0` };
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async (params) => {
+      events.push('skill-runner');
+      return {
+        replyText: 'gm',
+        assistantMessageId: null,
+      };
+    },
+    async () => {
+      events.push('notice-generated');
+      return '我需要查询一下，请稍等。';
+    },
+  );
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('Replied to')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1);
+  assert.equal(saveCount, 1);
+  assert.deepEqual(events, ['skill-runner', 'createPin']);
+  assert.equal(capturedCreatePinPayloads.length, 1);
+
+  const assistantMessages = session.messages.filter((message) => message.type === 'assistant');
+  assert.equal(assistantMessages.length, 1);
+  assert.equal(assistantMessages[0].content, 'gm');
+  assert.equal(assistantMessages.some((message) => message.metadata?.privateChatSkillWaitNotice === true), false);
+});
+
 test('regular private chat sends a wait notice before running a local chat skill', async () => {
   const { db, row } = createPrivateChatDbHarness();
   const { store: coworkStore, session } = createCoworkStoreHarness();
@@ -417,7 +495,10 @@ test('regular private chat sends a wait notice before running a local chat skill
       prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
       activeSkillIds: ['metaid-master-wiki'],
     }),
-    async () => {
+    async (params) => {
+      events.push('skill-runner');
+      assert.equal(typeof params.onSkillExecutionStart, 'function');
+      await params.onSkillExecutionStart();
       events.push('skill-start');
       return {
         replyText: 'PoP 的全称是 Proof of PIN',
@@ -438,7 +519,7 @@ test('regular private chat sends a wait notice before running a local chat skill
 
   assert.equal(row.is_processed, 1);
   assert.equal(saveCount, 1);
-  assert.deepEqual(events, ['notice-generated', 'createPin', 'skill-start', 'createPin']);
+  assert.deepEqual(events, ['skill-runner', 'notice-generated', 'createPin', 'skill-start', 'createPin']);
   assert.equal(capturedCreatePinPayloads.length, 2);
   assert.ok(capturedCreatePinPayloads.every((payload) => payload.path === '/protocols/simplemsg'));
 

@@ -147,6 +147,7 @@ type RunPrivateChatSkillTurnFn = (params: {
   userMessage: string;
   metabotId: number;
   activeSkillIds: string[];
+  onSkillExecutionStart?: () => Promise<void> | void;
 }) => Promise<{ replyText: string; assistantMessageId?: string | null }>;
 type GeneratePrivateChatSkillWaitNoticeFn = (params: {
   metabot: {
@@ -814,8 +815,8 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     : '- Do not claim local tool access or execute local skills in this regular private chat.';
   const skillWaitNoticeRule = allowedSkillsPrompt
     ? params.skillWaitNoticeAlreadySent
-      ? '- A brief wait notice has already been sent for this local-skill turn. Do not repeat it as the final answer; use the skill and then answer with the result.'
-      : '- If the latest private-chat message requires local skill execution, first send a brief wait notice in your own voice before using the skill; then answer with the final result after the skill completes.'
+      ? '- A brief wait notice has already been sent for this local-skill turn. Do not repeat it as the final answer; use the skill if needed and then answer with the result.'
+      : '- If local skill execution actually starts, the host will send a brief wait notice to the peer at that moment. Do not preface normal replies with wait notices; answer directly when no skill is needed.'
     : '';
 
   return [
@@ -3352,67 +3353,72 @@ async function processOne(
       && chatSkillsRouting.activeSkillIds.length > 0
       && runPrivateChatSkillTurn
     );
-    let skillWaitNoticeAlreadySent = false;
-    if (canRunChatSkills) {
-      const waitNoticeKey = getPrivateChatSkillWaitNoticeKey(row);
-      const sessionBeforeWaitNotice = coworkStore.getSession(sessionId);
+    const waitNoticeKey = canRunChatSkills ? getPrivateChatSkillWaitNoticeKey(row) : '';
+    let skillWaitNoticeAlreadySent = canRunChatSkills
+      ? hasSentPrivateChatSkillWaitNotice(
+          coworkStore.getSession(sessionId)?.messages ?? [],
+          waitNoticeKey
+        )
+      : false;
+    const sendSkillWaitNoticeBeforeExecution = async (): Promise<void> => {
+      if (!canRunChatSkills || skillWaitNoticeAlreadySent) return;
       skillWaitNoticeAlreadySent = hasSentPrivateChatSkillWaitNotice(
-        sessionBeforeWaitNotice?.messages ?? [],
+        coworkStore.getSession(sessionId)?.messages ?? [],
         waitNoticeKey
       );
-      if (!skillWaitNoticeAlreadySent) {
-        let waitNoticeText = '';
-        try {
-          const rawWaitNotice = generatePrivateChatSkillWaitNotice
-            ? await generatePrivateChatSkillWaitNotice({
-                metabot: {
-                  id: metabot.id,
-                  name: metabot.name,
-                  role: metabot.role,
-                  soul: metabot.soul,
-                  goal: metabot.goal,
-                  background: metabot.background,
-                },
-                userMessage: plaintext,
-                llmId,
-              })
-            : await performChat(
-                buildPrivateChatSkillWaitNoticeSystemPrompt({
-                  name: metabot.name,
-                  role: metabot.role,
-                  soul: metabot.soul,
-                  goal: metabot.goal,
-                  background: metabot.background,
-                }),
-                plaintext,
-                llmId
-              );
-          waitNoticeText = normalizePrivateChatSkillWaitNoticeText(rawWaitNotice);
-        } catch (error) {
-          rethrowSqliteWasmBoundsError(error);
-          waitNoticeText = normalizePrivateChatSkillWaitNoticeText('');
-          emitLog(`[PrivateChat] Skill wait notice generation failed for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
-        }
+      if (skillWaitNoticeAlreadySent) return;
 
-        const waitNoticeSent = await sendPrivateChatSkillWaitNotice({
-          coworkStore,
-          sessionId,
-          externalConversationId,
-          row,
-          fromGlobalMetaId,
-          sharedSecretForReply,
-          noticeText: waitNoticeText,
-          createSimpleMsgPin,
-          emitLog,
-          emitToRenderer,
-        });
-        if (!waitNoticeSent) {
-          emitLog(`[PrivateChat] Keeping message ${row.id} unprocessed until a skill wait notice can be delivered.`);
-          return;
-        }
-        skillWaitNoticeAlreadySent = true;
+      let waitNoticeText = '';
+      try {
+        const rawWaitNotice = generatePrivateChatSkillWaitNotice
+          ? await generatePrivateChatSkillWaitNotice({
+              metabot: {
+                id: metabot.id,
+                name: metabot.name,
+                role: metabot.role,
+                soul: metabot.soul,
+                goal: metabot.goal,
+                background: metabot.background,
+              },
+              userMessage: plaintext,
+              llmId,
+            })
+          : await performChat(
+              buildPrivateChatSkillWaitNoticeSystemPrompt({
+                name: metabot.name,
+                role: metabot.role,
+                soul: metabot.soul,
+                goal: metabot.goal,
+                background: metabot.background,
+              }),
+              plaintext,
+              llmId
+            );
+        waitNoticeText = normalizePrivateChatSkillWaitNoticeText(rawWaitNotice);
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        waitNoticeText = normalizePrivateChatSkillWaitNoticeText('');
+        emitLog(`[PrivateChat] Skill wait notice generation failed for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
       }
-    }
+
+      const waitNoticeSent = await sendPrivateChatSkillWaitNotice({
+        coworkStore,
+        sessionId,
+        externalConversationId,
+        row,
+        fromGlobalMetaId,
+        sharedSecretForReply,
+        noticeText: waitNoticeText,
+        createSimpleMsgPin,
+        emitLog,
+        emitToRenderer,
+      });
+      if (!waitNoticeSent) {
+        emitLog(`[PrivateChat] Continuing message ${row.id} skill execution without a delivered wait notice.`);
+        return;
+      }
+      skillWaitNoticeAlreadySent = true;
+    };
     const systemPrompt = buildPrivateChatA2ASystemPrompt({
       metabot: {
         name: metabot.name,
@@ -3439,6 +3445,7 @@ async function processOne(
           userMessage: plaintext,
           metabotId: metabot.id,
           activeSkillIds: chatSkillsRouting.activeSkillIds,
+          onSkillExecutionStart: sendSkillWaitNoticeBeforeExecution,
         });
         reply = skillTurnResult.replyText;
         skillAssistantMessageId = skillTurnResult.assistantMessageId ?? null;

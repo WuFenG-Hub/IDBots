@@ -30,6 +30,7 @@ export interface RunExistingSessionSkillTurnParams {
   cwd: string;
   activeSkillIds?: string[];
   disableRemoteServicesPrompt?: boolean;
+  onSkillExecutionStart?: () => Promise<void> | void;
 }
 
 export interface RunExistingSessionSkillTurnResult {
@@ -208,9 +209,11 @@ export function runSkillTurnInExistingSession(
 
   return new Promise<RunExistingSessionSkillTurnResult>((resolve, reject) => {
     let settled = false;
+    let skillExecutionStartPromise: Promise<void> | null = null;
     const cleanup = () => {
       runner.off('complete', onComplete);
       runner.off('error', onError);
+      runner.off('message', onMessage);
       if (timeoutId != null) clearTimeout(timeoutId);
     };
 
@@ -233,6 +236,38 @@ export function runSkillTurnInExistingSession(
       reject(typeof err === 'string' ? new Error(err) : err);
     };
 
+    const triggerSkillExecutionStart = () => {
+      if (skillExecutionStartPromise || !params.onSkillExecutionStart) return;
+      try {
+        skillExecutionStartPromise = Promise.resolve(params.onSkillExecutionStart()).catch((error) => {
+          console.warn(
+            '[Orchestrator] Private chat skill wait notice callback failed:',
+            error instanceof Error ? error.message : String(error)
+          );
+        });
+      } catch (error) {
+        skillExecutionStartPromise = Promise.resolve();
+        console.warn(
+          '[Orchestrator] Private chat skill wait notice callback failed:',
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    };
+
+    const finishAfterSkillStartNotice = (result: RunExistingSessionSkillTurnResult) => {
+      const waitForNotice = skillExecutionStartPromise;
+      if (!waitForNotice) {
+        finish(result);
+        return;
+      }
+      waitForNotice.then(() => finish(result));
+    };
+
+    const onMessage = (sid: string, message: { type?: string } | null | undefined) => {
+      if (sid !== sessionId || message?.type !== 'tool_use') return;
+      triggerSkillExecutionStart();
+    };
+
     const onComplete = (sid: string) => {
       if (sid !== sessionId) return;
       const sessionWithMessages = store.getSession(sessionId);
@@ -240,13 +275,18 @@ export function runSkillTurnInExistingSession(
       let lastAssistantContent = '';
       let lastAssistantMessageId: string | null = null;
       for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].type === 'assistant' && messages[i].content) {
+        if (
+          messages[i].type === 'assistant'
+          && messages[i].content
+          && messages[i].metadata?.privateChatSkillWaitNotice !== true
+          && messages[i].metadata?.isThinking !== true
+        ) {
           lastAssistantContent = String(messages[i].content).trim();
           lastAssistantMessageId = messages[i].id;
           break;
         }
       }
-      finish({
+      finishAfterSkillStartNotice({
         replyText: lastAssistantContent || '',
         assistantMessageId: lastAssistantMessageId,
       });
@@ -264,6 +304,7 @@ export function runSkillTurnInExistingSession(
 
     runner.on('complete', onComplete);
     runner.on('error', onError);
+    runner.on('message', onMessage);
 
     runner
       .startSession(sessionId, userMessage, {

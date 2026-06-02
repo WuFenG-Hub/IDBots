@@ -2743,6 +2743,7 @@ const startSqliteDaemons = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        onSkillExecutionStart: params.onSkillExecutionStart,
       });
     }
   );

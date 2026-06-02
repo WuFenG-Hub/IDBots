@@ -203,6 +203,72 @@ test('runSkillTurnInExistingSession reuses the private A2A session without creat
   assert.equal(session.messages.filter((message) => message.type === 'user').length, 1);
 });
 
+test('runSkillTurnInExistingSession calls onSkillExecutionStart when a local tool starts', async () => {
+  const runner = new EventEmitter();
+  const events = [];
+  const session = {
+    id: 'private-a2a-session-tool-use',
+    cwd: '/tmp/private-chat-workspace',
+    messages: [
+      {
+        id: 'user-1',
+        type: 'user',
+        content: '请查天气',
+        metadata: {
+          sourceChannel: 'metaweb_private',
+          externalConversationId: 'peer-global',
+          direction: 'incoming',
+        },
+      },
+    ],
+  };
+  const store = {
+    getSession(sessionId) {
+      assert.equal(sessionId, session.id);
+      return session;
+    },
+    updateSession() {},
+  };
+
+  runner.startSession = async (sessionId) => {
+    events.push('startSession');
+    queueMicrotask(() => {
+      const toolUse = {
+        id: 'tool-use-1',
+        type: 'tool_use',
+        content: 'Using tool: Bash',
+        timestamp: Date.now(),
+        metadata: {
+          toolName: 'Bash',
+        },
+      };
+      session.messages.push(toolUse);
+      runner.emit('message', sessionId, toolUse);
+      session.messages.push({
+        id: 'assistant-skill-1',
+        type: 'assistant',
+        content: '天气结果',
+        timestamp: Date.now(),
+      });
+      runner.emit('complete', sessionId);
+    });
+  };
+
+  const result = await runSkillTurnInExistingSession(runner, store, {
+    sessionId: session.id,
+    systemPrompt: 'system\n<available_skills></available_skills>',
+    userMessage: '请查天气',
+    cwd: '/tmp/private-chat-workspace',
+    activeSkillIds: ['weather'],
+    onSkillExecutionStart: async () => {
+      events.push('waitNotice');
+    },
+  });
+
+  assert.equal(result.replyText, '天气结果');
+  assert.deepEqual(events, ['startSession', 'waitNotice']);
+});
+
 test('runSkillTurnInExistingSession waits for slow local skill completion before timing out', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
 
