@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildNonDeliverableSellerFailureNotice,
   buildBuyerRatingSystemPrompt,
   deliveryResultHasExpectedArtifact,
   isOrderDeliveryFailureNotice,
+  markSellerOrderExecutionFailed,
   resolveBuyerRatingContext,
   resolveBuyerOrderOutputType,
   resolveSellerOrderOutputType,
@@ -82,6 +84,48 @@ test('isOrderDeliveryFailureNotice detects explicit missing media delivery notic
     isOrderDeliveryFailureNotice('数字成果已生成并上传链上交付。\nPINID: abc123i0'),
     false
   );
+});
+
+test('buildNonDeliverableSellerFailureNotice creates buyer-refundable timeout status text', () => {
+  const notice = buildNonDeliverableSellerFailureNotice({
+    outputType: 'video',
+    fallbackDetail: '[ORDER_STATUS:abc123] 本次服务执行超时，暂未生成可交付结果。\n若稍后仍未收到正式交付，系统会自动发起退款。',
+  });
+
+  assert.equal(isOrderDeliveryFailureNotice(notice), true);
+  assert.match(notice, /服务方未能按约定交付 video 数字成果/);
+  assert.match(notice, /本次服务执行超时/);
+  assert.match(notice, /退款流程/);
+  assert.doesNotMatch(notice, /^\[ORDER_STATUS/);
+});
+
+test('markSellerOrderExecutionFailed closes the scoped seller order', () => {
+  const calls: unknown[] = [];
+  markSellerOrderExecutionFailed({
+    serviceOrderLifecycle: {
+      markSellerOrderFailed: (input) => {
+        calls.push(input);
+        return null;
+      },
+    },
+    metabotId: 7,
+    peerGlobalMetaId: 'buyer-global-metaid',
+    orderPinId: 'seller-order-pin-i0',
+    paymentTxid: 'e'.repeat(64),
+    orderMessageTxid: 'f'.repeat(64),
+    failureReason: 'delivery_timeout',
+    failedAt: 1_770_000_333_000,
+  });
+
+  assert.deepEqual(calls, [{
+    localMetabotId: 7,
+    counterpartyGlobalMetaId: 'buyer-global-metaid',
+    orderPinId: 'seller-order-pin-i0',
+    paymentTxid: 'e'.repeat(64),
+    orderMessageTxid: 'f'.repeat(64),
+    failureReason: 'delivery_timeout',
+    failedAt: 1_770_000_333_000,
+  }]);
 });
 
 test('deliveryResultHasExpectedArtifact requires a matching metafile for non-text deliveries', () => {

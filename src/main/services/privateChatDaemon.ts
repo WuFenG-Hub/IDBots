@@ -900,6 +900,66 @@ function markSellerOrderFirstResponseSent(params: {
   });
 }
 
+export function markSellerOrderExecutionFailed(params: {
+  serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFailed'> | null;
+  metabotId: number;
+  peerGlobalMetaId: string;
+  orderPinId?: string | null;
+  paymentTxid?: string | null;
+  orderMessageTxid?: string | null;
+  failureReason: string;
+  failedAt: number;
+}): void {
+  if (
+    !params.serviceOrderLifecycle
+    || (!params.orderPinId && !params.paymentTxid && !params.orderMessageTxid)
+  ) {
+    return;
+  }
+  params.serviceOrderLifecycle.markSellerOrderFailed({
+    localMetabotId: params.metabotId,
+    counterpartyGlobalMetaId: params.peerGlobalMetaId,
+    ...(params.orderPinId ? { orderPinId: params.orderPinId } : {}),
+    ...(params.paymentTxid ? { paymentTxid: params.paymentTxid } : {}),
+    ...(params.orderMessageTxid ? { orderMessageTxid: params.orderMessageTxid } : {}),
+    failureReason: params.failureReason,
+    failedAt: params.failedAt,
+  });
+}
+
+function cleanNonDeliverableFallbackDetail(fallbackDetail?: string | null): string {
+  const raw = String(fallbackDetail || '').trim();
+  if (!raw) return '';
+  const parsed = parseOrderStatusMessage(raw);
+  return String(parsed?.content || raw)
+    .replace(/^\[ORDER_STATUS(?::[^\]]+)?\]\s*/i, '')
+    .split(/\r?\n/)
+    .filter((line) => !/^\s*order\s+pin\s+id\s*[:：=]/i.test(line))
+    .join('\n')
+    .trim();
+}
+
+export function buildNonDeliverableSellerFailureNotice(input: {
+  outputType?: ServiceOrderOutputType | string | null;
+  fallbackDetail?: string | null;
+} = {}): string {
+  const outputType = normalizeServiceOutputType(input.outputType);
+  const detail = cleanNonDeliverableFallbackDetail(input.fallbackDetail);
+  return [
+    `服务方未能按约定交付 ${outputType} 数字成果。`,
+    detail,
+    '系统将自动转入退款流程，请勿对本次服务进行好评确认。',
+  ].filter(Boolean).join('\n');
+}
+
+function resolveNonDeliverableSellerFailureReason(fallbackDetail?: string | null): string {
+  const detail = String(fallbackDetail || '');
+  if (/超时|timed out|timeout/i.test(detail)) {
+    return 'delivery_timeout';
+  }
+  return SERVICE_ORDER_DELIVERY_ARTIFACT_FAILED_REASON;
+}
+
 function buildOrderExecutionFailureNotice(error: unknown): string {
   const rawReason = error instanceof Error ? error.message : String(error || '');
   const reason = rawReason.replace(/\s+/g, ' ').trim();
@@ -2721,7 +2781,12 @@ async function processOne(
         });
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
-        const failureNotice = buildOrderExecutionFailureNotice(error);
+        const failureDetail = buildOrderExecutionFailureNotice(error);
+        const failureReason = resolveNonDeliverableSellerFailureReason(failureDetail);
+        const failureNotice = buildNonDeliverableSellerFailureNotice({
+          outputType: serviceOutputType,
+          fallbackDetail: failureDetail,
+        });
         const transmittedFailureNotice = orderMessageTxid || orderPinId
           ? buildOrderStatusMessage(orderMessageTxid, failureNotice, orderPinId)
           : failureNotice;
@@ -2762,6 +2827,16 @@ async function processOne(
             emitLog(`[Order] Failure notice broadcast failed: ${sendError instanceof Error ? sendError.message : String(sendError)}`);
           }
         }
+        markSellerOrderExecutionFailed({
+          serviceOrderLifecycle,
+          metabotId: metabot.id,
+          peerGlobalMetaId: orderPeerGlobalMetaId,
+          orderPinId,
+          paymentTxid,
+          orderMessageTxid,
+          failureReason,
+          failedAt: Date.now(),
+        });
         markProcessed(db, row.id, saveDb);
         return;
       }
@@ -2776,10 +2851,15 @@ async function processOne(
       let deliveryBroadcastFailed = false;
       if (trimmedReply && source === 'metaweb_private') {
         if (orderResult.isDeliverable === false) {
+          const failureReason = resolveNonDeliverableSellerFailureReason(trimmedReply);
+          const failureNotice = buildNonDeliverableSellerFailureNotice({
+            outputType: serviceOutputType,
+            fallbackDetail: trimmedReply,
+          });
           try {
             const transmittedFallbackReply = orderMessageTxid || orderPinId
-              ? buildOrderStatusMessage(orderMessageTxid, trimmedReply, orderPinId)
-              : trimmedReply;
+              ? buildOrderStatusMessage(orderMessageTxid, failureNotice, orderPinId)
+              : failureNotice;
             const fallbackResult = await sendEncryptedMsg(transmittedFallbackReply);
             emitLog(`[Order] Timeout fallback notice sent to ${fromGlobalMetaId.slice(0, 12)}…`);
             if (sellerOrderSessionId) {
@@ -2798,6 +2878,8 @@ async function processOne(
                   orderMappingExternalConversationId: externalConversationId,
                   extra: {
                     orderTimeoutFallback: true,
+                    orderExecutionFailed: true,
+                    orderNonDeliverableFailure: true,
                     ...buildPrivateChatA2AChainMetadata({
                       txids: fallbackResult.txids,
                       pinId: fallbackResult.pinId,
@@ -2813,6 +2895,16 @@ async function processOne(
             rethrowSqliteWasmBoundsError(error);
             emitLog(`[Order] Timeout fallback notice broadcast failed: ${error instanceof Error ? error.message : String(error)}`);
           }
+          markSellerOrderExecutionFailed({
+            serviceOrderLifecycle,
+            metabotId: metabot.id,
+            peerGlobalMetaId: orderPeerGlobalMetaId,
+            orderPinId,
+            paymentTxid,
+            orderMessageTxid,
+            failureReason,
+            failedAt: Date.now(),
+          });
         } else if (orderDispatchKey && sentOrderDeliveryKeys.has(orderDispatchKey)) {
           emitLog(`[Order] Delivery already sent for order ${orderTrackingId}, skipping duplicate send.`);
         } else {

@@ -421,6 +421,17 @@ export class ServiceOrderLifecycleService {
       await this.tryCreateRefundRequest(failedOrder.id, now);
     }
 
+    const openSellerOrders = this.store.listOrdersByStatuses('seller', [
+      'awaiting_first_response',
+      'in_progress',
+    ]);
+    for (const order of openSellerOrders) {
+      if (!String(order.paymentTxid || '').trim()) continue;
+      const transition = getTimedOutOrderTransition(order, now);
+      if (!transition) continue;
+      this.store.markFailed(order.id, transition, now);
+    }
+
     const retryCandidates = this.store.listRefundRequestRetryCandidates('buyer', now);
     for (const order of retryCandidates) {
       await this.tryCreateRefundRequest(order.id, now);

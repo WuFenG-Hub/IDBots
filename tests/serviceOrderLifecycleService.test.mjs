@@ -281,6 +281,49 @@ test('markSellerOrderFailed closes seller-side scope rejection orders', async ()
   assert.deepEqual(store.listOrdersByStatuses('seller', ['awaiting_first_response']).map((item) => item.id), []);
 });
 
+test('scanTimedOutOrders closes stale seller open orders without requesting refunds', async () => {
+  let currentNow = 1_770_000_222_000;
+  let refundRequestCalls = 0;
+  const { service, store } = await createLifecycleServiceForTest({
+    now: () => currentNow,
+    createRefundRequestPin: async () => {
+      refundRequestCalls += 1;
+      return { pinId: 'unexpected-refund-request-pin-id' };
+    },
+  });
+  const waitingOrder = service.createSellerOrder(baseOrderInput({
+    orderPinId: 'seller-waiting-order-pin-i0',
+    paymentTxid: '5'.repeat(64),
+  }));
+  const progressOrder = service.createSellerOrder(baseOrderInput({
+    orderPinId: 'seller-progress-order-pin-i0',
+    paymentTxid: '6'.repeat(64),
+  }));
+  service.markSellerOrderFirstResponseSent({
+    localMetabotId: progressOrder.localMetabotId,
+    counterpartyGlobalMetaId: progressOrder.counterpartyGlobalMetaid,
+    orderPinId: progressOrder.orderPinId,
+    paymentTxid: progressOrder.paymentTxid,
+    sentAt: currentNow,
+  });
+
+  currentNow += 15 * 60_000 + 1;
+  await service.scanTimedOutOrders();
+
+  const updatedWaitingOrder = store.getOrderById(waitingOrder.id);
+  assert.equal(updatedWaitingOrder?.status, 'failed');
+  assert.equal(updatedWaitingOrder?.failureReason, 'first_response_timeout');
+  assert.equal(updatedWaitingOrder?.failedAt, currentNow);
+  assert.equal(updatedWaitingOrder?.refundRequestPinId, null);
+
+  const updatedProgressOrder = store.getOrderById(progressOrder.id);
+  assert.equal(updatedProgressOrder?.status, 'failed');
+  assert.equal(updatedProgressOrder?.failureReason, 'delivery_timeout');
+  assert.equal(updatedProgressOrder?.failedAt, currentNow);
+  assert.equal(updatedProgressOrder?.refundRequestPinId, null);
+  assert.equal(refundRequestCalls, 0);
+});
+
 test('markBuyerOrderDelivered moves the buyer order into rating_pending and stores the delivery message pin', async () => {
   const now = 1_770_000_222_000;
   const { service } = await createLifecycleServiceForTest({
