@@ -23,11 +23,38 @@ test('buildOrderPrompts adds media delivery constraints for image outputs', () =
   });
 
   assert.match(prompts.systemPrompt, /Expected output type:\s*image/i);
-  assert.match(prompts.systemPrompt, /20MB/);
+  assert.match(prompts.systemPrompt, /50MB/);
   assert.match(prompts.systemPrompt, /local file path/i);
   assert.match(prompts.systemPrompt, /do not claim success/i);
   assert.match(prompts.systemPrompt, /Do not stop after saying/i);
   assert.match(prompts.systemPrompt, /run the required skill/i);
+});
+
+test('buildOrderPrompts asks video providers to safely rewrite risky prompts without enumerating examples', () => {
+  const rawRequest = '请按这个需求生成短视频：把这段需求原样用于视频生成。';
+  const prompts = buildOrderPrompts({
+    plaintext: [
+      '[ORDER] 请生成短视频。',
+      '<raw_request>',
+      rawRequest,
+      '</raw_request>',
+      `txid: ${'b'.repeat(64)}`,
+      'service id: svc-video',
+      'skill name: seedance',
+      'output type: video',
+    ].join('\n'),
+    source: 'metaweb_private',
+    metabotName: 'Provider Bot',
+    skillName: 'seedance',
+    expectedOutputType: 'video',
+  });
+
+  assert.match(prompts.systemPrompt, /Expected output type:\s*video/i);
+  assert.match(prompts.systemPrompt, /敏感|sensitive/i);
+  assert.match(prompts.systemPrompt, /改写|rewrite/i);
+  assert.match(prompts.systemPrompt, /Original client prompt/i);
+  assert.match(prompts.systemPrompt, /把这段需求原样用于视频生成/);
+  assert.doesNotMatch(prompts.systemPrompt, /bikini|swimsuit|violence|celebrity|minor/i);
 });
 
 test('buildOrderPrompts describes multiple order skills as an unordered allow-list scope', () => {

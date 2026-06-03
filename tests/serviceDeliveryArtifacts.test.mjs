@@ -317,11 +317,25 @@ test('resolveServiceDeliveryArtifact falls back to time window when scoped messa
   assert.equal(result.artifact.filePath, archivePath);
 });
 
-test('resolveServiceDeliveryArtifact rejects delivery files larger than 20 MiB', () => {
+test('resolveServiceDeliveryArtifact accepts video files up to 50 MiB and rejects larger files', () => {
   const cwd = makeTempDir();
-  const filePath = path.join(cwd, 'huge.mp4');
-  fs.closeSync(fs.openSync(filePath, 'w'));
-  fs.truncateSync(filePath, 20 * 1024 * 1024 + 1);
+  const acceptedPath = path.join(cwd, 'accepted.mp4');
+  fs.closeSync(fs.openSync(acceptedPath, 'w'));
+  fs.truncateSync(acceptedPath, 50 * 1024 * 1024);
+
+  const accepted = resolveServiceDeliveryArtifact({
+    outputType: 'video',
+    cwd,
+    orderStartedAt: Date.now() - 1000,
+    messages: [{ type: 'assistant', content: '视频文件：accepted.mp4' }],
+  });
+
+  assert.equal(accepted.status, 'found');
+  assert.equal(accepted.artifact.filePath, acceptedPath);
+
+  const rejectedPath = path.join(cwd, 'huge.mp4');
+  fs.closeSync(fs.openSync(rejectedPath, 'w'));
+  fs.truncateSync(rejectedPath, 50 * 1024 * 1024 + 1);
 
   const result = resolveServiceDeliveryArtifact({
     outputType: 'video',
@@ -397,48 +411,31 @@ test('verifyDeliveryArtifactUpload rejects an empty PINID without fetching', asy
   }
 });
 
-test('verifyDeliveryArtifactUpload accepts HEAD success', async () => {
+test('verifyDeliveryArtifactUpload accepts any non-empty PINID without waiting for indexer download', async () => {
   const originalFetch = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = async (url, options) => {
-    calls.push({ url: String(url), method: options?.method });
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
     return { ok: true };
   };
   try {
     assert.equal(await verifyDeliveryArtifactUpload({ pinId: 'abc123i0' }), true);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].method, 'HEAD');
-    assert.match(calls[0].url, /accelerate\/content\/abc123i0$/);
+    assert.equal(fetchCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test('verifyDeliveryArtifactUpload falls back to ranged GET when HEAD fails', async () => {
+test('verifyDeliveryArtifactUpload ignores temporary indexer network failures after upload success', async () => {
   const originalFetch = globalThis.fetch;
-  const calls = [];
-  globalThis.fetch = async (url, options) => {
-    calls.push({ url: String(url), method: options?.method, range: options?.headers?.Range });
-    return { ok: calls.length === 2 };
-  };
-  try {
-    assert.equal(await verifyDeliveryArtifactUpload({ pinId: 'abc123i0' }), true);
-    assert.equal(calls.length, 2);
-    assert.equal(calls[0].method, 'HEAD');
-    assert.equal(calls[1].method, 'GET');
-    assert.equal(calls[1].range, 'bytes=0-0');
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('verifyDeliveryArtifactUpload returns false on network failure', async () => {
-  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
   globalThis.fetch = async () => {
+    fetchCalls += 1;
     throw new Error('network down');
   };
   try {
-    assert.equal(await verifyDeliveryArtifactUpload({ pinId: 'abc123i0' }), false);
+    assert.equal(await verifyDeliveryArtifactUpload({ pinId: 'abc123i0' }), true);
+    assert.equal(fetchCalls, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

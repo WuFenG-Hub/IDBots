@@ -719,7 +719,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
 
     if (artifactResult.status !== 'found') {
       const reason = artifactResult.status === 'invalid' && artifactResult.reason === 'file_too_large'
-        ? '生成文件超过 20MB，无法按约定上传链上交付。'
+        ? '生成文件超过 50MB，无法按约定上传链上交付。'
         : `未找到符合 ${outputType} 交付格式的数字成果。`;
       const failureReply = [
         `服务方未能按约定交付 ${outputType} 数字成果。`,

@@ -458,41 +458,9 @@ export function getDeliveryArtifactPinId(upload) {
   return String(upload?.pinId || '').trim();
 }
 
-async function fetchWithTimeout(url, options = {}) {
-  if (typeof fetch !== 'function') {
-    return null;
-  }
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-  try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 export async function verifyDeliveryArtifactUpload(upload) {
   const pinId = getDeliveryArtifactPinId(upload);
-  if (!pinId) {
-    return false;
-  }
-  const url = `${DELIVERY_ACCELERATE_CONTENT_BASE_URL}/${encodeURIComponent(pinId)}`;
-  try {
-    const head = await fetchWithTimeout(url, { method: 'HEAD' });
-    if (head?.ok) {
-      return true;
-    }
-    const get = await fetchWithTimeout(url, {
-      method: 'GET',
-      headers: { Range: 'bytes=0-0' },
-    });
-    return Boolean(get?.ok);
-  } catch {
-    return false;
-  }
+  return Boolean(pinId);
 }
 
 export async function uploadVerifiedDeliveryArtifact(input) {
