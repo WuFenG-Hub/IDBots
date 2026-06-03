@@ -8526,6 +8526,25 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     return fetchMetaidUserInfoByGlobalMetaId(params.globalMetaId);
   });
 
+  ipcMain.handle('metaid:resolveAvatarSource', async (_e: Electron.IpcMainInvokeEvent, params: { reference: string }) => {
+    try {
+      const reference = toSafeString(params?.reference).trim();
+      if (!reference) {
+        return { success: true, avatarUrl: null };
+      }
+      return {
+        success: true,
+        avatarUrl: await resolvePinAssetSource(reference),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        avatarUrl: null,
+        error: error instanceof Error ? error.message : 'Failed to resolve avatar',
+      };
+    }
+  });
+
   ipcMain.handle('mcp:list', () => {
     try {
       return { success: true, servers: getMcpStore().listServers() };

@@ -379,10 +379,19 @@ export const createMetafileMediaObjectUrl = async (
 
 const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
   const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized.startsWith('data:')
+  return normalized.startsWith('data:image/')
     || normalized.startsWith('http://')
     || normalized.startsWith('https://')
     || normalized.startsWith('blob:');
+};
+
+const pickRenderableAvatarSource = (...values: Array<string | null | undefined>): string | null => {
+  for (const value of values) {
+    if (isRenderableAvatarSource(value)) {
+      return value?.trim() || null;
+    }
+  }
+  return null;
 };
 
 const Avatar: React.FC<{ src?: string | null; name?: string | null; size?: number }> = ({
@@ -713,8 +722,8 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
     : ((message.metadata?.senderName as string | undefined) || peerName || 'Peer');
   const senderAvatar = message.metadata?.senderAvatar as string | undefined;
   const fromAvatar = isLocal
-    ? metabotAvatar
-    : (isRenderableAvatarSource(peerAvatar) ? peerAvatar : senderAvatar);
+    ? pickRenderableAvatarSource(metabotAvatar)
+    : pickRenderableAvatarSource(peerAvatar, senderAvatar);
   const deliveryPayload = parseDeliveryPayload(message.content);
   const deliveryResult = typeof deliveryPayload?.result === 'string'
     ? deliveryPayload.result.trim()

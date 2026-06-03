@@ -27,7 +27,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
-import { fetchMetaidInfoByGlobalId } from '../../services/metabotInfoService';
+import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -200,7 +200,7 @@ const formatShortHash = (value: string): string => {
 
 const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
   const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized.startsWith('data:')
+  return normalized.startsWith('data:image/')
     || normalized.startsWith('http://')
     || normalized.startsWith('https://')
     || normalized.startsWith('blob:');
@@ -1922,22 +1922,50 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       setFetchedPeerAvatar(null);
       return;
     }
-    // Resolve peer globalMetaId: prefer session-level, fall back to first incoming message
+    const firstIncomingMetadata = currentSession.messages.find(
+      (m) => (m.metadata as Record<string, unknown>)?.direction === 'incoming'
+    )?.metadata as Record<string, unknown> | undefined;
+    const rawPeerAvatarCandidates = [
+      currentSession.peerAvatar,
+      typeof firstIncomingMetadata?.senderAvatar === 'string' ? firstIncomingMetadata.senderAvatar : null,
+    ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
+
+    // Resolve peer globalMetaId: prefer session-level, fall back to first incoming message.
     const peerGlobalMetaId = currentSession.peerGlobalMetaId
-      ?? (currentSession.messages.find(
-          (m) => (m.metadata as Record<string, unknown>)?.direction === 'incoming'
-        )?.metadata as Record<string, unknown> | undefined)?.senderGlobalMetaId as string | undefined
+      ?? firstIncomingMetadata?.senderGlobalMetaId as string | undefined
       ?? null;
-    if (!peerGlobalMetaId) {
+    if (!rawPeerAvatarCandidates.length && !peerGlobalMetaId) {
       setFetchedPeerAvatar(null);
       return;
     }
     let cancelled = false;
-    fetchMetaidInfoByGlobalId(peerGlobalMetaId)
-      .then((info) => {
+    const resolvePeerAvatar = async () => {
+      for (const candidate of rawPeerAvatarCandidates) {
+        try {
+          const resolved = await resolveMetaidAvatarSource(candidate);
+          if (cancelled) return;
+          if (isRenderableAvatarSource(resolved)) {
+            setFetchedPeerAvatar(resolved);
+            return;
+          }
+        } catch {
+          // Fall through to the next candidate or profile lookup.
+        }
+      }
+
+      if (!peerGlobalMetaId) {
+        if (!cancelled) setFetchedPeerAvatar(null);
+        return;
+      }
+
+      try {
+        const info = await fetchMetaidInfoByGlobalId(peerGlobalMetaId);
         if (!cancelled) setFetchedPeerAvatar(info.avatarUrl ?? null);
-      })
-      .catch(() => { /* ignore */ });
+      } catch {
+        if (!cancelled) setFetchedPeerAvatar(null);
+      }
+    };
+    void resolvePeerAvatar();
     return () => { cancelled = true; };
   }, [currentSession?.id, currentSession?.peerGlobalMetaId, currentSession?.peerAvatar, currentSession?.sessionType, currentSession?.messages]);
 

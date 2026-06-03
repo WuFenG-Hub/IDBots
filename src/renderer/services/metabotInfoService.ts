@@ -37,3 +37,18 @@ export async function fetchMetaidInfoByGlobalId(
     address: typeof data.address === 'string' ? data.address : undefined,
   };
 }
+
+export async function resolveMetaidAvatarSource(
+  reference: string | null | undefined
+): Promise<string | null> {
+  const ref = (reference || '').trim();
+  if (!ref) {
+    return null;
+  }
+  const result = await window.electron.p2p.resolveAvatarSource({ reference: ref });
+  const json = result as { success?: boolean; avatarUrl?: string | null; error?: string };
+  if (json.success === false) {
+    throw new Error(json.error || 'Avatar resolution failed');
+  }
+  return typeof json.avatarUrl === 'string' ? json.avatarUrl.trim() || null : null;
+}

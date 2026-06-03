@@ -36,6 +36,29 @@ test('A2A normal message bubble renders markdown content', () => {
   assert.match(markup, /Local Bot/);
 });
 
+test('A2A incoming message does not render raw MetaID content avatar paths directly', () => {
+  const txid = '1'.repeat(64);
+  const markup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-raw-avatar',
+        type: 'user',
+        content: 'Hello',
+        timestamp: 1_744_444_444_000,
+        metadata: {
+          direction: 'incoming',
+          senderName: 'Eric',
+          senderAvatar: '/content/92fcff9ceada16c20d26322748e877b2d48dee54cf09770768bb8b27998b90f9i0',
+          txid,
+        },
+      }}
+      peerName="Eric"
+    />
+  );
+
+  assert.doesNotMatch(markup, /src="\/content\//);
+});
+
 test('A2A non-chain ordinary messages render as internal status instead of chat bubbles', () => {
   const markup = renderToStaticMarkup(
     <A2AMessageItem

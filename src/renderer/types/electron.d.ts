@@ -850,6 +850,7 @@ interface IElectronAPI {
     setConfig: (config: Partial<ElectronP2PConfig>) => Promise<ElectronP2PConfig>;
     getPeers: () => Promise<string[]>;
     getUserInfo: (params: { globalMetaId: string }) => Promise<unknown>;
+    resolveAvatarSource: (params: { reference: string }) => Promise<unknown>;
     onStatusUpdate: (callback: (status: ElectronP2PStatus) => void) => () => void;
     onSyncProgress: (callback: (data: unknown) => void) => () => void;
   };
