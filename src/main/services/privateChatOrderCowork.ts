@@ -37,6 +37,8 @@ interface MessageAccumulator {
   resolve: (result: OrderCoworkResult) => void;
   reject: (error: Error) => void;
   timeoutId?: NodeJS.Timeout;
+  videoStatusIntervalId?: NodeJS.Timeout;
+  videoStatusUpdateCount: number;
   request?: OrderCoworkRequest;
 }
 
@@ -45,6 +47,8 @@ export interface PrivateChatOrderCoworkOptions {
   coworkStore: CoworkStore;
   metabotStore: MetabotStore;
   timeoutMs?: number;
+  videoTimeoutMs?: number;
+  videoStatusIntervalMs?: number;
   emitToRenderer?: (channel: string, data: unknown) => void;
   uploadDeliveryArtifact?: (artifact: Record<string, unknown>, request: OrderCoworkRequest) => Promise<Record<string, unknown>>;
   verifyDeliveryArtifactUpload?: (
@@ -87,7 +91,9 @@ export interface OrderCoworkRequest {
   sendStatusUpdate?: (content: string) => Promise<unknown>;
 }
 
-const DEFAULT_TIMEOUT_MS = 240_000;
+export const DEFAULT_ORDER_TIMEOUT_MS = 5 * 60_000;
+export const VIDEO_ORDER_TIMEOUT_MS = 20 * 60_000;
+export const VIDEO_ORDER_STATUS_INTERVAL_MS = 120_000;
 const MAX_MISSING_ARTIFACT_CONTINUATION_ATTEMPTS = 1;
 const TIMEOUT_FALLBACK_MAX_LINES = 8;
 const TIMEOUT_FALLBACK_MAX_CHARS = 900;
@@ -97,11 +103,32 @@ const HTML_ENTITY_RE = /&(nbsp|amp|lt|gt|quot|#39);/gi;
 const EXPLICIT_MEDIA_FAILURE_RE = /(无法|不能|未能|缺少|失败|报错|错误|被拒绝|not able|unable|cannot|can't|failed|failure|missing|error|denied|rejected)/i;
 const TIMEOUT_FINALIZABLE_OUTPUT_TYPES = new Set(['image', 'video', 'audio']);
 
+function normalizePositiveDuration(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+}
+
+export function resolveOrderExecutionTimeoutMs(
+  request?: Pick<OrderCoworkRequest, 'expectedOutputType'> | null,
+  options: {
+    defaultTimeoutMs?: number | null;
+    videoTimeoutMs?: number | null;
+  } = {},
+): number {
+  const defaultTimeoutMs = normalizePositiveDuration(options.defaultTimeoutMs) ?? DEFAULT_ORDER_TIMEOUT_MS;
+  const videoTimeoutMs = normalizePositiveDuration(options.videoTimeoutMs) ?? VIDEO_ORDER_TIMEOUT_MS;
+  return normalizeServiceOutputType(request?.expectedOutputType) === 'video'
+    ? videoTimeoutMs
+    : defaultTimeoutMs;
+}
+
 export class PrivateChatOrderCowork extends EventEmitter {
   private coworkRunner: CoworkRunner;
   private coworkStore: CoworkStore;
   private metabotStore: MetabotStore;
   private timeoutMs: number;
+  private videoTimeoutMs: number;
+  private videoStatusIntervalMs: number;
   private emitToRenderer?: (channel: string, data: unknown) => void;
   private uploadDeliveryArtifact?: (artifact: Record<string, unknown>, request: OrderCoworkRequest) => Promise<Record<string, unknown>>;
   private verifyDeliveryArtifactUpload?: (
@@ -119,7 +146,13 @@ export class PrivateChatOrderCowork extends EventEmitter {
     this.coworkRunner = options.coworkRunner;
     this.coworkStore = options.coworkStore;
     this.metabotStore = options.metabotStore;
-    this.timeoutMs = typeof options.timeoutMs === 'number' ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
+    const configuredTimeoutMs = normalizePositiveDuration(options.timeoutMs);
+    this.timeoutMs = configuredTimeoutMs ?? DEFAULT_ORDER_TIMEOUT_MS;
+    this.videoTimeoutMs = normalizePositiveDuration(options.videoTimeoutMs)
+      ?? configuredTimeoutMs
+      ?? VIDEO_ORDER_TIMEOUT_MS;
+    this.videoStatusIntervalMs = normalizePositiveDuration(options.videoStatusIntervalMs)
+      ?? VIDEO_ORDER_STATUS_INTERVAL_MS;
     this.emitToRenderer = options.emitToRenderer;
     this.uploadDeliveryArtifact = options.uploadDeliveryArtifact;
     this.verifyDeliveryArtifactUpload = options.verifyDeliveryArtifactUpload;
@@ -155,6 +188,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
     this.injectProcessingNotice(visibleSessionId, request);
     this.sessionIds.add(sessionId);
     const responsePromise = this.createAccumulatorPromise(sessionId, request);
+    this.startVideoLongTaskStatusUpdates(sessionId, visibleSessionId, request);
 
     const session = this.coworkStore.getSession(sessionId);
     if (!session) {
@@ -302,6 +336,10 @@ export class PrivateChatOrderCowork extends EventEmitter {
         existing.reject(new Error('Replaced by a newer order request'));
       }
 
+      const timeoutMs = resolveOrderExecutionTimeoutMs(request, {
+        defaultTimeoutMs: this.timeoutMs,
+        videoTimeoutMs: this.videoTimeoutMs,
+      });
       const timeoutId = setTimeout(() => {
         const acc = this.accumulators.get(sessionId);
         if (!acc) return;
@@ -322,6 +360,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
         messages: [],
         mirroredMessageIds: new Map(),
         missingArtifactContinuationAttempts: 0,
+        videoStatusUpdateCount: 0,
         resolve,
         reject,
         timeoutId,
@@ -353,6 +392,65 @@ export class PrivateChatOrderCowork extends EventEmitter {
     if (this.emitToRenderer) {
       this.emitToRenderer('cowork:stream:message', { sessionId, message: notice });
     }
+  }
+
+  private startVideoLongTaskStatusUpdates(
+    executionSessionId: string,
+    displaySessionId: string,
+    request: OrderCoworkRequest,
+  ): void {
+    if (normalizeServiceOutputType(request.expectedOutputType) !== 'video') return;
+    const accumulator = this.accumulators.get(executionSessionId);
+    if (!accumulator) return;
+
+    void this.publishVideoLongTaskStatusUpdate(executionSessionId, displaySessionId, accumulator);
+    accumulator.videoStatusIntervalId = setInterval(() => {
+      void this.publishVideoLongTaskStatusUpdate(executionSessionId, displaySessionId, accumulator);
+    }, this.videoStatusIntervalMs);
+  }
+
+  private async publishVideoLongTaskStatusUpdate(
+    executionSessionId: string,
+    displaySessionId: string,
+    accumulator: MessageAccumulator,
+  ): Promise<void> {
+    if (this.accumulators.get(executionSessionId) !== accumulator) return;
+    const request = accumulator.request;
+    const updateIndex = accumulator.videoStatusUpdateCount;
+    accumulator.videoStatusUpdateCount += 1;
+    const content = updateIndex === 0
+      ? this.buildVideoLongTaskInitialNotice(request)
+      : this.buildVideoLongTaskHeartbeatNotice(updateIndex);
+    const formattedContent = this.formatOrderStatusText(request, content);
+    const message = this.coworkStore.addMessage(displaySessionId, {
+      type: 'assistant',
+      content: formattedContent,
+      metadata: this.buildDisplayMetadata(request, 'ORDER_STATUS', {
+        excludeFromSandboxHistory: true,
+        orderVideoLongTaskStatus: true,
+        orderVideoLongTaskStatusKind: updateIndex === 0 ? 'initial' : 'heartbeat',
+        orderVideoLongTaskStatusCount: updateIndex,
+      }),
+    });
+    if (this.emitToRenderer) {
+      this.emitToRenderer('cowork:stream:message', { sessionId: displaySessionId, message });
+    }
+    const chainMetadata = await this.sendOrderStatusUpdate(request, formattedContent);
+    this.applyChainMetadataToMessage(displaySessionId, message, chainMetadata);
+  }
+
+  private buildVideoLongTaskInitialNotice(request?: OrderCoworkRequest): string {
+    const peerName = request?.peerName?.trim();
+    const prefix = peerName ? `${peerName}，` : '';
+    return `${prefix}这是一个视频任务，生成和上传通常会比普通任务更耗时，我会持续处理并同步进度，请耐心等待最终交付。`;
+  }
+
+  private buildVideoLongTaskHeartbeatNotice(updateIndex: number): string {
+    const elapsedMinutes = Math.max(
+      1,
+      Math.round((updateIndex * this.videoStatusIntervalMs) / 60_000),
+    );
+    return `视频任务还在处理中，已处理约 ${elapsedMinutes} 分钟；我会继续等待生成结果，并尽快完成交付。`;
   }
 
   private handleMessage(sessionId: string, message: CoworkMessage): void {
@@ -860,6 +958,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
   private cleanupAccumulator(sessionId: string): void {
     const accumulator = this.accumulators.get(sessionId);
     if (accumulator?.timeoutId) clearTimeout(accumulator.timeoutId);
+    if (accumulator?.videoStatusIntervalId) clearInterval(accumulator.videoStatusIntervalId);
     this.accumulators.delete(sessionId);
   }
 

@@ -4,7 +4,17 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { PrivateChatOrderCowork } = require('../dist-electron/services/privateChatOrderCowork.js');
+const {
+  DEFAULT_ORDER_TIMEOUT_MS,
+  VIDEO_ORDER_STATUS_INTERVAL_MS,
+  VIDEO_ORDER_TIMEOUT_MS,
+  PrivateChatOrderCowork,
+  resolveOrderExecutionTimeoutMs,
+} = require('../dist-electron/services/privateChatOrderCowork.js');
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 class FakeCoworkRunner extends EventEmitter {
   constructor() {
@@ -93,6 +103,82 @@ class FakeMetabotStore {
     return null;
   }
 }
+
+test('resolveOrderExecutionTimeoutMs uses 5 minutes by default and 20 minutes for video', () => {
+  assert.equal(DEFAULT_ORDER_TIMEOUT_MS, 5 * 60_000);
+  assert.equal(VIDEO_ORDER_TIMEOUT_MS, 20 * 60_000);
+  assert.equal(VIDEO_ORDER_STATUS_INTERVAL_MS, 120_000);
+  assert.equal(resolveOrderExecutionTimeoutMs({ expectedOutputType: 'text' }), 5 * 60_000);
+  assert.equal(resolveOrderExecutionTimeoutMs({ expectedOutputType: 'image' }), 5 * 60_000);
+  assert.equal(resolveOrderExecutionTimeoutMs({ expectedOutputType: 'video' }), 20 * 60_000);
+  assert.equal(
+    resolveOrderExecutionTimeoutMs(
+      { expectedOutputType: 'video' },
+      { defaultTimeoutMs: 30, videoTimeoutMs: 40 },
+    ),
+    40,
+  );
+});
+
+test('runOrder sends long-video notice and recurring scoped ORDER_STATUS updates', async () => {
+  const runner = new FakeCoworkRunner();
+  const store = new FakeCoworkStore(process.cwd());
+  const sessionId = store.createTestSession(process.cwd());
+  const orderTxid = 'a'.repeat(64);
+  const remoteStatusUpdates = [];
+
+  const handler = new PrivateChatOrderCowork({
+    coworkRunner: runner,
+    coworkStore: store,
+    metabotStore: new FakeMetabotStore(),
+    timeoutMs: 1000,
+    videoStatusIntervalMs: 20,
+  });
+
+  const runPromise = handler.runOrder({
+    metabotId: 1,
+    source: 'metaweb_private',
+    externalConversationId: 'metaweb-video-order-test',
+    existingSessionId: sessionId,
+    prompt: '[ORDER] 请生成一个海边短视频',
+    systemPrompt: 'test system prompt',
+    peerGlobalMetaId: 'peer-gmid',
+    peerName: 'eric',
+    peerAvatar: null,
+    expectedOutputType: 'video',
+    orderTxid,
+    orderPinId: 'video-order-pin-i0',
+    sendStatusUpdate: async (text) => {
+      remoteStatusUpdates.push(text);
+      return {
+        txids: [String(remoteStatusUpdates.length).padStart(64, '0')],
+        pinId: `${String(remoteStatusUpdates.length).padStart(64, '0')}i0`,
+      };
+    },
+  });
+
+  await sleep(55);
+  runner.emit('message', sessionId, {
+    id: 'assistant-progress',
+    type: 'assistant',
+    content: '视频还在生成中。',
+    timestamp: Date.now(),
+    metadata: {},
+  });
+  runner.emit('complete', sessionId);
+
+  await runPromise;
+  const statusCountAtComplete = remoteStatusUpdates.length;
+  await sleep(45);
+
+  assert.ok(statusCountAtComplete >= 3, `expected initial notice plus recurring updates, got ${statusCountAtComplete}`);
+  assert.equal(remoteStatusUpdates.length, statusCountAtComplete);
+  assert.match(remoteStatusUpdates[0], new RegExp(`^\\[ORDER_STATUS:${orderTxid}\\]`));
+  assert.match(remoteStatusUpdates[0], /视频任务/);
+  assert.match(remoteStatusUpdates[0], /耐心等待|耗时|时间/);
+  assert.ok(remoteStatusUpdates.slice(1).some((text) => /还在处理|处理中|已处理/.test(text)));
+  assert.ok(remoteStatusUpdates.every((text) => /order pin id: video-order-pin-i0/.test(text)));
+});
 
 test('runOrder resolves timeout with a visible non-deliverable fallback', async () => {
   const runner = new FakeCoworkRunner();
