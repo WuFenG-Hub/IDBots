@@ -70,6 +70,8 @@ import {
 import type { ListenerConfig } from './metaWebListenerService';
 import {
   buildA2AChainMetadata,
+  extractTxidFromA2AChainPinId,
+  normalizeA2AChainTxid,
   type A2AChainMetadata,
 } from './a2aChainMetadata';
 import {
@@ -190,6 +192,72 @@ export function buildPrivateChatA2AChainMetadata(input: {
   pinId?: unknown;
 }): CoworkMessageMetadata {
   return buildA2AChainMetadata(input) as CoworkMessageMetadata;
+}
+
+function normalizePrivateChatPinId(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function getPrivateChatRowTxid(row: PrivateChatMessageRow): string {
+  return normalizeA2AChainTxid(row.tx_id) || extractTxidFromA2AChainPinId(row.pin_id);
+}
+
+function metadataHasPrivateChatChainIdentity(
+  metadata: CoworkMessageMetadata | null | undefined,
+  row: PrivateChatMessageRow
+): boolean {
+  if (!metadata) return false;
+  const rowPinId = normalizePrivateChatPinId(row.pin_id);
+  if (rowPinId && normalizePrivateChatPinId(metadata.pinId) === rowPinId) return true;
+
+  const rowTxid = getPrivateChatRowTxid(row);
+  if (!rowTxid) return false;
+  if (normalizeA2AChainTxid(metadata.txid) === rowTxid) return true;
+  if (extractTxidFromA2AChainPinId(metadata.pinId) === rowTxid) return true;
+  if (Array.isArray(metadata.txids) && metadata.txids.some((txid) => normalizeA2AChainTxid(txid) === rowTxid)) {
+    return true;
+  }
+  return false;
+}
+
+function findPrivateChatA2AInboundMessage(params: {
+  coworkStore: Pick<CoworkStore, 'getSession'>;
+  sessionId: string;
+  externalConversationId: string;
+  row: PrivateChatMessageRow;
+}): CoworkMessage | null {
+  return params.coworkStore.getSession(params.sessionId)?.messages.find((message) => (
+    message.type === 'user'
+    && message.metadata?.sourceChannel === 'metaweb_private'
+    && message.metadata?.externalConversationId === params.externalConversationId
+    && metadataHasPrivateChatChainIdentity(message.metadata, params.row)
+  )) ?? null;
+}
+
+function findRetryablePrivateChatA2AReplyMessage(params: {
+  coworkStore: Pick<CoworkStore, 'getSession'>;
+  sessionId: string;
+  externalConversationId: string;
+  row: PrivateChatMessageRow;
+}): CoworkMessage | null {
+  const rowPinId = normalizePrivateChatPinId(params.row.pin_id);
+  const rowTxid = getPrivateChatRowTxid(params.row);
+  if (!rowPinId && !rowTxid) return null;
+  return params.coworkStore.getSession(params.sessionId)?.messages.find((message) => {
+    const metadata = message.metadata;
+    if (
+      message.type !== 'assistant'
+      || metadata?.sourceChannel !== 'metaweb_private'
+      || metadata.externalConversationId !== params.externalConversationId
+      || metadata.privateChatDeliveryStatus !== 'failed'
+    ) {
+      return false;
+    }
+    return Boolean(
+      (rowPinId && normalizePrivateChatPinId(metadata.privateChatReplyForPinId) === rowPinId)
+        || (rowTxid && normalizeA2AChainTxid(metadata.privateChatReplyForTxid) === rowTxid)
+    );
+  }) ?? null;
 }
 
 function buildOrderDispatchKey(
@@ -3393,7 +3461,12 @@ async function processOne(
       plaintext
     );
 
-    const userMessage = appendPrivateChatA2AMessage({
+    const userMessage = findPrivateChatA2AInboundMessage({
+      coworkStore,
+      sessionId,
+      externalConversationId,
+      row,
+    }) ?? appendPrivateChatA2AMessage({
       coworkStore,
       sessionId,
       externalConversationId,
@@ -3587,6 +3660,8 @@ async function processOne(
           sourceChannel: 'metaweb_private',
           externalConversationId,
           direction: 'outgoing',
+          privateChatReplyForPinId: normalizePrivateChatPinId(row.pin_id),
+          privateChatReplyForTxid: getPrivateChatRowTxid(row),
         };
         coworkStore.updateMessage(sessionId, existingAssistant.id, { metadata });
         existingAssistant.metadata = metadata;
@@ -3602,12 +3677,46 @@ async function processOne(
     }
 
     if (!assistantMessage) {
+      assistantMessage = findRetryablePrivateChatA2AReplyMessage({
+        coworkStore,
+        sessionId,
+        externalConversationId,
+        row,
+      });
+      if (assistantMessage) {
+        const metadata: CoworkMessageMetadata = {
+          ...(assistantMessage.metadata ?? {}),
+          sourceChannel: 'metaweb_private',
+          externalConversationId,
+          direction: 'outgoing',
+          privateChatReplyForPinId: normalizePrivateChatPinId(row.pin_id),
+          privateChatReplyForTxid: getPrivateChatRowTxid(row),
+        };
+        coworkStore.updateMessage(sessionId, assistantMessage.id, { content: trimmed, metadata });
+        assistantMessage.content = trimmed;
+        assistantMessage.metadata = metadata;
+        if (emitToRenderer) {
+          emitToRenderer('cowork:stream:messageUpdate', {
+            sessionId,
+            messageId: assistantMessage.id,
+            content: trimmed,
+            metadata,
+          });
+        }
+      }
+    }
+
+    if (!assistantMessage) {
       assistantMessage = appendPrivateChatA2AMessage({
         coworkStore,
         sessionId,
         externalConversationId,
         type: 'assistant',
         content: trimmed,
+        extraMetadata: {
+          privateChatReplyForPinId: normalizePrivateChatPinId(row.pin_id),
+          privateChatReplyForTxid: getPrivateChatRowTxid(row),
+        },
         emitToRenderer,
       });
     }
@@ -3642,20 +3751,21 @@ async function processOne(
         txids: sentResult.txids,
         pinId: sentResult.pinId,
       });
-      if (Object.keys(chainMetadata).length > 0) {
-        const updatedMetadata = {
-          ...(assistantMessage.metadata ?? {}),
-          ...chainMetadata,
-        };
-        coworkStore.updateMessage(sessionId, assistantMessage.id, { metadata: updatedMetadata });
-        assistantMessage.metadata = updatedMetadata;
-        if (emitToRenderer) {
-          emitToRenderer('cowork:stream:messageUpdate', {
-            sessionId,
-            messageId: assistantMessage.id,
-            metadata: updatedMetadata,
-          });
-        }
+      const updatedMetadata: CoworkMessageMetadata = {
+        ...(assistantMessage.metadata ?? {}),
+        ...chainMetadata,
+        privateChatDeliveryStatus: 'sent',
+      };
+      delete updatedMetadata.privateChatDeliveryError;
+      delete updatedMetadata.privateChatDeliveryFailedAt;
+      coworkStore.updateMessage(sessionId, assistantMessage.id, { metadata: updatedMetadata });
+      assistantMessage.metadata = updatedMetadata;
+      if (emitToRenderer) {
+        emitToRenderer('cowork:stream:messageUpdate', {
+          sessionId,
+          messageId: assistantMessage.id,
+          metadata: updatedMetadata,
+        });
       }
       emitLog(`[PrivateChat] Replied to ${fromGlobalMetaId.slice(0, 12)}…`);
     } catch (e) {

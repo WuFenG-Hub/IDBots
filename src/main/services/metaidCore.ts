@@ -31,6 +31,7 @@ import {
 } from './mvcFundingRecoveryService';
 import { buildMetabotBioPayload } from './metabotBioPayload';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
+import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
 const MANAPI_BASE = 'https://manapi.metaid.io';
 
@@ -429,15 +430,21 @@ export async function createPin(
     throw new Error(`MetaBot ${metabot_id} wallet mnemonic is empty`);
   }
 
-  // Worker: dist-electron/libs/createPinWorker.js when main runs from dist-electron; fallback for packaged/dev edge cases
+  // Worker lives under dist-electron/main/libs in Vite dev builds; keep legacy fallbacks for packaging.
   const appPath = app.getAppPath();
-  const candidatePaths = [
-    path.join(__dirname, '..', 'libs', 'createPinWorker.js'),
-    path.join(appPath, 'dist-electron', 'libs', 'createPinWorker.js'),
-    path.join(appPath, 'libs', 'createPinWorker.js'),
-  ];
-  const workerPathResolved = candidatePaths.find((p) => fs.existsSync(p)) ?? candidatePaths[0];
-  if (!fs.existsSync(workerPathResolved)) {
+  const workerBasename = 'createPinWorker.js';
+  const candidatePaths = getMainWorkerCandidatePaths({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+  });
+  const workerPathResolved = resolveMainWorkerPath({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+    exists: fs.existsSync,
+  });
+  if (!workerPathResolved) {
     appendMetaidLog('ERROR', 'createPinWorker.js not found', { candidatePaths });
     throw new Error(
       `createPinWorker.js not found. Tried: ${candidatePaths.join(', ')}. Run "npm run compile:electron" and ensure IDBots is started from project root.`

@@ -8,6 +8,7 @@ import { createPin } from './metaidCore';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
 import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
+import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
 function loadMetaFileUploadShared(): {
   DEFAULT_CHUNK_THRESHOLD_BYTES: number;
@@ -78,14 +79,19 @@ async function runUploadLargeFileWorker(
 ): Promise<Record<string, unknown>> {
   const workerBasename = 'uploadLargeFileWorker.js';
   const appPath = app.getAppPath();
-  const candidatePaths = [
-    path.join(__dirname, '..', 'libs', workerBasename),
-    path.join(appPath, 'dist-electron', 'libs', workerBasename),
-    path.join(appPath, 'libs', workerBasename),
-  ];
-  const workerPath = candidatePaths.find((entry) => fs.existsSync(entry)) ?? candidatePaths[0];
-  if (!fs.existsSync(workerPath)) {
-    throw new Error(`Worker not found: ${workerBasename}`);
+  const candidatePaths = getMainWorkerCandidatePaths({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+  });
+  const workerPath = resolveMainWorkerPath({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+    exists: fs.existsSync,
+  });
+  if (!workerPath) {
+    throw new Error(`Worker not found: ${workerBasename}. Tried: ${candidatePaths.join(', ')}`);
   }
 
   const electronExe = resolveElectronExecutablePath();

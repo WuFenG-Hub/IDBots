@@ -315,6 +315,90 @@ test('regular private chat broadcast failures keep the inbound skill reply retry
   assert.match(String(assistantMessage?.metadata?.privateChatDeliveryError || ''), /simulated broadcast failure/);
 });
 
+test('regular private chat broadcast retry reuses A2A inbound and failed reply bubbles', async () => {
+  const { db, row } = createPrivateChatDbHarness({
+    pin_id: 'incoming-pin-retry',
+    tx_id: '7'.repeat(64),
+    content: 'hi',
+  });
+  const { store: coworkStore, session } = createCoworkStoreHarness();
+  const { store: metabotStore } = createMetabotStoreHarness();
+  const logs = [];
+  let saveCount = 0;
+  let createPinCount = 0;
+
+  startPrivateChatDaemon(
+    db,
+    () => {
+      saveCount += 1;
+    },
+    coworkStore,
+    metabotStore,
+    {
+      on() {},
+      off() {},
+    },
+    async () => {
+      createPinCount += 1;
+      if (createPinCount === 1) {
+        const txid = 'e'.repeat(64);
+        return { txids: [txid], pinId: `${txid}i0` };
+      }
+      throw new Error('simulated broadcast failure');
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async (params) => {
+      assert.equal(typeof params.onSkillExecutionStart, 'function');
+      await params.onSkillExecutionStart();
+      return {
+        replyText: '嗨！有什么想聊的？',
+        assistantMessageId: null,
+      };
+    },
+    async () => '我需要查询一下，请稍等。',
+  );
+
+  try {
+    await waitFor(
+      () => logs.filter((message) => message.includes('Failed to broadcast reply')).length >= 2,
+      12_000
+    );
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 0);
+  assert.equal(saveCount, 0);
+  assert.equal(createPinCount, 3);
+
+  const inboundMessages = session.messages.filter((message) => (
+    message.type === 'user'
+    && message.metadata?.sourceChannel === 'metaweb_private'
+    && message.metadata?.pinId === row.pin_id
+  ));
+  assert.equal(inboundMessages.length, 1);
+
+  const failedAssistantMessages = session.messages.filter((message) => (
+    message.type === 'assistant'
+    && message.metadata?.privateChatDeliveryStatus === 'failed'
+  ));
+  assert.equal(failedAssistantMessages.length, 1);
+  assert.equal(failedAssistantMessages[0]?.content, '嗨！有什么想聊的？');
+  assert.equal(failedAssistantMessages[0]?.metadata?.privateChatReplyForPinId, row.pin_id);
+  assert.equal(failedAssistantMessages[0]?.metadata?.privateChatReplyForTxid, row.tx_id);
+});
+
 test('regular private chat replies emit markdown simplemsg payloads without changing the outer pin content type', async () => {
   const { db, row } = createPrivateChatDbHarness();
   const { store: coworkStore } = createCoworkStoreHarness();

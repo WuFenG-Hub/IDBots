@@ -1,10 +1,10 @@
 import { spawn } from 'child_process';
 import fs from 'fs';
-import path from 'path';
 import { app } from 'electron';
 import { mvc } from 'meta-contract';
 import type { MetabotStore } from '../metabotStore';
 import { resolveElectronExecutablePath } from '../libs/runtimePaths';
+import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
 const DEFAULT_PATH = "m/44'/10001'/0'/0/0";
 
@@ -263,14 +263,19 @@ export function summarizeMvcTransferTx(params: {
 
 async function runWorker(workerBasename: string, payload: unknown, env: NodeJS.ProcessEnv): Promise<WorkerTransferResult> {
   const appPath = app.getAppPath();
-  const candidatePaths = [
-    path.join(__dirname, '..', 'libs', workerBasename),
-    path.join(appPath, 'dist-electron', 'libs', workerBasename),
-    path.join(appPath, 'libs', workerBasename),
-  ];
-  const workerPath = candidatePaths.find((entry) => fs.existsSync(entry)) ?? candidatePaths[0];
-  if (!fs.existsSync(workerPath)) {
-    throw new Error(`Worker not found: ${workerBasename}`);
+  const candidatePaths = getMainWorkerCandidatePaths({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+  });
+  const workerPath = resolveMainWorkerPath({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+    exists: fs.existsSync,
+  });
+  if (!workerPath) {
+    throw new Error(`Worker not found: ${workerBasename}. Tried: ${candidatePaths.join(', ')}`);
   }
 
   const electronExe = resolveElectronExecutablePath();

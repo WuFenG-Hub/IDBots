@@ -14,6 +14,7 @@ import { BtcWallet, AddressType, CoinType, SignType } from '@metalet/utxo-wallet
 import { resolveElectronExecutablePath } from '../libs/runtimePaths';
 import type { MetabotStore } from '../metabotStore';
 import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
+import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 import {
   clearMvcExcludedOutpoints,
   getMvcCachedFundingOutpointKey,
@@ -331,13 +332,19 @@ async function runMvcTransferWorker(params: {
   preferredFundingUtxos?: MvcCachedFundingUtxo[];
 }): Promise<MvcTransferWorkerSuccess | MvcTransferWorkerFailure> {
   const appPath = app.getAppPath();
-  const candidatePaths = [
-    path.join(__dirname, '..', 'libs', 'transferMvcWorker.js'),
-    path.join(appPath, 'dist-electron', 'libs', 'transferMvcWorker.js'),
-    path.join(appPath, 'libs', 'transferMvcWorker.js'),
-  ];
-  const workerPathResolved = candidatePaths.find((p) => fs.existsSync(p)) ?? candidatePaths[0];
-  if (!fs.existsSync(workerPathResolved)) {
+  const workerBasename = 'transferMvcWorker.js';
+  const candidatePaths = getMainWorkerCandidatePaths({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+  });
+  const workerPathResolved = resolveMainWorkerPath({
+    moduleDir: __dirname,
+    appPath,
+    workerBasename,
+    exists: fs.existsSync,
+  });
+  if (!workerPathResolved) {
     console.error('[Transfer] transferMvcWorker.js not found. Tried:', candidatePaths);
     return { success: false, error: 'Transfer worker not found. Run npm run compile:electron.' };
   }
