@@ -530,3 +530,74 @@ test('regular private chat sends a wait notice before running a local chat skill
   assert.equal(assistantMessages[0].metadata?.privateChatDeliveryStatus, 'sent');
   assert.equal(assistantMessages[1].content, 'PoP 的全称是 Proof of PIN');
 });
+
+test('regular private chat skill turn consumes queued A2A guidance once', async () => {
+  const { db, row } = createPrivateChatDbHarness({
+    pin_id: 'incoming-pin-guidance',
+    tx_id: '8'.repeat(64),
+    content: '请继续说说。',
+  });
+  const { store: coworkStore } = createCoworkStoreHarness();
+  const { metabot, store: metabotStore } = createMetabotStoreHarness();
+  const logs = [];
+  let saveCount = 0;
+  let consumedCount = 0;
+  let capturedSystemPrompt = '';
+
+  startPrivateChatDaemon(
+    db,
+    () => {
+      saveCount += 1;
+    },
+    coworkStore,
+    metabotStore,
+    {
+      on() {},
+      off() {},
+    },
+    async (_metabotStore, metabotId, payload) => {
+      assert.equal(metabotId, metabot.id);
+      assert.equal(payload.path, '/protocols/simplemsg');
+      const txid = '8'.repeat(64);
+      return { txids: [txid], pinId: `${txid}i0` };
+    },
+    (message) => logs.push(message),
+    null,
+    undefined,
+    undefined,
+    () => ({ respondToStrangerPrivateChats: true }),
+    undefined,
+    undefined,
+    undefined,
+    async () => ({
+      prompt: '<available_skills><skill><id>metaid-master-wiki</id></skill></available_skills>',
+      activeSkillIds: ['metaid-master-wiki'],
+    }),
+    async (params) => {
+      capturedSystemPrompt = params.systemPrompt;
+      return {
+        replyText: '我会先聚焦预算范围。',
+        assistantMessageId: null,
+      };
+    },
+    async () => '我需要查询一下，请稍等。',
+    (sessionId, metabotId) => {
+      assert.equal(sessionId, 'session-private-1');
+      assert.equal(metabotId, 1);
+      consumedCount += 1;
+      return consumedCount === 1 ? '下一轮先追问预算范围。' : null;
+    },
+  );
+
+  try {
+    await waitFor(() => logs.some((message) => message.includes('Replied to')));
+  } finally {
+    await stopPrivateChatDaemon({ waitForTick: true });
+  }
+
+  assert.equal(row.is_processed, 1);
+  assert.equal(saveCount, 1);
+  assert.equal(consumedCount, 1);
+  assert.match(capturedSystemPrompt, /Human Operator Guidance/);
+  assert.match(capturedSystemPrompt, /下一轮先追问预算范围。/);
+});

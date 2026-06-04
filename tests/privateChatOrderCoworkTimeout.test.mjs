@@ -240,3 +240,70 @@ test('runOrder resolves timeout with a visible non-deliverable fallback', async 
   const hasCompleteEvent = rendererEvents.some((event) => event.channel === 'cowork:stream:complete');
   assert.equal(hasCompleteEvent, true);
 });
+
+test('missing artifact continuation consumes newly queued A2A guidance', async () => {
+  const runner = new FakeCoworkRunner();
+  const store = new FakeCoworkStore(process.cwd());
+  const displaySessionId = store.createTestSession(process.cwd());
+  const consumed = [];
+  let guidanceQueued = false;
+
+  const handler = new PrivateChatOrderCowork({
+    coworkRunner: runner,
+    coworkStore: store,
+    metabotStore: new FakeMetabotStore(),
+    timeoutMs: 1000,
+    consumeA2AGuidance: (sessionId, metabotId) => {
+      if (!guidanceQueued) return null;
+      guidanceQueued = false;
+      consumed.push({ displaySessionId: sessionId, metabotId });
+      return '如果没有生成图片，就立即继续调用工具生成真实文件。';
+    },
+  });
+
+  const runPromise = handler.runOrder({
+    metabotId: 1,
+    source: 'metaweb_private',
+    externalConversationId: 'metaweb-image-order-test',
+    displaySessionId,
+    prompt: '[ORDER] 请生成一张海边图片',
+    systemPrompt: 'test image system prompt',
+    peerGlobalMetaId: 'peer-gmid',
+    peerName: 'eric',
+    peerAvatar: null,
+    expectedOutputType: 'image',
+    orderTxid: 'b'.repeat(64),
+    orderPinId: 'image-order-pin-i0',
+  });
+
+  await sleep(25);
+  assert.equal(runner.startSessionCalls.length, 1);
+  const executionSessionId = runner.startSessionCalls[0].sessionId;
+  guidanceQueued = true;
+  runner.emit('message', executionSessionId, {
+    id: 'assistant-progress',
+    type: 'assistant',
+    content: '图片已经开始生成。',
+    timestamp: Date.now(),
+    metadata: {},
+  });
+  runner.emit('complete', executionSessionId);
+
+  await sleep(25);
+  assert.equal(runner.startSessionCalls.length, 2);
+  assert.deepEqual(consumed, [{ displaySessionId, metabotId: 1 }]);
+  assert.match(runner.startSessionCalls[1].options.systemPrompt, /Human Operator Guidance/);
+  assert.match(runner.startSessionCalls[1].options.systemPrompt, /立即继续调用工具生成真实文件/);
+
+  runner.emit('message', executionSessionId, {
+    id: 'assistant-failure',
+    type: 'assistant',
+    content: '无法生成图片：缺少可用图片生成工具。',
+    timestamp: Date.now(),
+    metadata: {},
+  });
+  runner.emit('complete', executionSessionId);
+
+  const result = await runPromise;
+  assert.equal(result.isDeliverable, false);
+});

@@ -24,6 +24,7 @@ import {
   buildA2AChainMetadata,
   type A2AChainMetadata,
 } from './a2aChainMetadata';
+import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
 import {
   buildOrderProtocolDisplayMetadata,
   type SimplemsgProtocolTag,
@@ -57,6 +58,7 @@ export interface PrivateChatOrderCoworkOptions {
     request: OrderCoworkRequest
   ) => Promise<boolean>;
   buildRatingInvite?: (serviceReply: string, request?: OrderCoworkRequest) => Promise<string>;
+  consumeA2AGuidance?: (sessionId: string, metabotId: number) => string | null;
 }
 
 export interface OrderCoworkResult {
@@ -137,6 +139,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
     request: OrderCoworkRequest
   ) => Promise<boolean>;
   private buildRatingInviteOverride?: (serviceReply: string, request?: OrderCoworkRequest) => Promise<string>;
+  private consumeA2AGuidance?: (sessionId: string, metabotId: number) => string | null;
 
   private sessionIds: Set<string> = new Set();
   private accumulators: Map<string, MessageAccumulator> = new Map();
@@ -157,6 +160,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
     this.uploadDeliveryArtifact = options.uploadDeliveryArtifact;
     this.verifyDeliveryArtifactUpload = options.verifyDeliveryArtifactUpload;
     this.buildRatingInviteOverride = options.buildRatingInvite;
+    this.consumeA2AGuidance = options.consumeA2AGuidance;
     this.setupListeners();
   }
 
@@ -199,7 +203,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       skipInitialUserMessage: true,
       workspaceRoot: session.cwd,
       confirmationMode: 'text',
-      systemPrompt: request.systemPrompt,
+      systemPrompt: this.buildSystemPromptForRun(sessionId, request),
       skillIds: request.activeSkillIds,
       autoApprove: true,
       disableMemoryUpdates: true,
@@ -233,6 +237,16 @@ export class PrivateChatOrderCowork extends EventEmitter {
     const displaySessionId = this.normalizeSessionId(request?.displaySessionId);
     if (!displaySessionId || displaySessionId === executionSessionId) return executionSessionId;
     return this.coworkStore.getSession(displaySessionId) ? displaySessionId : executionSessionId;
+  }
+
+  private buildSystemPromptForRun(sessionId: string, request?: OrderCoworkRequest): string {
+    const baseSystemPrompt = request?.systemPrompt || '';
+    if (!request || typeof request.metabotId !== 'number') {
+      return baseSystemPrompt;
+    }
+    const displaySessionId = this.getDisplaySessionId(sessionId, request);
+    const guidance = this.consumeA2AGuidance?.(displaySessionId, request.metabotId) ?? null;
+    return appendA2AGuidanceToSystemPrompt(baseSystemPrompt, guidance);
   }
 
   private hasSeparateDisplaySession(executionSessionId: string, request?: OrderCoworkRequest): boolean {
@@ -641,7 +655,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
           skipInitialUserMessage: true,
           workspaceRoot: session?.cwd,
           confirmationMode: 'text',
-          systemPrompt: request?.systemPrompt,
+          systemPrompt: this.buildSystemPromptForRun(sessionId, request),
           skillIds: this.normalizeActiveSkillIds(request?.activeSkillIds),
           autoApprove: true,
           disableMemoryUpdates: true,

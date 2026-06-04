@@ -162,6 +162,7 @@ type GeneratePrivateChatSkillWaitNoticeFn = (params: {
   userMessage: string;
   llmId?: string | null;
 }) => Promise<string>;
+type ConsumeA2AGuidanceFn = (sessionId: string, metabotId: number) => string | null;
 type GetListenerConfigFn = () => Partial<ListenerConfig> | null | undefined;
 
 export interface PrivateChatA2AContextMessage {
@@ -2263,7 +2264,8 @@ async function processOne(
   onWasmBoundsError?: () => void,
   getChatSkillsRoutingPrompt?: GetChatSkillsRoutingPromptFn,
   runPrivateChatSkillTurn?: RunPrivateChatSkillTurnFn,
-  generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn
+  generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
+  consumeA2AGuidance?: ConsumeA2AGuidanceFn
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -2746,6 +2748,9 @@ async function processOne(
         return;
       }
 
+      const operatorGuidance = sellerOrderSessionId
+        ? consumeA2AGuidance?.(sellerOrderSessionId, metabot.id) ?? null
+        : null;
       const prompts = buildOrderPrompts({
         plaintext,
         source,
@@ -2757,6 +2762,7 @@ async function processOne(
         allowedSkillNames: skillScope.allowedSkillNames,
         executionReminder,
         expectedOutputType: serviceOutputType,
+        operatorGuidance,
       });
       const externalConversationId = sellerOrderConversationId || buildOrderExternalConversationId(row, source, orderTrackingId);
       const orderDispatchKey = orderTrackingId
@@ -3518,6 +3524,9 @@ async function processOne(
       }
       skillWaitNoticeAlreadySent = true;
     };
+    const operatorGuidance = conversationAnalysis.shouldForceBye
+      ? null
+      : consumeA2AGuidance?.(sessionId, metabot.id) ?? null;
     const systemPrompt = buildPrivateChatA2ASystemPrompt({
       metabot: {
         name: metabot.name,
@@ -3530,6 +3539,7 @@ async function processOne(
       analysis: conversationAnalysis,
       skillsPrompt: canRunChatSkills ? chatSkillsRouting.prompt : null,
       skillWaitNoticeAlreadySent,
+      operatorGuidance,
     });
     let reply: string;
     let skillAssistantMessageId: string | null = null;
@@ -3727,6 +3737,7 @@ export function startPrivateChatDaemon(
   getChatSkillsRoutingPrompt?: GetChatSkillsRoutingPromptFn,
   runPrivateChatSkillTurn?: RunPrivateChatSkillTurnFn,
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
+  consumeA2AGuidance?: ConsumeA2AGuidanceFn,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -3745,6 +3756,7 @@ export function startPrivateChatDaemon(
       });
     },
     verifyDeliveryArtifactUpload,
+    consumeA2AGuidance,
   });
   const performChat = performChatCompletionForOrchestrator;
   const runPollTick = async (): Promise<void> => {
@@ -3789,6 +3801,7 @@ export function startPrivateChatDaemon(
               getChatSkillsRoutingPrompt,
               runPrivateChatSkillTurn,
               generatePrivateChatSkillWaitNotice,
+              consumeA2AGuidance,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
