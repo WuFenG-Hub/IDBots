@@ -55,7 +55,7 @@ import {
   executeTransfer,
   type TransferChain,
 } from './services/transferService';
-import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from './services/feeRateStore';
+import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, initFeeRateStore } from './services/feeRateStore';
 import {
   buildTokenTransferPreview as buildTokenTransferPreviewService,
   executeTokenTransfer as executeTokenTransferService,
@@ -9133,7 +9133,6 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     // Global fee rate store: must init after store is ready
-    const { initFeeRateStore } = require('./services/feeRateStore') as typeof import('./services/feeRateStore');
     initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
 
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore);

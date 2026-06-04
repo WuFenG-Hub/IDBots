@@ -7,6 +7,7 @@ import { resolveElectronExecutablePath } from '../libs/runtimePaths';
 import { createPin } from './metaidCore';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
+import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
 
 function loadMetaFileUploadShared(): {
   DEFAULT_CHUNK_THRESHOLD_BYTES: number;
@@ -18,13 +19,11 @@ function loadMetaFileUploadShared(): {
   validateUploadSize: (input: { sizeBytes: number; maxSizeBytes?: number }) => number;
   selectUploadMode: (input: { sizeBytes: number; chunkThresholdBytes?: number }) => 'direct' | 'chunked';
 } {
-  const candidatePaths = [
-    path.join(__dirname, 'metaFileUploadShared.js'),
-    path.join(__dirname, 'services', 'metaFileUploadShared.js'),
-    path.join(app.getAppPath(), 'dist-electron', 'services', 'metaFileUploadShared.js'),
-    path.join(app.getAppPath(), 'services', 'metaFileUploadShared.js'),
-  ];
-  const modulePath = candidatePaths.find((entry) => fs.existsSync(entry));
+  const modulePath = resolveMetaFileUploadSharedModulePath({
+    moduleDir: __dirname,
+    appPath: app.getAppPath(),
+    exists: fs.existsSync,
+  });
   if (!modulePath) {
     throw new Error('metaFileUploadShared module not found');
   }
