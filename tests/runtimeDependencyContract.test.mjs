@@ -4,12 +4,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 const packageJsonPath = path.join(process.cwd(), 'package.json');
 const mainProcessPath = path.join(process.cwd(), 'src', 'main', 'main.ts');
 const skillManagerPath = path.join(process.cwd(), 'src', 'main', 'skillManager.ts');
 const coworkRunnerPath = path.join(process.cwd(), 'src', 'main', 'libs', 'coworkRunner.ts');
 const claudeSdkCliPatchScriptPath = path.join(process.cwd(), 'scripts', 'patch-claude-sdk-cli.js');
+const electronMainExternalsPath = path.join(process.cwd(), 'scripts', 'electron-main-externals.cjs');
+const viteConfigPath = path.join(process.cwd(), 'vite.config.ts');
+const require = createRequire(import.meta.url);
 
 const CYGPATH_SNIPPET =
   'BS=(A)=>{let Q=g4([A]);return NL(`cygpath -u ${Q}`,{shell:dM1()}).toString().trim()},B0Q=(A)=>{let Q=g4([A]);return NL(`cygpath -w ${Q}`,{shell:dM1()}).toString().trim()};';
@@ -89,6 +93,53 @@ test('electron dev scripts use IPv4 loopback for Vite readiness', () => {
     mainProcessSource,
     /ELECTRON_START_URL \|\| 'http:\/\/127\.0\.0\.1:5175'/,
     'The main process development fallback should avoid localhost for direct Electron starts too',
+  );
+});
+
+test('Electron main build externalizes heavy runtime dependencies', () => {
+  const { createElectronMainExternalPredicate } = require(electronMainExternalsPath);
+  const external = createElectronMainExternalPredicate();
+  const viteConfigSource = fs.readFileSync(viteConfigPath, 'utf8');
+
+  assert.equal(external('@metalet/utxo-wallet-service'), true);
+  assert.equal(external('@metalet/utxo-wallet-service/dist/index.js'), true);
+  assert.equal(external('meta-contract'), true);
+  assert.equal(external('@larksuiteoapi/node-sdk'), true);
+  assert.equal(external('@scure/bip39/wordlists/english'), true);
+  assert.equal(external('electron'), true);
+  assert.equal(external('node:path'), true);
+  assert.equal(external('./services/metabotWalletService'), false);
+  assert.equal(external('/absolute/project/src/main/main.ts'), false);
+
+  assert.match(
+    viteConfigSource,
+    /createElectronMainExternalPredicate/,
+    'vite.config.ts should use the shared Electron main external predicate',
+  );
+  assert.match(
+    viteConfigSource,
+    /external:\s*electronMainExternal/,
+    'Electron main Rollup config should externalize runtime dependencies instead of bundling node_modules into main.js',
+  );
+});
+
+test('production Vite builds minify bundles without source maps', () => {
+  const viteConfigSource = fs.readFileSync(viteConfigPath, 'utf8');
+
+  assert.match(
+    viteConfigSource,
+    /const isProductionBuild = process\.env\.NODE_ENV === 'production'/,
+    'vite.config.ts should keep a single production-build flag for build output options',
+  );
+  assert.equal(
+    (viteConfigSource.match(/sourcemap:\s*!isProductionBuild/g) || []).length,
+    3,
+    'renderer, Electron main, and preload builds should omit source maps in production',
+  );
+  assert.equal(
+    (viteConfigSource.match(/minify:\s*isProductionBuild\s*\?\s*'esbuild'\s*:\s*false/g) || []).length,
+    3,
+    'renderer, Electron main, and preload builds should minify only production bundles',
   );
 });
 

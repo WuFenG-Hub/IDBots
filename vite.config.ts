@@ -3,9 +3,14 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
+import { createRequire } from 'node:module';
 
 // https://vitejs.dev/config/
 const devPort = 5175;
+const isProductionBuild = process.env.NODE_ENV === 'production';
+const require = createRequire(import.meta.url);
+const { createElectronMainExternalPredicate } = require('./scripts/electron-main-externals.cjs');
+const electronMainExternal = createElectronMainExternalPredicate();
 
 export default defineConfig({
   plugins: [
@@ -16,11 +21,11 @@ export default defineConfig({
         entry: 'src/main/main.ts',
         vite: {
           build: {
-            sourcemap: true,
+            sourcemap: !isProductionBuild,
             outDir: 'dist-electron',
-            minify: false,
+            minify: isProductionBuild ? 'esbuild' : false,
             rollupOptions: {
-              external: ['sql.js', 'discord.js', 'zlib-sync', '@discordjs/opus', 'bufferutil', 'utf-8-validate'],
+              external: electronMainExternal,
             },
           },
         },
@@ -31,9 +36,9 @@ export default defineConfig({
         entry: 'src/main/preload.ts',
         vite: {
           build: {
-            sourcemap: true,
+            sourcemap: !isProductionBuild,
             outDir: 'dist-electron',
-            minify: false,
+            minify: isProductionBuild ? 'esbuild' : false,
           },
         },
         onstart() {},
@@ -50,8 +55,8 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    sourcemap: true,
-    minify: false,
+    sourcemap: !isProductionBuild,
+    minify: isProductionBuild ? 'esbuild' : false,
   },
   server: {
     port: devPort,
