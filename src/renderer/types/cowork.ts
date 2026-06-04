@@ -82,6 +82,18 @@ export interface CoworkServiceOrderSummary {
   refundTxid?: string | null;
 }
 
+export interface CoworkA2AGuidanceRequest {
+  sessionId: string;
+  guidance: string;
+}
+
+export interface CoworkA2AGuidanceResult {
+  success: boolean;
+  mode?: 'queued' | 'restart_started';
+  messageId?: string | null;
+  error?: string;
+}
+
 // Cowork session
 export interface CoworkSession {
   id: string;

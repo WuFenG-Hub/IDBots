@@ -110,3 +110,41 @@ test('manual A2A delivery resend preserves service order pin identity for free o
     /markSellerOrderDelivered\(\{\s*localMetabotId: metabotId,\s*counterpartyGlobalMetaId: peerGlobalMetaId,\s*orderPinId: order\.orderPinId,\s*paymentTxid: order\.paymentTxid,/s
   );
 });
+
+test('A2A guidance IPC queues active sessions and restarts ended private chats', () => {
+  const mainSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'main.ts'),
+    'utf8'
+  );
+  const preloadSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'preload.ts'),
+    'utf8'
+  );
+  const electronTypes = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'types', 'electron.d.ts'),
+    'utf8'
+  );
+  const coworkTypes = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'types', 'cowork.ts'),
+    'utf8'
+  );
+
+  assert.match(mainSource, /ipcMain\.handle\('cowork:session:queueA2AGuidance'/);
+  assert.match(mainSource, /a2aGuidanceQueue\.queue/);
+  assert.match(mainSource, /a2aGuidanceQueue\.clear/);
+  assert.match(mainSource, /startPrivateChatDaemon\([\s\S]*a2aGuidanceQueue\.consume/);
+  assert.match(mainSource, /performChatCompletionForOrchestrator/);
+  assert.match(mainSource, /sendEncryptedSimplemsg/);
+  assert.match(mainSource, /a2aConversationRestarted/);
+  assert.match(mainSource, /byeSent:\s*false/);
+
+  assert.match(preloadSource, /queueA2AGuidance/);
+  assert.match(preloadSource, /cowork:session:queueA2AGuidance/);
+  assert.match(preloadSource, /CoworkA2AGuidanceRequest/);
+  assert.match(electronTypes, /queueA2AGuidance/);
+  assert.match(electronTypes, /CoworkA2AGuidanceRequest/);
+  assert.match(electronTypes, /CoworkA2AGuidanceResult/);
+  assert.match(coworkTypes, /interface CoworkA2AGuidanceRequest/);
+  assert.match(coworkTypes, /interface CoworkA2AGuidanceResult/);
+  assert.match(coworkTypes, /restart_started/);
+});

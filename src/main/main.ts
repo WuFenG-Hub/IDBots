@@ -84,6 +84,12 @@ import {
   startPrivateChatDaemon,
   stopPrivateChatDaemon,
 } from './services/privateChatDaemon';
+import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
+import {
+  buildA2AGuidanceRestartPrompt,
+  shouldRestartA2APrivateChatForGuidance,
+} from './services/a2aGuidanceRestart';
+import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
 import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { createPin, getPinData } from './services/metaidCore';
@@ -685,6 +691,18 @@ const buildPrivateMessagePayload = (to: string, encryptedContent: string, replyP
     replyPin: replyPin || '',
   };
   return JSON.stringify(body);
+};
+
+const parseJsonRecord = (value?: string | null): Record<string, unknown> => {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
 };
 
 const extractChatPubkeyFromList = (list: any[], metaid: string): string | null => {
@@ -2745,7 +2763,9 @@ const startSqliteDaemons = (): void => {
         activeSkillIds: params.activeSkillIds,
         onSkillExecutionStart: params.onSkillExecutionStart,
       });
-    }
+    },
+    undefined,
+    (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null
   );
 };
 
@@ -5224,6 +5244,145 @@ if (!gotTheLock) {
         error: error instanceof Error ? error.message : 'Failed to stop session',
       };
     }
+  });
+
+  ipcMain.handle('cowork:session:queueA2AGuidance', async (_event, input: {
+    sessionId?: unknown;
+    guidance?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:queueA2AGuidance', async () => {
+      try {
+        const sessionId = toSafeString(input?.sessionId).trim();
+        const guidance = normalizeA2AGuidanceText(input?.guidance);
+        if (!sessionId) throw new Error('A2A session id is required');
+
+        const coworkStoreInst = getCoworkStore();
+        const session = coworkStoreInst.getSession(sessionId);
+        if (!session) throw new Error('A2A session not found');
+        if (session.sessionType !== 'a2a') throw new Error('Only A2A sessions support guided dialogue');
+        if (typeof session.metabotId !== 'number') throw new Error('A2A session has no local MetaBot id');
+
+        const sourceContext = coworkStoreInst.getConversationSourceContextBySession(sessionId);
+        const currentMapping = sourceContext.sourceChannel === 'metaweb_private' && sourceContext.externalConversationId
+          ? coworkStoreInst.getConversationMapping(
+              'metaweb_private',
+              sourceContext.externalConversationId,
+              session.metabotId
+            )
+          : null;
+        const currentMetadata = parseJsonRecord(currentMapping?.metadataJson);
+        const shouldRestart = shouldRestartA2APrivateChatForGuidance({
+          session,
+          sourceChannel: sourceContext.sourceChannel,
+          mappingMetadata: currentMetadata,
+        });
+        if (!shouldRestart) {
+          a2aGuidanceQueue.queue({ sessionId, metabotId: session.metabotId, guidance });
+          return { success: true, mode: 'queued' as const };
+        }
+        if (sourceContext.sourceChannel !== 'metaweb_private' || !sourceContext.externalConversationId) {
+          throw new Error('Only MetaWeb private-chat A2A sessions can be restarted with guidance');
+        }
+        if (!currentMapping) throw new Error('Private chat conversation mapping not found');
+
+        const metabotStoreInst = getMetabotStore();
+        const metabot = metabotStoreInst.getMetabotById(session.metabotId);
+        const wallet = metabotStoreInst.getMetabotWalletByMetabotId(session.metabotId);
+        const peerGlobalMetaId = toSafeString(
+          session.peerGlobalMetaId || currentMetadata.peerGlobalMetaId
+        ).trim();
+        const localGlobalMetaId = toSafeString(metabot?.globalmetaid).trim();
+        if (!metabot || !wallet?.mnemonic?.trim() || !localGlobalMetaId) {
+          throw new Error('Local MetaBot wallet is not ready for encrypted A2A guidance restart');
+        }
+        if (!peerGlobalMetaId) throw new Error('A2A peer GlobalMetaID is missing');
+
+        const db = getStore().getDatabase();
+        const latestPeerKey = db.exec(
+          `SELECT from_chat_pubkey, reply_pin
+           FROM private_chat_messages
+           WHERE (from_global_metaid = ? OR from_metaid = ?)
+             AND (to_global_metaid = ? OR to_metaid = ?)
+             AND from_chat_pubkey IS NOT NULL
+             AND TRIM(from_chat_pubkey) != ''
+           ORDER BY id DESC
+           LIMIT 1`,
+          [peerGlobalMetaId, peerGlobalMetaId, localGlobalMetaId, localGlobalMetaId]
+        );
+        const row = latestPeerKey[0]?.values?.[0] ?? [];
+        let chatPubkey = toSafeString(row[0]).trim();
+        const replyPin = toSafeString(row[1]).trim();
+        if (!chatPubkey) {
+          chatPubkey = await resolveChatPubkeyForProvider(peerGlobalMetaId) ?? '';
+        }
+        if (!chatPubkey) throw new Error('Peer chat public key is unavailable');
+
+        const prompts = buildA2AGuidanceRestartPrompt({
+          localName: metabot.name || session.metabotName || 'Local Bot',
+          peerName: session.peerName || 'Remote Bot',
+          guidance,
+          messages: session.messages,
+        });
+        const rawReply = await performChatCompletionForOrchestrator(
+          prompts.systemPrompt,
+          prompts.userPrompt,
+          metabot.llm_id ?? undefined,
+        );
+        const replyText = toSafeString(rawReply).trim();
+        if (!replyText) throw new Error('Local MetaBot did not generate a restart message');
+
+        const sent = await sendEncryptedSimplemsg({
+          metabotId: session.metabotId,
+          wallet,
+          peerGlobalMetaId,
+          peerChatPubkey: chatPubkey,
+          plaintext: replyText,
+          replyPin,
+          createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload),
+        });
+
+        coworkStoreInst.updateConversationMappingMetadata(
+          'metaweb_private',
+          sourceContext.externalConversationId,
+          session.metabotId,
+          {
+            ...currentMetadata,
+            byeSent: false,
+            endedByHuman: false,
+            endedByAutoPolicy: false,
+            restartedAt: Date.now(),
+            peerGlobalMetaId,
+          },
+        );
+
+        const message = coworkStoreInst.addMessage(sessionId, {
+          type: 'assistant',
+          content: replyText,
+          metadata: {
+            sourceChannel: 'metaweb_private',
+            externalConversationId: sourceContext.externalConversationId,
+            direction: 'outgoing',
+            a2aConversationRestarted: true,
+            suppressRunningStatus: true,
+            ...buildA2AChainMetadata({
+              txids: sent.txids,
+              pinId: sent.pinId,
+            }),
+          },
+        });
+        emitCoworkStreamMessage(sessionId, message);
+        coworkStoreInst.updateSession(sessionId, { status: 'completed' });
+        a2aGuidanceQueue.clear(sessionId, session.metabotId);
+
+        return { success: true, mode: 'restart_started' as const, messageId: message.id };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to queue A2A guidance',
+        };
+      }
+    });
   });
 
   ipcMain.handle('cowork:session:endA2APrivateChat', async (_event, sessionId: string) => {

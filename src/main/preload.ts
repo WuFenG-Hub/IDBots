@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { CoworkA2AGuidanceRequest } from '../renderer/types/cowork';
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
@@ -243,6 +244,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
+    queueA2AGuidance: (input: CoworkA2AGuidanceRequest) =>
+      ipcRenderer.invoke('cowork:session:queueA2AGuidance', input),
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) =>
       ipcRenderer.invoke('cowork:session:resendA2ADeliveryArtifact', input),
     deleteSession: (sessionId: string) =>
