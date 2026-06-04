@@ -16,6 +16,7 @@ import {
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
+import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
 import { buildOrderPrompts } from './orderPromptBuilder';
 import {
   checkOrderPaymentStatus,
@@ -792,6 +793,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
   analysis: PrivateChatA2AAnalysis;
   skillsPrompt?: string | null;
   skillWaitNoticeAlreadySent?: boolean;
+  operatorGuidance?: string | null;
 }): string {
   const localName = params.metabot.name || 'Local Bot';
   const allowedSkillsPrompt =
@@ -820,7 +822,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
       : '- If local skill execution actually starts, the host will send a brief wait notice to the peer at that moment. Do not preface normal replies with wait notices; answer directly when no skill is needed.'
     : '';
 
-  return [
+  const basePrompt = [
     buildPrivateReplySystemPrompt(params.metabot),
     '',
     '## MetaBot-to-MetaBot Private Chat Policy',
@@ -850,6 +852,10 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     ...contextLines,
     ...(params.memoryContext ? ['', params.memoryContext] : []),
   ].join('\n');
+  return appendA2AGuidanceToSystemPrompt(
+    basePrompt,
+    params.analysis.shouldForceBye ? null : params.operatorGuidance,
+  );
 }
 
 function buildSellerOrderAcknowledgementSystemPrompt(metabot: {

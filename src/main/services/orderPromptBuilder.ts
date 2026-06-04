@@ -5,6 +5,7 @@ import {
   type OrderSource,
 } from './orderPayment';
 import { extractOrderDisplaySummary } from '../shared/orderMessage.js';
+import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
 
 export interface OrderPromptBuildResult {
   systemPrompt: string;
@@ -33,6 +34,7 @@ export function buildOrderPrompts(params: {
   allowedSkillNames?: string[] | null;
   executionReminder?: string | null;
   expectedOutputType?: string | null;
+  operatorGuidance?: string | null;
 }): OrderPromptBuildResult {
   const clientName = params.peerName?.trim() || 'the client';
   const allowedSkillNames = Array.from(new Set(
@@ -119,9 +121,13 @@ export function buildOrderPrompts(params: {
   ].join('\n');
 
   const sanitizedSkillsPrompt = stripRemoteDelegationInstructions(params.skillsPrompt);
-  const systemPrompt = sanitizedSkillsPrompt
+  const systemPromptWithoutGuidance = sanitizedSkillsPrompt
     ? `${sanitizedSkillsPrompt}\n\n${baseSystemPrompt}`
     : baseSystemPrompt;
+  const systemPrompt = appendA2AGuidanceToSystemPrompt(
+    systemPromptWithoutGuidance,
+    params.operatorGuidance,
+  );
 
   return {
     systemPrompt,

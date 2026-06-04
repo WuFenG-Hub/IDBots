@@ -73,3 +73,33 @@ test('private chat force-bye prompt does not inject chat skills', () => {
   assert.doesNotMatch(prompt, /weather-skill/);
   assert.doesNotMatch(prompt, /brief wait notice/i);
 });
+
+test('private chat prompt includes local-only operator guidance when provided', () => {
+  const prompt = buildPrivateChatA2ASystemPrompt({
+    metabot: baseMetabot(),
+    analysis: baseAnalysis(),
+    operatorGuidance: '下一轮先让对方给出预算范围。',
+  });
+
+  assert.match(prompt, /Human Operator Guidance/);
+  assert.match(prompt, /local MetaBot only/);
+  assert.match(prompt, /not a message from the remote peer/);
+  assert.match(prompt, /下一轮先让对方给出预算范围。/);
+  assert.match(prompt, /Do not claim local tool access or execute local skills/i);
+});
+
+test('private chat force-bye prompt ignores operator guidance', () => {
+  const prompt = buildPrivateChatA2ASystemPrompt({
+    metabot: baseMetabot(),
+    analysis: baseAnalysis({
+      incomingTurnCount: 30,
+      shouldForceBye: true,
+    }),
+    operatorGuidance: '不要结束，继续追问。',
+  });
+
+  assert.match(prompt, /Reply exactly "bye" now/);
+  assert.match(prompt, /When you say "bye", say exactly "bye" and nothing else/);
+  assert.doesNotMatch(prompt, /Human Operator Guidance/);
+  assert.doesNotMatch(prompt, /不要结束/);
+});
