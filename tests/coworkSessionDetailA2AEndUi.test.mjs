@@ -148,3 +148,37 @@ test('A2A guidance IPC queues active sessions and restarts ended private chats',
   assert.match(coworkTypes, /interface CoworkA2AGuidanceResult/);
   assert.match(coworkTypes, /restart_started/);
 });
+
+test('CoworkSessionDetail replaces observer notice with guided dialogue controls', () => {
+  const source = fs.readFileSync(sourcePath, 'utf8');
+  const serviceSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'services', 'cowork.ts'),
+    'utf8'
+  );
+  const i18nSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'services', 'i18n.ts'),
+    'utf8'
+  );
+
+  assert.doesNotMatch(source, /a2aSessionObserverNotice/);
+  assert.match(source, /a2aGuidanceOpen/);
+  assert.match(source, /handleSubmitA2AGuidance/);
+  assert.match(source, /currentSessionIdRef/);
+  assert.match(source, /currentSessionIdRef\.current !== requestSessionId/);
+  assert.match(source, /coworkService\.queueA2AGuidance/);
+  assert.match(source, /a2aGuidancePlaceholder/);
+  assert.match(source, /aria-label=\{i18nService\.t\('a2aGuidancePlaceholder'\)\}/);
+  assert.match(source, /a2aConversationRestarted/);
+  assert.match(source, /PaperAirplaneIcon/);
+
+  assert.match(serviceSource, /queueA2AGuidance/);
+  assert.match(serviceSource, /store\.getState\(\)\.cowork\.currentSessionId === request\.sessionId/);
+  assert.match(serviceSource, /loadSession\(request\.sessionId, \{ onlyIfCurrent: true \}\)/);
+  assert.match(
+    serviceSource,
+    /options\.onlyIfCurrent && store\.getState\(\)\.cowork\.currentSessionId !== sessionId/
+  );
+  assert.match(i18nSource, /a2aGuidance:\s*'引导对话'/);
+  assert.match(i18nSource, /a2aGuidanceQueued/);
+  assert.match(i18nSource, /a2aGuidanceRestartStarted/);
+});

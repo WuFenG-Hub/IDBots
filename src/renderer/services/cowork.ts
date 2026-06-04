@@ -26,6 +26,8 @@ import type {
   CoworkMemoryStats,
   CoworkMemoryPolicy,
   CoworkPermissionResult,
+  CoworkA2AGuidanceRequest,
+  CoworkA2AGuidanceResult,
   CoworkStartOptions,
   CoworkContinueOptions,
 } from '../types/cowork';
@@ -33,6 +35,7 @@ import {
   shouldMarkSessionRunningFromStreamMessage,
   shouldRegisterStreamSessionFromFetch,
 } from './coworkStreamPresentation';
+import { i18nService } from './i18n';
 
 class CoworkService {
   private streamListenerCleanups: Array<() => void> = [];
@@ -252,6 +255,43 @@ class CoworkService {
     return { success: false, error: result.error || 'Failed to end A2A private chat' };
   }
 
+  async queueA2AGuidance(input: CoworkA2AGuidanceRequest): Promise<CoworkA2AGuidanceResult> {
+    const request = {
+      sessionId: String(input.sessionId || '').trim(),
+      guidance: String(input.guidance || '').trim(),
+    };
+    const cowork = window.electron?.cowork;
+    if (!cowork?.queueA2AGuidance) {
+      return { success: false, error: 'A2A guidance API not available' };
+    }
+    if (!request.sessionId || !request.guidance) {
+      return { success: false, error: i18nService.t('a2aGuidanceEmpty') };
+    }
+
+    try {
+      const result = await cowork.queueA2AGuidance(request);
+      if (result?.success) {
+        if (result.mode === 'restart_started') {
+          if (store.getState().cowork.currentSessionId === request.sessionId) {
+            await this.loadSession(request.sessionId, { onlyIfCurrent: true });
+          }
+          await this.loadSessions();
+        }
+        return {
+          success: true,
+          mode: result.mode,
+          messageId: result.messageId ?? null,
+        };
+      }
+      return { success: false, error: result?.error || i18nService.t('a2aGuidanceFailed') };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : i18nService.t('a2aGuidanceFailed'),
+      };
+    }
+  }
+
   async resendA2ADeliveryArtifact(input: string | { sessionId: string; orderTxid?: string | null }): Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }> {
     const request = typeof input === 'string' ? { sessionId: input } : input;
     const cowork = window.electron?.cowork;
@@ -417,12 +457,15 @@ class CoworkService {
     }
   }
 
-  async loadSession(sessionId: string): Promise<CoworkSession | null> {
+  async loadSession(sessionId: string, options: { onlyIfCurrent?: boolean } = {}): Promise<CoworkSession | null> {
     const cowork = window.electron?.cowork;
     if (!cowork) return null;
 
     const result = await cowork.getSession(sessionId);
     if (result.success && result.session) {
+      if (options.onlyIfCurrent && store.getState().cowork.currentSessionId !== sessionId) {
+        return result.session;
+      }
       store.dispatch(setCurrentSession(result.session));
       store.dispatch(setStreaming(result.session.status === 'running'));
       return result.session;
