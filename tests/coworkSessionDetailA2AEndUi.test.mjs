@@ -116,6 +116,10 @@ test('A2A guidance IPC queues active sessions and restarts ended private chats',
     path.join(projectRoot, 'src', 'main', 'main.ts'),
     'utf8'
   );
+  const daemonSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'services', 'privateChatDaemon.ts'),
+    'utf8'
+  );
   const preloadSource = fs.readFileSync(
     path.join(projectRoot, 'src', 'main', 'preload.ts'),
     'utf8'
@@ -130,6 +134,11 @@ test('A2A guidance IPC queues active sessions and restarts ended private chats',
   );
 
   assert.match(mainSource, /ipcMain\.handle\('cowork:session:queueA2AGuidance'/);
+  assert.match(mainSource, /Only MetaWeb private-chat A2A sessions support guided dialogue/);
+  assert.match(
+    mainSource,
+    /sourceContext\.sourceChannel !== 'metaweb_private' \|\| !sourceContext\.externalConversationId[\s\S]*a2aGuidanceQueue\.queue/
+  );
   assert.match(mainSource, /a2aGuidanceQueue\.queue/);
   assert.match(mainSource, /a2aGuidanceQueue\.clear/);
   assert.match(mainSource, /startPrivateChatDaemon\([\s\S]*a2aGuidanceQueue\.consume/);
@@ -147,6 +156,12 @@ test('A2A guidance IPC queues active sessions and restarts ended private chats',
   assert.match(coworkTypes, /interface CoworkA2AGuidanceRequest/);
   assert.match(coworkTypes, /interface CoworkA2AGuidanceResult/);
   assert.match(coworkTypes, /restart_started/);
+
+  const orderPromptIndex = daemonSource.indexOf('const prompts = buildOrderPrompts({');
+  const orderConversationIndex = daemonSource.indexOf('const externalConversationId', orderPromptIndex);
+  assert.notEqual(orderPromptIndex, -1);
+  assert.notEqual(orderConversationIndex, -1);
+  assert.doesNotMatch(daemonSource.slice(orderPromptIndex, orderConversationIndex), /operatorGuidance/);
 });
 
 test('CoworkSessionDetail replaces observer notice with guided dialogue controls', () => {
@@ -166,6 +181,7 @@ test('CoworkSessionDetail replaces observer notice with guided dialogue controls
   assert.match(source, /currentSessionIdRef/);
   assert.match(source, /currentSessionIdRef\.current !== requestSessionId/);
   assert.match(source, /coworkService\.queueA2AGuidance/);
+  assert.match(source, /isPrivateA2ASession && \(\s*<>\s*<div[\s\S]*a2aGuidance/);
   assert.match(source, /a2aGuidancePlaceholder/);
   assert.match(source, /aria-label=\{i18nService\.t\('a2aGuidancePlaceholder'\)\}/);
   assert.match(source, /a2aConversationRestarted/);

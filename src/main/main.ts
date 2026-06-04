@@ -5263,6 +5263,9 @@ if (!gotTheLock) {
         if (typeof session.metabotId !== 'number') throw new Error('A2A session has no local MetaBot id');
 
         const sourceContext = coworkStoreInst.getConversationSourceContextBySession(sessionId);
+        if (sourceContext.sourceChannel !== 'metaweb_private' || !sourceContext.externalConversationId) {
+          throw new Error('Only MetaWeb private-chat A2A sessions support guided dialogue');
+        }
         const currentMapping = sourceContext.sourceChannel === 'metaweb_private' && sourceContext.externalConversationId
           ? coworkStoreInst.getConversationMapping(
               'metaweb_private',
@@ -5279,9 +5282,6 @@ if (!gotTheLock) {
         if (!shouldRestart) {
           a2aGuidanceQueue.queue({ sessionId, metabotId: session.metabotId, guidance });
           return { success: true, mode: 'queued' as const };
-        }
-        if (sourceContext.sourceChannel !== 'metaweb_private' || !sourceContext.externalConversationId) {
-          throw new Error('Only MetaWeb private-chat A2A sessions can be restarted with guidance');
         }
         if (!currentMapping) throw new Error('Private chat conversation mapping not found');
 

@@ -2748,9 +2748,6 @@ async function processOne(
         return;
       }
 
-      const operatorGuidance = sellerOrderSessionId
-        ? consumeA2AGuidance?.(sellerOrderSessionId, metabot.id) ?? null
-        : null;
       const prompts = buildOrderPrompts({
         plaintext,
         source,
@@ -2762,7 +2759,6 @@ async function processOne(
         allowedSkillNames: skillScope.allowedSkillNames,
         executionReminder,
         expectedOutputType: serviceOutputType,
-        operatorGuidance,
       });
       const externalConversationId = sellerOrderConversationId || buildOrderExternalConversationId(row, source, orderTrackingId);
       const orderDispatchKey = orderTrackingId
