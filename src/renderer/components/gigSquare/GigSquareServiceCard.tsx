@@ -17,6 +17,47 @@ interface GigSquareServiceCardProps {
   onOpen: () => void;
 }
 
+const SERVICE_ICON_FALLBACK_COLORS = [
+  { token: 'blue', backgroundColor: '#2563eb', textColor: '#ffffff' },
+  { token: 'violet', backgroundColor: '#7c3aed', textColor: '#ffffff' },
+  { token: 'rose', backgroundColor: '#e11d48', textColor: '#ffffff' },
+  { token: 'amber', backgroundColor: '#d97706', textColor: '#ffffff' },
+  { token: 'emerald', backgroundColor: '#059669', textColor: '#ffffff' },
+  { token: 'cyan', backgroundColor: '#0891b2', textColor: '#ffffff' },
+  { token: 'indigo', backgroundColor: '#4f46e5', textColor: '#ffffff' },
+  { token: 'slate', backgroundColor: '#475569', textColor: '#ffffff' },
+] as const;
+
+const hashString = (value: string): number => {
+  let hash = 0;
+  for (const char of value) {
+    hash = Math.imul(hash, 31) + char.codePointAt(0)!;
+    hash |= 0;
+  }
+  return Math.abs(hash);
+};
+
+const getServiceIconFallbackSeed = (service: GigSquareService): string => (
+  [service.id, service.displayName, service.serviceName]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join('|') || 'service'
+);
+
+const getServiceIconFallbackText = (service: GigSquareService): string => {
+  const source = [service.displayName, service.serviceName, service.id]
+    .map((value) => String(value || '').trim())
+    .find(Boolean) || '?';
+  const compactSource = source.replace(/\s+/g, '');
+  const fallbackText = Array.from(compactSource).slice(0, 2).join('');
+  return fallbackText.toUpperCase();
+};
+
+const getServiceIconFallbackColor = (service: GigSquareService) => {
+  const seed = getServiceIconFallbackSeed(service);
+  return SERVICE_ICON_FALLBACK_COLORS[hashString(seed) % SERVICE_ICON_FALLBACK_COLORS.length];
+};
+
 const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
   service,
   providerName,
@@ -35,6 +76,8 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
     treatZeroAsFree: true,
   });
   const iconSrc = service.serviceIcon || service.avatar || null;
+  const fallbackIconText = getServiceIconFallbackText(service);
+  const fallbackIconColor = getServiceIconFallbackColor(service);
   const providerSkills = Array.isArray(service.providerSkills) && service.providerSkills.length > 0
     ? [...new Set(service.providerSkills.map((skill) => String(skill || '').trim()).filter(Boolean))]
     : (service.providerSkill ? [service.providerSkill] : []);
@@ -64,8 +107,16 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
             className="h-14 w-14 flex-shrink-0 rounded-xl border border-claude-border object-cover dark:border-claude-darkBorder"
           />
         ) : (
-          <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-xl bg-claude-accent/20 text-sm font-semibold text-claude-accent">
-            {service.displayName.slice(0, 1).toUpperCase()}
+          <div
+            data-slot="gig-square-service-icon-fallback"
+            data-fallback-color={fallbackIconColor.token}
+            className="flex h-14 w-14 flex-shrink-0 select-none items-center justify-center rounded-xl border border-white/20 text-base font-semibold shadow-sm"
+            style={{
+              backgroundColor: fallbackIconColor.backgroundColor,
+              color: fallbackIconColor.textColor,
+            }}
+          >
+            {fallbackIconText}
           </div>
         )}
         <div className="min-w-0 flex-1">

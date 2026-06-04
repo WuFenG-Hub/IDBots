@@ -117,6 +117,35 @@ test('GigSquareServiceCard renders provider skill allow-list chips', () => {
   assert.doesNotMatch(markup, /data-slot="gig-square-provider-skill-chips"[\s\S]*legacy/);
 });
 
+test('GigSquareServiceCard renders a stable two-character colored fallback when service icon is missing', () => {
+  const markup = renderToStaticMarkup(
+    <GigSquareServiceCard
+      service={{
+        id: 'svc-fallback',
+        displayName: '紫微服务管家',
+        serviceName: 'ziwei-service',
+        description: 'Ziwei report',
+        price: '0.25',
+        currency: 'SPACE',
+        providerMetaId: 'meta-fallback',
+        providerGlobalMetaId: 'global-fallback',
+        providerAddress: 'addr-fallback',
+      }}
+      providerName="Ziwei Bot"
+      providerAvatarSrc="https://example.com/provider.png"
+      providerLookupId="global-fallback"
+      isOnline={true}
+      onOpen={() => {}}
+    />
+  );
+
+  assert.match(
+    markup,
+    /data-slot="gig-square-service-icon-fallback"[^>]*data-fallback-color="[^"]+"[^>]*>紫微<\/div>/,
+  );
+  assert.doesNotMatch(markup, />紫<\/div>/);
+});
+
 test('GigSquareServiceCard does not render publisher execution reminder', () => {
   const markup = renderToStaticMarkup(
     <GigSquareServiceCard
