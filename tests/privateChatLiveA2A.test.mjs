@@ -7,6 +7,7 @@ let analyzePrivateChatA2AConversation;
 let buildPrivateChatA2ASystemPrompt;
 let waitBeforePrivateChatReply;
 let getPrivateChatReplyDelayMs;
+let shouldKeepPrivateChatConversationClosedAfterBye;
 let shouldSkipPrivateChatAutoReplyText;
 let hasNewerPrivateChatMessage;
 let evaluatePrivateChatAutoReplyPolicy;
@@ -23,6 +24,7 @@ try {
     buildPrivateChatA2ASystemPrompt,
     waitBeforePrivateChatReply,
     getPrivateChatReplyDelayMs,
+    shouldKeepPrivateChatConversationClosedAfterBye,
     shouldSkipPrivateChatAutoReplyText,
     hasNewerPrivateChatMessage,
     evaluatePrivateChatAutoReplyPolicy,
@@ -40,6 +42,7 @@ try {
     buildPrivateChatA2ASystemPrompt,
     waitBeforePrivateChatReply,
     getPrivateChatReplyDelayMs,
+    shouldKeepPrivateChatConversationClosedAfterBye,
     shouldSkipPrivateChatAutoReplyText,
     hasNewerPrivateChatMessage,
     evaluatePrivateChatAutoReplyPolicy,
@@ -251,6 +254,32 @@ test('private chat replies do not wait based on active incoming turn count', asy
   });
 
   assert.deepEqual(delays, []);
+});
+
+test('auto-bye private chat conversations reopen after ten minutes', () => {
+  const endedAt = 1_770_000_000_000;
+
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({
+      mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
+      now: endedAt + 9 * 60_000 + 59_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({
+      mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
+      now: endedAt + 10 * 60_000 + 1_000,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({
+      mappingMeta: { byeSent: true, endedByHuman: true, endedAt },
+      now: endedAt + 60 * 60_000,
+    }),
+    true,
+  );
 });
 
 test('private chat prompt includes recent A2A context and topic-ending policy', () => {

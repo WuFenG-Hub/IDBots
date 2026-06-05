@@ -83,6 +83,7 @@ import {
 
 const POLL_INTERVAL_MS = 5_000;
 const PRIVATE_CHAT_SESSION_GAP_MS = 15 * 60 * 1000;
+const PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS = 10 * 60 * 1000;
 const PRIVATE_CHAT_MAX_INCOMING_TURNS = 30;
 const PRIVATE_CHAT_CLOSING_PHASE_TURNS = 20;
 const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
@@ -553,6 +554,19 @@ function isByeMessage(text: string): boolean {
 function parseConversationMappingMetadata(json: string | null | undefined): Record<string, unknown> {
   if (!json) return {};
   try { return JSON.parse(json) as Record<string, unknown>; } catch { return {}; }
+}
+
+export function shouldKeepPrivateChatConversationClosedAfterBye(params: {
+  mappingMeta: Record<string, unknown>;
+  now?: number;
+}): boolean {
+  if (params.mappingMeta.byeSent !== true) return false;
+  const endedAt = typeof params.mappingMeta.endedAt === 'number' && Number.isFinite(params.mappingMeta.endedAt)
+    ? params.mappingMeta.endedAt
+    : 0;
+  return params.mappingMeta.endedByHuman === true
+    || !endedAt
+    || (params.now ?? Date.now()) - endedAt < PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS;
 }
 
 export function resolveSellerOrderOutputType(input: {
@@ -3392,13 +3406,7 @@ async function processOne(
     const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
-      const endedAt = typeof mappingMeta.endedAt === 'number' && Number.isFinite(mappingMeta.endedAt)
-        ? mappingMeta.endedAt
-        : 0;
-      const shouldStayClosed = mappingMeta.endedByHuman === true
-        || !endedAt
-        || Date.now() - endedAt < PRIVATE_CHAT_SESSION_GAP_MS;
-      if (shouldStayClosed) {
+      if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta })) {
         emitLog(`[PrivateChat] byeSent flag set for ${externalConversationId.slice(0, 30)}…, ignoring message.`);
         markProcessed(db, row.id, saveDb);
         return;
