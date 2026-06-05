@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 // https://vitejs.dev/config/
 const devPort = 5175;
 const isProductionBuild = process.env.NODE_ENV === 'production';
+const shouldUseVitePolling = process.env.IDBOTS_VITE_USE_POLLING === '1';
 const require = createRequire(import.meta.url);
 const { createElectronMainExternalPredicate } = require('./scripts/electron-main-externals.cjs');
 const electronMainExternal = createElectronMainExternalPredicate();
@@ -66,7 +67,14 @@ export default defineConfig({
       port: devPort,
     },
     watch: {
-      usePolling: true,
+      usePolling: shouldUseVitePolling,
+      ignored: [
+        '**/.git/**',
+        '**/node_modules/**',
+        '**/dist/**',
+        '**/dist-electron/**',
+        '**/release/**',
+      ],
     },
   },
   optimizeDeps: {

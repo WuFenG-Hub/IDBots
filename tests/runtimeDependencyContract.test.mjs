@@ -143,6 +143,31 @@ test('production Vite builds minify bundles without source maps', () => {
   );
 });
 
+test('Vite dev file watching avoids polling generated output by default', () => {
+  const viteConfigSource = fs.readFileSync(viteConfigPath, 'utf8');
+
+  assert.doesNotMatch(
+    viteConfigSource,
+    /usePolling:\s*true/,
+    'Vite should not force polling by default because it keeps macOS dev servers busy even when idle',
+  );
+  assert.match(
+    viteConfigSource,
+    /const shouldUseVitePolling = process\.env\.IDBOTS_VITE_USE_POLLING === '1'/,
+    'Polling should remain available as an explicit opt-in for filesystems that need it',
+  );
+  assert.match(
+    viteConfigSource,
+    /\*\*\/dist-electron\/\*\*/,
+    'Vite should ignore Electron build output so generated files do not trigger dev rebuild work',
+  );
+  assert.match(
+    viteConfigSource,
+    /\*\*\/dist\/\*\*/,
+    'Vite should ignore renderer build output while watching source files',
+  );
+});
+
 test('SDK built-in web tools are gated by an explicit env flag', () => {
   const source = fs.readFileSync(coworkRunnerPath, 'utf8');
 
