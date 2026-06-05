@@ -22,3 +22,12 @@ test('electron dev build status waits for the hashed main bundle to parse', () =
   const complete = getElectronDevBuildStatus(distDir);
   assert.equal(complete.ready, true);
 });
+
+test('electron dev build status accepts a direct main bundle', () => {
+  const distDir = makeTempDir();
+  fs.writeFileSync(path.join(distDir, 'main.js'), '"use strict";\nfunction complete() { return 1; }\n');
+  fs.writeFileSync(path.join(distDir, 'preload.js'), '"use strict";\n');
+
+  const complete = getElectronDevBuildStatus(distDir);
+  assert.equal(complete.ready, true);
+});

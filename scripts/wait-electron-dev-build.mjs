@@ -26,13 +26,10 @@ const resolveMainBundlePath = (distDir) => {
 
   const mainSource = fs.readFileSync(mainPath, 'utf8');
   const match = mainSource.match(/require\(["']\.\/(main-[^"']+\.js)["']\)/);
-  if (!match?.[1]) {
-    return { mainPath, bundlePath: null, reason: 'dist-electron/main.js has not been rewritten to the Vite main bundle yet' };
-  }
 
   return {
     mainPath,
-    bundlePath: path.join(distDir, match[1]),
+    bundlePath: match?.[1] ? path.join(distDir, match[1]) : null,
     reason: '',
   };
 };
@@ -44,7 +41,7 @@ export function getElectronDevBuildStatus(distDir = path.resolve('dist-electron'
   if (reason) {
     return { ready: false, reason };
   }
-  if (!bundlePath || !fs.existsSync(bundlePath)) {
+  if (bundlePath && !fs.existsSync(bundlePath)) {
     return { ready: false, reason: 'Vite main bundle is missing' };
   }
   if (!fs.existsSync(preloadPath)) {
@@ -53,7 +50,7 @@ export function getElectronDevBuildStatus(distDir = path.resolve('dist-electron'
   if (!parseable(mainPath)) {
     return { ready: false, reason: 'dist-electron/main.js is not parseable yet' };
   }
-  if (!parseable(bundlePath)) {
+  if (bundlePath && !parseable(bundlePath)) {
     return { ready: false, reason: `${path.basename(bundlePath)} is not parseable yet` };
   }
   if (!parseable(preloadPath)) {
