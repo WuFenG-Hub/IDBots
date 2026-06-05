@@ -731,31 +731,14 @@ function normalizePrivateChatSkillWaitNoticeText(text: string): string {
   return result.length > 180 ? `${result.slice(0, 180).trim()}...` : result;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export function getPrivateChatReplyDelayMs(incomingTurnCount: number): number {
-  const count = Number.isFinite(incomingTurnCount)
-    ? Math.max(1, Math.floor(incomingTurnCount))
-    : 1;
-  if (count <= 5) return 5_000;
-  if (count <= 10) return 10_000;
-  if (count <= 20) return 15_000;
-  return 30_000;
+export function getPrivateChatReplyDelayMs(_incomingTurnCount: number): number {
+  return 0;
 }
 
 export async function waitBeforePrivateChatReply(
-  incomingTurnCountOrWait: number | DelayFn = 1,
-  maybeWait?: DelayFn
+  _incomingTurnCountOrWait: number | DelayFn = 1,
+  _maybeWait?: DelayFn
 ): Promise<void> {
-  const incomingTurnCount = typeof incomingTurnCountOrWait === 'number'
-    ? incomingTurnCountOrWait
-    : 1;
-  const wait = typeof incomingTurnCountOrWait === 'function'
-    ? incomingTurnCountOrWait
-    : maybeWait ?? sleep;
-  await wait(getPrivateChatReplyDelayMs(incomingTurnCount));
 }
 
 function isPrivateA2AMessage(message: CoworkMessage): boolean {

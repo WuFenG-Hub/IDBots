@@ -233,16 +233,16 @@ test('ending a private chat A2A conversation marks the mapping closed and emits 
   ]);
 });
 
-test('private chat reply delay scales with active incoming turn count', async () => {
-  assert.equal(getPrivateChatReplyDelayMs(1), 5000);
-  assert.equal(getPrivateChatReplyDelayMs(5), 5000);
-  assert.equal(getPrivateChatReplyDelayMs(6), 10000);
-  assert.equal(getPrivateChatReplyDelayMs(10), 10000);
-  assert.equal(getPrivateChatReplyDelayMs(11), 15000);
-  assert.equal(getPrivateChatReplyDelayMs(20), 15000);
-  assert.equal(getPrivateChatReplyDelayMs(21), 30000);
-  assert.equal(getPrivateChatReplyDelayMs(30), 30000);
-  assert.equal(getPrivateChatReplyDelayMs(50), 30000);
+test('private chat replies do not wait based on active incoming turn count', async () => {
+  assert.equal(getPrivateChatReplyDelayMs(1), 0);
+  assert.equal(getPrivateChatReplyDelayMs(5), 0);
+  assert.equal(getPrivateChatReplyDelayMs(6), 0);
+  assert.equal(getPrivateChatReplyDelayMs(10), 0);
+  assert.equal(getPrivateChatReplyDelayMs(11), 0);
+  assert.equal(getPrivateChatReplyDelayMs(20), 0);
+  assert.equal(getPrivateChatReplyDelayMs(21), 0);
+  assert.equal(getPrivateChatReplyDelayMs(30), 0);
+  assert.equal(getPrivateChatReplyDelayMs(50), 0);
 
   const delays = [];
   await waitBeforePrivateChatReply(21, (ms) => {
@@ -250,7 +250,7 @@ test('private chat reply delay scales with active incoming turn count', async ()
     return Promise.resolve();
   });
 
-  assert.deepEqual(delays, [30000]);
+  assert.deepEqual(delays, []);
 });
 
 test('private chat prompt includes recent A2A context and topic-ending policy', () => {
