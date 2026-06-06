@@ -178,10 +178,10 @@ test('CoworkSessionDetail replaces observer notice with guided dialogue controls
   assert.doesNotMatch(source, /a2aSessionObserverNotice/);
   assert.match(source, /a2aGuidanceOpen/);
   assert.match(source, /handleSubmitA2AGuidance/);
-  assert.match(source, /currentSessionIdRef/);
-  assert.match(source, /currentSessionIdRef\.current !== requestSessionId/);
+  assert.match(source, /sessionIdRef/);
+  assert.match(source, /sessionIdRef\.current !== requestSessionId/);
   assert.match(source, /coworkService\.queueA2AGuidance/);
-  assert.match(source, /isPrivateA2ASession && \(\s*<>\s*<div[\s\S]*a2aGuidance/);
+  assert.match(source, /isPrivateA2ASession && \(\s*<A2AGuidanceControls/);
   assert.match(source, /a2aGuidancePlaceholder/);
   assert.match(source, /aria-label=\{i18nService\.t\('a2aGuidancePlaceholder'\)\}/);
   assert.match(source, /a2aConversationRestarted/);
@@ -197,4 +197,37 @@ test('CoworkSessionDetail replaces observer notice with guided dialogue controls
   assert.match(i18nSource, /a2aGuidance:\s*'引导对话'/);
   assert.match(i18nSource, /a2aGuidanceQueued/);
   assert.match(i18nSource, /a2aGuidanceRestartStarted/);
+});
+
+test('CoworkSessionDetail keeps guided dialogue input state out of the heavy detail component', () => {
+  const source = fs.readFileSync(sourcePath, 'utf8');
+
+  assert.match(source, /const A2AGuidanceControls = React\.memo/);
+  assert.match(source, /const \[guidanceText, setGuidanceText\] = useState\(''\)/);
+  assert.match(source, /onChange=\{\(event\) => setGuidanceText\(event\.target\.value\)\}/);
+  assert.doesNotMatch(source, /const \[a2aGuidanceText, setA2AGuidanceText\]/);
+  assert.doesNotMatch(source, /setA2AGuidanceText\(event\.target\.value\)/);
+});
+
+test('A2A guidance queueing interrupts a current silent local bot turn', () => {
+  const mainSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'main.ts'),
+    'utf8'
+  );
+  const runnerSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'libs', 'coworkRunner.ts'),
+    'utf8'
+  );
+  const bridgeSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'main', 'services', 'orchestratorCoworkBridge.ts'),
+    'utf8'
+  );
+
+  assert.match(mainSource, /interruptPrivateChatA2AGuidanceTurnBeforeOutput/);
+  assert.match(mainSource, /getCoworkRunner\(\)\.interruptActiveTurnBeforeAssistantOutput\(sessionId\)/);
+  assert.match(runnerSource, /interruptActiveTurnBeforeAssistantOutput\(sessionId: string\): boolean/);
+  assert.match(runnerSource, /!activeSession\.hasAssistantTextOutput/);
+  assert.match(runnerSource, /this\.emit\('stopped', sessionId\)/);
+  assert.match(bridgeSource, /runner\.on\('stopped', onStopped\)/);
+  assert.match(bridgeSource, /runner\.off\('stopped', onStopped\)/);
 });

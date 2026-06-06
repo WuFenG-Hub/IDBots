@@ -56,7 +56,7 @@ function maskBaseURL(url: string): string {
  */
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
-  options: { llmId?: string | null; tools?: OpenAITool[] } = {}
+  options: { llmId?: string | null; tools?: OpenAITool[]; signal?: AbortSignal } = {}
 ): Promise<ChatCompletionResult> {
   const { config, error } = resolveApiConfigForModel(options.llmId ?? undefined);
   if (error || !config) {
@@ -84,7 +84,8 @@ export async function chatCompletionWithTools(
         model,
         config.apiKey ?? '',
         messages,
-        options.tools
+        options.tools,
+        options.signal
       );
     }
     return await callOpenAIStyleWithTools(
@@ -92,7 +93,8 @@ export async function chatCompletionWithTools(
       model,
       config.apiKey ?? '',
       messages,
-      options.tools
+      options.tools,
+      options.signal
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -108,13 +110,14 @@ export async function chatCompletionWithTools(
 export async function performChatCompletionForOrchestrator(
   systemPrompt: string,
   userMessage: string,
-  llmId?: string | null
+  llmId?: string | null,
+  options: { signal?: AbortSignal } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage },
   ];
-  const result = await chatCompletionWithTools(messages, { llmId });
+  const result = await chatCompletionWithTools(messages, { llmId, signal: options.signal });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
     console.warn('[Orchestrator] performChatCompletionForOrchestrator: LLM returned tool_calls but no tools were requested; ignoring tool_calls');
@@ -149,7 +152,8 @@ async function callAnthropicStyleWithTools(
   model: string,
   apiKey: string,
   messages: ChatMessage[],
-  tools?: OpenAITool[]
+  tools?: OpenAITool[],
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/messages`;
   const systemParts: string[] = [];
@@ -209,7 +213,7 @@ async function callAnthropicStyleWithTools(
     headers['x-api-key'] = apiKey.trim();
   }
 
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const text = await response.text();
   if (!response.ok) {
     console.error('[Orchestrator] LLM Anthropic error:', response.status, text.slice(0, 500));
@@ -252,7 +256,8 @@ async function callOpenAIStyleWithTools(
   model: string,
   apiKey: string,
   messages: ChatMessage[],
-  tools?: OpenAITool[]
+  tools?: OpenAITool[],
+  signal?: AbortSignal
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/chat/completions`;
   const body: Record<string, unknown> = {
@@ -269,7 +274,7 @@ async function callOpenAIStyleWithTools(
     headers.Authorization = `Bearer ${apiKey.trim()}`;
   }
 
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
   const text = await response.text();
   if (!response.ok) {
     console.error('[Orchestrator] LLM OpenAI-compat error:', response.status, text.slice(0, 500));

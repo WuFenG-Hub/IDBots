@@ -2962,6 +2962,7 @@ export class CoworkRunner extends EventEmitter {
     const finalStatus = options.finalStatus ?? 'idle';
     this.stoppedSessions.add(sessionId);
     const activeSession = this.activeSessions.get(sessionId);
+    const hadActiveSession = Boolean(activeSession);
     if (activeSession) {
       // Flush any partially streamed assistant/thinking text so interrupted sessions
       // do not get stuck with trailing isStreaming=true placeholders.
@@ -2988,6 +2989,9 @@ export class CoworkRunner extends EventEmitter {
     this.clearPendingPermissions(sessionId);
     this.clearSandboxPermissions(sessionId);
     this.store.updateSession(sessionId, { status: finalStatus });
+    if (hadActiveSession) {
+      this.emit('stopped', sessionId);
+    }
   }
 
   respondToPermission(requestId: string, result: PermissionResult): void {
@@ -6048,6 +6052,19 @@ export class CoworkRunner extends EventEmitter {
 
   isSessionActive(sessionId: string): boolean {
     return this.activeSessions.has(sessionId);
+  }
+
+  interruptActiveTurnBeforeAssistantOutput(sessionId: string): boolean {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) {
+      return false;
+    }
+    const canInterrupt = !activeSession.hasAssistantTextOutput;
+    if (!canInterrupt) {
+      return false;
+    }
+    this.stopSession(sessionId);
+    return true;
   }
 
   getSessionConfirmationMode(sessionId: string): 'modal' | 'text' | null {

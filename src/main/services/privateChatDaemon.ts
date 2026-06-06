@@ -167,6 +167,12 @@ type GeneratePrivateChatSkillWaitNoticeFn = (params: {
 }) => Promise<string>;
 type ConsumeA2AGuidanceFn = (sessionId: string, metabotId: number) => string | null;
 type GetListenerConfigFn = () => Partial<ListenerConfig> | null | undefined;
+type PrivateChatPerformChatFn = (
+  systemPrompt: string,
+  userMessage: string,
+  llmId?: string | null,
+  options?: { signal?: AbortSignal }
+) => Promise<string>;
 
 export interface PrivateChatA2AContextMessage {
   speaker: string;
@@ -183,9 +189,52 @@ export interface PrivateChatA2AAnalysis {
 
 /** In-flight task keys to avoid duplicate processing */
 const thinkingTasks = new Set<string>();
+const interruptibleA2AGuidanceTurns = new Map<string, {
+  sessionId: string;
+  metabotId: number;
+  abortController: AbortController;
+  assistantOutputStarted: boolean;
+}>();
 let orderCowork: PrivateChatOrderCowork | null = null;
 const sentOrderDeliveryKeys = new Set<string>();
 const sentOrderRatingInviteKeys = new Set<string>();
+
+function trackInterruptibleA2AGuidanceTurn(input: {
+  sessionId: string;
+  metabotId: number;
+}): {
+  sessionId: string;
+  metabotId: number;
+  abortController: AbortController;
+  assistantOutputStarted: boolean;
+} {
+  const turn = {
+    sessionId: input.sessionId,
+    metabotId: input.metabotId,
+    abortController: new AbortController(),
+    assistantOutputStarted: false,
+  };
+  interruptibleA2AGuidanceTurns.set(input.sessionId, turn);
+  return turn;
+}
+
+function releaseInterruptibleA2AGuidanceTurn(turn: {
+  sessionId: string;
+  abortController: AbortController;
+}): void {
+  if (interruptibleA2AGuidanceTurns.get(turn.sessionId) === turn) {
+    interruptibleA2AGuidanceTurns.delete(turn.sessionId);
+  }
+}
+
+export function interruptPrivateChatA2AGuidanceTurnBeforeOutput(sessionId: string): boolean {
+  const turn = interruptibleA2AGuidanceTurns.get(String(sessionId || '').trim());
+  if (!turn || turn.assistantOutputStarted || turn.abortController.signal.aborted) {
+    return false;
+  }
+  turn.abortController.abort('A2A guidance queued before assistant output');
+  return true;
+}
 
 export function buildPrivateChatA2AChainMetadata(input: {
   txId?: unknown;
@@ -2317,7 +2366,7 @@ async function processOne(
   coworkStore: CoworkStore,
   metabotStore: MetabotStore,
   createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>,
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null) => Promise<string>,
+  performChat: PrivateChatPerformChatFn,
   emitLog: (msg: string) => void,
   orderCoworkHandler: PrivateChatOrderCowork | null,
   serviceOrderLifecycle: ServiceOrderLifecycleService | null,
@@ -3601,43 +3650,65 @@ async function processOne(
       skillWaitNoticeAlreadySent,
       operatorGuidance,
     });
-    let reply: string;
+    let reply = '';
+    let trimmed = '';
     let skillAssistantMessageId: string | null = null;
+    const guidanceTurn = trackInterruptibleA2AGuidanceTurn({
+      sessionId,
+      metabotId: metabot.id,
+    });
     try {
-      if (conversationAnalysis.shouldForceBye) {
-        await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
-        reply = 'bye';
-      } else if (canRunChatSkills && runPrivateChatSkillTurn) {
-        const skillTurnResult = await runPrivateChatSkillTurn({
-          sessionId,
-          systemPrompt,
-          userMessage: plaintext,
-          metabotId: metabot.id,
-          activeSkillIds: chatSkillsRouting.activeSkillIds,
-          onSkillExecutionStart: sendSkillWaitNoticeBeforeExecution,
-        });
-        reply = skillTurnResult.replyText;
-        skillAssistantMessageId = skillTurnResult.assistantMessageId ?? null;
-      } else {
-        await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
-        reply = await performChat(systemPrompt, plaintext, llmId);
-      }
-    } catch (e) {
-      rethrowSqliteWasmBoundsError(e);
-      const errorMessage = e instanceof Error ? e.message : String(e);
-      emitLog(`[PrivateChat] LLM failed for message ${row.id}: ${errorMessage}`);
-      if (canRunChatSkills) {
-        emitLog(`[PrivateChat] Keeping message ${row.id} unprocessed until a skill reply can be delivered.`);
+      try {
+        if (conversationAnalysis.shouldForceBye) {
+          await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
+          reply = 'bye';
+        } else if (canRunChatSkills && runPrivateChatSkillTurn) {
+          const skillTurnResult = await runPrivateChatSkillTurn({
+            sessionId,
+            systemPrompt,
+            userMessage: plaintext,
+            metabotId: metabot.id,
+            activeSkillIds: chatSkillsRouting.activeSkillIds,
+            onSkillExecutionStart: sendSkillWaitNoticeBeforeExecution,
+          });
+          reply = skillTurnResult.replyText;
+          skillAssistantMessageId = skillTurnResult.assistantMessageId ?? null;
+        } else {
+          await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
+          reply = await performChat(systemPrompt, plaintext, llmId, {
+            signal: guidanceTurn.abortController.signal,
+          });
+        }
+      } catch (e) {
+        rethrowSqliteWasmBoundsError(e);
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        if (guidanceTurn.abortController.signal.aborted) {
+          emitLog(`[PrivateChat] Restarting message ${row.id} so queued A2A guidance can be applied before assistant output.`);
+          return;
+        }
+        emitLog(`[PrivateChat] LLM failed for message ${row.id}: ${errorMessage}`);
+        if (canRunChatSkills) {
+          emitLog(`[PrivateChat] Keeping message ${row.id} unprocessed until a skill reply can be delivered.`);
+          return;
+        }
+        markProcessed(db, row.id, saveDb);
         return;
       }
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
 
-    const trimmed = (reply ?? '').trim();
-    if (!trimmed) {
-      markProcessed(db, row.id, saveDb);
-      return;
+      if (guidanceTurn.abortController.signal.aborted) {
+        emitLog(`[PrivateChat] Restarting message ${row.id} so queued A2A guidance can be applied before assistant output.`);
+        return;
+      }
+
+      trimmed = (reply ?? '').trim();
+      if (!trimmed) {
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      guidanceTurn.assistantOutputStarted = true;
+      releaseInterruptibleA2AGuidanceTurn(guidanceTurn);
+    } finally {
+      releaseInterruptibleA2AGuidanceTurn(guidanceTurn);
     }
 
     let assistantMessage: CoworkMessage | null = null;
@@ -3795,7 +3866,6 @@ async function processOne(
       });
       emitLog(`[PrivateChat] Sent "bye" to ${fromGlobalMetaId.slice(0, 12)}…, byeSent flag set.`);
     }
-
     markProcessed(db, row.id, saveDb);
   } finally {
     thinkingTasks.delete(taskKey);

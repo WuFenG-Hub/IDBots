@@ -214,6 +214,7 @@ export function runSkillTurnInExistingSession(
       runner.off('complete', onComplete);
       runner.off('error', onError);
       runner.off('message', onMessage);
+      runner.off('stopped', onStopped);
       if (timeoutId != null) clearTimeout(timeoutId);
     };
 
@@ -233,6 +234,13 @@ export function runSkillTurnInExistingSession(
       } catch (e) {
         console.warn('[Orchestrator] Failed to mark existing skill session error:', e);
       }
+      reject(typeof err === 'string' ? new Error(err) : err);
+    };
+
+    const cancelWithoutSessionError = (err: string | Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
       reject(typeof err === 'string' ? new Error(err) : err);
     };
 
@@ -297,6 +305,11 @@ export function runSkillTurnInExistingSession(
       fail(errorMessage);
     };
 
+    const onStopped = (sid: string) => {
+      if (sid !== sessionId) return;
+      cancelWithoutSessionError('Private chat skill turn stopped before assistant output so queued A2A guidance can be applied');
+    };
+
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
       fail(`Skill turn timed out after ${SKILL_TURN_TIMEOUT_MS / 1000}s`);
@@ -305,6 +318,7 @@ export function runSkillTurnInExistingSession(
     runner.on('complete', onComplete);
     runner.on('error', onError);
     runner.on('message', onMessage);
+    runner.on('stopped', onStopped);
 
     runner
       .startSession(sessionId, userMessage, {

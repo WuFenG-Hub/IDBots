@@ -1532,6 +1532,146 @@ const AssistantMessageItem: React.FC<{
   );
 };
 
+const A2AGuidanceControls = React.memo(({
+  sessionId,
+  isConversationEnded,
+  isEnding,
+  endError,
+  resendError,
+  onEndConversation,
+}: {
+  sessionId: string;
+  isConversationEnded: boolean;
+  isEnding: boolean;
+  endError: string | null;
+  resendError: string | null;
+  onEndConversation: () => void;
+}) => {
+  const sessionIdRef = useRef(sessionId);
+  const [a2aGuidanceOpen, setA2AGuidanceOpen] = useState(false);
+  const [guidanceText, setGuidanceText] = useState('');
+  const [isSubmittingA2AGuidance, setIsSubmittingA2AGuidance] = useState(false);
+  const [a2aGuidanceStatus, setA2AGuidanceStatus] = useState<string | null>(null);
+  const [a2aGuidanceError, setA2AGuidanceError] = useState<string | null>(null);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+    setA2AGuidanceOpen(false);
+    setGuidanceText('');
+    setIsSubmittingA2AGuidance(false);
+    setA2AGuidanceStatus(null);
+    setA2AGuidanceError(null);
+  }, [sessionId]);
+
+  const handleSubmitA2AGuidance = useCallback(async (event?: React.FormEvent) => {
+    event?.preventDefault();
+    const guidance = guidanceText.trim();
+    const requestSessionId = sessionId;
+    if (!requestSessionId || isSubmittingA2AGuidance) return;
+    if (!guidance) {
+      setA2AGuidanceError(i18nService.t('a2aGuidanceEmpty'));
+      setA2AGuidanceStatus(null);
+      return;
+    }
+
+    setIsSubmittingA2AGuidance(true);
+    setA2AGuidanceError(null);
+    setA2AGuidanceStatus(null);
+    const result = await coworkService.queueA2AGuidance({
+      sessionId: requestSessionId,
+      guidance,
+    });
+    if (sessionIdRef.current !== requestSessionId) return;
+    if (!result.success) {
+      setA2AGuidanceError(result.error || i18nService.t('a2aGuidanceFailed'));
+      setIsSubmittingA2AGuidance(false);
+      return;
+    }
+
+    setGuidanceText('');
+    setA2AGuidanceOpen(false);
+    setA2AGuidanceStatus(
+      result.mode === 'restart_started'
+        ? i18nService.t('a2aGuidanceRestartStarted')
+        : i18nService.t('a2aGuidanceQueued')
+    );
+    setIsSubmittingA2AGuidance(false);
+  }, [guidanceText, isSubmittingA2AGuidance, sessionId]);
+
+  return (
+    <>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
+        <button
+          type="button"
+          onClick={() => {
+            setA2AGuidanceOpen((open) => !open);
+            setA2AGuidanceError(null);
+            setA2AGuidanceStatus(null);
+          }}
+          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border dark:border-claude-darkBorder border-claude-border px-3 text-xs font-medium dark:text-claude-darkText text-claude-text transition-colors hover:bg-claude-hover dark:hover:bg-claude-darkHover"
+        >
+          <PencilSquareIcon className="h-4 w-4" />
+          {i18nService.t('a2aGuidance')}
+        </button>
+        {isConversationEnded ? (
+          <span className="inline-flex h-8 items-center justify-center rounded-md border border-emerald-500/30 px-3 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            {i18nService.t('a2aSessionEnded')}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={onEndConversation}
+            disabled={isEnding}
+            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-red-500/30 px-3 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 dark:text-red-400"
+          >
+            <StopCircleIcon className="h-4 w-4" />
+            {isEnding ? i18nService.t('a2aSessionEnding') : i18nService.t('a2aSessionEndConversation')}
+          </button>
+        )}
+      </div>
+      {a2aGuidanceOpen && (
+        <form onSubmit={handleSubmitA2AGuidance} className="flex flex-col gap-2 sm:flex-row">
+          <input
+            type="text"
+            value={guidanceText}
+            onChange={(event) => setGuidanceText(event.target.value)}
+            placeholder={i18nService.t('a2aGuidancePlaceholder')}
+            aria-label={i18nService.t('a2aGuidancePlaceholder')}
+            maxLength={2000}
+            className="min-w-0 flex-1 rounded-md border dark:border-claude-darkBorder border-claude-border bg-transparent px-3 py-2 text-sm outline-none focus:border-claude-accent"
+          />
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={isSubmittingA2AGuidance || !guidanceText.trim()}
+              className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-claude-accent px-3 text-xs font-medium text-white transition-colors hover:bg-claude-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <PaperAirplaneIcon className="h-4 w-4" />
+              {isSubmittingA2AGuidance ? i18nService.t('a2aGuidanceSubmitting') : i18nService.t('a2aGuidanceSend')}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setA2AGuidanceOpen(false);
+                setGuidanceText('');
+                setA2AGuidanceError(null);
+              }}
+              className="inline-flex h-9 items-center justify-center rounded-md border dark:border-claude-darkBorder border-claude-border px-3 text-xs font-medium dark:text-claude-darkText text-claude-text hover:bg-claude-hover dark:hover:bg-claude-darkHover"
+            >
+              {i18nService.t('a2aGuidanceCancel')}
+            </button>
+          </div>
+        </form>
+      )}
+      {(a2aGuidanceError || a2aGuidanceStatus || endError || resendError) && (
+        <p className={`text-right text-xs ${a2aGuidanceError || endError || resendError ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+          {a2aGuidanceError || endError || resendError || a2aGuidanceStatus}
+        </p>
+      )}
+    </>
+  );
+});
+
 // Streaming activity bar shown between messages and input
 const StreamingActivityBar: React.FC<{ messages: CoworkMessage[] }> = ({ messages }) => {
   // Walk messages backwards to find the latest tool_use without a paired tool_result
@@ -1820,7 +1960,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const lastAutoScrollSessionIdRef = useRef<string | null>(null);
   const skipNextAutoScrollEffectRef = useRef(false);
   const focusHighlightTimeoutRef = useRef<number | null>(null);
-  const currentSessionIdRef = useRef<string | null>(currentSession?.id ?? null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [focusedOrderMessageId, setFocusedOrderMessageId] = useState<string | null>(null);
 
@@ -1844,11 +1983,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [delegationBlocking, setDelegationBlocking] = useState(false);
   const [isEndingA2A, setIsEndingA2A] = useState(false);
   const [a2aEndError, setA2AEndError] = useState<string | null>(null);
-  const [a2aGuidanceOpen, setA2AGuidanceOpen] = useState(false);
-  const [a2aGuidanceText, setA2AGuidanceText] = useState('');
-  const [isSubmittingA2AGuidance, setIsSubmittingA2AGuidance] = useState(false);
-  const [a2aGuidanceStatus, setA2AGuidanceStatus] = useState<string | null>(null);
-  const [a2aGuidanceError, setA2AGuidanceError] = useState<string | null>(null);
   const [resendingDeliveryOrderTxid, setResendingDeliveryOrderTxid] = useState<string | null>(null);
   const [resendDeliveryError, setResendDeliveryError] = useState<string | null>(null);
   const serviceOrderOutputType = String(currentSession?.serviceOrderSummary?.outputType || '').trim().toLowerCase();
@@ -1879,10 +2013,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       dismissedKeys: dismissedRefundStatusKeys,
     })
   );
-
-  useEffect(() => {
-    currentSessionIdRef.current = currentSession?.id ?? null;
-  }, [currentSession?.id]);
 
   // Fetch initial delegation blocking state when session changes
   useEffect(() => {
@@ -1998,11 +2128,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setRefundActionError(null);
     setIsEndingA2A(false);
     setA2AEndError(null);
-    setA2AGuidanceOpen(false);
-    setA2AGuidanceText('');
-    setIsSubmittingA2AGuidance(false);
-    setA2AGuidanceStatus(null);
-    setA2AGuidanceError(null);
     setResendingDeliveryOrderTxid(null);
     setResendDeliveryError(null);
   }, [
@@ -2050,41 +2175,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     setIsEndingA2A(false);
   }, [currentSession?.id, isA2AConversationEnded, isEndingA2A]);
-
-  const handleSubmitA2AGuidance = useCallback(async (event?: React.FormEvent) => {
-    event?.preventDefault();
-    const guidance = a2aGuidanceText.trim();
-    const requestSessionId = currentSession?.id;
-    if (!requestSessionId || isSubmittingA2AGuidance) return;
-    if (!guidance) {
-      setA2AGuidanceError(i18nService.t('a2aGuidanceEmpty'));
-      setA2AGuidanceStatus(null);
-      return;
-    }
-
-    setIsSubmittingA2AGuidance(true);
-    setA2AGuidanceError(null);
-    setA2AGuidanceStatus(null);
-    const result = await coworkService.queueA2AGuidance({
-      sessionId: requestSessionId,
-      guidance,
-    });
-    if (currentSessionIdRef.current !== requestSessionId) return;
-    if (!result.success) {
-      setA2AGuidanceError(result.error || i18nService.t('a2aGuidanceFailed'));
-      setIsSubmittingA2AGuidance(false);
-      return;
-    }
-
-    setA2AGuidanceText('');
-    setA2AGuidanceOpen(false);
-    setA2AGuidanceStatus(
-      result.mode === 'restart_started'
-        ? i18nService.t('a2aGuidanceRestartStarted')
-        : i18nService.t('a2aGuidanceQueued')
-    );
-    setIsSubmittingA2AGuidance(false);
-  }, [a2aGuidanceText, currentSession?.id, isSubmittingA2AGuidance]);
 
   const handleResendDigitalDelivery = useCallback(async (rawOrderTxid: string) => {
     const orderTxid = String(rawOrderTxid || '').trim().toLowerCase();
@@ -2997,76 +3087,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         <div className="px-4 py-3 shrink-0 border-t dark:border-claude-darkBorder border-claude-border">
           <div className="mx-auto flex max-w-3xl flex-col items-stretch gap-2">
             {isPrivateA2ASession && (
-              <>
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setA2AGuidanceOpen((open) => !open);
-                      setA2AGuidanceError(null);
-                      setA2AGuidanceStatus(null);
-                    }}
-                    className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border dark:border-claude-darkBorder border-claude-border px-3 text-xs font-medium dark:text-claude-darkText text-claude-text transition-colors hover:bg-claude-hover dark:hover:bg-claude-darkHover"
-                  >
-                    <PencilSquareIcon className="h-4 w-4" />
-                    {i18nService.t('a2aGuidance')}
-                  </button>
-                  {isA2AConversationEnded ? (
-                    <span className="inline-flex h-8 items-center justify-center rounded-md border border-emerald-500/30 px-3 text-xs font-medium text-emerald-600 dark:text-emerald-400">
-                      {i18nService.t('a2aSessionEnded')}
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleEndA2APrivateChat}
-                      disabled={isEndingA2A}
-                      className="inline-flex h-8 items-center justify-center gap-1.5 rounded-md border border-red-500/30 px-3 text-xs font-medium text-red-600 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 dark:text-red-400"
-                    >
-                      <StopCircleIcon className="h-4 w-4" />
-                      {isEndingA2A ? i18nService.t('a2aSessionEnding') : i18nService.t('a2aSessionEndConversation')}
-                    </button>
-                  )}
-                </div>
-                {a2aGuidanceOpen && (
-                  <form onSubmit={handleSubmitA2AGuidance} className="flex flex-col gap-2 sm:flex-row">
-                    <input
-                      type="text"
-                      value={a2aGuidanceText}
-                      onChange={(event) => setA2AGuidanceText(event.target.value)}
-                      placeholder={i18nService.t('a2aGuidancePlaceholder')}
-                      aria-label={i18nService.t('a2aGuidancePlaceholder')}
-                      maxLength={2000}
-                      className="min-w-0 flex-1 rounded-md border dark:border-claude-darkBorder border-claude-border bg-transparent px-3 py-2 text-sm outline-none focus:border-claude-accent"
-                    />
-                    <div className="flex gap-2">
-                      <button
-                        type="submit"
-                        disabled={isSubmittingA2AGuidance || !a2aGuidanceText.trim()}
-                        className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-claude-accent px-3 text-xs font-medium text-white transition-colors hover:bg-claude-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        <PaperAirplaneIcon className="h-4 w-4" />
-                        {isSubmittingA2AGuidance ? i18nService.t('a2aGuidanceSubmitting') : i18nService.t('a2aGuidanceSend')}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setA2AGuidanceOpen(false);
-                          setA2AGuidanceText('');
-                          setA2AGuidanceError(null);
-                        }}
-                        className="inline-flex h-9 items-center justify-center rounded-md border dark:border-claude-darkBorder border-claude-border px-3 text-xs font-medium dark:text-claude-darkText text-claude-text hover:bg-claude-hover dark:hover:bg-claude-darkHover"
-                      >
-                        {i18nService.t('a2aGuidanceCancel')}
-                      </button>
-                    </div>
-                  </form>
-                )}
-                {(a2aGuidanceError || a2aGuidanceStatus || a2aEndError || resendDeliveryError) && (
-                  <p className={`text-right text-xs ${a2aGuidanceError || a2aEndError || resendDeliveryError ? 'text-red-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
-                    {a2aGuidanceError || a2aEndError || resendDeliveryError || a2aGuidanceStatus}
-                  </p>
-                )}
-              </>
+              <A2AGuidanceControls
+                key={currentSession.id}
+                sessionId={currentSession.id}
+                isConversationEnded={isA2AConversationEnded}
+                isEnding={isEndingA2A}
+                endError={a2aEndError}
+                resendError={resendDeliveryError}
+                onEndConversation={handleEndA2APrivateChat}
+              />
             )}
           </div>
         </div>

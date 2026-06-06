@@ -27,15 +27,25 @@ export const getLatestA2APrivateChatControlState = (
 };
 
 export const shouldRestartA2APrivateChatForGuidance = (input: {
-  session: { messages?: CoworkMessage[] } | null | undefined;
+  session: { messages?: CoworkMessage[]; status?: string | null } | null | undefined;
   sourceChannel?: string | null;
   mappingMetadata?: Record<string, unknown> | null;
 }): boolean => {
   const controlState = getLatestA2APrivateChatControlState(input.session);
-  if (controlState === 'active') return false;
   if (controlState === 'ended') return true;
-  return input.sourceChannel === 'metaweb_private'
-    && input.mappingMetadata?.byeSent === true;
+  const isMetawebPrivate = input.sourceChannel === 'metaweb_private';
+  if (!isMetawebPrivate) return false;
+
+  const sessionStatus = typeof input.session?.status === 'string'
+    ? input.session.status.trim()
+    : '';
+  if (sessionStatus && sessionStatus !== 'running') {
+    return true;
+  }
+
+  if (controlState === 'active') return false;
+  return input.mappingMetadata?.byeSent === true
+    || Number.isFinite(Number(input.mappingMetadata?.endedAt));
 };
 
 export const buildA2AGuidanceRestartPrompt = (input: {

@@ -81,6 +81,7 @@ import {
 import { startOrchestrator as startCognitiveOrchestrator, stopOrchestrator as stopCognitiveOrchestrator } from './services/cognitiveOrchestrator';
 import {
   endPrivateChatA2AConversation,
+  interruptPrivateChatA2AGuidanceTurnBeforeOutput,
   startPrivateChatDaemon,
   stopPrivateChatDaemon,
 } from './services/privateChatDaemon';
@@ -5281,6 +5282,13 @@ if (!gotTheLock) {
         });
         if (!shouldRestart) {
           a2aGuidanceQueue.queue({ sessionId, metabotId: session.metabotId, guidance });
+          const interruptedPrivateChatTurn = interruptPrivateChatA2AGuidanceTurnBeforeOutput(sessionId);
+          const interruptedRunnerTurn = getCoworkRunner().interruptActiveTurnBeforeAssistantOutput(sessionId);
+          if (interruptedPrivateChatTurn || interruptedRunnerTurn) {
+            console.log(
+              `[A2A Guidance] Queued guidance for ${sessionId} and interrupted current silent local turn.`
+            );
+          }
           return { success: true, mode: 'queued' as const };
         }
         if (!currentMapping) throw new Error('Private chat conversation mapping not found');

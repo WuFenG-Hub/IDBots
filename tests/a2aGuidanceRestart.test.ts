@@ -37,6 +37,7 @@ test('shouldRestartA2APrivateChatForGuidance treats auto-bye metadata as ended',
 
 test('latest restart control marker reactivates guidance queueing', () => {
   const session = {
+    status: 'running',
     messages: [
       message('1', 'bye', { a2aConversationEnded: true }),
       message('2', '我们继续。', { a2aConversationRestarted: true }),
@@ -51,6 +52,32 @@ test('latest restart control marker reactivates guidance queueing', () => {
       mappingMetadata: { byeSent: true },
     }),
     false,
+  );
+});
+
+test('completed private A2A sessions restart from guide even after a prior restart marker', () => {
+  const session = {
+    status: 'completed',
+    messages: [
+      message('1', 'bye', { a2aConversationEnded: true }),
+      message('2', '你好啊，我们又见面了。', { a2aConversationRestarted: true }),
+      message('3', 'hi', { direction: 'incoming' }),
+      message('4', 'Hi again!', { direction: 'outgoing' }),
+    ],
+  };
+
+  assert.equal(getLatestA2APrivateChatControlState(session), 'active');
+  assert.equal(
+    shouldRestartA2APrivateChatForGuidance({
+      session,
+      sourceChannel: 'metaweb_private',
+      mappingMetadata: {
+        byeSent: false,
+        endedAt: 1_780_673_752_466,
+        restartedAt: 1_780_673_770_239,
+      },
+    }),
+    true,
   );
 });
 
