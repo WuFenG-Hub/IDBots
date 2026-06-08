@@ -5,6 +5,7 @@
  */
 
 import { fetchBtcBalance } from '../libs/btcApi';
+import { freshGetUrlAndInit } from './freshFetch';
 
 const METALET_HOST = 'https://www.metalet.space';
 const NET = 'livenet';
@@ -43,9 +44,8 @@ async function fetchMetaletJson<T>(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
   try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-    });
+    const freshRequest = freshGetUrlAndInit(url, { signal: controller.signal });
+    const res = await fetch(freshRequest.url, freshRequest.init);
     if (!res.ok) {
       throw new Error(`${fallbackMessage} (${res.status})`);
     }

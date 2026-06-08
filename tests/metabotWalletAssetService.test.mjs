@@ -6,9 +6,23 @@ const require = createRequire(import.meta.url);
 
 let assetService;
 try {
-  assetService = require('../dist-electron/services/metabotWalletAssetService.js');
+  assetService = require('../dist-electron/main/services/metabotWalletAssetService.js');
 } catch {
   assetService = null;
+}
+
+let mrc20Service;
+try {
+  mrc20Service = require('../dist-electron/main/services/mrc20Service.js');
+} catch {
+  mrc20Service = null;
+}
+
+let mvcFtService;
+try {
+  mvcFtService = require('../dist-electron/main/services/mvcFtService.js');
+} catch {
+  mvcFtService = null;
 }
 
 function createMetabotStoreStub(record) {
@@ -18,6 +32,23 @@ function createMetabotStoreStub(record) {
       return { ...record };
     },
   };
+}
+
+function jsonResponse(data) {
+  return {
+    ok: true,
+    status: 200,
+    async json() {
+      return data;
+    },
+  };
+}
+
+function getHeaderValue(headers, name) {
+  if (!headers) return '';
+  if (typeof headers.get === 'function') return headers.get(name) || '';
+  const match = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return match ? String(match[1]) : '';
 }
 
 test('getMetabotWalletAssets returns native, mrc20, and mvc ft sections with display balances', async () => {
@@ -149,4 +180,96 @@ test('getMetabotWalletAssets treats upstream token RPC failures as empty token s
   assert.equal(result.nativeAssets[0].symbol, 'BTC');
   assert.deepEqual(result.mrc20Assets, []);
   assert.deepEqual(result.mvcFtAssets, []);
+});
+
+test('listMrc20Assets uses fresh requests for repeated token balance refreshes', async () => {
+  assert.equal(
+    typeof mrc20Service?.listMrc20Assets,
+    'function',
+    'listMrc20Assets() should be exported',
+  );
+
+  const originalFetch = global.fetch;
+  const calls = [];
+
+  global.fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ href, init });
+
+    if (href.includes('/wallet-api/v3/mrc20/address/balance-list')) {
+      return jsonResponse({
+        code: 0,
+        message: 'success',
+        data: { list: [] },
+      });
+    }
+
+    throw new Error(`Unexpected fetch URL: ${href}`);
+  };
+
+  try {
+    await mrc20Service.listMrc20Assets('test-btc-address');
+    await mrc20Service.listMrc20Assets('test-btc-address');
+
+    assert.equal(calls.length, 2);
+
+    const first = new URL(calls[0].href);
+    const second = new URL(calls[1].href);
+    assert.notEqual(
+      first.searchParams.get('_fresh'),
+      second.searchParams.get('_fresh'),
+      'each manual token refresh should use a unique cache-buster',
+    );
+    assert.equal(calls[0].init.cache, 'no-store');
+    assert.equal(getHeaderValue(calls[0].init.headers, 'Cache-Control'), 'no-cache');
+    assert.equal(getHeaderValue(calls[0].init.headers, 'Pragma'), 'no-cache');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('listMvcFtAssets uses fresh requests for repeated token balance refreshes', async () => {
+  assert.equal(
+    typeof mvcFtService?.listMvcFtAssets,
+    'function',
+    'listMvcFtAssets() should be exported',
+  );
+
+  const originalFetch = global.fetch;
+  const calls = [];
+
+  global.fetch = async (url, init = {}) => {
+    const href = String(url);
+    calls.push({ href, init });
+
+    if (href.includes('/wallet-api/v4/mvc/address/contract/ft/balance-list')) {
+      return jsonResponse({
+        code: 0,
+        message: 'success',
+        data: { list: [] },
+      });
+    }
+
+    throw new Error(`Unexpected fetch URL: ${href}`);
+  };
+
+  try {
+    await mvcFtService.listMvcFtAssets('test-mvc-address');
+    await mvcFtService.listMvcFtAssets('test-mvc-address');
+
+    assert.equal(calls.length, 2);
+
+    const first = new URL(calls[0].href);
+    const second = new URL(calls[1].href);
+    assert.notEqual(
+      first.searchParams.get('_fresh'),
+      second.searchParams.get('_fresh'),
+      'each manual token refresh should use a unique cache-buster',
+    );
+    assert.equal(calls[0].init.cache, 'no-store');
+    assert.equal(getHeaderValue(calls[0].init.headers, 'Cache-Control'), 'no-cache');
+    assert.equal(getHeaderValue(calls[0].init.headers, 'Pragma'), 'no-cache');
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

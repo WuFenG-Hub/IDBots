@@ -4,6 +4,8 @@
  * provider is slow or returning transient backend errors.
  */
 
+import { freshGetUrlAndInit } from '../services/freshFetch';
+
 const METALET_HOST = 'https://www.metalet.space';
 const MEMPOOL_HOST = 'https://mempool.space';
 const NET = 'livenet';
@@ -72,9 +74,10 @@ async function fetchWithTimeout(
   const timeoutMs = resolveTimeoutMs(options.timeoutMs);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const fetchImpl = options.fetchImpl ?? fetch;
+  const freshRequest = freshGetUrlAndInit(url, init);
   try {
-    return await fetchImpl(url, {
-      ...init,
+    return await fetchImpl(freshRequest.url, {
+      ...freshRequest.init,
       signal: controller.signal,
     });
   } catch (error) {
@@ -125,7 +128,8 @@ async function metaletV3Post<T>(path: string, body: Record<string, unknown>): Pr
 
 async function mempoolGetJson<T>(path: string, fetchImpl: typeof fetch = fetch): Promise<T> {
   const url = `${MEMPOOL_HOST}/api${path}`;
-  const res = await fetchImpl(url);
+  const freshRequest = freshGetUrlAndInit(url);
+  const res = await fetchImpl(freshRequest.url, freshRequest.init);
   if (!res.ok) {
     throw new Error(`mempool request failed (${res.status})`);
   }
@@ -134,7 +138,8 @@ async function mempoolGetJson<T>(path: string, fetchImpl: typeof fetch = fetch):
 
 async function mempoolGetText(path: string, fetchImpl: typeof fetch = fetch): Promise<string> {
   const url = `${MEMPOOL_HOST}/api${path}`;
-  const res = await fetchImpl(url);
+  const freshRequest = freshGetUrlAndInit(url);
+  const res = await fetchImpl(freshRequest.url, freshRequest.init);
   if (!res.ok) {
     throw new Error(`mempool request failed (${res.status})`);
   }

@@ -14,6 +14,7 @@ import {
   buildMrc20TransferSignOptions,
 } from './tokenTransferAdapters';
 import { fetchBtcTxHex, fetchBtcUtxos } from '../libs/btcApi';
+import { freshGetUrlAndInit } from './freshFetch';
 
 const METALET_HOST = 'https://www.metalet.space';
 const NET = 'livenet';
@@ -549,7 +550,8 @@ async function fetchGovernedMrc20Utxos(
 }
 
 async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const freshRequest = freshGetUrlAndInit(url);
+  const response = await fetch(freshRequest.url, freshRequest.init);
   const json = await response.json() as { code?: number; message?: string; data?: T };
   if (json.code !== 0 && json.code !== undefined) {
     throw new Error(json.message || 'API request failed');
