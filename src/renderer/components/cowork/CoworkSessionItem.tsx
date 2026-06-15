@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkSessionSummary, CoworkSessionStatus } from '../../types/cowork';
-import { EllipsisHorizontalIcon, ExclamationTriangleIcon, PencilSquareIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { ClipboardDocumentIcon, EllipsisHorizontalIcon, ExclamationTriangleIcon, PencilSquareIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
+import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
 
 interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
@@ -123,7 +124,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
       closeMenu();
       return;
     }
-    const menuHeight = 120;
+    const menuHeight = 160;
     const position = calculateMenuPosition(menuHeight);
     if (position) {
       setMenuPosition(position);
@@ -176,6 +177,18 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     handleRenameSave(event);
   };
 
+  const handleCopySessionIdClick = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+      copyCoworkSessionLinkToClipboard(session.id, clipboard);
+    } catch {
+      // Ignore clipboard failures; the menu should still close.
+    } finally {
+      closeMenu();
+    }
+  };
+
   const handleDeleteClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setShowConfirmDelete(true);
@@ -220,7 +233,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
 
   useEffect(() => {
     if (!menuPosition) return;
-    const menuHeight = showConfirmDelete ? 112 : 120;
+    const menuHeight = showConfirmDelete ? 112 : 160;
     const position = calculateMenuPosition(menuHeight);
     if (position && (position.x !== menuPosition.x || position.y !== menuPosition.y)) {
       setMenuPosition(position);
@@ -237,6 +250,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
 
   const pinButtonLabel = session.pinned ? i18nService.t('coworkUnpinSession') : i18nService.t('coworkPinSession');
   const actionLabel = i18nService.t('coworkSessionActions');
+  const copySessionIdLabel = i18nService.t('coworkCopySessionId');
   const renameLabel = i18nService.t('renameConversation');
   const deleteLabel = i18nService.t('deleteSession');
   const relativeTime = formatRelativeTime(session.updatedAt);
@@ -250,12 +264,15 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     || i18nService.t('coworkNewSession');
   const menuItems = useMemo(() => {
     return [
+      { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick, tone: 'neutral' as const },
       { key: 'rename', label: renameLabel, onClick: handleRenameClick, tone: 'neutral' as const },
       { key: 'pin', label: pinButtonLabel, onClick: handleTogglePin, tone: 'neutral' as const },
       { key: 'delete', label: deleteLabel, onClick: handleDeleteClick, tone: 'danger' as const },
     ];
   }, [
+    copySessionIdLabel,
     deleteLabel,
+    handleCopySessionIdClick,
     handleDeleteClick,
     handleRenameClick,
     handleTogglePin,
@@ -375,6 +392,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
                   : 'dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
               }`}
             >
+              {item.key === 'copy-session-id' && <ClipboardDocumentIcon className="h-4 w-4" />}
               {item.key === 'rename' && <PencilSquareIcon className="h-4 w-4" />}
               {item.key === 'pin' && (
                 <PushPinIcon
