@@ -27,6 +27,7 @@ import { isPathWithin, resolveElectronExecutablePath } from './runtimePaths';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
+import { CoworkCrossSessionService } from '../services/coworkCrossSession';
 import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
@@ -714,6 +715,24 @@ interface QueuedTurnMemoryUpdate {
   enqueuedAt: number;
 }
 
+interface QueuedCrossSessionContinuation {
+  targetSessionId: string;
+  prompt: string;
+  enqueuedAt: number;
+}
+
+type CrossSessionContinuationQueueResult =
+  | {
+      runQueued: true;
+      queueDepth: number;
+    }
+  | {
+      runQueued: false;
+      warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED';
+      reason: 'TARGET_SESSION_STOPPED';
+      error: string;
+    };
+
 type AttachmentEntry = {
   lineIndex: number;
   label: string;
@@ -784,6 +803,10 @@ export class CoworkRunner extends EventEmitter {
   private turnMemoryQueueKeys: Set<string> = new Set();
   private lastTurnMemoryKeyBySession: Map<string, string> = new Map();
   private drainingTurnMemoryQueue = false;
+  private crossSessionContinuationQueues: Map<string, QueuedCrossSessionContinuation[]> = new Map();
+  private crossSessionContinuationDraining: Set<string> = new Set();
+  private crossSessionRunningTurns: Set<string> = new Set();
+  private crossSessionService: CoworkCrossSessionService | null = null;
 
   constructor(store: CoworkStore, options?: CoworkRunnerOptions) {
     super();
@@ -800,6 +823,13 @@ export class CoworkRunner extends EventEmitter {
 
   private getMemoryBackend() {
     return this.store.getMemoryBackend();
+  }
+
+  private getCrossSessionService(): CoworkCrossSessionService {
+    if (!this.crossSessionService) {
+      this.crossSessionService = new CoworkCrossSessionService(this.store);
+    }
+    return this.crossSessionService;
   }
 
   private isSessionStopRequested(sessionId: string, activeSession?: ActiveSession): boolean {
@@ -1150,6 +1180,83 @@ export class CoworkRunner extends EventEmitter {
       metabotId,
     });
     return this.formatChatSearchOutput(chats);
+  }
+
+  private formatCrossSessionToolOutput(result: unknown): string {
+    return JSON.stringify(result, null, 2);
+  }
+
+  private runIdbotsSessionReadAllTool(args: {
+    sessionId?: string;
+  }): { success: boolean; text: string } {
+    const result = this.getCrossSessionService().readAll({
+      sessionId: String(args.sessionId ?? ''),
+    });
+    return {
+      success: result.ok,
+      text: this.formatCrossSessionToolOutput(result),
+    };
+  }
+
+  private runIdbotsSessionReadLatestTool(args: {
+    sessionId?: string;
+  }): { success: boolean; text: string } {
+    const result = this.getCrossSessionService().readLatest({
+      sessionId: String(args.sessionId ?? ''),
+    });
+    return {
+      success: result.ok,
+      text: this.formatCrossSessionToolOutput(result),
+    };
+  }
+
+  private runIdbotsSessionInsertUserMessageTool(args: {
+    targetSessionId?: string;
+    sessionId?: string;
+    message?: string;
+  }, sourceSessionId: string): { success: boolean; text: string } {
+    const targetSessionId = typeof args.targetSessionId === 'string'
+      ? args.targetSessionId
+      : String(args.sessionId ?? '');
+    const result = this.getCrossSessionService().insertUserMessage({
+      sourceSessionId,
+      targetSessionId,
+      message: typeof args.message === 'string' ? args.message : '',
+    });
+
+    if (!result.ok) {
+      return {
+        success: false,
+        text: this.formatCrossSessionToolOutput(result),
+      };
+    }
+
+    const emittedMessage: CoworkMessage = {
+      ...result.message,
+      metadata: result.message.metadata ?? undefined,
+    };
+    this.emit('message', result.targetSessionId, emittedMessage);
+
+    try {
+      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
+      return {
+        success: true,
+        text: this.formatCrossSessionToolOutput({
+          ...result,
+          ...queueResult,
+        }),
+      };
+    } catch (error) {
+      return {
+        success: true,
+        text: this.formatCrossSessionToolOutput({
+          ...result,
+          runQueued: false,
+          warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      };
+    }
   }
 
   private runMemoryUserEditsTool(args: {
@@ -2463,6 +2570,8 @@ export class CoworkRunner extends EventEmitter {
     const memoryRecallPrompt = [
       '## Memory Strategy',
       '- Historical retrieval is tool-first: when the user references previous chats, earlier outputs, prior decisions, or says "还记得/之前/上次/刚才", call `conversation_search` or `recent_chats` before answering.',
+      '- When the conversation includes an `IDBots://{sessionId}` link, extract the session id and use `idbots_session_read_all` or `idbots_session_read_latest` to inspect that local Cowork/A2A session before relying on it.',
+      '- Use `idbots_session_insert_user_message` only to send an instruction into another Cowork session. The source session id is derived automatically; A2A sessions are read-only targets.',
       '- Do not guess historical facts from partial context. If retrieval returns no evidence, explicitly say not found.',
       '- Do not call history tools for every request; only use them when historical context is required.',
       '- If retrieved history conflicts with the latest explicit user instruction, follow the latest explicit user instruction.',
@@ -2755,6 +2864,105 @@ export class CoworkRunner extends EventEmitter {
     return null;
   }
 
+  private markCrossSessionTurnRunning(sessionId: string): void {
+    this.crossSessionRunningTurns.add(sessionId);
+  }
+
+  private markCrossSessionTurnSettled(sessionId: string): void {
+    this.crossSessionRunningTurns.delete(sessionId);
+    this.scheduleCrossSessionContinuationDrain(sessionId);
+  }
+
+  private isCrossSessionTurnRunning(sessionId: string): boolean {
+    return this.crossSessionRunningTurns.has(sessionId);
+  }
+
+  private scheduleCrossSessionContinuationDrain(sessionId: string): void {
+    if (this.stoppedSessions.has(sessionId)) {
+      this.crossSessionContinuationQueues.delete(sessionId);
+      return;
+    }
+    if (this.isCrossSessionTurnRunning(sessionId)) {
+      return;
+    }
+    const queue = this.crossSessionContinuationQueues.get(sessionId);
+    if (!queue || queue.length === 0) {
+      return;
+    }
+    if (this.crossSessionContinuationDraining.has(sessionId)) {
+      return;
+    }
+
+    this.crossSessionContinuationDraining.add(sessionId);
+    setTimeout(() => {
+      void this.drainCrossSessionContinuationQueue(sessionId);
+    }, 0);
+  }
+
+  private async drainCrossSessionContinuationQueue(sessionId: string): Promise<void> {
+    try {
+      while (!this.isCrossSessionTurnRunning(sessionId)) {
+        if (this.stoppedSessions.has(sessionId)) {
+          this.crossSessionContinuationQueues.delete(sessionId);
+          return;
+        }
+        const queue = this.crossSessionContinuationQueues.get(sessionId);
+        const next = queue?.shift();
+        if (!next) {
+          this.crossSessionContinuationQueues.delete(sessionId);
+          return;
+        }
+        if (queue.length === 0) {
+          this.crossSessionContinuationQueues.delete(sessionId);
+        }
+        if (this.stoppedSessions.has(next.targetSessionId)) {
+          this.crossSessionContinuationQueues.delete(sessionId);
+          return;
+        }
+
+        try {
+          await this.continueSession(next.targetSessionId, next.prompt, { skipUserMessage: true });
+        } catch (error) {
+          coworkLog('WARN', 'crossSession:continuationQueue', 'Failed to run queued continuation', {
+            sessionId: next.targetSessionId,
+            latencyMs: Math.max(0, Date.now() - next.enqueuedAt),
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } finally {
+      this.crossSessionContinuationDraining.delete(sessionId);
+      const queue = this.crossSessionContinuationQueues.get(sessionId);
+      if (queue && queue.length > 0 && !this.isCrossSessionTurnRunning(sessionId) && !this.stoppedSessions.has(sessionId)) {
+        this.scheduleCrossSessionContinuationDrain(sessionId);
+      }
+    }
+  }
+
+  private enqueueCrossSessionContinuation(targetSessionId: string, prompt: string): CrossSessionContinuationQueueResult {
+    if (this.stoppedSessions.has(targetSessionId)) {
+      return {
+        runQueued: false,
+        warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+        reason: 'TARGET_SESSION_STOPPED',
+        error: `TARGET_SESSION_STOPPED: target session ${targetSessionId} is stopped.`,
+      };
+    }
+
+    const queue = this.crossSessionContinuationQueues.get(targetSessionId) ?? [];
+    queue.push({
+      targetSessionId,
+      prompt,
+      enqueuedAt: Date.now(),
+    });
+    this.crossSessionContinuationQueues.set(targetSessionId, queue);
+    this.scheduleCrossSessionContinuationDrain(targetSessionId);
+    return {
+      runQueued: true,
+      queueDepth: queue.length,
+    };
+  }
+
   async startSession(
     sessionId: string,
     prompt: string,
@@ -2871,13 +3079,16 @@ export class CoworkRunner extends EventEmitter {
 
     // Run claude-code using the SDK
     try {
+      this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
       console.error('Cowork session error:', error);
+    } finally {
+      this.markCrossSessionTurnSettled(sessionId);
     }
   }
 
-  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[] } = {}): Promise<void> {
+  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; skipUserMessage?: boolean } = {}): Promise<void> {
     this.stoppedSessions.delete(sessionId);
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) {
@@ -2885,6 +3096,7 @@ export class CoworkRunner extends EventEmitter {
       await this.startSession(sessionId, prompt, {
         skillIds: options.skillIds,
         systemPrompt: options.systemPrompt,
+        skipInitialUserMessage: options.skipUserMessage,
       });
       return;
     }
@@ -2892,13 +3104,15 @@ export class CoworkRunner extends EventEmitter {
     // Ensure status returns to running for resumed turns on active sessions.
     this.store.updateSession(sessionId, { status: 'running' });
 
-    // Add user message with skill info
-    const userMessage = this.store.addMessage(sessionId, {
-      type: 'user',
-      content: prompt,
-      metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
-    });
-    this.emit('message', sessionId, userMessage);
+    if (!options.skipUserMessage) {
+      // Add user message with skill info
+      const userMessage = this.store.addMessage(sessionId, {
+        type: 'user',
+        content: prompt,
+        metadata: options.skillIds?.length ? { skillIds: options.skillIds } : undefined,
+      });
+      this.emit('message', sessionId, userMessage);
+    }
 
     // Continue with the existing session
     const session = this.store.getSession(sessionId);
@@ -2947,9 +3161,12 @@ export class CoworkRunner extends EventEmitter {
     );
 
     try {
+      this.markCrossSessionTurnRunning(sessionId);
       await this.runClaudeCode(activeSession, prompt, sessionCwd, effectiveSystemPrompt);
     } catch (error) {
       console.error('Cowork continue error:', error);
+    } finally {
+      this.markCrossSessionTurnSettled(sessionId);
     }
   }
 
@@ -2961,6 +3178,7 @@ export class CoworkRunner extends EventEmitter {
   ): void {
     const finalStatus = options.finalStatus ?? 'idle';
     this.stoppedSessions.add(sessionId);
+    this.crossSessionContinuationQueues.delete(sessionId);
     const activeSession = this.activeSessions.get(sessionId);
     const hadActiveSession = Boolean(activeSession);
     if (activeSession) {
@@ -3027,7 +3245,7 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  private handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): { success: boolean; text: string } {
+  private async handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): Promise<{ success: boolean; text: string }> {
     const toolName = String(payload.toolName ?? payload.name ?? '');
     const rawInput = payload.toolInput ?? payload.input ?? {};
     const toolInput =
@@ -3057,6 +3275,26 @@ export class CoworkRunner extends EventEmitter {
           after: typeof toolInput.after === 'string' ? toolInput.after : undefined,
         }, sessionId);
         return { success: true, text };
+      }
+
+      if (toolName === 'idbots_session_read_all') {
+        return this.runIdbotsSessionReadAllTool({
+          sessionId: typeof toolInput.sessionId === 'string' ? toolInput.sessionId : undefined,
+        });
+      }
+
+      if (toolName === 'idbots_session_read_latest') {
+        return this.runIdbotsSessionReadLatestTool({
+          sessionId: typeof toolInput.sessionId === 'string' ? toolInput.sessionId : undefined,
+        });
+      }
+
+      if (toolName === 'idbots_session_insert_user_message') {
+        return this.runIdbotsSessionInsertUserMessageTool({
+          targetSessionId: typeof toolInput.targetSessionId === 'string' ? toolInput.targetSessionId : undefined,
+          sessionId: typeof toolInput.sessionId === 'string' ? toolInput.sessionId : undefined,
+          message: typeof toolInput.message === 'string' ? toolInput.message : undefined,
+        }, sessionId);
       }
 
       if (toolName === 'memory_user_edits') {
@@ -3534,6 +3772,49 @@ export class CoworkRunner extends EventEmitter {
             const text = this.runRecentChatsTool(args, sessionId);
             return {
               content: [{ type: 'text', text }],
+            } as any;
+          }
+        ),
+        tool(
+          'idbots_session_read_all',
+          'Read all messages from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          {
+            sessionId: z.string().min(1),
+          },
+          async (args: { sessionId: string }) => {
+            const result = this.runIdbotsSessionReadAllTool(args);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: !result.success,
+            } as any;
+          }
+        ),
+        tool(
+          'idbots_session_read_latest',
+          'Read the latest message from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          {
+            sessionId: z.string().min(1),
+          },
+          async (args: { sessionId: string }) => {
+            const result = this.runIdbotsSessionReadLatestTool(args);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: !result.success,
+            } as any;
+          }
+        ),
+        tool(
+          'idbots_session_insert_user_message',
+          'Send an instruction into another local IDBots Cowork session and queue that session to continue. A2A sessions are read-only targets and writes will be rejected.',
+          {
+            targetSessionId: z.string().min(1),
+            message: z.string().min(1),
+          },
+          async (args: { targetSessionId: string; message: string }) => {
+            const result = this.runIdbotsSessionInsertUserMessageTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: !result.success,
             } as any;
           }
         ),
@@ -4243,14 +4524,27 @@ export class CoworkRunner extends EventEmitter {
           const requestId = String(payload.requestId ?? '');
           if (!requestId) return;
 
-          const result = this.handleHostToolExecution(payload, sessionId);
-          this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, requestId, {
-            type: 'host_tool_response',
-            requestId,
-            success: result.success,
-            text: result.text,
-            error: result.success ? undefined : result.text,
-          });
+          void (async () => {
+            try {
+              const result = await this.handleHostToolExecution(payload, sessionId);
+              this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, requestId, {
+                type: 'host_tool_response',
+                requestId,
+                success: result.success,
+                text: result.text,
+                error: result.success ? undefined : result.text,
+              });
+            } catch (error) {
+              const text = error instanceof Error ? error.message : String(error);
+              this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, requestId, {
+                type: 'host_tool_response',
+                requestId,
+                success: false,
+                text,
+                error: text,
+              });
+            }
+          })();
           return;
         }
 
@@ -4699,14 +4993,27 @@ export class CoworkRunner extends EventEmitter {
       if (messageType === 'host_tool_request') {
         const reqId = String(payload.requestId ?? '');
         if (!reqId) return;
-        const result = this.handleHostToolExecution(payload, sessionId);
-        this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, reqId, {
-          type: 'host_tool_response',
-          requestId: reqId,
-          success: result.success,
-          text: result.text,
-          error: result.success ? undefined : result.text,
-        });
+        void (async () => {
+          try {
+            const result = await this.handleHostToolExecution(payload, sessionId);
+            this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, reqId, {
+              type: 'host_tool_response',
+              requestId: reqId,
+              success: result.success,
+              text: result.text,
+              error: result.success ? undefined : result.text,
+            });
+          } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            this.writeSandboxHostToolResponse(activeSession, paths.responsesDir, reqId, {
+              type: 'host_tool_response',
+              requestId: reqId,
+              success: false,
+              text,
+              error: text,
+            });
+          }
+        })();
         return;
       }
 

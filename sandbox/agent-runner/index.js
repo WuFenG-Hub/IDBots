@@ -1325,6 +1325,64 @@ async function handleRequest(requestId, request, requestPath) {
             };
           }
         ),
+        tool(
+          'idbots_session_read_all',
+          'Read all messages from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          {
+            sessionId: z.string().min(1),
+          },
+          async (args, { signal }) => {
+            const response = await callHostTool('idbots_session_read_all', args, signal);
+            const text = typeof response?.text === 'string'
+              ? response.text
+              : typeof response?.error === 'string'
+                ? response.error
+                : '';
+            return {
+              content: [{ type: 'text', text }],
+              isError: response?.success === false,
+            };
+          }
+        ),
+        tool(
+          'idbots_session_read_latest',
+          'Read the latest message from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          {
+            sessionId: z.string().min(1),
+          },
+          async (args, { signal }) => {
+            const response = await callHostTool('idbots_session_read_latest', args, signal);
+            const text = typeof response?.text === 'string'
+              ? response.text
+              : typeof response?.error === 'string'
+                ? response.error
+                : '';
+            return {
+              content: [{ type: 'text', text }],
+              isError: response?.success === false,
+            };
+          }
+        ),
+        tool(
+          'idbots_session_insert_user_message',
+          'Send an instruction into another local IDBots Cowork session and queue that session to continue. A2A sessions are read-only targets and writes will be rejected.',
+          {
+            targetSessionId: z.string().min(1),
+            message: z.string().min(1),
+          },
+          async (args, { signal }) => {
+            const response = await callHostTool('idbots_session_insert_user_message', args, signal);
+            const text = typeof response?.text === 'string'
+              ? response.text
+              : typeof response?.error === 'string'
+                ? response.error
+                : '';
+            return {
+              content: [{ type: 'text', text }],
+              isError: response?.success === false,
+            };
+          }
+        ),
       ];
       if (request.memoryEnabled !== false) {
         memoryTools.push(

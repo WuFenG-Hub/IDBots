@@ -469,6 +469,21 @@ export interface CoworkSession {
   metabotAvatar?: string | null;
 }
 
+export type CoworkSessionMetadata = Pick<
+  CoworkSession,
+  | 'id'
+  | 'title'
+  | 'status'
+  | 'pinned'
+  | 'createdAt'
+  | 'updatedAt'
+  | 'metabotId'
+  | 'sessionType'
+  | 'peerGlobalMetaId'
+  | 'peerName'
+  | 'hiddenFromSessionList'
+>;
+
 export interface CoworkSessionSummary {
   id: string;
   title: string;
@@ -2002,6 +2017,45 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
+  getSessionMetadata(id: string): CoworkSessionMetadata | null {
+    interface SessionMetadataRow {
+      id: string;
+      title: string;
+      status: string;
+      pinned?: number | null;
+      metabot_id?: number | string | null;
+      session_type?: string | null;
+      peer_global_metaid?: string | null;
+      peer_name?: string | null;
+      hidden_from_session_list?: number | null;
+      created_at: number;
+      updated_at: number;
+    }
+
+    const row = this.getOne<SessionMetadataRow>(`
+      SELECT id, title, status, pinned, metabot_id, session_type, peer_global_metaid,
+             peer_name, hidden_from_session_list, created_at, updated_at
+      FROM cowork_sessions
+      WHERE id = ?
+    `, [id]);
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      title: row.title,
+      status: row.status as CoworkSessionStatus,
+      pinned: Boolean(row.pinned),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      metabotId: parseIdNumber(row.metabot_id) ?? undefined,
+      sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
+      peerGlobalMetaId: row.peer_global_metaid ?? null,
+      peerName: row.peer_name ?? null,
+      hiddenFromSessionList: Boolean(row.hidden_from_session_list),
+    };
+  }
+
   updateSession(
     id: string,
     updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode'>>
@@ -2205,6 +2259,28 @@ export class CoworkStore implements MemoryBackend {
     }));
   }
 
+  getSessionLatestMessage(sessionId: string): CoworkMessage | null {
+    const row = this.getOne<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages
+      WHERE session_id = ?
+      ORDER BY
+        created_at DESC,
+        COALESCE(sequence, 0) DESC,
+        ROWID DESC
+      LIMIT 1
+    `, [sessionId]);
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
 
   private shouldApplyExplicitMemoryFromUserText(text: string, guardLevel: CoworkMemoryGuardLevel): boolean {
     const trimmed = text?.trim();
