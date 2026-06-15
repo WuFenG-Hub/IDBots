@@ -721,6 +721,18 @@ interface QueuedCrossSessionContinuation {
   enqueuedAt: number;
 }
 
+type CrossSessionContinuationQueueResult =
+  | {
+      runQueued: true;
+      queueDepth: number;
+    }
+  | {
+      runQueued: false;
+      warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED';
+      reason: 'TARGET_SESSION_STOPPED';
+      error: string;
+    };
+
 type AttachmentEntry = {
   lineIndex: number;
   label: string;
@@ -1226,12 +1238,12 @@ export class CoworkRunner extends EventEmitter {
     this.emit('message', result.targetSessionId, emittedMessage);
 
     try {
-      this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
+      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
       return {
         success: true,
         text: this.formatCrossSessionToolOutput({
           ...result,
-          runQueued: true,
+          ...queueResult,
         }),
       };
     } catch (error) {
@@ -2927,7 +2939,16 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  private enqueueCrossSessionContinuation(targetSessionId: string, prompt: string): void {
+  private enqueueCrossSessionContinuation(targetSessionId: string, prompt: string): CrossSessionContinuationQueueResult {
+    if (this.stoppedSessions.has(targetSessionId)) {
+      return {
+        runQueued: false,
+        warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+        reason: 'TARGET_SESSION_STOPPED',
+        error: `TARGET_SESSION_STOPPED: target session ${targetSessionId} is stopped.`,
+      };
+    }
+
     const queue = this.crossSessionContinuationQueues.get(targetSessionId) ?? [];
     queue.push({
       targetSessionId,
@@ -2936,6 +2957,10 @@ export class CoworkRunner extends EventEmitter {
     });
     this.crossSessionContinuationQueues.set(targetSessionId, queue);
     this.scheduleCrossSessionContinuationDrain(targetSessionId);
+    return {
+      runQueued: true,
+      queueDepth: queue.length,
+    };
   }
 
   async startSession(

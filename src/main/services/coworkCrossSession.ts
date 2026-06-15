@@ -2,6 +2,7 @@ import type {
   CoworkMessage,
   CoworkMessageMetadata,
   CoworkSession,
+  CoworkSessionMetadata as CoworkStoreSessionMetadata,
   CoworkSessionType,
 } from '../coworkStore';
 
@@ -85,6 +86,7 @@ export type CoworkCrossSessionInsertResult =
 
 export interface CoworkCrossSessionStore {
   getSession(sessionId: string): CoworkSession | null;
+  getSessionMetadata(sessionId: string): CoworkStoreSessionMetadata | null;
   getSessionLatestMessage(sessionId: string): CoworkMessage | null;
   addMessage(sessionId: string, message: Omit<CoworkMessage, 'id' | 'timestamp'>): CoworkMessage;
 }
@@ -121,7 +123,7 @@ export function formatIdbotsSessionLink(sessionId: string): string {
   return `IDBots://${String(sessionId ?? '').trim()}`;
 }
 
-function toSessionMetadata(session: CoworkSession): CoworkCrossSessionMetadata {
+function toSessionMetadata(session: CoworkSession | CoworkStoreSessionMetadata): CoworkCrossSessionMetadata {
   return {
     id: session.id,
     title: session.title,
@@ -164,7 +166,7 @@ export class CoworkCrossSessionService {
   }
 
   readLatest(input: { sessionId: string }): CoworkCrossSessionReadLatestResult {
-    const resolved = this.getExistingSession(input.sessionId);
+    const resolved = this.getExistingSessionMetadata(input.sessionId);
     if (resolved.ok === false) {
       return resolved;
     }
@@ -243,6 +245,27 @@ export class CoworkCrossSessionService {
     }
 
     const session = this.store.getSession(parsed.sessionId);
+    if (!session) {
+      return error('SESSION_NOT_FOUND', `Session not found: ${parsed.sessionId}`);
+    }
+
+    return {
+      ok: true,
+      sessionId: parsed.sessionId,
+      session,
+    };
+  }
+
+  private getExistingSessionMetadata(rawSessionId: string): (
+    | { ok: true; sessionId: string; session: CoworkStoreSessionMetadata }
+    | CoworkCrossSessionError
+  ) {
+    const parsed = normalizeIdbotsSessionId(rawSessionId);
+    if (parsed.ok === false) {
+      return parsed;
+    }
+
+    const session = this.store.getSessionMetadata(parsed.sessionId);
     if (!session) {
       return error('SESSION_NOT_FOUND', `Session not found: ${parsed.sessionId}`);
     }

@@ -66,6 +66,11 @@ class FakeCoworkStore {
     return this.sessions.get(id) ?? null;
   }
 
+  getSessionMetadata(id) {
+    const session = this.getSession(id);
+    return session ? { ...session, messages: [] } : null;
+  }
+
   getSessionLatestMessage(id) {
     const session = this.getSession(id);
     return session?.messages.at(-1) ?? null;
@@ -324,6 +329,42 @@ test('write tool reports partial success if queue acceptance throws after insert
   assert.equal(store.getSession(target.id).messages.length, 1);
   assert.equal(emittedMessages.length, 1);
   await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runCalls.length, 0);
+});
+
+test('write tool reports unqueued when target was already stopped before insert', async () => {
+  const { store, runner, runCalls, emittedMessages } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('stopped-target');
+
+  runner.stopSession(target.id);
+
+  const result = await runner.handleHostToolExecution({
+    toolName: 'idbots_session_insert_user_message',
+    toolInput: {
+      targetSessionId: target.id,
+      message: 'insert without restart',
+    },
+  }, source.id);
+
+  assert.equal(result.success, true);
+  const payload = parseToolJson(result);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.sourceSessionId, source.id);
+  assert.equal(payload.targetSessionId, target.id);
+  assert.equal(payload.runQueued, false);
+  assert.equal(payload.warning, 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED');
+  assert.equal(payload.reason, 'TARGET_SESSION_STOPPED');
+  assert.match(payload.error, /TARGET_SESSION_STOPPED/);
+  assert.equal(payload.message.content, `来自${source.id} 的信息：insert without restart`);
+
+  assert.deepEqual(emittedMessages.map((event) => [event.sessionId, event.message.id]), [
+    [target.id, payload.message.id],
+  ]);
+  assert.deepEqual(store.getSession(target.id).messages.map((message) => message.content), [
+    payload.message.content,
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(runCalls.length, 0);
 });
 

@@ -130,7 +130,25 @@ test('reads the latest persisted message and returns null for existing empty ses
       metadata: { marker: 'latest' },
     });
 
-    assert.equal(store.getSessionLatestMessage(session.id)?.id, latest.id);
+    const execCalls = [];
+    const originalExec = sqlite.db.exec.bind(sqlite.db);
+    sqlite.db.exec = (sql, params) => {
+      execCalls.push(String(sql));
+      return originalExec(sql, params);
+    };
+    try {
+      assert.equal(store.getSessionLatestMessage(session.id)?.id, latest.id);
+    } finally {
+      sqlite.db.exec = originalExec;
+    }
+    const latestQuery = execCalls
+      .map((sql) => sql.replace(/\s+/g, ' ').trim())
+      .find((sql) => sql.includes('FROM cowork_messages') && sql.includes('LIMIT 1'));
+    assert.ok(latestQuery, 'getSessionLatestMessage should query one latest message row');
+    assert.match(
+      latestQuery,
+      /ORDER BY created_at DESC, COALESCE\(sequence, 0\) DESC, ROWID DESC LIMIT 1/
+    );
 
     const result = service.readLatest({ sessionId: session.id });
     assert.equal(result.ok, true);
@@ -141,6 +159,48 @@ test('reads the latest persisted message and returns null for existing empty ses
     const emptyResult = service.readLatest({ sessionId: empty.id });
     assert.equal(emptyResult.ok, true);
     assert.equal(emptyResult.message, null);
+  } finally {
+    sqlite.cleanup();
+  }
+});
+
+test('readLatest uses lightweight metadata lookup without loading full session history', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const store = createCoworkStore(sqlite.db);
+    const session = store.createSession('Lightweight latest chat', process.cwd(), '', 'local', [], 1);
+    const latest = store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'latest only',
+      metadata: { marker: 'lightweight' },
+    });
+    let metadataCalls = 0;
+
+    const wrapperStore = {
+      getSession() {
+        throw new Error('readLatest must not load full session history');
+      },
+      getSessionMetadata(sessionId) {
+        metadataCalls += 1;
+        return store.getSessionMetadata(sessionId);
+      },
+      getSessionLatestMessage(sessionId) {
+        return store.getSessionLatestMessage(sessionId);
+      },
+      addMessage(sessionId, message) {
+        return store.addMessage(sessionId, message);
+      },
+    };
+
+    const service = new CoworkCrossSessionService(wrapperStore);
+    const result = service.readLatest({ sessionId: session.id });
+
+    assert.equal(result.ok, true);
+    assert.equal(metadataCalls, 1);
+    assert.equal(result.session.id, session.id);
+    assert.equal(result.message.id, latest.id);
+    assert.equal(result.message.content, 'latest only');
+    assert.deepEqual(result.message.metadata, { marker: 'lightweight' });
   } finally {
     sqlite.cleanup();
   }
