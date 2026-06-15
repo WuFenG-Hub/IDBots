@@ -2205,6 +2205,10 @@ export class CoworkStore implements MemoryBackend {
     }));
   }
 
+  getSessionLatestMessage(sessionId: string): CoworkMessage | null {
+    const messages = this.getSessionMessages(sessionId);
+    return messages.length > 0 ? messages[messages.length - 1] : null;
+  }
 
   private shouldApplyExplicitMemoryFromUserText(text: string, guardLevel: CoworkMemoryGuardLevel): boolean {
     const trimmed = text?.trim();
