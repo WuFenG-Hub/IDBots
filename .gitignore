@@ -85,6 +85,11 @@ SKILLs/metaid-master-wiki/
 # Local generated skills for development only; never bundled into release.
 .local-skills/
 
+# Local MetaApp installs/generated apps
+METAAPPs/metaapps.config.json
+METAAPPs/IDDisk/
+METAAPPs/id-music-player/
+
 # SKILLs runtime files
 SKILLs/**/.connection
 SKILLs/**/.server.log
