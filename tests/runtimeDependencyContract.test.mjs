@@ -273,3 +273,58 @@ test('CoworkRunner injects SDK subagent overrides that inherit the main model', 
     'CoworkRunner should pass the overrides through SDK options.agents',
   );
 });
+
+test('sandbox runner mirrors IDBots cross-session host tools', () => {
+  const sandboxRunnerPath = path.join(process.cwd(), 'sandbox/agent-runner/index.js');
+  const source = fs.readFileSync(sandboxRunnerPath, 'utf8');
+
+  assert.ok(
+    source.includes('idbots_session_read_all'),
+    'Sandbox runner should expose the full-session IDBots host tool',
+  );
+  assert.ok(
+    source.includes('idbots_session_read_latest'),
+    'Sandbox runner should expose the latest-message IDBots host tool',
+  );
+  assert.ok(
+    source.includes('idbots_session_insert_user_message'),
+    'Sandbox runner should expose the cross-session insert IDBots host tool',
+  );
+  assert.ok(
+    source.includes("callHostTool('idbots_session_read_all'"),
+    'Sandbox full-session tool should delegate to the matching host tool',
+  );
+  assert.ok(
+    source.includes("callHostTool('idbots_session_read_latest'"),
+    'Sandbox latest-message tool should delegate to the matching host tool',
+  );
+  assert.ok(
+    source.includes("callHostTool('idbots_session_insert_user_message'"),
+    'Sandbox insert tool should delegate to the matching host tool',
+  );
+});
+
+test('CoworkRunner prompt teaches IDBots session links and write boundary', () => {
+  const source = fs.readFileSync(coworkRunnerPath, 'utf8');
+
+  assert.ok(
+    source.includes('IDBots://{sessionId}'),
+    'CoworkRunner prompt should teach the IDBots session link format',
+  );
+  assert.ok(
+    source.includes('idbots_session_read_all'),
+    'CoworkRunner prompt should mention the full-session read tool',
+  );
+  assert.ok(
+    source.includes('idbots_session_read_latest'),
+    'CoworkRunner prompt should mention the latest-message read tool',
+  );
+  assert.ok(
+    source.includes('idbots_session_insert_user_message'),
+    'CoworkRunner prompt should mention the cross-session insert tool',
+  );
+  assert.ok(
+    source.includes('A2A sessions are read-only'),
+    'CoworkRunner prompt should describe the A2A write boundary',
+  );
+});
