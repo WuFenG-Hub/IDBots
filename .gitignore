@@ -53,6 +53,7 @@ tests/*
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs
 !tests/metabotPostBuzzSkill.test.mjs
+!tests/metabotInfoPayload.test.mjs
 !tests/sqliteRecoveryLifecycle.test.mjs
 !tests/atomicFile.test.mjs
 !tests/sqliteBackgroundJobs.test.mjs
