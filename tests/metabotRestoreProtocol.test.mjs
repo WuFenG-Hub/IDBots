@@ -104,6 +104,56 @@ test('empty new protocol payloads clear stale legacy profile values', () => {
   assert.deepEqual(parsed.bio.allowChatSkills, []);
 });
 
+test('null new protocol placeholders without pin ids keep legacy bio JSON values', () => {
+  const parsed = parseMetaidRestoreProfileInfo({
+    name: 'Legacy Placeholder Bot',
+    bio: JSON.stringify({
+      role: 'Legacy role',
+      soul: 'Legacy soul',
+      goal: 'Legacy goal',
+      background: 'Legacy background',
+      llm: 'legacy-llm',
+      allowChatSkills: ['legacy-skill'],
+    }),
+    persona: null,
+    llm: null,
+    chatSkills: null,
+  });
+
+  assert.equal(parsed.bio.background, 'Legacy background');
+  assert.equal(parsed.bio.role, 'Legacy role');
+  assert.equal(parsed.bio.soul, 'Legacy soul');
+  assert.equal(parsed.bio.goal, 'Legacy goal');
+  assert.equal(parsed.bio.llm_id, 'legacy-llm');
+  assert.deepEqual(parsed.bio.allowChatSkills, ['legacy-skill']);
+});
+
+test('null new protocol payloads with pin ids still clear legacy profile values', () => {
+  const parsed = parseMetaidRestoreProfileInfo({
+    name: 'Pinned Clear Bot',
+    bio: JSON.stringify({
+      role: 'Legacy role',
+      soul: 'Legacy soul',
+      goal: 'Legacy goal',
+      llm: 'legacy-llm',
+      allowChatSkills: ['legacy-skill'],
+    }),
+    persona: null,
+    personaId: 'persona-pin',
+    llm: null,
+    llmId: 'llm-pin',
+    chatSkills: null,
+    chatSkillsId: 'chat-skills-pin',
+  });
+
+  assert.equal(parsed.bio.role, '');
+  assert.equal(parsed.bio.soul, '');
+  assert.equal(parsed.bio.goal, null);
+  assert.equal(parsed.bio.llm_id, null);
+  assert.deepEqual(parsed.bio.allowChatSkills, []);
+  assert.equal(parsed.metabotInfoPinId, 'chat-skills-pin');
+});
+
 test('canonical chatSkills restore ignores group-only skills when private list is missing', () => {
   const parsed = parseMetaidRestoreProfileInfo({
     name: 'Group Only Bot',

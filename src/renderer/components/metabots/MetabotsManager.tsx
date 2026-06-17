@@ -518,6 +518,15 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
         if (retryPlan.syncStepKeys.length > 0) {
           await delay(SYNC_RETRY_DELAY_MS);
           result = await window.electron.idbots.syncMetaBotEditChanges(buildEditSyncIpcInput(retryPlan));
+          if (!result.success) {
+            const manualRetryPlan = buildRemainingEditSyncPlan(retryPlan, result.syncedSteps ?? []);
+            setEditSyncPlan(manualRetryPlan);
+            setCreateSuccessModal((current) => (
+              current?.mode === 'editSync'
+                ? { ...current, syncStepKeys: manualRetryPlan.syncStepKeys }
+                : current
+            ));
+          }
         }
       }
       console.log('[MetaBot] edit sync result', result);

@@ -1066,7 +1066,6 @@ export async function syncMetaBotEditChangesToChain(
         return { success: false, error: `${step.key} pin failed: no txid`, txids, syncedSteps };
       }
       txids.push(txid);
-      syncedSteps.push(step.key as SyncMetaBotEditStep);
       if (isProfileSyncStep(step.key)) {
         metabotInfoPinId = result.pinId ?? `${txid}i0`;
         const persistError = persistProfilePinId(metabotInfoPinId);
@@ -1080,6 +1079,7 @@ export async function syncMetaBotEditChangesToChain(
           };
         }
       }
+      syncedSteps.push(step.key as SyncMetaBotEditStep);
       log(`${step.key} pin success`, { txid, pinId: result.pinId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

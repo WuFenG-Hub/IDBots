@@ -172,6 +172,13 @@ const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
 
 const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
 
+const hasProtocolPinId = (...values: unknown[]): boolean => normalizeFirstNonEmpty(...values) !== null;
+
+const hasProtocolPayload = (payload: unknown, ...pinIds: unknown[]): boolean => {
+  if (payload !== null && payload !== undefined) return true;
+  return hasProtocolPinId(...pinIds);
+};
+
 const parsePersonaPayload = (payload: unknown): {
   present: boolean;
   role: string;
@@ -228,13 +235,21 @@ const resolveAvatarPinId = (avatar?: string | null, avatarId?: string | null): s
 export function parseMetaidRestoreProfileInfo(info: MetaidAddressInfo): Pick<MetaidRestoreProfile, 'bio' | 'metabotInfoPinId' | 'chatpubkeyPinId' | 'raw'> {
   const legacy = parseLegacyMetaidBio(info.bio);
   const plainBio = typeof info.bio === 'string' && !looksLikeJsonObject(info.bio) ? normalizeOptionalString(info.bio) : null;
-  const persona = hasOwn(info, 'persona') ? parsePersonaPayload(info.persona) : emptyPersonaPayload();
-  const llm = hasOwn(info, 'llm')
+  const persona = (hasOwn(info, 'persona') || hasProtocolPinId(info.personaId, info.personaPinId))
+    && hasProtocolPayload(info.persona, info.personaId, info.personaPinId)
+    ? parsePersonaPayload(info.persona)
+    : emptyPersonaPayload();
+  const llm = (hasOwn(info, 'llm') || hasProtocolPinId(info.llmId, info.llmPinId))
+    && hasProtocolPayload(info.llm, info.llmId, info.llmPinId)
     ? parseLlmPayload(info.llm)
-    : hasOwn(info, 'LLM')
+    : (hasOwn(info, 'LLM') || hasProtocolPinId(info.LLMId, info.LLMPinId))
+      && hasProtocolPayload(info.LLM, info.LLMId, info.LLMPinId)
       ? parseLlmPayload(info.LLM)
       : emptyLlmPayload();
-  const chatSkills = hasOwn(info, 'chatSkills') ? parseChatSkillsPayload(info.chatSkills) : emptyChatSkillsPayload();
+  const chatSkills = (hasOwn(info, 'chatSkills') || hasProtocolPinId(info.chatSkillsId, info.chatSkillsPinId))
+    && hasProtocolPayload(info.chatSkills, info.chatSkillsId, info.chatSkillsPinId)
+    ? parseChatSkillsPayload(info.chatSkills)
+    : emptyChatSkillsPayload();
   const avatarPinId = resolveAvatarPinId(
     info.avatar ?? null,
     normalizeFirstNonEmpty(info.avatarId, info.avatarPinId),

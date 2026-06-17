@@ -864,7 +864,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotSyncStepBio: 'Bio',
     metabotSyncStepPersona: 'Persona',
     metabotSyncStepLlm: 'LLM',
-    metabotSyncStepChatSkills: 'Chat Skills',
+    metabotSyncStepChatSkills: '聊天技能',
     metabotEditSyncTitle: '保存成功，开始同步上链',
     metabotEditSyncSubtitle: '正在将修改内容写入链上，可在此查看状态并重试。',
     metabotUnsyncedSyncNow: '未同步上链，点此同步',

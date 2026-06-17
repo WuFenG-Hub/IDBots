@@ -239,6 +239,45 @@ test('edit sync persists latest successful profile pin before a later profile fa
   ]);
 });
 
+test('edit sync does not mark a profile step synced when local pin persistence fails', async () => {
+  const createPinPaths = [];
+  const fakeStore = {
+    getMetabotById: (id) => ({
+      ...metabot,
+      id,
+      chat_public_key_pin_id: 'chat-pin',
+    }),
+    getMetabotWalletByMetabotId: () => {
+      throw new Error('test createPin dependency was not used');
+    },
+    updateMetabot: () => {
+      throw new Error('sqlite is locked');
+    },
+  };
+
+  const result = await syncMetaBotEditChangesToChain(
+    fakeStore,
+    {
+      metabotId: 7,
+      syncBio: true,
+    },
+    {
+      createPin: async (_store, _metabotId, payload) => {
+        createPinPaths.push(payload.path);
+        return { txids: ['bio-tx'], pinId: 'bio-pin', totalCost: 1 };
+      },
+      sleep: async () => {},
+    },
+  );
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /database update failed/i);
+  assert.equal(result.metabotInfoPinId, 'bio-pin');
+  assert.deepEqual(result.txids, ['bio-tx']);
+  assert.deepEqual(result.syncedSteps, []);
+  assert.deepEqual(createPinPaths, ['/info/bio']);
+});
+
 test('full sync reports partial failure when chatpubkey is missing before bootstrap', async () => {
   const updateCalls = [];
   const createPinPaths = [];
@@ -314,6 +353,7 @@ test('renderer edit sync retry narrows already synced Bot Info steps', () => {
   assert.match(source, /syncLlm:\s*plan\.syncLlm && !synced\.has\('llm'\)/);
   assert.match(source, /syncChatSkills:\s*plan\.syncChatSkills && !synced\.has\('chatSkills'\)/);
   assert.match(source, /const retryPlan = buildRemainingEditSyncPlan\(plan, result\.syncedSteps \?\? \[\]\);/);
+  assert.match(source, /const manualRetryPlan = buildRemainingEditSyncPlan\(retryPlan, result\.syncedSteps \?\? \[\]\);/);
   assert.match(source, /if \(retryPlan\.syncStepKeys\.length > 0\)/);
   assert.match(source, /setEditSyncPlan\(retryPlan\)/);
 });
@@ -329,5 +369,6 @@ test('renderer chat skill hint copy references the /info/chatSkills protocol pat
     source,
     /metabotAllowChatSkillsHint:\s*'These skills are published to \/info\/chatSkills for private-chat and group-chat replies\.'/,
   );
+  assert.match(source, /metabotSyncStepChatSkills:\s*'聊天技能'/);
   assert.doesNotMatch(source, /bio\.allowChatSkills/);
 });
