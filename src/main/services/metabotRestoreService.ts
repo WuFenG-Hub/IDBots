@@ -21,6 +21,18 @@ export interface MetaidAddressInfo {
   bio?: unknown;
   bioId?: string;
   bioPinId?: string;
+  persona?: unknown;
+  personaId?: string;
+  personaPinId?: string;
+  llm?: unknown;
+  LLM?: unknown;
+  llmId?: string;
+  LLMId?: string;
+  llmPinId?: string;
+  LLMPinId?: string;
+  chatSkills?: unknown;
+  chatSkillsId?: string;
+  chatSkillsPinId?: string;
   chatpubkey?: string;
   chatPublicKey?: string;
   chatpubkeyId?: string;
@@ -44,7 +56,7 @@ export interface MetaidBioProfile {
 export interface MetaidRestoreProfile {
   name: string;
   avatarDataUrl: string | null;
-  /** Pin id for /info/bio; same semantics as local metabot_info_pinid (indexer field bioId). */
+  /** Latest useful profile pin id among Bot Info profile paths; stored as local metabot_info_pinid. */
   metabotInfoPinId: string | null;
   chatpubkeyPinId: string | null;
   bio: MetaidBioProfile;
@@ -68,7 +80,7 @@ const normalizeFirstNonEmpty = (...values: unknown[]): string | null => {
 const normalizeStringArray = (value: unknown): string[] => {
   if (!value) return [];
   if (Array.isArray(value)) {
-    return value.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
+    return dedupeStringArray(value);
   }
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -76,13 +88,25 @@ const normalizeStringArray = (value: unknown): string[] => {
     try {
       const parsed = JSON.parse(trimmed);
       if (Array.isArray(parsed)) {
-        return parsed.map((item) => String(item)).map((item) => item.trim()).filter(Boolean);
+        return dedupeStringArray(parsed);
       }
     } catch {
-      return [];
+      return dedupeStringArray(trimmed.split(','));
     }
   }
   return [];
+};
+
+const dedupeStringArray = (values: unknown[]): string[] => {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = String(value ?? '').trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
 };
 
 const normalizeBossId = (value: unknown): number | null => {
@@ -91,7 +115,27 @@ const normalizeBossId = (value: unknown): number | null => {
   return Number.isFinite(n) ? Math.floor(n) : null;
 };
 
-const parseMetaidBio = (bio: unknown): MetaidBioProfile => {
+const parseJsonObject = (value: unknown): Record<string, unknown> | null => {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+const looksLikeJsonObject = (value: string): boolean => parseJsonObject(value) !== null;
+
+const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
   const empty: MetaidBioProfile = {
     role: '',
     soul: '',
@@ -108,20 +152,7 @@ const parseMetaidBio = (bio: unknown): MetaidBioProfile => {
 
   if (!bio) return empty;
 
-  let raw: Record<string, unknown> | null = null;
-  if (typeof bio === 'string') {
-    const trimmed = bio.trim();
-    if (!trimmed) return empty;
-    try {
-      const parsed = JSON.parse(trimmed);
-      raw = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-    } catch {
-      raw = null;
-    }
-  } else if (typeof bio === 'object' && !Array.isArray(bio)) {
-    raw = bio as Record<string, unknown>;
-  }
-
+  const raw = parseJsonObject(bio);
   if (!raw) return empty;
 
   return {
@@ -139,6 +170,52 @@ const parseMetaidBio = (bio: unknown): MetaidBioProfile => {
   };
 };
 
+const hasOwn = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key);
+
+const parsePersonaPayload = (payload: unknown): {
+  present: boolean;
+  role: string;
+  soul: string;
+  goal: string | null;
+} => {
+  const raw = parseJsonObject(payload);
+  return {
+    present: true,
+    role: raw ? normalizeString(raw.role) : '',
+    soul: raw ? normalizeString(raw.soul) : '',
+    goal: raw ? normalizeOptionalString(raw.goal) : null,
+  };
+};
+
+const emptyPersonaPayload = (): {
+  present: boolean;
+  role: string;
+  soul: string;
+  goal: string | null;
+} => {
+  return { present: false, role: '', soul: '', goal: null };
+};
+
+const parseLlmPayload = (payload: unknown): { present: boolean; primaryProvider: string | null } => {
+  const raw = parseJsonObject(payload);
+  return {
+    present: true,
+    primaryProvider: raw ? normalizeOptionalString(raw.primaryProvider) : null,
+  };
+};
+
+const emptyLlmPayload = (): { present: boolean; primaryProvider: string | null } => ({ present: false, primaryProvider: null });
+
+const parseChatSkillsPayload = (payload: unknown): { present: boolean; allowChatSkills: string[] } => {
+  const raw = parseJsonObject(payload);
+  return {
+    present: true,
+    allowChatSkills: raw ? normalizeStringArray(raw.allowPrivateChatSkills) : [],
+  };
+};
+
+const emptyChatSkillsPayload = (): { present: boolean; allowChatSkills: string[] } => ({ present: false, allowChatSkills: [] });
+
 const resolveAvatarPinId = (avatar?: string | null, avatarId?: string | null): string | null => {
   const id = normalizeString(avatarId);
   if (id) return id;
@@ -147,6 +224,54 @@ const resolveAvatarPinId = (avatar?: string | null, avatarId?: string | null): s
   const match = raw.match(/content\/([^/?#]+)$/);
   return match ? match[1] : null;
 };
+
+export function parseMetaidRestoreProfileInfo(info: MetaidAddressInfo): Pick<MetaidRestoreProfile, 'bio' | 'metabotInfoPinId' | 'chatpubkeyPinId' | 'raw'> {
+  const legacy = parseLegacyMetaidBio(info.bio);
+  const plainBio = typeof info.bio === 'string' && !looksLikeJsonObject(info.bio) ? normalizeOptionalString(info.bio) : null;
+  const persona = hasOwn(info, 'persona') ? parsePersonaPayload(info.persona) : emptyPersonaPayload();
+  const llm = hasOwn(info, 'llm')
+    ? parseLlmPayload(info.llm)
+    : hasOwn(info, 'LLM')
+      ? parseLlmPayload(info.LLM)
+      : emptyLlmPayload();
+  const chatSkills = hasOwn(info, 'chatSkills') ? parseChatSkillsPayload(info.chatSkills) : emptyChatSkillsPayload();
+  const avatarPinId = resolveAvatarPinId(
+    info.avatar ?? null,
+    normalizeFirstNonEmpty(info.avatarId, info.avatarPinId),
+  );
+
+  const bio: MetaidBioProfile = {
+    ...legacy,
+    background: plainBio ?? legacy.background,
+    role: persona.present ? persona.role : legacy.role,
+    soul: persona.present ? persona.soul : legacy.soul,
+    goal: persona.present ? persona.goal : legacy.goal,
+    llm_id: llm.present ? llm.primaryProvider : legacy.llm_id,
+    allowChatSkills: chatSkills.present ? chatSkills.allowChatSkills : legacy.allowChatSkills,
+  };
+
+  return {
+    bio,
+    metabotInfoPinId: normalizeFirstNonEmpty(
+      info.chatSkillsId,
+      info.chatSkillsPinId,
+      info.llmId,
+      info.LLMId,
+      info.llmPinId,
+      info.LLMPinId,
+      info.personaId,
+      info.personaPinId,
+      info.bioId,
+      info.bioPinId,
+      info.nameId,
+      info.namePinId,
+      avatarPinId,
+      info.pinId,
+    ),
+    chatpubkeyPinId: normalizeFirstNonEmpty(info.chatpubkeyId, info.chatPublicKeyPinId),
+    raw: info,
+  };
+}
 
 const unwrapMetaidInfo = (payload: unknown): Record<string, unknown> | null => {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -251,7 +376,7 @@ export const fetchMetaidRestoreProfile = async (address: string): Promise<Metaid
   if (!name) {
     throw new Error('NAME_EMPTY');
   }
-  const bio = parseMetaidBio(info.bio);
+  const parsed = parseMetaidRestoreProfileInfo(info);
   const avatarPinId = resolveAvatarPinId(
     info.avatar ?? null,
     normalizeFirstNonEmpty(info.avatarId, info.avatarPinId),
@@ -264,21 +389,12 @@ export const fetchMetaidRestoreProfile = async (address: string): Promise<Metaid
       console.warn('[MetaBot] restore avatar fetch failed', err instanceof Error ? err.message : String(err));
     }
   }
-  const chatpubkeyPinId = normalizeFirstNonEmpty(info.chatpubkeyId, info.chatPublicKeyPinId);
-  const metabotInfoPinId = normalizeFirstNonEmpty(
-    info.bioId,
-    info.bioPinId,
-    info.nameId,
-    info.namePinId,
-    avatarPinId,
-    info.pinId,
-  );
   return {
     name,
     avatarDataUrl,
-    metabotInfoPinId,
-    chatpubkeyPinId,
-    bio,
+    metabotInfoPinId: parsed.metabotInfoPinId,
+    chatpubkeyPinId: parsed.chatpubkeyPinId,
+    bio: parsed.bio,
     raw: info,
   };
 };
