@@ -13,6 +13,7 @@ const {
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metabotsManagerPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetabotsManager.tsx');
+const i18nPath = path.join(projectRoot, 'src', 'renderer', 'services', 'i18n.ts');
 
 const metabot = {
   name: 'Alice Bot',
@@ -315,4 +316,18 @@ test('renderer edit sync retry narrows already synced Bot Info steps', () => {
   assert.match(source, /const retryPlan = buildRemainingEditSyncPlan\(plan, result\.syncedSteps \?\? \[\]\);/);
   assert.match(source, /if \(retryPlan\.syncStepKeys\.length > 0\)/);
   assert.match(source, /setEditSyncPlan\(retryPlan\)/);
+});
+
+test('renderer chat skill hint copy references the /info/chatSkills protocol path', () => {
+  const source = fs.readFileSync(i18nPath, 'utf8');
+
+  assert.match(
+    source,
+    /metabotAllowChatSkillsHint:\s*'这些技能会写入 \/info\/chatSkills，供私聊和群聊流程读取。'/,
+  );
+  assert.match(
+    source,
+    /metabotAllowChatSkillsHint:\s*'These skills are published to \/info\/chatSkills for private-chat and group-chat replies\.'/,
+  );
+  assert.doesNotMatch(source, /bio\.allowChatSkills/);
 });
