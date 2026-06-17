@@ -17,7 +17,7 @@ export interface MetaBotFormValues {
   role: string;
   soul: string;
   goal: string;
-  background: string;
+  bio: string;
   boss_global_metaid: string;
   boss_id: string;
   llm_id: string;
@@ -36,7 +36,7 @@ const defaultValues: MetaBotFormValues = {
   role: '',
   soul: '',
   goal: '',
-  background: '',
+  bio: '',
   boss_global_metaid: '',
   boss_id: '',
   llm_id: '',
@@ -336,15 +336,15 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
       </div>
 
       <div className={rowClass}>
-        <label htmlFor="metabot-background" className={labelClass}>
-          {i18nService.t('metabotBackground')}
+        <label htmlFor="metabot-bio" className={labelClass}>
+          {i18nService.t('metabotBio')}
         </label>
         <div className="min-w-0">
           <textarea
-            id="metabot-background"
-            value={values.background}
-            onChange={(e) => handleChange('background', e.target.value)}
-            placeholder={i18nService.t('metabotBackgroundPlaceholder')}
+            id="metabot-bio"
+            value={values.bio}
+            onChange={(e) => handleChange('bio', e.target.value)}
+            placeholder={i18nService.t('metabotBioPlaceholder')}
             rows={2}
             className={`${inputClass} resize-y`}
           />

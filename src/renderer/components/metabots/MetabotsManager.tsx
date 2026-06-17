@@ -22,8 +22,38 @@ interface EditSyncPlan {
   syncName: boolean;
   syncAvatar: boolean;
   syncBio: boolean;
+  syncPersona: boolean;
+  syncLlm: boolean;
+  syncChatSkills: boolean;
   syncStepKeys: SyncStepKey[];
 }
+
+const buildRemainingEditSyncPlan = (
+  plan: EditSyncPlan,
+  syncedSteps: readonly SyncStepKey[]
+): EditSyncPlan => {
+  const synced = new Set(syncedSteps);
+  return {
+    ...plan,
+    syncName: plan.syncName && !synced.has('name'),
+    syncAvatar: plan.syncAvatar && !synced.has('avatar'),
+    syncBio: plan.syncBio && !synced.has('bio'),
+    syncPersona: plan.syncPersona && !synced.has('persona'),
+    syncLlm: plan.syncLlm && !synced.has('llm'),
+    syncChatSkills: plan.syncChatSkills && !synced.has('chatSkills'),
+    syncStepKeys: plan.syncStepKeys.filter((step) => !synced.has(step)),
+  };
+};
+
+const buildEditSyncIpcInput = (plan: EditSyncPlan) => ({
+  metabotId: plan.metabotId,
+  syncName: plan.syncName,
+  syncAvatar: plan.syncAvatar,
+  syncBio: plan.syncBio,
+  syncPersona: plan.syncPersona,
+  syncLlm: plan.syncLlm,
+  syncChatSkills: plan.syncChatSkills,
+});
 
 const providerRequiresApiKey = (provider: string) => provider !== 'ollama';
 const providerLabel = (key: string) => key.charAt(0).toUpperCase() + key.slice(1);
@@ -164,7 +194,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: values.role.trim(),
       soul: values.soul.trim(),
       goal: values.goal.trim() || null,
-      background: values.background.trim() || null,
+      bio: values.bio.trim() || null,
       boss_id: parseOptionalBossId(values.boss_id),
       boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
@@ -205,7 +235,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
     const nextRole = values.role.trim();
     const nextSoul = values.soul.trim();
     const nextGoalRaw = values.goal.trim();
-    const nextBackgroundRaw = values.background.trim();
+    const nextBioRaw = values.bio.trim();
     const nextBossId = parseOptionalBossId(values.boss_id);
     const nextBossGlobalMetaId = values.boss_global_metaid.trim() || null;
     const nextLlmRaw = values.llm_id.trim();
@@ -216,28 +246,27 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
     const oldRole = (current.role || '').trim();
     const oldSoul = (current.soul || '').trim();
     const oldGoalRaw = (current.goal || '').trim();
-    const oldBackgroundRaw = (current.background || '').trim();
-    const oldBossId = current.boss_id ?? null;
-    const oldBossGlobalMetaId = current.boss_global_metaid ?? null;
+    const oldBioRaw = (current.bio || current.background || '').trim();
     const oldLlmRaw = (current.llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
 
     const syncName = nextName !== oldName;
     const syncAvatar = nextAvatarRaw !== oldAvatarRaw;
-    const syncBio =
+    const syncBio = nextBioRaw !== oldBioRaw;
+    const syncPersona =
       nextRole !== oldRole ||
       nextSoul !== oldSoul ||
-      nextGoalRaw !== oldGoalRaw ||
-      nextBackgroundRaw !== oldBackgroundRaw ||
-      nextLlmRaw !== oldLlmRaw ||
-      nextBossId !== oldBossId ||
-      nextBossGlobalMetaId !== oldBossGlobalMetaId ||
-      JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
+      nextGoalRaw !== oldGoalRaw;
+    const syncLlm = nextLlmRaw !== oldLlmRaw;
+    const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
 
     const syncStepKeys: SyncStepKey[] = [];
     if (syncName) syncStepKeys.push('name');
     if (syncAvatar) syncStepKeys.push('avatar');
     if (syncBio) syncStepKeys.push('bio');
+    if (syncPersona) syncStepKeys.push('persona');
+    if (syncLlm) syncStepKeys.push('llm');
+    if (syncChatSkills) syncStepKeys.push('chatSkills');
 
     const result = await window.electron.metabot.update(editId, {
       name: nextName,
@@ -246,7 +275,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
-      background: nextBackgroundRaw || null,
+      bio: nextBioRaw || null,
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
@@ -263,7 +292,8 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
-      background: nextBackgroundRaw || null,
+      bio: nextBioRaw || null,
+      background: current.background ?? null,
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
@@ -283,6 +313,9 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       syncName,
       syncAvatar,
       syncBio,
+      syncPersona,
+      syncLlm,
+      syncChatSkills,
       syncStepKeys,
     };
     setSyncStatus('syncing');
@@ -401,7 +434,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
             role: editMetabot.role,
             soul: editMetabot.soul,
             goal: editMetabot.goal || '',
-            background: editMetabot.background || '',
+            bio: editMetabot.bio || editMetabot.background || '',
             boss_id: editMetabot.boss_id != null ? String(editMetabot.boss_id) : '',
             boss_global_metaid: editMetabot.boss_global_metaid || '',
             llm_id: editMetabot.llm_id || '',
@@ -474,20 +507,28 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
     try {
       const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
       const SYNC_RETRY_DELAY_MS = 2500;
-      let result = await window.electron.idbots.syncMetaBotEditChanges({
-        metabotId: plan.metabotId,
-        syncName: plan.syncName,
-        syncAvatar: plan.syncAvatar,
-        syncBio: plan.syncBio,
-      });
+      let result = await window.electron.idbots.syncMetaBotEditChanges(buildEditSyncIpcInput(plan));
       if (!result.success) {
-        await delay(SYNC_RETRY_DELAY_MS);
-        result = await window.electron.idbots.syncMetaBotEditChanges({
-          metabotId: plan.metabotId,
-          syncName: plan.syncName,
-          syncAvatar: plan.syncAvatar,
-          syncBio: plan.syncBio,
-        });
+        const retryPlan = buildRemainingEditSyncPlan(plan, result.syncedSteps ?? []);
+        setEditSyncPlan(retryPlan);
+        setCreateSuccessModal((current) => (
+          current?.mode === 'editSync'
+            ? { ...current, syncStepKeys: retryPlan.syncStepKeys }
+            : current
+        ));
+        if (retryPlan.syncStepKeys.length > 0) {
+          await delay(SYNC_RETRY_DELAY_MS);
+          result = await window.electron.idbots.syncMetaBotEditChanges(buildEditSyncIpcInput(retryPlan));
+          if (!result.success) {
+            const manualRetryPlan = buildRemainingEditSyncPlan(retryPlan, result.syncedSteps ?? []);
+            setEditSyncPlan(manualRetryPlan);
+            setCreateSuccessModal((current) => (
+              current?.mode === 'editSync'
+                ? { ...current, syncStepKeys: manualRetryPlan.syncStepKeys }
+                : current
+            ));
+          }
+        }
       }
       console.log('[MetaBot] edit sync result', result);
       if (result.success) {

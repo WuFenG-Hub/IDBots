@@ -10,7 +10,7 @@ import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 
 export type SyncStatus = 'idle' | 'syncing' | 'success' | 'error';
-export type SyncStepKey = 'name' | 'avatar' | 'chatpubkey' | 'bio';
+export type SyncStepKey = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills';
 
 export interface MetaBotCreateSuccessModalProps {
   metabot: Metabot;
@@ -25,12 +25,15 @@ export interface MetaBotCreateSuccessModalProps {
   onSyncToChain: () => void;
 }
 
-const FULL_SYNC_STEP_KEYS: SyncStepKey[] = ['name', 'avatar', 'chatpubkey', 'bio'];
-const SYNC_STEP_LABEL_KEYS: Record<SyncStepKey, 'metabotSyncStepName' | 'metabotSyncStepAvatar' | 'metabotSyncStepChatPubKey' | 'metabotSyncStepBio'> = {
+const FULL_SYNC_STEP_KEYS: SyncStepKey[] = ['name', 'avatar', 'chatpubkey', 'bio', 'persona', 'llm', 'chatSkills'];
+const SYNC_STEP_LABEL_KEYS: Record<SyncStepKey, 'metabotSyncStepName' | 'metabotSyncStepAvatar' | 'metabotSyncStepChatPubKey' | 'metabotSyncStepBio' | 'metabotSyncStepPersona' | 'metabotSyncStepLlm' | 'metabotSyncStepChatSkills'> = {
   name: 'metabotSyncStepName',
   avatar: 'metabotSyncStepAvatar',
   chatpubkey: 'metabotSyncStepChatPubKey',
   bio: 'metabotSyncStepBio',
+  persona: 'metabotSyncStepPersona',
+  llm: 'metabotSyncStepLlm',
+  chatSkills: 'metabotSyncStepChatSkills',
 };
 
 const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({

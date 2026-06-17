@@ -29,7 +29,7 @@ import {
   fetchMvcAddressUtxos,
   filterRecoveredCandidatesByProvider,
 } from './mvcFundingRecoveryService';
-import { buildMetabotBioPayload } from './metabotBioPayload';
+import { buildMetabotInfoPayloads } from './metabotInfoPayload';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -649,10 +649,18 @@ function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; 
   const match = /^data:([^;]+);base64,(.+)$/.exec(avatar);
   if (!match) return null;
   const mime = match[1].trim().toLowerCase();
+  const supportedMimeTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+  if (!supportedMimeTypes.has(mime)) return null;
   const base64 = match[2];
   if (!base64) return null;
+  if (base64.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(base64)) {
+    return null;
+  }
   try {
     const buffer = Buffer.from(base64, 'base64');
+    if (buffer.length === 0 || buffer.toString('base64') !== base64) {
+      return null;
+    }
     return { mime, base64, buffer };
   } catch {
     return null;
@@ -662,23 +670,27 @@ function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; 
 export interface SyncMetaBotResult {
   success: boolean;
   error?: string;
-  /** True when name pin succeeded but at least one of avatar/chatpubkey/bio failed; caller may allow skip. */
+  /** True when name pin succeeded but at least one optional Bot Info step failed; caller may allow skip. */
   canSkip?: boolean;
-  /** PinID for /info/bio (metabot_info_pinid) */
+  /** Latest successful profile PinID among /info/bio, /info/persona, /info/llm, /info/chatSkills. */
   metabotInfoPinId?: string;
   /** PinID for /info/chatpubkey (chat_public_key_pin_id) */
   chatPublicKeyPinId?: string;
-  /** TXIDs in order: name, avatar, chatpubkey, bio */
+  /** TXIDs in attempted sync order. */
   txids?: string[];
 }
 
-export type SyncMetaBotEditStep = 'name' | 'avatar' | 'bio';
+export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills';
+export type SyncMetaBotEditStep = Exclude<SyncMetaBotStep, 'chatpubkey'>;
 
 export interface SyncMetaBotEditChangesInput {
   metabotId: number;
   syncName?: boolean;
   syncAvatar?: boolean;
   syncBio?: boolean;
+  syncPersona?: boolean;
+  syncLlm?: boolean;
+  syncChatSkills?: boolean;
 }
 
 export interface SyncMetaBotEditChangesResult {
@@ -689,15 +701,135 @@ export interface SyncMetaBotEditChangesResult {
   syncedSteps?: SyncMetaBotEditStep[];
 }
 
+type SyncMetaBotEditChangesDeps = {
+  createPin?: typeof createPin;
+  sleep?: typeof sleep;
+};
+
+type SyncMetaBotToChainDeps = {
+  createPin?: typeof createPin;
+  sleep?: typeof sleep;
+};
+
+export interface MetabotInfoSyncStep {
+  key: SyncMetaBotStep;
+  path: string;
+  contentType: string;
+  payload: string | Buffer;
+  encoding?: 'base64';
+}
+
+function isProfileSyncStep(step: SyncMetaBotStep): step is 'bio' | 'persona' | 'llm' | 'chatSkills' {
+  return step === 'bio' || step === 'persona' || step === 'llm' || step === 'chatSkills';
+}
+
+function buildAvatarDataUrlSyncStep(avatar: string | null | undefined): MetabotInfoSyncStep | null {
+  const avatarData = parseDataUrlAvatar(avatar);
+  if (!avatarData) {
+    return null;
+  }
+
+  return {
+    key: 'avatar',
+    path: '/info/avatar',
+    contentType: `${avatarData.mime};binary`,
+    payload: avatarData.buffer,
+    encoding: 'base64',
+  };
+}
+
+function buildEditAvatarSyncStep(avatar: string | null | undefined): MetabotInfoSyncStep {
+  const avatarRaw = typeof avatar === 'string' ? avatar.trim() : '';
+  if (!avatarRaw) {
+    return {
+      key: 'avatar',
+      path: '/info/avatar',
+      contentType: 'text/plain',
+      payload: '',
+    };
+  }
+
+  const avatarStep = buildAvatarDataUrlSyncStep(avatarRaw);
+  if (!avatarStep) {
+    throw new Error('Invalid avatar data URL');
+  }
+  return avatarStep;
+}
+
+export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[] {
+  const steps: MetabotInfoSyncStep[] = [{
+    key: 'name',
+    path: '/info/name',
+    contentType: 'text/plain',
+    payload: metabot?.name || 'MetaBot',
+  }];
+
+  const avatarStep = buildAvatarDataUrlSyncStep(metabot?.avatar);
+  if (avatarStep) {
+    steps.push(avatarStep);
+  }
+
+  const chatPubKey = typeof metabot?.chat_public_key === 'string'
+    ? metabot.chat_public_key.trim()
+    : '';
+  if (!metabot?.chat_public_key_pin_id && chatPubKey) {
+    steps.push({
+      key: 'chatpubkey',
+      path: '/info/chatpubkey',
+      contentType: 'text/plain',
+      payload: chatPubKey,
+    });
+  }
+
+  for (const payload of buildMetabotInfoPayloads(metabot ?? {})) {
+    steps.push({
+      key: payload.step,
+      path: payload.path,
+      contentType: payload.contentType,
+      payload: payload.payload,
+    });
+  }
+
+  return steps;
+}
+
+export function buildEditMetabotInfoSyncPlan(
+  input: SyncMetaBotEditChangesInput & { metabot: any }
+): MetabotInfoSyncStep[] {
+  const wanted = new Set<SyncMetaBotStep>();
+  if (input.syncName) wanted.add('name');
+  if (input.syncAvatar) wanted.add('avatar');
+  if (input.syncBio) wanted.add('bio');
+  if (input.syncPersona) wanted.add('persona');
+  if (input.syncLlm) wanted.add('llm');
+  if (input.syncChatSkills) wanted.add('chatSkills');
+
+  const steps = buildFullMetabotInfoSyncPlan({
+    ...input.metabot,
+    chat_public_key_pin_id: input.metabot?.chat_public_key_pin_id || 'skip-edit-chatpubkey',
+  }).filter((step) => step.key !== 'avatar' && step.key !== 'chatpubkey' && wanted.has(step.key));
+
+  if (input.syncAvatar) {
+    const avatarStep = buildEditAvatarSyncStep(input.metabot?.avatar);
+    const insertIndex = input.syncName ? 1 : 0;
+    steps.splice(insertIndex, 0, avatarStep);
+  }
+
+  return steps;
+}
+
 /**
- * Sync MetaBot basic info to chain: Name, Avatar, ChatPubKey, Bio.
+ * Sync MetaBot basic info to chain: Name, Avatar, ChatPubKey, and Bot Info protocol profile paths.
  * Sequential execution with sleep between steps to avoid UTXO double-spend (indexer delay).
  * On success, updates metabot_info_pinid and chat_public_key_pin_id in SQLite.
  */
 export async function syncMetaBotToChain(
   metabotStore: MetabotStore,
-  metabot_id: number
+  metabot_id: number,
+  deps: SyncMetaBotToChainDeps = {}
 ): Promise<SyncMetaBotResult> {
+  const createPinRunner = deps.createPin ?? createPin;
+  const sleepRunner = deps.sleep ?? sleep;
   const log = (msg: string, data?: object) => {
     console.log(`[syncMetaBot] metabot_id=${metabot_id} ${msg}`, data ?? '');
   };
@@ -716,7 +848,7 @@ export async function syncMetaBotToChain(
   log('MetaBot loaded', {
     name: metabot.name,
     hasAvatar: !!metabot.avatar,
-    hasChatPublicKey: !!metabot.chat_public_key,
+    hasChatPublicKey: !!String(metabot.chat_public_key || '').trim(),
     role: metabot.role?.slice(0, 50),
   });
 
@@ -725,145 +857,65 @@ export async function syncMetaBotToChain(
   let metabotInfoPinId: string | null = null;
   let someStepFailed = false;
   let lastError = '';
-
-  // Step 1: Name (mandatory; on failure do not set canSkip)
-  log('Step 1: Pinning name to /info/name');
-  try {
-    const nameResult = await createPin(metabotStore, metabot_id, {
-      operation: 'create',
-      path: '/info/name',
-      contentType: 'text/plain',
-      payload: metabot.name || 'MetaBot',
-    });
-    const nameTxid = nameResult.txids[0];
-    if (!nameTxid) {
-      logErr('Name pin: no txid returned');
-      return { success: false, error: 'Name pin failed: no txid', canSkip: false };
-    }
-    txids.push(nameTxid);
-    log('Name pin success', { txid: nameTxid, pinId: nameResult.pinId });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logErr('Chain sync failed at name step', { error: msg });
-    return { success: false, error: msg, canSkip: false };
+  const chatPubKey = typeof metabot.chat_public_key === 'string' ? metabot.chat_public_key.trim() : '';
+  if (!metabot.chat_public_key_pin_id && !chatPubKey) {
+    someStepFailed = true;
+    lastError = 'Missing chat public key; /info/chatpubkey was not synced';
+    logErr('Missing chat public key; continuing with skippable profile sync');
   }
 
-  log('Waiting 3s for indexer before next step');
-  await sleep(3000);
+  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot);
+  log('Prepared full sync plan', { plannedSteps: plannedSteps.map((step) => step.key) });
 
-  // Step 2: Avatar (optional on failure: continue and set canSkip later)
-  log('Step 2: Pinning avatar to /info/avatar');
-  const avatarData = parseDataUrlAvatar(metabot.avatar);
-  if (avatarData) {
+  for (let index = 0; index < plannedSteps.length; index += 1) {
+    const step = plannedSteps[index];
+    log(`Step ${index + 1}: Pinning ${step.key} to ${step.path}`, {
+      contentType: step.contentType,
+      payloadBytes: Buffer.isBuffer(step.payload) ? step.payload.length : Buffer.byteLength(String(step.payload)),
+    });
+
     try {
-      const { mime, buffer } = avatarData;
-      const contentType = `${mime};binary`;
-      log('Avatar parsed', { mime, sizeBytes: buffer.length });
-      const avatarResult = await createPin(metabotStore, metabot_id, {
+      const result = await createPinRunner(metabotStore, metabot_id, {
         operation: 'create',
-        path: '/info/avatar',
-        contentType,
-        payload: buffer,
-        encoding: 'base64',
+        path: step.path,
+        contentType: step.contentType,
+        payload: step.payload,
+        encoding: step.encoding,
       });
-      const avatarTxid = avatarResult.txids[0];
-      if (!avatarTxid) {
-        logErr('Avatar pin: no txid returned (skipped)');
+      const txid = result.txids[0];
+      if (!txid) {
+        const message = `${step.key} pin failed: no txid`;
+        if (step.key === 'name') {
+          logErr('Name pin: no txid returned');
+          return { success: false, error: message, canSkip: false };
+        }
+        logErr(`${step.key} pin: no txid returned (skipped)`);
         someStepFailed = true;
-        lastError = 'Avatar pin failed: no txid';
+        lastError = message;
       } else {
-        txids.push(avatarTxid);
-        log('Avatar pin success', { txid: avatarTxid, pinId: avatarResult.pinId });
+        txids.push(txid);
+        if (step.key === 'chatpubkey') {
+          chatPublicKeyPinId = result.pinId ?? `${txid}i0`;
+        } else if (isProfileSyncStep(step.key)) {
+          metabotInfoPinId = result.pinId ?? `${txid}i0`;
+        }
+        log(`${step.key} pin success`, { txid, pinId: result.pinId });
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logErr('Avatar pin failed (skipped)', { error: msg });
-      someStepFailed = true;
-      lastError = msg;
-    }
-  } else {
-    log('No avatar data (skip avatar pin)');
-  }
-
-  log('Waiting 3s for indexer before next step');
-  await sleep(3000);
-
-  // Step 3: ChatPubKey (optional on failure)
-  log('Step 3: Pinning chatpubkey to /info/chatpubkey');
-  const chatPubKey = metabot.chat_public_key?.trim();
-  if (chatPubKey) {
-    try {
-      const chatResult = await createPin(metabotStore, metabot_id, {
-        operation: 'create',
-        path: '/info/chatpubkey',
-        contentType: 'text/plain',
-        payload: chatPubKey,
-      });
-      const chatTxid = chatResult.txids[0];
-      if (!chatTxid) {
-        logErr('ChatPubKey pin: no txid returned (skipped)');
-        someStepFailed = true;
-        lastError = 'ChatPubKey pin failed: no txid';
-      } else {
-        txids.push(chatTxid);
-        chatPublicKeyPinId = chatResult.pinId ?? `${chatTxid}i0`;
-        log('ChatPubKey pin success', { txid: chatTxid, pinId: chatPublicKeyPinId });
+      if (step.key === 'name') {
+        logErr('Chain sync failed at name step', { error: msg });
+        return { success: false, error: msg, canSkip: false };
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logErr('ChatPubKey pin failed (skipped)', { error: msg });
+      logErr(`${step.key} pin failed (skipped)`, { error: msg });
       someStepFailed = true;
       lastError = msg;
     }
-  } else {
-    logErr('chat_public_key is empty (skipped)');
-    someStepFailed = true;
-    lastError = 'Chat public key is empty';
-  }
 
-  log('Waiting 3s for indexer before next step');
-  await sleep(3000);
-
-  // Step 4: Bio (optional on failure)
-  log('Step 4: Pinning bio to /info/bio');
-  try {
-    const bioObject = buildMetabotBioPayload({
-      role: metabot.role,
-      soul: metabot.soul,
-      goal: metabot.goal,
-      background: metabot.background,
-      llm_id: metabot.llm_id,
-      tools: metabot.tools ?? [],
-      skills: metabot.skills ?? [],
-      allow_chat_skills: metabot.allow_chat_skills ?? [],
-      boss_id: metabot.boss_id ?? null,
-      boss_global_metaid: metabot.boss_global_metaid ?? null,
-      created_by: metabot.created_by ?? '0000',
-    });
-    const bioJson = JSON.stringify(bioObject);
-    log('Bio payload prepared', { length: bioJson.length, keys: Object.keys(bioObject) });
-
-    const bioResult = await createPin(metabotStore, metabot_id, {
-      operation: 'create',
-      path: '/info/bio',
-      contentType: 'application/json',
-      payload: bioJson,
-    });
-    const bioTxid = bioResult.txids[0];
-    if (!bioTxid) {
-      logErr('Bio pin: no txid returned (skipped)');
-      someStepFailed = true;
-      lastError = 'Bio pin failed: no txid';
-    } else {
-      txids.push(bioTxid);
-      metabotInfoPinId = bioResult.pinId ?? `${bioTxid}i0`;
-      log('Bio pin success', { txid: bioTxid, pinId: metabotInfoPinId });
+    if (index < plannedSteps.length - 1) {
+      log('Waiting 3s for indexer before next step');
+      await sleepRunner(3000);
     }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logErr('Bio pin failed (skipped)', { error: msg });
-    someStepFailed = true;
-    lastError = msg;
   }
 
   if (someStepFailed) {
@@ -932,26 +984,14 @@ export async function syncMetaBotToChain(
   };
 }
 
-function resolveFirstTwinBossId(metabotStore: MetabotStore): string {
-  const firstTwin = metabotStore
-    .listMetabots()
-    .filter((item) => item.metabot_type === 'twin')
-    .sort((a, b) => a.id - b.id)[0];
-  return firstTwin ? String(firstTwin.id) : '0000';
-}
-
 export async function syncMetaBotEditChangesToChain(
   metabotStore: MetabotStore,
-  input: SyncMetaBotEditChangesInput
+  input: SyncMetaBotEditChangesInput,
+  deps: SyncMetaBotEditChangesDeps = {}
 ): Promise<SyncMetaBotEditChangesResult> {
   const metabotId = Number(input.metabotId);
-  const syncName = input.syncName === true;
-  const syncAvatar = input.syncAvatar === true;
-  const syncBio = input.syncBio === true;
-  const plannedSteps: SyncMetaBotEditStep[] = [];
-  if (syncName) plannedSteps.push('name');
-  if (syncAvatar) plannedSteps.push('avatar');
-  if (syncBio) plannedSteps.push('bio');
+  const createPinRunner = deps.createPin ?? createPin;
+  const sleepRunner = deps.sleep ?? sleep;
 
   const log = (msg: string, data?: object) => {
     console.log(`[syncMetaBotEdit] metabot_id=${metabotId} ${msg}`, data ?? '');
@@ -964,139 +1004,97 @@ export async function syncMetaBotEditChangesToChain(
     logErr('Invalid metabot id', { metabotId: input.metabotId });
     return { success: false, error: 'Invalid metabot id' };
   }
-  if (plannedSteps.length === 0) {
-    log('No requested steps, skip sync');
-    return { success: true, txids: [], syncedSteps: [] };
-  }
-
   const metabot = metabotStore.getMetabotById(metabotId);
   if (!metabot) {
     logErr('MetaBot not found');
     return { success: false, error: `MetaBot ${metabotId} not found` };
   }
 
-  log('Starting edit sync', { plannedSteps });
+  let plannedSteps: MetabotInfoSyncStep[];
+  try {
+    plannedSteps = buildEditMetabotInfoSyncPlan({ ...input, metabot });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logErr('Failed to build edit sync plan', { error: msg });
+    return { success: false, error: msg };
+  }
+  if (plannedSteps.length === 0) {
+    log('No requested steps, skip sync');
+    return { success: true, txids: [], syncedSteps: [] };
+  }
+
+  log('Starting edit sync', { plannedSteps: plannedSteps.map((step) => step.key) });
 
   const txids: string[] = [];
   const syncedSteps: SyncMetaBotEditStep[] = [];
   let metabotInfoPinId: string | null = null;
 
+  const persistProfilePinId = (pinId: string): string | null => {
+    try {
+      const updated = metabotStore.updateMetabot(metabotId, {
+        metabot_info_pinid: pinId,
+      });
+      if (!updated) {
+        logErr('Failed to update metabot_info_pinid after profile sync');
+        return 'Profile sync succeeded but failed to update metabot_info_pinid';
+      }
+      return null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logErr('Database update failed after profile sync', { error: msg });
+      return `Profile sync succeeded but database update failed: ${msg}`;
+    }
+  };
+
   for (let i = 0; i < plannedSteps.length; i += 1) {
     const step = plannedSteps[i];
     try {
-      if (step === 'name') {
-        log('Pinning name to /info/name');
-        const nameResult = await createPin(metabotStore, metabotId, {
-          operation: 'create',
-          path: '/info/name',
-          contentType: 'text/plain',
-          payload: metabot.name || 'MetaBot',
-        });
-        const nameTxid = nameResult.txids[0];
-        if (!nameTxid) {
-          logErr('Name pin returned no txid');
-          return { success: false, error: 'Name pin failed: no txid', txids, syncedSteps };
-        }
-        txids.push(nameTxid);
-        syncedSteps.push('name');
-        log('Name pin success', { txid: nameTxid, pinId: nameResult.pinId });
-      } else if (step === 'avatar') {
-        log('Pinning avatar to /info/avatar');
-        const avatarData = parseDataUrlAvatar(metabot.avatar);
-        if (!avatarData) {
-          logErr('Avatar data invalid for chain sync', { avatarType: typeof metabot.avatar });
-          return { success: false, error: 'Avatar sync failed: invalid data URL', txids, syncedSteps };
-        }
-        const avatarResult = await createPin(metabotStore, metabotId, {
-          operation: 'create',
-          path: '/info/avatar',
-          contentType: `${avatarData.mime};binary`,
-          payload: avatarData.buffer,
-          encoding: 'base64',
-        });
-        const avatarTxid = avatarResult.txids[0];
-        if (!avatarTxid) {
-          logErr('Avatar pin returned no txid');
-          return { success: false, error: 'Avatar pin failed: no txid', txids, syncedSteps };
-        }
-        txids.push(avatarTxid);
-        syncedSteps.push('avatar');
-        log('Avatar pin success', {
-          txid: avatarTxid,
-          pinId: avatarResult.pinId,
-          sizeBytes: avatarData.buffer.length,
-          mime: avatarData.mime,
-        });
-      } else if (step === 'bio') {
-        const bossId = resolveFirstTwinBossId(metabotStore);
-        const bioObject = buildMetabotBioPayload({
-          role: metabot.role,
-          soul: metabot.soul,
-          goal: metabot.goal,
-          background: metabot.background,
-          llm_id: metabot.llm_id,
-          tools: metabot.tools ?? [],
-          skills: metabot.skills ?? [],
-          allow_chat_skills: metabot.allow_chat_skills ?? [],
-          boss_id: bossId,
-          boss_global_metaid: metabot.boss_global_metaid ?? null,
-          created_by: metabot.created_by ?? '0000',
-        });
-        const bioJson = JSON.stringify(bioObject);
-        log('Pinning bio to /info/bio', { bossId, payloadLength: bioJson.length });
-        const bioResult = await createPin(metabotStore, metabotId, {
-          operation: 'create',
-          path: '/info/bio',
-          contentType: 'application/json',
-          payload: bioJson,
-        });
-        const bioTxid = bioResult.txids[0];
-        if (!bioTxid) {
-          logErr('Bio pin returned no txid');
-          return { success: false, error: 'Bio pin failed: no txid', txids, syncedSteps };
-        }
-        txids.push(bioTxid);
-        syncedSteps.push('bio');
-        metabotInfoPinId = bioResult.pinId ?? `${bioTxid}i0`;
-        log('Bio pin success', { txid: bioTxid, pinId: metabotInfoPinId, bossId });
+      log(`Pinning ${step.key} to ${step.path}`, {
+        contentType: step.contentType,
+        payloadBytes: Buffer.isBuffer(step.payload) ? step.payload.length : Buffer.byteLength(String(step.payload)),
+      });
+      const result = await createPinRunner(metabotStore, metabotId, {
+        operation: 'create',
+        path: step.path,
+        contentType: step.contentType,
+        payload: step.payload,
+        encoding: step.encoding,
+      });
+      const txid = result.txids[0];
+      if (!txid) {
+        logErr(`${step.key} pin returned no txid`);
+        return { success: false, error: `${step.key} pin failed: no txid`, txids, syncedSteps };
       }
+      txids.push(txid);
+      if (isProfileSyncStep(step.key)) {
+        metabotInfoPinId = result.pinId ?? `${txid}i0`;
+        const persistError = persistProfilePinId(metabotInfoPinId);
+        if (persistError) {
+          return {
+            success: false,
+            error: persistError,
+            txids,
+            syncedSteps,
+            metabotInfoPinId,
+          };
+        }
+      }
+      syncedSteps.push(step.key as SyncMetaBotEditStep);
+      log(`${step.key} pin success`, { txid, pinId: result.pinId });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logErr(`Step failed: ${step}`, { error: msg, plannedSteps, syncedSteps, txids });
+      logErr(`Step failed: ${step.key}`, {
+        error: msg,
+        plannedSteps: plannedSteps.map((plannedStep) => plannedStep.key),
+        syncedSteps,
+        txids,
+      });
       return { success: false, error: msg, txids, syncedSteps, metabotInfoPinId: metabotInfoPinId ?? undefined };
     }
 
     if (i < plannedSteps.length - 1) {
       log('Waiting 3s for indexer before next step');
-      await sleep(3000);
-    }
-  }
-
-  if (metabotInfoPinId) {
-    try {
-      const updated = metabotStore.updateMetabot(metabotId, {
-        metabot_info_pinid: metabotInfoPinId,
-      });
-      if (!updated) {
-        logErr('Failed to update metabot_info_pinid after bio sync');
-        return {
-          success: false,
-          error: 'Bio sync succeeded but failed to update metabot_info_pinid',
-          txids,
-          syncedSteps,
-          metabotInfoPinId,
-        };
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logErr('Database update failed after bio sync', { error: msg });
-      return {
-        success: false,
-        error: `Bio sync succeeded but database update failed: ${msg}`,
-        txids,
-        syncedSteps,
-        metabotInfoPinId,
-      };
+      await sleepRunner(3000);
     }
   }
 

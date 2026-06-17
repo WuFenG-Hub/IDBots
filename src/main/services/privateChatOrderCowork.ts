@@ -1221,7 +1221,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       metabot.name ? `Your name is ${metabot.name}.` : '',
       metabot.role ? `Your role: ${metabot.role}.` : '',
       metabot.soul ? `Your personality: ${metabot.soul}.` : '',
-      metabot.background ? `Background: ${metabot.background}.` : '',
+      metabot.bio ? `Bio: ${metabot.bio}.` : '',
     ].filter(Boolean).join(' ') : '';
 
     const systemPrompt = [

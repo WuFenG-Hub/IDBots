@@ -15,6 +15,8 @@ export interface Metabot {
   role: string;
   soul: string;
   goal: string | null;
+  bio: string | null;
+  /** Deprecated compatibility field; v3 Bot Info uses `bio`. */
   background: string | null;
   boss_id: number | null;
   boss_global_metaid: string | null;

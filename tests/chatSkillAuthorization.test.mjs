@@ -6,7 +6,14 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { SkillManager } = require('../dist-electron/skillManager.js');
+const skillManagerPath = (() => {
+  try {
+    return require.resolve('../dist-electron/main/skillManager.js');
+  } catch {
+    return require.resolve('../dist-electron/skillManager.js');
+  }
+})();
+const { SkillManager } = require(skillManagerPath);
 
 class MemoryStore {
   constructor(initial = {}) {

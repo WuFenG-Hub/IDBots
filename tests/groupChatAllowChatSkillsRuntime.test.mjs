@@ -3,7 +3,14 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { runTickOnce } = require('../dist-electron/services/cognitiveOrchestrator.js');
+const cognitiveOrchestratorPath = (() => {
+  try {
+    return require.resolve('../dist-electron/main/services/cognitiveOrchestrator.js');
+  } catch {
+    return require.resolve('../dist-electron/services/cognitiveOrchestrator.js');
+  }
+})();
+const { runTickOnce } = require(cognitiveOrchestratorPath);
 
 function makeDb(senderGlobalMetaId, overrides = {}) {
   const runs = [];

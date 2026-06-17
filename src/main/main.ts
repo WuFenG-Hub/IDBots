@@ -3687,7 +3687,7 @@ const getCoworkRunner = () => {
           globalmetaid: m.globalmetaid ?? null,
           role: m.role,
           soul: m.soul,
-          background: m.background ?? null,
+          bio: m.bio ?? null,
           goal: m.goal ?? null,
           llm_id: m.llm_id ?? null,
         } : null;
@@ -6532,6 +6532,8 @@ if (!gotTheLock) {
     role: string;
     soul: string;
     goal?: string | null;
+    bio?: string | null;
+    /** Deprecated compatibility input; use bio. */
     background?: string | null;
     boss_id?: number | null;
     boss_global_metaid?: string | null;
@@ -6569,7 +6571,7 @@ if (!gotTheLock) {
         role: input.role,
         soul: input.soul,
         goal: input.goal ?? null,
-        background: input.background ?? null,
+        bio: input.bio !== undefined ? input.bio : (input.background ?? null),
         boss_id: input.boss_id ?? null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
@@ -6592,6 +6594,8 @@ if (!gotTheLock) {
     role?: string;
     soul?: string;
     goal?: string | null;
+    bio?: string | null;
+    /** Deprecated compatibility input; use bio. */
     background?: string | null;
     boss_id?: number | null;
     boss_global_metaid?: string | null;
@@ -6620,6 +6624,8 @@ if (!gotTheLock) {
     role: string;
     soul: string;
     goal?: string | null;
+    bio?: string | null;
+    /** Deprecated compatibility input; use bio. */
     background?: string | null;
     boss_id?: number | null;
     boss_global_metaid?: string | null;
@@ -6656,7 +6662,7 @@ if (!gotTheLock) {
         role: input.role,
         soul: input.soul,
         goal: input.goal ?? null,
-        background: input.background ?? null,
+        bio: input.bio !== undefined ? input.bio : (input.background ?? null),
         boss_id: null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
@@ -6688,6 +6694,8 @@ if (!gotTheLock) {
     role: string;
     soul: string;
     goal?: string | null;
+    bio?: string | null;
+    /** Deprecated compatibility input; use bio. */
     background?: string | null;
     boss_id?: number | null;
     boss_global_metaid?: string | null;
@@ -6743,7 +6751,7 @@ if (!gotTheLock) {
         role: input.role,
         soul: input.soul,
         goal: input.goal ?? null,
-        background: input.background ?? null,
+        bio: input.bio !== undefined ? input.bio : (input.background ?? null),
         boss_id: null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
@@ -6866,7 +6874,7 @@ if (!gotTheLock) {
         role: profile.bio.role || '',
         soul: profile.bio.soul || '',
         goal: profile.bio.goal ?? null,
-        background: profile.bio.background ?? null,
+        bio: profile.bio.bio ?? null,
         boss_id: profile.bio.boss_id ?? null,
         boss_global_metaid: (input?.boss_global_metaid ?? '').trim() || (profile.bio.boss_global_metaid ?? null),
         llm_id: profile.bio.llm_id ?? null,
@@ -6910,6 +6918,9 @@ if (!gotTheLock) {
     syncName?: boolean;
     syncAvatar?: boolean;
     syncBio?: boolean;
+    syncPersona?: boolean;
+    syncLlm?: boolean;
+    syncChatSkills?: boolean;
   }) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBotEditChanges requested', input);

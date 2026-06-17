@@ -38,7 +38,7 @@ function buildPersonaLine(buyerPersona) {
     normalizeText(buyerPersona.name) ? `Your name is ${normalizeText(buyerPersona.name)}.` : '',
     normalizeText(buyerPersona.role) ? `Your role: ${normalizeText(buyerPersona.role)}.` : '',
     normalizeText(buyerPersona.soul) ? `Your personality: ${normalizeText(buyerPersona.soul)}.` : '',
-    normalizeText(buyerPersona.background) ? `Background: ${normalizeText(buyerPersona.background)}.` : '',
+    normalizeText(buyerPersona.bio ?? buyerPersona.background) ? `Bio: ${normalizeText(buyerPersona.bio ?? buyerPersona.background)}.` : '',
   ].filter(Boolean).join(' ');
 }
 

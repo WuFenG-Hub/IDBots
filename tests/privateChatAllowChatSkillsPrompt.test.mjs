@@ -3,9 +3,16 @@ import test from 'node:test';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const privateChatDaemonPath = (() => {
+  try {
+    return require.resolve('../dist-electron/main/services/privateChatDaemon.js');
+  } catch {
+    return require.resolve('../dist-electron/services/privateChatDaemon.js');
+  }
+})();
 const {
   buildPrivateChatA2ASystemPrompt,
-} = require('../dist-electron/services/privateChatDaemon.js');
+} = require(privateChatDaemonPath);
 
 function baseAnalysis(overrides = {}) {
   return {
@@ -29,7 +36,7 @@ function baseMetabot() {
     role: 'Technical partner',
     soul: 'direct',
     goal: 'useful discussion',
-    background: 'MetaID',
+    bio: 'MetaID',
   };
 }
 
