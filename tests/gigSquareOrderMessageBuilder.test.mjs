@@ -18,7 +18,7 @@ test('buildBuyerOrderMessageSystemPrompt keeps the LLM in buyer perspective and 
       name: 'Sky',
       role: 'Travel concierge',
       soul: 'Warm and concise',
-      background: 'Helps users plan trips',
+      bio: 'Helps users plan trips',
     },
     price: '0.00005',
     currency: 'SPACE',

@@ -43,6 +43,8 @@ export interface MetaidBioProfile {
   role: string;
   soul: string;
   goal: string | null;
+  bio: string | null;
+  /** Deprecated legacy value from old `/info/bio` JSON background field. */
   background: string | null;
   llm_id: string | null;
   tools: string[];
@@ -140,6 +142,7 @@ const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
     role: '',
     soul: '',
     goal: null,
+    bio: null,
     background: null,
     llm_id: null,
     tools: [],
@@ -159,6 +162,7 @@ const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
     role: normalizeString(raw.role),
     soul: normalizeString(raw.soul),
     goal: normalizeOptionalString(raw.goal),
+    bio: normalizeOptionalString(raw.bio ?? raw.background),
     background: normalizeOptionalString(raw.background),
     llm_id: normalizeOptionalString(raw.llm ?? raw.llm_id),
     tools: normalizeStringArray(raw.tools),
@@ -257,7 +261,7 @@ export function parseMetaidRestoreProfileInfo(info: MetaidAddressInfo): Pick<Met
 
   const bio: MetaidBioProfile = {
     ...legacy,
-    background: plainBio ?? legacy.background,
+    bio: plainBio ?? legacy.bio,
     role: persona.present ? persona.role : legacy.role,
     soul: persona.present ? persona.soul : legacy.soul,
     goal: persona.present ? persona.goal : legacy.goal,

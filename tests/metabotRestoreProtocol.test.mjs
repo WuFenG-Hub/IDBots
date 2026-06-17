@@ -28,7 +28,7 @@ test('new protocol fields override legacy bio JSON', () => {
     chatSkillsId: 'skills-pin',
   });
 
-  assert.equal(parsed.bio.background, 'Legacy background');
+  assert.equal(parsed.bio.bio, 'Legacy background');
   assert.equal(parsed.bio.role, 'New role');
   assert.equal(parsed.bio.soul, 'New soul');
   assert.equal(parsed.bio.goal, 'New goal');
@@ -37,7 +37,7 @@ test('new protocol fields override legacy bio JSON', () => {
   assert.equal(parsed.metabotInfoPinId, 'skills-pin');
 });
 
-test('plain text bio becomes local background while new paths fill profile fields', () => {
+test('plain text bio becomes local bio while new paths fill profile fields', () => {
   const parsed = parseMetaidRestoreProfileInfo({
     name: 'Restored Bot',
     bio: 'Plain public bio',
@@ -45,7 +45,7 @@ test('plain text bio becomes local background while new paths fill profile field
     chatSkills: {},
   });
 
-  assert.equal(parsed.bio.background, 'Plain public bio');
+  assert.equal(parsed.bio.bio, 'Plain public bio');
   assert.equal(parsed.bio.role, 'Role');
   assert.equal(parsed.bio.soul, 'Soul');
   assert.equal(parsed.bio.goal, null);
@@ -72,7 +72,7 @@ test('legacy bio JSON still restores old bots', () => {
   assert.equal(parsed.bio.role, 'Legacy role');
   assert.equal(parsed.bio.soul, 'Legacy soul');
   assert.equal(parsed.bio.goal, 'Legacy goal');
-  assert.equal(parsed.bio.background, 'Legacy background');
+  assert.equal(parsed.bio.bio, 'Legacy background');
   assert.equal(parsed.bio.llm_id, 'codex');
   assert.deepEqual(parsed.bio.allowChatSkills, ['legacy-skill']);
   assert.equal(parsed.bio.boss_id, 42);
@@ -96,7 +96,7 @@ test('empty new protocol payloads clear stale legacy profile values', () => {
     chatSkills: '',
   });
 
-  assert.equal(parsed.bio.background, 'Legacy background');
+  assert.equal(parsed.bio.bio, 'Legacy background');
   assert.equal(parsed.bio.role, '');
   assert.equal(parsed.bio.soul, '');
   assert.equal(parsed.bio.goal, null);
@@ -120,7 +120,7 @@ test('null new protocol placeholders without pin ids keep legacy bio JSON values
     chatSkills: null,
   });
 
-  assert.equal(parsed.bio.background, 'Legacy background');
+  assert.equal(parsed.bio.bio, 'Legacy background');
   assert.equal(parsed.bio.role, 'Legacy role');
   assert.equal(parsed.bio.soul, 'Legacy soul');
   assert.equal(parsed.bio.goal, 'Legacy goal');

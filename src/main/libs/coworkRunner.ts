@@ -755,6 +755,8 @@ type CoworkMetabotIdentity = {
   name?: string | null;
   role?: string | null;
   soul?: string | null;
+  bio?: string | null;
+  /** Deprecated compatibility field; use bio. */
   background?: string | null;
   goal?: string | null;
   llm_id?: string | null;
@@ -2615,8 +2617,9 @@ export class CoworkRunner extends EventEmitter {
     if (metabot.role?.trim()) {
       tags.push(`  <role>${this.escapeXmlText(metabot.role.trim())}</role>`);
     }
-    if (metabot.background?.trim()) {
-      tags.push(`  <background>${this.escapeXmlText(metabot.background.trim())}</background>`);
+    const metabotBio = metabot.bio ?? metabot.background;
+    if (metabotBio?.trim()) {
+      tags.push(`  <bio>${this.escapeXmlText(metabotBio.trim())}</bio>`);
     }
     if (metabot.soul?.trim()) {
       tags.push(`  <soul>${this.escapeXmlText(metabot.soul.trim())}</soul>`);
@@ -2628,7 +2631,7 @@ export class CoworkRunner extends EventEmitter {
 
     const identityBlock = ['<metabot_identity>', ...tags, '</metabot_identity>'].join('\n');
     const instructionBlock =
-      '<instruction>\nYou must strictly adhere to the persona, soul, and background defined in the &lt;metabot_identity&gt; block above for all responses in this session.\n</instruction>';
+      '<instruction>\nYou must strictly adhere to the persona, soul, and bio defined in the &lt;metabot_identity&gt; block above for all responses in this session.\n</instruction>';
     return `${identityBlock}\n${instructionBlock}`;
   }
 

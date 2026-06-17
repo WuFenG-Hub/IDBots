@@ -17,7 +17,7 @@ const insertWallet = (db, id) => {
   );
 };
 
-const insertMetabot = (db, { id, walletId, name, type = 'worker', bossId = null }) => {
+const insertMetabot = (db, { id, walletId, name, type = 'worker', bossId = null, background = null }) => {
   db.run(
     `INSERT INTO metabots (
       id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
@@ -45,7 +45,7 @@ const insertMetabot = (db, { id, walletId, name, type = 'worker', bossId = null 
       `${name} role`,
       `${name} soul`,
       null,
-      null,
+      background,
       bossId,
       null,
       'openai',
@@ -59,7 +59,7 @@ const insertMetabot = (db, { id, walletId, name, type = 'worker', bossId = null 
 };
 
 test('SqliteStore uses native sqlite by default and persists without sql.js export', async () => {
-  const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
   const tempDir = makeTempDir();
 
   const store = await SqliteStore.create(tempDir);
@@ -74,7 +74,7 @@ test('SqliteStore uses native sqlite by default and persists without sql.js expo
 });
 
 test('native sqlite adapter preserves sql.js exec and row-change behavior', async () => {
-  const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
   const tempDir = makeTempDir();
   const store = await SqliteStore.create(tempDir);
   const db = store.getDatabase();
@@ -96,9 +96,87 @@ test('native sqlite adapter preserves sql.js exec and row-change behavior', asyn
   store.close();
 });
 
+test('SqliteStore creates bio column and backfills deprecated MetaBot background', async () => {
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
+  const tempDir = makeTempDir();
+
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  const columns = db.exec('PRAGMA table_info(metabots)')[0].values.map((row) => row[1]);
+  assert.equal(columns.includes('bio'), true);
+  assert.equal(columns.includes('background'), true);
+
+  insertWallet(db, 9);
+  insertMetabot(db, { id: 9, walletId: 9, name: 'Legacy Bio Bot', background: 'Legacy public bio' });
+  assert.deepEqual(
+    db.exec('SELECT bio, background FROM metabots WHERE id = 9')[0].values[0],
+    [null, 'Legacy public bio'],
+  );
+  store.close();
+
+  const reopened = await SqliteStore.create(tempDir);
+  assert.deepEqual(
+    reopened.getDatabase().exec('SELECT bio, background FROM metabots WHERE id = 9')[0].values[0],
+    ['Legacy public bio', 'Legacy public bio'],
+  );
+
+  const metabotStore = new MetabotStore(reopened.getDatabase(), reopened.getSaveFunction());
+  const restored = metabotStore.getMetabotById(9);
+  assert.equal(restored?.bio, 'Legacy public bio');
+  reopened.close();
+});
+
+test('MetabotStore writes new public profile text to bio without populating deprecated background', async () => {
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
+  const tempDir = makeTempDir();
+
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  insertWallet(db, 10);
+
+  const metabotStore = new MetabotStore(db, store.getSaveFunction());
+  const created = metabotStore.createMetabot({
+    wallet_id: 10,
+    mvc_address: 'mvc-created',
+    btc_address: 'btc-created',
+    doge_address: 'doge-created',
+    public_key: 'public-created',
+    chat_public_key: 'chat-public-created',
+    chat_public_key_pin_id: null,
+    name: 'Created Bio Bot',
+    avatar: null,
+    enabled: true,
+    metaid: 'metaid-created',
+    globalmetaid: 'globalmetaid-created',
+    metabot_info_pinid: null,
+    metabot_type: 'worker',
+    created_by: '0000',
+    role: 'Created role',
+    soul: 'Created soul',
+    goal: null,
+    bio: 'Created public bio',
+    boss_id: null,
+    boss_global_metaid: null,
+    llm_id: 'openai',
+    tools: [],
+    skills: [],
+    allow_chat_skills: [],
+  });
+
+  assert.equal(created.bio, 'Created public bio');
+  assert.equal(created.background, null);
+  assert.deepEqual(
+    db.exec('SELECT bio, background FROM metabots WHERE id = ? LIMIT 1', [created.id])[0].values[0],
+    ['Created public bio', null],
+  );
+  store.close();
+});
+
 test('SqliteStore.create() clears orphan MetaBot boss ids before native FK updates', async () => {
-  const { SqliteStore } = require('../dist-electron/sqliteStore.js');
-  const { MetabotStore } = require('../dist-electron/metabotStore.js');
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
   const tempDir = makeTempDir();
 
   const store = await SqliteStore.create(tempDir);
@@ -123,8 +201,8 @@ test('SqliteStore.create() clears orphan MetaBot boss ids before native FK updat
 });
 
 test('deleting a MetaBot clears child boss ids instead of failing FK constraints', async () => {
-  const { SqliteStore } = require('../dist-electron/sqliteStore.js');
-  const { MetabotStore } = require('../dist-electron/metabotStore.js');
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
   const tempDir = makeTempDir();
   const store = await SqliteStore.create(tempDir);
   const db = store.getDatabase();

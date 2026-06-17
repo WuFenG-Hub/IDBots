@@ -5,6 +5,8 @@ export interface MetabotInfoPayloadInput {
   role?: string | null;
   soul?: string | null;
   goal?: string | null;
+  bio?: string | null;
+  /** Deprecated local compatibility field; v3 Bot Info uses `bio`. */
   background?: string | null;
   llm_id?: string | null;
   allow_chat_skills?: unknown;
@@ -69,7 +71,8 @@ function dedupeStrings(values: unknown[]): string[] {
 }
 
 export function buildMetabotInfoPayloads(input: MetabotInfoPayloadInput): MetabotInfoPayload[] {
-  const background = cleanString(input.background);
+  const hasBio = Object.prototype.hasOwnProperty.call(input, 'bio');
+  const bio = cleanString(hasBio ? input.bio : input.background);
   const role = cleanString(input.role);
   const soul = cleanString(input.soul);
   const goal = cleanString(input.goal);
@@ -81,7 +84,7 @@ export function buildMetabotInfoPayloads(input: MetabotInfoPayloadInput): Metabo
       step: 'bio',
       path: '/info/bio',
       contentType: 'text/plain',
-      payload: background,
+      payload: bio,
     },
     {
       step: 'persona',

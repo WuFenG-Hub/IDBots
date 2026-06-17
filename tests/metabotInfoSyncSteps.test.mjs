@@ -23,7 +23,8 @@ const metabot = {
   role: ' Assistant ',
   soul: ' Direct ',
   goal: ' Help ',
-  background: ' Bio ',
+  bio: ' Bio ',
+  background: ' Deprecated background ',
   llm_id: ' codex ',
   allow_chat_skills: ['metabot-help', ' metabot-wallet-manage ', 'metabot-help'],
 };
@@ -325,7 +326,7 @@ test('renderer edit sync splits Bot Info protocol flags and forwards them to IPC
   const source = fs.readFileSync(metabotsManagerPath, 'utf8');
 
   assert.match(source, /syncBio:\s*boolean;\s*syncPersona:\s*boolean;\s*syncLlm:\s*boolean;\s*syncChatSkills:\s*boolean;/);
-  assert.match(source, /const syncBio =\s*nextBackgroundRaw !== oldBackgroundRaw;/);
+  assert.match(source, /const syncBio =\s*nextBioRaw !== oldBioRaw;/);
   assert.match(source, /const syncPersona =\s*nextRole !== oldRole \|\|\s*nextSoul !== oldSoul \|\|\s*nextGoalRaw !== oldGoalRaw;/);
   assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw;/);
   assert.match(source, /const syncChatSkills =\s*JSON\.stringify\(nextAllowChatSkills\) !== JSON\.stringify\(oldAllowChatSkills\);/);

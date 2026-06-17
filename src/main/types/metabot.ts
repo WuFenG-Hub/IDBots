@@ -29,6 +29,8 @@ export interface Metabot {
   role: string;
   soul: string;
   goal: string | null;
+  bio: string | null;
+  /** Deprecated local compatibility column; v3 Bot Info stores public bio in `bio` and `/info/bio`. */
   background: string | null;
   boss_id: number | null;
   /** External BOSS globalmetaid (on-chain identity of the supervisor) */
@@ -64,6 +66,8 @@ export interface MetabotInsert {
   role: string;
   soul: string;
   goal?: string | null;
+  bio?: string | null;
+  /** Deprecated compatibility input; use `bio`. */
   background?: string | null;
   boss_id?: number | null;
   boss_global_metaid?: string | null;
@@ -93,6 +97,8 @@ export interface MetabotUpdate {
   role?: string;
   soul?: string;
   goal?: string | null;
+  bio?: string | null;
+  /** Deprecated compatibility input; use `bio`. */
   background?: string | null;
   boss_id?: number | null;
   boss_global_metaid?: string | null;

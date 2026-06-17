@@ -36,7 +36,7 @@ function baseMetabot() {
     role: 'Technical partner',
     soul: 'direct',
     goal: 'useful discussion',
-    background: 'MetaID',
+    bio: 'MetaID',
   };
 }
 

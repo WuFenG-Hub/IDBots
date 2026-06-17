@@ -194,7 +194,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: values.role.trim(),
       soul: values.soul.trim(),
       goal: values.goal.trim() || null,
-      background: values.background.trim() || null,
+      bio: values.bio.trim() || null,
       boss_id: parseOptionalBossId(values.boss_id),
       boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
@@ -235,7 +235,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
     const nextRole = values.role.trim();
     const nextSoul = values.soul.trim();
     const nextGoalRaw = values.goal.trim();
-    const nextBackgroundRaw = values.background.trim();
+    const nextBioRaw = values.bio.trim();
     const nextBossId = parseOptionalBossId(values.boss_id);
     const nextBossGlobalMetaId = values.boss_global_metaid.trim() || null;
     const nextLlmRaw = values.llm_id.trim();
@@ -246,13 +246,13 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
     const oldRole = (current.role || '').trim();
     const oldSoul = (current.soul || '').trim();
     const oldGoalRaw = (current.goal || '').trim();
-    const oldBackgroundRaw = (current.background || '').trim();
+    const oldBioRaw = (current.bio || current.background || '').trim();
     const oldLlmRaw = (current.llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
 
     const syncName = nextName !== oldName;
     const syncAvatar = nextAvatarRaw !== oldAvatarRaw;
-    const syncBio = nextBackgroundRaw !== oldBackgroundRaw;
+    const syncBio = nextBioRaw !== oldBioRaw;
     const syncPersona =
       nextRole !== oldRole ||
       nextSoul !== oldSoul ||
@@ -275,7 +275,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
-      background: nextBackgroundRaw || null,
+      bio: nextBioRaw || null,
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
@@ -292,7 +292,8 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
-      background: nextBackgroundRaw || null,
+      bio: nextBioRaw || null,
+      background: current.background ?? null,
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
@@ -433,7 +434,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
             role: editMetabot.role,
             soul: editMetabot.soul,
             goal: editMetabot.goal || '',
-            background: editMetabot.background || '',
+            bio: editMetabot.bio || editMetabot.background || '',
             boss_id: editMetabot.boss_id != null ? String(editMetabot.boss_id) : '',
             boss_global_metaid: editMetabot.boss_global_metaid || '',
             llm_id: editMetabot.llm_id || '',

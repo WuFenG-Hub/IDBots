@@ -686,7 +686,7 @@ const GigSquareOrderModal: React.FC<GigSquareOrderModalProps> = ({
             name: buyerMetabot.name,
             role: buyerMetabot.role,
             soul: buyerMetabot.soul,
-            background: buyerMetabot.background,
+            bio: buyerMetabot.bio,
           } : null,
           price: service.price,
           currency: settlement.currency,

@@ -489,6 +489,8 @@ contextBridge.exposeInMainWorld('electron', {
       role: string;
       soul: string;
       goal?: string | null;
+      bio?: string | null;
+      /** Deprecated compatibility input; use bio. */
       background?: string | null;
       boss_id?: number | null;
       boss_global_metaid?: string | null;
@@ -553,6 +555,8 @@ contextBridge.exposeInMainWorld('electron', {
       role: string;
       soul: string;
       goal?: string | null;
+      bio?: string | null;
+      /** Deprecated compatibility input; use bio. */
       background?: string | null;
       boss_id?: number | null;
       boss_global_metaid?: string | null;
@@ -585,6 +589,8 @@ contextBridge.exposeInMainWorld('electron', {
       role: string;
       soul: string;
       goal?: string | null;
+      bio?: string | null;
+      /** Deprecated compatibility input; use bio. */
       background?: string | null;
       boss_id?: number | null;
       llm_id?: string | null;
@@ -597,6 +603,8 @@ contextBridge.exposeInMainWorld('electron', {
       role?: string;
       soul?: string;
       goal?: string | null;
+      bio?: string | null;
+      /** Deprecated compatibility input; use bio. */
       background?: string | null;
       boss_id?: number | null;
       boss_global_metaid?: string | null;

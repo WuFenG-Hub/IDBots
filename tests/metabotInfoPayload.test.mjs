@@ -8,7 +8,8 @@ const {
 
 test('buildMetabotInfoPayloads emits protocol info payload steps', () => {
   const payloads = buildMetabotInfoPayloads({
-    background: ' Local background ',
+    bio: ' Local bio ',
+    background: ' Deprecated background ',
     role: ' assistant ',
     soul: ' helpful ',
     goal: ' ship protocol alignment ',
@@ -28,7 +29,7 @@ test('buildMetabotInfoPayloads emits protocol info payload steps', () => {
     payloads.map((payload) => payload.contentType),
     ['text/plain', 'application/json', 'application/json', 'application/json'],
   );
-  assert.equal(payloads[0].payload, 'Local background');
+  assert.equal(payloads[0].payload, 'Local bio');
   assert.equal(typeof payloads[0].payload, 'string');
   assert.deepEqual(JSON.parse(payloads[1].payload), {
     role: 'assistant',
@@ -47,6 +48,7 @@ test('buildMetabotInfoPayloads emits protocol info payload steps', () => {
 
 test('buildMetabotInfoPayloads clears nullish values to protocol defaults', () => {
   const payloads = buildMetabotInfoPayloads({
+    bio: null,
     background: null,
     role: null,
     soul: undefined,
@@ -65,6 +67,16 @@ test('buildMetabotInfoPayloads clears nullish values to protocol defaults', () =
     allowPrivateChatSkills: [],
     allowGroupChatSkills: [],
   });
+});
+
+test('buildMetabotInfoPayloads falls back to deprecated background for old local rows', () => {
+  const payloads = buildMetabotInfoPayloads({
+    background: ' Legacy background ',
+  });
+
+  assert.equal(payloads[0].path, '/info/bio');
+  assert.equal(payloads[0].contentType, 'text/plain');
+  assert.equal(payloads[0].payload, 'Legacy background');
 });
 
 test('normalizeBotInfoStringArrayForTests normalizes array and string forms', () => {

@@ -980,6 +980,8 @@ export class SqliteStore {
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
         goal TEXT,
+        bio TEXT,
+        -- Deprecated compatibility column; v3 Bot Info uses bio and /info/bio.
         background TEXT,
         boss_id INTEGER,
         llm_id TEXT,
@@ -1002,6 +1004,8 @@ export class SqliteStore {
     this.migrateChatPublicKeyPinIdOptional();
     // Migration: add allow_chat_skills for private-chat allowlist storage
     this.migrateMetabotAllowChatSkills();
+    // Migration: add v3 public bio column and backfill from deprecated background.
+    this.migrateMetabotBioColumn();
     // Migration: clear legacy local boss_id values that point at missing/self rows.
     this.migrateOrphanMetabotBossIds();
 
@@ -1458,6 +1462,7 @@ export class SqliteStore {
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
         goal TEXT,
+        bio TEXT,
         background TEXT,
         boss_id INTEGER,
         llm_id TEXT,
@@ -1517,6 +1522,7 @@ export class SqliteStore {
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
         goal TEXT,
+        bio TEXT,
         background TEXT,
         boss_id INTEGER,
         llm_id TEXT,
@@ -1551,6 +1557,35 @@ export class SqliteStore {
       this.save();
     } catch (error) {
       console.warn('migrateMetabotAllowChatSkills:', error);
+    }
+  }
+
+  private migrateMetabotBioColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('bio')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN bio TEXT');
+        columns = [...columns, 'bio'];
+        changed = true;
+      }
+      if (!columns.includes('background')) return;
+      this.db.run(`
+        UPDATE metabots
+        SET bio = background
+        WHERE (bio IS NULL OR trim(bio) = '')
+          AND background IS NOT NULL
+          AND trim(background) <> ''
+      `);
+      if ((this.db.getRowsModified?.() ?? 0) > 0) {
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateMetabotBioColumn:', error);
     }
   }
 
