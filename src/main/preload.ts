@@ -493,6 +493,7 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
     }) => ipcRenderer.invoke('idbots:addMetaBot', input),
     restoreMetaBotFromMnemonic: (input: { mnemonic: string; path?: string }) =>
@@ -542,6 +543,9 @@ contextBridge.exposeInMainWorld('electron', {
       syncName?: boolean;
       syncAvatar?: boolean;
       syncBio?: boolean;
+      syncPersona?: boolean;
+      syncLlm?: boolean;
+      syncChatSkills?: boolean;
     }) => ipcRenderer.invoke('idbots:syncMetaBotEditChanges', input),
     createMetaBotOnChain: (input: {
       name: string;
@@ -553,6 +557,7 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
     }) => ipcRenderer.invoke('idbots:createMetaBotOnChain', input),
   },

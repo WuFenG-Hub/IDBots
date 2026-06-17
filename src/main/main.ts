@@ -6910,6 +6910,9 @@ if (!gotTheLock) {
     syncName?: boolean;
     syncAvatar?: boolean;
     syncBio?: boolean;
+    syncPersona?: boolean;
+    syncLlm?: boolean;
+    syncChatSkills?: boolean;
   }) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBotEditChanges requested', input);

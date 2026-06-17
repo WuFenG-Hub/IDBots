@@ -790,12 +790,15 @@ interface IElectronAPI {
       syncName?: boolean;
       syncAvatar?: boolean;
       syncBio?: boolean;
+      syncPersona?: boolean;
+      syncLlm?: boolean;
+      syncChatSkills?: boolean;
     }) => Promise<{
       success: boolean;
       error?: string;
       metabotInfoPinId?: string;
       txids?: string[];
-      syncedSteps?: Array<'name' | 'avatar' | 'bio'>;
+      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills'>;
     }>;
     createMetaBotOnChain: (input: {
       name: string;
