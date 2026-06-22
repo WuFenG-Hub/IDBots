@@ -229,3 +229,38 @@ test('endpoint shim rejects malformed request bodies before calling adapter meth
 
   assert.deepEqual(calls, []);
 });
+
+test('endpoint shim converts adapter throws into browser failure envelopes', async () => {
+  const { adapter } = createAdapter();
+  const shim = createBrowserEndpointShim({
+    ...adapter,
+    async getRuntime() {
+      throw new Error('runtime exploded');
+    },
+    async runTrustedAction() {
+      throw new Error('action exploded');
+    },
+  });
+
+  const runtime = await shim({ url: '/api/browser/runtime' });
+  assert.equal(runtime.status, 400);
+  assert.equal(runtime.body.ok, false);
+  assert.equal(runtime.body.state, 'failed');
+  assert.equal(runtime.body.code, 'browser_endpoint_error');
+  assert.match(runtime.body.message, /runtime exploded/);
+
+  const action = await shim({
+    url: '/api/browser/actions',
+    method: 'POST',
+    body: {
+      resourceUri: 'metaid://idq1peer',
+      kind: 'open-conversation',
+      payload: { peerGlobalMetaId: 'idq1peer' },
+    },
+  });
+  assert.equal(action.status, 400);
+  assert.equal(action.body.ok, false);
+  assert.equal(action.body.state, 'failed');
+  assert.equal(action.body.code, 'browser_endpoint_error');
+  assert.match(action.body.message, /action exploded/);
+});

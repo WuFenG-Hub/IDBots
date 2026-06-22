@@ -28,7 +28,7 @@ test('metabotToBrowserActor converts a local IDBots bot to an ABC actor model', 
     globalMetaId: 'idq1abc',
     avatar: 'https://cdn.example/avatar.png',
     isDefault: true,
-    capabilities: ['private-chat', 'message-view', 'profile-management', 'chat-configuration'],
+    capabilities: ['private-chat'],
     localMetabotId: 1,
   });
 });
@@ -38,6 +38,15 @@ test('metabotToBrowserActor uses Bot wording for unnamed actor fallback labels',
 
   assert.equal(actor.label, 'Bot 9');
   assert.doesNotMatch(actor.label, /MetaBot/i);
+});
+
+test('metabotToBrowserActor only exposes capabilities backed by trusted actions', () => {
+  const actor = metabotToBrowserActor(createMetabot());
+
+  assert.deepEqual(actor.capabilities, ['private-chat']);
+  assert.equal(actor.capabilities.includes('message-view'), false);
+  assert.equal(actor.capabilities.includes('profile-management'), false);
+  assert.equal(actor.capabilities.includes('chat-configuration'), false);
 });
 
 test('metabotsToBrowserActors drops actors without usable globalmetaid', () => {
@@ -70,7 +79,7 @@ test('selectDefaultBrowserActor follows the browser metabot sort rule', () => {
     globalMetaId: 'idq1def',
     avatar: 'https://cdn.example/avatar.png',
     isDefault: true,
-    capabilities: ['private-chat', 'message-view', 'profile-management', 'chat-configuration'],
+    capabilities: ['private-chat'],
     localMetabotId: 2,
   });
 });

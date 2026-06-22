@@ -27,7 +27,7 @@ export function metabotToBrowserActor(metabot, defaultMetabotId = null) {
     globalMetaId,
     ...(avatar ? { avatar } : {}),
     isDefault: id === defaultMetabotId,
-    capabilities: ['private-chat', 'message-view', 'profile-management', 'chat-configuration'],
+    capabilities: ['private-chat'],
     localMetabotId: id,
   };
 }

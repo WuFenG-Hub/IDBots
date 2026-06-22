@@ -80,6 +80,15 @@ function invalidBrowserAction(message = 'Browser action request is invalid.'): B
   return response(browserFailure('invalid_browser_action', message));
 }
 
+function endpointError(error: unknown): BrowserEndpointShimResponse {
+  return response(
+    browserFailure(
+      'browser_endpoint_error',
+      error instanceof Error ? error.message : String(error),
+    ),
+  );
+}
+
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -95,83 +104,87 @@ function bodyRecord(request: BrowserEndpointShimRequest): Record<string, unknown
 
 export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserEndpointShim {
   return async (request) => {
-    const url = new URL(request.url, browserOrigin());
-    const method = methodOf(request.method);
-    const actorId = actorIdFromUrl(url);
+    try {
+      const url = new URL(request.url, browserOrigin());
+      const method = methodOf(request.method);
+      const actorId = actorIdFromUrl(url);
 
-    if (url.pathname === '/api/browser/runtime') {
-      if (method !== 'GET') return methodNotAllowed();
-      return response(await adapter.getRuntime({ actorId }));
-    }
-
-    if (url.pathname === '/api/browser/resolve') {
-      if (method !== 'GET') return methodNotAllowed();
-      const uri = text(url.searchParams.get('uri'));
-      if (!uri) {
-        return response(browserFailure('missing_uri', 'Browser resolve requires a uri query parameter.'));
+      if (url.pathname === '/api/browser/runtime') {
+        if (method !== 'GET') return methodNotAllowed();
+        return response(await adapter.getRuntime({ actorId }));
       }
-      return response(await adapter.resolveResource({ actorId, uri }));
-    }
 
-    if (url.pathname === '/api/browser/settings') {
-      if (method === 'GET') {
-        return response(await adapter.getSettings({ actorId }));
+      if (url.pathname === '/api/browser/resolve') {
+        if (method !== 'GET') return methodNotAllowed();
+        const uri = text(url.searchParams.get('uri'));
+        if (!uri) {
+          return response(browserFailure('missing_uri', 'Browser resolve requires a uri query parameter.'));
+        }
+        return response(await adapter.resolveResource({ actorId, uri }));
       }
-      if (method === 'PUT') {
+
+      if (url.pathname === '/api/browser/settings') {
+        if (method === 'GET') {
+          return response(await adapter.getSettings({ actorId }));
+        }
+        if (method === 'PUT') {
+          const body = bodyRecord(request);
+          if (!body) return invalidRequestBody();
+          const browser = objectRecord(body.browser);
+          if (!browser) return invalidRequestBody();
+          return response(
+            await adapter.updateSettings({
+              actorId,
+              browser,
+            }),
+          );
+        }
+        return methodNotAllowed();
+      }
+
+      if (url.pathname === '/api/browser/cache') {
+        if (method === 'GET') {
+          return response(await adapter.getCache({ actorId }));
+        }
+        if (method === 'DELETE') {
+          const body = bodyRecord(request);
+          if (!body) return invalidRequestBody();
+          const input: BrowserCacheClearInput = {
+            actorId,
+            scope: text(body.scope) || undefined,
+            all: typeof body.all === 'boolean' ? body.all : undefined,
+            pinId: text(body.pinId) || undefined,
+            cacheKey: text(body.cacheKey) || undefined,
+          };
+          return response(await adapter.clearCache(input));
+        }
+        return methodNotAllowed();
+      }
+
+      if (url.pathname === '/api/browser/actions') {
+        if (method !== 'POST') return methodNotAllowed();
         const body = bodyRecord(request);
         if (!body) return invalidRequestBody();
-        const browser = objectRecord(body.browser);
-        if (!browser) return invalidRequestBody();
+        const resourceUri = text(body.resourceUri);
+        const kind = text(body.kind) as BrowserTrustedActionKind;
+        if (!resourceUri || !kind) return invalidBrowserAction();
+        const payload = body.payload === undefined
+          ? undefined
+          : objectRecord(body.payload);
+        if (body.payload !== undefined && !payload) return invalidRequestBody();
         return response(
-          await adapter.updateSettings({
+          await adapter.runTrustedAction({
             actorId,
-            browser,
+            resourceUri,
+            kind,
+            payload,
           }),
         );
       }
-      return methodNotAllowed();
-    }
 
-    if (url.pathname === '/api/browser/cache') {
-      if (method === 'GET') {
-        return response(await adapter.getCache({ actorId }));
-      }
-      if (method === 'DELETE') {
-        const body = bodyRecord(request);
-        if (!body) return invalidRequestBody();
-        const input: BrowserCacheClearInput = {
-          actorId,
-          scope: text(body.scope) || undefined,
-          all: typeof body.all === 'boolean' ? body.all : undefined,
-          pinId: text(body.pinId) || undefined,
-          cacheKey: text(body.cacheKey) || undefined,
-        };
-        return response(await adapter.clearCache(input));
-      }
-      return methodNotAllowed();
+      return response(browserFailure('not_found', 'Browser endpoint not found.'));
+    } catch (error) {
+      return endpointError(error);
     }
-
-    if (url.pathname === '/api/browser/actions') {
-      if (method !== 'POST') return methodNotAllowed();
-      const body = bodyRecord(request);
-      if (!body) return invalidRequestBody();
-      const resourceUri = text(body.resourceUri);
-      const kind = text(body.kind) as BrowserTrustedActionKind;
-      if (!resourceUri || !kind) return invalidBrowserAction();
-      const payload = body.payload === undefined
-        ? undefined
-        : objectRecord(body.payload);
-      if (body.payload !== undefined && !payload) return invalidRequestBody();
-      return response(
-        await adapter.runTrustedAction({
-          actorId,
-          resourceUri,
-          kind,
-          payload,
-        }),
-      );
-    }
-
-    return response(browserFailure('not_found', 'Browser endpoint not found.'));
   };
 }
