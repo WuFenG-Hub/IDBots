@@ -154,19 +154,25 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     }, [postToIframe]);
 
     const flushPendingOpenUris = useCallback(() => {
+      if (!readyRef.current) return;
       const pending = pendingOpenUrisRef.current.splice(0);
-      for (const input of pending) {
+      for (let index = 0; index < pending.length; index += 1) {
+        const input = pending[index];
         if (!postOpenUri(input)) {
-          pendingOpenUrisRef.current.unshift(input);
+          readyRef.current = false;
+          pendingOpenUrisRef.current.unshift(...pending.slice(index));
           break;
         }
       }
     }, [postOpenUri]);
 
     const flushPendingRefreshRuntime = useCallback(() => {
+      if (!readyRef.current) return;
       if (!pendingRefreshRuntimeRef.current) return;
       if (postToIframe({ type: 'refresh-runtime' })) {
         pendingRefreshRuntimeRef.current = false;
+      } else {
+        readyRef.current = false;
       }
     }, [postToIframe]);
 
@@ -179,6 +185,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         try {
           const definition = injectBrowserIframeBridge(buildBrowserPageDefinition());
           const html = await renderBrowserPageHtml(definition, getBrowserLanguagePreference());
+          readyRef.current = false;
           srcDocRef.current = html;
           setSrcDoc(html);
         } catch (error) {
@@ -232,19 +239,26 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       return () => window.removeEventListener('message', handleMessage);
     }, [flushPendingOpenUris, flushPendingRefreshRuntime, postToIframe]);
 
-    const handleIframeLoad = useCallback(() => {
-      flushPendingOpenUris();
-      flushPendingRefreshRuntime();
-    }, [flushPendingOpenUris, flushPendingRefreshRuntime]);
-
     useImperativeHandle(ref, () => ({
       async openUri(input: BotBrowserOpenUriInput): Promise<void> {
+        if (!readyRef.current) {
+          pendingOpenUrisRef.current.push(input);
+          await ensureSrcDoc().catch(() => {});
+          return;
+        }
         if (postOpenUri(input)) return;
+        readyRef.current = false;
         pendingOpenUrisRef.current.push(input);
         await ensureSrcDoc().catch(() => {});
       },
       async refreshRuntime(): Promise<void> {
+        if (!readyRef.current) {
+          pendingRefreshRuntimeRef.current = true;
+          await ensureSrcDoc().catch(() => {});
+          return;
+        }
         if (postToIframe({ type: 'refresh-runtime' })) return;
+        readyRef.current = false;
         pendingRefreshRuntimeRef.current = true;
         await ensureSrcDoc().catch(() => {});
       },
@@ -263,7 +277,6 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
             ref={iframeRef}
             title="Bot Browser"
             srcDoc={srcDoc}
-            onLoad={handleIframeLoad}
             className="h-full w-full"
             style={{ border: 0, display: 'block' }}
           />
