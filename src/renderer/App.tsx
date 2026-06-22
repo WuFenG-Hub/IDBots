@@ -39,6 +39,8 @@ import { normalizePreselectedSkillId } from './utils/newChatPreselect';
 import BotBrowserModeSwitch from './features/botBrowser/BotBrowserModeSwitch';
 import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
 import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
+import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
+import type { BotBrowserConversationRequest } from './features/botBrowser/types';
 
 type FocusedOrderTarget = {
   sessionId: string;
@@ -476,10 +478,13 @@ const App: React.FC = () => {
     await coworkService.respondToPermission(pendingPermission.requestId, result);
   }, [pendingPermission]);
 
-  const handleBrowserOpenConversation = useCallback(async () => {
-    showToast('Conversation opening is not wired yet.');
-    throw new Error('Conversation opening is not wired yet.');
-  }, [showToast]);
+  const handleBrowserOpenConversation = useCallback(async (request: BotBrowserConversationRequest) => {
+    await openBotBrowserConversationInCowork(request, {
+      switchToHome: botBrowserShell.switchToHome,
+      showCowork: handleShowCowork,
+      showToast,
+    });
+  }, [botBrowserShell.switchToHome, handleShowCowork, showToast]);
 
   const handleCloseSettings = () => {
     setShowSettings(false);

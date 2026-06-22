@@ -41,9 +41,12 @@ test('shell hook includes no-bot guard toast and persistent browser mount state'
   assert.match(shellSource, /const \[hasMountedBrowser, setHasMountedBrowser\] = useState\(false\);/);
 });
 
-test('shell hook rejects failed conversation opens after toast', () => {
-  assert.match(appSource, /showToast\('Conversation opening is not wired yet\.'\);/);
-  assert.match(appSource, /throw new Error\('Conversation opening is not wired yet\.'\);/);
+test('App routes Browser conversation opens through the Cowork adapter', () => {
+  assert.match(appSource, /openBotBrowserConversationInCowork/);
+  assert.match(appSource, /handleBrowserOpenConversation = useCallback\(async \(request/);
+  assert.match(appSource, /switchToHome:\s*botBrowserShell\.switchToHome/);
+  assert.match(appSource, /showCowork:\s*handleShowCowork/);
+  assert.doesNotMatch(appSource, /Conversation opening is not wired yet/);
 });
 
 test('switch strip exposes Bot Home and Bot Browser labels', () => {
