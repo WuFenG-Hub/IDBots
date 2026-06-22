@@ -7,11 +7,15 @@ export async function openSelectedMetaApp({ app, metaAppService }) {
 }
 
 export function canOpenMetaAppInBrowser(app) {
-  return typeof app?.sourcePinId === 'string' && app.sourcePinId.trim() !== '';
+  return normalizeMetaAppSourcePinId(app?.sourcePinId) !== '';
+}
+
+export function normalizeMetaAppSourcePinId(sourcePinId) {
+  return typeof sourcePinId === 'string' ? sourcePinId.trim().toLowerCase() : '';
 }
 
 export function buildMetaAppBrowserUri(app) {
-  const sourcePinId = typeof app?.sourcePinId === 'string' ? app.sourcePinId.trim().toLowerCase() : '';
+  const sourcePinId = normalizeMetaAppSourcePinId(app?.sourcePinId);
   return sourcePinId ? `metaapp://${encodeURIComponent(sourcePinId)}` : '';
 }
 

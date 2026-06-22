@@ -1,17 +1,41 @@
-import { buildMetaAppBrowserUri, canOpenMetaAppInBrowser } from '../../components/metaapps/metaAppLaunch.js';
+import {
+  buildMetaAppBrowserUri,
+  canOpenMetaAppInBrowser,
+  normalizeMetaAppSourcePinId,
+} from '../../components/metaapps/metaAppLaunch.js';
+
+export { normalizeMetaAppSourcePinId };
 
 function text(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function browserRenderableUrl(value) {
+  const url = text(value);
+  if (!url) return '';
+  if (url.startsWith('/') && !url.startsWith('//')) return url;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? url : '';
+  } catch {
+    return '';
+  }
+}
+
+function codeContentReference(app) {
+  const codePinId = text(app?.codePinId);
+  return codePinId ? `metafile://${codePinId}` : '';
+}
+
 export function localMetaAppToBrowserRecord(app, resolvedUrl) {
   if (!canOpenMetaAppInBrowser(app)) return null;
-  const runUrl = text(resolvedUrl);
+  const runUrl = browserRenderableUrl(resolvedUrl);
   if (!runUrl) return null;
 
-  const sourcePinId = text(app.sourcePinId).toLowerCase();
+  const sourcePinId = normalizeMetaAppSourcePinId(app.sourcePinId);
   const name = text(app.name) || sourcePinId;
   const ownerGlobalMetaId = text(app.creatorMetaId);
+  const contentReference = codeContentReference(app);
 
   return {
     pinId: sourcePinId,
@@ -26,10 +50,10 @@ export function localMetaAppToBrowserRecord(app, resolvedUrl) {
     version: text(app.version) || '0.0.0',
     runtime: 'idbots-local',
     indexFile: text(app.entry) || 'index.html',
-    code: text(app.codePinId),
-    content: text(app.codePinId),
+    code: contentReference,
+    content: contentReference,
     contentType: 'text/html',
-    codeType: 'html',
+    codeType: contentReference ? 'application/zip' : 'text/html',
     tags: [],
     ownerGlobalMetaId,
     network: 'mvc',
