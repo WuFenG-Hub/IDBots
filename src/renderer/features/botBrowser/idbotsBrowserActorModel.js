@@ -14,7 +14,7 @@ export function metabotToBrowserActor(metabot, defaultMetabotId = null) {
   const label =
     typeof metabot?.name === 'string' && metabot.name.trim()
       ? metabot.name.trim()
-      : `MetaBot ${id}`;
+      : `Bot ${id}`;
   const avatar =
     typeof metabot?.avatar === 'string' && metabot.avatar.trim()
       ? metabot.avatar.trim()

@@ -87,7 +87,7 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
 }
 
 function bodyRecord(request: BrowserEndpointShimRequest): Record<string, unknown> | null {
-  if (request.body === undefined || request.body === null) {
+  if (request.body === undefined) {
     return {};
   }
   return objectRecord(request.body);

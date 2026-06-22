@@ -191,6 +191,22 @@ test('endpoint shim rejects malformed request bodies before calling adapter meth
   assert.equal(cache.status, 400);
   assert.equal(cache.body.code, 'invalid_request_body');
 
+  const cacheNull = await shim({
+    url: '/api/browser/cache',
+    method: 'DELETE',
+    body: null,
+  });
+  assert.equal(cacheNull.status, 400);
+  assert.equal(cacheNull.body.code, 'invalid_request_body');
+
+  const actionNull = await shim({
+    url: '/api/browser/actions',
+    method: 'POST',
+    body: null,
+  });
+  assert.equal(actionNull.status, 400);
+  assert.equal(actionNull.body.code, 'invalid_request_body');
+
   const action = await shim({
     url: '/api/browser/actions',
     method: 'POST',
@@ -198,6 +214,18 @@ test('endpoint shim rejects malformed request bodies before calling adapter meth
   });
   assert.equal(action.status, 400);
   assert.equal(action.body.code, 'invalid_browser_action');
+
+  const actionPayload = await shim({
+    url: '/api/browser/actions',
+    method: 'POST',
+    body: {
+      resourceUri: 'metaid://idq1peer',
+      kind: 'open-conversation',
+      payload: 'bad',
+    },
+  });
+  assert.equal(actionPayload.status, 400);
+  assert.equal(actionPayload.body.code, 'invalid_request_body');
 
   assert.deepEqual(calls, []);
 });

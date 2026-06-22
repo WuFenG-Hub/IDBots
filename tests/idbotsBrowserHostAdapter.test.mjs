@@ -150,6 +150,7 @@ test('resolveResource filters service actions and converts private-chat to open-
 test('runTrustedAction opens a conversation only with a local actor id and peer id', async () => {
   const opened = [];
   const adapter = createAdapter({
+    listMetabots: async () => [createMetabot({ id: 7, globalmetaid: 'idq1777' })],
     openConversation: async (request) => {
       opened.push(request);
     },
@@ -162,6 +163,7 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   });
   assert.equal(missingActor.ok, false);
   assert.equal(missingActor.code, 'browser_action_missing_actor');
+  assert.doesNotMatch(missingActor.message, /MetaBot/i);
 
   const invalidActor = await adapter.runTrustedAction({
     actorId: 'oac-bot-1',
@@ -171,6 +173,17 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   });
   assert.equal(invalidActor.ok, false);
   assert.equal(invalidActor.code, 'browser_action_invalid_actor');
+  assert.doesNotMatch(invalidActor.message, /MetaBot/i);
+
+  const missingLocalActor = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-999',
+    resourceUri: 'metaid://idq1peer',
+    kind: 'open-conversation',
+    payload: { peerGlobalMetaId: 'idq1peer' },
+  });
+  assert.equal(missingLocalActor.ok, false);
+  assert.equal(missingLocalActor.code, 'browser_action_invalid_actor');
+  assert.doesNotMatch(missingLocalActor.message, /MetaBot/i);
 
   const missingPeer = await adapter.runTrustedAction({
     actorId: 'idbots-metabot-7',
@@ -179,6 +192,7 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   });
   assert.equal(missingPeer.ok, false);
   assert.equal(missingPeer.code, 'browser_action_missing_peer');
+  assert.doesNotMatch(missingPeer.message, /MetaBot/i);
 
   const success = await adapter.runTrustedAction({
     actorId: 'idbots-metabot-7',

@@ -28,7 +28,10 @@ import {
 } from '@openagentinternet/agent-browser-host-contract';
 import type { MetaAppRecord } from '../../types/metaApp';
 import type { Metabot } from '../../types/metabot';
-import { parseLocalMetabotActorId } from './botBrowserIntent.js';
+import {
+  normalizeBrowserGlobalMetaId,
+  parseLocalMetabotActorId,
+} from './botBrowserIntent.js';
 import {
   metabotsToBrowserActors,
   selectDefaultBrowserActor,
@@ -126,6 +129,12 @@ function conversationUriFromPayload(
   peerGlobalMetaId: string,
 ): string {
   return text(payload?.conversationUri) || buildConversationUri(peerGlobalMetaId);
+}
+
+function hasUsableLocalMetabot(metabots: Metabot[], localMetabotId: number): boolean {
+  return metabots.some((metabot) => {
+    return metabot.id === localMetabotId && normalizeBrowserGlobalMetaId(metabot.globalmetaid) !== '';
+  });
 }
 
 function normalizeMetaAppUri(value: string): string {
@@ -270,10 +279,15 @@ export function createIdbotsBrowserHostAdapter(
       if (actionInput.kind === 'open-conversation' || actionInput.kind === 'private-chat') {
         const actorId = text(actionInput.actorId);
         if (!actorId) {
-          return browserFailure('browser_action_missing_actor', 'A local MetaBot actor is required.');
+          return browserFailure('browser_action_missing_actor', 'A local Bot actor is required.');
         }
-        if (parseLocalMetabotActorId(actorId) === null) {
-          return browserFailure('browser_action_invalid_actor', 'The selected actor is not a local IDBots MetaBot.');
+        const localMetabotId = parseLocalMetabotActorId(actorId);
+        if (localMetabotId === null) {
+          return browserFailure('browser_action_invalid_actor', 'The selected actor is not an available local Bot.');
+        }
+        const metabots = await input.listMetabots();
+        if (!hasUsableLocalMetabot(metabots, localMetabotId)) {
+          return browserFailure('browser_action_invalid_actor', 'The selected actor is not an available local Bot.');
         }
 
         const peerGlobalMetaId = peerGlobalMetaIdFromPayload(actionInput.payload);

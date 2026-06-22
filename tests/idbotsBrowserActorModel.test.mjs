@@ -33,6 +33,13 @@ test('metabotToBrowserActor converts a local IDBots bot to an ABC actor model', 
   });
 });
 
+test('metabotToBrowserActor uses Bot wording for unnamed actor fallback labels', () => {
+  const actor = metabotToBrowserActor(createMetabot({ id: 9, name: '   ' }));
+
+  assert.equal(actor.label, 'Bot 9');
+  assert.doesNotMatch(actor.label, /MetaBot/i);
+});
+
 test('metabotsToBrowserActors drops actors without usable globalmetaid', () => {
   const actors = metabotsToBrowserActors([
     createMetabot({ id: 1, created_at: 10, globalmetaid: 'idq111' }),
