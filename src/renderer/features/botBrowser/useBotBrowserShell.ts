@@ -27,18 +27,30 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('home');
   const [hasMountedBrowser, setHasMountedBrowser] = useState(false);
 
+  const messageFromError = (error: unknown, fallback: string): string => {
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === 'string' && error.trim()) return error;
+    return fallback;
+  };
+
   const ensureLocalBot = useCallback(async (): Promise<boolean> => {
-    let count = 0;
     try {
       const result = await window.electron.metabot.list();
-      count = result?.success && Array.isArray(result.list) ? result.list.length : 0;
-    } catch {
-      count = 0;
-    }
+      if (!result?.success) {
+        showToast(messageFromError(result?.error, 'Failed to load local Bots.'));
+        return false;
+      }
 
-    if (count > 0) return true;
-    showToast('No local Bot. Please create a Bot first.');
-    return false;
+      if (!Array.isArray(result.list) || result.list.length === 0) {
+        showToast('No local Bot. Please create a Bot first.');
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      showToast(messageFromError(error, 'Failed to load local Bots.'));
+      return false;
+    }
   }, [showToast]);
 
   const showBrowser = useCallback(async (): Promise<boolean> => {

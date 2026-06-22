@@ -32,8 +32,18 @@ test('App gates Home and Browser surfaces with botBrowserShell.surfaceMode', () 
 
 test('shell hook includes no-bot guard toast and persistent browser mount state', () => {
   assert.match(shellSource, /window\.electron\.metabot\.list\(\)/);
-  assert.match(shellSource, /No local Bot\. Please create a Bot first\./);
+  assert.match(shellSource, /if \(!result\?\.success\) \{/);
+  assert.match(shellSource, /showToast\(messageFromError\(result\?\.error, 'Failed to load local Bots\.'\)\);/);
+  assert.match(shellSource, /if \(!Array\.isArray\(result\.list\) \|\| result\.list\.length === 0\) \{/);
+  assert.match(shellSource, /showToast\('No local Bot\. Please create a Bot first\.'\);/);
+  assert.match(shellSource, /catch \(error\) \{/);
+  assert.match(shellSource, /showToast\(messageFromError\(error, 'Failed to load local Bots\.'\)\);/);
   assert.match(shellSource, /const \[hasMountedBrowser, setHasMountedBrowser\] = useState\(false\);/);
+});
+
+test('shell hook rejects failed conversation opens after toast', () => {
+  assert.match(appSource, /showToast\('Conversation opening is not wired yet\.'\);/);
+  assert.match(appSource, /throw new Error\('Conversation opening is not wired yet\.'\);/);
 });
 
 test('switch strip exposes Bot Home and Bot Browser labels', () => {

@@ -469,6 +469,7 @@ const App: React.FC = () => {
 
   const handleBrowserOpenConversation = useCallback(async () => {
     showToast('Conversation opening is not wired yet.');
+    throw new Error('Conversation opening is not wired yet.');
   }, [showToast]);
 
   const handleCloseSettings = () => {
