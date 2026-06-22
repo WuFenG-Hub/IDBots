@@ -1,5 +1,13 @@
+const RAW_GLOBAL_META_ID_VERSION_CHARS = new Set(['q', 'p', 'z', 'r', 'y', 't']);
+
 export function normalizeBrowserGlobalMetaId(value) {
-  return typeof value === 'string' ? value.trim() : '';
+  if (typeof value !== 'string') return '';
+  const normalized = value.trim().toLowerCase();
+  if (!normalized || normalized.startsWith('metaid:')) return '';
+  if (!normalized.startsWith('id')) return '';
+  if (!RAW_GLOBAL_META_ID_VERSION_CHARS.has(normalized[2] ?? '')) return '';
+  if (normalized[3] !== '1') return '';
+  return normalized;
 }
 
 export function buildBotPageBrowserUri(globalMetaId) {
@@ -8,12 +16,14 @@ export function buildBotPageBrowserUri(globalMetaId) {
 }
 
 export function buildMetaAppBrowserUri(sourcePinId) {
-  const normalized = typeof sourcePinId === 'string' ? sourcePinId.trim() : '';
+  const normalized = typeof sourcePinId === 'string' ? sourcePinId.trim().toLowerCase() : '';
   return normalized ? `metaapp://${encodeURIComponent(normalized)}` : '';
 }
 
 export function buildLocalMetabotActorId(metabotId) {
-  const parsed = Number.parseInt(String(metabotId), 10);
+  const text = typeof metabotId === 'number' ? String(metabotId) : typeof metabotId === 'string' ? metabotId.trim() : '';
+  if (!/^[1-9]\d*$/.test(text)) return '';
+  const parsed = Number.parseInt(text, 10);
   return Number.isFinite(parsed) && parsed > 0 ? `idbots-metabot-${parsed}` : '';
 }
 

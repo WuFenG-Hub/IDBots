@@ -12,7 +12,7 @@ function createMetabot(overrides = {}) {
     id: 1,
     name: ' Alpha ',
     avatar: ' https://cdn.example/avatar.png ',
-    globalmetaid: ' idq123 ',
+    globalmetaid: ' IDQ1ABC ',
     created_at: 10,
     ...overrides,
   };
@@ -25,7 +25,7 @@ test('metabotToBrowserActor converts a local IDBots bot to an ABC actor model', 
     id: 'idbots-metabot-1',
     label: 'Alpha',
     kind: 'idbots-agent',
-    globalMetaId: 'idq123',
+    globalMetaId: 'idq1abc',
     avatar: 'https://cdn.example/avatar.png',
     isDefault: true,
     capabilities: ['private-chat', 'message-view', 'profile-management', 'chat-configuration'],
@@ -38,6 +38,8 @@ test('metabotsToBrowserActors drops actors without usable globalmetaid', () => {
     createMetabot({ id: 1, created_at: 10, globalmetaid: 'idq111' }),
     createMetabot({ id: 2, created_at: 20, globalmetaid: '   ' }),
     createMetabot({ id: 3, created_at: 30, globalmetaid: null }),
+    createMetabot({ id: 4, created_at: 40, globalmetaid: 'abc' }),
+    createMetabot({ id: 5, created_at: 50, globalmetaid: 'metaid://idq1abc' }),
   ]);
 
   assert.deepEqual(
@@ -50,15 +52,15 @@ test('selectDefaultBrowserActor follows the browser metabot sort rule', () => {
   const actor = selectDefaultBrowserActor([
     createMetabot({ id: 8, created_at: 30, globalmetaid: 'idq888' }),
     createMetabot({ id: 3, created_at: 10, globalmetaid: '   ' }),
-    createMetabot({ id: 4, created_at: 20, globalmetaid: 'idq444' }),
-    createMetabot({ id: 2, created_at: 20, globalmetaid: 'idq222' }),
+    createMetabot({ id: 4, created_at: 20, globalmetaid: 'abc' }),
+    createMetabot({ id: 2, created_at: 20, globalmetaid: 'IDQ1DEF' }),
   ]);
 
   assert.deepEqual(actor, {
     id: 'idbots-metabot-2',
     label: 'Alpha',
     kind: 'idbots-agent',
-    globalMetaId: 'idq222',
+    globalMetaId: 'idq1def',
     avatar: 'https://cdn.example/avatar.png',
     isDefault: true,
     capabilities: ['private-chat', 'message-view', 'profile-management', 'chat-configuration'],
