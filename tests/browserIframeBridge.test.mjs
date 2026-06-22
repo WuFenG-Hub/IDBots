@@ -23,7 +23,16 @@ test('bridge waits for runtime readiness before actor selection and navigation',
 test('bridge clears failed runtime readiness state so later intents can retry', () => {
   const script = buildBrowserIframeBridgeScript();
 
-  assert.match(script, /if \(runtimeReadyPromise\) \{\s*return runtimeReadyPromise;\s*\}/);
+  assert.match(script, /if \(!forceReload && runtimeReadyPromise\) \{\s*return runtimeReadyPromise;\s*\}/);
   assert.match(script, /runtimeReadyPromise = null;/);
   assert.match(script, /\.catch\(function \(error\) \{[\s\S]*runtimeReadyPromise = null;[\s\S]*throw error;[\s\S]*\}\)/);
+});
+
+test('bridge refresh-runtime forceReload bypasses cached runtimeReadyPromise', () => {
+  const script = buildBrowserIframeBridgeScript();
+
+  assert.match(
+    script,
+    /function ensureRuntimeReady\(options\) \{[\s\S]*var forceReload = Boolean\(options && options\.forceReload\);[\s\S]*if \(!forceReload && runtimeReadyPromise\) \{\s*return runtimeReadyPromise;\s*\}[\s\S]*await globalThis\.loadRuntime\(\);/,
+  );
 });

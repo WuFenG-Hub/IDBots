@@ -15,6 +15,7 @@ export function buildBrowserIframeBridgeScript(): string {
   var requestSeq = 0;
   var runtimeReady = false;
   var runtimeReadyPromise = null;
+  var runtimeLoadSeq = 0;
   var readyPosted = false;
 
   if (globalThis.__idbotsBrowserIframeBridgeInstalled) {
@@ -191,11 +192,12 @@ export function buildBrowserIframeBridgeScript(): string {
     if (!forceReload && runtimeReady && runtimeApisReady()) {
       return Promise.resolve();
     }
-    if (runtimeReadyPromise) {
+    if (!forceReload && runtimeReadyPromise) {
       return runtimeReadyPromise;
     }
     runtimeReady = false;
-    runtimeReadyPromise = (async function () {
+    var loadSeq = ++runtimeLoadSeq;
+    var loadPromise = (async function () {
       if (typeof globalThis.loadRuntime !== 'function') {
         throw new Error('Browser runtime loader is not ready.');
       }
@@ -206,11 +208,16 @@ export function buildBrowserIframeBridgeScript(): string {
       if (typeof globalThis.selectUsingIdentity !== 'function') {
         throw new Error('Browser actor selection is not ready.');
       }
-      runtimeReady = true;
-      postReady();
-    })().catch(function (error) {
-      runtimeReady = false;
-      runtimeReadyPromise = null;
+      if (loadSeq === runtimeLoadSeq) {
+        runtimeReady = true;
+        postReady();
+      }
+    })();
+    runtimeReadyPromise = loadPromise.catch(function (error) {
+      if (loadSeq === runtimeLoadSeq) {
+        runtimeReady = false;
+        runtimeReadyPromise = null;
+      }
       throw error;
     });
     return runtimeReadyPromise;
