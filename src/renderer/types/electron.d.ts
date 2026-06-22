@@ -132,6 +132,22 @@ interface CoworkSessionSummary {
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
+interface CoworkEnsureA2ASessionInput {
+  actorId?: string | null;
+  localMetabotId?: number | null;
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+}
+
+interface CoworkEnsureA2ASessionResult {
+  success: boolean;
+  created?: boolean;
+  externalConversationId?: string;
+  session?: CoworkSession;
+  error?: string;
+}
+
 interface CoworkConfig {
   workingDirectory: string;
   systemPrompt: string;
@@ -523,6 +539,7 @@ interface IElectronAPI {
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     endA2APrivateChat: (sessionId: string) => Promise<{ success: boolean; noticeSent?: boolean; error?: string }>;
+    ensureA2ASession: (input: CoworkEnsureA2ASessionInput) => Promise<CoworkEnsureA2ASessionResult>;
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) => Promise<CoworkA2AGuidanceResult>;
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) => Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }>;
     deleteSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;

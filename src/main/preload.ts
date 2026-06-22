@@ -244,6 +244,14 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
+    ensureA2ASession: (input: {
+      actorId?: string | null;
+      localMetabotId?: number | null;
+      peerGlobalMetaId: string;
+      peerName?: string | null;
+      peerAvatar?: string | null;
+    }) =>
+      ipcRenderer.invoke('cowork:session:ensureA2A', input),
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) =>
       ipcRenderer.invoke('cowork:session:queueA2AGuidance', input),
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) =>
