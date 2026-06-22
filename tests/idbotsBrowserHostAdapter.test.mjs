@@ -147,6 +147,41 @@ test('resolveResource filters service actions and converts private-chat to open-
   assert.equal(canonical.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1peer');
 });
 
+test('resolveResource removes unsupported renderer service payload while preserving other renderer data', async () => {
+  const adapter = createAdapter({
+    fetch: async () =>
+      createJsonResponse({
+        code: 0,
+        data: {
+          schemaVersion: 'botHomepage.v3',
+          identity: { globalMetaId: 'idq1peer' },
+          profile: { name: 'Peer Bot' },
+          services: [
+            { id: 'svc-1', name: 'Unsupported service' },
+          ],
+          sections: [
+            { id: 'overview', title: 'Overview', items: [{ text: 'keep me' }] },
+            { id: 'services', title: 'Services', items: [{ id: 'svc-2' }] },
+          ],
+          actions: [
+            { id: 'custom-service-list', label: 'Services', kind: 'service-list', enabled: true },
+          ],
+        },
+      }),
+  });
+
+  const result = await adapter.resolveResource({ uri: 'metaid://idq1peer' });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.renderer.data.profile.name, 'Peer Bot');
+  assert.equal(result.data.renderer.data.identity.globalMetaId, 'idq1peer');
+  assert.equal('services' in result.data.renderer.data, false);
+  assert.deepEqual(result.data.renderer.data.sections, [
+    { id: 'overview', title: 'Overview', items: [{ text: 'keep me' }] },
+  ]);
+  assert.equal(result.data.actions.some((action) => action.kind === 'service-list'), false);
+});
+
 test('runTrustedAction opens a conversation only with a local actor id and peer id', async () => {
   const opened = [];
   const adapter = createAdapter({
@@ -194,12 +229,22 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   assert.equal(missingPeer.code, 'browser_action_missing_peer');
   assert.doesNotMatch(missingPeer.message, /MetaBot/i);
 
+  const invalidPeer = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaid://abc',
+    kind: 'open-conversation',
+    payload: { peerGlobalMetaId: 'abc' },
+  });
+  assert.equal(invalidPeer.ok, false);
+  assert.equal(invalidPeer.code, 'browser_action_missing_peer');
+  assert.doesNotMatch(invalidPeer.message, /MetaBot/i);
+
   const success = await adapter.runTrustedAction({
     actorId: 'idbots-metabot-7',
     resourceUri: 'metaid://idq1peer',
     kind: 'private-chat',
     payload: {
-      to: 'idq1peer',
+      to: ' IDQ1PEER ',
       conversationUri: 'map://simplemsg/conversation?peer=idq1peer',
       peerName: 'Peer Bot',
       peerAvatar: 'https://cdn.example/peer.png',
