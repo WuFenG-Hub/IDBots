@@ -13,6 +13,9 @@ export function buildBrowserIframeBridgeScript(): string {
     : null;
   var pendingRequests = {};
   var requestSeq = 0;
+  var runtimeReady = false;
+  var runtimeReadyPromise = null;
+  var readyPosted = false;
 
   if (globalThis.__idbotsBrowserIframeBridgeInstalled) {
     return;
@@ -169,6 +172,50 @@ export function buildBrowserIframeBridgeScript(): string {
     }
   }
 
+  function postReady() {
+    if (readyPosted) return;
+    readyPosted = true;
+    window.parent.postMessage({
+      source: BRIDGE_SOURCE,
+      type: 'browser-ready'
+    }, targetOrigin);
+  }
+
+  function runtimeApisReady() {
+    return typeof globalThis.navigateTo === 'function'
+      && typeof globalThis.selectUsingIdentity === 'function';
+  }
+
+  function ensureRuntimeReady(options) {
+    var forceReload = Boolean(options && options.forceReload);
+    if (!forceReload && runtimeReady && runtimeApisReady()) {
+      return Promise.resolve();
+    }
+    if (runtimeReadyPromise) {
+      return runtimeReadyPromise;
+    }
+    runtimeReady = false;
+    runtimeReadyPromise = (async function () {
+      if (typeof globalThis.loadRuntime !== 'function') {
+        throw new Error('Browser runtime loader is not ready.');
+      }
+      await globalThis.loadRuntime();
+      if (typeof globalThis.navigateTo !== 'function') {
+        throw new Error('Browser navigation is not ready.');
+      }
+      if (typeof globalThis.selectUsingIdentity !== 'function') {
+        throw new Error('Browser actor selection is not ready.');
+      }
+      runtimeReady = true;
+      postReady();
+    })().catch(function (error) {
+      runtimeReady = false;
+      runtimeReadyPromise = null;
+      throw error;
+    });
+    return runtimeReadyPromise;
+  }
+
   async function handleOpenUri(input) {
     try {
       var uri = textValue(input && input.uri);
@@ -176,11 +223,9 @@ export function buildBrowserIframeBridgeScript(): string {
       if (!uri) {
         throw new Error('Browser URI is required.');
       }
-      if (actorId && typeof globalThis.selectUsingIdentity === 'function') {
+      await ensureRuntimeReady();
+      if (actorId) {
         await globalThis.selectUsingIdentity(actorId);
-      }
-      if (typeof globalThis.navigateTo !== 'function') {
-        throw new Error('Browser navigation is not ready.');
       }
       await globalThis.navigateTo(uri);
     } catch (error) {
@@ -190,10 +235,7 @@ export function buildBrowserIframeBridgeScript(): string {
 
   async function handleRefreshRuntime() {
     try {
-      if (typeof globalThis.loadRuntime !== 'function') {
-        throw new Error('Browser runtime loader is not ready.');
-      }
-      await globalThis.loadRuntime();
+      await ensureRuntimeReady({ forceReload: true });
     } catch (error) {
       toast(error && error.message ? error.message : String(error));
     }
@@ -216,19 +258,20 @@ export function buildBrowserIframeBridgeScript(): string {
     }
   });
 
-  function postReady() {
-    window.parent.postMessage({
-      source: BRIDGE_SOURCE,
-      type: 'browser-ready'
-    }, targetOrigin);
-  }
-
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
-      setTimeout(postReady, 0);
+      Promise.resolve().then(function () {
+        return ensureRuntimeReady();
+      }).catch(function (error) {
+        toast(error && error.message ? error.message : String(error));
+      });
     });
   } else {
-    setTimeout(postReady, 0);
+    Promise.resolve().then(function () {
+      return ensureRuntimeReady();
+    }).catch(function (error) {
+      toast(error && error.message ? error.message : String(error));
+    });
   }
 })();
 `;

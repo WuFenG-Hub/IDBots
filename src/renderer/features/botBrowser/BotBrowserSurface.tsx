@@ -154,7 +154,6 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     }, [postToIframe]);
 
     const flushPendingOpenUris = useCallback(() => {
-      if (!readyRef.current) return;
       const pending = pendingOpenUrisRef.current.splice(0);
       for (const input of pending) {
         if (!postOpenUri(input)) {
@@ -165,7 +164,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     }, [postOpenUri]);
 
     const flushPendingRefreshRuntime = useCallback(() => {
-      if (!readyRef.current || !pendingRefreshRuntimeRef.current) return;
+      if (!pendingRefreshRuntimeRef.current) return;
       if (postToIframe({ type: 'refresh-runtime' })) {
         pendingRefreshRuntimeRef.current = false;
       }
@@ -233,14 +232,19 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       return () => window.removeEventListener('message', handleMessage);
     }, [flushPendingOpenUris, flushPendingRefreshRuntime, postToIframe]);
 
+    const handleIframeLoad = useCallback(() => {
+      flushPendingOpenUris();
+      flushPendingRefreshRuntime();
+    }, [flushPendingOpenUris, flushPendingRefreshRuntime]);
+
     useImperativeHandle(ref, () => ({
       async openUri(input: BotBrowserOpenUriInput): Promise<void> {
-        if (readyRef.current && postOpenUri(input)) return;
+        if (postOpenUri(input)) return;
         pendingOpenUrisRef.current.push(input);
         await ensureSrcDoc().catch(() => {});
       },
       async refreshRuntime(): Promise<void> {
-        if (readyRef.current && postToIframe({ type: 'refresh-runtime' })) return;
+        if (postToIframe({ type: 'refresh-runtime' })) return;
         pendingRefreshRuntimeRef.current = true;
         await ensureSrcDoc().catch(() => {});
       },
@@ -259,6 +263,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
             ref={iframeRef}
             title="Bot Browser"
             srcDoc={srcDoc}
+            onLoad={handleIframeLoad}
             className="h-full w-full"
             style={{ border: 0, display: 'block' }}
           />
