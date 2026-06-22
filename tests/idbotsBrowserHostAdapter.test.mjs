@@ -74,9 +74,11 @@ test('getRuntime exposes the IDBots host and local actors/default actor', async 
     templateSettings: true,
     walletLogin: false,
   });
-  assert.match(result.data.labels.noActorTitle, /MetaBot/i);
+  assert.match(result.data.labels.noActorTitle, /Bot/i);
+  assert.doesNotMatch(result.data.labels.noActorTitle, /MetaBot/i);
   assert.match(result.data.labels.noActorBody, /local/i);
-  assert.match(result.data.labels.noActorAction.label, /MetaBot/i);
+  assert.match(result.data.labels.noActorAction.label, /Bot/i);
+  assert.doesNotMatch(result.data.labels.noActorAction.label, /MetaBot/i);
 });
 
 test('resolveResource finds a local MetaApp by normalized source pin id and returns its local run URL', async () => {
@@ -113,6 +115,16 @@ test('resolveResource filters service actions and converts private-chat to open-
           profile: { name: 'Peer Bot' },
           actions: [
             { id: 'custom-private', label: 'Message', kind: 'private-chat', enabled: true, payload: { to: 'idq1payload' } },
+            {
+              id: 'custom-conversation',
+              label: 'Conversation',
+              kind: 'open-conversation',
+              enabled: true,
+              payload: {
+                conversationUri: 'map://simplemsg/conversation?peer=idq1peer',
+                peerGlobalMetaId: 'idq1peer',
+              },
+            },
             { id: 'custom-service', label: 'Service', kind: 'service-call', enabled: true },
           ],
         },
@@ -128,6 +140,11 @@ test('resolveResource filters service actions and converts private-chat to open-
   const converted = result.data.actions.find((action) => action.id === 'custom-private');
   assert.equal(converted.kind, 'open-conversation');
   assert.equal(converted.payload.peerGlobalMetaId, 'idq1payload');
+  assert.equal(converted.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1payload');
+
+  const canonical = result.data.actions.find((action) => action.id === 'custom-conversation');
+  assert.equal(canonical.kind, 'open-conversation');
+  assert.equal(canonical.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1peer');
 });
 
 test('runTrustedAction opens a conversation only with a local actor id and peer id', async () => {
@@ -167,7 +184,12 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
     actorId: 'idbots-metabot-7',
     resourceUri: 'metaid://idq1peer',
     kind: 'private-chat',
-    payload: { to: 'idq1peer', peerName: 'Peer Bot', peerAvatar: 'https://cdn.example/peer.png' },
+    payload: {
+      to: 'idq1peer',
+      conversationUri: 'map://simplemsg/conversation?peer=idq1peer',
+      peerName: 'Peer Bot',
+      peerAvatar: 'https://cdn.example/peer.png',
+    },
   });
 
   assert.equal(success.ok, true);
@@ -182,6 +204,7 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
       actorId: 'idbots-metabot-7',
       resourceUri: 'metaid://idq1peer',
       peerGlobalMetaId: 'idq1peer',
+      conversationUri: 'map://simplemsg/conversation?peer=idq1peer',
       peerName: 'Peer Bot',
       peerAvatar: 'https://cdn.example/peer.png',
     },

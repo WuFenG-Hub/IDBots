@@ -162,3 +162,42 @@ test('endpoint shim returns failures for missing uri, wrong method, unknown path
   assert.equal(configMissing.status, 500);
   assert.equal(configMissing.body.code, 'browser_config_missing');
 });
+
+test('endpoint shim rejects malformed request bodies before calling adapter methods', async () => {
+  const { adapter, calls } = createAdapter();
+  const shim = createBrowserEndpointShim(adapter);
+
+  const settings = await shim({
+    url: '/api/browser/settings',
+    method: 'PUT',
+    body: 'not-an-object',
+  });
+  assert.equal(settings.status, 400);
+  assert.equal(settings.body.code, 'invalid_request_body');
+
+  const settingsMissingBrowser = await shim({
+    url: '/api/browser/settings',
+    method: 'PUT',
+    body: {},
+  });
+  assert.equal(settingsMissingBrowser.status, 400);
+  assert.equal(settingsMissingBrowser.body.code, 'invalid_request_body');
+
+  const cache = await shim({
+    url: '/api/browser/cache',
+    method: 'DELETE',
+    body: ['bad'],
+  });
+  assert.equal(cache.status, 400);
+  assert.equal(cache.body.code, 'invalid_request_body');
+
+  const action = await shim({
+    url: '/api/browser/actions',
+    method: 'POST',
+    body: { resourceUri: 'metaid://idq1peer' },
+  });
+  assert.equal(action.status, 400);
+  assert.equal(action.body.code, 'invalid_browser_action');
+
+  assert.deepEqual(calls, []);
+});

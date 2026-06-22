@@ -87,6 +87,7 @@ function normalizeResolveAction(
     text(payload.targetGlobalMetaId) ||
     text(payload.to) ||
     text(result.owner.globalMetaId);
+  const conversationUri = conversationUriFromPayload(payload, peerGlobalMetaId);
 
   return {
     ...action,
@@ -94,6 +95,7 @@ function normalizeResolveAction(
     payload: {
       ...payload,
       peerGlobalMetaId,
+      conversationUri,
     },
   };
 }
@@ -113,6 +115,17 @@ function peerGlobalMetaIdFromPayload(payload: Record<string, unknown> | undefine
     text(payload?.targetGlobalMetaId) ||
     text(payload?.to)
   );
+}
+
+function buildConversationUri(peerGlobalMetaId: string): string {
+  return `map://simplemsg/conversation?peer=${encodeURIComponent(peerGlobalMetaId)}`;
+}
+
+function conversationUriFromPayload(
+  payload: Record<string, unknown> | undefined,
+  peerGlobalMetaId: string,
+): string {
+  return text(payload?.conversationUri) || buildConversationUri(peerGlobalMetaId);
 }
 
 function normalizeMetaAppUri(value: string): string {
@@ -167,11 +180,11 @@ export function createIdbotsBrowserHostAdapter(
           walletLogin: false,
         },
         labels: {
-          actorChip: 'MetaBot',
-          noActorTitle: 'No local MetaBot available',
-          noActorBody: 'Create or restore a local MetaBot before using IDBots Browser actions.',
+          actorChip: 'Bot',
+          noActorTitle: 'No Bot available',
+          noActorBody: 'Create or restore a local Bot before using IDBots Browser actions.',
           noActorAction: {
-            label: 'Create MetaBot',
+            label: 'Create Bot',
             actionKind: 'open-settings',
           },
         },
@@ -267,12 +280,14 @@ export function createIdbotsBrowserHostAdapter(
         if (!peerGlobalMetaId) {
           return browserFailure('browser_action_missing_peer', 'A peer GlobalMetaID is required.');
         }
+        const conversationUri = conversationUriFromPayload(actionInput.payload, peerGlobalMetaId);
 
         await input.openConversation({
           actionKind: actionInput.kind,
           actorId,
           resourceUri: actionInput.resourceUri,
           peerGlobalMetaId,
+          conversationUri,
           peerName: text(actionInput.payload?.peerName) || undefined,
           peerAvatar: text(actionInput.payload?.peerAvatar) || undefined,
         });

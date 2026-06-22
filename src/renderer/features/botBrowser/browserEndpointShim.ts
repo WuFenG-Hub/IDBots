@@ -9,7 +9,7 @@ import {
 export interface BrowserEndpointShimRequest {
   url: string;
   method?: string;
-  body?: Record<string, unknown> | null;
+  body?: unknown;
 }
 
 export interface BrowserEndpointShimResponse {
@@ -72,10 +72,25 @@ function methodNotAllowed(): BrowserEndpointShimResponse {
   return response(browserFailure('method_not_allowed', 'Method not allowed.'));
 }
 
-function readBody(request: BrowserEndpointShimRequest): Record<string, unknown> {
-  return request.body && typeof request.body === 'object' && !Array.isArray(request.body)
-    ? request.body
-    : {};
+function invalidRequestBody(): BrowserEndpointShimResponse {
+  return response(browserFailure('invalid_request_body', 'Request body must be a JSON object.'));
+}
+
+function invalidBrowserAction(message = 'Browser action request is invalid.'): BrowserEndpointShimResponse {
+  return response(browserFailure('invalid_browser_action', message));
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function bodyRecord(request: BrowserEndpointShimRequest): Record<string, unknown> | null {
+  if (request.body === undefined || request.body === null) {
+    return {};
+  }
+  return objectRecord(request.body);
 }
 
 export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserEndpointShim {
@@ -103,14 +118,14 @@ export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserE
         return response(await adapter.getSettings({ actorId }));
       }
       if (method === 'PUT') {
-        const body = readBody(request);
+        const body = bodyRecord(request);
+        if (!body) return invalidRequestBody();
+        const browser = objectRecord(body.browser);
+        if (!browser) return invalidRequestBody();
         return response(
           await adapter.updateSettings({
             actorId,
-            browser:
-              body.browser && typeof body.browser === 'object' && !Array.isArray(body.browser)
-                ? body.browser as Record<string, unknown>
-                : undefined,
+            browser,
           }),
         );
       }
@@ -122,7 +137,8 @@ export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserE
         return response(await adapter.getCache({ actorId }));
       }
       if (method === 'DELETE') {
-        const body = readBody(request);
+        const body = bodyRecord(request);
+        if (!body) return invalidRequestBody();
         const input: BrowserCacheClearInput = {
           actorId,
           scope: text(body.scope) || undefined,
@@ -137,16 +153,21 @@ export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserE
 
     if (url.pathname === '/api/browser/actions') {
       if (method !== 'POST') return methodNotAllowed();
-      const body = readBody(request);
+      const body = bodyRecord(request);
+      if (!body) return invalidRequestBody();
+      const resourceUri = text(body.resourceUri);
+      const kind = text(body.kind) as BrowserTrustedActionKind;
+      if (!resourceUri || !kind) return invalidBrowserAction();
+      const payload = body.payload === undefined
+        ? undefined
+        : objectRecord(body.payload);
+      if (body.payload !== undefined && !payload) return invalidRequestBody();
       return response(
         await adapter.runTrustedAction({
           actorId,
-          resourceUri: text(body.resourceUri),
-          kind: text(body.kind) as BrowserTrustedActionKind,
-          payload:
-            body.payload && typeof body.payload === 'object' && !Array.isArray(body.payload)
-              ? body.payload as Record<string, unknown>
-              : undefined,
+          resourceUri,
+          kind,
+          payload,
         }),
       );
     }

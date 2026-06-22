@@ -41,6 +41,7 @@ export interface BotBrowserConversationRequest {
   actionKind: Extract<BrowserTrustedActionKind, 'open-conversation' | 'private-chat'>;
   actorId?: string | null;
   resourceUri: string;
+  conversationUri?: string | null;
   peerGlobalMetaId: string;
   peerName?: string | null;
   peerAvatar?: string | null;
