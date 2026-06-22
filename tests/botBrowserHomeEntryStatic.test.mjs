@@ -43,7 +43,7 @@ test('GigSquare remote provider browser entry uses confirmed globalMetaId and se
   assert.match(viewSource, /globalMetaId:\s*string;/);
   assert.match(viewSource, /name\?:\s*string;/);
   assert.match(viewSource, /avatar\?:\s*string;/);
-  assert.doesNotMatch(viewSource, /const providerLookupId = service\.providerGlobalMetaId \|\| service\.providerMetaId;/);
+  assert.match(viewSource, /const providerLookupId = providerGlobalMetaId \|\| service\.providerMetaId;/);
   assert.match(viewSource, /const providerGlobalMetaId = \(service\.providerGlobalMetaId \|\| ''\)\.trim\(\);/);
   assert.match(
     viewSource,

@@ -406,8 +406,9 @@ const GigSquareView: React.FC<GigSquareViewProps> = ({ onOpenRemoteBotInBrowser 
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filteredServices.map((service) => {
               const providerGlobalMetaId = (service.providerGlobalMetaId || '').trim();
+              const providerLookupId = providerGlobalMetaId || service.providerMetaId;
               const providerInfo = providerInfoMap[providerGlobalMetaId] || {};
-              const providerName = getGigSquareProviderDisplayName(providerInfo, providerGlobalMetaId);
+              const providerName = getGigSquareProviderDisplayName(providerInfo, providerLookupId);
               const providerAvatarSrc = getGigSquareProviderAvatarSrc(providerInfo);
               const refundRiskBadge = getGigSquareRefundRiskBadge(service.refundRisk);
               const hasRefundRisk = Boolean(refundRiskBadge);
@@ -418,8 +419,8 @@ const GigSquareView: React.FC<GigSquareViewProps> = ({ onOpenRemoteBotInBrowser 
                   service={service}
                   providerName={providerName}
                   providerAvatarSrc={providerAvatarSrc}
-                  providerLookupId={providerGlobalMetaId}
-                  providerIdRow={providerGlobalMetaId ? <GigSquareProviderIdRow providerId={providerGlobalMetaId} /> : null}
+                  providerLookupId={providerLookupId}
+                  providerIdRow={providerLookupId ? <GigSquareProviderIdRow providerId={providerLookupId} /> : null}
                   isOnline={isOnline}
                   hasRefundRisk={hasRefundRisk}
                   refundRiskLabel={refundRiskBadge ? i18nService.t('gigSquareRefundRiskBadge') : null}
