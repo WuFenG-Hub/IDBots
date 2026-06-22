@@ -110,7 +110,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
       return false;
     }
 
-    if (!await showBrowser()) return false;
+    if (!await showBrowser()) return true;
     openUriWhenBrowserReady({ uri });
     return true;
   }, [openUriWhenBrowserReady, showBrowser]);

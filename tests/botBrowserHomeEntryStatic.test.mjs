@@ -88,3 +88,16 @@ test('MetaApp Browser hook only reports unsupported MetaApps and leaves fallback
   assert.match(shellSource, /if \(!canOpenMetaAppInBrowser\(app\)\) \{\s*return false;\s*\}/);
   assert.match(shellSource, /if \(!uri\) \{\s*return false;\s*\}/);
 });
+
+test('MetaApp Browser hook treats no-bot guard failure as handled instead of falling back', () => {
+  const shellSource = read('src/renderer/features/botBrowser/useBotBrowserShell.ts');
+  const openMetaAppStart = shellSource.indexOf('const openMetaApp = useCallback');
+  const openMetaAppEnd = shellSource.indexOf('const switchToHome = useCallback', openMetaAppStart);
+  assert.ok(openMetaAppStart > 0, 'openMetaApp hook should exist');
+  assert.ok(openMetaAppEnd > openMetaAppStart, 'openMetaApp hook should end before switchToHome');
+
+  const openMetaAppSource = shellSource.slice(openMetaAppStart, openMetaAppEnd);
+  assert.match(openMetaAppSource, /if \(!canOpenMetaAppInBrowser\(app\)\) \{\s*return false;\s*\}/);
+  assert.match(openMetaAppSource, /if \(!uri\) \{\s*return false;\s*\}/);
+  assert.match(openMetaAppSource, /if \(!await showBrowser\(\)\) return true;/);
+});
