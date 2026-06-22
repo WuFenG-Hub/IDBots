@@ -70,9 +70,16 @@ const formatMetabotLimitReached = () =>
 const resolveMetabotActionError = (error?: string): string =>
   error === METABOT_LIMIT_REACHED_ERROR ? formatMetabotLimitReached() : (error || i18nService.t('metabotSaveFailed'));
 
-const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequestOnboarding?: () => void }> = ({
+interface MetabotsManagerProps {
+  onRequestModelSettings?: () => void;
+  onRequestOnboarding?: () => void;
+  onOpenMetabotInBrowser?: (metabot: Metabot) => void;
+}
+
+const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   onRequestModelSettings,
   onRequestOnboarding,
+  onOpenMetabotInBrowser,
 }) => {
   const dispatch = useDispatch();
   const [list, setList] = useState<Metabot[]>([]);
@@ -654,6 +661,7 @@ const MetabotsManager: React.FC<{ onRequestModelSettings?: () => void; onRequest
                 onDelete={() => handleDeleteRequest(m)}
                 isChainSynced={!!(m.metabot_info_pinid && m.metabot_info_pinid.trim())}
                 onSyncToChain={() => handleSyncUnsyncedMetabot(m)}
+                onOpenMetabotInBrowser={onOpenMetabotInBrowser}
               />
             ))}
           </div>

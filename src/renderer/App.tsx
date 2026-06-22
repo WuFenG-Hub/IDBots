@@ -70,6 +70,7 @@ const App: React.FC = () => {
   const mockUpdateModeRef = useRef(false);
   const mockDownloadTimerRef = useRef<number | null>(null);
   const mockInstallTimerRef = useRef<number | null>(null);
+  const openingMetaAppIdsRef = useRef<Set<string>>(new Set());
   const hasInitialized = useRef(false);
   const dispatch = useDispatch();
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
@@ -359,8 +360,17 @@ const App: React.FC = () => {
   }, [handleNewChat]);
 
   const handleStartTaskWithMetaApp = useCallback(async (app: MetaAppRecord) => {
-    await openSelectedMetaApp({ app, metaAppService });
-  }, [dispatch]);
+    if (openingMetaAppIdsRef.current.has(app.id)) {
+      return;
+    }
+
+    openingMetaAppIdsRef.current.add(app.id);
+    try {
+      await openSelectedMetaApp({ app, metaAppService });
+    } finally {
+      openingMetaAppIdsRef.current.delete(app.id);
+    }
+  }, []);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -732,12 +742,13 @@ const App: React.FC = () => {
   }
 
   const homeContent = mainView === 'gigSquare' ? (
-    <GigSquareView />
+    <GigSquareView onOpenRemoteBotInBrowser={botBrowserShell.openRemoteBot} />
   ) : mainView === 'metaapps' ? (
     <MetaAppsView
       isSidebarCollapsed={isSidebarCollapsed}
       onToggleSidebar={handleToggleSidebar}
       onNewChat={handleNewChat}
+      onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
       onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
     />
@@ -764,6 +775,7 @@ const App: React.FC = () => {
       updateBadge={isSidebarCollapsed ? updateBadge : null}
       onRequestModelSettings={() => handleShowSettings({ initialTab: 'model' })}
       onRequestOnboarding={handleOpenOnboarding}
+      onOpenMetabotInBrowser={botBrowserShell.openLocalMetabot}
     />
   ) : (
     <CoworkView

@@ -28,6 +28,7 @@ interface MetaBotListCardProps {
   onDelete: () => void;
   isChainSynced: boolean;
   onSyncToChain: () => void;
+  onOpenMetabotInBrowser?: (metabot: Metabot) => void;
 }
 
 interface BalanceState {
@@ -56,6 +57,7 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
   onDelete,
   isChainSynced,
   onSyncToChain,
+  onOpenMetabotInBrowser,
 }) => {
   const [balance, setBalance] = useState<BalanceState>({ loading: true });
   const [isAddressExpanded, setIsAddressExpanded] = useState(false);
@@ -202,110 +204,124 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
         }}
         className="rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface/50 bg-claude-surface/50 p-4 transition-colors hover:border-claude-accent/50 cursor-pointer text-left"
       >
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-3 min-w-0">
-          <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
-            {metabot.avatar && (metabot.avatar.startsWith('data:') || metabot.avatar.startsWith('http')) ? (
-              <img
-                src={metabot.avatar}
-                alt=""
-                className="w-12 h-12 rounded-xl object-cover"
-              />
-            ) : (
-              <div className="w-12 h-12 rounded-xl dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center">
-                <CpuChipIcon className="h-6 w-6 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
-              </div>
-            )}
-            {shortGlobalMetaId && (
-              <div className="flex items-center gap-1 max-w-[136px] text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                <span className="truncate">metaid:{shortGlobalMetaId}</span>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    copyGlobalMetaId(globalMetaId);
-                  }}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  className="shrink-0 p-0.5 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
-                  title={i18nService.t('metabotCopyGlobalMetaId')}
-                  aria-label={i18nService.t('metabotCopyGlobalMetaId')}
-                >
-                  <DocumentDuplicateIcon className="h-3 w-3 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
-                </button>
-              </div>
-            )}
+        <div className="flex items-start justify-between mb-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex flex-col items-center gap-1.5 flex-shrink-0">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenMetabotInBrowser?.(metabot);
+                }}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                }}
+                className="rounded-xl transition hover:ring-2 hover:ring-claude-accent/40 focus:outline-none focus:ring-2 focus:ring-claude-accent/60"
+                title="Open in Bot Browser"
+                aria-label="Open in Bot Browser"
+              >
+                {metabot.avatar && (metabot.avatar.startsWith('data:') || metabot.avatar.startsWith('http')) ? (
+                  <img
+                    src={metabot.avatar}
+                    alt=""
+                    className="w-12 h-12 rounded-xl object-cover"
+                  />
+                ) : (
+                  <div className="w-12 h-12 rounded-xl dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center">
+                    <CpuChipIcon className="h-6 w-6 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                  </div>
+                )}
+              </button>
+              {shortGlobalMetaId && (
+                <div className="flex items-center gap-1 max-w-[136px] text-[11px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  <span className="truncate">metaid:{shortGlobalMetaId}</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      copyGlobalMetaId(globalMetaId);
+                    }}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    className="shrink-0 p-0.5 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
+                    title={i18nService.t('metabotCopyGlobalMetaId')}
+                    aria-label={i18nService.t('metabotCopyGlobalMetaId')}
+                  >
+                    <DocumentDuplicateIcon className="h-3 w-3 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                  </button>
+                </div>
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <span className="text-base font-medium dark:text-claude-darkText text-claude-text block truncate">
+                {metabot.name}
+              </span>
+              <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate block">
+                {metabot.role || '—'}
+              </span>
+            </div>
           </div>
-          <div className="min-w-0 flex-1">
-            <span className="text-base font-medium dark:text-claude-darkText text-claude-text block truncate">
-              {metabot.name}
-            </span>
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate block">
-              {metabot.role || '—'}
-            </span>
-          </div>
-        </div>
-        <div
-          className={enabledToggleView.trackClass}
-          onClick={(e) => {
-            e.stopPropagation();
-            onToggleEnabled(!metabot.enabled);
-          }}
-          role="switch"
-          aria-checked={metabot.enabled}
-          title={metabot.enabled ? i18nService.t('metabotActive') : i18nService.t('metabotInactive')}
-        >
           <div
-            className={enabledToggleView.knobClass}
-          />
+            className={enabledToggleView.trackClass}
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleEnabled(!metabot.enabled);
+            }}
+            role="switch"
+            aria-checked={metabot.enabled}
+            title={metabot.enabled ? i18nService.t('metabotActive') : i18nService.t('metabotInactive')}
+          >
+            <div
+              className={enabledToggleView.knobClass}
+            />
+          </div>
         </div>
-      </div>
 
-      {metabot.goal && (
-        <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-3 line-clamp-2">
-          {metabot.goal}
-        </p>
-      )}
+        {metabot.goal && (
+          <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-3 line-clamp-2">
+            {metabot.goal}
+          </p>
+        )}
 
-      {!isChainSynced && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onSyncToChain();
-          }}
-          className="mb-3 inline-flex items-center gap-2 text-xs text-red-500 dark:text-red-400 hover:underline"
-          title={i18nService.t('metabotUnsyncedSyncNow')}
-        >
-          <span className="inline-block h-2 w-2 rounded-full bg-red-500 dark:bg-red-400" aria-hidden />
-          <span>{i18nService.t('metabotUnsyncedSyncNow')}</span>
-        </button>
-      )}
+        {!isChainSynced && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onSyncToChain();
+            }}
+            className="mb-3 inline-flex items-center gap-2 text-xs text-red-500 dark:text-red-400 hover:underline"
+            title={i18nService.t('metabotUnsyncedSyncNow')}
+          >
+            <span className="inline-block h-2 w-2 rounded-full bg-red-500 dark:bg-red-400" aria-hidden />
+            <span>{i18nService.t('metabotUnsyncedSyncNow')}</span>
+          </button>
+        )}
 
-      <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setIsAddressExpanded((v) => !v);
-          }}
-          className="text-xs text-claude-accent hover:underline"
-        >
-          {isAddressExpanded ? i18nService.t('metabotHideAddresses') : i18nService.t('metabotShowAddresses')}
-        </button>
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className="text-sm text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 transition-colors"
-          title={i18nService.t('metabotDelete')}
-        >
-          <TrashIcon className="h-4 w-4" />
-        </button>
-      </div>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsAddressExpanded((v) => !v);
+            }}
+            className="text-xs text-claude-accent hover:underline"
+          >
+            {isAddressExpanded ? i18nService.t('metabotHideAddresses') : i18nService.t('metabotShowAddresses')}
+          </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete();
+            }}
+            className="text-sm text-gray-400 hover:text-red-500 dark:text-gray-500 dark:hover:text-red-400 transition-colors"
+            title={i18nService.t('metabotDelete')}
+          >
+            <TrashIcon className="h-4 w-4" />
+          </button>
+        </div>
 
         {isAddressExpanded && (
           <div className="space-y-2 mt-2">

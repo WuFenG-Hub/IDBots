@@ -28,13 +28,17 @@ import {
 import { openMetaAppDirectory } from './metaAppLaunch.js';
 
 interface MetaAppsManagerProps {
+  onOpenMetaAppInBrowser?: (app: MetaAppRecord) => Promise<boolean> | boolean;
   onStartTaskWithMetaApp?: (app: MetaAppRecord) => Promise<void> | void;
 }
 
 const COMMUNITY_PAGE_SIZE = 30;
 const COMMUNITY_ROOT_CURSOR = '0';
 
-const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({ onStartTaskWithMetaApp }) => {
+const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
+  onOpenMetaAppInBrowser,
+  onStartTaskWithMetaApp,
+}) => {
   const [activeTab, setActiveTab] = useState<'local' | 'recommended' | 'chainCommunity'>('local');
   const [apps, setApps] = useState<MetaAppRecord[]>([]);
   const [communityApps, setCommunityApps] = useState<CommunityMetaAppRecord[]>([]);
@@ -335,10 +339,15 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({ onStartTaskWithMetaAp
   };
 
   const handleUseMetaApp = async (app: MetaAppRecord) => {
-    if (!onStartTaskWithMetaApp || openingFolderAppId || startingAppId) return;
+    if ((!onOpenMetaAppInBrowser && !onStartTaskWithMetaApp) || openingFolderAppId || startingAppId) return;
     setStartingAppId(app.id);
     setActionError('');
     try {
+      const openedInBrowser = onOpenMetaAppInBrowser ? await onOpenMetaAppInBrowser(app) : false;
+      if (openedInBrowser) {
+        return;
+      }
+      if (!onStartTaskWithMetaApp) return;
       await onStartTaskWithMetaApp(app);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : i18nService.t('metaAppUseFailed'));
@@ -505,7 +514,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({ onStartTaskWithMetaAp
                   <Tooltip content={i18nService.t('metaAppUse')} position="top">
                     <button
                       type="button"
-                      disabled={!onStartTaskWithMetaApp || openingFolderAppId !== null || startingAppId !== null}
+                      disabled={(!onOpenMetaAppInBrowser && !onStartTaskWithMetaApp) || openingFolderAppId !== null || startingAppId !== null}
                       onClick={() => void handleUseMetaApp(app)}
                       className="p-1 rounded text-claude-textSecondary dark:text-claude-darkTextSecondary hover:text-claude-accent hover:bg-claude-accent/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                       title={i18nService.t('metaAppUse')}
