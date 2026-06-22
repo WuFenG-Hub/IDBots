@@ -385,7 +385,6 @@ const App: React.FC = () => {
 
   const botBrowserShell = useBotBrowserShell({
     showToast,
-    fallbackOpenMetaApp: handleStartTaskWithMetaApp,
   });
 
   const handleShowLogin = useCallback(() => {

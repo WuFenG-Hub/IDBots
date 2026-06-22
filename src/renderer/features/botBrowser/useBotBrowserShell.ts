@@ -17,11 +17,10 @@ import type {
 
 interface UseBotBrowserShellInput {
   showToast: (message: string) => void;
-  fallbackOpenMetaApp: (app: MetaAppRecord) => Promise<void>;
 }
 
 export function useBotBrowserShell(input: UseBotBrowserShellInput) {
-  const { showToast, fallbackOpenMetaApp } = input;
+  const { showToast } = input;
   const browserRef = useRef<BotBrowserSurfaceHandle | null>(null);
   const pendingOpenUriRef = useRef<BotBrowserOpenUriInput | null>(null);
   const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('home');
@@ -103,20 +102,18 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
 
   const openMetaApp = useCallback(async (app: MetaAppRecord): Promise<boolean> => {
     if (!canOpenMetaAppInBrowser(app)) {
-      await fallbackOpenMetaApp(app);
       return false;
     }
 
     const uri = buildMetaAppBrowserUri(app);
     if (!uri) {
-      await fallbackOpenMetaApp(app);
       return false;
     }
 
     if (!await showBrowser()) return false;
     openUriWhenBrowserReady({ uri });
     return true;
-  }, [fallbackOpenMetaApp, openUriWhenBrowserReady, showBrowser]);
+  }, [openUriWhenBrowserReady, showBrowser]);
 
   const switchToHome = useCallback(() => {
     setSurfaceMode('home');

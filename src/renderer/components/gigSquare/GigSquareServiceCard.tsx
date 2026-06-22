@@ -176,6 +176,9 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
             event.stopPropagation();
             onOpenProviderInBrowser?.();
           }}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+          }}
           className="min-w-0 flex items-center gap-2 text-left disabled:cursor-default"
           title="Open provider in Bot Browser"
         >

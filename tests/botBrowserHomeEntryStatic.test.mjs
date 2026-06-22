@@ -54,6 +54,13 @@ test('GigSquare remote provider browser entry uses confirmed globalMetaId and se
   assert.match(cardSource, /onOpenProviderInBrowser\?:\s*\(\)\s*=>\s*void;/);
   assert.match(cardSource, /disabled=\{!onOpenProviderInBrowser\}/);
   assert.match(cardSource, /onClick=\{\(event\)\s*=>\s*\{[\s\S]*event\.stopPropagation\(\);[\s\S]*onOpenProviderInBrowser\?\.?\(\);[\s\S]*\}\}/);
+
+  const providerButtonStart = cardSource.indexOf('disabled={!onOpenProviderInBrowser}');
+  const actionButtonStart = cardSource.indexOf('className="btn-idchat-primary-filled', providerButtonStart);
+  assert.ok(providerButtonStart > 0, 'provider browser button should be present');
+  assert.ok(actionButtonStart > providerButtonStart, 'service action button should follow provider button');
+  const providerButtonSource = cardSource.slice(providerButtonStart, actionButtonStart);
+  assert.match(providerButtonSource, /onKeyDown=\{\(event\)\s*=>\s*\{[\s\S]*event\.stopPropagation\(\);[\s\S]*\}\}/);
 });
 
 test('MetaApps run path tries Browser first and falls back to existing task launch', () => {
@@ -70,4 +77,14 @@ test('MetaApps run path tries Browser first and falls back to existing task laun
   );
   assert.match(managerSource, /if \(openedInBrowser\) \{\s*return;\s*\}/);
   assert.match(managerSource, /await onStartTaskWithMetaApp\(app\);/);
+});
+
+test('MetaApp Browser hook only reports unsupported MetaApps and leaves fallback to manager', () => {
+  const appSource = read('src/renderer/App.tsx');
+  const shellSource = read('src/renderer/features/botBrowser/useBotBrowserShell.ts');
+
+  assert.doesNotMatch(appSource, /fallbackOpenMetaApp/);
+  assert.doesNotMatch(shellSource, /fallbackOpenMetaApp/);
+  assert.match(shellSource, /if \(!canOpenMetaAppInBrowser\(app\)\) \{\s*return false;\s*\}/);
+  assert.match(shellSource, /if \(!uri\) \{\s*return false;\s*\}/);
 });
