@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let listCommunityMetaApps;
 try {
-  ({ listCommunityMetaApps } = require('../dist-electron/services/metaAppChainService.js'));
+  ({ listCommunityMetaApps } = require('../dist-electron/main/services/metaAppChainService.js'));
 } catch {
   listCommunityMetaApps = null;
 }

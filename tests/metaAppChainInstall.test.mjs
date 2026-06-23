@@ -13,12 +13,12 @@ let installCommunityMetaApp;
 let MetaAppManager;
 let AdmZip;
 try {
-  ({ installCommunityMetaApp } = require('../dist-electron/services/metaAppChainService.js'));
+  ({ installCommunityMetaApp } = require('../dist-electron/main/services/metaAppChainService.js'));
 } catch {
   installCommunityMetaApp = null;
 }
 try {
-  ({ MetaAppManager } = require('../dist-electron/metaAppManager.js'));
+  ({ MetaAppManager } = require('../dist-electron/main/metaAppManager.js'));
 } catch {
   MetaAppManager = null;
 }
@@ -185,6 +185,49 @@ test('installCommunityMetaApp installs zip from content metafile when code is em
   const config = JSON.parse(fs.readFileSync(path.join(metaAppsRoot, 'metaapps.config.json'), 'utf8'));
   assert.equal(config.defaults?.IDDisk?.version, 'v1.1.0');
   assert.equal(config.defaults?.IDDisk?.['source-type'], 'chain-community');
+});
+
+test('installCommunityMetaApp strips optional file extension from metafile code uri', async () => {
+  assert.equal(typeof installCommunityMetaApp, 'function', 'installCommunityMetaApp() should be exported');
+  assert.equal(typeof MetaAppManager, 'function', 'MetaAppManager should be exported');
+
+  const tempDir = createTempDir();
+  const metaAppsRoot = path.join(tempDir, 'METAAPPs');
+
+  const result = await withMetaAppsRoot(metaAppsRoot, async () => {
+    const manager = new MetaAppManager();
+    return installCommunityMetaApp({
+      sourcePinId: 'pin-eric-homepage',
+      manager,
+      fetchList: async () => [
+        {
+          id: 'pin-eric-homepage',
+          globalMetaId: 'idq1creator',
+          timestamp: 1_781_447_240,
+          contentSummary: JSON.stringify({
+            title: 'Eric Homepage',
+            appName: 'eric-homepage',
+            intro: 'Homepage app from chain',
+            runtime: 'browser',
+            version: '1.0.0',
+            code: 'metafile://zip-eric-homepage.zip',
+            codeType: 'application/zip',
+            indexFile: 'index.html',
+            disabled: false,
+          }),
+        },
+      ],
+      fetchCodeZip: async (pinId) => {
+        assert.equal(pinId, 'zip-eric-homepage');
+        return createZipBuffer([{ name: 'index.html', content: '<html>eric</html>' }]);
+      },
+      now: () => 555,
+    });
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.appId, 'eric-homepage');
+  assert.equal(fs.existsSync(path.join(metaAppsRoot, 'eric-homepage', 'index.html')), true);
 });
 
 test('installCommunityMetaApp blocks install on appId conflict with different creator', async () => {

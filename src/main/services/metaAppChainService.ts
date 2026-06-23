@@ -333,11 +333,12 @@ const extractMetafilePinId = (uri: string): string => {
   if (!trimmed.toLowerCase().startsWith('metafile://')) {
     return '';
   }
-  const pinId = trimmed.slice('metafile://'.length).trim();
-  if (!pinId || pinId.includes('/') || pinId.includes('\\')) {
+  const rawPinId = trimmed.slice('metafile://'.length).trim();
+  if (!rawPinId || rawPinId.includes('/') || rawPinId.includes('\\')) {
     return '';
   }
-  return pinId;
+  const pinId = rawPinId.replace(/\.[A-Za-z0-9_-]+$/, '');
+  return pinId || '';
 };
 
 const sanitizeAppId = (name: string, fallbackPinId: string): string => {
