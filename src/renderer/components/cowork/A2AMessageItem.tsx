@@ -15,6 +15,15 @@ interface A2AMessageItemProps {
   metabotName?: string | null;
   /** Local MetaBot avatar data URL */
   metabotAvatar?: string | null;
+  /** Remote peer MetaBot GlobalMetaID */
+  peerGlobalMetaId?: string | null;
+  /** Local MetaBot GlobalMetaID */
+  localGlobalMetaId?: string | null;
+  onOpenBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string | null;
+    avatar?: string | null;
+  }) => void;
   canResendDigitalDelivery?: boolean;
   isResendingDigitalDelivery?: boolean;
   onResendDigitalDelivery?: (orderTxid: string) => void;
@@ -394,19 +403,59 @@ const pickRenderableAvatarSource = (...values: Array<string | null | undefined>)
   return null;
 };
 
-const Avatar: React.FC<{ src?: string | null; name?: string | null; size?: number }> = ({
+const normalizeA2ABotGlobalMetaId = (value: unknown): string => (
+  typeof value === 'string' ? value.trim() : ''
+);
+
+const Avatar: React.FC<{
+  src?: string | null;
+  name?: string | null;
+  size?: number;
+  browserGlobalMetaId?: string | null;
+  onOpenInBrowser?: () => void;
+}> = ({
   src,
   name,
   size = 32,
-}) => (
-  <img
-    src={src || DEFAULT_METABOT_AVATAR}
-    alt={name || ''}
-    style={{ width: size, height: size }}
-    className="rounded-full object-cover flex-shrink-0"
-    onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_METABOT_AVATAR; }}
-  />
-);
+  browserGlobalMetaId,
+  onOpenInBrowser,
+}) => {
+  const image = (
+    <img
+      src={src || DEFAULT_METABOT_AVATAR}
+      alt={name || ''}
+      className="h-full w-full rounded-full object-cover"
+      onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_METABOT_AVATAR; }}
+    />
+  );
+
+  if (browserGlobalMetaId && onOpenInBrowser) {
+    const label = `Open ${name || 'Bot'} in Bot Browser`;
+    return (
+      <button
+        type="button"
+        data-browser-global-metaid={browserGlobalMetaId}
+        aria-label={label}
+        title={label}
+        onClick={onOpenInBrowser}
+        style={{ width: size, height: size }}
+        className="rounded-full flex-shrink-0 overflow-hidden transition-shadow hover:ring-2 hover:ring-claude-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+      >
+        {image}
+      </button>
+    );
+  }
+
+  return (
+    <img
+      src={src || DEFAULT_METABOT_AVATAR}
+      alt={name || ''}
+      style={{ width: size, height: size }}
+      className="rounded-full object-cover flex-shrink-0"
+      onError={(e) => { (e.currentTarget as HTMLImageElement).src = DEFAULT_METABOT_AVATAR; }}
+    />
+  );
+};
 
 const getA2AMarkdownClassName = (isLocal: boolean): string => {
   return isLocal
@@ -638,6 +687,9 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   peerAvatar,
   metabotName,
   metabotAvatar,
+  peerGlobalMetaId,
+  localGlobalMetaId,
+  onOpenBotInBrowser,
   canResendDigitalDelivery = false,
   isResendingDigitalDelivery = false,
   onResendDigitalDelivery,
@@ -724,6 +776,19 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
   const fromAvatar = isLocal
     ? pickRenderableAvatarSource(metabotAvatar)
     : pickRenderableAvatarSource(peerAvatar, senderAvatar);
+  const fromGlobalMetaId = isLocal
+    ? normalizeA2ABotGlobalMetaId(localGlobalMetaId)
+    : (
+      normalizeA2ABotGlobalMetaId(message.metadata?.senderGlobalMetaId)
+      || normalizeA2ABotGlobalMetaId(peerGlobalMetaId)
+    );
+  const handleOpenSenderInBrowser = fromGlobalMetaId && onOpenBotInBrowser
+    ? () => onOpenBotInBrowser({
+      globalMetaId: fromGlobalMetaId,
+      name: fromName,
+      avatar: fromAvatar,
+    })
+    : undefined;
   const deliveryPayload = parseDeliveryPayload(message.content);
   const deliveryResult = typeof deliveryPayload?.result === 'string'
     ? deliveryPayload.result.trim()
@@ -738,7 +803,13 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
 
   return (
     <div className={`flex items-end gap-2 px-4 py-1 ${isLocal ? 'flex-row-reverse' : 'flex-row'}`}>
-      <Avatar src={fromAvatar} name={fromName} size={32} />
+      <Avatar
+        src={fromAvatar}
+        name={fromName}
+        size={32}
+        browserGlobalMetaId={fromGlobalMetaId}
+        onOpenInBrowser={handleOpenSenderInBrowser}
+      />
       <div className={`flex flex-col max-w-[70%] ${isLocal ? 'items-end' : 'items-start'}`}>
         <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-0.5 px-1">
           {fromName}

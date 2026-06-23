@@ -54,6 +54,11 @@ interface CoworkSessionDetailProps {
   isSidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
   onNewChat?: () => void;
+  onOpenBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string | null;
+    avatar?: string | null;
+  }) => void;
   updateBadge?: React.ReactNode;
 }
 
@@ -1927,6 +1932,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   isSidebarCollapsed,
   onToggleSidebar,
   onNewChat,
+  onOpenBotInBrowser,
   updateBadge,
 }) => {
   const isMac = window.electron.platform === 'darwin';
@@ -1994,6 +2000,19 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const visibleA2AMessages = useMemo(() => (
     currentSession?.messages.filter((message) => !shouldHideControlMessage(message)) ?? []
   ), [currentSession?.messages]);
+  const a2aPeerGlobalMetaId = useMemo(() => {
+    if (currentSession?.sessionType !== 'a2a') return null;
+    const sessionPeerGlobalMetaId = typeof currentSession.peerGlobalMetaId === 'string'
+      ? currentSession.peerGlobalMetaId.trim()
+      : '';
+    if (sessionPeerGlobalMetaId) return sessionPeerGlobalMetaId;
+    const firstIncomingMetadata = currentSession.messages.find(
+      (message) => message.metadata?.direction === 'incoming'
+    )?.metadata;
+    return typeof firstIncomingMetadata?.senderGlobalMetaId === 'string'
+      ? firstIncomingMetadata.senderGlobalMetaId.trim() || null
+      : null;
+  }, [currentSession?.sessionType, currentSession?.peerGlobalMetaId, currentSession?.messages]);
   const normalizedFocusedOrderTxid = normalizeOrderFocusTxid(focusedOrderTxid);
   const refundStatusDismissKey = useMemo(() => (
     buildRefundStatusDismissKey(currentSession?.id, currentSession?.serviceOrderSummary)
@@ -3056,6 +3075,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   peerAvatar={resolvedPeerAvatar}
                   metabotName={currentSession.metabotName}
                   metabotAvatar={currentSession.metabotAvatar}
+                  peerGlobalMetaId={a2aPeerGlobalMetaId}
+                  localGlobalMetaId={sessionMetabot?.globalmetaid}
+                  onOpenBotInBrowser={onOpenBotInBrowser}
                   canResendDigitalDelivery={canResendDigitalDelivery}
                   isResendingDigitalDelivery={Boolean(resendingDeliveryOrderTxid)}
                   onResendDigitalDelivery={handleResendDigitalDelivery}

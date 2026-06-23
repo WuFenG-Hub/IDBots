@@ -110,6 +110,11 @@ export interface CoworkViewProps {
   onRequestAppSettings?: (options?: SettingsOpenOptions) => void;
   onRequestOnboarding?: () => void;
   onShowSkills?: () => void;
+  onOpenBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string | null;
+    avatar?: string | null;
+  }) => void;
   focusedOrderTxid?: string | null;
   onFocusedOrderConsumed?: (orderTxid: string) => void;
   isSidebarCollapsed?: boolean;
@@ -122,6 +127,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   onRequestAppSettings,
   onRequestOnboarding,
   onShowSkills,
+  onOpenBotInBrowser,
   focusedOrderTxid,
   onFocusedOrderConsumed,
   isSidebarCollapsed,
@@ -547,6 +553,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
           isSidebarCollapsed={isSidebarCollapsed}
           onToggleSidebar={onToggleSidebar}
           onNewChat={onNewChat}
+          onOpenBotInBrowser={onOpenBotInBrowser}
           updateBadge={updateBadge}
         />
       </>

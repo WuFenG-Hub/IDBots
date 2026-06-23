@@ -792,6 +792,7 @@ const App: React.FC = () => {
       onRequestOnboarding={handleOpenOnboarding}
       focusedOrderTxid={focusedOrderTxid}
       onFocusedOrderConsumed={handleFocusedOrderConsumed}
+      onOpenBotInBrowser={botBrowserShell.openRemoteBot}
     />
   );
 

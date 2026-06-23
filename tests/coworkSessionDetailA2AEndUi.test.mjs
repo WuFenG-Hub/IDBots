@@ -70,6 +70,25 @@ test('CoworkSessionDetail wires resend digital delivery to order-scoped A2A mess
   assert.doesNotMatch(source, /outputType !== 'text'/);
 });
 
+test('A2A Bot avatar browser-open handler is wired from App into message items', () => {
+  const appSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'App.tsx'),
+    'utf8'
+  );
+  const coworkViewSource = fs.readFileSync(
+    path.join(projectRoot, 'src', 'renderer', 'components', 'cowork', 'CoworkView.tsx'),
+    'utf8'
+  );
+  const source = fs.readFileSync(sourcePath, 'utf8');
+
+  assert.match(appSource, /onOpenBotInBrowser=\{botBrowserShell\.openRemoteBot\}/);
+  assert.match(coworkViewSource, /onOpenBotInBrowser\?:/);
+  assert.match(coworkViewSource, /onOpenBotInBrowser=\{onOpenBotInBrowser\}/);
+  assert.match(source, /localGlobalMetaId=\{sessionMetabot\?\.globalmetaid/);
+  assert.match(source, /peerGlobalMetaId=\{a2aPeerGlobalMetaId\}/);
+  assert.match(source, /onOpenBotInBrowser=\{onOpenBotInBrowser\}/);
+});
+
 test('manual A2A delivery resend IPC accepts an order-scoped request', () => {
   const source = fs.readFileSync(
     path.join(projectRoot, 'src', 'main', 'main.ts'),

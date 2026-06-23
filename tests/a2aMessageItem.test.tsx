@@ -59,6 +59,55 @@ test('A2A incoming message does not render raw MetaID content avatar paths direc
   assert.doesNotMatch(markup, /src="\/content\//);
 });
 
+test('A2A message avatars expose Bot Browser targets for both local and peer Bots', () => {
+  const txid = '1'.repeat(64);
+  const outgoingMarkup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-local-avatar-browser',
+        type: 'assistant',
+        content: 'Hello from local',
+        timestamp: 1_744_444_444_000,
+        metadata: { direction: 'outgoing', txid },
+      }}
+      metabotName="Local Bot"
+      metabotAvatar="https://example.com/local.png"
+      localGlobalMetaId="idq1localbot"
+      peerGlobalMetaId="idq1peerbot"
+      onOpenBotInBrowser={() => {}}
+    />
+  );
+
+  assert.match(outgoingMarkup, /<button[^>]*data-browser-global-metaid="idq1localbot"[^>]*aria-label="Open Local Bot in Bot Browser"/);
+  assert.doesNotMatch(outgoingMarkup, /data-browser-global-metaid="idq1peerbot"/);
+
+  const incomingMarkup = renderToStaticMarkup(
+    <A2AMessageItem
+      message={{
+        id: 'msg-peer-avatar-browser',
+        type: 'user',
+        content: 'Hello from peer',
+        timestamp: 1_744_444_444_000,
+        metadata: {
+          direction: 'incoming',
+          senderName: 'Peer Bot',
+          senderGlobalMetaId: 'idq1senderpeer',
+          senderAvatar: 'https://example.com/peer.png',
+          txid,
+        },
+      }}
+      peerName="Fallback Peer"
+      peerAvatar="https://example.com/fallback-peer.png"
+      localGlobalMetaId="idq1localbot"
+      peerGlobalMetaId="idq1fallbackpeer"
+      onOpenBotInBrowser={() => {}}
+    />
+  );
+
+  assert.match(incomingMarkup, /<button[^>]*data-browser-global-metaid="idq1senderpeer"[^>]*aria-label="Open Peer Bot in Bot Browser"/);
+  assert.doesNotMatch(incomingMarkup, /data-browser-global-metaid="idq1fallbackpeer"/);
+});
+
 test('A2A non-chain ordinary messages render as internal status instead of chat bubbles', () => {
   const markup = renderToStaticMarkup(
     <A2AMessageItem
