@@ -8881,6 +8881,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   // 设置 Content Security Policy
   const setContentSecurityPolicy = () => {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      // Bot Browser 的 MetaApp 预览内容由本地预览服务器 (127.0.0.1) 提供，
+      // 属于第三方 MetaApp 自带的 HTML。它的 index.html 可能引用任意外部 CDN
+      // 资源（字体、动画库等），不应被为 IDBots 主界面设计的严格 CSP 约束。
+      // 在此豁免预览服务器的响应，让 MetaApp 自行决定可加载的资源来源。
+      if (/^http:\/\/(127\.0\.0\.1|localhost):\d+\/browser-cache\/metaapp-preview\//iu.test(details.url)) {
+        callback({});
+        return;
+      }
       const devPort = process.env.ELECTRON_START_URL?.match(/:(\d+)/)?.[1] || '5175';
       const cspDirectives = [
         "default-src 'self'",
