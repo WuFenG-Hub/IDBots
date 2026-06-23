@@ -1,6 +1,7 @@
 import type { BrowserPageDefinition } from '@openagentinternet/agent-browser-ui/browser';
 
 export const BROWSER_INIT_MARKER = "if (document.readyState === 'loading') {";
+const METAAPP_IFRAME_SANDBOX_RE = /(<iframe\b(?=[^>]*\bclass=["']browser-html-frame["'])(?=[^>]*\bsandbox=["'])[^>]*\bsandbox=["'])allow-scripts(["'][^>]*>)/gu;
 
 export function buildBrowserIframeBridgeScript(): string {
   return `
@@ -282,6 +283,10 @@ export function buildBrowserIframeBridgeScript(): string {
   }
 })();
 `;
+}
+
+export function relaxMetaAppIframeSandbox(html: string): string {
+  return html.replace(METAAPP_IFRAME_SANDBOX_RE, '$1allow-scripts allow-same-origin$2');
 }
 
 export function injectBrowserIframeBridge(

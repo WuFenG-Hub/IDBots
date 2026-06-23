@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildBrowserIframeBridgeScript } from '../src/renderer/features/botBrowser/browserIframeBridge.ts';
+import {
+  buildBrowserIframeBridgeScript,
+  relaxMetaAppIframeSandbox,
+} from '../src/renderer/features/botBrowser/browserIframeBridge.ts';
 
 test('bridge gates browser-ready on runtime readiness without DOM timer readiness', () => {
   const script = buildBrowserIframeBridgeScript();
@@ -35,4 +38,16 @@ test('bridge refresh-runtime forceReload bypasses cached runtimeReadyPromise', (
     script,
     /function ensureRuntimeReady\(options\) \{[\s\S]*var forceReload = Boolean\(options && options\.forceReload\);[\s\S]*if \(!forceReload && runtimeReadyPromise\) \{\s*return runtimeReadyPromise;\s*\}[\s\S]*await globalThis\.loadRuntime\(\);/,
   );
+});
+
+test('relaxes only MetaAPP preview iframe sandbox to preserve local preview same-origin behavior', () => {
+  const html = [
+    '<iframe class="browser-html-frame" sandbox="allow-scripts" src="http://127.0.0.1:23456/browser-cache/metaapp-preview/session/index.html"></iframe>',
+    '<iframe class="browser-pdf" sandbox="" src="http://127.0.0.1:23456/file.pdf"></iframe>',
+  ].join('\n');
+
+  const relaxed = relaxMetaAppIframeSandbox(html);
+
+  assert.match(relaxed, /class="browser-html-frame" sandbox="allow-scripts allow-same-origin"/);
+  assert.match(relaxed, /class="browser-pdf" sandbox=""/);
 });

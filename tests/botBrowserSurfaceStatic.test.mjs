@@ -70,3 +70,11 @@ test('surface wires Bot Browser MetaApp cache IPC into the host adapter', () => 
   assert.match(adapterSection, /getMetaAppCache:\s*\(\) => window\.electron\.botBrowser\.getMetaAppCache\(\)/);
   assert.match(adapterSection, /clearMetaAppCache:\s*\(input\) => window\.electron\.botBrowser\.clearMetaAppCache\(input\)/);
 });
+
+test('surface relaxes MetaAPP iframe sandbox after rendering the packaged Browser HTML', () => {
+  assert.match(
+    source,
+    /import \{ injectBrowserIframeBridge,\s*relaxMetaAppIframeSandbox \} from '\.\/browserIframeBridge';/,
+  );
+  assert.match(source, /const html = relaxMetaAppIframeSandbox\(\s*await renderBrowserPageHtml\(definition, getBrowserLanguagePreference\(\)\),\s*\);/);
+});
