@@ -36,6 +36,7 @@ tests/*
 !tests/gigSquareSkillOptions.test.mjs
 !tests/gigSquareServiceCard.test.tsx
 !tests/a2aMessageItem.test.tsx
+!tests/botBrowserModeSwitch.test.tsx
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
 !tests/orderPromptBuilder.test.ts

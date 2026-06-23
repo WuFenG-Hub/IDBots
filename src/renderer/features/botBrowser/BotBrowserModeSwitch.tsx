@@ -10,10 +10,10 @@ interface BotBrowserModeSwitchProps {
 }
 
 const tabClass = (active: boolean) => [
-  'non-draggable h-6 rounded-md px-2.5 text-[11px] font-medium transition-colors',
+  'non-draggable inline-flex h-7 min-w-[96px] items-center justify-center rounded-full px-3 text-[12px] font-medium leading-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/40',
   active
-    ? 'bg-claude-accent/10 text-claude-accent'
-    : 'text-claude-textSecondary hover:bg-claude-surfaceHover hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover dark:hover:text-claude-darkText',
+    ? 'bg-claude-accentMuted text-claude-accent shadow-sm'
+    : 'text-claude-textSecondary hover:bg-claude-surfaceHover/70 hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover/70 dark:hover:text-claude-darkText',
 ].join(' ');
 
 const BotBrowserModeSwitch: React.FC<BotBrowserModeSwitchProps> = ({
@@ -23,10 +23,19 @@ const BotBrowserModeSwitch: React.FC<BotBrowserModeSwitchProps> = ({
   onSelectBrowser,
 }) => {
   return (
-    <div className="draggable flex h-8 shrink-0 items-center justify-between border-b border-claude-border/60 bg-claude-surfaceMuted/80 px-2 dark:border-claude-darkBorder/60 dark:bg-claude-darkSurfaceMuted/80">
-      <div className="non-draggable inline-flex items-center gap-1 rounded-lg border border-claude-border/70 bg-claude-bg/70 p-0.5 dark:border-claude-darkBorder/70 dark:bg-claude-darkBg/70">
+    <div
+      data-slot="bot-browser-mode-bar"
+      className="draggable relative flex h-11 shrink-0 items-center justify-center border-b border-claude-border/60 bg-claude-surfaceMuted/85 px-3 dark:border-claude-darkBorder/60 dark:bg-claude-darkSurfaceMuted/85"
+    >
+      <div
+        data-slot="bot-browser-mode-segments"
+        role="group"
+        aria-label="Bot Browser display mode"
+        className="non-draggable inline-flex items-center gap-0.5 rounded-full border border-claude-border/70 bg-claude-bg/80 p-0.5 shadow-sm dark:border-claude-darkBorder/70 dark:bg-claude-darkBg/80"
+      >
         <button
           type="button"
+          aria-pressed={mode === 'home'}
           className={tabClass(mode === 'home')}
           onClick={onSelectHome}
         >
@@ -34,13 +43,16 @@ const BotBrowserModeSwitch: React.FC<BotBrowserModeSwitchProps> = ({
         </button>
         <button
           type="button"
+          aria-pressed={mode === 'browser'}
           className={tabClass(mode === 'browser')}
           onClick={onSelectBrowser}
         >
           Bot Browser
         </button>
       </div>
-      {isBrowserVisible ? <WindowTitleBar inline /> : <div className="h-8 w-0" />}
+      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center">
+        {isBrowserVisible ? <WindowTitleBar inline /> : <div aria-hidden="true" className="h-8 w-0" />}
+      </div>
     </div>
   );
 };
