@@ -1,5 +1,15 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
 import type {
+  BrowserCommandResult as CoreBrowserCommandResult,
+  MetaAppGalleryRecord,
+} from '@openagentinternet/agent-browser-core';
+import type {
+  BrowserCacheClearInput,
+  BrowserCacheClearResult,
+  BrowserCacheSnapshot,
+  BrowserCommandResult as HostBrowserCommandResult,
+} from '@openagentinternet/agent-browser-host-contract';
+import type {
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
 } from './cowork';
@@ -418,6 +428,11 @@ interface IElectronAPI {
     resolveUrl: (input: { appId: string; targetPath?: string }) => Promise<MetaAppUrlResult>;
     autoRoutingPrompt: () => Promise<{ success: boolean; prompt?: string | null; error?: string }>;
     onChanged: (callback: () => void) => () => void;
+  };
+  botBrowser: {
+    resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
+    getMetaAppCache: () => Promise<HostBrowserCommandResult<BrowserCacheSnapshot>>;
+    clearMetaAppCache: (input?: BrowserCacheClearInput) => Promise<HostBrowserCommandResult<BrowserCacheClearResult>>;
   };
   api: {
     fetch: (options: {

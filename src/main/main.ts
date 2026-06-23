@@ -119,6 +119,7 @@ import * as p2pIndexerService from './services/p2pIndexerService';
 import * as p2pConfigService from './services/p2pConfigService';
 import { runAppCleanup as runSharedAppCleanup } from './services/appCleanup';
 import { ensureMetaAppServerReady, stopMetaAppServer } from './services/metaAppLocalServer';
+import { createBotBrowserMetaAppCacheService, type BotBrowserMetaAppCacheService } from './services/botBrowserMetaAppCacheService';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   findCommunityMetaAppRecordBySourcePinId,
@@ -2299,6 +2300,7 @@ let mcpStore: McpStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
 let skillManager: SkillManager | null = null;
 let metaAppManager: MetaAppManager | null = null;
+let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
@@ -3828,6 +3830,15 @@ const getMetaAppManager = () => {
   return metaAppManager;
 };
 
+const getBotBrowserMetaAppCacheService = () => {
+  if (!botBrowserMetaAppCacheService) {
+    botBrowserMetaAppCacheService = createBotBrowserMetaAppCacheService({
+      cacheRoot: path.join(app.getPath('userData'), 'browser-cache', 'metaapps'),
+    });
+  }
+  return botBrowserMetaAppCacheService;
+};
+
 const getIMGatewayManager = () => {
   if (!imGatewayManager) {
     const sqliteStore = getStore();
@@ -4901,6 +4912,18 @@ if (!gotTheLock) {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to build MetaApp auto-routing prompt' };
     }
+  });
+
+  ipcMain.handle('botBrowser:resolveMetaAppPin', async (_event, input: { pinId?: string }) => {
+    return getBotBrowserMetaAppCacheService().resolveMetaAppPin(String(input?.pinId ?? ''));
+  });
+
+  ipcMain.handle('botBrowser:getMetaAppCache', async () => {
+    return getBotBrowserMetaAppCacheService().getCache();
+  });
+
+  ipcMain.handle('botBrowser:clearMetaAppCache', async (_event, input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) => {
+    return getBotBrowserMetaAppCacheService().clearCache(input);
   });
 
   ipcMain.handle('metaapps:list', async () => {
@@ -8820,7 +8843,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         "font-src 'self' data:",
         "media-src 'self' blob: https://file.metaid.io https://metafs.oss-cn-beijing.aliyuncs.com",
         "worker-src 'self' blob:",
-        "frame-src 'self'"
+        "frame-src 'self' http://127.0.0.1:* http://localhost:*"
       ];
 
       callback({
@@ -9045,6 +9068,10 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     await stopMetaAppServer().catch((error) => {
       console.error('[metaapps] Failed to stop local server during cleanup:', error);
     });
+    await botBrowserMetaAppCacheService?.stop().catch((error) => {
+      console.error('[bot-browser] Failed to stop MetaApp cache server during cleanup:', error);
+    });
+    botBrowserMetaAppCacheService = null;
     await runSharedAppCleanup({
       destroyTray,
       stopSkillWatching: () => {

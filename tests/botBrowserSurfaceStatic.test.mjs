@@ -58,3 +58,15 @@ test('surface does not flush pending intents from iframe load events', () => {
   assert.doesNotMatch(source, /const handleIframeLoad = useCallback\(/);
   assert.doesNotMatch(source, /onLoad=\{handleIframeLoad\}/);
 });
+
+test('surface wires Bot Browser MetaApp cache IPC into the host adapter', () => {
+  const adapterSection = getSection(
+    'const adapter = createIdbotsBrowserHostAdapter({',
+    '      endpointShimRef.current = createBrowserEndpointShim(adapter);',
+  );
+
+  assert.match(adapterSection, /resolveMetaAppPin:\s*async \(pinId\) =>/);
+  assert.match(adapterSection, /window\.electron\.botBrowser\.resolveMetaAppPin\(\{ pinId \}\)/);
+  assert.match(adapterSection, /getMetaAppCache:\s*\(\) => window\.electron\.botBrowser\.getMetaAppCache\(\)/);
+  assert.match(adapterSection, /clearMetaAppCache:\s*\(input\) => window\.electron\.botBrowser\.clearMetaAppCache\(input\)/);
+});

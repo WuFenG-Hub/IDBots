@@ -124,6 +124,9 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const result = await window.electron.metaapps.list();
           return result?.apps ?? [];
         },
+        resolveMetaAppPin: async (pinId) => {
+          return window.electron.botBrowser.resolveMetaAppPin({ pinId });
+        },
         installCommunityMetaApp: async (sourcePinId) => {
           return window.electron.metaapps.installCommunity({ sourcePinId });
         },
@@ -137,6 +140,8 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           }
           return result.url;
         },
+        getMetaAppCache: () => window.electron.botBrowser.getMetaAppCache(),
+        clearMetaAppCache: (input) => window.electron.botBrowser.clearMetaAppCache(input),
         openConversation: (request) => callbacksRef.current.onOpenConversation(request),
       });
       endpointShimRef.current = createBrowserEndpointShim(adapter);

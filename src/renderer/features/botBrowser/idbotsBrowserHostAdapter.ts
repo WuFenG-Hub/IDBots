@@ -52,8 +52,11 @@ import type { BotBrowserConversationRequest } from './types';
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
   listMetaApps: () => Promise<MetaAppRecord[]>;
+  resolveMetaAppPin?: (pinId: string) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
   installCommunityMetaApp?: (sourcePinId: string) => Promise<CommunityMetaAppInstallResult>;
   resolveMetaAppUrl: (app: MetaAppRecord) => Promise<string>;
+  getMetaAppCache?: () => Promise<BrowserCommandResult<BrowserCacheSnapshot>>;
+  clearMetaAppCache?: (input: BrowserCacheClearInput) => Promise<BrowserCommandResult<BrowserCacheClearResult>>;
   openConversation: (request: BotBrowserConversationRequest) => Promise<void>;
   fetch?: typeof fetch;
 }
@@ -214,6 +217,13 @@ async function resolveMetaAppRecord(
   pinId: string,
 ): Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>> {
   const normalizedPinId = normalizeMetaAppSourcePinId(pinId);
+  if (input.resolveMetaAppPin && normalizedPinId) {
+    const cachedResult = await input.resolveMetaAppPin(normalizedPinId);
+    if (cachedResult.ok) {
+      return cachedResult;
+    }
+  }
+
   const apps = await input.listMetaApps();
   const localApp = findMetaAppBySourcePinId(apps, normalizedPinId);
   if (localApp) {
@@ -286,7 +296,7 @@ export function createIdbotsBrowserHostAdapter(
         features: {
           privateChat: true,
           serviceCall: false,
-          cacheManagement: false,
+          cacheManagement: true,
           templateSettings: true,
           walletLogin: false,
         },
@@ -345,12 +355,18 @@ export function createIdbotsBrowserHostAdapter(
     },
 
     async getCache(_cacheInput?: BrowserCacheInput): Promise<BrowserCommandResult<BrowserCacheSnapshot>> {
+      if (input.getMetaAppCache) {
+        return input.getMetaAppCache();
+      }
       return browserSuccess({});
     },
 
     async clearCache(
-      _cacheInput: BrowserCacheClearInput,
+      cacheInput: BrowserCacheClearInput,
     ): Promise<BrowserCommandResult<BrowserCacheClearResult>> {
+      if (input.clearMetaAppCache) {
+        return input.clearMetaAppCache(cacheInput);
+      }
       return browserSuccess({});
     },
 

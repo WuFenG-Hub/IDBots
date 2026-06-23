@@ -70,7 +70,7 @@ test('getRuntime exposes the IDBots host and local actors/default actor', async 
   assert.deepEqual(result.data.features, {
     privateChat: true,
     serviceCall: false,
-    cacheManagement: false,
+    cacheManagement: true,
     templateSettings: true,
     walletLogin: false,
   });
@@ -132,6 +132,60 @@ test('resolveResource installs a community MetaApp by source pin id before resol
   assert.equal(result.data.renderer.url, 'http://127.0.0.1:17878/metaapps/community-demo');
   assert.deepEqual(installRequests, [sourcePinId]);
   assert.deepEqual(resolvedApps, [sourcePinId]);
+});
+
+test('resolveResource prefers the Browser MetaApp cache resolver before install fallback', async () => {
+  const sourcePinId = 'c06b7a2db6efa241560a2356e9966cf9758dae3ec9c795f614a652b113e30329i0';
+  const resolvedPins = [];
+  const installRequests = [];
+  const adapter = createAdapter({
+    listMetaApps: async () => [],
+    resolveMetaAppPin: async (pinId) => {
+      resolvedPins.push(pinId);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          pinId,
+          firstPinId: pinId,
+          operation: 'create',
+          title: 'Eric Homepage',
+          appName: 'eric-homepage',
+          version: '1.0.0',
+          runtime: 'browser',
+          indexFile: 'index.html',
+          code: 'metafile://code123i0.zip',
+          content: 'metafile://code123i0.zip',
+          contentType: 'text/html',
+          codeType: 'application/zip',
+          tags: [],
+          ownerGlobalMetaId: 'idq1publisher',
+          network: 'mvc',
+          localUiUrl: 'http://127.0.0.1:23456/browser-cache/metaapp-preview/session/index.html',
+          runUrl: 'http://127.0.0.1:23456/browser-cache/metaapp-preview/session/index.html',
+          updatedAt: 1_700_000_000_000,
+          source: 'indexer',
+        },
+      };
+    },
+    installCommunityMetaApp: async (pinId) => {
+      installRequests.push(pinId);
+      return { success: false, error: 'install should not be used' };
+    },
+  });
+
+  const result = await adapter.resolveResource({ uri: `metaapp://${sourcePinId.toUpperCase()}` });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.resourceType, 'metaapp');
+  assert.equal(result.data.normalizedUri, `metaapp://${sourcePinId}`);
+  assert.equal(result.data.renderer.type, 'html-iframe');
+  assert.equal(
+    result.data.renderer.url,
+    'http://127.0.0.1:23456/browser-cache/metaapp-preview/session/index.html',
+  );
+  assert.deepEqual(resolvedPins, [sourcePinId]);
+  assert.deepEqual(installRequests, []);
 });
 
 test('resolveResource filters service actions and converts private-chat to open-conversation', async () => {
@@ -300,8 +354,20 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   ]);
 });
 
-test('settings and phase-one cache return browser command result envelopes', async () => {
-  const adapter = createAdapter();
+test('settings and cache return browser command result envelopes', async () => {
+  const cacheSnapshot = {
+    cacheRoot: '/tmp/idbots-browser-cache/metaapps',
+    artifactCount: 1,
+    activePreviewSessionCount: 1,
+  };
+  const adapter = createAdapter({
+    getMetaAppCache: async () => ({ ok: true, state: 'success', data: cacheSnapshot }),
+    clearMetaAppCache: async (input) => ({
+      ok: true,
+      state: 'success',
+      data: { clearedArtifacts: 1, clearedPinRecords: 1, input },
+    }),
+  });
 
   const settings = await adapter.getSettings();
   assert.equal(settings.ok, true);
@@ -313,8 +379,12 @@ test('settings and phase-one cache return browser command result envelopes', asy
   assert.equal(updated.data.effectiveBrowser.localMode, true);
 
   const cache = await adapter.getCache();
-  assert.deepEqual(cache, { ok: true, state: 'success', data: {} });
+  assert.deepEqual(cache, { ok: true, state: 'success', data: cacheSnapshot });
 
   const cleared = await adapter.clearCache({ all: true });
-  assert.deepEqual(cleared, { ok: true, state: 'success', data: {} });
+  assert.deepEqual(cleared, {
+    ok: true,
+    state: 'success',
+    data: { clearedArtifacts: 1, clearedPinRecords: 1, input: { all: true } },
+  });
 });

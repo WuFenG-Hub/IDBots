@@ -47,6 +47,12 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('metaapps:changed', handler);
     },
   },
+  botBrowser: {
+    resolveMetaAppPin: (input: { pinId: string }) => ipcRenderer.invoke('botBrowser:resolveMetaAppPin', input),
+    getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),
+    clearMetaAppCache: (input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) =>
+      ipcRenderer.invoke('botBrowser:clearMetaAppCache', input),
+  },
   permissions: {
     checkCalendar: () => ipcRenderer.invoke('permissions:checkCalendar'),
     requestCalendar: () => ipcRenderer.invoke('permissions:requestCalendar'),
