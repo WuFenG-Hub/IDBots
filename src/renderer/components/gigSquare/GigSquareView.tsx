@@ -68,7 +68,15 @@ const GigSquareProviderIdRow: React.FC<{
   );
 };
 
-const GigSquareView: React.FC = () => {
+interface GigSquareViewProps {
+  onOpenRemoteBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string;
+    avatar?: string;
+  }) => void;
+}
+
+const GigSquareView: React.FC<GigSquareViewProps> = ({ onOpenRemoteBotInBrowser }) => {
   const [services, setServices] = useState<GigSquareService[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -397,8 +405,9 @@ const GigSquareView: React.FC = () => {
         {!isLoading && !error && filteredServices.length > 0 && (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {filteredServices.map((service) => {
-              const providerLookupId = service.providerGlobalMetaId || service.providerMetaId;
-              const providerInfo = providerInfoMap[service.providerGlobalMetaId] || {};
+              const providerGlobalMetaId = (service.providerGlobalMetaId || '').trim();
+              const providerLookupId = providerGlobalMetaId || service.providerMetaId;
+              const providerInfo = providerInfoMap[providerGlobalMetaId] || {};
               const providerName = getGigSquareProviderDisplayName(providerInfo, providerLookupId);
               const providerAvatarSrc = getGigSquareProviderAvatarSrc(providerInfo);
               const refundRiskBadge = getGigSquareRefundRiskBadge(service.refundRisk);
@@ -416,6 +425,11 @@ const GigSquareView: React.FC = () => {
                   hasRefundRisk={hasRefundRisk}
                   refundRiskLabel={refundRiskBadge ? i18nService.t('gigSquareRefundRiskBadge') : null}
                   actionLabel={i18nService.t('gigSquarePayAndRequest')}
+                  onOpenProviderInBrowser={providerGlobalMetaId ? () => onOpenRemoteBotInBrowser?.({
+                    globalMetaId: providerGlobalMetaId,
+                    name: providerName,
+                    avatar: providerAvatarSrc,
+                  }) : undefined}
                   onOpen={() => handleOpenModal(service)}
                 />
               );

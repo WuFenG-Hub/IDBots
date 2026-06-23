@@ -11,6 +11,7 @@ interface MetaAppsViewProps {
   isSidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
   onNewChat?: () => void;
+  onOpenMetaAppInBrowser?: (app: MetaAppRecord) => Promise<boolean> | boolean;
   onStartTaskWithMetaApp?: (app: MetaAppRecord) => Promise<void> | void;
   updateBadge?: React.ReactNode;
 }
@@ -19,6 +20,7 @@ const MetaAppsView: React.FC<MetaAppsViewProps> = ({
   isSidebarCollapsed,
   onToggleSidebar,
   onNewChat,
+  onOpenMetaAppInBrowser,
   onStartTaskWithMetaApp,
   updateBadge,
 }) => {
@@ -57,7 +59,10 @@ const MetaAppsView: React.FC<MetaAppsViewProps> = ({
 
       <div className="flex-1 overflow-y-auto min-h-0">
         <div className="max-w-3xl mx-auto px-4 py-6">
-          <MetaAppsManager onStartTaskWithMetaApp={onStartTaskWithMetaApp} />
+          <MetaAppsManager
+            onOpenMetaAppInBrowser={onOpenMetaAppInBrowser}
+            onStartTaskWithMetaApp={onStartTaskWithMetaApp}
+          />
         </div>
       </div>
     </div>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { i18nService } from '../../services/i18n';
+import type { Metabot } from '../../types/metabot';
 import MetabotsManager from './MetabotsManager';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -12,6 +13,7 @@ interface MetabotsViewProps {
   updateBadge?: React.ReactNode;
   onRequestModelSettings?: () => void;
   onRequestOnboarding?: () => void;
+  onOpenMetabotInBrowser?: (metabot: Metabot) => void;
 }
 
 const MetabotsView: React.FC<MetabotsViewProps> = ({
@@ -21,6 +23,7 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
   updateBadge,
   onRequestModelSettings,
   onRequestOnboarding,
+  onOpenMetabotInBrowser,
 }) => {
   const isMac = window.electron.platform === 'darwin';
   return (
@@ -58,6 +61,7 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
           <MetabotsManager
             onRequestModelSettings={onRequestModelSettings}
             onRequestOnboarding={onRequestOnboarding}
+            onOpenMetabotInBrowser={onOpenMetabotInBrowser}
           />
         </div>
       </div>

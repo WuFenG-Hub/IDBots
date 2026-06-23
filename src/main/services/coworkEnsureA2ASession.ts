@@ -1,0 +1,176 @@
+import type { CoworkSession, CoworkStore } from '../coworkStore';
+import type { Metabot } from '../types/metabot';
+import { buildCanonicalPrivateConversationExternalConversationId } from './simplemsgPeerConversation';
+
+const RAW_GLOBAL_META_ID_VERSION_CHARS = new Set(['q', 'p', 'z', 'r', 'y', 't']);
+
+export interface CoworkA2ASessionInput {
+  actorId?: unknown;
+  localMetabotId?: unknown;
+  peerGlobalMetaId?: unknown;
+  peerName?: unknown;
+  peerAvatar?: unknown;
+}
+
+export interface NormalizedCoworkA2ASessionInput {
+  localMetabotId: number;
+  peerGlobalMetaId: string;
+  peerName: string | null;
+  peerAvatar: string | null;
+}
+
+export interface EnsureCoworkA2ASessionParams {
+  coworkStore: CoworkStore;
+  getMetabotById: (metabotId: number) => Pick<Metabot, 'id' | 'name' | 'globalmetaid'> | null;
+  input: CoworkA2ASessionInput;
+}
+
+export interface EnsureCoworkA2ASessionResult {
+  created: boolean;
+  externalConversationId: string;
+  session: CoworkSession;
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeGlobalMetaId(value: unknown): string {
+  const normalized = text(value).toLowerCase();
+  if (!normalized || normalized.startsWith('metaid:')) return '';
+  if (!normalized.startsWith('id')) return '';
+  if (!RAW_GLOBAL_META_ID_VERSION_CHARS.has(normalized[2] ?? '')) return '';
+  if (normalized[3] !== '1') return '';
+  return normalized;
+}
+
+function parseLocalMetabotActorId(actorId: unknown): number | null {
+  const match = /^idbots-metabot-(\d+)$/.exec(text(actorId));
+  if (!match) return null;
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normalizePositiveInteger(value: unknown): number | null {
+  const textValue = typeof value === 'number'
+    ? String(value)
+    : typeof value === 'string'
+      ? value.trim()
+      : '';
+  if (!/^[1-9]\d*$/.test(textValue)) return null;
+  const parsed = Number.parseInt(textValue, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+export function normalizeCoworkA2ASessionInput(
+  input: CoworkA2ASessionInput,
+): NormalizedCoworkA2ASessionInput {
+  const localMetabotId = parseLocalMetabotActorId(input.actorId)
+    ?? normalizePositiveInteger(input.localMetabotId);
+  if (!localMetabotId) {
+    throw new Error('A valid local Bot actor is required');
+  }
+
+  const peerGlobalMetaId = normalizeGlobalMetaId(input.peerGlobalMetaId);
+  if (!peerGlobalMetaId) {
+    throw new Error('A valid peer GlobalMetaID is required');
+  }
+
+  return {
+    localMetabotId,
+    peerGlobalMetaId,
+    peerName: text(input.peerName) || null,
+    peerAvatar: text(input.peerAvatar) || null,
+  };
+}
+
+export function ensureCoworkA2ASession(
+  params: EnsureCoworkA2ASessionParams,
+): EnsureCoworkA2ASessionResult {
+  const normalized = normalizeCoworkA2ASessionInput(params.input);
+  const localMetabot = params.getMetabotById(normalized.localMetabotId);
+  if (!localMetabot) {
+    throw new Error('Local Bot not found');
+  }
+
+  const localGlobalMetaId = normalizeGlobalMetaId(localMetabot.globalmetaid);
+  if (!localGlobalMetaId) {
+    throw new Error('Local Bot GlobalMetaID is missing');
+  }
+  if (localGlobalMetaId === normalized.peerGlobalMetaId) {
+    throw new Error('A Bot cannot open an A2A session with itself');
+  }
+
+  const externalConversationId = buildCanonicalPrivateConversationExternalConversationId(
+    normalized.peerGlobalMetaId,
+  );
+  const existing = params.coworkStore.getConversationMapping(
+    'metaweb_private',
+    externalConversationId,
+    normalized.localMetabotId,
+  );
+  if (existing) {
+    const session = params.coworkStore.getSession(existing.coworkSessionId);
+    if (session) {
+      const repaired = params.coworkStore.ensureCanonicalPeerSessionShape({
+        sessionId: existing.coworkSessionId,
+        metabotId: normalized.localMetabotId,
+        peerGlobalMetaId: normalized.peerGlobalMetaId,
+        peerName: normalized.peerName,
+        peerAvatar: normalized.peerAvatar,
+      });
+      if (repaired) {
+        params.coworkStore.touchConversationMapping(
+          'metaweb_private',
+          externalConversationId,
+          normalized.localMetabotId,
+        );
+        return {
+          created: false,
+          externalConversationId,
+          session: params.coworkStore.getSession(existing.coworkSessionId) ?? session,
+        };
+      }
+    }
+    params.coworkStore.deleteConversationMapping(
+      'metaweb_private',
+      externalConversationId,
+      normalized.localMetabotId,
+    );
+  }
+
+  const config = params.coworkStore.getConfig();
+  const workspaceRoot = text(config.workingDirectory) || process.cwd();
+  const title = normalized.peerName || `Private-${normalized.peerGlobalMetaId.slice(0, 12)}`;
+  const session = params.coworkStore.createSession(
+    title,
+    workspaceRoot,
+    '',
+    config.executionMode || 'local',
+    [],
+    normalized.localMetabotId,
+    'a2a',
+    normalized.peerGlobalMetaId,
+    normalized.peerName,
+    normalized.peerAvatar,
+  );
+
+  params.coworkStore.upsertConversationMapping({
+    channel: 'metaweb_private',
+    externalConversationId,
+    metabotId: normalized.localMetabotId,
+    coworkSessionId: session.id,
+    metadataJson: JSON.stringify({
+      peerGlobalMetaId: normalized.peerGlobalMetaId,
+      peerName: normalized.peerName,
+      peerAvatar: normalized.peerAvatar,
+      source: 'bot_browser',
+    }),
+  });
+
+  return {
+    created: true,
+    externalConversationId,
+    session: params.coworkStore.getSession(session.id) ?? session,
+  };
+}

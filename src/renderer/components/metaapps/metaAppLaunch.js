@@ -6,6 +6,19 @@ export async function openSelectedMetaApp({ app, metaAppService }) {
   return result;
 }
 
+export function canOpenMetaAppInBrowser(app) {
+  return normalizeMetaAppSourcePinId(app?.sourcePinId) !== '';
+}
+
+export function normalizeMetaAppSourcePinId(sourcePinId) {
+  return typeof sourcePinId === 'string' ? sourcePinId.trim().toLowerCase() : '';
+}
+
+export function buildMetaAppBrowserUri(app) {
+  const sourcePinId = normalizeMetaAppSourcePinId(app?.sourcePinId);
+  return sourcePinId ? `metaapp://${encodeURIComponent(sourcePinId)}` : '';
+}
+
 export async function openMetaAppDirectory({ app, shell }) {
   const appRoot = String(app?.appRoot || '').trim();
   if (!appRoot) {

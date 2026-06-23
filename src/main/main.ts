@@ -93,6 +93,7 @@ import {
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
 import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
+import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import { createPin, getPinData } from './services/metaidCore';
 import { shouldForwardCoworkStreamEvent } from './services/coworkStreamForwarding';
 import type { DiscoverySnapshot } from './services/providerDiscoveryService';
@@ -5201,6 +5202,36 @@ if (!gotTheLock) {
         error: error instanceof Error ? error.message : 'Failed to start session',
       };
     }
+    });
+  });
+
+  ipcMain.handle('cowork:session:ensureA2A', async (_event, input: {
+    actorId?: unknown;
+    localMetabotId?: unknown;
+    peerGlobalMetaId?: unknown;
+    peerName?: unknown;
+    peerAvatar?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:ensureA2A', async () => {
+      try {
+        const result = ensureCoworkA2ASession({
+          coworkStore: getCoworkStore(),
+          getMetabotById: (metabotId) => getMetabotStore().getMetabotById(metabotId),
+          input,
+        });
+        return {
+          success: true,
+          created: result.created,
+          externalConversationId: result.externalConversationId,
+          session: result.session,
+        };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to ensure A2A session',
+        };
+      }
     });
   });
 

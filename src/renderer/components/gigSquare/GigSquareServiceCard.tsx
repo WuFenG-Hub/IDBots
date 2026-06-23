@@ -14,6 +14,7 @@ interface GigSquareServiceCardProps {
   hasRefundRisk?: boolean;
   refundRiskLabel?: string | null;
   actionLabel?: string;
+  onOpenProviderInBrowser?: () => void;
   onOpen: () => void;
 }
 
@@ -68,6 +69,7 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
   hasRefundRisk = false,
   refundRiskLabel = null,
   actionLabel = 'Open',
+  onOpenProviderInBrowser,
   onOpen,
 }) => {
   const price = formatGigSquarePrice(service.price, service.currency, {
@@ -167,7 +169,19 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
         </div>
       </div>
       <div className="mt-4 flex items-center justify-between gap-3 border-t border-claude-border/70 pt-3 dark:border-claude-darkBorder/70">
-        <div className="min-w-0 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!onOpenProviderInBrowser}
+          onClick={(event) => {
+            event.stopPropagation();
+            onOpenProviderInBrowser?.();
+          }}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+          }}
+          className="min-w-0 flex items-center gap-2 text-left disabled:cursor-default"
+          title="Open provider in Bot Browser"
+        >
           {isOnline && (
             <span className="h-2 w-2 flex-shrink-0 rounded-full bg-green-400" />
           )}
@@ -183,7 +197,7 @@ const GigSquareServiceCard: React.FC<GigSquareServiceCardProps> = ({
             </div>
             {providerLookupId && providerIdRow}
           </div>
-        </div>
+        </button>
         <button
           type="button"
           onClick={(event) => {

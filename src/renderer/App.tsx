@@ -36,6 +36,11 @@ import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
 import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
+import BotBrowserModeSwitch from './features/botBrowser/BotBrowserModeSwitch';
+import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
+import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
+import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
+import type { BotBrowserConversationRequest } from './features/botBrowser/types';
 
 type FocusedOrderTarget = {
   sessionId: string;
@@ -67,6 +72,7 @@ const App: React.FC = () => {
   const mockUpdateModeRef = useRef(false);
   const mockDownloadTimerRef = useRef<number | null>(null);
   const mockInstallTimerRef = useRef<number | null>(null);
+  const openingMetaAppIdsRef = useRef<Set<string>>(new Set());
   const hasInitialized = useRef(false);
   const dispatch = useDispatch();
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
@@ -356,8 +362,17 @@ const App: React.FC = () => {
   }, [handleNewChat]);
 
   const handleStartTaskWithMetaApp = useCallback(async (app: MetaAppRecord) => {
-    await openSelectedMetaApp({ app, metaAppService });
-  }, [dispatch]);
+    if (openingMetaAppIdsRef.current.has(app.id)) {
+      return;
+    }
+
+    openingMetaAppIdsRef.current.add(app.id);
+    try {
+      await openSelectedMetaApp({ app, metaAppService });
+    } finally {
+      openingMetaAppIdsRef.current.delete(app.id);
+    }
+  }, []);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -369,6 +384,10 @@ const App: React.FC = () => {
       toastTimerRef.current = null;
     }, 2200);
   }, []);
+
+  const botBrowserShell = useBotBrowserShell({
+    showToast,
+  });
 
   const handleShowLogin = useCallback(() => {
     showToast(i18nService.t('featureInDevelopment'));
@@ -458,6 +477,14 @@ const App: React.FC = () => {
     if (!pendingPermission) return;
     await coworkService.respondToPermission(pendingPermission.requestId, result);
   }, [pendingPermission]);
+
+  const handleBrowserOpenConversation = useCallback(async (request: BotBrowserConversationRequest) => {
+    await openBotBrowserConversationInCowork(request, {
+      switchToHome: botBrowserShell.switchToHome,
+      showCowork: handleShowCowork,
+      showToast,
+    });
+  }, [botBrowserShell.switchToHome, handleShowCowork, showToast]);
 
   const handleCloseSettings = () => {
     setShowSettings(false);
@@ -718,78 +745,105 @@ const App: React.FC = () => {
     return <Onboarding onComplete={handleOnboardingComplete} onClose={handleCloseOnboarding} />;
   }
 
+  const homeContent = mainView === 'gigSquare' ? (
+    <GigSquareView onOpenRemoteBotInBrowser={botBrowserShell.openRemoteBot} />
+  ) : mainView === 'metaapps' ? (
+    <MetaAppsView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleNewChat}
+      onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
+      onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+    />
+  ) : mainView === 'skills' ? (
+    <SkillsView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleBlankNewChat}
+      onStartTaskWithSkill={(skillId) => handleNewChat(skillId)}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+    />
+  ) : mainView === 'scheduledTasks' ? (
+    <ScheduledTasksView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleBlankNewChat}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+    />
+  ) : mainView === 'metabots' ? (
+    <MetabotsView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleBlankNewChat}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+      onRequestModelSettings={() => handleShowSettings({ initialTab: 'model' })}
+      onRequestOnboarding={handleOpenOnboarding}
+      onOpenMetabotInBrowser={botBrowserShell.openLocalMetabot}
+    />
+  ) : (
+    <CoworkView
+      onRequestAppSettings={handleShowSettings}
+      onShowSkills={handleShowSkills}
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleBlankNewChat}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+      onRequestOnboarding={handleOpenOnboarding}
+      focusedOrderTxid={focusedOrderTxid}
+      onFocusedOrderConsumed={handleFocusedOrderConsumed}
+    />
+  );
+
   return (
     <div className="h-screen overflow-hidden flex flex-col dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
       {toastMessage && (
         <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
       )}
+      <BotBrowserModeSwitch
+        mode={botBrowserShell.surfaceMode}
+        isBrowserVisible={botBrowserShell.surfaceMode === 'browser'}
+        onSelectHome={botBrowserShell.switchToHome}
+        onSelectBrowser={() => {
+          void botBrowserShell.openBrowserHome();
+        }}
+      />
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        <Sidebar
-          onShowLogin={handleShowLogin}
-          onShowSettings={handleShowSettings}
-          activeView={mainView}
-          onShowMetaApps={handleShowMetaApps}
-          onShowSkills={handleShowSkills}
-          onShowCowork={handleShowCowork}
-          onShowScheduledTasks={handleShowScheduledTasks}
-          onShowGigSquare={handleShowGigSquare}
-          onShowMetabots={handleShowMetabots}
-          onNewChat={handleBlankNewChat}
-          isCollapsed={isSidebarCollapsed}
-          onToggleCollapse={handleToggleSidebar}
-          updateBadge={!isSidebarCollapsed ? updateBadge : null}
-        />
-        <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
-          <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
-            {mainView === 'gigSquare' ? (
-              <GigSquareView />
-            ) : mainView === 'metaapps' ? (
-              <MetaAppsView
-                isSidebarCollapsed={isSidebarCollapsed}
-                onToggleSidebar={handleToggleSidebar}
-                onNewChat={handleNewChat}
-                onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
-                updateBadge={isSidebarCollapsed ? updateBadge : null}
-              />
-            ) : mainView === 'skills' ? (
-              <SkillsView
-                isSidebarCollapsed={isSidebarCollapsed}
-                onToggleSidebar={handleToggleSidebar}
-                onNewChat={handleBlankNewChat}
-                onStartTaskWithSkill={(skillId) => handleNewChat(skillId)}
-                updateBadge={isSidebarCollapsed ? updateBadge : null}
-              />
-            ) : mainView === 'scheduledTasks' ? (
-              <ScheduledTasksView
-                isSidebarCollapsed={isSidebarCollapsed}
-                onToggleSidebar={handleToggleSidebar}
-                onNewChat={handleBlankNewChat}
-                updateBadge={isSidebarCollapsed ? updateBadge : null}
-              />
-            ) : mainView === 'metabots' ? (
-              <MetabotsView
-                isSidebarCollapsed={isSidebarCollapsed}
-                onToggleSidebar={handleToggleSidebar}
-                onNewChat={handleBlankNewChat}
-                updateBadge={isSidebarCollapsed ? updateBadge : null}
-                onRequestModelSettings={() => handleShowSettings({ initialTab: 'model' })}
-                onRequestOnboarding={handleOpenOnboarding}
-              />
-            ) : (
-              <CoworkView
-                onRequestAppSettings={handleShowSettings}
-                onShowSkills={handleShowSkills}
-                isSidebarCollapsed={isSidebarCollapsed}
-                onToggleSidebar={handleToggleSidebar}
-                onNewChat={handleBlankNewChat}
-                updateBadge={isSidebarCollapsed ? updateBadge : null}
-                onRequestOnboarding={handleOpenOnboarding}
-                focusedOrderTxid={focusedOrderTxid}
-                onFocusedOrderConsumed={handleFocusedOrderConsumed}
-              />
-            )}
+        {botBrowserShell.surfaceMode === 'home' ? (
+          <>
+            <Sidebar
+              onShowLogin={handleShowLogin}
+              onShowSettings={handleShowSettings}
+              activeView={mainView}
+              onShowMetaApps={handleShowMetaApps}
+              onShowSkills={handleShowSkills}
+              onShowCowork={handleShowCowork}
+              onShowScheduledTasks={handleShowScheduledTasks}
+              onShowGigSquare={handleShowGigSquare}
+              onShowMetabots={handleShowMetabots}
+              onNewChat={handleBlankNewChat}
+              isCollapsed={isSidebarCollapsed}
+              onToggleCollapse={handleToggleSidebar}
+              updateBadge={!isSidebarCollapsed ? updateBadge : null}
+            />
+            <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
+              <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
+                {homeContent}
+              </div>
+            </div>
+          </>
+        ) : null}
+        {botBrowserShell.hasMountedBrowser ? (
+          <div className={botBrowserShell.surfaceMode === 'browser' ? 'flex-1 min-w-0' : 'hidden'}>
+            <BotBrowserSurface
+              ref={botBrowserShell.browserRef}
+              visible={botBrowserShell.surfaceMode === 'browser'}
+              onOpenConversation={handleBrowserOpenConversation}
+              onError={showToast}
+              onReady={botBrowserShell.onBrowserReady}
+            />
           </div>
-        </div>
+        ) : null}
       </div>
 
       {/* 设置窗口显示在所有主内容之上，但不影响主界面的交互 */}
