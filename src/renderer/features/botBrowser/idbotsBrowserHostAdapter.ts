@@ -1,10 +1,14 @@
 import {
   applyBrowserSettingsUpdate,
+  browserCommandFailed,
+  browserCommandSuccess,
   createBrowserSettingsSnapshot,
   createDefaultBrowserConfig,
   resolveBrowserConfig,
   resolveBrowserResource,
+  type BrowserCommandResult as CoreBrowserCommandResult,
   type BrowserConfigContainer,
+  type MetaAppGalleryRecord,
 } from '@openagentinternet/agent-browser-core';
 import {
   browserFailure,
@@ -26,7 +30,10 @@ import {
   type BrowserTrustedActionInput,
   type BrowserTrustedActionResult,
 } from '@openagentinternet/agent-browser-host-contract';
-import type { MetaAppRecord } from '../../types/metaApp';
+import type {
+  CommunityMetaAppInstallResult,
+  MetaAppRecord,
+} from '../../types/metaApp';
 import type { Metabot } from '../../types/metabot';
 import {
   normalizeBrowserGlobalMetaId,
@@ -45,6 +52,7 @@ import type { BotBrowserConversationRequest } from './types';
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
   listMetaApps: () => Promise<MetaAppRecord[]>;
+  installCommunityMetaApp?: (sourcePinId: string) => Promise<CommunityMetaAppInstallResult>;
   resolveMetaAppUrl: (app: MetaAppRecord) => Promise<string>;
   openConversation: (request: BotBrowserConversationRequest) => Promise<void>;
   fetch?: typeof fetch;
@@ -176,6 +184,68 @@ function normalizeMetaAppUri(value: string): string {
   return pinId ? `metaapp://${pinId}` : value;
 }
 
+function findMetaAppBySourcePinId(apps: MetaAppRecord[], sourcePinId: string): MetaAppRecord | undefined {
+  return apps.find((candidate) => {
+    return normalizeMetaAppSourcePinId(candidate.sourcePinId) === sourcePinId;
+  });
+}
+
+async function resolveLocalMetaAppRecord(
+  input: IdBotsBrowserHostAdapterInput,
+  app: MetaAppRecord,
+): Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>> {
+  try {
+    const runUrl = await input.resolveMetaAppUrl(app);
+    const record = localMetaAppToBrowserRecord(app, runUrl) as MetaAppGalleryRecord | null;
+    if (!record) {
+      return browserCommandFailed('browser_resolve_failed', 'MetaApp is not renderable in Bot Browser.');
+    }
+    return browserCommandSuccess(record);
+  } catch (error) {
+    return browserCommandFailed(
+      'browser_resolve_failed',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+async function resolveMetaAppRecord(
+  input: IdBotsBrowserHostAdapterInput,
+  pinId: string,
+): Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>> {
+  const normalizedPinId = normalizeMetaAppSourcePinId(pinId);
+  const apps = await input.listMetaApps();
+  const localApp = findMetaAppBySourcePinId(apps, normalizedPinId);
+  if (localApp) {
+    return resolveLocalMetaAppRecord(input, localApp);
+  }
+
+  if (!input.installCommunityMetaApp || !normalizedPinId) {
+    return browserCommandFailed('browser_resource_not_found', 'Resource not found.');
+  }
+
+  const installResult = await input.installCommunityMetaApp(normalizedPinId);
+  if (!installResult?.success) {
+    return browserCommandFailed(
+      'browser_resource_not_found',
+      installResult?.error || `MetaApp not found: ${normalizedPinId}`,
+    );
+  }
+
+  const refreshedApps = await input.listMetaApps();
+  const installedApp =
+    findMetaAppBySourcePinId(refreshedApps, normalizedPinId) ||
+    refreshedApps.find((candidate) => text(candidate.id) === text(installResult.appId));
+  if (!installedApp) {
+    return browserCommandFailed(
+      'browser_resource_not_found',
+      `MetaApp installed but local record was not found: ${normalizedPinId}`,
+    );
+  }
+
+  return resolveLocalMetaAppRecord(input, installedApp);
+}
+
 function normalizeMetaAppResolveResult(result: BrowserResolveResult): BrowserResolveResult {
   if (result.resourceType !== 'metaapp') {
     return result;
@@ -239,17 +309,7 @@ export function createIdbotsBrowserHostAdapter(
         uri: resolveInput.uri,
         config: resolveBrowserConfig(browserConfig),
         fetch: input.fetch,
-        metaAppLookup: async (pinId) => {
-          const normalizedPinId = normalizeMetaAppSourcePinId(pinId);
-          const apps = await input.listMetaApps();
-          const app = apps.find((candidate) => {
-            return normalizeMetaAppSourcePinId(candidate.sourcePinId) === normalizedPinId;
-          });
-          if (!app) return null;
-
-          const runUrl = await input.resolveMetaAppUrl(app);
-          return localMetaAppToBrowserRecord(app, runUrl);
-        },
+        metaAppResolve: (pinId) => resolveMetaAppRecord(input, pinId),
       });
 
       if (!result.ok) {

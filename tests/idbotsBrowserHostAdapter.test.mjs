@@ -104,6 +104,36 @@ test('resolveResource finds a local MetaApp by normalized source pin id and retu
   assert.deepEqual(resolvedApps, [' pin123i0 ']);
 });
 
+test('resolveResource installs a community MetaApp by source pin id before resolving its local URL', async () => {
+  const sourcePinId = 'c06b7a2db6efa241560a2356e9966cf9758dae3ec9c795f614a652b113e30329i0';
+  let installed = false;
+  const installRequests = [];
+  const resolvedApps = [];
+  const adapter = createAdapter({
+    listMetaApps: async () => installed
+      ? [createMetaApp({ sourcePinId, id: 'community-demo' })]
+      : [],
+    installCommunityMetaApp: async (pinId) => {
+      installRequests.push(pinId);
+      installed = true;
+      return { success: true, appId: 'community-demo', name: 'Community Demo', status: 'installed' };
+    },
+    resolveMetaAppUrl: async (app) => {
+      resolvedApps.push(app.sourcePinId);
+      return 'http://127.0.0.1:17878/metaapps/community-demo';
+    },
+  });
+
+  const result = await adapter.resolveResource({ uri: `metaapp://${sourcePinId.toUpperCase()}` });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.resourceType, 'metaapp');
+  assert.equal(result.data.normalizedUri, `metaapp://${sourcePinId}`);
+  assert.equal(result.data.renderer.url, 'http://127.0.0.1:17878/metaapps/community-demo');
+  assert.deepEqual(installRequests, [sourcePinId]);
+  assert.deepEqual(resolvedApps, [sourcePinId]);
+});
+
 test('resolveResource filters service actions and converts private-chat to open-conversation', async () => {
   const adapter = createAdapter({
     fetch: async () =>

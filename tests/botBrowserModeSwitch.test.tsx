@@ -29,11 +29,12 @@ test('BotBrowserModeSwitch renders a taller centered segmented toggle bar', () =
   );
 });
 
-test('BotBrowserModeSwitch exposes pressed state with a subtle selected segment background', () => {
+test('BotBrowserModeSwitch exposes pressed state with the IDBots filled primary style', () => {
   const markup = renderSwitch('browser');
 
   assert.match(markup, />Bot Home<\/button>/);
   assert.match(markup, />Bot Browser<\/button>/);
   assert.match(markup, /aria-pressed="false"[^>]*>Bot Home<\/button>/);
-  assert.match(markup, /aria-pressed="true"[^>]*class="[^"]*\bbg-claude-accentMuted\b[^"]*"[^>]*>Bot Browser<\/button>/);
+  assert.match(markup, /aria-pressed="true"[^>]*class="[^"]*\bbtn-idchat-primary-filled\b[^"]*\bstill\b[^"]*"[^>]*>Bot Browser<\/button>/);
+  assert.doesNotMatch(markup, /aria-pressed="true"[^>]*class="[^"]*\bbg-claude-accentMuted\b[^"]*"[^>]*>Bot Browser<\/button>/);
 });

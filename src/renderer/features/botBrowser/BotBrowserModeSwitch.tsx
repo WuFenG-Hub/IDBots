@@ -12,7 +12,7 @@ interface BotBrowserModeSwitchProps {
 const tabClass = (active: boolean) => [
   'non-draggable inline-flex h-7 min-w-[96px] items-center justify-center rounded-full px-3 text-[12px] font-medium leading-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/40',
   active
-    ? 'bg-claude-accentMuted text-claude-accent shadow-sm'
+    ? 'btn-idchat-primary-filled still'
     : 'text-claude-textSecondary hover:bg-claude-surfaceHover/70 hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover/70 dark:hover:text-claude-darkText',
 ].join(' ');
 

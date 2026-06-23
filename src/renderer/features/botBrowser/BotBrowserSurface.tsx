@@ -124,6 +124,9 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const result = await window.electron.metaapps.list();
           return result?.apps ?? [];
         },
+        installCommunityMetaApp: async (sourcePinId) => {
+          return window.electron.metaapps.installCommunity({ sourcePinId });
+        },
         resolveMetaAppUrl: async (app) => {
           const result = await window.electron.metaapps.resolveUrl({
             appId: app.id,
