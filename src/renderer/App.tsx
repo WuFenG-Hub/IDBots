@@ -93,6 +93,14 @@ const App: React.FC = () => {
     ));
   }, [currentSessionId]);
 
+  const reportRendererStartupComplete = useCallback(async () => {
+    try {
+      await window.electron.startup.rendererInitialized();
+    } catch (error) {
+      console.warn('[Startup] Failed to report renderer initialization:', error);
+    }
+  }, []);
+
   const clearMockTimers = useCallback(() => {
     if (mockDownloadTimerRef.current != null) {
       window.clearInterval(mockDownloadTimerRef.current);
@@ -217,10 +225,12 @@ const App: React.FC = () => {
         }
         setShowOnboarding(shouldShowInitialOnboarding(metabotCount));
         setIsInitialized(true);
+        void reportRendererStartupComplete();
       } catch (error) {
         console.error('Failed to initialize app:', error);
         setInitError(i18nService.t('initializationError'));
         setIsInitialized(true);
+        void reportRendererStartupComplete();
       }
     };
 

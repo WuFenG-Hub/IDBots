@@ -664,6 +664,13 @@ interface IElectronAPI {
     getVersion: () => Promise<string>;
     getSystemLocale: () => Promise<string>;
   };
+  startup: {
+    rendererInitialized: () => Promise<{
+      success: boolean;
+      elapsedMs: number;
+      startedAt: number;
+    }>;
+  };
   appUpdate: {
     download: (url: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
     cancelDownload: () => Promise<{ success: boolean }>;

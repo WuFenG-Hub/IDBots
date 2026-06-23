@@ -14,8 +14,11 @@ import { resolveElectronExecutablePath } from './libs/runtimePaths';
  * Reuses cowork env hardening so Windows/macOS/Linux behavior stays aligned.
  */
 async function buildSkillServiceEnv(): Promise<Record<string, string | undefined>> {
+  const startedAt = Date.now();
+  console.log('[SkillServices] Building skill service env...');
   const env = await getEnhancedEnv('local');
   env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+  console.log(`[SkillServices] Built skill service env in ${Date.now() - startedAt}ms`);
   return env;
 }
 
@@ -103,12 +106,16 @@ export class SkillServiceManager {
   }
 
   private ensureWebSearchRuntimeReady(skillPath: string): void {
+    const startedAt = Date.now();
+    console.log(`[SkillServices] Checking web-search runtime health: ${skillPath}`);
     if (this.isWebSearchRuntimeHealthy(skillPath)) {
+      console.log(`[SkillServices] Web-search runtime already healthy in ${Date.now() - startedAt}ms`);
       return;
     }
 
     this.repairWebSearchRuntimeFromBundled(skillPath);
     if (this.isWebSearchRuntimeHealthy(skillPath)) {
+      console.log(`[SkillServices] Web-search runtime repaired from bundled resources in ${Date.now() - startedAt}ms`);
       return;
     }
 
@@ -124,6 +131,7 @@ export class SkillServiceManager {
       }
       console.log('[SkillServices] Installing/reparing web-search dependencies...');
       execSync('npm install', { cwd: skillPath, stdio: 'ignore', env });
+      console.log(`[SkillServices] Web-search dependencies repaired in ${Date.now() - startedAt}ms`);
     }
 
     if (!fs.existsSync(distDir)) {
@@ -132,27 +140,32 @@ export class SkillServiceManager {
       }
       console.log('[SkillServices] Compiling web-search TypeScript...');
       execSync('npm run build', { cwd: skillPath, stdio: 'ignore', env });
+      console.log(`[SkillServices] Web-search dist rebuilt in ${Date.now() - startedAt}ms`);
     }
 
     if (!this.isWebSearchRuntimeHealthy(skillPath)) {
       throw new Error('Web-search runtime is still unhealthy after attempted repair');
     }
+    console.log(`[SkillServices] Web-search runtime healthy after repair in ${Date.now() - startedAt}ms`);
   }
 
   /**
    * Start all skill services
    */
   async startAll(): Promise<void> {
+    const startedAt = Date.now();
     console.log('[SkillServices] Starting skill services...');
 
     // Resolve environment once for all service spawns
     this.skillEnv = await buildSkillServiceEnv();
+    console.log(`[SkillServices] Skill service env ready after ${Date.now() - startedAt}ms`);
 
     try {
       await this.startWebSearchService();
     } catch (error) {
       console.error('[SkillServices] Error starting services:', error);
     }
+    console.log(`[SkillServices] startAll complete in ${Date.now() - startedAt}ms`);
   }
 
   /**
@@ -173,11 +186,13 @@ export class SkillServiceManager {
    */
   async startWebSearchService(): Promise<void> {
     try {
+      const startedAt = Date.now();
       const skillPath = this.getWebSearchPath();
       if (!skillPath) {
         console.log('[SkillServices] Web Search skill not found, skipping');
         return;
       }
+      console.log(`[SkillServices] Web Search skill path resolved in ${Date.now() - startedAt}ms: ${skillPath}`);
 
       // Check if already running
       if (this.isWebSearchServiceRunning()) {
@@ -201,12 +216,14 @@ export class SkillServiceManager {
       } else {
         console.warn('[SkillServices] Web Search Bridge Server may not have started correctly');
       }
+      console.log(`[SkillServices] startWebSearchService complete in ${Date.now() - startedAt}ms`);
     } catch (error) {
       console.error('[SkillServices] Failed to start Web Search service:', error);
     }
   }
 
   private async startWebSearchServiceProcess(skillPath: string): Promise<void> {
+    const startedAt = Date.now();
     const pidFile = path.join(skillPath, '.server.pid');
     const logFile = path.join(skillPath, '.server.log');
     const serverEntry = path.join(skillPath, 'dist', 'server', 'index.js');
@@ -240,6 +257,7 @@ export class SkillServiceManager {
     const runtimeLabel = runtime.command === resolveElectronExecutablePath() ? 'electron-node' : 'node';
     console.log(`[SkillServices] Web Search Bridge Server starting (PID: ${child.pid}, runtime: ${runtimeLabel})`);
     console.log(`[SkillServices] Logs: ${logFile}`);
+    console.log(`[SkillServices] startWebSearchServiceProcess complete in ${Date.now() - startedAt}ms`);
   }
 
   /**

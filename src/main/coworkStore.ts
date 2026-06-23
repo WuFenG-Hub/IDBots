@@ -72,6 +72,9 @@ const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:�
 const MEMORY_OPERATIONAL_PREFERENCE_RE = /(默认语言|回复格式|输出风格|回复风格|尽量简洁|保持简短|reply(?:\s+in)?|respond(?:\s+in)?|language|format|style|tone|markdown|concise|brief)/i;
 const MEMORY_PREFERENCE_RE = /(偏好|喜欢|prefer|preference|likes?|dislikes?)/i;
 const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.completed';
+const METAWEB_ORDER_SESSION_MIGRATION_KEY = 'cowork.metawebOrderSessionsToPeerConversations.v1.completed';
+const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplemsgMetadata.v1.completed';
+const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
   created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility
@@ -769,10 +772,10 @@ export class CoworkStore implements MemoryBackend {
   // In-memory tracking of delegation-blocked sessions
   private delegationBlockedSessions: Map<string, { orderId: string }> = new Map();
 
-  constructor(db: Database, saveDb: () => void) {
+  constructor(db: Database, saveDb: () => void, options?: { deferHeavyStartupMaintenance?: boolean }) {
     this.db = db;
     this.saveDb = saveDb;
-    this.ensureSchemaCompatibility();
+    this.ensureSchemaCompatibility(Boolean(options?.deferHeavyStartupMaintenance));
   }
 
   getMemoryBackend(): MemoryBackend {
@@ -812,15 +815,28 @@ export class CoworkStore implements MemoryBackend {
     return this.delegationBlockedSessions.get(sessionId) || null;
   }
 
-  private ensureSchemaCompatibility(): void {
+  private ensureSchemaCompatibility(deferHeavyStartupMaintenance = false): void {
     this.ensureMemorySchemaCompatibility();
     this.ensureMemoryPolicySchemaCompatibility();
     this.ensureConversationMappingSchemaCompatibility();
     this.ensureCoworkMessageIndexes();
-    this.migrateMetawebOrderSessionsToPeerConversations();
     this.backfillScopedMemoryMetadata();
-    this.backfillMetawebOrderSimplemsgMetadata();
-    this.backfillMetawebPrivateSimplemsgMetadata();
+    if (deferHeavyStartupMaintenance) {
+      return;
+    }
+    this.runHeavyStartupMaintenance();
+  }
+
+  runHeavyStartupMaintenance(): {
+    migratedMetawebOrderSessions: number;
+    backfilledMetawebOrderMessages: number;
+    backfilledMetawebPrivateMessages: number;
+  } {
+    return {
+      migratedMetawebOrderSessions: this.migrateMetawebOrderSessionsToPeerConversations(),
+      backfilledMetawebOrderMessages: this.backfillMetawebOrderSimplemsgMetadata(),
+      backfilledMetawebPrivateMessages: this.backfillMetawebPrivateSimplemsgMetadata(),
+    };
   }
 
   private ensureCoworkMessageIndexes(): void {
@@ -2202,10 +2218,14 @@ export class CoworkStore implements MemoryBackend {
       SET status = 'idle', updated_at = ?
       WHERE status = 'running'
     `, [now]);
-    this.saveDb();
 
     const changes = this.db.getRowsModified?.();
-    return typeof changes === 'number' ? changes : 0;
+    const modified = typeof changes === 'number' ? changes : 0;
+    if (modified > 0) {
+      this.saveDb();
+    }
+
+    return modified;
   }
 
   listRecentCwds(limit: number = 8): string[] {
@@ -2382,6 +2402,9 @@ export class CoworkStore implements MemoryBackend {
   }
 
   migrateMetawebOrderSessionsToPeerConversations(): number {
+    if (this.getKvValue(METAWEB_ORDER_SESSION_MIGRATION_KEY) === '1') {
+      return 0;
+    }
     if (
       !this.tableExists('cowork_conversation_mappings')
       || !this.tableExists('cowork_sessions')
@@ -2493,7 +2516,9 @@ export class CoworkStore implements MemoryBackend {
     }
 
     if (changed > 0) {
-      this.saveDb();
+      this.setKvValue(METAWEB_ORDER_SESSION_MIGRATION_KEY, '1');
+    } else {
+      this.setKvValue(METAWEB_ORDER_SESSION_MIGRATION_KEY, '1');
     }
     return changed;
   }
@@ -2764,6 +2789,9 @@ export class CoworkStore implements MemoryBackend {
   }
 
   backfillMetawebOrderSimplemsgMetadata(): number {
+    if (this.getKvValue(METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY) === '1') {
+      return 0;
+    }
     if (!this.tableExists('cowork_conversation_mappings') || !this.tableExists('cowork_messages')) {
       return 0;
     }
@@ -2854,12 +2882,17 @@ export class CoworkStore implements MemoryBackend {
     }
 
     if (changed > 0) {
-      this.saveDb();
+      this.setKvValue(METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY, '1');
+    } else {
+      this.setKvValue(METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY, '1');
     }
     return changed;
   }
 
   backfillMetawebPrivateSimplemsgMetadata(): number {
+    if (this.getKvValue(METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY) === '1') {
+      return 0;
+    }
     if (
       !this.tableExists('cowork_conversation_mappings')
       || !this.tableExists('cowork_messages')
@@ -2916,7 +2949,9 @@ export class CoworkStore implements MemoryBackend {
     }
 
     if (changed > 0) {
-      this.saveDb();
+      this.setKvValue(METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY, '1');
+    } else {
+      this.setKvValue(METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY, '1');
     }
     return changed;
   }

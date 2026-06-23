@@ -2051,6 +2051,11 @@ const migrateLegacyUserData = (): void => {
 
 configureUserDataPath();
 initLogger();
+const startupStartedAt = Date.now();
+const startupLog = (stage: string): void => {
+  console.log(`[Startup +${Date.now() - startupStartedAt}ms] ${stage}`);
+};
+startupLog(`boot marker ${new Date(startupStartedAt).toISOString()}`);
 
 const isDev = process.env.NODE_ENV === 'development';
 const isLinux = process.platform === 'linux';
@@ -2296,6 +2301,8 @@ process.on('unhandledRejection', (error) => {
 
 let store: SqliteStore | null = null;
 let coworkStore: CoworkStore | null = null;
+let coworkStoreHeavyMaintenanceScheduled = false;
+let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
 let skillManager: SkillManager | null = null;
@@ -2947,13 +2954,46 @@ const rethrowSqliteWasmBoundsError = (error: unknown): void => {
 const getCoworkStore = () => {
   if (!coworkStore) {
     const sqliteStore = getStore();
-    coworkStore = new CoworkStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+    startupLog('cowork store construct begin');
+    coworkStore = new CoworkStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+      { deferHeavyStartupMaintenance: true },
+    );
+    startupLog('cowork store construct done');
+    startupLog('cowork store auto-delete begin');
     const cleaned = coworkStore.autoDeleteNonPersonalMemories();
+    startupLog(`cowork store auto-delete done (cleaned=${cleaned})`);
     if (cleaned > 0) {
       console.info(`[cowork-memory] Auto-deleted ${cleaned} non-personal/procedural memories`);
     }
   }
   return coworkStore;
+};
+
+const scheduleCoworkStoreHeavyMaintenance = (): void => {
+  if (coworkStoreHeavyMaintenanceScheduled || coworkStoreHeavyMaintenanceFinished) {
+    return;
+  }
+  coworkStoreHeavyMaintenanceScheduled = true;
+
+  setTimeout(() => {
+    if (coworkStoreHeavyMaintenanceFinished || !coworkStore) {
+      return;
+    }
+
+    try {
+      startupLog('cowork store heavy maintenance begin');
+      const result = coworkStore.runHeavyStartupMaintenance();
+      startupLog(
+        `cowork store heavy maintenance done (orderSessions=${result.migratedMetawebOrderSessions}, orderBackfill=${result.backfilledMetawebOrderMessages}, privateBackfill=${result.backfilledMetawebPrivateMessages})`,
+      );
+      coworkStoreHeavyMaintenanceFinished = true;
+    } catch (error) {
+      coworkStoreHeavyMaintenanceScheduled = false;
+      console.error('[CoworkStore] Heavy startup maintenance failed:', error);
+    }
+  }, 0);
 };
 
 const getMcpStore = () => {
@@ -4854,6 +4894,14 @@ if (!gotTheLock) {
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
   ipcMain.handle('app:getSystemLocale', () => app.getLocale());
+  ipcMain.handle('startup:rendererInitialized', () => {
+    startupLog('renderer initialization complete');
+    return {
+      success: true,
+      elapsedMs: Date.now() - startupStartedAt,
+      startedAt: startupStartedAt,
+    };
+  });
 
   // Skills IPC handlers
   ipcMain.handle('skills:list', () => {
@@ -8865,6 +8913,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       return;
     }
 
+    startupLog('createWindow begin');
     mainWindow = new BrowserWindow({
       width: 1200,
       height: 800,
@@ -8931,6 +8980,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       clearTimeout(loadTimeout);
     });
     mainWindow.webContents.on('did-finish-load', () => {
+      startupLog('main frame did-finish-load');
       emitWindowState();
     });
     if (isDev) {
@@ -9048,6 +9098,8 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
     // 等待内容加载完成后再显示窗口
     mainWindow.once('ready-to-show', () => {
+      startupLog('window ready-to-show');
+      scheduleCoworkStoreHeavyMaintenance();
       emitWindowState();
       // 开机自启时不显示窗口，仅显示托盘图标
       if (!isAutoLaunched()) {
@@ -9174,7 +9226,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
 
   // 初始化应用
   const initApp = async () => {
+    startupLog('initApp begin');
     await app.whenReady();
+    startupLog('app.whenReady resolved');
 
     migrateLegacyUserData();
 
@@ -9189,6 +9243,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     store = await initStore();
+    startupLog('store ready');
 
     // Start man-p2p local indexer (non-fatal if binary not present)
     try {
@@ -9198,39 +9253,65 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       await syncP2PRuntimeConfigForCurrentMetabots();
       await p2pIndexerService.start(dataDir, configPath);
       console.log('[p2p] man-p2p started');
+      startupLog('p2p ready');
     } catch (err) {
       console.warn('[p2p] man-p2p failed to start, continuing without local indexer:', err);
     }
 
     const listenerConfig = getListenerConfigFromStore();
+    startupLog(`listener config loaded (enabled=${shouldRunListener(listenerConfig)})`);
     if (shouldRunListener(listenerConfig)) {
+      startupLog('listener start begin');
       startListenerWithConfig(listenerConfig).catch((error) => {
         console.error('[MetaWebListener] auto-start failed:', error);
       });
+      startupLog('listener start invoked');
     }
 
     // Global fee rate store: must init after store is ready
+    startupLog('fee rate store init schedule begin');
     initFeeRateStore(getStore()).catch((e: unknown) => console.error('[FeeRateStore] init failed:', e));
+    startupLog('fee rate store init scheduled');
 
+    startupLog('metaid rpc server start begin');
     metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore);
+    startupLog('metaid rpc server started');
+
     // Defensive recovery: app may be force-closed during execution and leave
     // stale running flags in DB. Normalize them on startup.
+    startupLog('reset running sessions begin');
     const resetCount = getCoworkStore().resetRunningSessions();
     if (resetCount > 0) {
       console.log(`[Main] Reset ${resetCount} stuck cowork session(s) from running -> idle`);
     }
+    startupLog(`reset running sessions done (count=${resetCount})`);
+
     // Inject store getter into claudeSettings
+    startupLog('setStoreGetter begin');
     setStoreGetter(() => store);
+    startupLog('setStoreGetter done');
+
     const manager = getSkillManager();
+    startupLog('sync bundled skills begin');
     manager.syncBundledSkillsToUserData();
+    startupLog('sync bundled skills done');
+    startupLog('skill manager watching begin');
     manager.startWatching();
+    startupLog('skill manager watching done');
+
     const metaAppMgr = getMetaAppManager();
+    startupLog('sync bundled metaapps begin');
     metaAppMgr.syncBundledMetaAppsToUserData();
+    startupLog('sync bundled metaapps done');
+    startupLog('metaapp manager watching begin');
     metaAppMgr.startWatching();
+    startupLog('metaapp manager watching done');
 
     // Start skill services
     const skillServices = getSkillServiceManager();
+    startupLog('skill services startAll begin');
     await skillServices.startAll();
+    startupLog('skill services ready');
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）
@@ -9247,6 +9328,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     setContentSecurityPolicy();
 
     // 创建窗口
+    startupLog('about to create window');
     createWindow();
 
     await startSqliteBackgroundJobs();

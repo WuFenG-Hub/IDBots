@@ -416,6 +416,13 @@ contextBridge.exposeInMainWorld('electron', {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getSystemLocale: () => ipcRenderer.invoke('app:getSystemLocale'),
   },
+  startup: {
+    rendererInitialized: () => ipcRenderer.invoke('startup:rendererInitialized') as Promise<{
+      success: boolean;
+      elapsedMs: number;
+      startedAt: number;
+    }>,
+  },
   appUpdate: {
     download: (url: string) => ipcRenderer.invoke('appUpdate:download', url),
     cancelDownload: () => ipcRenderer.invoke('appUpdate:cancelDownload'),
