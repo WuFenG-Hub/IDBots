@@ -388,3 +388,38 @@ test('settings and cache return browser command result envelopes', async () => {
     data: { clearedArtifacts: 1, clearedPinRecords: 1, input: { all: true } },
   });
 });
+
+test('getCache keeps settings available when the Electron cache IPC handler is missing', async () => {
+  const adapter = createAdapter({
+    getMetaAppCache: async () => {
+      throw new Error(
+        "Error invoking remote method 'botBrowser:getMetaAppCache': Error: No handler registered for 'botBrowser:getMetaAppCache'",
+      );
+    },
+  });
+
+  const cache = await adapter.getCache();
+
+  assert.equal(cache.ok, true);
+  assert.equal(cache.state, 'success');
+  assert.equal(cache.data.cacheRoot, null);
+  assert.equal(cache.data.unavailable, true);
+  assert.match(String(cache.data.error), /No handler registered/);
+});
+
+test('clearCache reports a cache unavailable failure when the Electron cache IPC handler is missing', async () => {
+  const adapter = createAdapter({
+    clearMetaAppCache: async () => {
+      throw new Error(
+        "Error invoking remote method 'botBrowser:clearMetaAppCache': Error: No handler registered for 'botBrowser:clearMetaAppCache'",
+      );
+    },
+  });
+
+  const cleared = await adapter.clearCache({ all: true });
+
+  assert.equal(cleared.ok, false);
+  assert.equal(cleared.state, 'failed');
+  assert.equal(cleared.code, 'browser_cache_unavailable');
+  assert.match(cleared.message, /No handler registered/);
+});

@@ -65,6 +65,15 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isMissingIpcHandlerError(error: unknown, channel: string): boolean {
+  const message = errorMessage(error);
+  return message.includes('No handler registered') && message.includes(channel);
+}
+
 function objectRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -356,7 +365,19 @@ export function createIdbotsBrowserHostAdapter(
 
     async getCache(_cacheInput?: BrowserCacheInput): Promise<BrowserCommandResult<BrowserCacheSnapshot>> {
       if (input.getMetaAppCache) {
-        return input.getMetaAppCache();
+        try {
+          return await input.getMetaAppCache();
+        } catch (error) {
+          const message = errorMessage(error);
+          if (isMissingIpcHandlerError(error, 'botBrowser:getMetaAppCache')) {
+            return browserSuccess({
+              cacheRoot: null,
+              unavailable: true,
+              error: message,
+            });
+          }
+          return browserFailure('browser_cache_unavailable', message);
+        }
       }
       return browserSuccess({});
     },
@@ -365,7 +386,11 @@ export function createIdbotsBrowserHostAdapter(
       cacheInput: BrowserCacheClearInput,
     ): Promise<BrowserCommandResult<BrowserCacheClearResult>> {
       if (input.clearMetaAppCache) {
-        return input.clearMetaAppCache(cacheInput);
+        try {
+          return await input.clearMetaAppCache(cacheInput);
+        } catch (error) {
+          return browserFailure('browser_cache_unavailable', errorMessage(error));
+        }
       }
       return browserSuccess({});
     },
