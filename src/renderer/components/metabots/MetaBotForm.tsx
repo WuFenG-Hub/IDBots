@@ -74,6 +74,8 @@ interface MetaBotFormProps {
   excludeIdForNameCheck?: number | null;
   /** Metabot id for homepage file upload (edit mode). Null/undefined in create mode disables metafile upload. */
   metabotId?: number | null;
+  /** Open a MetaApp homepage preview by its pin id (best-effort; browser may fail to resolve). */
+  onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
 }
 
 const MetaBotForm: React.FC<MetaBotFormProps> = ({
@@ -88,6 +90,7 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   onCheckNameExists,
   excludeIdForNameCheck,
   metabotId,
+  onPreviewMetaAppHomepage,
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const homepageFileInputRef = useRef<HTMLInputElement>(null);
@@ -629,13 +632,28 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
 
           {values.homepage_source === 'metaapp' && (
             <div className="space-y-2">
-              <input
-                type="text"
-                value={values.homepage_metaapp_pin}
-                onChange={(e) => handleChange('homepage_metaapp_pin', e.target.value)}
-                placeholder={i18nService.t('metabotHomepageMetaappPinPlaceholder')}
-                className={`${inputClass} font-mono`}
-              />
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={values.homepage_metaapp_pin}
+                  onChange={(e) => handleChange('homepage_metaapp_pin', e.target.value)}
+                  placeholder={i18nService.t('metabotHomepageMetaappPinPlaceholder')}
+                  className={`${inputClass} flex-1 font-mono`}
+                />
+                {onPreviewMetaAppHomepage && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pin = values.homepage_metaapp_pin.trim().replace(/^metaapp:\/\//i, '').trim();
+                      if (pin) void onPreviewMetaAppHomepage(pin);
+                    }}
+                    disabled={!values.homepage_metaapp_pin.trim()}
+                    className="shrink-0 px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {i18nService.t('metabotHomepageMetaappPreview')}
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

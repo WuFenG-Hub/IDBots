@@ -77,12 +77,14 @@ interface MetabotsManagerProps {
   onRequestModelSettings?: () => void;
   onRequestOnboarding?: () => void;
   onOpenMetabotInBrowser?: (metabot: Metabot) => void;
+  onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
 }
 
 const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   onRequestModelSettings,
   onRequestOnboarding,
   onOpenMetabotInBrowser,
+  onPreviewMetaAppHomepage,
 }) => {
   const dispatch = useDispatch();
   const [list, setList] = useState<Metabot[]>([]);
@@ -388,6 +390,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={null}
           metabotId={null}
+          onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
         />
         {/* Chain publishing overlay */}
         {createChainStatus !== 'idle' && (
@@ -499,6 +502,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={editId}
           metabotId={editId}
+          onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
         />
       </div>
     );
