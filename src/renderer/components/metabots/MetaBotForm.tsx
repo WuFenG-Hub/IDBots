@@ -22,6 +22,14 @@ export interface MetaBotFormValues {
   boss_id: string;
   llm_id: string;
   allow_chat_skills: string[];
+  homepage_source: 'default' | 'metafile' | 'metaapp';
+  homepage_metafile_uri: string;
+  homepage_metafile_content_type: string;
+  homepage_metaapp_pin: string;
+  /** DB homepage JSON at form open (for diff & read-only display in metafile edit mode). */
+  homepage_initial: string | null;
+  /** Composed final homepage JSON string (or null) set by handleSubmit for the parent. */
+  homepage?: string | null;
 }
 
 export interface LlmOption {
@@ -41,6 +49,11 @@ const defaultValues: MetaBotFormValues = {
   boss_id: '',
   llm_id: '',
   allow_chat_skills: [],
+  homepage_source: 'default',
+  homepage_metafile_uri: '',
+  homepage_metafile_content_type: '',
+  homepage_metaapp_pin: '',
+  homepage_initial: null,
 };
 
 interface MetaBotFormProps {
@@ -59,6 +72,8 @@ interface MetaBotFormProps {
   onCheckNameExists?: (name: string, excludeId?: number) => Promise<boolean>;
   /** Exclude this metabot ID when checking name (for edit mode). */
   excludeIdForNameCheck?: number | null;
+  /** Metabot id for homepage file upload (edit mode). Null/undefined in create mode disables metafile upload. */
+  metabotId?: number | null;
 }
 
 const MetaBotForm: React.FC<MetaBotFormProps> = ({
@@ -72,8 +87,10 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   onRequestModelSettings,
   onCheckNameExists,
   excludeIdForNameCheck,
+  metabotId,
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
+  const homepageFileInputRef = useRef<HTMLInputElement>(null);
   const [values, setValues] = useState<MetaBotFormValues>({
     ...defaultValues,
     ...(initialValues || {}),
@@ -83,6 +100,8 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [nameDuplicate, setNameDuplicate] = useState(false);
+  const [homepageUploading, setHomepageUploading] = useState(false);
+  const [homepageUploadError, setHomepageUploadError] = useState('');
 
   useEffect(() => {
     if (initialValues) {
@@ -160,6 +179,61 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
     e.target.value = '';
   };
 
+  const handleHomepageFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || metabotId == null) return;
+    setHomepageUploading(true);
+    setHomepageUploadError('');
+    try {
+      const reader = new FileReader();
+      const base64 = await new Promise<string>((resolve, reject) => {
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          const m = /^data:[^;]+;base64,(.+)$/.exec(result);
+          resolve(m ? m[1] : '');
+        };
+        reader.onerror = () => reject(new Error('read failed'));
+        reader.readAsDataURL(file);
+      });
+      if (!base64) throw new Error('empty');
+      const res = await window.electron.idbots.uploadMetabotHomepageFile({
+        metabotId,
+        fileName: file.name,
+        contentType: file.type || undefined,
+        base64,
+      });
+      if (!res.success || !res.metafileUri) {
+        throw new Error(res.error || i18nService.t('metabotSaveFailed'));
+      }
+      handleChange('homepage_metafile_uri', res.metafileUri);
+      handleChange('homepage_metafile_content_type', res.contentType || file.type || '');
+      handleChange('homepage_source', 'metafile');
+    } catch (err) {
+      setHomepageUploadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setHomepageUploading(false);
+      e.target.value = '';
+    }
+  };
+
+  /** Compose the final homepage JSON string (or null) from current form selection. Throws on invalid. */
+  const composeHomepageForSave = (): string | null => {
+    if (values.homepage_source === 'default') return null;
+    if (values.homepage_source === 'metafile') {
+      const uri = values.homepage_metafile_uri.trim();
+      if (!uri) throw new Error(i18nService.t('metabotHomepageErrNoFile'));
+      const contentType = values.homepage_metafile_content_type.trim() || 'application/octet-stream';
+      return JSON.stringify({ uri, renderer: 'auto', contentType });
+    }
+    // metaapp
+    const pin = values.homepage_metaapp_pin.trim();
+    const stripped = pin.replace(/^metaapp:\/\//i, '').trim();
+    if (!stripped || /\s/u.test(stripped) || /:\/\//.test(stripped)) {
+      throw new Error(i18nService.t('metabotHomepageErrInvalidPin'));
+    }
+    return JSON.stringify({ uri: `metaapp://${stripped}`, renderer: 'metaapp', contentType: 'application/vnd.metaapp' });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!values.name.trim()) {
@@ -190,12 +264,20 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
       setError(i18nService.t('metabotLlmRequired'));
       return;
     }
+    let homepageForSave: string | null = null;
+    try {
+      homepageForSave = composeHomepageForSave();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : i18nService.t('metabotSaveFailed'));
+      return;
+    }
     setSaving(true);
     setError('');
     try {
       await onSave({
         ...values,
         allow_chat_skills: normalizeAllowChatSkills(values.allow_chat_skills),
+        homepage: homepageForSave,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : i18nService.t('metabotSaveFailed'));
@@ -491,6 +573,73 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
               {i18nService.t('metabotNoAvailableSkills')}
             </p>
           )}
+        </div>
+      </div>
+
+      <div className={rowClass}>
+        <label htmlFor="metabot-homepage" className={labelClass}>
+          {i18nService.t('metabotHomepage')}
+        </label>
+        <div className="min-w-0 space-y-2">
+          <select
+            id="metabot-homepage"
+            value={values.homepage_source}
+            onChange={(e) => handleChange('homepage_source', e.target.value as MetaBotFormValues['homepage_source'])}
+            className={inputClass}
+          >
+            <option value="default">{i18nService.t('metabotHomepageDefault')}</option>
+            <option value="metafile">{i18nService.t('metabotHomepageMetafile')}</option>
+            <option value="metaapp">{i18nService.t('metabotHomepageMetaapp')}</option>
+          </select>
+
+          {values.homepage_source === 'default' && (
+            <p className={hintClass}>{i18nService.t('metabotHomepageDefaultDesc')}</p>
+          )}
+
+          {values.homepage_source === 'metafile' && (
+            <div className="space-y-2">
+              <input
+                ref={homepageFileInputRef}
+                type="file"
+                className="hidden"
+                onChange={handleHomepageFileChange}
+              />
+              {metabotId == null ? (
+                <p className={hintClass}>{i18nService.t('metabotHomepageMetafileDisabledHint')}</p>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => homepageFileInputRef.current?.click()}
+                  disabled={homepageUploading}
+                  className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {homepageUploading ? i18nService.t('metabotHomepageUploading') : i18nService.t('metabotHomepageMetafileUpload')}
+                </button>
+              )}
+              {values.homepage_metafile_uri && (
+                <p className={hintClass}>
+                  {i18nService.t('metabotHomepageUploaded')}: <code className="break-all">{values.homepage_metafile_uri}</code>
+                </p>
+              )}
+              {homepageUploadError && (
+                <p className="text-xs text-red-500">{homepageUploadError}</p>
+              )}
+            </div>
+          )}
+
+          {values.homepage_source === 'metaapp' && (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={values.homepage_metaapp_pin}
+                onChange={(e) => handleChange('homepage_metaapp_pin', e.target.value)}
+                placeholder={i18nService.t('metabotHomepageMetaappPinPlaceholder')}
+                className={`${inputClass} font-mono`}
+              />
+            </div>
+          )}
+
+          <p className={hintClass}>{i18nService.t('metabotHomepageHint')}</p>
         </div>
       </div>
 
