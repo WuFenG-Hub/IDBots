@@ -13,6 +13,9 @@ release/
 .env.local
 
 
+# ZCode worktrees (do not publish)
+.zcode/
+
 # Internal / tooling (do not publish)
 .claude/
 .cursorrules
@@ -64,6 +67,7 @@ tests/*
 !tests/waitElectronDevBuild.test.mjs
 !tests/providerDiscoveryService.test.mjs
 !tests/sqliteWasmRethrowGuards.test.mjs
+!tests/metabotHomepage.test.mjs
 
 # Local DB (never commit)
 *.sqlite
