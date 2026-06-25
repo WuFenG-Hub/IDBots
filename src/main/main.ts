@@ -6703,6 +6703,7 @@ if (!gotTheLock) {
     boss_global_metaid?: string | null;
     llm_id?: string | null;
     allow_chat_skills?: string[];
+    homepage?: string | null;
   }) => {
     try {
       await mockUpdateConfigOnChain();

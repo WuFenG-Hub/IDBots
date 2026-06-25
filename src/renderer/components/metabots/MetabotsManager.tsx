@@ -25,6 +25,7 @@ interface EditSyncPlan {
   syncPersona: boolean;
   syncLlm: boolean;
   syncChatSkills: boolean;
+  syncHomepage: boolean;
   syncStepKeys: SyncStepKey[];
 }
 
@@ -41,6 +42,7 @@ const buildRemainingEditSyncPlan = (
     syncPersona: plan.syncPersona && !synced.has('persona'),
     syncLlm: plan.syncLlm && !synced.has('llm'),
     syncChatSkills: plan.syncChatSkills && !synced.has('chatSkills'),
+    syncHomepage: plan.syncHomepage && !synced.has('homepage'),
     syncStepKeys: plan.syncStepKeys.filter((step) => !synced.has(step)),
   };
 };
@@ -53,6 +55,7 @@ const buildEditSyncIpcInput = (plan: EditSyncPlan) => ({
   syncPersona: plan.syncPersona,
   syncLlm: plan.syncLlm,
   syncChatSkills: plan.syncChatSkills,
+  syncHomepage: plan.syncHomepage,
 });
 
 const providerRequiresApiKey = (provider: string) => provider !== 'ollama';
@@ -206,6 +209,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
       allow_chat_skills: normalizeAllowChatSkills(values.allow_chat_skills),
+      homepage: values.homepage ?? null,
     });
     if (!result.success || !result.metabot) {
       setCreateChainStatus('error');
@@ -247,6 +251,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextBossGlobalMetaId = values.boss_global_metaid.trim() || null;
     const nextLlmRaw = values.llm_id.trim();
     const nextAllowChatSkills = normalizeAllowChatSkills(values.allow_chat_skills);
+    const nextHomepage = values.homepage ?? null;
 
     const oldName = (current.name || '').trim();
     const oldAvatarRaw = (current.avatar || '').trim();
@@ -256,6 +261,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const oldBioRaw = (current.bio || current.background || '').trim();
     const oldLlmRaw = (current.llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
+    const oldHomepage = current.homepage ?? null;
 
     const syncName = nextName !== oldName;
     const syncAvatar = nextAvatarRaw !== oldAvatarRaw;
@@ -266,6 +272,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       nextGoalRaw !== oldGoalRaw;
     const syncLlm = nextLlmRaw !== oldLlmRaw;
     const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
+    const syncHomepage = nextHomepage !== oldHomepage;
 
     const syncStepKeys: SyncStepKey[] = [];
     if (syncName) syncStepKeys.push('name');
@@ -274,6 +281,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     if (syncPersona) syncStepKeys.push('persona');
     if (syncLlm) syncStepKeys.push('llm');
     if (syncChatSkills) syncStepKeys.push('chatSkills');
+    if (syncHomepage) syncStepKeys.push('homepage');
 
     const result = await window.electron.metabot.update(editId, {
       name: nextName,
@@ -287,6 +295,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
       allow_chat_skills: nextAllowChatSkills,
+      homepage: nextHomepage,
     });
     if (!result.success) {
       throw new Error(result.error || i18nService.t('metabotSaveFailed'));
@@ -305,6 +314,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
       allow_chat_skills: nextAllowChatSkills,
+      homepage: nextHomepage,
     };
     setList((prev) => prev.map((m) => (m.id === editId ? updatedMetabot : m)));
     setViewMode('list');
@@ -323,6 +333,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       syncPersona,
       syncLlm,
       syncChatSkills,
+      syncHomepage,
       syncStepKeys,
     };
     setSyncStatus('syncing');
@@ -376,6 +387,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={null}
+          metabotId={null}
         />
         {/* Chain publishing overlay */}
         {createChainStatus !== 'idle' && (
@@ -446,6 +458,36 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
             boss_global_metaid: editMetabot.boss_global_metaid || '',
             llm_id: editMetabot.llm_id || '',
             allow_chat_skills: editMetabot.allow_chat_skills || [],
+            homepage: editMetabot.homepage ?? null,
+            homepage_initial: editMetabot.homepage ?? null,
+            homepage_source: ((): MetaBotFormValues['homepage_source'] => {
+              const hp = editMetabot.homepage;
+              if (!hp) return 'default';
+              try {
+                const obj = JSON.parse(hp);
+                if (obj?.uri?.startsWith('metaapp://')) return 'metaapp';
+                if (obj?.uri?.startsWith('metafile://')) return 'metafile';
+              } catch { /* ignore */ }
+              return 'default';
+            })(),
+            homepage_metafile_uri: (() => {
+              try {
+                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+                return obj?.uri?.startsWith('metafile://') ? obj.uri : '';
+              } catch { return ''; }
+            })(),
+            homepage_metafile_content_type: (() => {
+              try {
+                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+                return obj?.contentType ?? '';
+              } catch { return ''; }
+            })(),
+            homepage_metaapp_pin: (() => {
+              try {
+                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+                return obj?.uri?.startsWith('metaapp://') ? String(obj.uri).slice('metaapp://'.length) : '';
+              } catch { return ''; }
+            })(),
           }}
           isEdit={true}
           onCancel={handleCancelForm}
@@ -456,6 +498,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={editId}
+          metabotId={editId}
         />
       </div>
     );

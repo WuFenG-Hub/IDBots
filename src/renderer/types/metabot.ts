@@ -25,7 +25,7 @@ export interface Metabot {
   skills: string[];
   allow_chat_skills: string[];
   /** Homepage pointer JSON string (serialized {uri,renderer,contentType}); null = Default template. */
-  homepage: string | null;
+  homepage?: string | null;
   created_at: number;
   updated_at: number;
 }

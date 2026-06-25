@@ -354,6 +354,7 @@ interface MetabotUpdateInput {
   boss_global_metaid?: string | null;
   llm_id?: string | null;
   allow_chat_skills?: string[];
+  homepage?: string | null;
 }
 
 interface AssignGroupChatTaskParams {
@@ -840,12 +841,13 @@ interface IElectronAPI {
       syncPersona?: boolean;
       syncLlm?: boolean;
       syncChatSkills?: boolean;
+      syncHomepage?: boolean;
     }) => Promise<{
       success: boolean;
       error?: string;
       metabotInfoPinId?: string;
       txids?: string[];
-      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills'>;
+      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage'>;
     }>;
     createMetaBotOnChain: (input: {
       name: string;
@@ -861,6 +863,7 @@ interface IElectronAPI {
       llm_id?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
+      homepage?: string | null;
     }) => Promise<{
       success: boolean;
       error?: string;
@@ -869,6 +872,19 @@ interface IElectronAPI {
       subsidy?: { success: boolean; error?: string };
       chainPartial?: boolean;
       chainError?: string;
+    }>;
+    uploadMetabotHomepageFile: (input: {
+      metabotId: number;
+      fileName: string;
+      contentType?: string;
+      base64: string;
+      network?: string;
+    }) => Promise<{
+      success: boolean;
+      error?: string;
+      pinId?: string;
+      metafileUri?: string;
+      contentType?: string;
     }>;
   };
   metaWebListener: {

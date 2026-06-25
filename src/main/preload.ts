@@ -639,6 +639,7 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
