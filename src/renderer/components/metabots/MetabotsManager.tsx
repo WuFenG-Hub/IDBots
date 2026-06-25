@@ -502,6 +502,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={editId}
           metabotId={editId}
+          onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
         />
       </div>

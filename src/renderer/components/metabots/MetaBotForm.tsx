@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PhotoIcon, PlusIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowTopRightOnSquareIcon, PhotoIcon, PlusIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Skill } from '../../types/skill';
 import {
@@ -74,6 +74,8 @@ interface MetaBotFormProps {
   excludeIdForNameCheck?: number | null;
   /** Metabot id for homepage file upload (edit mode). Null/undefined in create mode disables metafile upload. */
   metabotId?: number | null;
+  /** Open the current Bot's default template homepage in Bot Browser. */
+  onOpenDefaultHomepage?: () => void;
   /** Open a MetaApp homepage preview by its pin id (best-effort; browser may fail to resolve). */
   onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
 }
@@ -90,6 +92,7 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   onCheckNameExists,
   excludeIdForNameCheck,
   metabotId,
+  onOpenDefaultHomepage,
   onPreviewMetaAppHomepage,
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
@@ -295,7 +298,9 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
-  const inputClass = 'w-full px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent';
+  const inputChromeClass = 'px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent';
+  const inputClass = `w-full ${inputChromeClass}`;
+  const homepageInlineButtonClass = 'inline-flex h-[38px] shrink-0 items-center justify-center gap-1.5 px-3 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap';
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3">
@@ -583,58 +588,80 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
         <label htmlFor="metabot-homepage" className={labelClass}>
           {i18nService.t('metabotHomepage')}
         </label>
-        <div className="min-w-0 space-y-2">
-          <select
-            id="metabot-homepage"
-            value={values.homepage_source}
-            onChange={(e) => handleChange('homepage_source', e.target.value as MetaBotFormValues['homepage_source'])}
-            className={inputClass}
+        <div className="min-w-0 space-y-1.5">
+          <div
+            data-slot="metabot-homepage-control-row"
+            className="flex min-w-0 items-center gap-2"
           >
-            <option value="default">{i18nService.t('metabotHomepageDefault')}</option>
-            <option value="metafile">{i18nService.t('metabotHomepageMetafile')}</option>
-            <option value="metaapp">{i18nService.t('metabotHomepageMetaapp')}</option>
-          </select>
+            <select
+              id="metabot-homepage"
+              value={values.homepage_source}
+              onChange={(e) => handleChange('homepage_source', e.target.value as MetaBotFormValues['homepage_source'])}
+              className={`${inputChromeClass} h-[38px] w-[9.5rem] shrink-0`}
+            >
+              <option value="default">{i18nService.t('metabotHomepageDefault')}</option>
+              <option value="metafile">{i18nService.t('metabotHomepageMetafile')}</option>
+              <option value="metaapp">{i18nService.t('metabotHomepageMetaapp')}</option>
+            </select>
 
-          {values.homepage_source === 'default' && (
-            <p className={hintClass}>{i18nService.t('metabotHomepageDefaultDesc')}</p>
-          )}
+            {values.homepage_source === 'default' && (
+              <div className="min-w-0 flex-1">
+                {onOpenDefaultHomepage ? (
+                  <button
+                    type="button"
+                    data-slot="metabot-homepage-view"
+                    onClick={onOpenDefaultHomepage}
+                    className={homepageInlineButtonClass}
+                    title={i18nService.t('metabotHomepageView')}
+                  >
+                    <ArrowTopRightOnSquareIcon className="h-4 w-4" />
+                    <span>{i18nService.t('metabotHomepageView')}</span>
+                  </button>
+                ) : (
+                  <p className={`${hintClass} mt-0 truncate`}>
+                    {i18nService.t('metabotHomepageDefaultDesc')}
+                  </p>
+                )}
+              </div>
+            )}
 
-          {values.homepage_source === 'metafile' && (
-            <div className="space-y-2">
-              <input
-                ref={homepageFileInputRef}
-                type="file"
+            {values.homepage_source === 'metafile' && (
+              <div className="min-w-0 flex-1 flex items-center gap-2">
+                <input
+                  ref={homepageFileInputRef}
+                  type="file"
                 className="hidden"
                 onChange={handleHomepageFileChange}
               />
               {metabotId == null ? (
-                <p className={hintClass}>{i18nService.t('metabotHomepageMetafileDisabledHint')}</p>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => homepageFileInputRef.current?.click()}
-                  disabled={homepageUploading}
-                  className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {homepageUploading ? i18nService.t('metabotHomepageUploading') : i18nService.t('metabotHomepageMetafileUpload')}
-                </button>
-              )}
-              {values.homepage_metafile_uri && (
-                <p className={hintClass}>
-                  {i18nService.t('metabotHomepageUploaded')}: <code className="break-all">{values.homepage_metafile_uri}</code>
-                </p>
-              )}
-              {homepageUploadError && (
-                <p className="text-xs text-red-500">{homepageUploadError}</p>
-              )}
-            </div>
-          )}
+                  <p className={hintClass}>{i18nService.t('metabotHomepageMetafileDisabledHint')}</p>
+                ) : (
+                  <button
+                    type="button"
+                    data-slot="metabot-homepage-metafile-upload"
+                    onClick={() => homepageFileInputRef.current?.click()}
+                    disabled={homepageUploading}
+                    className={homepageInlineButtonClass}
+                  >
+                    {homepageUploading ? i18nService.t('metabotHomepageUploading') : i18nService.t('metabotHomepageMetafileUpload')}
+                  </button>
+                )}
+                {values.homepage_metafile_uri && (
+                  <p className={`${hintClass} mt-0 min-w-0 truncate`}>
+                    {i18nService.t('metabotHomepageUploaded')}: <code>{values.homepage_metafile_uri}</code>
+                  </p>
+                )}
+                {homepageUploadError && (
+                  <p className="min-w-0 truncate text-xs text-red-500">{homepageUploadError}</p>
+                )}
+              </div>
+            )}
 
-          {values.homepage_source === 'metaapp' && (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
+            {values.homepage_source === 'metaapp' && (
+              <div className="min-w-0 flex-1 flex items-center gap-2">
                 <input
                   type="text"
+                  data-slot="metabot-homepage-metaapp-pin"
                   value={values.homepage_metaapp_pin}
                   onChange={(e) => handleChange('homepage_metaapp_pin', e.target.value)}
                   placeholder={i18nService.t('metabotHomepageMetaappPinPlaceholder')}
@@ -643,21 +670,22 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
                 {onPreviewMetaAppHomepage && (
                   <button
                     type="button"
+                    data-slot="metabot-homepage-metaapp-preview"
                     onClick={() => {
                       const pin = values.homepage_metaapp_pin.trim().replace(/^metaapp:\/\//i, '').trim();
                       if (pin) void onPreviewMetaAppHomepage(pin);
                     }}
                     disabled={!values.homepage_metaapp_pin.trim()}
-                    className="shrink-0 px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    className={homepageInlineButtonClass}
                   >
                     {i18nService.t('metabotHomepageMetaappPreview')}
                   </button>
                 )}
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
-          <p className={hintClass}>{i18nService.t('metabotHomepageHint')}</p>
+          <p data-slot="metabot-homepage-hint" className={hintClass}>{i18nService.t('metabotHomepageHint')}</p>
         </div>
       </div>
 
