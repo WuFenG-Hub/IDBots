@@ -34,11 +34,11 @@ test('full sync plan uses protocol paths and includes chatpubkey only before boo
 
   assert.deepEqual(
     steps.map((step) => step.key),
-    ['name', 'chatpubkey', 'bio', 'persona', 'llm', 'chatSkills'],
+    ['name', 'chatpubkey', 'bio', 'persona', 'llm', 'chatSkills', 'homepage'],
   );
   assert.deepEqual(
     steps.map((step) => step.path),
-    ['/info/name', '/info/chatpubkey', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills'],
+    ['/info/name', '/info/chatpubkey', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills', '/info/homepage'],
   );
   assert.equal(steps.find((step) => step.key === 'bio').contentType, 'text/plain');
   assert.equal(steps.find((step) => step.key === 'persona').contentType, 'application/json');
@@ -316,7 +316,7 @@ test('full sync reports partial failure when chatpubkey is missing before bootst
   assert.match(result.error, /chat public key/i);
   assert.equal(result.chatPublicKeyPinId, undefined);
   assert.equal(result.metabotInfoPinId, 'chatSkills-pin');
-  assert.deepEqual(createPinPaths, ['/info/name', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills']);
+  assert.deepEqual(createPinPaths, ['/info/name', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills', '/info/homepage']);
   assert.deepEqual(updateCalls, [
     { id: 8, input: { metabot_info_pinid: 'chatSkills-pin' } },
   ]);
@@ -372,4 +372,29 @@ test('renderer chat skill hint copy references the /info/chatSkills protocol pat
   );
   assert.match(source, /metabotSyncStepChatSkills:\s*'聊天技能'/);
   assert.doesNotMatch(source, /bio\.allowChatSkills/);
+});
+
+test('full sync plan includes homepage step', () => {
+  const steps = buildFullMetabotInfoSyncPlan({
+    name: 'Bot',
+    chat_public_key: 'k',
+    role: 'r', soul: 's', goal: 'g', bio: 'b', llm_id: 'l',
+    homepage: '{"uri":"metaapp://p","renderer":"metaapp","contentType":"application/vnd.metaapp"}',
+  });
+  const hp = steps.find((s) => s.key === 'homepage');
+  assert.ok(hp, 'homepage step present');
+  assert.equal(hp.path, '/info/homepage');
+  assert.equal(hp.contentType, 'application/json');
+});
+
+test('edit sync plan includes homepage only when syncHomepage', () => {
+  const baseMetabot = {
+    name: 'Bot', avatar: '', role: 'r', soul: 's', goal: 'g', bio: 'b', llm_id: 'l',
+    allow_chat_skills: [],
+    homepage: '{"uri":"metaapp://p","renderer":"metaapp","contentType":"application/vnd.metaapp"}',
+  };
+  const withHp = buildEditMetabotInfoSyncPlan({ metabotId: 1, syncHomepage: true, metabot: baseMetabot });
+  assert.ok(withHp.some((s) => s.key === 'homepage'));
+  const withoutHp = buildEditMetabotInfoSyncPlan({ metabotId: 1, syncName: true, metabot: baseMetabot });
+  assert.equal(withoutHp.some((s) => s.key === 'homepage'), false);
 });

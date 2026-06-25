@@ -110,4 +110,24 @@ export function buildMetabotInfoPayloads(input: MetabotInfoPayloadInput): Metabo
   ];
 }
 
+import { serializeMetabotHomepagePayload, parseHomepage } from './metabotHomepage';
+
 export const normalizeBotInfoStringArrayForTests = normalizeStringArray;
+
+export interface MetabotHomepagePayload {
+  step: 'homepage';
+  path: '/info/homepage';
+  contentType: 'application/json';
+  payload: string; // compact JSON or '' for Default
+}
+
+/** Build the /info/homepage payload from a stored homepage JSON string. '' (Default) when null/invalid. */
+export function buildMetabotHomepagePayload(homepageJson: string | null | undefined): MetabotHomepagePayload {
+  const homepage = parseHomepage(homepageJson);
+  return {
+    step: 'homepage',
+    path: '/info/homepage',
+    contentType: 'application/json',
+    payload: serializeMetabotHomepagePayload(homepage),
+  };
+}

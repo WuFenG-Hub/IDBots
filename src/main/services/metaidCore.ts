@@ -29,7 +29,7 @@ import {
   fetchMvcAddressUtxos,
   filterRecoveredCandidatesByProvider,
 } from './mvcFundingRecoveryService';
-import { buildMetabotInfoPayloads } from './metabotInfoPayload';
+import { buildMetabotInfoPayloads, buildMetabotHomepagePayload } from './metabotInfoPayload';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -680,7 +680,7 @@ export interface SyncMetaBotResult {
   txids?: string[];
 }
 
-export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills';
+export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage';
 export type SyncMetaBotEditStep = Exclude<SyncMetaBotStep, 'chatpubkey'>;
 
 export interface SyncMetaBotEditChangesInput {
@@ -691,6 +691,7 @@ export interface SyncMetaBotEditChangesInput {
   syncPersona?: boolean;
   syncLlm?: boolean;
   syncChatSkills?: boolean;
+  syncHomepage?: boolean;
 }
 
 export interface SyncMetaBotEditChangesResult {
@@ -790,6 +791,15 @@ export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[
     });
   }
 
+  // Homepage is an independent /info/homepage step (always included in full sync).
+  const homepagePayload = buildMetabotHomepagePayload(metabot?.homepage);
+  steps.push({
+    key: 'homepage',
+    path: homepagePayload.path,
+    contentType: homepagePayload.contentType,
+    payload: homepagePayload.payload,
+  });
+
   return steps;
 }
 
@@ -803,6 +813,7 @@ export function buildEditMetabotInfoSyncPlan(
   if (input.syncPersona) wanted.add('persona');
   if (input.syncLlm) wanted.add('llm');
   if (input.syncChatSkills) wanted.add('chatSkills');
+  if (input.syncHomepage) wanted.add('homepage');
 
   const steps = buildFullMetabotInfoSyncPlan({
     ...input.metabot,
