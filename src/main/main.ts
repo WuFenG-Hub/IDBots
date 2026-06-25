@@ -6804,6 +6804,7 @@ if (!gotTheLock) {
     llm_id?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker';
+    homepage?: string | null;
   }) => {
     const store = getMetabotStore();
     let walletId: number | null = null;
@@ -6860,6 +6861,7 @@ if (!gotTheLock) {
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
+        homepage: input.homepage ?? null,
       });
       metabotId = metabot.id;
 
@@ -7023,6 +7025,7 @@ if (!gotTheLock) {
     syncPersona?: boolean;
     syncLlm?: boolean;
     syncChatSkills?: boolean;
+    syncHomepage?: boolean;
   }) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBotEditChanges requested', input);
@@ -7039,6 +7042,53 @@ if (!gotTheLock) {
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:syncMetaBotEditChanges failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('idbots:uploadMetabotHomepageFile', async (_event, input: {
+    metabotId: number;
+    fileName: string;
+    contentType?: string;
+    base64: string;
+    network?: string;
+  }) => {
+    try {
+      const metabotId = Number(input.metabotId);
+      if (!Number.isInteger(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'metabotId is required' };
+      }
+      const base64 = String(input.base64 ?? '').replace(/^data:[^;]+;base64,/, '').trim();
+      if (!base64) {
+        return { success: false, error: 'File data is required' };
+      }
+      const data = Buffer.from(base64, 'base64');
+      if (data.length === 0) {
+        return { success: false, error: 'File is empty' };
+      }
+      const fileName = String(input.fileName || 'homepage-upload').trim() || 'homepage-upload';
+      const store = getMetabotStore();
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      const result = await uploadMetaFile(store, {
+        metabotId,
+        data,
+        dataFileName: fileName,
+        contentType: input.contentType,
+        network: input.network,
+      });
+      const pinId = String((result as Record<string, unknown>).pinId ?? '').trim();
+      if (!pinId) {
+        return { success: false, error: 'Upload succeeded but no pinId returned' };
+      }
+      return {
+        success: true,
+        pinId,
+        metafileUri: `metafile://${pinId}`,
+        contentType: String((result as Record<string, unknown>).contentType ?? input.contentType ?? 'application/octet-stream'),
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[MetaBot] idbots:uploadMetabotHomepageFile failed:', errMsg);
       return { success: false, error: errMsg };
     }
   });
