@@ -42,6 +42,8 @@ export interface Metabot {
   skills: string[];
   /** Skills allowed in private chat; stored as JSON array in DB */
   allow_chat_skills: string[];
+  /** Homepage pointer JSON string (serialized {uri,renderer,contentType}); null = Default template. */
+  homepage: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -75,6 +77,8 @@ export interface MetabotInsert {
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];
+  /** Homepage pointer JSON string; null = Default. */
+  homepage?: string | null;
 }
 
 /** Input for updating a MetaBot (all optional except identity) */
@@ -106,6 +110,8 @@ export interface MetabotUpdate {
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];
+  /** Homepage pointer JSON string; null = Default. */
+  homepage?: string | null;
 }
 
 /** MetaBot wallet (append-only; no update/delete in app layer). Created before metabot; metabots.wallet_id references this id. */

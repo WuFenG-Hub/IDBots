@@ -115,6 +115,16 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     return true;
   }, [openUriWhenBrowserReady, showBrowser]);
 
+  /** Open a MetaApp in the browser by its bare pin id (no local MetaAppRecord required). */
+  const openMetaAppByPin = useCallback(async (pin: string): Promise<boolean> => {
+    const normalized = String(pin ?? '').trim().toLowerCase();
+    if (!normalized) return false;
+    const uri = `metaapp://${encodeURIComponent(normalized)}`;
+    if (!await showBrowser()) return true;
+    openUriWhenBrowserReady({ uri });
+    return true;
+  }, [openUriWhenBrowserReady, showBrowser]);
+
   const switchToHome = useCallback(() => {
     setSurfaceMode('home');
   }, []);
@@ -128,6 +138,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     openLocalMetabot,
     openRemoteBot,
     openMetaApp,
+    openMetaAppByPin,
     switchToHome,
   };
 }

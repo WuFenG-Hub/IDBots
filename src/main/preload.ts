@@ -569,6 +569,7 @@ contextBridge.exposeInMainWorld('electron', {
       syncPersona?: boolean;
       syncLlm?: boolean;
       syncChatSkills?: boolean;
+      syncHomepage?: boolean;
     }) => ipcRenderer.invoke('idbots:syncMetaBotEditChanges', input),
     createMetaBotOnChain: (input: {
       name: string;
@@ -584,7 +585,15 @@ contextBridge.exposeInMainWorld('electron', {
       llm_id?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
+      homepage?: string | null;
     }) => ipcRenderer.invoke('idbots:createMetaBotOnChain', input),
+    uploadMetabotHomepageFile: (input: {
+      metabotId: number;
+      fileName: string;
+      contentType?: string;
+      base64: string;
+      network?: string;
+    }) => ipcRenderer.invoke('idbots:uploadMetabotHomepageFile', input),
   },
   metaWebListener: {
     getListenerConfig: () => ipcRenderer.invoke('idbots:getListenerConfig'),
@@ -630,6 +639,7 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
     checkNameExists: (options: { name: string; excludeId?: number }) =>

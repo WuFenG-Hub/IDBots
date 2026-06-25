@@ -46,7 +46,12 @@ const DEFAULT_PATH = "m/44'/10001'/0'/0/0";
 
 export interface UploadMetaFileParams {
   metabotId: number;
-  filePath: string;
+  /** Path to file on disk. Mutually exclusive with `data`. */
+  filePath?: string;
+  /** In-memory file bytes. Mutually exclusive with `filePath`. */
+  data?: Buffer;
+  /** File name used for contentType inference when `data` is provided. */
+  dataFileName?: string;
   contentType?: string;
   network?: string;
   chunkThresholdBytes?: number;
@@ -163,29 +168,48 @@ export async function uploadMetaFile(
     throw new Error('metabot_id must be a positive integer');
   }
 
-  const resolvedFilePath = path.resolve(String(params.filePath || '').trim());
-  if (!resolvedFilePath) {
-    throw new Error('file_path is required');
+  const useData = Buffer.isBuffer(params.data) && params.data.length > 0;
+  const useFile = !useData && Boolean(String(params.filePath || '').trim());
+  if (!useData && !useFile) {
+    throw new Error('Either filePath or data is required');
   }
 
-  let stat: fs.Stats;
-  try {
-    stat = await fs.promises.stat(resolvedFilePath);
-  } catch {
-    throw new Error(`File not found: ${resolvedFilePath}`);
-  }
-  if (!stat.isFile()) {
-    throw new Error(`Not a file: ${resolvedFilePath}`);
+  let resolvedFilePath = '';
+  let fileName = '';
+  let size: number;
+  let dataBuffer: Buffer | null = null;
+
+  if (useData) {
+    dataBuffer = params.data as Buffer;
+    size = validateUploadSize({
+      sizeBytes: dataBuffer.length,
+      maxSizeBytes: params.maxSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+    });
+    fileName = String(params.dataFileName || 'homepage-upload').trim() || 'homepage-upload';
+  } else {
+    resolvedFilePath = path.resolve(String(params.filePath || '').trim());
+    if (!resolvedFilePath) {
+      throw new Error('file_path is required');
+    }
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.stat(resolvedFilePath);
+    } catch {
+      throw new Error(`File not found: ${resolvedFilePath}`);
+    }
+    if (!stat.isFile()) {
+      throw new Error(`Not a file: ${resolvedFilePath}`);
+    }
+    size = validateUploadSize({
+      sizeBytes: stat.size,
+      maxSizeBytes: params.maxSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES,
+    });
+    fileName = path.basename(resolvedFilePath);
   }
 
-  const size = validateUploadSize({
-    sizeBytes: stat.size,
-    maxSizeBytes: params.maxSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES,
-  });
-  const fileName = path.basename(resolvedFilePath);
   const network = normalizeUploadNetwork(params.network);
   const contentType = normalizeUploadContentType(
-    params.contentType || inferContentTypeFromFilePath(resolvedFilePath),
+    params.contentType || inferContentTypeFromFilePath(fileName),
   );
   const uploadMode = selectUploadMode({
     sizeBytes: size,
@@ -193,7 +217,7 @@ export async function uploadMetaFile(
   });
 
   if (uploadMode === 'direct') {
-    const buffer = await fs.promises.readFile(resolvedFilePath);
+    const buffer = dataBuffer ?? await fs.promises.readFile(resolvedFilePath);
     const feeRate = getGlobalFeeRate(network);
     const result = await createPin(
       metabotStore,

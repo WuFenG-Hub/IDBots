@@ -790,6 +790,7 @@ const App: React.FC = () => {
       onRequestModelSettings={() => handleShowSettings({ initialTab: 'model' })}
       onRequestOnboarding={handleOpenOnboarding}
       onOpenMetabotInBrowser={botBrowserShell.openLocalMetabot}
+      onPreviewMetaAppHomepage={botBrowserShell.openMetaAppByPin}
     />
   ) : (
     <CoworkView

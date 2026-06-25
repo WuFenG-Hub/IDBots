@@ -3,6 +3,7 @@ import test from 'node:test';
 
 const {
   buildMetabotInfoPayloads,
+  buildMetabotHomepagePayload,
   normalizeBotInfoStringArrayForTests,
 } = await import('../dist-electron/main/services/metabotInfoPayload.js');
 
@@ -92,4 +93,18 @@ test('normalizeBotInfoStringArrayForTests normalizes array and string forms', ()
     normalizeBotInfoStringArrayForTests('alpha, beta,alpha,, gamma '),
     ['alpha', 'beta', 'gamma'],
   );
+});
+
+test('buildMetabotHomepagePayload empty for null/invalid', () => {
+  assert.equal(buildMetabotHomepagePayload(null).payload, '');
+  assert.equal(buildMetabotHomepagePayload('garbage').payload, '');
+});
+
+test('buildMetabotHomepagePayload compact JSON for valid homepage', () => {
+  const hp = '{"uri":"metaapp://p1","renderer":"metaapp","contentType":"application/vnd.metaapp"}';
+  const out = buildMetabotHomepagePayload(hp);
+  assert.equal(out.step, 'homepage');
+  assert.equal(out.path, '/info/homepage');
+  assert.equal(out.contentType, 'application/json');
+  assert.deepEqual(JSON.parse(out.payload), { uri: 'metaapp://p1', renderer: 'metaapp', contentType: 'application/vnd.metaapp' });
 });

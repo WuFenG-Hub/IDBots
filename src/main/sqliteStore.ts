@@ -988,6 +988,7 @@ export class SqliteStore {
         tools TEXT DEFAULT '[]',
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
+        homepage TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
@@ -1199,6 +1200,18 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('Failed to migrate metabots boss_global_metaid:', error);
+    }
+
+    // Migration: Add homepage column to metabots (MetaBot homepage source pointer)
+    try {
+      const hpColsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const hpColumns = (hpColsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!hpColumns.includes('homepage')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN homepage TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('Failed to migrate metabots homepage:', error);
     }
 
     // Migration: Add payment_address column to remote_skill_service
