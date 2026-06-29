@@ -438,11 +438,11 @@ interface IElectronAPI {
       nextCursor?: string;
       total?: number;
     }>;
-    publish: (input: { metabotId: number; manifest: Record<string, unknown>; confirm?: boolean; network?: string }) => Promise<{
+    publish: (input: { metabotId: number; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
       success: boolean; error?: string;
       pinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
     }>;
-    update: (input: { metabotId: number; targetPinId: string; manifest: Record<string, unknown>; confirm?: boolean; network?: string }) => Promise<{
+    update: (input: { metabotId: number; targetPinId: string; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
       success: boolean; error?: string;
       pinId?: string; targetPinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
     }>;
