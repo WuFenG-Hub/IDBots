@@ -10,7 +10,8 @@ const require = createRequire(import.meta.url);
 const {
   FEATURED_SKILL_ADDRESSES,
   buildOfficialSkillStatuses,
-} = require('../dist-electron/services/skillSyncService.js');
+  extractPinIdFromUri,
+} = require('../dist-electron/main/services/skillSyncService.js');
 
 function makeSkillPin({
   name,
@@ -38,6 +39,15 @@ test('FEATURED_SKILL_ADDRESSES keeps the featured curator address priority order
     '1GrqX7K9jdnUor8hAoAfDx99uFH2tT75Za',
     '12ghVWG1yAgNjzXj4mr3qK9DgyornMUikZ',
   ]);
+});
+
+test('extractPinIdFromUri accepts extension-bearing metafile skill archives', () => {
+  assert.equal(extractPinIdFromUri('metafile://abc123i0.zip'), 'abc123i0');
+  assert.equal(
+    extractPinIdFromUri('metafile://0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefi0.zip'),
+    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdefi0',
+  );
+  assert.equal(extractPinIdFromUri('metafile://abc123i0'), 'abc123i0');
 });
 
 test('buildOfficialSkillStatuses prefers the higher remote version for duplicate skill names', () => {

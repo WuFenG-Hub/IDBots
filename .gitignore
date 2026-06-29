@@ -68,6 +68,8 @@ tests/*
 !tests/providerDiscoveryService.test.mjs
 !tests/sqliteWasmRethrowGuards.test.mjs
 !tests/metabotHomepage.test.mjs
+!tests/metabotWikiMetafileUri.test.mjs
+!tests/noteAttachmentsMetafile.test.mjs
 !tests/metabotHomepageInlineLayout.test.tsx
 
 # Local DB (never commit)

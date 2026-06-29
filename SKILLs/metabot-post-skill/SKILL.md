@@ -65,7 +65,7 @@ official: true
   "name": "metabot-example",
   "description": "一个示例技能",
   "version": "1.0.0",
-  "skill-file": "metafile://<zip-pinid>"
+  "skill-file": "metafile://<zip-pinid>.zip"
 }
 ```
 
@@ -91,13 +91,15 @@ Request 文件格式（`/tmp/metabot-post-skill-request.json`）：
 }
 ```
 
-脚本会自动：先上传 ZIP 到 `/file` → 获得 `metafile://<pinId>` → 再发布 `/protocols/metabot-skill` pin。
+脚本会自动：先上传 ZIP 到 `/file` → 获得 `metafile://<pinId>.zip` → 再发布 `/protocols/metabot-skill` pin。
+
+MetaFile URI 协议层面允许 `metafile://<pinId>` 和 `metafile://<pinId>.<ext>`；官方发布工具默认使用带扩展名的 URI，减少前端为判断类型而额外查询 `/file` pin。
 
 **分步模式（当 ZIP 已提前上传时）：**
 
 ```bash
 node "$SKILLS_ROOT/metabot-post-skill/scripts/index.js" \
-  --payload '{"name":"metabot-example","description":"示例技能","version":"1.0.0","skillFileUri":"metafile://<pinid>"}'
+  --payload '{"name":"metabot-example","description":"示例技能","version":"1.0.0","skillFileUri":"metafile://<pinid>.zip"}'
 ```
 
 ## 命令语法
@@ -125,7 +127,7 @@ node "$SKILLS_ROOT/metabot-post-skill/scripts/index.js" \
 | name | 是 | 技能标识 |
 | description | 否 | 简短描述 |
 | version | 是 | 语义版本号，如 `1.0.0` |
-| skill-file | 是 | `metafile://<pinid>` URI，指向已上传的 ZIP；若通过 `--zip` 或 request 的 `zip` 字段提供本地路径，脚本会自动上传并填充 |
+| skill-file | 是 | `metafile://<pinid>.zip` URI，指向已上传的 ZIP；若通过 `--zip` 或 request 的 `zip` 字段提供本地路径，脚本会自动上传并填充 |
 | zip (仅 request) | 否 | 本地 ZIP 文件路径，脚本会先上传该文件再发布 |
 
 ## Request 文件完整格式
@@ -146,7 +148,7 @@ ZIP 已提前上传时可不传 `zip`，改为在 payload 中包含 `skillFileUr
   "name": "metabot-example",
   "description": "一个示例技能",
   "version": "1.0.0",
-  "skillFileUri": "metafile://<pinid>"
+  "skillFileUri": "metafile://<pinid>.zip"
 }
 ```
 
@@ -159,7 +161,7 @@ ZIP 已提前上传时可不传 `zip`，改为在 payload 中包含 `skillFileUr
   "success": true,
   "pinId": "<pinId>",
   "txid": "<txid>",
-  "skillFileUri": "metafile://<zip-pinid>",
+  "skillFileUri": "metafile://<zip-pinid>.zip",
   "totalCost": 1234
 }
 ```

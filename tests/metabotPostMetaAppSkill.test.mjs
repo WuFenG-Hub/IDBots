@@ -140,10 +140,10 @@ test('prepare uploads runtime, source, icon, and cover files into a confirmed Me
   assert.equal(output.payload.indexFile, 'index.html');
   assert.equal(output.payload.contentType, 'application/zip');
   assert.equal(output.payload.codeType, 'application/zip');
-  assert.equal(output.payload.content, 'metafile://upload-1i0');
-  assert.equal(output.payload.code, 'metafile://upload-2i0');
-  assert.equal(output.payload.icon, 'metafile://upload-3i0');
-  assert.equal(output.payload.coverImg, 'metafile://upload-4i0');
+  assert.equal(output.payload.content, 'metafile://upload-1i0.zip');
+  assert.equal(output.payload.code, 'metafile://upload-2i0.zip');
+  assert.equal(output.payload.icon, 'metafile://upload-3i0.png');
+  assert.equal(output.payload.coverImg, 'metafile://upload-4i0.jpg');
   assert.match(output.payload.contentHash, /^[a-f0-9]{64}$/);
 });
 

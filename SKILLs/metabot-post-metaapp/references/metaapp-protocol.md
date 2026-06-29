@@ -10,7 +10,9 @@ Local mirror: `SKILLs/metabot-omni-caster/references/02-content-app.md`
 
 ## Publishing Model
 
-The MetaApp wrapper pin itself is JSON on `/protocols/metaapp`. Heavy artifacts are uploaded first, then referenced from the wrapper with `metafile://<pinId>`.
+The MetaApp wrapper pin itself is JSON on `/protocols/metaapp`. Heavy artifacts are uploaded first, then referenced from the wrapper with `metafile://<pinId>.<ext>`.
+
+Protocol-level parsers may accept both `metafile://<pinId>` and `metafile://<pinId>.<ext>`. For official publishing tools, prefer extension-bearing URIs because clients can infer the file type without an extra `/file` pin lookup for `contentType`.
 
 For this skill, runtime `content` and source `code` are published as ZIP files by default:
 
@@ -27,19 +29,19 @@ For this skill, runtime `content` and source `code` are published as ZIP files b
   "title": "Example App Title",
   "appName": "Example App",
   "prompt": "AI generation prompt",
-  "icon": "metafile://pinid",
-  "coverImg": "metafile://pinid",
+  "icon": "metafile://pinid.png",
+  "coverImg": "metafile://pinid.jpg",
   "introImgs": [
-    "metafile://pinid1",
-    "metafile://pinid2"
+    "metafile://pinid1.png",
+    "metafile://pinid2.jpg"
   ],
   "intro": "This is a sample introduction text for the application...",
   "runtime": "browser/android/ios",
   "version": "1.0.0",
   "contentType": "application/zip",
-  "content": "metafile://pinid",
+  "content": "metafile://pinid.zip",
   "indexFile": "index.html",
-  "code": "metafile://pinid",
+  "code": "metafile://pinid.zip",
   "contentHash": "sha256_hash_here",
   "metadata": "any data",
   "tags": [
@@ -56,7 +58,7 @@ For this skill, runtime `content` and source `code` are published as ZIP files b
 - `title`: user-facing display title.
 - `appName`: app name or stable identifier.
 - `prompt`: original generation prompt when the app was AI-generated; otherwise empty string.
-- `icon`, `coverImg`, `introImgs`: local image paths must be uploaded first. Existing `metafile://` URIs may pass through.
+- `icon`, `coverImg`, `introImgs`: local image paths must be uploaded first. Existing `metafile://` URIs may pass through; newly assembled URIs should include the image extension.
 - `runtime`: slash-separated supported environments. Default to `browser` if the user gives no preference.
 - `indexFile`: entry file inside content ZIP. Default to `index.html`.
 - `metadata`: protocol examples use a string. If the user provides structured metadata, stringify it before publishing unless they explicitly want a different representation.

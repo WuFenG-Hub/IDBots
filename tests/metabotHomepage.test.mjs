@@ -14,7 +14,7 @@ const {
 test('serializeMetabotHomepagePayload produces compact JSON', () => {
   const hp = buildMetafileHomepage({ pinId: 'abc123', contentType: 'text/html' });
   const out = serializeMetabotHomepagePayload(hp);
-  assert.deepEqual(JSON.parse(out), { uri: 'metafile://abc123', renderer: 'auto', contentType: 'text/html' });
+  assert.deepEqual(JSON.parse(out), { uri: 'metafile://abc123.html', renderer: 'auto', contentType: 'text/html' });
 });
 
 test('buildMetaappHomepage strips metaapp:// prefix and sets vnd.metaapp', () => {

@@ -31,6 +31,23 @@ const MIME_MAP = {
   '.json': 'application/json',
   '.md': 'text/markdown',
 };
+const CONTENT_TYPE_EXTENSION_MAP = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'image/bmp': '.bmp',
+  'image/x-icon': '.ico',
+  'application/pdf': '.pdf',
+  'application/zip': '.zip',
+  'application/x-zip-compressed': '.zip',
+  'text/html': '.html',
+  'text/css': '.css',
+  'application/javascript': '.js',
+  'application/json': '.json',
+  'text/markdown': '.md',
+};
 
 const EXCLUDE_DIRS = new Set([
   '.git',
@@ -107,6 +124,36 @@ function inferContentType(filePath) {
   return MIME_MAP[ext] || 'application/octet-stream';
 }
 
+function normalizeMetafileExtension(ext) {
+  const normalized = String(ext || '').trim().toLowerCase();
+  return /^\.[a-z0-9]{1,16}$/.test(normalized) ? normalized : '';
+}
+
+function getMetafileExtension({ fileName, filePath, contentType } = {}) {
+  const nameExt = normalizeMetafileExtension(path.extname(cleanString(fileName || filePath)));
+  if (nameExt) return nameExt;
+  const normalizedContentType = cleanString(contentType).split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXTENSION_MAP[normalizedContentType] || '';
+}
+
+function stripMetafileUriPrefix(value) {
+  const text = cleanString(value);
+  return text.toLowerCase().startsWith('metafile://') ? text.slice('metafile://'.length).trim() : text;
+}
+
+function hasMetafileExtension(pinIdOrUri) {
+  const raw = stripMetafileUriPrefix(pinIdOrUri).split('?')[0].split('#')[0].trim();
+  const tail = raw.split('/').pop() || raw;
+  return Boolean(normalizeMetafileExtension(path.extname(tail)));
+}
+
+function buildMetafileUri(pinIdOrUri, options = {}) {
+  const pinId = stripMetafileUriPrefix(pinIdOrUri);
+  if (!pinId) return '';
+  const extension = hasMetafileExtension(pinId) ? '' : getMetafileExtension(options);
+  return `metafile://${pinId}${extension}`;
+}
+
 function normalizePinId(response) {
   if (!response || typeof response !== 'object') return '';
   const direct = cleanString(response.pinId);
@@ -162,7 +209,11 @@ async function uploadLocalFile(filePath, contentType, metabotId, network, role) 
   if (!pinId) {
     throw new Error(`Upload did not return pinId for ${resolved}`);
   }
-  const uri = `metafile://${pinId}`;
+  const uri = buildMetafileUri(pinId, {
+    fileName: response.fileName || path.basename(resolved),
+    filePath: resolved,
+    contentType: response.contentType || finalContentType,
+  });
   return {
     role,
     pinId,
@@ -339,7 +390,12 @@ function resourceInput(request, key) {
     if (typeof value.uri === 'string') return cleanString(value.uri);
     if (typeof value.path === 'string') return cleanString(value.path);
     if (typeof value.file === 'string') return cleanString(value.file);
-    if (typeof value.pinId === 'string') return `metafile://${cleanString(value.pinId)}`;
+    if (typeof value.pinId === 'string') {
+      return buildMetafileUri(value.pinId, {
+        fileName: value.fileName || value.name || value.path || value.file,
+        contentType: value.contentType || value.content_type || value.mime,
+      });
+    }
   }
   return '';
 }

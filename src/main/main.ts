@@ -114,6 +114,7 @@ import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/
 import { cancelActiveDownload, downloadUpdate, installUpdate } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
+import { buildMetafileUri } from './services/metaFileUploadShared';
 import { resolveMetaAppVisualFields } from './services/metaAppVisualService';
 import * as p2pIndexerService from './services/p2pIndexerService';
 import * as p2pConfigService from './services/p2pConfigService';
@@ -7081,11 +7082,14 @@ if (!gotTheLock) {
       if (!pinId) {
         return { success: false, error: 'Upload succeeded but no pinId returned' };
       }
+      const contentType = String((result as Record<string, unknown>).contentType ?? input.contentType ?? 'application/octet-stream');
+      const metafileUri = String((result as Record<string, unknown>).metafileUri ?? '').trim()
+        || buildMetafileUri(pinId, { fileName, contentType });
       return {
         success: true,
         pinId,
-        metafileUri: `metafile://${pinId}`,
-        contentType: String((result as Record<string, unknown>).contentType ?? input.contentType ?? 'application/octet-stream'),
+        metafileUri,
+        contentType,
       };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
@@ -7561,7 +7565,7 @@ if (!gotTheLock) {
           contentType: parsed.mime,
           payload: parsed.buffer,
         });
-        serviceIconUri = `metafile://${fileResult.pinId}`;
+        serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
       const payload = buildGigSquareServicePayload({
@@ -7818,7 +7822,7 @@ if (!gotTheLock) {
           contentType: parsed.mime,
           payload: parsed.buffer,
         });
-        serviceIconUri = `metafile://${fileResult.pinId}`;
+        serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
       const payload = buildGigSquareServicePayload({

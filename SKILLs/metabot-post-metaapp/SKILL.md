@@ -6,7 +6,7 @@ official: true
 
 # MetaBot Post MetaApp
 
-将用户已开发好的 MetaApp 运行时包、源码包、图标和封面先上传为 `metafile://<pinId>`，再按 `/protocols/metaapp` 组装协议 JSON，让用户确认后发布到链上。
+将用户已开发好的 MetaApp 运行时包、源码包、图标和封面先上传为 `metafile://<pinId>.<ext>`，再按 `/protocols/metaapp` 组装协议 JSON，让用户确认后发布到链上。
 
 ## 何时调用
 
@@ -55,6 +55,8 @@ official: true
 | disabled | 否 | 默认 `false` |
 
 `contentHash` 不询问用户手填：当 `content` 来自本地目录或 ZIP 时，脚本自动计算最终 content ZIP 文件的 SHA256；当 `content` 是已有 `metafile://` 时，可沿用用户提供的 `contentHash`，否则为空。
+
+MetaFile URI 协议层面允许 `metafile://<pinId>` 和 `metafile://<pinId>.<ext>` 两种形式；官方应用发布实践中，默认推荐带扩展名。这样前端可以直接从 URI 判断文件类型，避免为了拿 `contentType` 再查一次 `/file` pin。
 
 ### 4. 准备并让用户确认
 
@@ -106,16 +108,16 @@ node "$SKILLS_ROOT/metabot-post-metaapp/scripts/index.js" \
   "title": "应用标题",
   "appName": "应用名称",
   "prompt": "",
-  "icon": "metafile://pinid",
-  "coverImg": "metafile://pinid",
+  "icon": "metafile://pinid.png",
+  "coverImg": "metafile://pinid.jpg",
   "introImgs": [],
   "intro": "应用介绍文本",
   "runtime": "browser",
   "version": "v1.0.0",
   "contentType": "application/zip",
-  "content": "metafile://runtime-zip-pinid",
+  "content": "metafile://runtime-zip-pinid.zip",
   "indexFile": "index.html",
-  "code": "metafile://source-zip-pinid",
+  "code": "metafile://source-zip-pinid.zip",
   "contentHash": "sha256_hex_of_content_zip",
   "metadata": "",
   "tags": [],
@@ -128,7 +130,7 @@ node "$SKILLS_ROOT/metabot-post-metaapp/scripts/index.js" \
 
 1. 先问运行时 `content`，再问源码 `code`；二者允许其一为空，但不能同时为空。
 2. 用户给目录时默认压缩为 ZIP；本技能当前默认运行时和源码都按 `application/zip` 上链。
-3. 本地图片、ZIP 都要先上传并替换成 `metafile://<pinId>`。
+3. 本地图片、ZIP 都要先上传并替换成 `metafile://<pinId>.<ext>`；用户已提供的合法 `metafile://<pinId>` 可保留，但新组装的 URI 默认带扩展名。
 4. 准备阶段可先上传文件；真正发布 `/protocols/metaapp` 前必须展示完整 JSON 并得到用户确认。
 5. 始终使用 `$SKILLS_ROOT/metabot-post-metaapp/scripts/index.js`，不要绕开脚本另写临时发布逻辑。
 6. 底层 RPC 通过 `IDBOTS_METABOT_ID` 获取发布身份，无需向用户询问 MetaBot 身份。

@@ -4,11 +4,12 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const {
+  buildMetafileUri,
   selectUploadMode,
   validateUploadSize,
   buildUploadSuccessPayload,
   normalizeRpcUploadResult,
-} = require('../dist-electron/services/metaFileUploadShared.js');
+} = require('../dist-electron/main/services/metaFileUploadShared.js');
 
 const MIB = 1024 * 1024;
 
@@ -41,7 +42,23 @@ test('validateUploadSize rejects files larger than the hard ceiling', () => {
   );
 });
 
-test('buildUploadSuccessPayload returns pinId and preview URL', () => {
+test('buildMetafileUri appends an extension from file name or content type', () => {
+  assert.equal(
+    buildMetafileUri('abc123i0', { fileName: 'demo.png', contentType: 'application/octet-stream' }),
+    'metafile://abc123i0.png',
+  );
+  assert.equal(
+    buildMetafileUri('abc123i0', { contentType: 'text/html; charset=utf-8' }),
+    'metafile://abc123i0.html',
+  );
+  assert.equal(
+    buildMetafileUri('abc123i0.zip', { contentType: 'application/zip' }),
+    'metafile://abc123i0.zip',
+  );
+  assert.equal(buildMetafileUri('abc123i0'), 'metafile://abc123i0');
+});
+
+test('buildUploadSuccessPayload returns pinId, metafile URI, and preview URL', () => {
   assert.deepEqual(
     buildUploadSuccessPayload({
       pinId: 'abc123i0',
@@ -53,6 +70,7 @@ test('buildUploadSuccessPayload returns pinId and preview URL', () => {
     {
       success: true,
       pinId: 'abc123i0',
+      metafileUri: 'metafile://abc123i0.png',
       previewUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/abc123i0',
       fallbackUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/content/abc123i0',
       fileName: 'demo.png',
@@ -74,6 +92,7 @@ test('normalizeRpcUploadResult preserves the backend JSON contract for the skill
 
   assert.equal(payload.success, true);
   assert.equal(payload.pinId, 'pin123i0');
+  assert.equal(payload.metafileUri, 'metafile://pin123i0.mp4');
   assert.equal(
     payload.previewUrl,
     'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/pin123i0',

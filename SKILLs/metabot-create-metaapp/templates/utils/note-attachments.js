@@ -1,5 +1,22 @@
 const METAFILE_PREFIX = 'metafile://';
 const DEFAULT_METAFS_BASE = 'https://file.metaid.io/metafile-indexer/api/v1';
+const CONTENT_TYPE_EXTENSION_MAP = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'application/pdf': '.pdf',
+  'application/zip': '.zip',
+  'application/x-zip-compressed': '.zip',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+  'audio/mpeg': '.mp3',
+  'audio/wav': '.wav',
+  'text/html': '.html',
+  'text/markdown': '.md',
+  'text/plain': '.txt',
+};
 
 function stripQueryAndHash(value) {
   return String(value || '').trim().split('?')[0].split('#')[0].trim();
@@ -27,6 +44,44 @@ function normalizeMetafsBase(value) {
   return text + '/v1';
 }
 
+function normalizeMetafileExtension(ext) {
+  var normalized = String(ext || '').trim().toLowerCase();
+  return /^\.[a-z0-9]{1,16}$/.test(normalized) ? normalized : '';
+}
+
+function extensionFromFileName(fileName) {
+  var text = String(fileName || '').trim().split('?')[0].split('#')[0];
+  var slashIndex = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'));
+  var name = slashIndex >= 0 ? text.slice(slashIndex + 1) : text;
+  var dotIndex = name.lastIndexOf('.');
+  if (dotIndex <= 0 || dotIndex === name.length - 1) return '';
+  return normalizeMetafileExtension(name.slice(dotIndex));
+}
+
+function extensionFromContentType(contentType) {
+  var normalized = String(contentType || '').split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXTENSION_MAP[normalized] || '';
+}
+
+function hasMetafileExtension(pinIdOrUri) {
+  var text = stripQueryAndHash(String(pinIdOrUri || '').trim());
+  if (text.indexOf(METAFILE_PREFIX) === 0) text = text.slice(METAFILE_PREFIX.length).trim();
+  var slashIndex = Math.max(text.lastIndexOf('/'), text.lastIndexOf('\\'));
+  var tail = slashIndex >= 0 ? text.slice(slashIndex + 1) : text;
+  return Boolean(extensionFromFileName(tail));
+}
+
+function buildMetafileUri(pinId, options) {
+  var raw = String(pinId || '').trim();
+  if (!raw) return '';
+  if (raw.indexOf(METAFILE_PREFIX) === 0) raw = raw.slice(METAFILE_PREFIX.length).trim();
+  var ext = hasMetafileExtension(raw)
+    ? ''
+    : extensionFromFileName(options && (options.fileName || options.name || options.path || options.file))
+      || extensionFromContentType(options && (options.contentType || options.content_type || options.mime));
+  return METAFILE_PREFIX + raw + ext;
+}
+
 function pickAttachmentValue(value) {
   if (typeof value === 'string') return value.trim();
   if (!value || typeof value !== 'object') return '';
@@ -36,7 +91,7 @@ function pickAttachmentValue(value) {
   if (typeof value.url === 'string') return value.url.trim();
   if (typeof value.value === 'string') return value.value.trim();
   if (typeof value.pinId === 'string' && value.pinId.trim()) {
-    return METAFILE_PREFIX + value.pinId.trim();
+    return buildMetafileUri(value.pinId, value);
   }
   return '';
 }

@@ -1,6 +1,8 @@
 # MetaID Protocols: Group Management
 **说明**：群组的创建、白名单、黑名单、管理员设置等管理操作。
 
+**MetaFile URI 最佳实践**：协议层面 `metafile://<pinId>` 和 `metafile://<pinId>.<ext>` 都合法；官方应用/技能新写入群图标、频道图标等文件引用时推荐带扩展名，便于前端快速识别类型。
+
 ## 1. SimpleGroupCreate (创建/修改群组协议)
 - **Intro**: 用于在链上创建或修改群组基础信息。
 - **Path**: `/protocols/simplegroupcreate`
@@ -14,7 +16,7 @@
   "communityId": "{Community_ID}",
   "groupName": "MetaID开发者交流群",
   "groupNote": "群公告内容...",
-  "groupIcon": "metafile://{pinid}",
+  "groupIcon": "metafile://{pinid}.png",
   /** 消息类型: 0-明文, 1-加密(AES) */
   "groupType": "0",
   "status": "1",
@@ -68,4 +70,4 @@
 * **SimpleGroupRemoveUser** (`/protocols/simplegroupremoveuser`) - 踢出某人:
 `{"removeMetaid": "{MetaID}", "groupId": "{ID}", "reason": "违规", "timestamp": "0"}`
 * **SimpleGroupChannel** (`/protocols/simplegroupchannel`) - 创建群频道:
-`{"groupId": "{ID}", "channelId": "{ID}", "channelName": "新闻频道", "channelIcon": "metafile://pinid", "channelNote": "公告", "channelType": 1}`
+`{"groupId": "{ID}", "channelId": "{ID}", "channelName": "新闻频道", "channelIcon": "metafile://pinid.png", "channelNote": "公告", "channelType": 1}`

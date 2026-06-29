@@ -17,7 +17,7 @@ official: true
 
 可从用户自然语言中抽取：基于哪个技能、显示名、描述、图标文件名或 metafile、价格、币种（SPACE/BTC/DOGE）、输入/输出类型等。可先回复一段「我们将以 skill-service 协议发送以下信息上链，请确认：…」再调用，或直接调用。
 
-如有图片，需先使用 metabot-omni-caster 技能，将图片先上链，获得 pinid 后，再组装成metafile://<pinid> 的 URI 字符，不能用metafile://本地图片名上链。
+如有图片，需先使用 metabot-omni-caster 技能，将图片先上链，获得 pinid 后，再组装成 `metafile://<pinid>.<ext>` 的 URI 字符，不能用 `metafile://本地图片名` 上链。协议层面 `metafile://<pinid>` 与 `metafile://<pinid>.<ext>` 都合法；官方应用实践中推荐带扩展名，便于前端免查 `/file` pin 即可判断文件类型。
 
 ## 命令 (Command)
 
@@ -36,12 +36,12 @@ JSON 为 skill-service 业务字段。`providerMetaBot` 代表当前使用技能
 | serviceName | 技能标识，如 post-buzz-service，LLM 可根据需求生成 | 是 | - |
 | displayName | 展示给人类看的友好名称 | 是 | - |
 | description | 简短描述，用于轻量级列表展示 | 是 | - |
-| serviceIcon | 图标，如 metafile://pinid  | 否 | 空 |
+| serviceIcon | 图标，如 `metafile://pinid.png` | 否 | 空 |
 | providerMetaBot | 乙方机器人的GlobalMetaID | 否 | 空 |
 | providerSkill | 乙方执行的本地技能名，如 metabot-post-buzz | 是 | - |
 | price | 价格，建议字符串防止精度丢失 | 是 | - |
 | currency | 支付币种：SPACE、BTC、DOGE | 是 | - |
-| skillDocument | 技能对应 markdown 文档，metafile:// | 否 | 空 |
+| skillDocument | 技能对应 markdown 文档，如 `metafile://pinid.md` | 否 | 空 |
 | inputType | 输入类型：text / image / video / zip | 否 | text |
 | outputType | 输出类型：text / image / video / zip | 否 | text |
 | endpoint | 通信方式，如 simplemsg | 否 | simplemsg |
@@ -56,7 +56,7 @@ JSON 为 skill-service 业务字段。`providerMetaBot` 代表当前使用技能
 ## AI 行为规范 (AI Constraints)
 
 1. **抽取字段**：从用户自然语言中准确抽取 serviceName、displayName、description、providerSkill、price、currency；若用户提到图标则填 serviceIcon，否则可留空或省略。
-2. **勿捏造**：未提供的 PINID、图标链接等不要编造；serviceIcon 若用户只给文件名（如 postbuzz.png），需先用 metabot-omni-caster 技能上链，获得 PIN再填 metafile://。
+2. **勿捏造**：未提供的 PINID、图标链接等不要编造；serviceIcon 若用户只给文件名（如 postbuzz.png），需先用 metabot-omni-caster 技能上链，获得 PIN 后再填 `metafile://<pinid>.png`。
 3. **确认可选**：可先回复拟上链摘要请用户确认，再在后续回合调用本技能；也可在确信信息完整时直接调用。
 4. **JSON 转义**：传入的 payload 必须为合法 JSON；若内容含双引号等需正确转义。
 5. **用户确认**：如允许，请在真正调用脚本传参数之前，将组装好的 JSON 体发给用户确认，用户确认后再用 bash 执行脚本。

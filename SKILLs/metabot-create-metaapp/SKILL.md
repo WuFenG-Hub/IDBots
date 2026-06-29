@@ -132,6 +132,10 @@ MetaBot 在编写代码时需严格遵守以下文件职责：
 - **Buzz 能力**
   - `components/id-buzz-list.js`、`components/id-post-buzz.js`、`components/id-attachments.js`
   - `commands/FetchBuzzCommand.js`、`PostBuzzCommand.js`
+- **MetaFile URI 最佳实践**
+  - 协议层面 `metafile://<pinId>` 和 `metafile://<pinId>.<ext>` 都合法。
+  - 生成官方示例应用或内置协议写入逻辑时，新组装的 MetaFile URI 默认带扩展名；扩展名优先从本地文件名推断，其次从 `/file` pin 的 `contentType` 推断。
+  - 这样前端可以直接判断附件/封面/上传文件类型，不需要为了获取 `contentType` 再查询一次文件 pin。
 
 ## 哪些新增逻辑应写入 `idframework.js` (核心边界)
 

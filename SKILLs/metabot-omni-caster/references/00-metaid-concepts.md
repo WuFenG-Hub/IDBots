@@ -37,9 +37,8 @@ MetaID 协议约定，所有的二进制文件（如图片、视频、压缩包�
 - **Payload**: `<Binary Buffer>`
 
 **如何引用文件 (The `metafile://` Scheme)**:
-当你在其他协议的 Payload 中（例如设置头像、发送带有附件的 Buzz、创建 MetaApp 的图标）需要引用链上的文件时，**必须使用 `metafile://<pinId>` 的 URI 格式**。
-有时，返回的 metafile 格式会直接返回类似的格式`metafile://<pinId>+<.ext>`, 这时，`<.ext>`代表是该文件的文件类型，如`.jpg`代表为`image/jpg`，如果类推，这方便前端快速渲染
+当你在其他协议的 Payload 中（例如设置头像、发送带有附件的 Buzz、创建 MetaApp 的图标）需要引用链上的文件时，**必须使用 `metafile://<pinId>` 或 `metafile://<pinId>.<ext>` 的 URI 格式**。
+协议层面两种格式都合法；官方应用和技能在新组装 URI 时推荐带扩展名，例如 `metafile://<pinId>.jpg`、`metafile://<pinId>.zip`。扩展名可从 `/file` pin 的 `contentType` 或本地文件名推断，前端可据此快速渲染，避免为了判断类型再查询一次文件 pin。
 
 - *错误认知*: `metafile://` 不是 7 元组的 Path。
-- *正确用法*: 它只是一个填在 JSON Payload 内部的字符串值。例如：`"coverImg": "metafile://9f995b4f978b...i0"`。
-
+- *正确用法*: 它只是一个填在 JSON Payload 内部的字符串值。例如：`"coverImg": "metafile://9f995b4f978b...i0.jpg"`。

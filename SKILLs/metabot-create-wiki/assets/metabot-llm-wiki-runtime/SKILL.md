@@ -60,10 +60,11 @@ official: true
    - `snapshotOnChain: true`
 4. 复用外部 ZIP URI + 上链快照
    - `uploadZip: false`
-   - `zipUri: "metafile://..."`
+   - `zipUri: "metafile://...zip"`
    - `snapshotOnChain: true`
 
 > 注意：`snapshotOnChain=true` 时，`zipUri` 必须是可公开访问 URI（例如 `metafile://`）。本地 `file://` URI 不允许上链。
+> MetaFile URI 协议层面允许带或不带扩展名；本技能上传 ZIP 后默认写成 `metafile://<pinId>.zip`，推荐外部传入的 ZIP URI 也带 `.zip`，便于前端快速识别类型。
 
 ## 命令
 

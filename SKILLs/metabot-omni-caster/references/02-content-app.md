@@ -1,6 +1,8 @@
 # MetaID Protocols: Content & Applications
 **说明**：包含长文笔记、图片相册、应用发布等重资产协议。
 
+**MetaFile URI 最佳实践**：协议层面 `metafile://<pinId>` 和 `metafile://<pinId>.<ext>` 都合法；官方应用/技能在新组装 URI 时推荐带扩展名。扩展名可由 `/file` pin 的 `contentType` 或本地文件名推断，前端可据此快速判断类型，避免额外查询文件 pin。
+
 ## 1. SimpleNote (简单笔记/长文协议)
 - **Intro**: 用于发布长文笔记、博客文章的协议。
 - **Path**: `/protocols/simplenote`
@@ -11,7 +13,7 @@
 {
   "title": "笔记标题",
   "subtitle": "副标题内容",
-  "coverImg": "metafile://封面图PINID",
+  "coverImg": "metafile://封面图PINID.jpg",
   "contentType": "text/markdown",
   "content": "笔记内容主体",
   /** content 的加密方式，默认为空即不加密 */
@@ -42,8 +44,8 @@
   "mention": ["MetaID_1", "MetaID_2"],
   /** 以 metafile 格式存储的图片 PINID 列表 */
   "photos": [
-    "metafile://{PINID_1}",
-    "metafile://{PINID_2}"
+    "metafile://{PINID_1}.jpg",
+    "metafile://{PINID_2}.png"
   ]
 }
 
@@ -63,20 +65,20 @@
   "appName": "应用名称",
   /** 若由 AI 生成，记录提示词 */
   "prompt": "You are an AI...",
-  "icon": "metafile://pinid",
-  "coverImg": "metafile://pinid",
-  "introImgs": ["metafile://pinid1", "metafile://pinid2"],
+  "icon": "metafile://pinid.png",
+  "coverImg": "metafile://pinid.jpg",
+  "introImgs": ["metafile://pinid1.png", "metafile://pinid2.jpg"],
   "intro": "应用介绍文本...",
   /** 支持的运行环境 (如 browser/android/ios) */
   "runtime": "browser/android/ios",
   "version": "1.0.0",
   "contentType": "text/html",
   /** 应用的运行时主内容 PINID */
-  "content": "metafile://pinid",
+  "content": "metafile://pinid.zip",
   /** 入口文件 */
   "indexFile": "index.html",
   /** 源码压缩包 PINID */
-  "code": "metafile://pinid",
+  "code": "metafile://pinid.zip",
   "contentHash": "sha256_hash_here",
   "metadata": "any data",
   "tags": ["工具", "Web3"],
@@ -126,7 +128,7 @@
   "description": "让 MetaBot 可以发 buzz 的官方核心技能。",
   "version": "1.0.1",
   /** 指向提前上传到 /file 路径下的 ZIP 压缩包的 PINID */
-  "skill-file": "metafile://<zip_pinid>"
+  "skill-file": "metafile://<zip_pinid>.zip"
 }
 
 ```
@@ -144,13 +146,13 @@
   "serviceName": "post-buzz-service", // 技能标识，llm 可根据用户的需求来生成
   "displayName": "代客发链上信息", // 展示给人类看的友好名称
   "description": "代用户发 buzz 上链，你告诉我要求，我来将你希望的的信息发布到链上", // 简短描述，用于轻量级列表展示
-  "serviceIcon":"metafile://icon", //本次技能服务的图标，以吸引用户注意
+  "serviceIcon":"metafile://icon.png", //本次技能服务的图标，以吸引用户注意
   "providerMetaBot":"乙方机器人的GlobalMetaID", //本次将服务的 metabot
   "providerSkill":"乙方执行的技能名字", //本次服务的乙方本地技能的名字
   "price": "0.001", // 建议用字符串防止精度丢失，或定义为最小单位(satoshi)
   "currency": "SPACE", // 支付币种，SPACE,BTC 和 DOGE
   "executionReminder": "执行服务时的要点提醒，发布者预设，可为空", // bot 执行技能服务时应与用户需求一起纳入执行上下文
-  "skillDocument": "metafile://", // 技能对应的 markdown 文档，默认为空
+  "skillDocument": "metafile://document.md", // 技能对应的 markdown 文档，默认为空
   "inputType":"text", // text or image or video or zip，默认为text
   "outputType":"text", //text or image, or video or zip，默认为text
   "endpoint": "simplemsg", // 即protocls/simplemsg协议，通信方式，默认通过加密私聊进行握手和交付，默认就为 simplemsg

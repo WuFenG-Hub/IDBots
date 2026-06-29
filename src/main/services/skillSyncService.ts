@@ -132,14 +132,20 @@ function ensureDir(dir: string): void {
 }
 
 /**
- * Extract pinId from metafile://<pinid>. Pinid may include suffix like i0 (e.g. xxx...i0).
+ * Extract pinId from metafile://<pinid>[.<ext>]. Pinid may include suffix like i0.
  */
-function extractPinIdFromUri(uri: string): string | null {
+export function extractPinIdFromUri(uri: string): string | null {
   const trimmed = String(uri || '').trim();
-  if (trimmed.startsWith('metafile://')) {
-    return trimmed.replace(/^metafile:\/\//, '').trim() || null;
+  const raw = trimmed.startsWith('metafile://')
+    ? trimmed.replace(/^metafile:\/\//, '').trim()
+    : trimmed;
+  if (!raw) return null;
+  const withoutQuery = raw.split('?')[0].split('#')[0].trim();
+  const pinMatch = withoutQuery.match(/[A-Fa-f0-9]{64}i\d+/);
+  if (pinMatch?.[0]) {
+    return pinMatch[0];
   }
-  return trimmed || null;
+  return withoutQuery.replace(/\.[A-Za-z0-9]{1,16}$/u, '') || null;
 }
 
 function extractSkillListFromPayload(data: { data?: { list?: unknown[] }; list?: unknown[]; pins?: unknown[] }): unknown[] {
@@ -332,7 +338,7 @@ export async function installOfficialSkill(
 
   const pinId = extractPinIdFromUri(skillFileUri);
   if (!pinId) {
-    return { success: false, error: 'Invalid skillFileUri: expected metafile://<pinid>' };
+    return { success: false, error: 'Invalid skillFileUri: expected metafile://<pinid>[.<ext>]' };
   }
 
   try {

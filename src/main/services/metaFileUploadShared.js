@@ -5,6 +5,7 @@ const DEFAULT_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_METAFS_UPLOADER_BASE = 'https://file.metaid.io/metafile-uploader';
 const PREVIEW_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content';
 const FALLBACK_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/content';
+const METAFILE_URI_PREFIX = 'metafile://';
 const MIME_MAP = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -33,6 +34,36 @@ const MIME_MAP = {
   '.md': 'text/markdown',
   '.csv': 'text/csv',
 };
+const CONTENT_TYPE_EXTENSION_MAP = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+  'image/bmp': '.bmp',
+  'image/x-icon': '.ico',
+  'application/pdf': '.pdf',
+  'application/zip': '.zip',
+  'application/x-zip-compressed': '.zip',
+  'application/gzip': '.gz',
+  'application/x-gzip': '.gz',
+  'application/x-tar': '.tar',
+  'video/mp4': '.mp4',
+  'video/webm': '.webm',
+  'video/quicktime': '.mov',
+  'audio/mpeg': '.mp3',
+  'audio/wav': '.wav',
+  'audio/ogg': '.ogg',
+  'text/plain': '.txt',
+  'text/html': '.html',
+  'text/css': '.css',
+  'application/javascript': '.js',
+  'application/x-javascript': '.js',
+  'application/json': '.json',
+  'application/xml': '.xml',
+  'text/markdown': '.md',
+  'text/csv': '.csv',
+};
 
 function assertPositiveInteger(value, fieldName) {
   if (!Number.isInteger(value) || value < 0) {
@@ -48,6 +79,42 @@ function formatMiB(bytes) {
 function inferContentTypeFromFilePath(filePath) {
   const ext = path.extname(String(filePath || '')).toLowerCase();
   return MIME_MAP[ext] || 'application/octet-stream';
+}
+
+function normalizeMetafileExtension(ext) {
+  const normalized = String(ext || '').trim().toLowerCase();
+  return /^\.[a-z0-9]{1,16}$/.test(normalized) ? normalized : '';
+}
+
+function getMetafileExtension(input = {}) {
+  const fileName = String(input.fileName || input.filePath || '').trim();
+  const fileExt = normalizeMetafileExtension(path.extname(fileName));
+  if (fileExt) return fileExt;
+
+  const contentType = String(input.contentType || '').split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXTENSION_MAP[contentType] || '';
+}
+
+function stripMetafileUriPrefix(value) {
+  const text = String(value || '').trim();
+  return text.toLowerCase().startsWith(METAFILE_URI_PREFIX)
+    ? text.slice(METAFILE_URI_PREFIX.length).trim()
+    : text;
+}
+
+function hasMetafileUriExtension(pinIdOrUri) {
+  const raw = stripMetafileUriPrefix(pinIdOrUri).split('?')[0].split('#')[0].trim();
+  const tail = raw.split('/').pop() || raw;
+  return Boolean(normalizeMetafileExtension(path.extname(tail)));
+}
+
+function buildMetafileUri(pinIdOrUri, input = {}) {
+  const raw = stripMetafileUriPrefix(pinIdOrUri);
+  if (!raw) {
+    throw new Error('pinId is required');
+  }
+  const extension = hasMetafileUriExtension(raw) ? '' : getMetafileExtension(input);
+  return `${METAFILE_URI_PREFIX}${raw}${extension}`;
 }
 
 function isTextContentType(contentType) {
@@ -138,6 +205,7 @@ function buildUploadSuccessPayload({
   return {
     success: true,
     pinId: normalizedPinId,
+    metafileUri: buildMetafileUri(normalizedPinId, { fileName, contentType }),
     previewUrl: buildPreviewUrl(normalizedPinId),
     fallbackUrl: buildFallbackUrl(normalizedPinId),
     fileName: String(fileName || ''),
@@ -170,13 +238,17 @@ const metaFileUploadShared = {
   DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_METAFS_UPLOADER_BASE,
   MIME_MAP,
+  CONTENT_TYPE_EXTENSION_MAP,
   buildChunkedMetaFilePath,
   FALLBACK_URL_BASE,
+  METAFILE_URI_PREFIX,
   PREVIEW_URL_BASE,
   buildFallbackUrl,
+  buildMetafileUri,
   buildPreviewUrl,
   buildUploadSuccessPayload,
   formatMiB,
+  getMetafileExtension,
   inferContentTypeFromFilePath,
   isTextContentType,
   normalizeRpcUploadResult,
@@ -192,14 +264,18 @@ export {
   DEFAULT_CHUNK_THRESHOLD_BYTES,
   DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_METAFS_UPLOADER_BASE,
+  CONTENT_TYPE_EXTENSION_MAP,
   FALLBACK_URL_BASE,
+  METAFILE_URI_PREFIX,
   MIME_MAP,
   PREVIEW_URL_BASE,
   buildChunkedMetaFilePath,
   buildFallbackUrl,
+  buildMetafileUri,
   buildPreviewUrl,
   buildUploadSuccessPayload,
   formatMiB,
+  getMetafileExtension,
   inferContentTypeFromFilePath,
   isTextContentType,
   normalizeRpcUploadResult,

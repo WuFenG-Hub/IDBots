@@ -1,7 +1,9 @@
+import { buildMetafileUri } from './metaFileUploadShared';
+
 export type MetabotHomepageRenderer = 'auto' | 'metaapp';
 
 export interface MetabotHomepage {
-  uri: string; // metafile://<pinId> 或 metaapp://<pinId>
+  uri: string; // metafile://<pinId>[.<ext>] 或 metaapp://<pinId>
   renderer: MetabotHomepageRenderer;
   contentType: string;
 }
@@ -12,11 +14,11 @@ const METAAPP_URI_RE = /^metaapp:\/\/\S+$/iu;
 /** Build a homepage pointer for a MetaFile source (uploaded file pin). */
 export function buildMetafileHomepage(input: { pinId: string; contentType: string }): MetabotHomepage {
   const pinId = String(input.pinId ?? '').trim();
-  const uri = `metafile://${pinId}`;
+  const contentType = String(input.contentType ?? 'application/octet-stream').trim() || 'application/octet-stream';
+  const uri = buildMetafileUri(pinId, { contentType });
   if (!METAFILE_URI_RE.test(uri)) {
     throw new Error('Invalid MetaFile pin id');
   }
-  const contentType = String(input.contentType ?? 'application/octet-stream').trim() || 'application/octet-stream';
   return { uri, renderer: 'auto', contentType };
 }
 

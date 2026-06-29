@@ -70,6 +70,15 @@ const DEFAULT_WIKI_SNAPSHOT_PATH = '/protocols/llm-wiki-snapshot';
 const DEFAULT_REGISTRY_DIR = '.metabot-llm-wiki';
 const REGISTRY_FILE_NAME = 'registry.json';
 const SUPPORTED_EXTENSIONS = new Set(['.md', '.txt', '.json', '.csv', '.pdf', '.docx']);
+const METAFILE_URI_PREFIX = 'metafile://';
+const CONTENT_TYPE_EXTENSION_MAP = {
+  'application/zip': '.zip',
+  'application/x-zip-compressed': '.zip',
+  'application/json': '.json',
+  'text/html': '.html',
+  'text/markdown': '.md',
+  'text/plain': '.txt',
+};
 
 class SkillError extends Error {
   constructor(code, detail, retryable = false) {
@@ -152,6 +161,38 @@ function hashFile(filePath) {
 
 function safeTrim(value) {
   return String(value == null ? '' : value).trim();
+}
+
+function normalizeMetafileExtension(ext) {
+  const normalized = safeTrim(ext).toLowerCase();
+  return /^\.[a-z0-9]{1,16}$/.test(normalized) ? normalized : '';
+}
+
+function getMetafileExtension({ fileName, filePath, contentType } = {}) {
+  const fileExt = normalizeMetafileExtension(path.extname(safeTrim(fileName) || safeTrim(filePath)));
+  if (fileExt) return fileExt;
+  const normalizedContentType = safeTrim(contentType).split(';')[0].trim().toLowerCase();
+  return CONTENT_TYPE_EXTENSION_MAP[normalizedContentType] || '';
+}
+
+function stripMetafileUriPrefix(value) {
+  const text = safeTrim(value);
+  return text.toLowerCase().startsWith(METAFILE_URI_PREFIX)
+    ? text.slice(METAFILE_URI_PREFIX.length).trim()
+    : text;
+}
+
+function hasMetafileExtension(value) {
+  const raw = stripMetafileUriPrefix(value).split('?')[0].split('#')[0].trim();
+  const tail = raw.split('/').pop() || raw;
+  return Boolean(normalizeMetafileExtension(path.extname(tail)));
+}
+
+function buildMetafileUri(pinIdOrUri, options = {}) {
+  const pinId = stripMetafileUriPrefix(pinIdOrUri);
+  if (!pinId) return '';
+  const extension = hasMetafileExtension(pinId) ? '' : getMetafileExtension(options);
+  return `${METAFILE_URI_PREFIX}${pinId}${extension}`;
 }
 
 function parseOptionalBooleanFlag(value, fieldName) {
@@ -2613,7 +2654,11 @@ function actionPublishZip(input, paths, state) {
     if (!uploadResult || !uploadResult.success || !safeTrim(uploadResult.pinId)) {
       throw new SkillError('publish_failed', 'Upload script did not return valid pinId.', true);
     }
-    zipUri = `metafile://${safeTrim(uploadResult.pinId)}`;
+    zipUri = buildMetafileUri(safeTrim(uploadResult.metafileUri) || safeTrim(uploadResult.pinId), {
+      fileName: safeTrim(uploadResult.fileName) || path.basename(zipPath),
+      filePath: zipPath,
+      contentType: safeTrim(uploadResult.contentType) || 'application/zip',
+    });
   }
 
   const nextState = {
