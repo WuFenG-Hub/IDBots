@@ -9,7 +9,7 @@ import MetaAppDeleteModal from './MetaAppDeleteModal';
 import type { OwnerMetaAppRecord } from '../../../types/metaAppOwner';
 
 interface MyAppsTabProps {
-  onRunByPin?: (pin: string) => void | Promise<void>;
+  onRunByPin?: (pin: string) => Promise<boolean> | boolean;
 }
 
 const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
