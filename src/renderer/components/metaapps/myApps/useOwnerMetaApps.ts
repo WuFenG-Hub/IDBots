@@ -160,7 +160,13 @@ export function useOwnerMetaApps() {
     setSubmitting(true);
     setChainStatus({ status: 'pending' });
     try {
-      const res = await metaAppOwnerService.remove({ metabotId: selectedBotId, targetPinId: record.pinId });
+      const res = await metaAppOwnerService.remove({
+        metabotId: selectedBotId,
+        targetPinId: record.pinId,
+        // Pass the create-root firstPinId so the local revoke cache hides the whole group
+        // (create + all modifies), keeping the app hidden until the indexer syncs the revoke.
+        firstPinId: record.firstPinId || record.pinId,
+      });
       if (res.success) {
         // optimistic removal — match OAC (filter by exact pinId only). The list is already
         // collapsed to one record per firstPinId group, so removing by pinId suffices and

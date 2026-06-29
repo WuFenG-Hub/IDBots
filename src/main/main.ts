@@ -5090,7 +5090,7 @@ if (!gotTheLock) {
   ipcMain.handle('metaappOwner:delete', async (_event, input: any) => {
     try {
       const result = await removeMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, {
-        confirm: input.confirm, network: input.network,
+        confirm: input.confirm, network: input.network, firstPinId: input.firstPinId,
       });
       return { success: true, ...result };
     } catch (error) {

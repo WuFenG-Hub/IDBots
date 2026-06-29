@@ -346,7 +346,7 @@ export async function updateMetaApp(
 
 export async function removeMetaApp(
   store: MetabotStore, metabotId: number, targetPinId: string,
-  options: { confirm?: boolean; network?: string } = {},
+  options: { confirm?: boolean; network?: string; firstPinId?: string } = {},
 ): Promise<{ revokedPinId: string; pinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number } }> {
   ensureConfirm(options.confirm, 'delete');
   const { mvcAddress } = await resolveMetabotAndAddress(store, metabotId);
@@ -361,10 +361,15 @@ export async function removeMetaApp(
     encoding: 'utf-8',
   }, { network: options.network });
   const pinId = String(chainWrite.pinId).toLowerCase();
+  // Use the record's true firstPinId (the create root) as the revoke cache group key when available,
+  // so a revoke hides the whole group (create + all modifies) and the app doesn't reappear after a
+  // manual refresh even for previously-modified apps, until the indexer syncs the on-chain revoke.
+  // Falls back to targetPinId (the modify/create pin) when firstPinId isn't supplied.
+  const revokeGroupKey = (options.firstPinId || targetPinId).toLowerCase();
   store.upsertMetaAppOwnerCache({
     metabot_id: metabotId,
     pin_id: pinId,
-    first_pin_id: targetPinId.toLowerCase(),
+    first_pin_id: revokeGroupKey,
     operation: 'revoke',
     mvc_address: mvcAddress,
     payload: null,

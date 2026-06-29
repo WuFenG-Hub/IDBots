@@ -446,7 +446,7 @@ interface IElectronAPI {
       success: boolean; error?: string;
       pinId?: string; targetPinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
     }>;
-    remove: (input: { metabotId: number; targetPinId: string; confirm?: boolean; network?: string }) => Promise<{
+    remove: (input: { metabotId: number; targetPinId: string; firstPinId?: string; confirm?: boolean; network?: string }) => Promise<{
       success: boolean; error?: string;
       revokedPinId?: string; pinId?: string; chainWrite?: unknown;
     }>;

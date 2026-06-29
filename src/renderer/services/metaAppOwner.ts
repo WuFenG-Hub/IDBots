@@ -45,9 +45,10 @@ class MetaAppOwnerService {
     return { success: !!res.success, error: res.error, ...res };
   }
 
-  async remove(input: { metabotId: number; targetPinId: string; network?: string }): Promise<OwnerMutationResult> {
+  async remove(input: { metabotId: number; targetPinId: string; firstPinId?: string; network?: string }): Promise<OwnerMutationResult> {
     const res = await window.electron.metaappOwner.remove({
-      metabotId: input.metabotId, targetPinId: input.targetPinId, confirm: true, network: input.network,
+      metabotId: input.metabotId, targetPinId: input.targetPinId, firstPinId: input.firstPinId,
+      confirm: true, network: input.network,
     });
     return { success: !!res.success, error: res.error, ...res };
   }

@@ -54,7 +54,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaappOwner:publish', input),
     update: (input: { metabotId: number; targetPinId: string; manifest: Record<string, unknown>; confirm?: boolean; network?: string }) =>
       ipcRenderer.invoke('metaappOwner:update', input),
-    remove: (input: { metabotId: number; targetPinId: string; confirm?: boolean; network?: string }) =>
+    remove: (input: { metabotId: number; targetPinId: string; firstPinId?: string; confirm?: boolean; network?: string }) =>
       ipcRenderer.invoke('metaappOwner:delete', input),
   },
   botBrowser: {
