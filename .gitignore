@@ -71,6 +71,7 @@ tests/*
 !tests/metabotWikiMetafileUri.test.mjs
 !tests/noteAttachmentsMetafile.test.mjs
 !tests/metabotHomepageInlineLayout.test.tsx
+!tests/metaAppProtocol.test.mjs
 
 # Local DB (never commit)
 *.sqlite
