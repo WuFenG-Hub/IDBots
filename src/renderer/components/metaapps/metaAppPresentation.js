@@ -1,3 +1,5 @@
+import { normalizeBrowserGlobalMetaId } from '../../features/botBrowser/botBrowserIntent.js';
+
 export function filterMetaApps(apps, query) {
   const normalized = String(query || '').trim().toLowerCase();
   if (!normalized) {
@@ -55,6 +57,20 @@ export function getMetaAppAuthorModel(app, language = 'zh') {
   return {
     name: language === 'en' ? 'Unknown author' : '未知作者',
     avatar: avatar || null,
+  };
+}
+
+export function getMetaAppAuthorBrowserTarget(app, language = 'zh') {
+  const globalMetaId = normalizeBrowserGlobalMetaId(app?.creatorMetaId);
+  if (!globalMetaId) {
+    return null;
+  }
+
+  const author = getMetaAppAuthorModel(app, language);
+  return {
+    globalMetaId,
+    name: author.name,
+    avatar: author.avatar,
   };
 }
 

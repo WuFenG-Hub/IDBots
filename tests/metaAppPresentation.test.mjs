@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
+import * as metaAppPresentation from '../src/renderer/components/metaapps/metaAppPresentation.js';
+
+const {
   buildUseMetaAppPrompt,
   filterMetaApps,
   getMetaAppAiPromptModel,
   getMetaAppAuthorModel,
+  getMetaAppAuthorBrowserTarget,
   getMetaAppVisualModel,
   getRecommendedMetaAppsEmptyState,
-} from '../src/renderer/components/metaapps/metaAppPresentation.js';
+} = metaAppPresentation;
 
 const sampleApps = [
   {
@@ -57,6 +60,32 @@ test('getMetaAppAuthorModel uses author fields and IDBots fallback', () => {
     getMetaAppAuthorModel({ creatorMetaId: '' }, 'en'),
     { name: 'Unknown author', avatar: null },
   );
+});
+
+test('getMetaAppAuthorBrowserTarget exposes valid creator GlobalMetaIDs only', () => {
+  assert.equal(typeof getMetaAppAuthorBrowserTarget, 'function');
+  assert.deepEqual(
+    getMetaAppAuthorBrowserTarget({
+      authorName: 'Creator Bot',
+      authorAvatar: 'https://example.com/avatar.png',
+      creatorMetaId: ' IDQ1CREATOR ',
+    }),
+    {
+      globalMetaId: 'idq1creator',
+      name: 'Creator Bot',
+      avatar: 'https://example.com/avatar.png',
+    },
+  );
+  assert.equal(
+    getMetaAppAuthorBrowserTarget({
+      authorName: 'IDBots',
+      creatorMetaId: 'idbots',
+      sourceType: 'bundled-idbots',
+      managedByIdbots: true,
+    }),
+    null,
+  );
+  assert.equal(getMetaAppAuthorBrowserTarget({ creatorMetaId: 'metaid://idq1creator' }), null);
 });
 
 test('getMetaAppAiPromptModel only exposes chain AI development prompts', () => {

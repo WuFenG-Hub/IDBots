@@ -79,6 +79,19 @@ test('MetaApps run path tries Browser first and falls back to existing task laun
   assert.match(managerSource, /await onStartTaskWithMetaApp\(app\);/);
 });
 
+test('MetaApp author avatars open creator Bot Pages when the creator has a GlobalMetaID', () => {
+  const appSource = read('src/renderer/App.tsx');
+  const viewSource = read('src/renderer/components/metaapps/MetaAppsView.tsx');
+  const managerSource = read('src/renderer/components/metaapps/MetaAppsManager.tsx');
+
+  assert.match(appSource, /<MetaAppsView[\s\S]*onOpenBotInBrowser=\{botBrowserShell\.openRemoteBot\}/);
+  assert.match(viewSource, /onOpenBotInBrowser\?:/);
+  assert.match(viewSource, /<MetaAppsManager[\s\S]*onOpenBotInBrowser=\{onOpenBotInBrowser\}/);
+  assert.match(managerSource, /getMetaAppAuthorBrowserTarget/);
+  assert.match(managerSource, /data-browser-global-metaid=\{authorBrowserTarget\.globalMetaId\}/);
+  assert.match(managerSource, /onOpenBotInBrowser\?\.\(\{\s*globalMetaId:\s*authorBrowserTarget\.globalMetaId,\s*name:\s*authorBrowserTarget\.name,\s*avatar:\s*authorBrowserTarget\.avatar,\s*\}\)/);
+});
+
 test('MetaApp Browser hook only reports unsupported MetaApps and leaves fallback to manager', () => {
   const appSource = read('src/renderer/App.tsx');
   const shellSource = read('src/renderer/features/botBrowser/useBotBrowserShell.ts');

@@ -764,6 +764,7 @@ const App: React.FC = () => {
       onNewChat={handleNewChat}
       onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
       onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
+      onOpenBotInBrowser={botBrowserShell.openRemoteBot}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
     />
   ) : mainView === 'skills' ? (

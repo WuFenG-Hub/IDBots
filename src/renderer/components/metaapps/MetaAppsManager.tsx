@@ -21,6 +21,7 @@ import {
   getCommunityMetaAppsEmptyState,
   getCommunityMetaAppStatusLabel,
   getMetaAppAiPromptModel,
+  getMetaAppAuthorBrowserTarget,
   getMetaAppAuthorModel,
   getMetaAppVisualModel,
   getRecommendedMetaAppsEmptyState,
@@ -30,6 +31,11 @@ import { openMetaAppDirectory } from './metaAppLaunch.js';
 interface MetaAppsManagerProps {
   onOpenMetaAppInBrowser?: (app: MetaAppRecord) => Promise<boolean> | boolean;
   onStartTaskWithMetaApp?: (app: MetaAppRecord) => Promise<void> | void;
+  onOpenBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string | null;
+    avatar?: string | null;
+  }) => void | Promise<void>;
 }
 
 const COMMUNITY_PAGE_SIZE = 30;
@@ -38,6 +44,7 @@ const COMMUNITY_ROOT_CURSOR = '0';
 const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   onOpenMetaAppInBrowser,
   onStartTaskWithMetaApp,
+  onOpenBotInBrowser,
 }) => {
   const [activeTab, setActiveTab] = useState<'local' | 'recommended' | 'chainCommunity'>('local');
   const [apps, setApps] = useState<MetaAppRecord[]>([]);
@@ -216,6 +223,55 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
           alt={app.name}
           className={`h-full w-full ${visual.kind === 'cover' ? 'object-cover' : 'object-contain p-4'}`}
         />
+      </div>
+    );
+  };
+
+  const renderAuthorIdentity = (app: MetaAppRecord | CommunityMetaAppRecord, language: string) => {
+    const author = getMetaAppAuthorModel(app, language);
+    const authorAvatarSrc = author.avatar || DEFAULT_GIG_SQUARE_PROVIDER_AVATAR;
+    const authorBrowserTarget = getMetaAppAuthorBrowserTarget(app, language);
+    const authorContent = (
+      <>
+        <img
+          src={authorAvatarSrc}
+          alt={author.name}
+          className="h-7 w-7 flex-shrink-0 rounded-full border border-claude-border object-cover dark:border-claude-darkBorder"
+          onError={(event) => { event.currentTarget.src = DEFAULT_GIG_SQUARE_PROVIDER_AVATAR; }}
+        />
+        <div className="min-w-0">
+          <div className="truncate text-xs font-medium text-claude-text dark:text-claude-darkText">
+            {author.name}
+          </div>
+        </div>
+      </>
+    );
+
+    if (authorBrowserTarget && onOpenBotInBrowser) {
+      const label = `Open ${authorBrowserTarget.name || 'Bot'} in Bot Browser`;
+      return (
+        <button
+          type="button"
+          data-browser-global-metaid={authorBrowserTarget.globalMetaId}
+          aria-label={label}
+          title={label}
+          onClick={() => {
+            void onOpenBotInBrowser?.({
+              globalMetaId: authorBrowserTarget.globalMetaId,
+              name: authorBrowserTarget.name,
+              avatar: authorBrowserTarget.avatar,
+            });
+          }}
+          className="min-w-0 flex items-center gap-2 rounded-full text-left transition-shadow hover:ring-2 hover:ring-claude-accent/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/60"
+        >
+          {authorContent}
+        </button>
+      );
+    }
+
+    return (
+      <div className="min-w-0 flex items-center gap-2">
+        {authorContent}
       </div>
     );
   };
@@ -462,8 +518,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
     return (
       <div className="grid grid-cols-2 gap-3">
         {filteredApps.map((app) => {
-          const author = getMetaAppAuthorModel(app, i18nService.getLanguage());
-          const authorAvatarSrc = author.avatar || DEFAULT_GIG_SQUARE_PROVIDER_AVATAR;
+          const language = i18nService.getLanguage();
 
           return (
             <div
@@ -497,19 +552,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
               </Tooltip>
 
               <div className="flex items-center justify-between gap-2 mt-1">
-                <div className="min-w-0 flex items-center gap-2">
-                  <img
-                    src={authorAvatarSrc}
-                    alt={author.name}
-                    className="h-7 w-7 flex-shrink-0 rounded-full border border-claude-border object-cover dark:border-claude-darkBorder"
-                    onError={(event) => { event.currentTarget.src = DEFAULT_GIG_SQUARE_PROVIDER_AVATAR; }}
-                  />
-                  <div className="min-w-0">
-                    <div className="truncate text-xs font-medium text-claude-text dark:text-claude-darkText">
-                      {author.name}
-                    </div>
-                  </div>
-                </div>
+                {renderAuthorIdentity(app, language)}
                 <div className="flex items-center gap-1 flex-shrink-0">
                   <Tooltip content={i18nService.t('metaAppUse')} position="top">
                     <button
@@ -574,8 +617,6 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
             const language = i18nService.getLanguage();
             const statusLabel = getCommunityMetaAppStatusLabel(app.status, language);
             const actionLabel = getCommunityMetaAppActionLabel(app.status, language);
-            const author = getMetaAppAuthorModel(app, language);
-            const authorAvatarSrc = author.avatar || DEFAULT_GIG_SQUARE_PROVIDER_AVATAR;
             const isInstalling = installingSourcePinId === app.sourcePinId;
             const canInstall = app.status === 'install' || app.status === 'update';
             const isActionDisabled = installingSourcePinId !== null;
@@ -610,19 +651,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
                 </Tooltip>
 
                 <div className="flex items-center justify-between gap-2 mt-1">
-                  <div className="min-w-0 flex items-center gap-2">
-                    <img
-                      src={authorAvatarSrc}
-                      alt={author.name}
-                      className="h-7 w-7 flex-shrink-0 rounded-full border border-claude-border object-cover dark:border-claude-darkBorder"
-                      onError={(event) => { event.currentTarget.src = DEFAULT_GIG_SQUARE_PROVIDER_AVATAR; }}
-                    />
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-medium text-claude-text dark:text-claude-darkText">
-                        {author.name}
-                      </div>
-                    </div>
-                  </div>
+                  {renderAuthorIdentity(app, language)}
                   <Tooltip
                     content={app.reason || actionLabel}
                     position="top"

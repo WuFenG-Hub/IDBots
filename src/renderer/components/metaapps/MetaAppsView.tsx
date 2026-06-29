@@ -13,6 +13,11 @@ interface MetaAppsViewProps {
   onNewChat?: () => void;
   onOpenMetaAppInBrowser?: (app: MetaAppRecord) => Promise<boolean> | boolean;
   onStartTaskWithMetaApp?: (app: MetaAppRecord) => Promise<void> | void;
+  onOpenBotInBrowser?: (input: {
+    globalMetaId: string;
+    name?: string | null;
+    avatar?: string | null;
+  }) => void | Promise<void>;
   updateBadge?: React.ReactNode;
 }
 
@@ -22,6 +27,7 @@ const MetaAppsView: React.FC<MetaAppsViewProps> = ({
   onNewChat,
   onOpenMetaAppInBrowser,
   onStartTaskWithMetaApp,
+  onOpenBotInBrowser,
   updateBadge,
 }) => {
   const isMac = window.electron.platform === 'darwin';
@@ -62,6 +68,7 @@ const MetaAppsView: React.FC<MetaAppsViewProps> = ({
           <MetaAppsManager
             onOpenMetaAppInBrowser={onOpenMetaAppInBrowser}
             onStartTaskWithMetaApp={onStartTaskWithMetaApp}
+            onOpenBotInBrowser={onOpenBotInBrowser}
           />
         </div>
       </div>
