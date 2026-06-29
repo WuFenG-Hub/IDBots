@@ -47,6 +47,16 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('metaapps:changed', handler);
     },
   },
+  metaappOwner: {
+    list: (input: { metabotId: number; cursor?: string; size?: number }) =>
+      ipcRenderer.invoke('metaappOwner:list', input),
+    publish: (input: { metabotId: number; manifest: Record<string, unknown>; confirm?: boolean; network?: string }) =>
+      ipcRenderer.invoke('metaappOwner:publish', input),
+    update: (input: { metabotId: number; targetPinId: string; manifest: Record<string, unknown>; confirm?: boolean; network?: string }) =>
+      ipcRenderer.invoke('metaappOwner:update', input),
+    remove: (input: { metabotId: number; targetPinId: string; confirm?: boolean; network?: string }) =>
+      ipcRenderer.invoke('metaappOwner:delete', input),
+  },
   botBrowser: {
     resolveMetaAppPin: (input: { pinId: string }) => ipcRenderer.invoke('botBrowser:resolveMetaAppPin', input),
     getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),

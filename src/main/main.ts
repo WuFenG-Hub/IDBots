@@ -95,6 +95,12 @@ import { performChatCompletionForOrchestrator } from './services/cognitiveChatCo
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import { createPin, getPinData } from './services/metaidCore';
+import {
+  listOwnerMetaApps,
+  publishMetaApp,
+  updateMetaApp,
+  removeMetaApp,
+} from './services/metaAppOwnerService';
 import { shouldForwardCoworkStreamEvent } from './services/coworkStreamForwarding';
 import type { DiscoverySnapshot } from './services/providerDiscoveryService';
 import { ProviderDiscoveryService } from './services/providerDiscoveryService';
@@ -5045,6 +5051,50 @@ if (!gotTheLock) {
       return result;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to install community MetaApp' };
+    }
+  });
+
+  ipcMain.handle('metaappOwner:list', async (_event, input: { metabotId: number; cursor?: string; size?: number }) => {
+    try {
+      const result = await listOwnerMetaApps(getMetabotStore(), input.metabotId, {
+        cursor: input.cursor, size: input.size,
+      });
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list MetaApps' };
+    }
+  });
+
+  ipcMain.handle('metaappOwner:publish', async (_event, input: any) => {
+    try {
+      const result = await publishMetaApp(getMetabotStore(), input.metabotId, input.manifest, {
+        confirm: input.confirm, network: input.network,
+      });
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to publish MetaApp' };
+    }
+  });
+
+  ipcMain.handle('metaappOwner:update', async (_event, input: any) => {
+    try {
+      const result = await updateMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, input.manifest, {
+        confirm: input.confirm, network: input.network,
+      });
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update MetaApp' };
+    }
+  });
+
+  ipcMain.handle('metaappOwner:delete', async (_event, input: any) => {
+    try {
+      const result = await removeMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, {
+        confirm: input.confirm, network: input.network,
+      });
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to delete MetaApp' };
     }
   });
 
