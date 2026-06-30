@@ -14,12 +14,50 @@ const CODE_TYPE_OPTIONS = [
   'application/gzip', 'application/json', 'application/xml', 'text/html', 'text/css', 'application/javascript',
 ];
 const ASSET_FIELDS = [
+  { name: 'content', multiple: false, image: false, labelKey: 'myAppsContent' },
   { name: 'icon', multiple: false, image: true, labelKey: 'myAppsIcon' },
   { name: 'coverImg', multiple: false, image: true, labelKey: 'myAppsCoverImg' },
   { name: 'introImgs', multiple: true, image: true, labelKey: 'myAppsIntroImgs' },
-  { name: 'content', multiple: false, image: false, labelKey: 'myAppsContent' },
   { name: 'code', multiple: false, image: false, labelKey: 'myAppsCode' },
 ] as const;
+
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.ico', '.avif']);
+const IMAGE_MIME_PREFIX = 'image/';
+
+// Map a file (name + browser MIME) to a content/code-type option string, if a sensible one exists.
+const detectTypeOption = (file: File, allowOctetStream: boolean): string => {
+  const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+  const extToType: Record<string, string> = {
+    '.zip': 'application/zip', '.tar': 'application/x-tar', '.7z': 'application/x-7z-compressed',
+    '.rar': 'application/x-rar-compressed', '.gz': 'application/gzip', '.tgz': 'application/gzip',
+    '.json': 'application/json', '.xml': 'application/xml', '.txt': 'text/plain',
+    '.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+    '.js': 'application/javascript', '.mjs': 'application/javascript',
+    '.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+    '.gif': 'image/gif', '.svg': 'image/svg+xml', '.webp': 'image/webp',
+    '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+  };
+  if (extToType[ext]) return extToType[ext];
+  // Fall back to the browser-provided MIME type if it is one of the known options.
+  const byMime = [...CONTENT_TYPE_OPTIONS].find((o) => o === file.type);
+  if (byMime) return byMime;
+  return allowOctetStream ? 'application/octet-stream' : '';
+};
+
+const isLikelyImage = (file: File): boolean => {
+  if (file.type && file.type.startsWith(IMAGE_MIME_PREFIX)) return true;
+  const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext);
+};
+
+const sha256HexFromFile = async (file: File): Promise<string> => {
+  if (!file || typeof file.arrayBuffer !== 'function') return '';
+  const cryptoObj = (window as unknown as { crypto?: Crypto }).crypto;
+  if (!cryptoObj?.subtle || typeof cryptoObj.subtle.digest !== 'function') return '';
+  const buffer = await file.arrayBuffer();
+  const digest = await cryptoObj.subtle.digest('SHA-256', buffer);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+};
 
 const bumpVersionValue = (value: string | undefined): string => {
   const text = (value || '').trim() || 'v1.0.0';
@@ -68,6 +106,8 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
   const [content, setContent] = useState(record?.content || '');
   const [code, setCode] = useState(record?.code || '');
   const [contentHash, setContentHash] = useState(record?.contentHash || '');
+  // The metafile:// source the contentHash was computed from (for display next to the hash field).
+  const [contentSource, setContentSource] = useState(record?.content || '');
   const [runtime, setRuntime] = useState<string[]>(
     (record?.runtime ? String(record.runtime).split('/') : ['browser']).filter(Boolean),
   );
@@ -83,11 +123,27 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
 
   const handleUpload = async (fieldName: string, files: FileList | null) => {
     if (!files || files.length === 0) return;
+    const asset = ASSET_FIELDS.find((f) => f.name === fieldName);
     setUploadingField(fieldName);
     setUploadError('');
     try {
-      const isContent = fieldName === 'content';
+      // Validate image-only fields up front (icon/coverImg/introImgs must be images).
+      if (asset?.image) {
+        const nonImage = Array.from(files).find((f) => !isLikelyImage(f));
+        if (nonImage) {
+          const msg = (t('myAppsErrNotImage') || '"{{name}}" is not an image. icon/cover/intro images must be PNG, JPG, GIF, WebP, or SVG.')
+            .replace('{{name}}', nonImage.name);
+          setUploadError(msg);
+          onUploadError?.(msg);
+          return;
+        }
+      }
+
       const collected: string[] = [];
+      let detectedContentType = '';
+      let detectedCodeType = '';
+      let contentHashValue = '';
+      let contentSourceUri = '';
       for (const file of Array.from(files)) {
         const base64 = await fileToBase64Body(file);
         const res = await window.electron.idbots.uploadMetabotHomepageFile({
@@ -100,17 +156,34 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
           throw new Error(res?.error || 'Upload failed');
         }
         collected.push(res.metafileUri);
-        if (isContent) {
-          // content hash not computed client-side in IDBots; leave contentHash editable / unchanged
+
+        if (fieldName === 'content') {
+          // Auto-detect content type (allow octet-stream fallback) and compute SHA-256 hash.
+          const detected = detectTypeOption(file, true);
+          if (detected) detectedContentType = detected;
+          contentSourceUri = res.metafileUri;
+          const hash = await sha256HexFromFile(file);
+          if (hash) contentHashValue = hash;
+        } else if (fieldName === 'code') {
+          // Auto-detect code type (no octet-stream fallback — code types are archive/text only).
+          const detected = detectTypeOption(file, false);
+          if (detected && CODE_TYPE_OPTIONS.includes(detected as never)) detectedCodeType = detected;
         }
       }
-      const asset = ASSET_FIELDS.find((f) => f.name === fieldName);
+
       if (asset?.multiple) {
         setIntroImgs((prev) => Array.from(new Set([...prev, ...collected])));
       } else if (fieldName === 'icon') setIcon(collected[0] || '');
       else if (fieldName === 'coverImg') setCoverImg(collected[0] || '');
-      else if (fieldName === 'content') setContent(collected[0] || '');
-      else if (fieldName === 'code') setCode(collected[0] || '');
+      else if (fieldName === 'content') {
+        setContent(collected[0] || '');
+        if (detectedContentType) setContentType(detectedContentType);
+        if (contentHashValue) setContentHash(contentHashValue);
+        if (contentSourceUri) setContentSource(contentSourceUri);
+      } else if (fieldName === 'code') {
+        setCode(collected[0] || '');
+        if (detectedCodeType) setCodeType(detectedCodeType);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
       // Show inline (visible inside the modal) and also bubble up to the tab notice.
@@ -228,7 +301,7 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
           ) : null}
           {metabotName ? (
             <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {(t('myAppsPublishedBy') || 'Published by')} <span className="font-medium dark:text-claude-darkText text-claude-text">{metabotName}</span>
+              {(t('myAppsPublishedBy') || 'Published by').replace('{{name}}', metabotName)}
             </p>
           ) : null}
           {isEdit && record?.version ? (
@@ -312,7 +385,12 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
             </div>
             <div>
               <label className={labelCls}>{t('myAppsContentHash') || 'Content hash'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
-              <input value={contentHash} onChange={(e) => setContentHash(e.target.value)} className={inputCls} />
+              <input value={contentHash} onChange={(e) => setContentHash(e.target.value)} className={inputCls} placeholder={t('myAppsContentHashPlaceholder') || 'auto-filled from uploaded content (SHA-256)'} />
+              {contentSource ? (
+                <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                  {(t('myAppsContentHashSource') || 'Hash of')}: <code className="text-claude-accent">{contentSource}</code>
+                </p>
+              ) : null}
             </div>
             <div>
               <label className={labelCls}>{t('myAppsMetadata') || 'Metadata (JSON)'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
