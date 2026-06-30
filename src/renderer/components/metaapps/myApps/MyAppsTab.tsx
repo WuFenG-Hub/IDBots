@@ -120,19 +120,30 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
                   onClick={() => owner.setModal({ kind: 'detail', record })}
                   onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); owner.setModal({ kind: 'detail', record }); } }}
                   className={cardCls}>
-                  <div className="relative h-[126px] overflow-hidden dark:bg-claude-darkBg bg-claude-bg">
+                  <div className="relative h-[126px] overflow-hidden">
                     {visual.cover ? (
                       <img src={visual.cover} alt="" className="absolute inset-0 h-full w-full object-cover"
-                        onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
-                    ) : (
-                      // Placeholder cover when no cover image: subtle gradient + centered app initials.
-                      <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-claude-accent/10 to-claude-surfaceHover/40 dark:from-claude-accent/10 dark:to-claude-darkSurfaceHover/30">
-                        <span className="text-2xl font-bold text-claude-accent/60">
-                          {(record.appName || record.title || 'MA').slice(0, 2).toUpperCase()}
-                        </span>
-                      </div>
-                    )}
-                    <div className="absolute left-2 bottom-2 h-10 w-10 rounded-lg overflow-hidden border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center">
+                        onError={(e) => {
+                          // Swap to the placeholder if the cover fails to load.
+                          const el = e.currentTarget as HTMLImageElement;
+                          el.style.display = 'none';
+                          const ph = el.parentElement?.querySelector('[data-cover-placeholder]') as HTMLElement | null;
+                          if (ph) ph.style.display = 'flex';
+                        }} />
+                    ) : null}
+                    {/* Default cover placeholder — shown when there is no cover or the cover fails to load. */}
+                    <div data-cover-placeholder style={{ display: visual.cover ? 'none' : 'flex' }}
+                      className="absolute inset-0 flex flex-col items-center justify-center gap-1.5 dark:bg-claude-darkSurfaceHover bg-claude-surfaceMuted">
+                      <svg className="h-9 w-9 text-claude-accent/55" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <rect x="3" y="3" width="18" height="18" rx="3" />
+                        <circle cx="8.5" cy="8.5" r="1.5" />
+                        <path d="m21 15-5-5L5 21" />
+                      </svg>
+                      <span className="text-sm font-bold text-claude-accent/70">
+                        {(record.appName || record.title || 'MA').slice(0, 2).toUpperCase()}
+                      </span>
+                    </div>
+                    <div className="absolute left-2 bottom-2 h-10 w-10 rounded-lg overflow-hidden border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center shadow-sm">
                       {visual.icon ? (
                         <img src={visual.icon} alt="" className="h-full w-full object-cover"
                           onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
