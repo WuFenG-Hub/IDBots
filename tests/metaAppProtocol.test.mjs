@@ -30,6 +30,34 @@ test('buildMetaAppProtocolPayload requires content', () => {
   assert.throws(() => buildMetaAppProtocolPayload({ appName: 'X' }), /content is required/);
 });
 
+test('content accepts bare pin, metafile://pin, and metafile://pin.ext', () => {
+  const pin = 'a'.repeat(64) + 'i0';
+  // bare pin
+  assert.equal(buildMetaAppProtocolPayload({ appName: 'A', content: pin }).content, `metafile://${pin}`);
+  // metafile:// prefixed (what the upload form stores)
+  assert.equal(buildMetaAppProtocolPayload({ appName: 'A', content: `metafile://${pin}` }).content, `metafile://${pin}`);
+  // metafile:// prefixed with extension
+  assert.equal(
+    buildMetaAppProtocolPayload({ appName: 'A', content: `metafile://${pin}.zip` }).content,
+    `metafile://${pin}.zip`,
+  );
+  // bare pin with extension
+  assert.equal(
+    buildMetaAppProtocolPayload({ appName: 'A', content: `${pin}.zip` }).content,
+    `metafile://${pin}.zip`,
+  );
+});
+
+test('image refs accept metafile:// prefixed values too', () => {
+  const pin = 'a'.repeat(64) + 'i0';
+  const m = buildMetaAppProtocolPayload({
+    appName: 'A', content: pin,
+    icon: `metafile://${pin}`, coverImg: `metafile://${pin}.png`,
+  });
+  assert.equal(m.icon, `metafile://${pin}`);
+  assert.equal(m.coverImg, `metafile://${pin}.png`);
+});
+
 test('buildMetaAppProtocolPayload normalizes defaults', () => {
   const m = buildMetaAppProtocolPayload({
     appName: 'MyApp',

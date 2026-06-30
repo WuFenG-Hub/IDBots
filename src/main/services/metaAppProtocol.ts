@@ -48,9 +48,14 @@ const normalizeText = (value: unknown): string => (typeof value === 'string' ? v
 
 const isHttpUrl = (value: string): boolean => /^https?:\/\//i.test(value);
 
+// Strip an optional `metafile://` scheme prefix so the bare-pin reference regex can match.
+const stripMetafileScheme = (value: string): string =>
+  value.toLowerCase().startsWith('metafile://') ? value.slice('metafile://'.length) : value;
+
 const normalizeMetafile = (value: string): string => {
   if (isHttpUrl(value)) return value;
-  if (!METAAPP_METAFILE_REFERENCE_PATTERN.test(value)) {
+  // Validate the reference with or without the `metafile://` prefix.
+  if (!METAAPP_METAFILE_REFERENCE_PATTERN.test(stripMetafileScheme(value))) {
     throw new Error('Invalid metafile reference.');
   }
   return value.toLowerCase().startsWith('metafile://') ? value : `metafile://${value}`;
@@ -60,7 +65,7 @@ const normalizeImageRef = (value: string): string | undefined => {
   const text = normalizeText(value);
   if (!text) return undefined;
   if (isHttpUrl(text)) return text;
-  if (!METAAPP_METAFILE_REFERENCE_PATTERN.test(text)) {
+  if (!METAAPP_METAFILE_REFERENCE_PATTERN.test(stripMetafileScheme(text))) {
     throw new Error('Invalid image metafile reference.');
   }
   return text.toLowerCase().startsWith('metafile://') ? text : `metafile://${text}`;
