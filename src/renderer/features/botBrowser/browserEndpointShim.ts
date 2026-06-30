@@ -76,6 +76,10 @@ function invalidRequestBody(): BrowserEndpointShimResponse {
   return response(browserFailure('invalid_request_body', 'Request body must be a JSON object.'));
 }
 
+function invalidRequest(): BrowserEndpointShimResponse {
+  return response(browserFailure('invalid_request', 'Request body must be a JSON object.'));
+}
+
 function invalidBrowserAction(message = 'Browser action request is invalid.'): BrowserEndpointShimResponse {
   return response(browserFailure('invalid_browser_action', message));
 }
@@ -159,6 +163,20 @@ export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserE
           return response(await adapter.clearCache(input));
         }
         return methodNotAllowed();
+      }
+
+      if (url.pathname === '/api/browser/metafile-upload') {
+        if (method !== 'POST') return methodNotAllowed();
+        const body = bodyRecord(request);
+        if (!body) return invalidRequest();
+        return response(
+          await adapter.runTrustedAction({
+            actorId,
+            resourceUri: text(body.resourceUri),
+            kind: 'metafile-upload' as BrowserTrustedActionKind,
+            payload: body,
+          }),
+        );
       }
 
       if (url.pathname === '/api/browser/actions') {

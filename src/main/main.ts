@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, session, nativeTheme, dialog, shell, nativeImage, systemPreferences, Menu } from 'electron';
-import type { Session, WebContents } from 'electron';
+import type { FileFilter, MessageBoxOptions, OpenDialogOptions, Session, WebContents } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import * as bip39 from '@scure/bip39';
@@ -127,6 +127,13 @@ import * as p2pConfigService from './services/p2pConfigService';
 import { runAppCleanup as runSharedAppCleanup } from './services/appCleanup';
 import { ensureMetaAppServerReady, stopMetaAppServer } from './services/metaAppLocalServer';
 import { createBotBrowserMetaAppCacheService, type BotBrowserMetaAppCacheService } from './services/botBrowserMetaAppCacheService';
+import {
+  createBotBrowserBridgeService,
+  type BotBrowserHostPickedFile,
+  type BotBrowserMetaFileUploadInput,
+  type BotBrowserPinWriteConfirmDetails,
+  type BotBrowserPinWriteInput,
+} from './services/botBrowserBridgeService';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   findCommunityMetaAppRecordBySourcePinId,
@@ -2338,6 +2345,130 @@ let serviceOrderTimeoutScanInterval: ReturnType<typeof setInterval> | null = nul
 let serviceRefundSyncInterval: ReturnType<typeof setInterval> | null = null;
 let sqliteMaintenanceInterval: ReturnType<typeof setInterval> | null = null;
 let sqliteRecoveryRelaunchRequested = false;
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function botBrowserDialogMessageBox(
+  ownerWindow: BrowserWindow | null,
+  options: MessageBoxOptions,
+) {
+  if (ownerWindow && !ownerWindow.isDestroyed()) {
+    return dialog.showMessageBox(ownerWindow, options);
+  }
+  return dialog.showMessageBox(options);
+}
+
+function botBrowserDialogOpen(
+  ownerWindow: BrowserWindow | null,
+  options: OpenDialogOptions,
+) {
+  if (ownerWindow && !ownerWindow.isDestroyed()) {
+    return dialog.showOpenDialog(ownerWindow, options);
+  }
+  return dialog.showOpenDialog(options);
+}
+
+function acceptItemToExtensions(value: string): string[] {
+  const item = text(value).toLowerCase();
+  if (!item) return [];
+  if (item.startsWith('.')) {
+    return [item.slice(1)].filter(Boolean);
+  }
+  const mimeExtensions: Record<string, string[]> = {
+    'image/png': ['png'],
+    'image/jpeg': ['jpg', 'jpeg'],
+    'image/webp': ['webp'],
+    'image/gif': ['gif'],
+    'text/plain': ['txt', 'text'],
+    'text/html': ['html', 'htm'],
+    'application/json': ['json'],
+    'application/pdf': ['pdf'],
+    'application/zip': ['zip'],
+  };
+  if (item === 'image/*') {
+    return ['png', 'jpg', 'jpeg', 'webp', 'gif'];
+  }
+  return mimeExtensions[item] ?? [];
+}
+
+function buildBotBrowserUploadFilters(accept: string[]): FileFilter[] | undefined {
+  const extensions = Array.from(
+    new Set(accept.flatMap(acceptItemToExtensions).filter(Boolean)),
+  );
+  if (extensions.length === 0) {
+    return undefined;
+  }
+  return [{ name: 'Accepted files', extensions }];
+}
+
+async function confirmBotBrowserPinWrite(
+  ownerWindow: BrowserWindow | null,
+  details: BotBrowserPinWriteConfirmDetails,
+): Promise<boolean> {
+  const detailLines = [
+    `Actor: ${details.actor.name} (${details.actor.globalMetaId})`,
+    `Operation: ${details.operation}`,
+    `Path: ${details.path}`,
+    `Content-Type: ${details.contentType}`,
+    `Payload Size: ${details.payloadSize} bytes`,
+  ];
+  if (details.display.title) {
+    detailLines.push(`Title: ${details.display.title}`);
+  }
+  if (details.display.summary) {
+    detailLines.push(`Summary: ${details.display.summary}`);
+  }
+
+  const result = await botBrowserDialogMessageBox(ownerWindow, {
+    type: 'question',
+    title: 'Confirm MetaID PIN Write',
+    message: details.display.title || 'Confirm MetaID PIN write',
+    detail: detailLines.join('\n'),
+    buttons: ['Cancel', 'Write PIN'],
+    cancelId: 0,
+    defaultId: 1,
+    noLink: true,
+  });
+  return result.response === 1;
+}
+
+async function pickBotBrowserMetaFiles(
+  ownerWindow: BrowserWindow | null,
+  input: { multiple: boolean; accept: string[]; purpose?: string },
+): Promise<BotBrowserHostPickedFile[]> {
+  const result = await botBrowserDialogOpen(ownerWindow, {
+    title: input.purpose ? `Select file for ${input.purpose}` : 'Select file for MetaFile upload',
+    properties: input.multiple ? ['openFile', 'multiSelections'] : ['openFile'],
+    filters: buildBotBrowserUploadFilters(input.accept),
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return [];
+  }
+  return result.filePaths.map((filePath) => ({ filePath }));
+}
+
+function createBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null) {
+  return createBotBrowserBridgeService({
+    metabotStore: getMetabotStore(),
+    createPin,
+    uploadMetaFile: async (...args) => {
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      return uploadMetaFile(...args);
+    },
+    confirmPinWrite: (details) => confirmBotBrowserPinWrite(ownerWindow, details),
+    pickFiles: (input) => pickBotBrowserMetaFiles(ownerWindow, input),
+  });
+}
+
+function botBrowserBridgeInput<T extends BotBrowserPinWriteInput | BotBrowserMetaFileUploadInput>(
+  input: unknown,
+): T {
+  return input && typeof input === 'object' && !Array.isArray(input)
+    ? input as T
+    : {} as T;
+}
 
 const listPendingPrivateMessages = (): Array<Record<string, unknown>> => {
   const db = getStore().getDatabase();
@@ -4979,6 +5110,20 @@ if (!gotTheLock) {
 
   ipcMain.handle('botBrowser:clearMetaAppCache', async (_event, input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) => {
     return getBotBrowserMetaAppCacheService().clearCache(input);
+  });
+
+  ipcMain.handle('botBrowser:writeMetaIdPin', async (event, input: unknown) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    return createBotBrowserBridgeServiceForWindow(ownerWindow).writeMetaIdPin(
+      botBrowserBridgeInput<BotBrowserPinWriteInput>(input),
+    );
+  });
+
+  ipcMain.handle('botBrowser:uploadMetaFile', async (event, input: unknown) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    return createBotBrowserBridgeServiceForWindow(ownerWindow).uploadMetaFile(
+      botBrowserBridgeInput<BotBrowserMetaFileUploadInput>(input),
+    );
   });
 
   ipcMain.handle('metaapps:list', async () => {

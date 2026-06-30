@@ -354,6 +354,159 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
   ]);
 });
 
+test('runTrustedAction forwards metaid-pin-write to the trusted host writer', async () => {
+  const writes = [];
+  const adapter = createAdapter({
+    writeMetaIdPin: async (request) => {
+      writes.push(request);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          pinId: 'pin123i0',
+          txid: 'tx123',
+          operation: 'create',
+          path: '/demo',
+          actor: {
+            uri: 'metaid://idq1abc',
+            globalMetaId: 'idq1abc',
+            name: 'Alpha',
+          },
+        },
+      };
+    },
+  });
+
+  const result = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-1',
+    resourceUri: 'metaapp://app123i0',
+    kind: 'metaid-pin-write',
+    payload: {
+      operation: 'create',
+      path: '/demo',
+      encryption: '0',
+      version: '1.0',
+      contentType: 'text/plain',
+      payload: { encoding: 'utf8', value: 'hello' },
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data, {
+    kind: 'metaid-pin-write',
+    handled: true,
+    data: {
+      pinId: 'pin123i0',
+      txid: 'tx123',
+      operation: 'create',
+      path: '/demo',
+      actor: {
+        uri: 'metaid://idq1abc',
+        globalMetaId: 'idq1abc',
+        name: 'Alpha',
+      },
+    },
+  });
+  assert.deepEqual(writes, [
+    {
+      actorId: 'idbots-metabot-1',
+      resourceUri: 'metaapp://app123i0',
+      payload: {
+        operation: 'create',
+        path: '/demo',
+        encryption: '0',
+        version: '1.0',
+        contentType: 'text/plain',
+        payload: { encoding: 'utf8', value: 'hello' },
+      },
+    },
+  ]);
+});
+
+test('runTrustedAction forwards metafile-upload and returns stable unsupported errors when unimplemented', async () => {
+  const uploads = [];
+  const adapter = createAdapter({
+    uploadMetaFile: async (request) => {
+      uploads.push(request);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          files: [
+            {
+              pinId: 'file123i0',
+              uri: 'metafile://file123i0.png',
+              name: 'avatar.png',
+              size: 100,
+              contentType: 'image/png',
+              actor: {
+                uri: 'metaid://idq1abc',
+                globalMetaId: 'idq1abc',
+                name: 'Alpha',
+              },
+            },
+          ],
+        },
+      };
+    },
+  });
+
+  const uploaded = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-1',
+    resourceUri: '',
+    kind: 'metafile-upload',
+    payload: { source: { kind: 'host-picker' } },
+  });
+  assert.equal(uploaded.ok, true);
+  assert.deepEqual(uploaded.data, {
+    kind: 'metafile-upload',
+    handled: true,
+    data: {
+      files: [
+        {
+          pinId: 'file123i0',
+          uri: 'metafile://file123i0.png',
+          name: 'avatar.png',
+          size: 100,
+          contentType: 'image/png',
+          actor: {
+            uri: 'metaid://idq1abc',
+            globalMetaId: 'idq1abc',
+            name: 'Alpha',
+          },
+        },
+      ],
+    },
+  });
+  assert.deepEqual(uploads, [
+    {
+      actorId: 'idbots-metabot-1',
+      resourceUri: '',
+      payload: { source: { kind: 'host-picker' } },
+    },
+  ]);
+
+  const noWriter = await createAdapter().runTrustedAction({
+    actorId: 'idbots-metabot-1',
+    resourceUri: 'metaapp://app123i0',
+    kind: 'metaid-pin-write',
+    payload: { operation: 'create' },
+  });
+  assert.equal(noWriter.ok, false);
+  assert.equal(noWriter.code, 'unsupported_method');
+  assert.doesNotMatch(noWriter.message, /ipc|handler|route/i);
+
+  const noUpload = await createAdapter().runTrustedAction({
+    actorId: 'idbots-metabot-1',
+    resourceUri: '',
+    kind: 'metafile-upload',
+    payload: { source: { kind: 'host-picker' } },
+  });
+  assert.equal(noUpload.ok, false);
+  assert.equal(noUpload.code, 'unsupported_method');
+  assert.doesNotMatch(noUpload.message, /ipc|handler|route/i);
+});
+
 test('settings and cache return browser command result envelopes', async () => {
   const cacheSnapshot = {
     cacheRoot: '/tmp/idbots-browser-cache/metaapps',
