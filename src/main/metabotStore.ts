@@ -195,6 +195,51 @@ export class MetabotStore {
     });
   }
 
+  // --- MetaApp owner cache ---
+
+  listMetaAppOwnerCache(mvcAddress: string): Array<{
+    id: number; metabot_id: number; pin_id: string; first_pin_id: string | null;
+    operation: string; mvc_address: string; payload: string | null;
+    txids: string | null; created_at: number;
+  }> {
+    if (!mvcAddress) return [];
+    return this.getAll(
+      'SELECT * FROM metaapp_owner_cache WHERE mvc_address = ? ORDER BY created_at DESC',
+      [mvcAddress],
+    );
+  }
+
+  upsertMetaAppOwnerCache(record: {
+    metabot_id: number; pin_id: string; first_pin_id?: string | null;
+    operation: string; mvc_address: string; payload?: string | null;
+    txids?: string | null;
+  }): void {
+    this.db.run(
+      `INSERT INTO metaapp_owner_cache
+        (metabot_id, pin_id, first_pin_id, operation, mvc_address, payload, txids, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(pin_id) DO UPDATE SET
+         metabot_id=excluded.metabot_id,
+         first_pin_id=excluded.first_pin_id,
+         operation=excluded.operation,
+         mvc_address=excluded.mvc_address,
+         payload=excluded.payload,
+         txids=excluded.txids,
+         created_at=excluded.created_at`,
+      [
+        record.metabot_id,
+        record.pin_id,
+        record.first_pin_id ?? null,
+        record.operation,
+        record.mvc_address,
+        record.payload ?? null,
+        record.txids ?? null,
+        Date.now(),
+      ],
+    );
+    this.saveDb();
+  }
+
   // --- Metabots CRUD ---
 
   listMetabots(): Metabot[] {

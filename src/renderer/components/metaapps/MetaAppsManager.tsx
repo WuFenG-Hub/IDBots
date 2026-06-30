@@ -24,13 +24,14 @@ import {
   getMetaAppAuthorBrowserTarget,
   getMetaAppAuthorModel,
   getMetaAppVisualModel,
-  getRecommendedMetaAppsEmptyState,
 } from './metaAppPresentation.js';
 import { openMetaAppDirectory } from './metaAppLaunch.js';
+import MyAppsTab from './myApps/MyAppsTab';
 
 interface MetaAppsManagerProps {
   onOpenMetaAppInBrowser?: (app: MetaAppRecord) => Promise<boolean> | boolean;
   onStartTaskWithMetaApp?: (app: MetaAppRecord) => Promise<void> | void;
+  onPreviewMetaAppByPin?: (pin: string) => Promise<boolean> | boolean;
   onOpenBotInBrowser?: (input: {
     globalMetaId: string;
     name?: string | null;
@@ -45,8 +46,9 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   onOpenMetaAppInBrowser,
   onStartTaskWithMetaApp,
   onOpenBotInBrowser,
+  onPreviewMetaAppByPin,
 }) => {
-  const [activeTab, setActiveTab] = useState<'local' | 'recommended' | 'chainCommunity'>('local');
+  const [activeTab, setActiveTab] = useState<'local' | 'myApps' | 'chainCommunity'>('local');
   const [apps, setApps] = useState<MetaAppRecord[]>([]);
   const [communityApps, setCommunityApps] = useState<CommunityMetaAppRecord[]>([]);
   const [communityCursor, setCommunityCursor] = useState(COMMUNITY_ROOT_CURSOR);
@@ -199,7 +201,6 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
     [communityApps, searchQuery],
   );
 
-  const recommendedEmptyState = getRecommendedMetaAppsEmptyState(i18nService.getLanguage());
   const communityEmptyState = getCommunityMetaAppsEmptyState(i18nService.getLanguage());
   const hasPreviousCommunityPage = communityCursorStack.length > 0;
   const hasNextCommunityPage = Boolean(communityNextCursor && communityNextCursor !== communityCursor);
@@ -712,14 +713,14 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab('recommended')}
+          onClick={() => setActiveTab('myApps')}
           className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeTab === 'recommended'
+            activeTab === 'myApps'
               ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text border-b-2 border-transparent -mb-[1px]'
               : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
           }`}
         >
-          {i18nService.t('recommended')}
+          {i18nService.t('myAppsTab') || 'My Apps'}
         </button>
         <button
           type="button"
@@ -734,11 +735,13 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         </button>
       </div>
 
-      <div>
-        <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('metaAppsDescription')}
-        </p>
-      </div>
+      {activeTab !== 'myApps' ? (
+        <div>
+          <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('metaAppsDescription')}
+          </p>
+        </div>
+      ) : null}
 
       {actionError ? (
         <ErrorMessage
@@ -747,15 +750,8 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         />
       ) : null}
 
-      {activeTab === 'recommended' ? (
-        <div className="py-12 text-center">
-          <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-            {recommendedEmptyState.title}
-          </div>
-          <div className="mt-2 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {recommendedEmptyState.description}
-          </div>
-        </div>
+      {activeTab === 'myApps' ? (
+        <MyAppsTab onRunByPin={onPreviewMetaAppByPin} />
       ) : (
         <>
           <div className="flex items-center gap-3">

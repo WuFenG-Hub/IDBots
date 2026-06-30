@@ -763,6 +763,7 @@ const App: React.FC = () => {
       onToggleSidebar={handleToggleSidebar}
       onNewChat={handleNewChat}
       onOpenMetaAppInBrowser={botBrowserShell.openMetaApp}
+      onPreviewMetaAppByPin={botBrowserShell.openMetaAppByPin}
       onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
       onOpenBotInBrowser={botBrowserShell.openRemoteBot}
       updateBadge={isSidebarCollapsed ? updateBadge : null}

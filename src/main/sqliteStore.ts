@@ -996,6 +996,27 @@ export class SqliteStore {
       );
     `);
 
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metaapp_owner_cache (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metabot_id INTEGER NOT NULL,
+        pin_id TEXT NOT NULL,
+        first_pin_id TEXT,
+        operation TEXT NOT NULL,
+        mvc_address TEXT NOT NULL,
+        payload TEXT,
+        txids TEXT,
+        created_at INTEGER NOT NULL,
+        UNIQUE(pin_id)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metaapp_owner_cache_bot ON metaapp_owner_cache(metabot_id);
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metaapp_owner_cache_mvc ON metaapp_owner_cache(mvc_address);
+    `);
+
     // Migration: existing DBs with old schema (metabot_wallets.metabot_id, metabots without wallet_id, avatar TEXT)
     this.migrateMetabotWalletRelationAndAvatar(basePath);
 

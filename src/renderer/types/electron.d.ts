@@ -430,6 +430,27 @@ interface IElectronAPI {
     autoRoutingPrompt: () => Promise<{ success: boolean; prompt?: string | null; error?: string }>;
     onChanged: (callback: () => void) => () => void;
   };
+  metaappOwner: {
+    list: (input: { metabotId: number; cursor?: string; size?: number }) => Promise<{
+      success: boolean;
+      error?: string;
+      records?: import('./metaAppOwner').OwnerMetaAppRecord[];
+      nextCursor?: string;
+      total?: number;
+    }>;
+    publish: (input: { metabotId: number; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
+      success: boolean; error?: string;
+      pinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
+    }>;
+    update: (input: { metabotId: number; targetPinId: string; firstPinId?: string; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
+      success: boolean; error?: string;
+      pinId?: string; targetPinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
+    }>;
+    remove: (input: { metabotId: number; targetPinId: string; firstPinId?: string; confirm?: boolean; network?: string }) => Promise<{
+      success: boolean; error?: string;
+      revokedPinId?: string; pinId?: string; chainWrite?: unknown;
+    }>;
+  };
   botBrowser: {
     resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
     getMetaAppCache: () => Promise<HostBrowserCommandResult<BrowserCacheSnapshot>>;
