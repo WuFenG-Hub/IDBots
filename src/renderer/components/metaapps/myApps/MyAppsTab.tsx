@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
+import { DocumentDuplicateIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../../services/i18n';
 import { useOwnerMetaApps } from './useOwnerMetaApps';
-import { getCardVisual, getStatePill, buildShareUrl, getOwnerEmptyState } from './myAppsPresentation.js';
+import { getCardVisual, getStatePill, buildShareUrl, getOwnerEmptyState, formatRuntime } from './myAppsPresentation.js';
 import ChainStatusModal from './ChainStatusModal';
 import MetaAppPublishForm from './MetaAppPublishForm';
 import MetaAppDetailModal from './MetaAppDetailModal';
@@ -22,13 +23,22 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
 
   const selectedBot = owner.bots.find((b) => b.id === owner.selectedBotId) || null;
 
-  const handleShare = (record: OwnerMetaAppRecord) => {
-    const url = buildShareUrl(record.pinId);
-    navigator.clipboard?.writeText(url).then(
-      () => setToast(t('myAppsShareCopied') || 'Share link copied'),
-      () => setToast(url),
+  const showToast = (msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(''), 2000);
+  };
+
+  // Copy arbitrary text to the clipboard with a toast confirmation (used by the copy-icon buttons).
+  const copyValue = (value: string, confirmMsg: string) => {
+    navigator.clipboard?.writeText(value).then(
+      () => showToast(confirmMsg),
+      () => showToast(value),
     );
-    setTimeout(() => setToast(''), 2500);
+  };
+
+  // Share now opens a modal panel (set below) instead of copying a single URL immediately.
+  const handleShare = (record: OwnerMetaAppRecord) => {
+    owner.setShareRecord(record);
   };
 
   const handleRun = (record: OwnerMetaAppRecord) => {
@@ -60,24 +70,43 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
 
       {/* bot filter */}
       {owner.bots.length > 0 ? (
-        <div className="relative inline-block">
-          <button type="button" onClick={() => setBotMenuOpen((v) => !v)}
-            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text">
-            <span>{t('myAppsLocalBot') || 'Local Bot'}:</span>
-            <span className="font-medium">{selectedBot?.name || '—'}</span>
-            <span className="text-xs">▾</span>
-          </button>
-          {botMenuOpen ? (
-            <div className="absolute z-20 mt-1 w-56 max-h-64 overflow-auto rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-elevated">
-              {owner.bots.map((b) => (
-                <button key={b.id} type="button"
-                  onClick={() => { owner.setSelectedBotId(b.id); setBotMenuOpen(false); }}
-                  className={`w-full text-left px-3 py-2 text-sm hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover ${b.id === owner.selectedBotId ? 'text-claude-accent font-medium' : 'dark:text-claude-darkText text-claude-text'}`}>
-                  {b.name}
-                </button>
-              ))}
-            </div>
-          ) : null}
+        <div className="flex justify-center">
+          <div className="relative w-full max-w-xs">
+            <button type="button" onClick={() => setBotMenuOpen((v) => !v)}
+              className="w-full flex items-center gap-2 rounded-lg dark:bg-claude-darkSurface bg-claude-surface dark:border-claude-darkBorder border-claude-border border px-4 py-2 text-sm focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/40 cursor-pointer">
+              {selectedBot?.avatar && (selectedBot.avatar.startsWith('data:') || selectedBot.avatar.startsWith('http')) ? (
+                <img src={selectedBot.avatar} alt="" className="w-6 h-6 rounded-md object-cover flex-shrink-0" />
+              ) : (
+                <div className="w-6 h-6 rounded-md dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover flex items-center justify-center flex-shrink-0">
+                  <span className="text-[10px] font-semibold dark:text-claude-darkText text-claude-text uppercase">
+                    {(selectedBot?.name || '?').slice(0, 2)}
+                  </span>
+                </div>
+              )}
+              <span className="truncate flex-1 text-left dark:text-claude-darkText text-claude-text">{selectedBot?.name || (t('myAppsLocalBot') || 'Local Bot')}</span>
+              <svg className={`h-4 w-4 flex-shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary transition-transform ${botMenuOpen ? 'rotate-180' : ''}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fillRule="evenodd" d="M5.23 7.21a.75.75 0 0 1 1.06.02L10 11.06l3.71-3.83a.75.75 0 1 1 1.08 1.04l-4.25 4.39a.75.75 0 0 1-1.08 0L5.21 8.27a.75.75 0 0 1 .02-1.06z" clipRule="evenodd" />
+              </svg>
+            </button>
+            {botMenuOpen ? (
+              <div className="absolute top-full left-0 right-0 mt-1 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-popover z-50 overflow-hidden max-h-56 overflow-y-auto">
+                {owner.bots.map((b) => (
+                  <button key={b.id} type="button"
+                    onClick={() => { owner.setSelectedBotId(b.id); setBotMenuOpen(false); }}
+                    className={`w-full flex items-center gap-2 px-4 py-2 text-left text-sm hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors ${b.id === owner.selectedBotId ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50 text-claude-accent font-medium' : 'dark:text-claude-darkText text-claude-text'}`}>
+                    {b.avatar && (b.avatar.startsWith('data:') || b.avatar.startsWith('http')) ? (
+                      <img src={b.avatar} alt="" className="w-6 h-6 rounded-md object-cover flex-shrink-0" />
+                    ) : (
+                      <div className="w-6 h-6 rounded-md dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover flex items-center justify-center flex-shrink-0">
+                        <span className="text-[10px] font-semibold dark:text-claude-darkText text-claude-text uppercase">{(b.name || '?').slice(0, 2)}</span>
+                      </div>
+                    )}
+                    <span className="truncate flex-1">{b.name}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       ) : null}
 
@@ -158,27 +187,31 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
                     </span>
                   </div>
                   <div className="p-3 space-y-1.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">{record.title || record.appName}</span>
-                      <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">{record.version}</span>
+                    <div>
+                      <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text truncate">{record.title || record.appName}</h3>
+                      <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
+                        {[record.version, formatRuntime(record.runtime)].filter(Boolean).join(' · ') || '—'}
+                      </p>
                     </div>
-                    <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2">{record.intro || record.prompt}</p>
-                    <div className="flex items-center gap-1.5">
-                      <code className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">{record.pinId.slice(0, 10)}…</code>
+                    {/* Pin id line with a copy-icon button (matches OAC apps-pin-line). */}
+                    <div className="flex items-center gap-1">
+                      <code className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary truncate" title={record.pinId}>{record.pinId}</code>
                       <button type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          navigator.clipboard?.writeText(record.pinId).then(
-                            () => setToast(t('myAppsPinCopied') || 'Pin ID copied'),
-                            () => setToast(record.pinId),
-                          );
-                          setTimeout(() => setToast(''), 2000);
-                        }}
+                        onClick={(e) => { e.stopPropagation(); copyValue(record.pinId, t('myAppsPinCopied') || 'Pin ID copied'); }}
                         title={t('myAppsCopyPin') || 'Copy pin ID'}
-                        className="text-[10px] text-claude-accent hover:underline shrink-0">
-                        {t('copy') || 'copy'}
+                        aria-label={t('myAppsCopyPin') || 'Copy pin ID'}
+                        className="shrink-0 p-0.5 rounded hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-accent dark:hover:text-claude-accent transition-colors">
+                        <DocumentDuplicateIcon className="h-3 w-3" />
                       </button>
                     </div>
+                    <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2">{record.intro || record.prompt}</p>
+                    {record.tags && record.tags.length > 0 ? (
+                      <div className="flex flex-wrap gap-1">
+                        {record.tags.slice(0, 4).map((tag) => (
+                          <span key={tag} className="px-1.5 py-0.5 rounded bg-claude-accent/10 text-claude-accent text-[10px] font-medium">{tag}</span>
+                        ))}
+                      </div>
+                    ) : null}
                     <div className="flex items-center gap-1.5 pt-1">
                       <button type="button" onClick={(e) => { e.stopPropagation(); handleRun(record); }} disabled={record.disabled}
                         className="btn-idchat-primary-filled px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-60">
@@ -199,20 +232,26 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
             })}
           </div>
 
-          {/* pagination */}
-          <div className="flex items-center justify-center gap-3 pt-1">
-            <button type="button" onClick={owner.goPrev} disabled={owner.cursorStack.length <= 1}
-              className="px-2.5 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text disabled:opacity-40">
-              ‹ {t('prev') || 'Prev'}
-            </button>
-            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              {t('page') || 'Page'} {owner.cursorStack.length}
-            </span>
-            <button type="button" onClick={owner.goNext} disabled={!owner.nextCursor}
-              className="px-2.5 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text disabled:opacity-40">
-              {t('next') || 'Next'} ›
-            </button>
-          </div>
+          {/* pagination — only render when there is more than one page to navigate (matches OAC: prev/next hidden unless navigable) */}
+          {(owner.cursorStack.length > 1 || owner.nextCursor) ? (
+            <div className="flex items-center justify-center gap-3 pt-1">
+              {owner.cursorStack.length > 1 ? (
+                <button type="button" onClick={owner.goPrev}
+                  className="px-2.5 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text">
+                  ‹ {t('prev') || 'Prev'}
+                </button>
+              ) : null}
+              <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {t('page') || 'Page'} {owner.cursorStack.length}
+              </span>
+              {owner.nextCursor ? (
+                <button type="button" onClick={owner.goNext}
+                  className="px-2.5 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text">
+                  {t('next') || 'Next'} ›
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </>
       )}
 
@@ -255,6 +294,52 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
         <ChainStatusModal status={owner.chainStatus.status} txids={owner.chainStatus.txids} error={owner.chainStatus.error}
           onClose={() => owner.setChainStatus(null)} />
       ) : null}
+      {/* OAC-style share panel: two copyable URIs (MetaApp URI + Web URL). */}
+      {owner.shareRecord ? (() => {
+        const rec = owner.shareRecord;
+        const metaappUri = rec.metaappUri || `metaapp://${rec.pinId}`;
+        const webUrl = rec.metawebUrl || buildShareUrl(rec.pinId);
+        const shareRows: Array<[string, string]> = [
+          [t('myAppsShareMetaappUri') || 'MetaApp URI', metaappUri],
+          [t('myAppsShareWebUrl') || 'Web URL', webUrl],
+        ];
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+            <div className="w-full max-w-md mx-4 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-xl">
+              <div className="px-5 py-3 border-b dark:border-claude-darkBorder border-claude-border flex items-center justify-between">
+                <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text">{t('myAppsShareTitle') || 'Share MetaApp'}</h3>
+                <button type="button" onClick={() => owner.setShareRecord(null)} className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-accent">✕</button>
+              </div>
+              <div className="px-5 py-4 space-y-3">
+                <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {t('myAppsShareDesc') || 'Copy either link to share this MetaApp.'}
+                </p>
+                {shareRows.map(([label, value]) => (
+                  <div key={label}>
+                    <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">{label}</div>
+                    <div className="flex items-center gap-1.5">
+                      <code className="flex-1 min-w-0 truncate text-[11px] dark:text-claude-darkText text-claude-text dark:bg-claude-darkBg bg-claude-bg border dark:border-claude-darkBorder border-claude-border rounded-lg px-2 py-1.5" title={value}>{value}</code>
+                      <button type="button"
+                        onClick={() => copyValue(value, t('myAppsShareCopied') || 'Copied')}
+                        title={t('copy') || 'Copy'}
+                        aria-label={t('copy') || 'Copy'}
+                        className="shrink-0 p-1.5 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover hover:text-claude-accent dark:hover:text-claude-accent transition-colors">
+                        <DocumentDuplicateIcon className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 border-t dark:border-claude-darkBorder border-claude-border flex justify-end">
+                <button type="button" onClick={() => owner.setShareRecord(null)}
+                  className="px-3 py-1.5 text-sm rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                  {t('close') || 'Close'}
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })() : null}
     </div>
   );
 };

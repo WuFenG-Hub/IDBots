@@ -28,6 +28,8 @@ export function useOwnerMetaApps() {
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState('');
   const [modal, setModal] = useState<ModalState>({ kind: 'none' });
+  // Share modal target record (OAC-style share panel with two copyable URIs).
+  const [shareRecord, setShareRecord] = useState<OwnerMetaAppRecord | null>(null);
   const [chainStatus, setChainStatus] = useState<
     null | { status: 'pending' | 'success' | 'error'; txids?: string[]; error?: string }
   >(null);
@@ -199,6 +201,7 @@ export function useOwnerMetaApps() {
     records, loading, notice, setNotice,
     cursor, cursorStack, nextCursor, refresh, goNext, goPrev,
     modal, setModal,
+    shareRecord, setShareRecord,
     chainStatus, setChainStatus,
     submitting,
     submitPublish, submitEdit, submitDelete,
