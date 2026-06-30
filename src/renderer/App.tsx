@@ -793,6 +793,7 @@ const App: React.FC = () => {
       onRequestOnboarding={handleOpenOnboarding}
       onOpenMetabotInBrowser={botBrowserShell.openLocalMetabot}
       onPreviewMetaAppHomepage={botBrowserShell.openMetaAppByPin}
+      onRequestMetaApps={handleShowMetaApps}
     />
   ) : (
     <CoworkView
