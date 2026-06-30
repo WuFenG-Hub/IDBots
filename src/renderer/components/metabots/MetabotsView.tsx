@@ -15,6 +15,7 @@ interface MetabotsViewProps {
   onRequestOnboarding?: () => void;
   onOpenMetabotInBrowser?: (metabot: Metabot) => void;
   onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
+  onRequestMetaApps?: () => void;
 }
 
 const MetabotsView: React.FC<MetabotsViewProps> = ({
@@ -26,6 +27,7 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
   onRequestOnboarding,
   onOpenMetabotInBrowser,
   onPreviewMetaAppHomepage,
+  onRequestMetaApps,
 }) => {
   const isMac = window.electron.platform === 'darwin';
   return (
@@ -65,6 +67,7 @@ const MetabotsView: React.FC<MetabotsViewProps> = ({
             onRequestOnboarding={onRequestOnboarding}
             onOpenMetabotInBrowser={onOpenMetabotInBrowser}
             onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
+            onRequestMetaApps={onRequestMetaApps}
           />
         </div>
       </div>
