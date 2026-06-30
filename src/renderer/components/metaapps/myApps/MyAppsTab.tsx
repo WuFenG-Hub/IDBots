@@ -154,6 +154,19 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
                     <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2">{record.intro || record.prompt}</p>
                     <div className="flex items-center gap-1.5">
                       <code className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">{record.pinId.slice(0, 10)}…</code>
+                      <button type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          navigator.clipboard?.writeText(record.pinId).then(
+                            () => setToast(t('myAppsPinCopied') || 'Pin ID copied'),
+                            () => setToast(record.pinId),
+                          );
+                          setTimeout(() => setToast(''), 2000);
+                        }}
+                        title={t('myAppsCopyPin') || 'Copy pin ID'}
+                        className="text-[10px] text-claude-accent hover:underline shrink-0">
+                        {t('copy') || 'copy'}
+                      </button>
                     </div>
                     <div className="flex items-center gap-1.5 pt-1">
                       <button type="button" onClick={(e) => { e.stopPropagation(); handleRun(record); }} disabled={record.disabled}
