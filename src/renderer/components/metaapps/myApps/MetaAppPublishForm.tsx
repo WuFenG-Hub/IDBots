@@ -78,11 +78,13 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
   const [metadata, setMetadata] = useState(record?.metadata ? JSON.stringify(record.metadata) : '');
   const [disabled, setDisabled] = useState<boolean>(!!record?.disabled);
   const [uploadingField, setUploadingField] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState('');
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const handleUpload = async (fieldName: string, files: FileList | null) => {
     if (!files || files.length === 0) return;
     setUploadingField(fieldName);
+    setUploadError('');
     try {
       const isContent = fieldName === 'content';
       const collected: string[] = [];
@@ -110,7 +112,10 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
       else if (fieldName === 'content') setContent(collected[0] || '');
       else if (fieldName === 'code') setCode(collected[0] || '');
     } catch (err) {
-      onUploadError?.(err instanceof Error ? err.message : 'Upload failed');
+      const message = err instanceof Error ? err.message : 'Upload failed';
+      // Show inline (visible inside the modal) and also bubble up to the tab notice.
+      setUploadError(message);
+      onUploadError?.(message);
     } finally {
       setUploadingField(null);
     }
@@ -163,7 +168,9 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
       <div key={field.name}>
         <label className={labelCls}>
           {t(field.labelKey) || field.name}
-          {field.name === 'content' ? ` (${t('myAppsRequired') || 'required'})` : ''}
+          {field.name === 'content'
+            ? ` (${t('myAppsRequired') || 'required'})`
+            : ` (${t('myAppsOptional') || 'optional'})`}
         </label>
         <div className="flex items-center gap-2">
           <input
@@ -213,6 +220,12 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
         </div>
 
         <div className="px-5 py-4 overflow-y-auto space-y-4">
+          {uploadError ? (
+            <div className="rounded-lg border border-red-300 dark:border-red-800/60 bg-red-50 dark:bg-red-900/20 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+              <span className="font-medium">{t('myAppsUploadError') || 'Upload failed'}:</span> {uploadError}
+              <button type="button" onClick={() => setUploadError('')} className="ml-2 underline">✕</button>
+            </div>
+          ) : null}
           {metabotName ? (
             <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
               {(t('myAppsPublishedBy') || 'Published by')} <span className="font-medium dark:text-claude-darkText text-claude-text">{metabotName}</span>
@@ -231,21 +244,24 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
                 <input value={appName} onChange={(e) => setAppName(e.target.value)} className={inputCls} />
               </div>
               <div>
-                <label className={labelCls}>{t('myAppsTitle') || 'Title'}</label>
+                <label className={labelCls}>{t('myAppsTitle') || 'Title'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
                 <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder={appName} className={inputCls} />
               </div>
             </div>
             <div>
-              <label className={labelCls}>{t('myAppsPrompt') || 'Prompt'}</label>
+              <label className={labelCls}>{t('myAppsPrompt') || 'Prompt'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
               <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={2} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>{t('myAppsIntro') || 'Intro'}</label>
+              <label className={labelCls}>{t('myAppsIntro') || 'Intro'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
               <textarea value={intro} onChange={(e) => setIntro(e.target.value)} rows={2} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>{t('myAppsTags') || 'Tags (comma separated)'}</label>
-              <input value={tags} onChange={(e) => setTags(e.target.value)} className={inputCls} />
+              <label className={labelCls}>{t('myAppsTags') || 'Tags'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
+              <input value={tags} onChange={(e) => setTags(e.target.value)} className={inputCls} placeholder={t('myAppsTagsPlaceholder') || 'e.g. game, tool, ai'} />
+              <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {t('myAppsTagsHint') || 'Separate multiple tags with commas. Example: game, productivity, ai'}
+              </p>
             </div>
           </div>
 
@@ -273,21 +289,21 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className={labelCls}>{t('myAppsVersion') || 'Version'}</label>
+                <label className={labelCls}>{t('myAppsVersion') || 'Version'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
                 <input value={version} onChange={(e) => setVersion(e.target.value)} className={inputCls} />
               </div>
               <div>
-                <label className={labelCls}>{t('myAppsIndexFile') || 'Index file'}</label>
+                <label className={labelCls}>{t('myAppsIndexFile') || 'Index file'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
                 <input value={indexFile} onChange={(e) => setIndexFile(e.target.value)} className={inputCls} />
               </div>
               <div>
-                <label className={labelCls}>{t('myAppsContentType') || 'Content type'}</label>
+                <label className={labelCls}>{t('myAppsContentType') || 'Content type'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
                 <select value={contentType} onChange={(e) => setContentType(e.target.value)} className={inputCls}>
                   {CONTENT_TYPE_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
                 </select>
               </div>
               <div>
-                <label className={labelCls}>{t('myAppsCodeType') || 'Code type'}</label>
+                <label className={labelCls}>{t('myAppsCodeType') || 'Code type'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
                 <select value={codeType} onChange={(e) => setCodeType(e.target.value)} className={inputCls}>
                   <option value="">—</option>
                   {CODE_TYPE_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
@@ -295,11 +311,11 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
               </div>
             </div>
             <div>
-              <label className={labelCls}>{t('myAppsContentHash') || 'Content hash'}</label>
+              <label className={labelCls}>{t('myAppsContentHash') || 'Content hash'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
               <input value={contentHash} onChange={(e) => setContentHash(e.target.value)} className={inputCls} />
             </div>
             <div>
-              <label className={labelCls}>{t('myAppsMetadata') || 'Metadata (JSON)'}</label>
+              <label className={labelCls}>{t('myAppsMetadata') || 'Metadata (JSON)'} <span className="font-normal opacity-70">({t('myAppsOptional') || 'optional'})</span></label>
               <textarea value={metadata} onChange={(e) => setMetadata(e.target.value)} rows={2} className={inputCls} />
             </div>
             <label className="inline-flex items-center gap-1.5 text-sm dark:text-claude-darkText text-claude-text">
@@ -315,7 +331,7 @@ const MetaAppPublishForm: React.FC<MetaAppPublishFormProps> = ({
             {t('cancel') || 'Cancel'}
           </button>
           <button type="button" onClick={handleSubmit} disabled={submitting || !appName.trim() || !content.trim()}
-            className="px-3 py-1.5 text-sm rounded-lg bg-claude-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+            className="btn-idchat-primary-filled px-3 py-1.5 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60">
             {submitting ? (t('myAppsSubmitting') || 'Submitting…') : (isEdit ? (t('save') || 'Save') : (t('publish') || 'Publish'))}
           </button>
         </div>

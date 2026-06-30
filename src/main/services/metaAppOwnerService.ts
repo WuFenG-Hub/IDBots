@@ -184,29 +184,20 @@ function mergeWithLocalCache(
       cacheHidden.add((row.first_pin_id || row.pin_id).toLowerCase());
     }
   }
-  // Track both exact pinIds AND group keys (firstPinId) already shown by the indexer,
-  // so a local create/modify for an already-indexed group does not appear as a duplicate card.
-  const seenPinIds = new Set<string>();
-  const seenGroupKeys = new Set<string>();
-  const out: OwnerMetaAppRecord[] = [];
-  for (const rec of indexRecords) {
-    const key = (rec.firstPinId || rec.pinId).toLowerCase();
-    if (cacheHidden.has(key)) continue;
-    seenPinIds.add(rec.pinId.toLowerCase());
-    seenGroupKeys.add(key);
-    out.push(rec);
-  }
-  // Append local create/modify records not yet reflected by the indexer.
+  // Build the LATEST local create/modify record per group key (by created_at desc, since cacheRows
+  // are already ORDER BY created_at DESC the first match wins). These local records reflect
+  // user actions (publish/edit) that may not yet be synced by the indexer, so they take priority
+  // over the indexer's (possibly stale) record for the same group.
+  const localLatestByGroup = new Map<string, OwnerMetaAppRecord>();
   for (const row of cacheRows) {
     if (row.operation === 'revoke') continue;
     const rowKey = (row.first_pin_id || row.pin_id).toLowerCase();
-    if (cacheHidden.has(rowKey)) continue;                 // group was revoked locally
-    if (seenPinIds.has(row.pin_id.toLowerCase())) continue; // exact pin already shown
-    if (seenGroupKeys.has(rowKey)) continue;                // group already shown by indexer
+    if (cacheHidden.has(rowKey)) continue; // group was revoked locally
+    if (localLatestByGroup.has(rowKey)) continue; // already have a newer local record for this group
     let payload: any = null;
     try { payload = row.payload ? JSON.parse(row.payload) : null; } catch { payload = null; }
     if (!payload) continue;
-    const rec: OwnerMetaAppRecord = {
+    localLatestByGroup.set(rowKey, {
       pinId: row.pin_id, firstPinId: row.first_pin_id || row.pin_id,
       operation: row.operation,
       title: payload.title || payload.appName || '',
@@ -225,7 +216,23 @@ function mergeWithLocalCache(
       metaappUri: `metaapp://${row.pin_id}`,
       metawebUrl: `https://metaweb.world/metaapp/${row.pin_id}`,
       runUrl: `/browser/metaapp/${row.pin_id}`,
-    };
+    });
+  }
+
+  const out: OwnerMetaAppRecord[] = [];
+  const coveredGroupKeys = new Set<string>();
+  for (const rec of indexRecords) {
+    const key = (rec.firstPinId || rec.pinId).toLowerCase();
+    if (cacheHidden.has(key)) continue;
+    coveredGroupKeys.add(key);
+    // Prefer the latest local create/modify record for this group (immediate feedback after
+    // publish/edit, before the indexer syncs); otherwise show the indexer record.
+    out.push(localLatestByGroup.get(key) || rec);
+  }
+  // Append local records for groups the indexer doesn't show yet (e.g. a brand-new publish
+  // not yet indexed).
+  for (const [key, rec] of localLatestByGroup) {
+    if (coveredGroupKeys.has(key)) continue;
     out.push(rec);
   }
   return out;
@@ -311,7 +318,7 @@ export async function publishMetaApp(
 
 export async function updateMetaApp(
   store: MetabotStore, metabotId: number, targetPinId: string, manifestInput: MetaAppManifestInput,
-  options: { confirm?: boolean; network?: string } = {},
+  options: { confirm?: boolean; network?: string; firstPinId?: string } = {},
 ): Promise<{ pinId: string; targetPinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number }; metaappUri: string; metawebUrl: string }> {
   ensureConfirm(options.confirm, 'update');
   const { mvcAddress } = await resolveMetabotAndAddress(store, metabotId);
@@ -327,10 +334,14 @@ export async function updateMetaApp(
     encoding: 'utf-8',
   }, { network: options.network });
   const pinId = String(chainWrite.pinId).toLowerCase();
+  // Use the record's true create-root firstPinId as the modify cache group key when available,
+  // so the modified record collapses onto the same indexer group (create + all modifies) instead
+  // of appearing as a duplicate card next to the stale create record.
+  const modifyGroupKey = (options.firstPinId || targetPinId).toLowerCase();
   store.upsertMetaAppOwnerCache({
     metabot_id: metabotId,
     pin_id: pinId,
-    first_pin_id: targetPinId.toLowerCase(),
+    first_pin_id: modifyGroupKey,
     operation: 'modify',
     mvc_address: mvcAddress,
     payload: JSON.stringify(manifest),

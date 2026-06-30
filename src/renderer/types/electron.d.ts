@@ -442,7 +442,7 @@ interface IElectronAPI {
       success: boolean; error?: string;
       pinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
     }>;
-    update: (input: { metabotId: number; targetPinId: string; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
+    update: (input: { metabotId: number; targetPinId: string; firstPinId?: string; manifest: import('./metaAppOwner').MetaAppManifestInput; confirm?: boolean; network?: string }) => Promise<{
       success: boolean; error?: string;
       pinId?: string; targetPinId?: string; chainWrite?: unknown; metaappUri?: string; metawebUrl?: string;
     }>;

@@ -38,9 +38,10 @@ class MetaAppOwnerService {
     return { success: !!res.success, error: res.error, ...res };
   }
 
-  async update(input: { metabotId: number; targetPinId: string; manifest: MetaAppManifestInput; network?: string }): Promise<OwnerMutationResult> {
+  async update(input: { metabotId: number; targetPinId: string; firstPinId?: string; manifest: MetaAppManifestInput; network?: string }): Promise<OwnerMutationResult> {
     const res = await window.electron.metaappOwner.update({
-      metabotId: input.metabotId, targetPinId: input.targetPinId, manifest: input.manifest, confirm: true, network: input.network,
+      metabotId: input.metabotId, targetPinId: input.targetPinId, firstPinId: input.firstPinId,
+      manifest: input.manifest, confirm: true, network: input.network,
     });
     return { success: !!res.success, error: res.error, ...res };
   }

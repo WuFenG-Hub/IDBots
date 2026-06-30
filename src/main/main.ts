@@ -5079,7 +5079,7 @@ if (!gotTheLock) {
   ipcMain.handle('metaappOwner:update', async (_event, input: any) => {
     try {
       const result = await updateMetaApp(getMetabotStore(), input.metabotId, input.targetPinId, input.manifest, {
-        confirm: input.confirm, network: input.network,
+        confirm: input.confirm, network: input.network, firstPinId: input.firstPinId,
       });
       return { success: true, ...result };
     } catch (error) {

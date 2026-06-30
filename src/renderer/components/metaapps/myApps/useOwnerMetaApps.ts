@@ -40,13 +40,17 @@ export function useOwnerMetaApps() {
       if (res.success && Array.isArray(res.list)) {
         // Keep ALL bots (including those without an MVC address) so the no-MVC empty
         // state can surface; publishing for a no-MVC bot is guarded in MyAppsTab.
-        const options = res.list.map((m: any) => ({
-          id: m.id,
-          name: m.name,
-          mvcAddress: typeof m.mvc_address === 'string' && m.mvc_address ? m.mvc_address : null,
-          avatar: m.avatar ?? null,
-        }));
+        const options = res.list
+          .map((m: any) => ({
+            id: m.id,
+            name: m.name,
+            mvcAddress: typeof m.mvc_address === 'string' && m.mvc_address ? m.mvc_address : null,
+            avatar: m.avatar ?? null,
+          }))
+          // Order by earliest-created bot first (smallest id) for stable default selection.
+          .sort((a: BotOption, b: BotOption) => a.id - b.id);
         setBots(options);
+        // Default to the earliest-created bot (smallest id).
         setSelectedBotId((prev) => prev ?? options[0]?.id ?? null);
       }
     } catch {
@@ -138,7 +142,13 @@ export function useOwnerMetaApps() {
     setChainStatus({ status: 'pending' });
     try {
       const res = await metaAppOwnerService.update({
-        metabotId: selectedBotId, targetPinId: record.pinId, manifest,
+        metabotId: selectedBotId,
+        targetPinId: record.pinId,
+        // Pass the create-root firstPinId so the modify cache row collapses onto the same
+        // indexer group as the create record (otherwise the edit appears not to take effect
+        // or shows as a duplicate card next to the stale create record).
+        firstPinId: record.firstPinId || record.pinId,
+        manifest,
       });
       if (res.success) {
         setChainStatus({ status: 'success', txids: readTxids(res.chainWrite) });

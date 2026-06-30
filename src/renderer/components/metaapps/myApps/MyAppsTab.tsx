@@ -52,7 +52,7 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
             {t('refresh') || 'Refresh'}
           </button>
           <button type="button" onClick={() => owner.setModal({ kind: 'publish' })} disabled={!selectedBot || !selectedBot.mvcAddress}
-            className="px-3 py-1.5 text-xs rounded-lg bg-claude-accent text-white hover:opacity-90 transition-opacity disabled:opacity-50">
+            className="btn-idchat-primary-filled px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-60">
             {t('myAppsPublish') || 'Publish MetaApp'}
           </button>
         </div>
@@ -124,12 +124,23 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
                     {visual.cover ? (
                       <img src={visual.cover} alt="" className="absolute inset-0 h-full w-full object-cover"
                         onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
-                    ) : null}
-                    <div className="absolute left-2 bottom-2 h-10 w-10 rounded-lg overflow-hidden border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface">
+                    ) : (
+                      // Placeholder cover when no cover image: subtle gradient + centered app initials.
+                      <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-claude-accent/10 to-claude-surfaceHover/40 dark:from-claude-accent/10 dark:to-claude-darkSurfaceHover/30">
+                        <span className="text-2xl font-bold text-claude-accent/60">
+                          {(record.appName || record.title || 'MA').slice(0, 2).toUpperCase()}
+                        </span>
+                      </div>
+                    )}
+                    <div className="absolute left-2 bottom-2 h-10 w-10 rounded-lg overflow-hidden border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface flex items-center justify-center">
                       {visual.icon ? (
                         <img src={visual.icon} alt="" className="h-full w-full object-cover"
-                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }} />
-                      ) : null}
+                          onError={(e) => { (e.currentTarget as HTMLImageElement).style.visibility = 'hidden'; }} />
+                      ) : (
+                        <span className="text-xs font-semibold text-claude-accent">
+                          {(record.appName || 'MA').slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
                     </div>
                     <span className={`absolute right-2 top-2 px-1.5 py-0.5 rounded text-[10px] font-medium ${pill.tone === 'warn' ? 'bg-amber-500/20 text-amber-600' : 'bg-emerald-500/20 text-emerald-600'}`}>
                       {t(pill.labelKey) || pill.label}
@@ -146,7 +157,7 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
                     </div>
                     <div className="flex items-center gap-1.5 pt-1">
                       <button type="button" onClick={(e) => { e.stopPropagation(); handleRun(record); }} disabled={record.disabled}
-                        className="px-2 py-1 text-[11px] rounded-md bg-claude-accent text-white hover:opacity-90 disabled:opacity-40">
+                        className="btn-idchat-primary-filled px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-60">
                         {t('run') || 'Run'}
                       </button>
                       <button type="button" onClick={(e) => { e.stopPropagation(); owner.setModal({ kind: 'edit', record }); }}
@@ -192,14 +203,14 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
       {modal.kind === 'publish' ? (
         <MetaAppPublishForm mode="publish" metabotId={owner.selectedBotId!} metabotName={selectedBot?.name}
           submitting={owner.submitting}
-          onUploadError={(m) => setToast(m)}
+          onUploadError={(m) => owner.setNotice(m)}
           onSubmit={(manifest) => void owner.submitPublish(manifest)}
           onCancel={() => owner.setModal({ kind: 'none' })} />
       ) : null}
       {modal.kind === 'edit' ? (
         <MetaAppPublishForm mode="edit" metabotId={owner.selectedBotId!} metabotName={selectedBot?.name}
           record={modal.record} submitting={owner.submitting}
-          onUploadError={(m) => setToast(m)}
+          onUploadError={(m) => owner.setNotice(m)}
           onSubmit={(manifest) => void owner.submitEdit(modal.record, manifest)}
           onCancel={() => owner.setModal({ kind: 'none' })} />
       ) : null}

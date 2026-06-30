@@ -735,11 +735,13 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         </button>
       </div>
 
-      <div>
-        <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('metaAppsDescription')}
-        </p>
-      </div>
+      {activeTab !== 'myApps' ? (
+        <div>
+          <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('metaAppsDescription')}
+          </p>
+        </div>
+      ) : null}
 
       {actionError ? (
         <ErrorMessage
