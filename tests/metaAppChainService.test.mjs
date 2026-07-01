@@ -18,6 +18,27 @@ function jsonResponse(payload, status = 200) {
   });
 }
 
+function chainMetaAppItem(index, overrides = {}) {
+  const suffix = String(index).padStart(2, '0');
+  return {
+    id: `pin-${suffix}`,
+    globalMetaId: `idq1creator${suffix}`,
+    timestamp: 1_888_888_000 + index,
+    contentSummary: JSON.stringify({
+      title: `Paged App ${suffix}`,
+      appName: `paged-app-${suffix}`,
+      intro: `Paged chain app ${suffix}`,
+      runtime: 'browser',
+      version: '1.0.0',
+      code: `metafile://zip-paged-app-${suffix}`,
+      codeType: 'application/zip',
+      indexFile: 'index.html',
+      disabled: false,
+      ...overrides,
+    }),
+  };
+}
+
 test('listCommunityMetaApps parses chain protocol items and computes install status', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
@@ -155,24 +176,7 @@ test('listCommunityMetaApps forwards cursor and size, and returns nextCursor', a
     fetchList: async (params = {}) => {
       calls.push(params);
       return {
-        list: [
-          {
-            id: 'pin-page-2',
-            globalMetaId: 'idq1creator',
-            timestamp: 1_888_888_888,
-            contentSummary: JSON.stringify({
-              title: 'Paged App',
-              appName: 'paged-app',
-              intro: 'Paged chain app',
-              runtime: 'browser',
-              version: '1.0.0',
-              code: 'metafile://zip-paged-app',
-              codeType: 'application/zip',
-              indexFile: 'index.html',
-              disabled: false,
-            }),
-          },
-        ],
+        list: Array.from({ length: 30 }, (_, index) => chainMetaAppItem(index + 1)),
         nextCursor: 'cursor-60',
       };
     },
@@ -181,8 +185,26 @@ test('listCommunityMetaApps forwards cursor and size, and returns nextCursor', a
   assert.equal(result.success, true);
   assert.equal(result.nextCursor, 'cursor-60');
   assert.deepEqual(calls, [{ cursor: 'cursor-30', size: 30 }]);
-  assert.equal(result.apps.length, 1);
-  assert.equal(result.apps[0]?.appId, 'paged-app');
+  assert.equal(result.apps.length, 30);
+  assert.equal(result.apps[0]?.appId, 'paged-app-30');
+});
+
+test('listCommunityMetaApps hides nextCursor when the current page is shorter than the requested page size', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const result = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    cursor: 'cursor-30',
+    size: 30,
+    fetchList: async () => ({
+      list: Array.from({ length: 12 }, (_, index) => chainMetaAppItem(index + 1)),
+      nextCursor: 'stale-cursor-after-short-page',
+    }),
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.apps.length, 12);
+  assert.equal(result.nextCursor, null);
 });
 
 test('listCommunityMetaApps uses the remote chain list when the local indexer is stale but non-empty', async () => {
@@ -226,22 +248,10 @@ test('listCommunityMetaApps uses the remote chain list when the local indexer is
       return jsonResponse({
         code: 1,
         data: {
-          list: [{
-            id: 'remote-current-pin',
-            globalMetaId: 'idq1remote',
-            timestamp: 200,
-            contentSummary: JSON.stringify({
-              title: 'Remote Current App',
-              appName: 'remote-current-app',
-              intro: 'Present in the canonical remote chain list',
-              runtime: 'browser',
-              version: '1.0.0',
-              code: 'metafile://zip-remote-current',
-              codeType: 'application/zip',
-              indexFile: 'index.html',
-              disabled: false,
-            }),
-          }],
+          list: Array.from({ length: 30 }, (_, index) => chainMetaAppItem(index + 1, {
+            title: `Remote Current App ${index + 1}`,
+            appName: `remote-current-app-${index + 1}`,
+          })),
           nextCursor: 'remote-next',
         },
       });
@@ -260,7 +270,7 @@ test('listCommunityMetaApps uses the remote chain list when the local indexer is
 
     assert.equal(result.success, true);
     assert.equal(result.nextCursor, 'remote-next');
-    assert.deepEqual(result.apps.map((app) => app.sourcePinId), ['remote-current-pin']);
+    assert.deepEqual(result.apps.map((app) => app.sourcePinId).slice(0, 2), ['pin-30', 'pin-29']);
     assert.equal(
       calls.some((href) => href.startsWith('https://manapi.metaid.io/pin/path/list')),
       true,

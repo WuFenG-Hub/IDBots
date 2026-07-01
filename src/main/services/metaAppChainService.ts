@@ -64,6 +64,7 @@ type ListCommunityMetaAppsInput = {
   fetchAuthorInfo?: FetchAuthorInfoFn;
   cursor?: string;
   size?: number;
+  allowShortPageNextCursor?: boolean;
 };
 
 type InstallCommunityMetaAppInput = {
@@ -544,9 +545,10 @@ const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
 export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): Promise<CommunityMetaAppListResult> {
   try {
     const fetchList = input.fetchList || defaultFetchList;
+    const pageSize = normalizeListPageSize(input.size);
     const rawPage = normalizeFetchListResult(await fetchList({
       cursor: normalizeListCursor(input.cursor),
-      size: normalizeListPageSize(input.size),
+      size: pageSize,
     }));
     const rawList = rawPage.list;
     const localApps = input.manager.listMetaApps() || [];
@@ -579,7 +581,7 @@ export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): 
     return {
       success: true,
       apps: records,
-      nextCursor: rawPage.nextCursor,
+      nextCursor: (input.allowShortPageNextCursor || rawList.length >= pageSize) ? rawPage.nextCursor : null,
     };
   } catch (error) {
     return {
@@ -603,6 +605,7 @@ const findCommunityMetaAppBySourcePinId = async (
       fetchAuthorInfo: input.fetchAuthorInfo,
       cursor,
       size: COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE,
+      allowShortPageNextCursor: true,
     });
 
     if (!result.success) {
