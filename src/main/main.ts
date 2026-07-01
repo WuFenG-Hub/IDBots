@@ -2420,6 +2420,12 @@ async function confirmBotBrowserPinWrite(
   if (details.display.summary) {
     detailLines.push(`Summary: ${details.display.summary}`);
   }
+  if (details.bridgeMetadata?.originalId) {
+    detailLines.push(`Original PIN: ${details.bridgeMetadata.originalId}`);
+  }
+  if (details.bridgeMetadata?.appAction) {
+    detailLines.push(`App Action: ${details.bridgeMetadata.appAction}`);
+  }
 
   const result = await botBrowserDialogMessageBox(ownerWindow, {
     type: 'question',

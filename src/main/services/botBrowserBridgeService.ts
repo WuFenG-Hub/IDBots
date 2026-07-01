@@ -9,6 +9,7 @@ import type { Metabot } from '../types/metabot';
 import type { MetaidDataPayload } from './metaidCore';
 
 const MAX_PIN_PAYLOAD_BYTES = 512 * 1024;
+const PIN_ID_PATTERN = /^[0-9a-f]{64}i\d+$/iu;
 
 export type BotBrowserBridgeErrorCode =
   | 'invalid_request'
@@ -58,6 +59,10 @@ export interface BotBrowserPinWriteConfirmDetails {
   display: {
     title?: string;
     summary?: string;
+  };
+  bridgeMetadata?: {
+    originalId?: string;
+    appAction?: string;
   };
 }
 
@@ -207,7 +212,68 @@ function isCommandFailure(value: unknown): value is BrowserCommandResult<never> 
   return Boolean(value && typeof value === 'object' && (value as BrowserCommandResult<never>).ok === false);
 }
 
-function decodePayload(payloadRecord: Record<string, unknown>): {
+function normalizePinId(value: unknown): string {
+  const normalized = text(value).toLowerCase();
+  return PIN_ID_PATTERN.test(normalized) ? normalized : '';
+}
+
+function validatePinWritePath(
+  operation: 'create' | 'modify' | 'revoke',
+  value: unknown,
+): { path: string; targetPinId?: string } | BrowserCommandResult<never> {
+  const pinPath = text(value);
+  if (!pinPath || /[\r\n]/u.test(pinPath)) {
+    return failure('invalid_params', 'MetaID PIN write path is invalid.');
+  }
+
+  if (operation === 'create') {
+    if (!pinPath.startsWith('/')) {
+      return failure('invalid_params', 'MetaID PIN create path must start with /.');
+    }
+    return { path: pinPath };
+  }
+
+  if (!pinPath.startsWith('@')) {
+    return failure('invalid_params', 'MetaID PIN modify/revoke path must be @<targetPinId>.');
+  }
+  const targetPinId = normalizePinId(pinPath.slice(1));
+  if (!targetPinId) {
+    return failure('invalid_params', 'MetaID PIN modify/revoke target pin id is invalid.');
+  }
+  return { path: `@${targetPinId}`, targetPinId };
+}
+
+function validateBridgeMetadata(
+  body: Record<string, unknown>,
+  targetPinId?: string,
+): { originalId?: string; appAction?: string } | BrowserCommandResult<never> | undefined {
+  const originalIdText = text(body.originalId);
+  const originalId = originalIdText ? normalizePinId(originalIdText) : undefined;
+  if (originalIdText && !originalId) {
+    return failure('invalid_params', 'MetaID PIN write originalId is invalid.');
+  }
+  if (originalId && targetPinId && originalId !== targetPinId) {
+    return failure('invalid_params', 'MetaID PIN write originalId must match the target pin id.');
+  }
+
+  const appAction = text(body.appAction) || undefined;
+  if (appAction && (appAction.length > 128 || /[\r\n]/u.test(appAction))) {
+    return failure('invalid_params', 'MetaID PIN write appAction is invalid.');
+  }
+
+  if (!originalId && !appAction) {
+    return undefined;
+  }
+  return {
+    ...(originalId ? { originalId } : {}),
+    ...(appAction ? { appAction } : {}),
+  };
+}
+
+function decodePayload(
+  payloadRecord: Record<string, unknown>,
+  operation: 'create' | 'modify' | 'revoke',
+): {
   payload: string | Buffer;
   encoding: 'utf-8' | 'base64';
   size: number;
@@ -215,6 +281,9 @@ function decodePayload(payloadRecord: Record<string, unknown>): {
   const encoding = text(payloadRecord.encoding);
   const value = typeof payloadRecord.value === 'string' ? payloadRecord.value : '';
   if (!value) {
+    if (operation === 'revoke' && encoding === 'utf8') {
+      return { payload: '', encoding: 'utf-8', size: 0 };
+    }
     return failure('invalid_params', 'MetaID PIN write payload is required.');
   }
 
@@ -247,6 +316,7 @@ function validatePinWritePayload(payload: unknown): {
   contentType: string;
   payloadSize: number;
   display: { title?: string; summary?: string };
+  bridgeMetadata?: { originalId?: string; appAction?: string };
 } | BrowserCommandResult<never> {
   const body = objectRecord(payload);
   if (!body) {
@@ -258,10 +328,8 @@ function validatePinWritePayload(payload: unknown): {
     return failure('invalid_params', 'MetaID PIN write operation must be create, modify, or revoke.');
   }
 
-  const pinPath = text(body.path);
-  if (!pinPath || !pinPath.startsWith('/') || /[\r\n]/u.test(pinPath)) {
-    return failure('invalid_params', 'MetaID PIN write path is invalid.');
-  }
+  const pathValidation = validatePinWritePath(operation, body.path);
+  if (isCommandFailure(pathValidation)) return pathValidation;
 
   const encryption = text(body.encryption);
   if (encryption !== '0' && encryption !== '1' && encryption !== '2') {
@@ -278,8 +346,11 @@ function validatePinWritePayload(payload: unknown): {
   if (!payloadRecord) {
     return failure('invalid_params', 'MetaID PIN write payload data is required.');
   }
-  const decoded = decodePayload(payloadRecord);
+  const decoded = decodePayload(payloadRecord, operation);
   if (isCommandFailure(decoded)) return decoded;
+
+  const bridgeMetadata = validateBridgeMetadata(body, pathValidation.targetPinId);
+  if (isCommandFailure(bridgeMetadata)) return bridgeMetadata;
 
   const displayRecord = objectRecord(body.display);
   const display = {
@@ -290,7 +361,7 @@ function validatePinWritePayload(payload: unknown): {
   return {
     metaidPayload: {
       operation,
-      path: pinPath,
+      path: pathValidation.path,
       encryption,
       version,
       contentType,
@@ -298,10 +369,11 @@ function validatePinWritePayload(payload: unknown): {
       encoding: decoded.encoding,
     },
     operation,
-    path: pinPath,
+    path: pathValidation.path,
     contentType,
     payloadSize: decoded.size,
     display,
+    ...(bridgeMetadata ? { bridgeMetadata } : {}),
   };
 }
 
@@ -389,6 +461,7 @@ export function createBotBrowserBridgeService(
         contentType: validation.contentType,
         payloadSize: validation.payloadSize,
         display: validation.display,
+        ...(validation.bridgeMetadata ? { bridgeMetadata: validation.bridgeMetadata } : {}),
       });
       if (!confirmed) {
         return failure('user_cancelled', 'MetaID PIN write was cancelled.');
