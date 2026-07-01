@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { fetchContentWithFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './localIndexerProxy';
+import { fetchContentWithFallback } from './localIndexerProxy';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
+import { getP2PLocalBase } from './p2pLocalEndpoint';
 
 let AdmZip: typeof import('adm-zip') | null = null;
 try {
@@ -218,6 +219,26 @@ const normalizeFetchListResult = (value: unknown): CommunityMetaAppListPage => {
   const nextCursor = asText(data?.nextCursor ?? parsed.nextCursor) || null;
 
   return { list, nextCursor };
+};
+
+const fetchListPageFromUrl = async (
+  sourceName: string,
+  targetUrl: string,
+  options?: RequestInit,
+): Promise<CommunityMetaAppListPage> => {
+  const response = await fetch(targetUrl, options);
+  if (!response.ok) {
+    throw new Error(`${sourceName} MetaApp chain list request failed: ${response.status} ${response.statusText}`);
+  }
+
+  const json = await response.json() as unknown;
+  const parsed = parseJsonObject(json);
+  const code = parsed?.code;
+  if (code !== undefined && code !== 1 && code !== '1') {
+    throw new Error(`${sourceName} MetaApp chain list request returned code ${String(code)}`);
+  }
+
+  return normalizeFetchListResult(json);
 };
 
 const authorInfoCache = new Map<string, Promise<CommunityMetaAppAuthorInfo | null>>();
@@ -491,13 +512,20 @@ const defaultFetchList: FetchListFn = async (input = {}) => {
   url.searchParams.set('size', String(size));
   url.searchParams.set('path', METAAPP_PROTOCOL_PATH);
   const localPath = `/api/pin/path/list${url.search}`;
-  const response = await fetchJsonWithFallbackOnMiss(localPath, url.toString(), isEmptyListDataPayload);
-  if (!response.ok) {
-    throw new Error(`MetaApp chain list request failed: ${response.status} ${response.statusText}`);
-  }
 
-  const json = await response.json() as unknown;
-  return normalizeFetchListResult(json);
+  try {
+    return await fetchListPageFromUrl('Remote', url.toString());
+  } catch (remoteError) {
+    try {
+      return await fetchListPageFromUrl('Local', `${getP2PLocalBase()}${localPath}`, {
+        signal: AbortSignal.timeout(2000),
+      });
+    } catch (localError) {
+      const remoteMessage = remoteError instanceof Error ? remoteError.message : String(remoteError);
+      const localMessage = localError instanceof Error ? localError.message : String(localError);
+      throw new Error(`MetaApp chain list request failed: ${remoteMessage}; local fallback failed: ${localMessage}`);
+    }
+  }
 };
 
 const defaultFetchCodeZip: FetchZipFn = async (pinId) => {

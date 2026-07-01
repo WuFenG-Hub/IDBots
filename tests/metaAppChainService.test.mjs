@@ -11,6 +11,13 @@ try {
   listCommunityMetaApps = null;
 }
 
+function jsonResponse(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
 test('listCommunityMetaApps parses chain protocol items and computes install status', async () => {
   assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
 
@@ -176,6 +183,97 @@ test('listCommunityMetaApps forwards cursor and size, and returns nextCursor', a
   assert.deepEqual(calls, [{ cursor: 'cursor-30', size: 30 }]);
   assert.equal(result.apps.length, 1);
   assert.equal(result.apps[0]?.appId, 'paged-app');
+});
+
+test('listCommunityMetaApps uses the remote chain list when the local indexer is stale but non-empty', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const previousFetch = globalThis.fetch;
+  const previousLocalBase = process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+  const calls = [];
+
+  process.env.IDBOTS_MAN_P2P_LOCAL_BASE = 'http://127.0.0.1:19099';
+  globalThis.fetch = async (url) => {
+    const href = String(url);
+    calls.push(href);
+
+    if (href.startsWith('http://127.0.0.1:19099')) {
+      return jsonResponse({
+        code: 1,
+        data: {
+          list: [{
+            id: 'local-stale-pin',
+            globalMetaId: 'idq1local',
+            timestamp: 100,
+            contentSummary: JSON.stringify({
+              title: 'Local Stale App',
+              appName: 'local-stale-app',
+              intro: 'Only present in the stale local indexer page',
+              runtime: 'browser',
+              version: '1.0.0',
+              code: 'metafile://zip-local-stale',
+              codeType: 'application/zip',
+              indexFile: 'index.html',
+              disabled: false,
+            }),
+          }],
+          nextCursor: 'local-next',
+        },
+      });
+    }
+
+    if (href.startsWith('https://manapi.metaid.io')) {
+      return jsonResponse({
+        code: 1,
+        data: {
+          list: [{
+            id: 'remote-current-pin',
+            globalMetaId: 'idq1remote',
+            timestamp: 200,
+            contentSummary: JSON.stringify({
+              title: 'Remote Current App',
+              appName: 'remote-current-app',
+              intro: 'Present in the canonical remote chain list',
+              runtime: 'browser',
+              version: '1.0.0',
+              code: 'metafile://zip-remote-current',
+              codeType: 'application/zip',
+              indexFile: 'index.html',
+              disabled: false,
+            }),
+          }],
+          nextCursor: 'remote-next',
+        },
+      });
+    }
+
+    throw new Error(`Unexpected fetch: ${href}`);
+  };
+
+  try {
+    const result = await listCommunityMetaApps({
+      manager: { listMetaApps: () => [] },
+      fetchAuthorInfo: async () => null,
+      cursor: '0',
+      size: 30,
+    });
+
+    assert.equal(result.success, true);
+    assert.equal(result.nextCursor, 'remote-next');
+    assert.deepEqual(result.apps.map((app) => app.sourcePinId), ['remote-current-pin']);
+    assert.equal(
+      calls.some((href) => href.startsWith('https://manapi.metaid.io/pin/path/list')),
+      true,
+      'remote chain list should be queried even when the local indexer returns a non-empty stale page',
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousLocalBase === undefined) {
+      delete process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+    } else {
+      process.env.IDBOTS_MAN_P2P_LOCAL_BASE = previousLocalBase;
+    }
+  }
 });
 
 test('listCommunityMetaApps accepts content metafile when code is empty', async () => {
