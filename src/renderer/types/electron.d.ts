@@ -455,6 +455,18 @@ interface IElectronAPI {
     resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
     getMetaAppCache: () => Promise<HostBrowserCommandResult<BrowserCacheSnapshot>>;
     clearMetaAppCache: (input?: BrowserCacheClearInput) => Promise<HostBrowserCommandResult<BrowserCacheClearResult>>;
+    writeMetaIdPin: (input: {
+      actorId?: string;
+      resourceUri?: string;
+      payload?: unknown;
+      network?: string;
+    }) => Promise<HostBrowserCommandResult<unknown>>;
+    uploadMetaFile: (input: {
+      actorId?: string;
+      resourceUri?: string;
+      payload?: unknown;
+      network?: string;
+    }) => Promise<HostBrowserCommandResult<unknown>>;
   };
   api: {
     fetch: (options: {

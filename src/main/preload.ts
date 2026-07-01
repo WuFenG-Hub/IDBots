@@ -62,6 +62,10 @@ contextBridge.exposeInMainWorld('electron', {
     getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),
     clearMetaAppCache: (input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) =>
       ipcRenderer.invoke('botBrowser:clearMetaAppCache', input),
+    writeMetaIdPin: (input: { actorId?: string; resourceUri?: string; payload?: unknown; network?: string }) =>
+      ipcRenderer.invoke('botBrowser:writeMetaIdPin', input),
+    uploadMetaFile: (input: { actorId?: string; resourceUri?: string; payload?: unknown; network?: string }) =>
+      ipcRenderer.invoke('botBrowser:uploadMetaFile', input),
   },
   permissions: {
     checkCalendar: () => ipcRenderer.invoke('permissions:checkCalendar'),

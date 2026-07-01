@@ -28,6 +28,7 @@ import {
   type BrowserSettingsSnapshot,
   type BrowserSettingsUpdateInput,
   type BrowserTrustedActionInput,
+  type BrowserTrustedActionKind,
   type BrowserTrustedActionResult,
 } from '@openagentinternet/agent-browser-host-contract';
 import type {
@@ -57,8 +58,16 @@ export interface IdBotsBrowserHostAdapterInput {
   resolveMetaAppUrl: (app: MetaAppRecord) => Promise<string>;
   getMetaAppCache?: () => Promise<BrowserCommandResult<BrowserCacheSnapshot>>;
   clearMetaAppCache?: (input: BrowserCacheClearInput) => Promise<BrowserCommandResult<BrowserCacheClearResult>>;
+  writeMetaIdPin?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
+  uploadMetaFile?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
   openConversation: (request: BotBrowserConversationRequest) => Promise<void>;
   fetch?: typeof fetch;
+}
+
+export interface BotBrowserBridgeTrustedActionRequest {
+  actorId?: string;
+  resourceUri: string;
+  payload?: unknown;
 }
 
 function text(value: unknown): string {
@@ -72,6 +81,15 @@ function errorMessage(error: unknown): string {
 function isMissingIpcHandlerError(error: unknown, channel: string): boolean {
   const message = errorMessage(error);
   return message.includes('No handler registered') && message.includes(channel);
+}
+
+function safeBridgeMessage(value: unknown, fallback: string): string {
+  const message = text(value);
+  if (!message) return fallback;
+  if (/ipc|handler|channel|route|stack|file:|\/Users\/|\\Users\\/iu.test(message)) {
+    return fallback;
+  }
+  return message;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
@@ -200,6 +218,55 @@ function findMetaAppBySourcePinId(apps: MetaAppRecord[], sourcePinId: string): M
   return apps.find((candidate) => {
     return normalizeMetaAppSourcePinId(candidate.sourcePinId) === sourcePinId;
   });
+}
+
+function trustedActionSuccess(
+  kind: BrowserTrustedActionKind,
+  data: unknown,
+): BrowserCommandResult<BrowserTrustedActionResult> {
+  return browserSuccess({
+    kind,
+    handled: true,
+    data,
+  } as BrowserTrustedActionResult);
+}
+
+function trustedActionFailureFromResult(
+  result: BrowserCommandResult<unknown>,
+  fallbackCode: string,
+  fallbackMessage: string,
+): BrowserCommandResult<BrowserTrustedActionResult> {
+  return browserFailure(
+    text((result as { code?: unknown }).code) || fallbackCode,
+    safeBridgeMessage((result as { message?: unknown }).message, fallbackMessage),
+  );
+}
+
+async function runBridgeTrustedAction(
+  invoke: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>,
+  input: BotBrowserBridgeTrustedActionRequest,
+  kind: BrowserTrustedActionKind,
+  ipcChannel: string,
+  fallbackCode: string,
+  fallbackMessage: string,
+): Promise<BrowserCommandResult<BrowserTrustedActionResult>> {
+  try {
+    const result = await invoke(input);
+    if (!result.ok) {
+      return trustedActionFailureFromResult(result, fallbackCode, fallbackMessage);
+    }
+    return trustedActionSuccess(kind, result.data);
+  } catch (error) {
+    if (isMissingIpcHandlerError(error, ipcChannel)) {
+      return browserFailure(
+        'unsupported_method',
+        kind === ('metaid-pin-write' as BrowserTrustedActionKind)
+          ? 'MetaID PIN write is not supported in this IDBots build.'
+          : 'MetaFile upload is not supported in this IDBots build.',
+      );
+    }
+    return browserFailure(fallbackCode, fallbackMessage);
+  }
 }
 
 async function resolveLocalMetaAppRecord(
@@ -398,6 +465,49 @@ export function createIdbotsBrowserHostAdapter(
     async runTrustedAction(
       actionInput: BrowserTrustedActionInput,
     ): Promise<BrowserCommandResult<BrowserTrustedActionResult>> {
+      const actionKind = text(actionInput.kind);
+      if (actionKind === 'metaid-pin-write') {
+        if (!input.writeMetaIdPin) {
+          return browserFailure(
+            'unsupported_method',
+            'MetaID PIN write is not supported in this IDBots build.',
+          );
+        }
+        return runBridgeTrustedAction(
+          input.writeMetaIdPin,
+          {
+            actorId: text(actionInput.actorId) || undefined,
+            resourceUri: actionInput.resourceUri,
+            payload: actionInput.payload,
+          },
+          actionInput.kind,
+          'botBrowser:writeMetaIdPin',
+          'pin_write_failed',
+          'MetaID PIN write failed.',
+        );
+      }
+
+      if (actionKind === 'metafile-upload') {
+        if (!input.uploadMetaFile) {
+          return browserFailure(
+            'unsupported_method',
+            'MetaFile upload is not supported in this IDBots build.',
+          );
+        }
+        return runBridgeTrustedAction(
+          input.uploadMetaFile,
+          {
+            actorId: text(actionInput.actorId) || undefined,
+            resourceUri: actionInput.resourceUri,
+            payload: actionInput.payload,
+          },
+          actionInput.kind,
+          'botBrowser:uploadMetaFile',
+          'upload_failed',
+          'MetaFile upload failed.',
+        );
+      }
+
       if (actionInput.kind === 'copy-uri') {
         return browserSuccess({
           kind: actionInput.kind,

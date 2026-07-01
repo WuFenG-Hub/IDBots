@@ -40,6 +40,7 @@ tests/*
 !tests/gigSquareServiceCard.test.tsx
 !tests/a2aMessageItem.test.tsx
 !tests/botBrowserModeSwitch.test.tsx
+!tests/botBrowserBridgeService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
 !tests/orderPromptBuilder.test.ts

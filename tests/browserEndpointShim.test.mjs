@@ -230,6 +230,71 @@ test('endpoint shim rejects malformed request bodies before calling adapter meth
   assert.deepEqual(calls, []);
 });
 
+test('endpoint shim forwards MetaFile host-picker uploads as trusted actions', async () => {
+  const { adapter, calls } = createAdapter();
+  const shim = createBrowserEndpointShim(adapter);
+
+  const upload = await shim({
+    url: '/api/browser/metafile-upload?actorId=idbots-metabot-1',
+    method: 'POST',
+    body: {
+      source: {
+        kind: 'host-picker',
+        multiple: true,
+        accept: ['image/png'],
+      },
+      purpose: 'profile-cover',
+    },
+  });
+
+  assert.equal(upload.status, 200);
+  assert.deepEqual(upload.body.data, {
+    kind: 'metafile-upload',
+    handled: true,
+    data: { message: 'ok' },
+  });
+  assert.deepEqual(calls, [
+    [
+      'runTrustedAction',
+      {
+        actorId: 'idbots-metabot-1',
+        resourceUri: '',
+        kind: 'metafile-upload',
+        payload: {
+          source: {
+            kind: 'host-picker',
+            multiple: true,
+            accept: ['image/png'],
+          },
+          purpose: 'profile-cover',
+        },
+      },
+    ],
+  ]);
+});
+
+test('endpoint shim rejects invalid MetaFile upload requests before adapter execution', async () => {
+  const { adapter, calls } = createAdapter();
+  const shim = createBrowserEndpointShim(adapter);
+
+  const wrongMethod = await shim({
+    url: '/api/browser/metafile-upload',
+    method: 'GET',
+  });
+  assert.equal(wrongMethod.status, 405);
+  assert.equal(wrongMethod.body.code, 'method_not_allowed');
+
+  const badBody = await shim({
+    url: '/api/browser/metafile-upload',
+    method: 'POST',
+    body: 'bad',
+  });
+  assert.equal(badBody.status, 400);
+  assert.equal(badBody.body.code, 'invalid_request');
+
+  assert.deepEqual(calls, []);
+});
+
 test('endpoint shim converts adapter throws into browser failure envelopes', async () => {
   const { adapter } = createAdapter();
   const shim = createBrowserEndpointShim({
