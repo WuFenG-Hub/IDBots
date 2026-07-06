@@ -152,7 +152,7 @@ async function startRpcServerForTestWithOverrides({
   };
 }
 
-test('rpc bot-browser open route accepts Browser URI and invokes the host open callback', async () => {
+test('rpc bot-browser open route accepts Browser URIs and invokes the host open callback', async () => {
   const opened = [];
   const { server, baseUrl } = await startRpcServerForTestWithOverrides({
     onBotBrowserOpen(input) {
@@ -161,21 +161,31 @@ test('rpc bot-browser open route accepts Browser URI and invokes the host open c
   });
 
   try {
-    const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uri: 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
-      }),
-    });
-    const json = await response.json();
+    const uris = [
+      'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
+      'metafile://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
+    ];
 
-    assert.equal(response.status, 200);
-    assert.equal(json.success, true);
-    assert.equal(json.uri, 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0');
+    for (const uri of uris) {
+      const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uri }),
+      });
+      const json = await response.json();
+
+      assert.equal(response.status, 200);
+      assert.equal(json.success, true);
+      assert.equal(json.uri, uri);
+    }
+
     assert.deepEqual(opened, [
       {
-        uri: 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
+        uri: uris[0],
+        actorId: null,
+      },
+      {
+        uri: uris[1],
         actorId: null,
       },
     ]);

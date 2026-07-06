@@ -20,6 +20,7 @@ test('metabot-browser-open skill is installed with Browser routing guidance', ()
   assert.match(source, /metaapp:\/\//);
   assert.match(source, /pin:\/\//);
   assert.match(source, /map:\/\//);
+  assert.match(source, /metafile:\/\//);
   assert.match(source, /metaid:\/\//);
   assert.match(source, /\.eth/);
   assert.match(source, /scripts\/index\.js/);
@@ -53,6 +54,10 @@ test('browser-open script normalizes supported user requests into Browser URIs',
   assert.equal(
     normalizeBrowserOpenTarget('map://simplebuzz/pin/abc123i0').uri,
     'map://simplebuzz/pin/abc123i0',
+  );
+  assert.equal(
+    normalizeBrowserOpenTarget(`metafile://${PIN_ID}`).uri,
+    `metafile://${PIN_ID}`,
   );
 });
 
