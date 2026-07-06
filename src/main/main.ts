@@ -134,8 +134,13 @@ import {
   type BotBrowserPinWriteConfirmDetails,
   type BotBrowserPinWriteInput,
 } from './services/botBrowserBridgeService';
+import {
+  createBotBrowserHostService,
+  type BotBrowserHostService,
+} from './services/botBrowserHostService';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
+  type CommunityMetaAppInstallResult,
   findCommunityMetaAppRecordBySourcePinId,
   installCommunityMetaApp,
   listCommunityMetaApps,
@@ -2322,6 +2327,7 @@ let coworkRunner: CoworkRunner | null = null;
 let skillManager: SkillManager | null = null;
 let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
+let botBrowserHostService: BotBrowserHostService | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
@@ -2471,6 +2477,12 @@ function createBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | nul
 function botBrowserBridgeInput<T extends BotBrowserPinWriteInput | BotBrowserMetaFileUploadInput>(
   input: unknown,
 ): T {
+  return input && typeof input === 'object' && !Array.isArray(input)
+    ? input as T
+    : {} as T;
+}
+
+function botBrowserHostInput<T extends Record<string, unknown>>(input: unknown): T {
   return input && typeof input === 'object' && !Array.isArray(input)
     ? input as T
     : {} as T;
@@ -4023,6 +4035,48 @@ const getBotBrowserMetaAppCacheService = () => {
   return botBrowserMetaAppCacheService;
 };
 
+function notifyMetaAppsChanged() {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
+      win.webContents.send('metaapps:changed');
+    }
+  });
+}
+
+async function installCommunityMetaAppAndNotify(sourcePinId: string): Promise<CommunityMetaAppInstallResult> {
+  const result = await installCommunityMetaApp({
+    sourcePinId,
+    manager: getMetaAppManager(),
+  });
+  if (result.success) {
+    notifyMetaAppsChanged();
+  }
+  return result;
+}
+
+const getBotBrowserHostService = () => {
+  if (!botBrowserHostService) {
+    botBrowserHostService = createBotBrowserHostService({
+      listMetaApps: async () => getMetaAppManager().listMetaApps(),
+      resolveMetaAppPin: (pinId) => getBotBrowserMetaAppCacheService().resolveMetaAppPin(pinId),
+      installCommunityMetaApp: (sourcePinId) => installCommunityMetaAppAndNotify(sourcePinId),
+      resolveMetaAppUrl: async (app) => {
+        const result = await resolveMetaAppUrl({
+          appId: app.id,
+          targetPath: app.entry,
+          manager: getMetaAppManager(),
+          ensureServerReady: ensureMetaAppServerReady,
+        });
+        if (!result.success || !result.url) {
+          throw new Error(result.error || 'Failed to resolve MetaApp URL.');
+        }
+        return result.url;
+      },
+    });
+  }
+  return botBrowserHostService;
+};
+
 const getIMGatewayManager = () => {
   if (!imGatewayManager) {
     const sqliteStore = getStore();
@@ -5110,6 +5164,24 @@ if (!gotTheLock) {
     return getBotBrowserMetaAppCacheService().resolveMetaAppPin(String(input?.pinId ?? ''));
   });
 
+  ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
+    return getBotBrowserHostService().resolveResource(
+      botBrowserHostInput<{ actorId?: string; uri?: string }>(input) as { actorId?: string; uri: string },
+    );
+  });
+
+  ipcMain.handle('botBrowser:getSettings', async (_event, input?: unknown) => {
+    return getBotBrowserHostService().getSettings(
+      botBrowserHostInput<{ actorId?: string }>(input),
+    );
+  });
+
+  ipcMain.handle('botBrowser:updateSettings', async (_event, input: unknown) => {
+    return getBotBrowserHostService().updateSettings(
+      botBrowserHostInput<{ actorId?: string; browser?: Record<string, unknown> }>(input),
+    );
+  });
+
   ipcMain.handle('botBrowser:getMetaAppCache', async () => {
     return getBotBrowserMetaAppCacheService().getCache();
   });
@@ -5188,17 +5260,7 @@ if (!gotTheLock) {
 
   ipcMain.handle('metaapps:installCommunity', async (_event, input: { sourcePinId: string }) => {
     try {
-      const result = await installCommunityMetaApp({
-        sourcePinId: String(input?.sourcePinId || ''),
-        manager: getMetaAppManager(),
-      });
-      if (result.success) {
-        BrowserWindow.getAllWindows().forEach((win) => {
-          if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-            win.webContents.send('metaapps:changed');
-          }
-        });
-      }
+      const result = await installCommunityMetaAppAndNotify(String(input?.sourcePinId || ''));
       return result;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to install community MetaApp' };

@@ -576,3 +576,163 @@ test('clearCache reports a cache unavailable failure when the Electron cache IPC
   assert.equal(cleared.code, 'browser_cache_unavailable');
   assert.match(cleared.message, /No handler registered/);
 });
+
+test('resolveResource delegates to host resolve wiring when provided and still normalizes Browser actions', async () => {
+  const resolveCalls = [];
+  const adapter = createAdapter({
+    resolveBrowserResource: async (input) => {
+      resolveCalls.push(input);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          uri: 'metaid://sunnyfung.eth',
+          normalizedUri: 'metaid://sunnyfung.eth',
+          resourceType: 'bot',
+          title: 'Sunny Bot',
+          owner: {
+            kind: 'bot',
+            globalMetaId: 'idq1sunny',
+            name: 'Sunny Bot',
+            verificationState: 'verified',
+          },
+          renderer: {
+            type: 'bot-page',
+            contentType: 'application/vnd.oac.bot-homepage+json',
+            data: {
+              profile: { name: 'Sunny Bot' },
+              sections: [
+                { id: 'services', title: 'Services', items: [{ id: 'svc-1' }] },
+              ],
+            },
+          },
+          status: { state: 'resolved', verificationState: 'verified', message: '' },
+          source: { resolver: 'host' },
+          actions: [
+            { id: 'message', label: 'Message', kind: 'private-chat', enabled: true, payload: { to: 'idq1peer' } },
+            { id: 'services', label: 'Services', kind: 'service-call', enabled: true },
+          ],
+        },
+      };
+    },
+  });
+
+  const result = await adapter.resolveResource({
+    actorId: 'idbots-metabot-1',
+    uri: 'sunnyfung.eth',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.data.normalizedUri, 'metaid://sunnyfung.eth');
+  assert.deepEqual(resolveCalls, [
+    { actorId: 'idbots-metabot-1', uri: 'sunnyfung.eth' },
+  ]);
+  assert.equal(result.data.actions.some((action) => action.kind === 'service-call'), false);
+  assert.equal(result.data.actions[0].kind, 'open-conversation');
+  assert.equal(result.data.actions[0].payload.peerGlobalMetaId, 'idq1peer');
+  assert.deepEqual(result.data.renderer.data.sections, []);
+});
+
+test('settings delegate to the host wiring when provided so resolve uses host-owned Browser config', async () => {
+  const calls = [];
+  const adapter = createAdapter({
+    getBrowserSettings: async () => {
+      calls.push(['get']);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          browser: {
+            nameResolution: {
+              enabled: true,
+              ens: {
+                enabled: true,
+                rpcUrls: ['https://rpc.example'],
+                textKey: 'org.example.agent-browser.uri',
+              },
+            },
+          },
+          effectiveBrowser: {
+            localMode: true,
+            nameResolution: {
+              enabled: true,
+              ens: {
+                enabled: true,
+                chainId: 1,
+                rpcUrls: ['https://rpc.example'],
+                textKey: 'org.example.agent-browser.uri',
+              },
+            },
+          },
+          defaults: {},
+        },
+      };
+    },
+    updateBrowserSettings: async (input) => {
+      calls.push(['update', input]);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          browser: input.browser,
+          effectiveBrowser: {
+            localMode: true,
+            ...(input.browser ?? {}),
+          },
+          defaults: {},
+        },
+      };
+    },
+  });
+
+  const settings = await adapter.getSettings();
+  assert.equal(settings.ok, true);
+  assert.deepEqual(settings.data.browser.nameResolution, {
+    enabled: true,
+    ens: {
+      enabled: true,
+      rpcUrls: ['https://rpc.example'],
+      textKey: 'org.example.agent-browser.uri',
+    },
+  });
+
+  const updated = await adapter.updateSettings({
+    browser: {
+      nameResolution: {
+        enabled: false,
+        ens: {
+          enabled: false,
+          rpcUrls: [],
+          textKey: 'org.example.agent-browser.uri',
+        },
+      },
+    },
+  });
+  assert.equal(updated.ok, true);
+  assert.deepEqual(updated.data.browser.nameResolution, {
+    enabled: false,
+    ens: {
+      enabled: false,
+      rpcUrls: [],
+      textKey: 'org.example.agent-browser.uri',
+    },
+  });
+  assert.deepEqual(calls, [
+    ['get'],
+    [
+      'update',
+      {
+        browser: {
+          nameResolution: {
+            enabled: false,
+            ens: {
+              enabled: false,
+              rpcUrls: [],
+              textKey: 'org.example.agent-browser.uri',
+            },
+          },
+        },
+      },
+    ],
+  ]);
+});

@@ -124,6 +124,9 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           const result = await window.electron.metaapps.list();
           return result?.apps ?? [];
         },
+        resolveBrowserResource: (input) => window.electron.botBrowser.resolveResource(input),
+        getBrowserSettings: (input) => window.electron.botBrowser.getSettings(input),
+        updateBrowserSettings: (input) => window.electron.botBrowser.updateSettings(input),
         resolveMetaAppPin: async (pinId) => {
           return window.electron.botBrowser.resolveMetaAppPin({ pinId });
         },

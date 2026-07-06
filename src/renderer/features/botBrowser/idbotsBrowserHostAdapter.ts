@@ -53,6 +53,15 @@ import type { BotBrowserConversationRequest } from './types';
 export interface IdBotsBrowserHostAdapterInput {
   listMetabots: () => Promise<Metabot[]>;
   listMetaApps: () => Promise<MetaAppRecord[]>;
+  resolveBrowserResource?: (
+    input: BrowserResolveInput,
+  ) => Promise<BrowserCommandResult<BrowserResolveResult>>;
+  getBrowserSettings?: (
+    input?: BrowserSettingsInput,
+  ) => Promise<BrowserCommandResult<BrowserSettingsSnapshot>>;
+  updateBrowserSettings?: (
+    input: BrowserSettingsUpdateInput,
+  ) => Promise<BrowserCommandResult<BrowserSettingsSnapshot>>;
   resolveMetaAppPin?: (pinId: string) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
   installCommunityMetaApp?: (sourcePinId: string) => Promise<CommunityMetaAppInstallResult>;
   resolveMetaAppUrl: (app: MetaAppRecord) => Promise<string>;
@@ -391,6 +400,19 @@ export function createIdbotsBrowserHostAdapter(
     async resolveResource(
       resolveInput: BrowserResolveInput,
     ): Promise<BrowserCommandResult<BrowserResolveResult>> {
+      if (input.resolveBrowserResource) {
+        const hostResult = await input.resolveBrowserResource(resolveInput);
+        if (!hostResult.ok) {
+          return hostResult;
+        }
+        return {
+          ...hostResult,
+          data: removeUnsupportedServiceRendererData(
+            normalizeResolveResultActions(normalizeMetaAppResolveResult(hostResult.data)),
+          ),
+        };
+      }
+
       const result = await resolveBrowserResource({
         uri: resolveInput.uri,
         config: resolveBrowserConfig(browserConfig),
@@ -411,12 +433,18 @@ export function createIdbotsBrowserHostAdapter(
     },
 
     async getSettings(_settingsInput?: BrowserSettingsInput): Promise<BrowserCommandResult<BrowserSettingsSnapshot>> {
+      if (input.getBrowserSettings) {
+        return input.getBrowserSettings(_settingsInput);
+      }
       return browserSuccess(createContractSettingsSnapshot(browserConfig));
     },
 
     async updateSettings(
       settingsInput: BrowserSettingsUpdateInput,
     ): Promise<BrowserCommandResult<BrowserSettingsSnapshot>> {
+      if (input.updateBrowserSettings) {
+        return input.updateBrowserSettings(settingsInput);
+      }
       try {
         browserConfig = ensureLocalBrowserConfig(
           applyBrowserSettingsUpdate(browserConfig, settingsInput.browser),

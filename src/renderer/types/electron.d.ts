@@ -8,6 +8,11 @@ import type {
   BrowserCacheClearResult,
   BrowserCacheSnapshot,
   BrowserCommandResult as HostBrowserCommandResult,
+  BrowserResolveInput,
+  BrowserResolveResult,
+  BrowserSettingsInput,
+  BrowserSettingsSnapshot,
+  BrowserSettingsUpdateInput,
 } from '@openagentinternet/agent-browser-host-contract';
 import type {
   CoworkA2AGuidanceRequest,
@@ -453,6 +458,9 @@ interface IElectronAPI {
   };
   botBrowser: {
     onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => () => void;
+    resolveResource: (input: BrowserResolveInput) => Promise<HostBrowserCommandResult<BrowserResolveResult>>;
+    getSettings: (input?: BrowserSettingsInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;
+    updateSettings: (input: BrowserSettingsUpdateInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;
     resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
     getMetaAppCache: () => Promise<HostBrowserCommandResult<BrowserCacheSnapshot>>;
     clearMetaAppCache: (input?: BrowserCacheClearInput) => Promise<HostBrowserCommandResult<BrowserCacheClearResult>>;

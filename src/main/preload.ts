@@ -63,6 +63,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('botBrowser:openUri', handler);
       return () => ipcRenderer.removeListener('botBrowser:openUri', handler);
     },
+    resolveResource: (input: { actorId?: string; uri: string }) =>
+      ipcRenderer.invoke('botBrowser:resolveResource', input),
+    getSettings: (input?: { actorId?: string }) =>
+      ipcRenderer.invoke('botBrowser:getSettings', input),
+    updateSettings: (input: { actorId?: string; browser?: Record<string, unknown> }) =>
+      ipcRenderer.invoke('botBrowser:updateSettings', input),
     resolveMetaAppPin: (input: { pinId: string }) => ipcRenderer.invoke('botBrowser:resolveMetaAppPin', input),
     getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),
     clearMetaAppCache: (input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) =>

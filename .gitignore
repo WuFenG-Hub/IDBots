@@ -41,6 +41,7 @@ tests/*
 !tests/a2aMessageItem.test.tsx
 !tests/botBrowserModeSwitch.test.tsx
 !tests/botBrowserBridgeService.test.mjs
+!tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
 !tests/orderPromptBuilder.test.ts
