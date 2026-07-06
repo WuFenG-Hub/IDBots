@@ -8,6 +8,7 @@ let buildPrivateChatA2ASystemPrompt;
 let waitBeforePrivateChatReply;
 let getPrivateChatReplyDelayMs;
 let shouldKeepPrivateChatConversationClosedAfterBye;
+let shouldDisplayInboundPrivateChatWhileClosed;
 let shouldSkipPrivateChatAutoReplyText;
 let hasNewerPrivateChatMessage;
 let evaluatePrivateChatAutoReplyPolicy;
@@ -25,6 +26,7 @@ try {
     waitBeforePrivateChatReply,
     getPrivateChatReplyDelayMs,
     shouldKeepPrivateChatConversationClosedAfterBye,
+    shouldDisplayInboundPrivateChatWhileClosed,
     shouldSkipPrivateChatAutoReplyText,
     hasNewerPrivateChatMessage,
     evaluatePrivateChatAutoReplyPolicy,
@@ -43,6 +45,7 @@ try {
     waitBeforePrivateChatReply,
     getPrivateChatReplyDelayMs,
     shouldKeepPrivateChatConversationClosedAfterBye,
+    shouldDisplayInboundPrivateChatWhileClosed,
     shouldSkipPrivateChatAutoReplyText,
     hasNewerPrivateChatMessage,
     evaluatePrivateChatAutoReplyPolicy,
@@ -256,20 +259,20 @@ test('private chat replies do not wait based on active incoming turn count', asy
   assert.deepEqual(delays, []);
 });
 
-test('auto-bye private chat conversations reopen after ten minutes', () => {
+test('auto-bye private chat conversations reopen after five minutes', () => {
   const endedAt = 1_770_000_000_000;
 
   assert.equal(
     shouldKeepPrivateChatConversationClosedAfterBye({
       mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
-      now: endedAt + 9 * 60_000 + 59_000,
+      now: endedAt + 4 * 60_000 + 59_000,
     }),
     true,
   );
   assert.equal(
     shouldKeepPrivateChatConversationClosedAfterBye({
       mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
-      now: endedAt + 10 * 60_000 + 1_000,
+      now: endedAt + 5 * 60_000 + 1_000,
     }),
     false,
   );
@@ -279,6 +282,32 @@ test('auto-bye private chat conversations reopen after ten minutes', () => {
       now: endedAt + 60 * 60_000,
     }),
     true,
+  );
+});
+
+test('closed private chat still displays inbound remote messages while auto-reply remains suppressed', () => {
+  const endedAt = 1_770_000_000_000;
+
+  assert.equal(
+    shouldDisplayInboundPrivateChatWhileClosed({
+      mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
+      now: endedAt + 4 * 60_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisplayInboundPrivateChatWhileClosed({
+      mappingMeta: { byeSent: true, endedByHuman: true, endedAt },
+      now: endedAt + 4 * 60_000,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldDisplayInboundPrivateChatWhileClosed({
+      mappingMeta: { byeSent: true, endedByAutoPolicy: true, endedAt },
+      now: endedAt + 5 * 60_000 + 1_000,
+    }),
+    false,
   );
 });
 
@@ -490,7 +519,7 @@ test('regular private chat skips older turns when a newer peer message exists', 
   ]);
 });
 
-test('private chat analysis keeps one active segment within fifteen minutes', () => {
+test('private chat analysis keeps one active segment within five minutes', () => {
   const base = 1_770_000_000_000;
   const analysis = analyzePrivateChatA2AConversation({
     messages: [
@@ -504,18 +533,18 @@ test('private chat analysis keeps one active segment within fifteen minutes', ()
       {
         id: 'within-gap',
         type: 'user',
-        content: 'continue after fourteen minutes',
-        timestamp: base + 14 * 60_000,
+        content: 'continue after four minutes',
+        timestamp: base + 4 * 60_000,
         metadata: { direction: 'incoming', sourceChannel: 'metaweb_private' },
       },
     ],
-    now: base + 14 * 60_000,
+    now: base + 4 * 60_000,
   });
 
   assert.equal(analysis.incomingTurnCount, 2);
   assert.deepEqual(
     analysis.contextMessages.map((message) => message.content),
-    ['previous topic still relevant', 'continue after fourteen minutes'],
+    ['previous topic still relevant', 'continue after four minutes'],
   );
 });
 
@@ -543,11 +572,11 @@ test('private chat analysis requests bye at fifty incoming turns and carries pri
         id: 'after-gap',
         type: 'user',
         content: 'new topic after a long gap',
-        timestamp: base + 50 * 10_000 + 16 * 60_000,
+        timestamp: base + 50 * 10_000 + 6 * 60_000,
         metadata: { direction: 'incoming', sourceChannel: 'metaweb_private' },
       },
     ],
-    now: base + 50 * 10_000 + 16 * 60_000,
+    now: base + 50 * 10_000 + 6 * 60_000,
   });
 
   assert.equal(resetAnalysis.shouldForceBye, false);

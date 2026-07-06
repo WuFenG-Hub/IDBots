@@ -82,8 +82,8 @@ import {
 } from './simplemsgPeerConversation';
 
 const POLL_INTERVAL_MS = 5_000;
-const PRIVATE_CHAT_SESSION_GAP_MS = 15 * 60 * 1000;
-const PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS = 10 * 60 * 1000;
+const PRIVATE_CHAT_SESSION_GAP_MS = 5 * 60 * 1000;
+const PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS = 5 * 60 * 1000;
 const PRIVATE_CHAT_MAX_INCOMING_TURNS = 30;
 const PRIVATE_CHAT_CLOSING_PHASE_TURNS = 20;
 const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
@@ -618,6 +618,14 @@ export function shouldKeepPrivateChatConversationClosedAfterBye(params: {
   return params.mappingMeta.endedByHuman === true
     || !endedAt
     || (params.now ?? Date.now()) - endedAt < PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS;
+}
+
+export function shouldDisplayInboundPrivateChatWhileClosed(params: {
+  mappingMeta: Record<string, unknown>;
+  now?: number;
+}): boolean {
+  return params.mappingMeta.byeSent === true
+    && shouldKeepPrivateChatConversationClosedAfterBye(params);
 }
 
 export function resolveSellerOrderOutputType(input: {
@@ -3465,12 +3473,41 @@ async function processOne(
       return;
     }
 
-    // Human-ended conversations stay closed. Auto-bye conversations can restart after 10 minutes.
+    // Human-ended conversations stay closed. Auto-bye conversations can restart after 5 minutes.
     const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
       if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta })) {
-        emitLog(`[PrivateChat] byeSent flag set for ${externalConversationId.slice(0, 30)}…, ignoring message.`);
+        const { sessionId } = await resolvePrivateConversationSession(
+          coworkStore,
+          metabot.id,
+          row,
+          plaintext
+        );
+        const existingInbound = findPrivateChatA2AInboundMessage({
+          coworkStore,
+          sessionId,
+          externalConversationId,
+          row,
+        });
+        if (!existingInbound) {
+          appendPrivateChatA2AMessage({
+            coworkStore,
+            sessionId,
+            externalConversationId,
+            type: 'user',
+            content: plaintext,
+            senderGlobalMetaId: fromGlobalMetaId,
+            senderName: (row.from_name as string | null) ?? null,
+            senderAvatar: (row.from_avatar as string | null) ?? null,
+            extraMetadata: buildPrivateChatA2AChainMetadata({
+              txId: row.tx_id,
+              pinId: row.pin_id,
+            }),
+            emitToRenderer,
+          });
+        }
+        emitLog(`[PrivateChat] byeSent flag set for ${externalConversationId.slice(0, 30)}…, stored inbound message without auto-reply.`);
         markProcessed(db, row.id, saveDb);
         return;
       }
