@@ -58,6 +58,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaappOwner:delete', input),
   },
   botBrowser: {
+    onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, input: { uri: string; actorId?: string | null }) => callback(input);
+      ipcRenderer.on('botBrowser:openUri', handler);
+      return () => ipcRenderer.removeListener('botBrowser:openUri', handler);
+    },
     resolveMetaAppPin: (input: { pinId: string }) => ipcRenderer.invoke('botBrowser:resolveMetaAppPin', input),
     getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),
     clearMetaAppCache: (input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) =>

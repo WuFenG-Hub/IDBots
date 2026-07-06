@@ -6,7 +6,7 @@
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
-import { app } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import {
   AddressType,
   BtcWallet,
@@ -48,6 +48,64 @@ const SIGN_BTC_MESSAGE_PATH = '/api/idbots/wallet/btc/sign-message';
 const SIGN_BTC_PSBT_PATH = '/api/idbots/wallet/btc/sign-psbt';
 const UPLOAD_LARGEFILE_PATH = '/api/idbots/files/upload-largefile';
 const EXECUTE_TRANSFER_PATH = '/api/idbots/wallet/transfer';
+const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
+const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
+
+export type BotBrowserRpcOpenRequest = {
+  uri: string;
+  actorId: string | null;
+};
+
+export type MetaidRpcServerOptions = {
+  openBotBrowserUri?: (input: BotBrowserRpcOpenRequest) => Promise<void> | void;
+};
+
+function normalizeBotBrowserUri(value: unknown): string {
+  const uri = String(value || '').trim();
+  const match = /^([a-z][a-z0-9+.-]*):\/\/(.+)$/i.exec(uri);
+  if (!match) {
+    throw new Error('uri must be a supported Bot Browser URI');
+  }
+
+  const scheme = match[1].toLowerCase();
+  if (!BOT_BROWSER_URI_SCHEMES.has(scheme)) {
+    throw new Error(`unsupported Bot Browser URI scheme: ${scheme}`);
+  }
+
+  if (!match[2].trim() || /\s/.test(match[2])) {
+    throw new Error('uri must not contain whitespace');
+  }
+
+  return `${scheme}://${match[2].trim()}`;
+}
+
+function normalizeOptionalActorId(value: unknown): string | null {
+  const actorId = String(value || '').trim();
+  return actorId || null;
+}
+
+function defaultOpenBotBrowserUri(input: BotBrowserRpcOpenRequest): void {
+  const windows = BrowserWindow.getAllWindows();
+  let delivered = 0;
+
+  for (const win of windows) {
+    if (win.isDestroyed()) continue;
+    if (win.webContents.isDestroyed()) continue;
+    win.webContents.send('botBrowser:openUri', input);
+    delivered += 1;
+  }
+
+  const firstWindow = windows.find((win) => !win.isDestroyed());
+  if (firstWindow) {
+    if (firstWindow.isMinimized()) firstWindow.restore();
+    if (!firstWindow.isVisible()) firstWindow.show();
+    firstWindow.focus();
+  }
+
+  if (delivered === 0) {
+    throw new Error('No IDBots window is available to open Bot Browser');
+  }
+}
 
 function createMetabotBtcWallet(store: MetabotStore, metabotId: number): BtcWallet {
   if (!Number.isInteger(metabotId) || metabotId <= 0) {
@@ -71,9 +129,11 @@ function createMetabotBtcWallet(store: MetabotStore, metabotId: number): BtcWall
 
 export function startMetaidRpcServer(
   getMetabotStore: () => MetabotStore,
-  getStore: () => SqliteStore
+  getStore: () => SqliteStore,
+  options: MetaidRpcServerOptions = {}
 ): http.Server {
   setMetaidCoreStore(getStore);
+  const openBotBrowserUri = options.openBotBrowserUri ?? defaultOpenBotBrowserUri;
 
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -93,6 +153,29 @@ export function startMetaidRpcServer(
     const url = req.url ?? '';
     const [pathname, search] = url.split('?');
     const persist = new URLSearchParams(search || '').get('persist') === 'true';
+
+    if (req.method === 'POST' && pathname === BOT_BROWSER_OPEN_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      let parsed: { uri?: unknown; actorId?: unknown };
+      try {
+        parsed = JSON.parse(body || '{}') as { uri?: unknown; actorId?: unknown };
+        const openRequest = {
+          uri: normalizeBotBrowserUri(parsed.uri),
+          actorId: normalizeOptionalActorId(parsed.actorId),
+        };
+        await openBotBrowserUri(openRequest);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, ...openRequest }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
 
     if (req.method === 'POST' && pathname === SIGN_BTC_MESSAGE_PATH) {
       let body = '';

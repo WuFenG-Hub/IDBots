@@ -399,6 +399,12 @@ const App: React.FC = () => {
     showToast,
   });
 
+  useEffect(() => {
+    return window.electron.botBrowser.onOpenUri((input) => {
+      void botBrowserShell.openUri(input);
+    });
+  }, [botBrowserShell.openUri]);
+
   const handleShowLogin = useCallback(() => {
     showToast(i18nService.t('featureInDevelopment'));
   }, [showToast]);

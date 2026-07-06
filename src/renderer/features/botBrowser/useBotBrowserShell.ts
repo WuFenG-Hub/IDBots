@@ -100,6 +100,19 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     openUriWhenBrowserReady({ uri });
   }, [openUriWhenBrowserReady, showBrowser, showToast]);
 
+  const openUri = useCallback(async (input: BotBrowserOpenUriInput) => {
+    const uri = String(input?.uri ?? '').trim();
+    const actorId = typeof input?.actorId === 'string' && input.actorId.trim()
+      ? input.actorId.trim()
+      : null;
+    if (!uri) {
+      showToast('Bot Browser URI is missing.');
+      return;
+    }
+    if (!await showBrowser()) return;
+    openUriWhenBrowserReady({ uri, actorId });
+  }, [openUriWhenBrowserReady, showBrowser, showToast]);
+
   const openMetaApp = useCallback(async (app: MetaAppRecord): Promise<boolean> => {
     if (!canOpenMetaAppInBrowser(app)) {
       return false;
@@ -137,6 +150,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     openBrowserHome,
     openLocalMetabot,
     openRemoteBot,
+    openUri,
     openMetaApp,
     openMetaAppByPin,
     switchToHome,

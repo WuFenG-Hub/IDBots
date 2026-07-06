@@ -49,6 +49,13 @@ test('App routes Browser conversation opens through the Cowork adapter', () => {
   assert.doesNotMatch(appSource, /Conversation opening is not wired yet/);
 });
 
+test('App listens for host bot-browser open requests and forwards them to the shell', () => {
+  assert.match(shellSource, /const openUri = useCallback\(async \(input: BotBrowserOpenUriInput\)/);
+  assert.match(shellSource, /openUriWhenBrowserReady\(\{ uri, actorId \}\)/);
+  assert.match(appSource, /window\.electron\.botBrowser\.onOpenUri\(/);
+  assert.match(appSource, /botBrowserShell\.openUri\(input\)/);
+});
+
 test('switch strip exposes Bot Home and Bot Browser labels', () => {
   assert.match(switchSource, />\s*Bot Home\s*</);
   assert.match(switchSource, />\s*Bot Browser\s*</);

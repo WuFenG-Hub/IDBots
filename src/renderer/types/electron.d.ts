@@ -452,6 +452,7 @@ interface IElectronAPI {
     }>;
   };
   botBrowser: {
+    onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => () => void;
     resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
     getMetaAppCache: () => Promise<HostBrowserCommandResult<BrowserCacheSnapshot>>;
     clearMetaAppCache: (input?: BrowserCacheClearInput) => Promise<HostBrowserCommandResult<BrowserCacheClearResult>>;

@@ -39,6 +39,21 @@ function createMetabotStore() {
   };
 }
 
+function resolveCompiledMetaidRpcServerPath() {
+  const candidates = [
+    '../dist-electron/services/metaidRpcServer.js',
+    '../dist-electron/main/services/metaidRpcServer.js',
+  ];
+  for (const candidate of candidates) {
+    try {
+      return require.resolve(candidate);
+    } catch {
+      // Try next compile output layout.
+    }
+  }
+  return require.resolve(candidates[0]);
+}
+
 async function startRpcServerForTest() {
   return startRpcServerForTestWithOverrides({});
 }
@@ -48,6 +63,7 @@ async function startRpcServerForTestWithOverrides({
   transferService = null,
   utxoWalletService = null,
   mrc20Service = null,
+  onBotBrowserOpen = null,
 } = {}) {
   const originalLoad = Module._load;
   Module._load = function patchedModuleLoad(request, parent, isMain) {
@@ -59,6 +75,11 @@ async function startRpcServerForTestWithOverrides({
           },
           getAppPath() {
             return process.cwd();
+          },
+        },
+        BrowserWindow: {
+          getAllWindows() {
+            return [];
           },
         },
       };
@@ -89,8 +110,9 @@ async function startRpcServerForTestWithOverrides({
 
   let startMetaidRpcServer;
   try {
-    delete require.cache[require.resolve('../dist-electron/services/metaidRpcServer.js')];
-    ({ startMetaidRpcServer } = require('../dist-electron/services/metaidRpcServer.js'));
+    const compiledRpcServerPath = resolveCompiledMetaidRpcServerPath();
+    delete require.cache[compiledRpcServerPath];
+    ({ startMetaidRpcServer } = require(compiledRpcServerPath));
   } finally {
     Module._load = originalLoad;
   }
@@ -105,6 +127,7 @@ async function startRpcServerForTestWithOverrides({
         return () => {};
       },
     }),
+    onBotBrowserOpen ? { openBotBrowserUri: onBotBrowserOpen } : undefined,
   );
 
   await new Promise((resolve, reject) => {
@@ -128,6 +151,62 @@ async function startRpcServerForTestWithOverrides({
     baseUrl: `http://127.0.0.1:${port}`,
   };
 }
+
+test('rpc bot-browser open route accepts Browser URI and invokes the host open callback', async () => {
+  const opened = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    onBotBrowserOpen(input) {
+      opened.push(input);
+    },
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uri: 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
+      }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(json.uri, 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0');
+    assert.deepEqual(opened, [
+      {
+        uri: 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0',
+        actorId: null,
+      },
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc bot-browser open route rejects unsupported URI schemes', async () => {
+  const opened = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    onBotBrowserOpen(input) {
+      opened.push(input);
+    },
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: 'https://example.com' }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(json.success, false);
+    assert.equal(opened.length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 test('rpc routes expose account-summary, address-balance, and fee-rate-summary endpoints', async () => {
   const originalFetch = global.fetch;
