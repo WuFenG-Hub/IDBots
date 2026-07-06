@@ -28,6 +28,14 @@ function stripQueryAndFragment(value: string): string {
   return value.split(/[?#]/)[0] ?? '';
 }
 
+function stripOptionalMetafileExtension(value: string): string {
+  const normalized = stripQueryAndFragment(value).trim();
+  if (!normalized) {
+    return '';
+  }
+  return normalized.replace(/\.[A-Za-z0-9][A-Za-z0-9+-]{0,31}$/u, '') || normalized;
+}
+
 function normalizeEmbeddedImageDataUrl(buffer: Buffer): string | null {
   const text = buffer.toString('utf8').trim();
   if (/^data:image\/[a-z0-9.+-]+(?:;[a-z0-9_.=+-]+)*,/i.test(text)) {
@@ -107,14 +115,18 @@ export function extractPinIdFromReference(reference: string | null | undefined):
   }
 
   if (normalized.toLowerCase().startsWith('metafile://')) {
-    const pinId = stripQueryAndFragment(normalized.slice('metafile://'.length).trim());
-    return pinId || null;
+    const pinId = stripOptionalMetafileExtension(normalized.slice('metafile://'.length).trim());
+    if (!pinId || pinId.includes('/') || pinId.includes('\\')) {
+      return null;
+    }
+    return pinId;
   }
 
   for (const pattern of PIN_CONTENT_PATTERNS) {
     const match = normalized.match(pattern);
     if (match?.[1]) {
-      return decodeURIComponent(match[1]);
+      const pinId = stripOptionalMetafileExtension(decodeURIComponent(match[1]));
+      return pinId || null;
     }
   }
 
@@ -124,7 +136,8 @@ export function extractPinIdFromReference(reference: string | null | undefined):
       for (const pattern of PIN_CONTENT_PATTERNS) {
         const match = url.pathname.match(pattern);
         if (match?.[1]) {
-          return decodeURIComponent(match[1]);
+          const pinId = stripOptionalMetafileExtension(decodeURIComponent(match[1]));
+          return pinId || null;
         }
       }
     } catch {
@@ -133,7 +146,7 @@ export function extractPinIdFromReference(reference: string | null | undefined):
     return null;
   }
 
-  const bare = stripQueryAndFragment(normalized);
+  const bare = stripOptionalMetafileExtension(normalized);
   if (!bare.includes('/') && !bare.includes(':')) {
     return bare;
   }

@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 
 let resolveMetaAppVisualFields;
 try {
-  ({ resolveMetaAppVisualFields } = require('../dist-electron/services/metaAppVisualService.js'));
+  ({ resolveMetaAppVisualFields } = require('../dist-electron/main/services/metaAppVisualService.js'));
 } catch {
   resolveMetaAppVisualFields = null;
 }
@@ -46,6 +46,42 @@ test('resolveMetaAppVisualFields maps chain metafile visuals to browser URLs wit
       'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/avatar-pin-i0',
     );
     assert.equal(result.name, 'Chain App');
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test('resolveMetaAppVisualFields strips optional metafile extensions when mapping chain visuals to browser URLs', async () => {
+  assert.equal(typeof resolveMetaAppVisualFields, 'function', 'resolveMetaAppVisualFields() should be exported');
+
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw new Error('extension-bearing chain visual preview URL mapping should not fetch image bytes');
+  };
+
+  try {
+    const result = await resolveMetaAppVisualFields(
+      {
+        name: 'Bot Internet',
+        icon: 'metafile://icon-pin-i0.png',
+        cover: 'metafile://cover-pin-i0.webp?download=1',
+        authorAvatar: '/content/avatar-pin-i0.jpeg?process=thumbnail',
+      },
+      { preferRemoteAssetUrls: true },
+    );
+
+    assert.equal(
+      result.icon,
+      'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/icon-pin-i0',
+    );
+    assert.equal(
+      result.cover,
+      'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/cover-pin-i0',
+    );
+    assert.equal(
+      result.authorAvatar,
+      'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/avatar-pin-i0',
+    );
   } finally {
     global.fetch = originalFetch;
   }

@@ -9,7 +9,7 @@ const {
   extractPinIdFromReference,
   resolveMetaidAvatarReference,
   resolvePinAssetSource,
-} = require('../dist-electron/services/pinAssetService.js');
+} = require('../dist-electron/main/services/pinAssetService.js');
 
 const ERIC_AVATAR_PIN_ID = '92fcff9ceada16c20d26322748e877b2d48dee54cf09770768bb8b27998b90f9i0';
 
@@ -53,6 +53,42 @@ test('resolvePinAssetSource unwraps legacy text data URL wrappers', async () => 
   assert.equal(await resolvePinAssetSource(wrapped), imageDataUrl);
 });
 
+test('resolvePinAssetSource strips an optional metafile extension before fetching asset bytes', async () => {
+  clearResolvedPinAssetCache();
+  const originalFetch = global.fetch;
+  const fetchedUrls = [];
+
+  global.fetch = async (url) => {
+    const href = String(url);
+    fetchedUrls.push(href);
+    if (href.endsWith(`/${ERIC_AVATAR_PIN_ID}`)) {
+      return new Response(Buffer.from([0x89, 0x50, 0x4e, 0x47]), {
+        headers: {
+          'content-type': 'image/png',
+          'content-length': '4',
+        },
+      });
+    }
+    return new Response('', { status: 404 });
+  };
+
+  try {
+    const result = await resolvePinAssetSource(`metafile://${ERIC_AVATAR_PIN_ID}.png`);
+    assert.equal(result, 'data:image/png;base64,iVBORw==');
+    assert.ok(
+      fetchedUrls.some((href) => href.endsWith(`/${ERIC_AVATAR_PIN_ID}`)),
+      'resolver should fetch the stripped pin id without the file extension',
+    );
+    assert.ok(
+      fetchedUrls.every((href) => !href.includes(`/${ERIC_AVATAR_PIN_ID}.png`)),
+      'resolver should not request content URLs with the metafile extension still attached',
+    );
+  } finally {
+    global.fetch = originalFetch;
+    clearResolvedPinAssetCache();
+  }
+});
+
 test('extractPinIdFromReference accepts MetaID accelerated avatar URL variants', () => {
   assert.equal(
     extractPinIdFromReference(
@@ -63,6 +99,23 @@ test('extractPinIdFromReference accepts MetaID accelerated avatar URL variants',
   assert.equal(
     extractPinIdFromReference(
       `https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/${ERIC_AVATAR_PIN_ID}?process=thumbnail`,
+    ),
+    ERIC_AVATAR_PIN_ID,
+  );
+});
+
+test('extractPinIdFromReference strips optional metafile extensions across supported reference forms', () => {
+  assert.equal(
+    extractPinIdFromReference(`metafile://${ERIC_AVATAR_PIN_ID}.png?download=1#preview`),
+    ERIC_AVATAR_PIN_ID,
+  );
+  assert.equal(
+    extractPinIdFromReference(`/content/${ERIC_AVATAR_PIN_ID}.webp?size=large`),
+    ERIC_AVATAR_PIN_ID,
+  );
+  assert.equal(
+    extractPinIdFromReference(
+      `https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/${ERIC_AVATAR_PIN_ID}.jpeg?process=thumbnail`,
     ),
     ERIC_AVATAR_PIN_ID,
   );

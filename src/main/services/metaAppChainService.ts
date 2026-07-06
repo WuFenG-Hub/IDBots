@@ -3,6 +3,7 @@ import path from 'path';
 import { fetchContentWithFallback } from './localIndexerProxy';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
 import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { extractPinIdFromReference } from './pinAssetService';
 
 let AdmZip: typeof import('adm-zip') | null = null;
 try {
@@ -355,12 +356,11 @@ const extractMetafilePinId = (uri: string): string => {
   if (!trimmed.toLowerCase().startsWith('metafile://')) {
     return '';
   }
-  const rawPinId = trimmed.slice('metafile://'.length).trim();
-  if (!rawPinId || rawPinId.includes('/') || rawPinId.includes('\\')) {
+  const pinId = extractPinIdFromReference(trimmed);
+  if (!pinId || pinId.includes('/') || pinId.includes('\\')) {
     return '';
   }
-  const pinId = rawPinId.replace(/\.[A-Za-z0-9_-]+$/, '');
-  return pinId || '';
+  return pinId;
 };
 
 const sanitizeAppId = (name: string, fallbackPinId: string): string => {
