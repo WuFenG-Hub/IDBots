@@ -133,6 +133,11 @@ function normalizeResolveAction(
   if (action.kind === 'service-call' || action.kind === 'service-list') {
     return null;
   }
+  // Keep ABC's original action kinds intact. Previously this rewrote
+  // `private-chat` into `open-conversation`, but ABC's bot-page header filter
+  // (isBotPageHeaderAction) drops `open-conversation` while keeping
+  // `private-chat`, so the rewrite hid the Message button. We now only enrich
+  // the payload; the action kind is preserved so the UI renders as designed.
   if (action.kind !== 'private-chat') {
     return action;
   }
@@ -147,7 +152,6 @@ function normalizeResolveAction(
 
   return {
     ...action,
-    kind: 'open-conversation',
     payload: {
       ...payload,
       peerGlobalMetaId,
