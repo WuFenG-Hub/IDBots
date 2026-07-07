@@ -77,6 +77,13 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('botBrowser:writeMetaIdPin', input),
     uploadMetaFile: (input: { actorId?: string; resourceUri?: string; payload?: unknown; network?: string }) =>
       ipcRenderer.invoke('botBrowser:uploadMetaFile', input),
+    sendPrivateChat: (input: {
+      actorId?: string;
+      peerGlobalMetaId?: string;
+      content?: string;
+      replyPin?: string;
+      network?: string;
+    }) => ipcRenderer.invoke('botBrowser:sendPrivateChat', input),
   },
   permissions: {
     checkCalendar: () => ipcRenderer.invoke('permissions:checkCalendar'),

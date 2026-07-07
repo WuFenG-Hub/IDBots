@@ -70,6 +70,17 @@ export interface IdBotsBrowserHostAdapterInput {
   writeMetaIdPin?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
   uploadMetaFile?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
   openConversation: (request: BotBrowserConversationRequest) => Promise<void>;
+  /**
+   * Sends an on-chain /protocols/simplemsg PIN (ECDH-encrypted) to a peer.
+   * Used by the private-chat trusted action when it carries authored content
+   * (the Bot Browser "Send" modal). Returns the resulting pin/txids.
+   */
+  sendPrivateChat?: (input: {
+    actorId?: string;
+    peerGlobalMetaId: string;
+    content: string;
+    replyPin?: string;
+  }) => Promise<{ success: boolean; pinId?: string; txids?: string[]; error?: string }>;
   fetch?: typeof fetch;
 }
 
@@ -573,8 +584,58 @@ export function createIdbotsBrowserHostAdapter(
         if (!peerGlobalMetaId) {
           return browserFailure('browser_action_missing_peer', 'A peer GlobalMetaID is required.');
         }
-        const conversationUri = conversationUriFromPayload(actionInput.payload, peerGlobalMetaId);
 
+        // ABC's private-chat modal submits the authored text as payload.content.
+        // When present, send it as an on-chain /protocols/simplemsg PIN rather
+        // than only opening an empty conversation (mirrors OAC's chat.private).
+        const content = text(actionInput.payload?.content);
+        if (actionInput.kind === 'private-chat' && content) {
+          if (!input.sendPrivateChat) {
+            return browserFailure(
+              'browser_action_not_supported',
+              'On-chain private messaging is not supported in this IDBots build.',
+            );
+          }
+          const replyPin = text(actionInput.payload?.replyPin) || undefined;
+          const sendResult = await input.sendPrivateChat({
+            actorId,
+            peerGlobalMetaId,
+            content,
+            ...(replyPin ? { replyPin } : {}),
+          });
+          if (!sendResult.success) {
+            return browserFailure(
+              'browser_action_send_failed',
+              sendResult.error || 'Failed to send the private message.',
+            );
+          }
+
+          // After delivering on-chain, surface the conversation view so the
+          // user lands in the chat thread the message belongs to.
+          const conversationUri = conversationUriFromPayload(actionInput.payload, peerGlobalMetaId);
+          await input.openConversation({
+            actionKind: 'open-conversation',
+            actorId,
+            resourceUri: actionInput.resourceUri,
+            peerGlobalMetaId,
+            conversationUri,
+            peerName: text(actionInput.payload?.peerName) || undefined,
+            peerAvatar: text(actionInput.payload?.peerAvatar) || undefined,
+          }).catch(() => { /* navigation is best-effort after a successful send */ });
+
+          return browserSuccess({
+            kind: actionInput.kind,
+            handled: true,
+            data: {
+              message: 'Private message sent.',
+              ...(sendResult.pinId ? { pinId: sendResult.pinId } : {}),
+              ...(sendResult.txids ? { txids: sendResult.txids } : {}),
+            },
+          });
+        }
+
+        // No authored content (or open-conversation): just open the thread.
+        const conversationUri = conversationUriFromPayload(actionInput.payload, peerGlobalMetaId);
         await input.openConversation({
           actionKind: actionInput.kind,
           actorId,

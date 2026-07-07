@@ -5204,6 +5204,91 @@ if (!gotTheLock) {
     );
   });
 
+  // Sends an on-chain /protocols/simplemsg PIN (ECDH-encrypted) from a local
+  // Bot to a peer, driven by the Bot Browser private-chat trusted action.
+  // Mirrors the A2A guidance-restart send path (see main.ts:5708).
+  ipcMain.handle('botBrowser:sendPrivateChat', async (_event, input: unknown) => {
+    try {
+      const body = (input ?? {}) as {
+        actorId?: unknown;
+        peerGlobalMetaId?: unknown;
+        content?: unknown;
+        replyPin?: unknown;
+        network?: unknown;
+      };
+
+      const actorMatch = /^idbots-metabot-(\d+)$/.exec(toSafeString(body.actorId));
+      const metabotId = actorMatch ? Number.parseInt(actorMatch[1], 10) : NaN;
+      const peerGlobalMetaId = toSafeString(body.peerGlobalMetaId).trim();
+      const content = toSafeString(body.content).trim();
+      if (!Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'A valid local Bot actor is required.' };
+      }
+      if (!peerGlobalMetaId) {
+        return { success: false, error: 'A valid peer GlobalMetaID is required.' };
+      }
+      if (!content) {
+        return { success: false, error: 'Message content is required.' };
+      }
+
+      const metabotStoreInst = getMetabotStore();
+      const metabot = metabotStoreInst.getMetabotById(metabotId);
+      const wallet = metabotStoreInst.getMetabotWalletByMetabotId(metabotId);
+      const localGlobalMetaId = toSafeString(metabot?.globalmetaid).trim();
+      if (!metabot || !wallet?.mnemonic?.trim() || !localGlobalMetaId) {
+        return { success: false, error: 'Local Bot wallet is not ready for encrypted messaging.' };
+      }
+
+      // Prefer a peer chat pubkey previously seen on an inbound message; fall
+      // back to resolving it from chain, matching the A2A guidance send path.
+      const db = getStore().getDatabase();
+      const latestPeerKey = db.exec(
+        `SELECT from_chat_pubkey, reply_pin
+         FROM private_chat_messages
+         WHERE (from_global_metaid = ? OR from_metaid = ?)
+           AND (to_global_metaid = ? OR to_metaid = ?)
+           AND from_chat_pubkey IS NOT NULL
+           AND TRIM(from_chat_pubkey) != ''
+         ORDER BY id DESC
+         LIMIT 1`,
+        [peerGlobalMetaId, peerGlobalMetaId, localGlobalMetaId, localGlobalMetaId],
+      );
+      const row = latestPeerKey[0]?.values?.[0] ?? [];
+      let chatPubkey = toSafeString(row[0]).trim();
+      let replyPin = toSafeString(row[1]).trim();
+      if (!chatPubkey) {
+        chatPubkey = (await resolveChatPubkeyForProvider(peerGlobalMetaId)) ?? '';
+      }
+      const explicitReplyPin = toSafeString(body.replyPin).trim();
+      if (explicitReplyPin) replyPin = explicitReplyPin;
+      if (!chatPubkey) {
+        return { success: false, error: 'Peer chat public key is unavailable.' };
+      }
+
+      const sent = await sendEncryptedSimplemsg({
+        metabotId,
+        wallet,
+        peerGlobalMetaId,
+        peerChatPubkey: chatPubkey,
+        plaintext: content,
+        replyPin: replyPin || null,
+        createPin: async (id, payload) => createPin(metabotStoreInst, id, payload),
+      });
+
+      return {
+        success: true,
+        pinId: sent.pinId,
+        txids: sent.txids,
+        peerGlobalMetaId,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
   ipcMain.handle('metaapps:list', async () => {
     try {
       const manager = getMetaAppManager();

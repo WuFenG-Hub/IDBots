@@ -147,6 +147,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         clearMetaAppCache: (input) => window.electron.botBrowser.clearMetaAppCache(input),
         writeMetaIdPin: (input) => window.electron.botBrowser.writeMetaIdPin(input),
         uploadMetaFile: (input) => window.electron.botBrowser.uploadMetaFile(input),
+        sendPrivateChat: (input) => window.electron.botBrowser.sendPrivateChat(input),
         openConversation: (request) => callbacksRef.current.onOpenConversation(request),
       });
       endpointShimRef.current = createBrowserEndpointShim(adapter);

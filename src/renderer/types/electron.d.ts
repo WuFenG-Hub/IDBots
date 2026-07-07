@@ -476,6 +476,19 @@ interface IElectronAPI {
       payload?: unknown;
       network?: string;
     }) => Promise<HostBrowserCommandResult<unknown>>;
+    sendPrivateChat: (input: {
+      actorId?: string;
+      peerGlobalMetaId?: string;
+      content?: string;
+      replyPin?: string;
+      network?: string;
+    }) => Promise<{
+      success: boolean;
+      pinId?: string;
+      txids?: string[];
+      peerGlobalMetaId?: string;
+      error?: string;
+    }>;
   };
   api: {
     fetch: (options: {
