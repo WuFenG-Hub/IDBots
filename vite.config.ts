@@ -11,10 +11,12 @@ const isProductionBuild = process.env.NODE_ENV === 'production';
 const shouldUseVitePolling = process.env.IDBOTS_VITE_USE_POLLING === '1';
 const require = createRequire(import.meta.url);
 const { createElectronMainExternalPredicate } = require('./scripts/electron-main-externals.cjs');
+const { createDepsCacheBusterPlugin } = require('./scripts/vite-deps-cache-buster.cjs');
 const electronMainExternal = createElectronMainExternalPredicate();
 
 export default defineConfig({
   plugins: [
+    createDepsCacheBusterPlugin(),
     react(),
     electron([
       {

@@ -7,6 +7,8 @@ node_modules/
 dist/
 dist-electron/
 release/
+# Local optimizeDeps content fingerprint (regenerated on each dev start)
+.vite-deps-fingerprint.json
 .DS_Store
 .cursor/
 .env
