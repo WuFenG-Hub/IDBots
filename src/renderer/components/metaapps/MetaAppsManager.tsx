@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ArrowPathIcon,
   ClipboardDocumentIcon,
   FolderOpenIcon,
   MagnifyingGlassIcon,
@@ -19,7 +18,6 @@ import {
   filterMetaApps,
   getCommunityMetaAppActionLabel,
   getCommunityMetaAppsEmptyState,
-  getCommunityMetaAppStatusLabel,
   getMetaAppAiPromptModel,
   getMetaAppAuthorBrowserTarget,
   getMetaAppAuthorModel,
@@ -60,7 +58,7 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   const [actionError, setActionError] = useState('');
   const [openingFolderAppId, setOpeningFolderAppId] = useState<string | null>(null);
   const [startingAppId, setStartingAppId] = useState<string | null>(null);
-  const [installingSourcePinId, setInstallingSourcePinId] = useState<string | null>(null);
+  const [runningCommunitySourcePinId, setRunningCommunitySourcePinId] = useState<string | null>(null);
   const [promptPanel, setPromptPanel] = useState<{ appName: string; prompt: string } | null>(null);
   const [copiedPrompt, setCopiedPrompt] = useState(false);
 
@@ -413,33 +411,19 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
     }
   };
 
-  const handleInstallCommunityMetaApp = async (app: CommunityMetaAppRecord) => {
-    if (installingSourcePinId || app.status === 'installed' || app.status === 'uninstallable') return;
-    setInstallingSourcePinId(app.sourcePinId);
+  const handleRunCommunityMetaApp = async (app: CommunityMetaAppRecord) => {
+    if (!onPreviewMetaAppByPin || runningCommunitySourcePinId) return;
+    setRunningCommunitySourcePinId(app.sourcePinId);
     setActionError('');
     try {
-      const result = await metaAppService.installCommunityMetaApp(app.sourcePinId);
-      if (!result.success) {
-        setActionError(result.error || i18nService.t('metaAppInstallFailed'));
-      }
-
-      const refreshed = await metaAppService.listCommunityMetaApps({
-        cursor: communityCursor,
-        size: COMMUNITY_PAGE_SIZE,
-      });
-      if (refreshed.success && refreshed.apps) {
-        setCommunityApps(refreshed.apps);
-        setCommunityNextCursor(refreshed.nextCursor || null);
-      }
-
-      const localResult = await window.electron.metaapps.list();
-      if (localResult.success && localResult.apps) {
-        setApps(localResult.apps);
+      const opened = await onPreviewMetaAppByPin?.(app.sourcePinId);
+      if (!opened) {
+        setActionError(i18nService.t('metaAppUseFailed'));
       }
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : i18nService.t('metaAppInstallFailed'));
+      setActionError(error instanceof Error ? error.message : i18nService.t('metaAppUseFailed'));
     } finally {
-      setInstallingSourcePinId(null);
+      setRunningCommunitySourcePinId(null);
     }
   };
 
@@ -616,11 +600,9 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         <div className="grid grid-cols-2 gap-3">
           {filteredCommunityApps.map((app) => {
             const language = i18nService.getLanguage();
-            const statusLabel = getCommunityMetaAppStatusLabel(app.status, language);
             const actionLabel = getCommunityMetaAppActionLabel(app.status, language);
-            const isInstalling = installingSourcePinId === app.sourcePinId;
-            const canInstall = app.status === 'install' || app.status === 'update';
-            const isActionDisabled = installingSourcePinId !== null;
+            const isRunning = runningCommunitySourcePinId === app.sourcePinId;
+            const isActionDisabled = !onPreviewMetaAppByPin || runningCommunitySourcePinId !== null;
 
             return (
               <div
@@ -635,9 +617,6 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
                     </span>
                     {renderAiPromptButton(app)}
                   </div>
-                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-claude-accent/10 text-claude-accent font-medium">
-                    {statusLabel}
-                  </span>
                 </div>
 
                 <Tooltip
@@ -654,40 +633,20 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
                 <div className="flex items-center justify-between gap-2 mt-1">
                   {renderAuthorIdentity(app, language)}
                   <Tooltip
-                    content={app.reason || actionLabel}
+                    content={actionLabel}
                     position="top"
                   >
-                    {canInstall ? (
-                      <button
-                        type="button"
-                        disabled={isActionDisabled}
-                        onClick={() => void handleInstallCommunityMetaApp(app)}
-                        className="btn-idchat-primary-filled inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-                        title={actionLabel}
-                      >
-                        {isInstalling ? <ArrowPathIcon className="h-3.5 w-3.5 animate-spin" /> : null}
-                        {isInstalling ? i18nService.t('loading') : actionLabel}
-                      </button>
-                    ) : app.status === 'installed' ? (
-                      <span className="shrink-0 whitespace-nowrap px-2.5 py-1 text-xs rounded-lg dark:bg-claude-darkBorder bg-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-not-allowed">
-                        {actionLabel}
-                      </span>
-                    ) : (
-                      <span
-                        className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap px-2.5 py-1 text-xs rounded-lg bg-red-500/20 text-red-500 cursor-not-allowed"
-                        title={app.reason || actionLabel}
-                      >
-                        {actionLabel}
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      disabled={isActionDisabled}
+                      onClick={() => void handleRunCommunityMetaApp(app)}
+                      className="btn-idchat-primary-filled inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap px-2.5 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                      title={actionLabel}
+                    >
+                      {isRunning ? i18nService.t('loading') : actionLabel}
+                    </button>
                   </Tooltip>
                 </div>
-
-                {app.reason ? (
-                  <div className="mt-2 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary line-clamp-2">
-                    {app.reason}
-                  </div>
-                ) : null}
               </div>
             );
           })}
