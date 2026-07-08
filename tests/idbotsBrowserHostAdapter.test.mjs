@@ -221,7 +221,7 @@ test('getProfile delegates Browser info lookups to the host profile resolver', a
   ]);
 });
 
-test('resolveResource filters service actions and converts private-chat to open-conversation', async () => {
+test('resolveResource filters service actions and preserves private-chat actions', async () => {
   const adapter = createAdapter({
     fetch: async () =>
       createJsonResponse({
@@ -254,10 +254,10 @@ test('resolveResource filters service actions and converts private-chat to open-
   assert.equal(result.data.actions.some((action) => action.kind === 'service-call'), false);
   assert.equal(result.data.actions.some((action) => action.kind === 'service-list'), false);
 
-  const converted = result.data.actions.find((action) => action.id === 'custom-private');
-  assert.equal(converted.kind, 'open-conversation');
-  assert.equal(converted.payload.peerGlobalMetaId, 'idq1payload');
-  assert.equal(converted.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1payload');
+  const privateChat = result.data.actions.find((action) => action.id === 'custom-private');
+  assert.equal(privateChat.kind, 'private-chat');
+  assert.equal(privateChat.payload.peerGlobalMetaId, 'idq1payload');
+  assert.equal(privateChat.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1payload');
 
   const canonical = result.data.actions.find((action) => action.id === 'custom-conversation');
   assert.equal(canonical.kind, 'open-conversation');
@@ -385,6 +385,59 @@ test('runTrustedAction opens a conversation only with a local actor id and peer 
       peerAvatar: 'https://cdn.example/peer.png',
     },
   ]);
+});
+
+test('runTrustedAction sends private-chat content without opening the conversation before follow-up', async () => {
+  const opened = [];
+  const sent = [];
+  const adapter = createAdapter({
+    listMetabots: async () => [createMetabot({ id: 7, globalmetaid: 'idq1777' })],
+    openConversation: async (request) => {
+      opened.push(request);
+    },
+    sendPrivateChat: async (request) => {
+      sent.push(request);
+      return {
+        success: true,
+        pinId: 'pin123i0',
+        txids: ['tx123'],
+      };
+    },
+  });
+
+  const result = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaid://idq1peer',
+    kind: 'private-chat',
+    payload: {
+      to: ' IDQ1PEER ',
+      content: ' hello ',
+      replyPin: ' reply123i0 ',
+      conversationUri: 'map://simplemsg/conversation?peer=idq1peer',
+      peerName: 'Peer Bot',
+      peerAvatar: 'https://cdn.example/peer.png',
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data, {
+    kind: 'private-chat',
+    handled: true,
+    data: {
+      message: 'Private message sent.',
+      pinId: 'pin123i0',
+      txids: ['tx123'],
+    },
+  });
+  assert.deepEqual(sent, [
+    {
+      actorId: 'idbots-metabot-7',
+      peerGlobalMetaId: 'idq1peer',
+      content: 'hello',
+      replyPin: 'reply123i0',
+    },
+  ]);
+  assert.deepEqual(opened, []);
 });
 
 test('runTrustedAction forwards metaid-pin-write to the trusted host writer', async () => {
@@ -661,7 +714,7 @@ test('resolveResource delegates to host resolve wiring when provided and still n
     { actorId: 'idbots-metabot-1', uri: 'sunnyfung.eth' },
   ]);
   assert.equal(result.data.actions.some((action) => action.kind === 'service-call'), false);
-  assert.equal(result.data.actions[0].kind, 'open-conversation');
+  assert.equal(result.data.actions[0].kind, 'private-chat');
   assert.equal(result.data.actions[0].payload.peerGlobalMetaId, 'idq1peer');
   assert.deepEqual(result.data.renderer.data.sections, []);
 });

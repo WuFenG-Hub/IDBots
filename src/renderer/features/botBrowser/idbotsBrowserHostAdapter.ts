@@ -641,19 +641,8 @@ export function createIdbotsBrowserHostAdapter(
             );
           }
 
-          // After delivering on-chain, surface the conversation view so the
-          // user lands in the chat thread the message belongs to.
-          const conversationUri = conversationUriFromPayload(actionInput.payload, peerGlobalMetaId);
-          await input.openConversation({
-            actionKind: 'open-conversation',
-            actorId,
-            resourceUri: actionInput.resourceUri,
-            peerGlobalMetaId,
-            conversationUri,
-            peerName: text(actionInput.payload?.peerName) || undefined,
-            peerAvatar: text(actionInput.payload?.peerAvatar) || undefined,
-          }).catch(() => { /* navigation is best-effort after a successful send */ });
-
+          // Let ABC show its post-send confirmation modal. The modal's
+          // "View conversation" button will invoke the open-conversation action.
           return browserSuccess({
             kind: actionInput.kind,
             handled: true,
