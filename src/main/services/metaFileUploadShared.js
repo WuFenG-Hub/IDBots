@@ -1,6 +1,6 @@
 import path from 'path';
 
-const DEFAULT_CHUNK_THRESHOLD_BYTES = 2 * 1024 * 1024;
+const DEFAULT_CHUNK_THRESHOLD_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_METAFS_UPLOADER_BASE = 'https://file.metaid.io/metafile-uploader';
 const PREVIEW_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content';
@@ -160,14 +160,14 @@ function normalizeUploaderBaseUrl(url) {
 function selectUploadMode({ sizeBytes, chunkThresholdBytes = DEFAULT_CHUNK_THRESHOLD_BYTES }) {
   assertPositiveInteger(sizeBytes, 'sizeBytes');
   assertPositiveInteger(chunkThresholdBytes, 'chunkThresholdBytes');
-  return sizeBytes > chunkThresholdBytes ? 'chunked' : 'direct';
+  return sizeBytes >= chunkThresholdBytes ? 'chunked' : 'direct';
 }
 
 function validateUploadSize({ sizeBytes, maxSizeBytes = DEFAULT_MAX_FILE_SIZE_BYTES }) {
   assertPositiveInteger(sizeBytes, 'sizeBytes');
   assertPositiveInteger(maxSizeBytes, 'maxSizeBytes');
-  if (sizeBytes > maxSizeBytes) {
-    throw new Error(`File size exceeds the ${formatMiB(maxSizeBytes)} hard limit`);
+  if (sizeBytes >= maxSizeBytes) {
+    throw new Error(`File size must be smaller than the ${formatMiB(maxSizeBytes)} hard limit`);
   }
   return sizeBytes;
 }

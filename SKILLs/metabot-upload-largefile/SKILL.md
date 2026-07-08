@@ -8,9 +8,9 @@ official: true
 
 这个技能统一处理小文件和大文件上链。
 
-- `<= 2 MiB`：直接上链
-- `> 2 MiB`：自动走分片上链
-- 硬限制：`<= 20 MiB`
+- `< 5 MiB`：直接上链
+- `>= 5 MiB` 且 `< 50 MiB`：自动走分片上链
+- 硬限制：`< 50 MiB`
 - 成功后必须返回 `pinId` 和预览地址
 
 预览地址格式固定为：
@@ -71,9 +71,9 @@ node "$SKILLS_ROOT/metabot-upload-largefile/scripts/upload-largefile.js" \
 ## ⚠️ 严格约束
 
 1. 不要用 `cat`、Read 工具或其它方式主动读取用户的大文件内容。只传文件路径给脚本。
-2. 文件超过 `20 MiB` 必须直接报错，不要尝试上传。
-3. 文件大于 `2 MiB` 时必须走分片上传，不能继续走 direct upload。
-4. 当前 IDBots 内置实现里，大文件分片上传只支持 `mvc`。如果用户指定 `doge` 或 `btc` 且文件大于 `2 MiB`，要明确报错，不要假装支持。
+2. 文件大于等于 `50 MiB` 必须直接报错，不要尝试上传。
+3. 文件大于等于 `5 MiB` 时必须走分片上传，不能继续走 direct upload。
+4. 当前 IDBots 内置实现里，大文件分片上传只支持 `mvc`。如果用户指定 `doge` 或 `btc` 且文件大于等于 `5 MiB`，要明确报错，不要假装支持。
 5. 如果用户没有提供真实文件路径，必须先追问路径，不能捏造。
 6. 始终使用 `$SKILLS_ROOT/metabot-upload-largefile/scripts/upload-largefile.js`，不要调用 `.ts`。
 
@@ -94,7 +94,7 @@ node "$SKILLS_ROOT/metabot-upload-largefile/scripts/upload-largefile.js" \
   --content-type application/pdf
 ```
 
-**3. 上传一个大于 2 MiB 的视频到 MVC：**
+**3. 上传一个大于等于 5 MiB 的视频到 MVC：**
 
 ```bash
 node "$SKILLS_ROOT/metabot-upload-largefile/scripts/upload-largefile.js" \

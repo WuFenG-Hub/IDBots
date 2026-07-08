@@ -317,11 +317,11 @@ test('resolveServiceDeliveryArtifact falls back to time window when scoped messa
   assert.equal(result.artifact.filePath, archivePath);
 });
 
-test('resolveServiceDeliveryArtifact accepts video files up to 50 MiB and rejects larger files', () => {
+test('resolveServiceDeliveryArtifact accepts video files below 50 MiB and rejects files at the ceiling', () => {
   const cwd = makeTempDir();
   const acceptedPath = path.join(cwd, 'accepted.mp4');
   fs.closeSync(fs.openSync(acceptedPath, 'w'));
-  fs.truncateSync(acceptedPath, 50 * 1024 * 1024);
+  fs.truncateSync(acceptedPath, 50 * 1024 * 1024 - 1);
 
   const accepted = resolveServiceDeliveryArtifact({
     outputType: 'video',
@@ -335,7 +335,7 @@ test('resolveServiceDeliveryArtifact accepts video files up to 50 MiB and reject
 
   const rejectedPath = path.join(cwd, 'huge.mp4');
   fs.closeSync(fs.openSync(rejectedPath, 'w'));
-  fs.truncateSync(rejectedPath, 50 * 1024 * 1024 + 1);
+  fs.truncateSync(rejectedPath, 50 * 1024 * 1024);
 
   const result = resolveServiceDeliveryArtifact({
     outputType: 'video',

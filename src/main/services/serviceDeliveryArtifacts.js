@@ -212,7 +212,7 @@ function makeArtifact(filePath, deliveryKind, source) {
   if (!stat.isFile()) {
     return null;
   }
-  if (stat.size > DEFAULT_MAX_FILE_SIZE_BYTES) {
+  if (stat.size >= DEFAULT_MAX_FILE_SIZE_BYTES) {
     return {
       status: 'invalid',
       reason: 'file_too_large',

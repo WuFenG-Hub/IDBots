@@ -5988,7 +5988,7 @@ if (!gotTheLock) {
       });
       if (artifactResult.status !== 'found') {
         const reason = artifactResult.status === 'invalid' && artifactResult.reason === 'file_too_large'
-          ? 'Generated artifact is larger than 20 MiB and cannot be uploaded'
+          ? 'Generated artifact must be smaller than 50 MiB to be uploaded'
           : `No matching ${outputType} artifact was found in this A2A session`;
         throw new Error(reason);
       }
