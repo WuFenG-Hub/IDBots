@@ -5170,6 +5170,12 @@ if (!gotTheLock) {
     );
   });
 
+  ipcMain.handle('botBrowser:getProfile', async (_event, input: unknown) => {
+    return getBotBrowserHostService().getProfile(
+      botBrowserHostInput<{ actorId?: string; globalMetaId?: string }>(input) as { actorId?: string; globalMetaId: string },
+    );
+  });
+
   ipcMain.handle('botBrowser:getSettings', async (_event, input?: unknown) => {
     return getBotBrowserHostService().getSettings(
       botBrowserHostInput<{ actorId?: string }>(input),

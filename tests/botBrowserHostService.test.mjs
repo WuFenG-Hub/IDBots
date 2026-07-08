@@ -26,7 +26,9 @@ function createMetaApp(overrides = {}) {
 
 function createJsonResponse(payload, status = 200) {
   return {
+    ok: status >= 200 && status < 300,
     status,
+    statusText: status >= 200 && status < 300 ? 'OK' : 'Error',
     async json() {
       return payload;
     },
@@ -89,6 +91,86 @@ test('resolveResource keeps local MetaApp resolution working through the host se
   assert.equal(result.data.resourceType, 'metaapp');
   assert.equal(result.data.normalizedUri, 'metaapp://PIN123I0');
   assert.equal(result.data.renderer.url, 'http://127.0.0.1:17878/metaapps/local-demo');
+});
+
+test('resolveResource enriches pin owners through ABC profile fetching with host-default fetch', async () => {
+  const pinId = '941c5cfe188a01f50c925c0dfab640b3e1a0638a22979c801e8b8c1f45dbda2di0';
+  const ownerGlobalMetaId = 'idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz';
+  const fetchCalls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    fetchCalls.push(String(url));
+    if (String(url).includes(`/pin/${pinId}`)) {
+      return createJsonResponse({
+        code: 0,
+        data: {
+          pin: {
+            pinId,
+            ownerGlobalMetaId,
+            contentType: 'application/json',
+            contentBody: JSON.stringify({ title: 'Demo Pin' }),
+          },
+        },
+      });
+    }
+    if (String(url).includes(`/api/info/globalmetaid/${ownerGlobalMetaId}`)) {
+      return createJsonResponse({
+        code: 0,
+        data: {
+          globalMetaId: ownerGlobalMetaId,
+          name: 'Owner Bot',
+          avatarId: 'avatar123i0',
+        },
+      });
+    }
+    return createJsonResponse({}, 404);
+  };
+
+  try {
+    const service = createHostService();
+    const result = await service.resolveResource({ uri: `pin://${pinId}` });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.data.owner.globalMetaId, ownerGlobalMetaId);
+    assert.equal(result.data.owner.name, 'Owner Bot');
+    assert.equal(result.data.owner.avatar, 'https://file.metaid.io/metafile-indexer/content/avatar123i0');
+    assert.deepEqual(fetchCalls, [
+      `https://manapi.metaid.io/pin/${pinId}`,
+      `https://so.metaid.io/api/info/globalmetaid/${ownerGlobalMetaId}`,
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getProfile reuses ABC fetchBotProfileInfo for Browser info hydration', async () => {
+  const globalMetaId = 'idq14hmv23j5fnlx4ccnmvlyldjd38xjsechzwg9xz';
+  const fetchCalls = [];
+  const service = createHostService({
+    fetch: async (url) => {
+      fetchCalls.push(String(url));
+      return createJsonResponse({
+        code: 0,
+        data: {
+          globalMetaId,
+          name: 'Related Bot',
+          avatarId: 'relatedavatar123i0',
+        },
+      });
+    },
+  });
+
+  const result = await service.getProfile({ globalMetaId });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data, {
+    globalMetaId,
+    name: 'Related Bot',
+    avatar: 'https://file.metaid.io/metafile-indexer/content/relatedavatar123i0',
+  });
+  assert.deepEqual(fetchCalls, [
+    `https://so.metaid.io/api/info/globalmetaid/${globalMetaId}`,
+  ]);
 });
 
 test('resolveResource resolves a bare ENS alias from host settings and preserves alias semantics', async () => {

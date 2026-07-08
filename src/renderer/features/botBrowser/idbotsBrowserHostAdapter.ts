@@ -4,6 +4,7 @@ import {
   browserCommandSuccess,
   createBrowserSettingsSnapshot,
   createDefaultBrowserConfig,
+  fetchBotProfileInfo,
   resolveBrowserConfig,
   resolveBrowserResource,
   type BrowserCommandResult as CoreBrowserCommandResult,
@@ -18,7 +19,6 @@ import {
   type BrowserCacheInput,
   type BrowserCacheSnapshot,
   type BrowserCommandResult,
-  type BrowserHostAdapter,
   type BrowserResolveAction,
   type BrowserResolveInput,
   type BrowserResolveResult,
@@ -31,6 +31,7 @@ import {
   type BrowserTrustedActionKind,
   type BrowserTrustedActionResult,
 } from '@openagentinternet/agent-browser-host-contract';
+import type { BrowserEndpointAdapter, BrowserProfileInput } from './browserEndpointShim';
 import type {
   CommunityMetaAppInstallResult,
   MetaAppRecord,
@@ -56,6 +57,9 @@ export interface IdBotsBrowserHostAdapterInput {
   resolveBrowserResource?: (
     input: BrowserResolveInput,
   ) => Promise<BrowserCommandResult<BrowserResolveResult>>;
+  getBrowserProfile?: (
+    input: BrowserProfileInput,
+  ) => Promise<BrowserCommandResult<Record<string, unknown>>>;
   getBrowserSettings?: (
     input?: BrowserSettingsInput,
   ) => Promise<BrowserCommandResult<BrowserSettingsSnapshot>>;
@@ -382,7 +386,7 @@ function createContractSettingsSnapshot(config: BrowserConfigContainer): Browser
 
 export function createIdbotsBrowserHostAdapter(
   input: IdBotsBrowserHostAdapterInput,
-): BrowserHostAdapter {
+): BrowserEndpointAdapter {
   let browserConfig = createInitialBrowserConfig();
 
   return {
@@ -445,6 +449,33 @@ export function createIdbotsBrowserHostAdapter(
           normalizeResolveResultActions(normalizeMetaAppResolveResult(result.data)),
         ),
       };
+    },
+
+    async getProfile(
+      profileInput: BrowserProfileInput,
+    ): Promise<BrowserCommandResult<Record<string, unknown>>> {
+      const globalMetaId = text(profileInput.globalMetaId);
+      if (!globalMetaId) {
+        return browserFailure('missing_global_metaid', 'Browser info lookup requires a globalMetaId query parameter.');
+      }
+      if (input.getBrowserProfile) {
+        return input.getBrowserProfile({
+          actorId: text(profileInput.actorId) || undefined,
+          globalMetaId,
+        });
+      }
+
+      const resolvedConfig = resolveBrowserConfig(browserConfig);
+      const profile = await fetchBotProfileInfo({
+        baseUrl: resolvedConfig.metasoP2PBaseUrl,
+        globalMetaId,
+        fetch: input.fetch,
+        metafileContentBaseUrl: resolvedConfig.metafileContentBaseUrl,
+      });
+      if (!profile) {
+        return browserFailure('browser_resource_not_found', 'Browser profile info was not found.');
+      }
+      return browserSuccess(profile);
     },
 
     async getSettings(_settingsInput?: BrowserSettingsInput): Promise<BrowserCommandResult<BrowserSettingsSnapshot>> {

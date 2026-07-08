@@ -37,6 +37,14 @@ function createAdapter() {
         calls.push(['runTrustedAction', input]);
         return browserSuccess({ kind: input.kind, handled: true, data: { message: 'ok' } });
       },
+      async getProfile(input) {
+        calls.push(['getProfile', input]);
+        return browserSuccess({
+          globalMetaId: input.globalMetaId,
+          name: 'Owner Bot',
+          avatar: 'https://cdn.example/owner.png',
+        });
+      },
     },
   };
 }
@@ -83,6 +91,29 @@ test('endpoint shim returns raw command result shapes for runtime, settings, res
         payload: { peerGlobalMetaId: 'idq1peer' },
       },
     ],
+  ]);
+});
+
+test('endpoint shim forwards Browser info profile lookups', async () => {
+  const { adapter, calls } = createAdapter();
+  const shim = createBrowserEndpointShim(adapter);
+
+  const profile = await shim({
+    url: '/api/browser/info?globalMetaId=%20IDQ1OWNER%20&actorId=idbots-metabot-1',
+  });
+
+  assert.equal(profile.status, 200);
+  assert.deepEqual(profile.body, {
+    ok: true,
+    state: 'success',
+    data: {
+      globalMetaId: 'IDQ1OWNER',
+      name: 'Owner Bot',
+      avatar: 'https://cdn.example/owner.png',
+    },
+  });
+  assert.deepEqual(calls, [
+    ['getProfile', { actorId: 'idbots-metabot-1', globalMetaId: 'IDQ1OWNER' }],
   ]);
 });
 

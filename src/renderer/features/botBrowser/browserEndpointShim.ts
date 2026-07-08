@@ -6,6 +6,17 @@ import {
   type BrowserTrustedActionKind,
 } from '@openagentinternet/agent-browser-host-contract';
 
+export interface BrowserProfileInput {
+  actorId?: string;
+  globalMetaId: string;
+}
+
+export type BrowserEndpointAdapter = BrowserHostAdapter & {
+  getProfile?: (
+    input: BrowserProfileInput,
+  ) => Promise<BrowserCommandResult<Record<string, unknown>>>;
+};
+
 export interface BrowserEndpointShimRequest {
   url: string;
   method?: string;
@@ -106,7 +117,7 @@ function bodyRecord(request: BrowserEndpointShimRequest): Record<string, unknown
   return objectRecord(request.body);
 }
 
-export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserEndpointShim {
+export function createBrowserEndpointShim(adapter: BrowserEndpointAdapter): BrowserEndpointShim {
   return async (request) => {
     try {
       const url = new URL(request.url, browserOrigin());
@@ -125,6 +136,18 @@ export function createBrowserEndpointShim(adapter: BrowserHostAdapter): BrowserE
           return response(browserFailure('missing_uri', 'Browser resolve requires a uri query parameter.'));
         }
         return response(await adapter.resolveResource({ actorId, uri }));
+      }
+
+      if (url.pathname === '/api/browser/info') {
+        if (method !== 'GET') return methodNotAllowed();
+        const globalMetaId = text(url.searchParams.get('globalMetaId'));
+        if (!globalMetaId) {
+          return response(browserFailure('missing_global_metaid', 'Browser info lookup requires a globalMetaId query parameter.'));
+        }
+        if (typeof adapter.getProfile !== 'function') {
+          return response(browserFailure('unsupported_method', 'Browser info lookup is not supported in this host.'));
+        }
+        return response(await adapter.getProfile({ actorId, globalMetaId }));
       }
 
       if (url.pathname === '/api/browser/settings') {

@@ -188,6 +188,39 @@ test('resolveResource prefers the Browser MetaApp cache resolver before install 
   assert.deepEqual(installRequests, []);
 });
 
+test('getProfile delegates Browser info lookups to the host profile resolver', async () => {
+  const profileCalls = [];
+  const adapter = createAdapter({
+    getBrowserProfile: async (input) => {
+      profileCalls.push(input);
+      return {
+        ok: true,
+        state: 'success',
+        data: {
+          globalMetaId: input.globalMetaId,
+          name: 'Owner Bot',
+          avatar: 'https://cdn.example/owner.png',
+        },
+      };
+    },
+  });
+
+  const result = await adapter.getProfile({
+    actorId: 'idbots-metabot-1',
+    globalMetaId: ' IDQ1OWNER ',
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.data, {
+    globalMetaId: 'IDQ1OWNER',
+    name: 'Owner Bot',
+    avatar: 'https://cdn.example/owner.png',
+  });
+  assert.deepEqual(profileCalls, [
+    { actorId: 'idbots-metabot-1', globalMetaId: 'IDQ1OWNER' },
+  ]);
+});
+
 test('resolveResource filters service actions and converts private-chat to open-conversation', async () => {
   const adapter = createAdapter({
     fetch: async () =>

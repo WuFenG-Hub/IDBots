@@ -65,6 +65,8 @@ contextBridge.exposeInMainWorld('electron', {
     },
     resolveResource: (input: { actorId?: string; uri: string }) =>
       ipcRenderer.invoke('botBrowser:resolveResource', input),
+    getProfile: (input: { actorId?: string; globalMetaId: string }) =>
+      ipcRenderer.invoke('botBrowser:getProfile', input),
     getSettings: (input?: { actorId?: string }) =>
       ipcRenderer.invoke('botBrowser:getSettings', input),
     updateSettings: (input: { actorId?: string; browser?: Record<string, unknown> }) =>

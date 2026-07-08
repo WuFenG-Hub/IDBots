@@ -459,6 +459,7 @@ interface IElectronAPI {
   botBrowser: {
     onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => () => void;
     resolveResource: (input: BrowserResolveInput) => Promise<HostBrowserCommandResult<BrowserResolveResult>>;
+    getProfile: (input: { actorId?: string; globalMetaId: string }) => Promise<HostBrowserCommandResult<Record<string, unknown>>>;
     getSettings: (input?: BrowserSettingsInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;
     updateSettings: (input: BrowserSettingsUpdateInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;
     resolveMetaAppPin: (input: { pinId: string }) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;

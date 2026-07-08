@@ -4,6 +4,7 @@ import {
   browserCommandSuccess,
   createBrowserSettingsSnapshot,
   createDefaultBrowserConfig,
+  fetchBotProfileInfo,
   resolveBrowserConfig,
   resolveBrowserResource,
   type BrowserBaseConfig,
@@ -29,9 +30,17 @@ import type { CommunityMetaAppInstallResult } from './metaAppChainService';
 
 export interface BotBrowserHostService {
   resolveResource(input: BrowserResolveInput): Promise<BrowserCommandResult<BrowserResolveResult>>;
+  getProfile(input: BotBrowserProfileInput): Promise<BrowserCommandResult<BotBrowserProfileSnapshot>>;
   getSettings(input?: BrowserSettingsInput): Promise<BrowserCommandResult<BrowserSettingsSnapshot>>;
   updateSettings(input: BrowserSettingsUpdateInput): Promise<BrowserCommandResult<BrowserSettingsSnapshot>>;
 }
+
+export interface BotBrowserProfileInput {
+  actorId?: string;
+  globalMetaId: string;
+}
+
+export type BotBrowserProfileSnapshot = Record<string, unknown>;
 
 export interface CreateBotBrowserHostServiceInput {
   listMetaApps: () => Promise<MetaAppRecord[]> | MetaAppRecord[];
@@ -333,6 +342,13 @@ function createHostSettingsSnapshot(
   };
 }
 
+function resolveFetch(fetchImpl: typeof fetch | undefined): typeof fetch | undefined {
+  if (fetchImpl) return fetchImpl;
+  return typeof globalThis.fetch === 'function'
+    ? globalThis.fetch.bind(globalThis)
+    : undefined;
+}
+
 function createNameAliasProviders(input: {
   configured: BrowserNameAliasProvider[] | undefined;
   ensNameAliasProviderFactory: CreateBotBrowserHostServiceInput['ensNameAliasProviderFactory'];
@@ -351,6 +367,7 @@ export function createBotBrowserHostService(
   input: CreateBotBrowserHostServiceInput,
 ): BotBrowserHostService {
   const env = input.env ?? process.env;
+  const fetchImpl = resolveFetch(input.fetch);
   let browserConfig = createInitialBrowserConfig();
 
   return {
@@ -364,11 +381,33 @@ export function createBotBrowserHostService(
       const result = await resolveBrowserResource({
         uri: resolveInput.uri,
         config: resolvedConfig,
-        fetch: input.fetch,
+        fetch: fetchImpl,
         nameAliasProviders,
         metaAppResolve: (pinId) => resolveMetaAppRecord(input, pinId),
       });
       return toHostResult(result);
+    },
+
+    async getProfile(profileInput) {
+      const globalMetaId = text(profileInput.globalMetaId);
+      if (!globalMetaId) {
+        return browserFailure('missing_global_metaid', 'Browser info lookup requires a globalMetaId query parameter.');
+      }
+      if (!fetchImpl) {
+        return browserFailure('browser_resolve_failed', 'A fetch implementation is required to resolve Browser profile info.');
+      }
+
+      const resolvedConfig = resolveHostBrowserConfig(browserConfig, env);
+      const profile = await fetchBotProfileInfo({
+        baseUrl: resolvedConfig.metasoP2PBaseUrl,
+        globalMetaId,
+        fetch: fetchImpl,
+        metafileContentBaseUrl: resolvedConfig.metafileContentBaseUrl,
+      });
+      if (!profile) {
+        return browserFailure('browser_resource_not_found', 'Browser profile info was not found.');
+      }
+      return browserSuccess(profile);
     },
 
     async getSettings(_settingsInput) {
