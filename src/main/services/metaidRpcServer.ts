@@ -15,7 +15,13 @@ import {
 } from '@metalet/utxo-wallet-service';
 import type { SqliteStore } from '../sqliteStore';
 import type { MetabotStore } from '../metabotStore';
-import { createPin, getPinData, setMetaidCoreStore, type MetaidDataPayload } from './metaidCore';
+import {
+  createPin,
+  getPinData,
+  setMetaidCoreStore,
+  syncMetaBotEditChangesToChain,
+  type MetaidDataPayload,
+} from './metaidCore';
 import {
   assignGroupChatTask,
   resolveMetabotIdByName,
@@ -31,6 +37,8 @@ import { buildMvcFtTransferRawTx, buildMvcOrderedRawTxBundle, buildMvcTransferRa
 import { executeTransfer } from './transferService';
 import { parseAddressIndexFromPath } from './metabotWalletService';
 import { executeMrc20Transfer } from './mrc20Service';
+import { buildMetaappHomepage } from './metabotHomepage';
+import { METAAPP_PIN_ID_PATTERN } from './metaAppProtocol';
 
 const RPC_HOST = DEFAULT_METAID_RPC_HOST;
 
@@ -49,6 +57,7 @@ const SIGN_BTC_PSBT_PATH = '/api/idbots/wallet/btc/sign-psbt';
 const UPLOAD_LARGEFILE_PATH = '/api/idbots/files/upload-largefile';
 const EXECUTE_TRANSFER_PATH = '/api/idbots/wallet/transfer';
 const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
+const SET_METABOT_HOMEPAGE_METAAPP_PATH = '/api/idbots/metabot/homepage/set-metaapp';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
 export type BotBrowserRpcOpenRequest = {
@@ -82,6 +91,25 @@ function normalizeBotBrowserUri(value: unknown): string {
 function normalizeOptionalActorId(value: unknown): string | null {
   const actorId = String(value || '').trim();
   return actorId || null;
+}
+
+function normalizeRequiredMetabotId(value: unknown): number {
+  const metabotId = Number(value);
+  if (!Number.isInteger(metabotId) || metabotId <= 0) {
+    throw new Error('metabot_id is required');
+  }
+  return metabotId;
+}
+
+function normalizeMetaappPinId(value: unknown): string {
+  let pinId = String(value || '').trim();
+  if (/^metaapp:\/\//i.test(pinId)) {
+    pinId = pinId.slice('metaapp://'.length).trim();
+  }
+  if (!METAAPP_PIN_ID_PATTERN.test(pinId)) {
+    throw new Error('pin_id must be a MetaApp pin id');
+  }
+  return pinId.toLowerCase();
 }
 
 function defaultOpenBotBrowserUri(input: BotBrowserRpcOpenRequest): void {
@@ -170,6 +198,89 @@ export function startMetaidRpcServer(
         await openBotBrowserUri(openRequest);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, ...openRequest }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === SET_METABOT_HOMEPAGE_METAAPP_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      let parsed: { metabot_id?: unknown; pin_id?: unknown; sync?: unknown };
+      try {
+        parsed = JSON.parse(body || '{}') as { metabot_id?: unknown; pin_id?: unknown; sync?: unknown };
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+
+      try {
+        const metabotId = normalizeRequiredMetabotId(parsed.metabot_id);
+        const pinId = normalizeMetaappPinId(parsed.pin_id);
+        const syncRequested = parsed.sync !== false;
+        const store = getMetabotStore();
+        const metabot = store.getMetabotById(metabotId);
+        if (!metabot) {
+          throw new Error(`MetaBot ${metabotId} not found`);
+        }
+
+        const homepage = buildMetaappHomepage(pinId);
+        const homepageJson = JSON.stringify(homepage);
+        const updated = store.updateMetabot(metabotId, {
+          homepage: homepageJson,
+        });
+        if (!updated) {
+          throw new Error(`Failed to update MetaBot ${metabotId}`);
+        }
+
+        let syncResult = {
+          success: true,
+          txids: [] as string[],
+          syncedSteps: [] as string[],
+        };
+        if (syncRequested) {
+          const result = await syncMetaBotEditChangesToChain(store, {
+            metabotId,
+            syncHomepage: true,
+          });
+          if (!result.success) {
+            res.writeHead(200);
+            res.end(JSON.stringify({
+              success: false,
+              error: `Bot homepage was saved locally, but /info/homepage sync failed: ${result.error || 'Unknown error'}`,
+              metabot_id: metabotId,
+              pin_id: pinId,
+              homepage,
+              homepage_json: homepageJson,
+              saved_homepage: true,
+              sync_requested: true,
+              sync_result: result,
+            }));
+            return;
+          }
+          syncResult = {
+            success: true,
+            txids: Array.isArray(result.txids) ? result.txids : [],
+            syncedSteps: Array.isArray(result.syncedSteps) ? result.syncedSteps : [],
+          };
+        }
+
+        res.writeHead(200);
+        res.end(JSON.stringify({
+          success: true,
+          metabot_id: metabotId,
+          pin_id: pinId,
+          homepage,
+          homepage_json: homepageJson,
+          sync_requested: syncRequested,
+          sync_result: syncResult,
+        }));
       } catch (err) {
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));

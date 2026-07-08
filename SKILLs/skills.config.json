@@ -65,15 +65,22 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
-    "metabot-create-metaapp": {
+    "metabot-metaapp": {
       "order": 20,
+      "version": "1.0.0",
+      "creator-metaid": "",
+      "installedAt": 1740969600000,
+      "enabled": true
+    },
+    "metabot-create-metaapp": {
+      "order": 23,
       "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-post-metaapp": {
-      "order": 22,
+      "order": 24,
       "version": "1.0.0",
       "creator-metaid": "",
       "installedAt": 1740969600000,

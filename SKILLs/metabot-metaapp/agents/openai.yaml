@@ -1,0 +1,4 @@
+interface:
+  display_name: "MetaApp"
+  short_description: "Develop, publish, update, and share static MetaApps for Bot Browser"
+  default_prompt: "Help me build, publish, update, delete, or share a MetaApp that follows the latest Bot Browser and MetaID URI rules."
