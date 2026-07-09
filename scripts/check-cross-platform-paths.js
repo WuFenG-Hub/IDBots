@@ -81,11 +81,22 @@ function checkFileNotContains(relPath, snippets, checkName) {
 function checkSymlinkTarget(relPath, expectedTarget, checkName) {
   const linkPath = resolveInProject(relPath);
   let actualTarget;
+  let sourceKind = 'symlink';
   try {
     actualTarget = fs.readlinkSync(linkPath);
   } catch (error) {
-    addCheck(checkName, false, `missing or unreadable symlink: ${relPath} (${error.message})`);
-    return;
+    if (process.platform !== 'win32' || error.code !== 'EINVAL') {
+      addCheck(checkName, false, `missing or unreadable symlink: ${relPath} (${error.message})`);
+      return;
+    }
+
+    // Git for Windows may check out symlinks as regular files containing the target.
+    actualTarget = readFileSafe(relPath)?.trim();
+    sourceKind = 'git symlink text file';
+    if (!actualTarget) {
+      addCheck(checkName, false, `missing symlink target text: ${relPath}`);
+      return;
+    }
   }
 
   const targetPath = path.resolve(path.dirname(linkPath), actualTarget);
@@ -93,7 +104,7 @@ function checkSymlinkTarget(relPath, expectedTarget, checkName) {
   addCheck(
     checkName,
     ok,
-    ok ? `${relPath} -> ${actualTarget}` : `${relPath} -> ${actualTarget}; expected ${expectedTarget}; targetExists=${fs.existsSync(targetPath)}`
+    ok ? `${relPath} -> ${actualTarget} (${sourceKind})` : `${relPath} -> ${actualTarget}; expected ${expectedTarget}; targetExists=${fs.existsSync(targetPath)}`
   );
 }
 
