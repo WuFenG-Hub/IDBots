@@ -147,22 +147,15 @@ export function getCommunityMetaAppStatusLabel(status, language = 'zh') {
 }
 
 export function getCommunityMetaAppActionLabel(status, language = 'zh') {
-  const key = String(status || '').trim();
   const zh = {
-    install: '安装',
-    update: '更新',
-    installed: '已安装',
-    uninstallable: '不可安装',
+    run: '运行',
   };
   const en = {
-    install: 'Install',
-    update: 'Update',
-    installed: 'Installed',
-    uninstallable: 'Unavailable',
+    run: 'Run',
   };
 
   if (language === 'zh') {
-    return zh[key] || zh.uninstallable;
+    return zh.run;
   }
-  return en[key] || en.uninstallable;
+  return en.run;
 }

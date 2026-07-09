@@ -114,3 +114,21 @@ test('MetaApp Browser hook treats no-bot guard failure as handled instead of fal
   assert.match(openMetaAppSource, /if \(!uri\) \{\s*return false;\s*\}/);
   assert.match(openMetaAppSource, /if \(!await showBrowser\(\)\) return true;/);
 });
+
+test('Chain Community MetaApps run in Bot Browser instead of installing locally', () => {
+  const managerSource = read('src/renderer/components/metaapps/MetaAppsManager.tsx');
+  const chainCommunityStart = managerSource.indexOf('const renderChainCommunityTab = () => {');
+  const chainCommunityEnd = managerSource.indexOf('  return (\n    <div className="space-y-4">', chainCommunityStart);
+  assert.ok(chainCommunityStart > 0, 'Chain Community render function should exist');
+  assert.ok(chainCommunityEnd > chainCommunityStart, 'Chain Community render function should end before the component return');
+
+  const chainCommunitySource = managerSource.slice(chainCommunityStart, chainCommunityEnd);
+
+  assert.match(managerSource, /const handleRunCommunityMetaApp = async \(app: CommunityMetaAppRecord\) => \{/);
+  assert.match(managerSource, /await onPreviewMetaAppByPin\?\.\(app\.sourcePinId\)/);
+  assert.doesNotMatch(managerSource, /metaAppService\.installCommunityMetaApp/);
+  assert.doesNotMatch(chainCommunitySource, /getCommunityMetaAppStatusLabel/);
+  assert.doesNotMatch(chainCommunitySource, /statusLabel/);
+  assert.doesNotMatch(chainCommunitySource, /handleInstallCommunityMetaApp/);
+  assert.match(chainCommunitySource, /handleRunCommunityMetaApp\(app\)/);
+});

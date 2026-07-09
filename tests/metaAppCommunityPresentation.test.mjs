@@ -51,13 +51,14 @@ test('getCommunityMetaAppStatusLabel and action label map statuses', () => {
   assert.equal(getCommunityMetaAppStatusLabel('installed', 'zh'), '已安装');
   assert.equal(getCommunityMetaAppStatusLabel('uninstallable', 'zh'), '不可安装');
 
-  assert.equal(getCommunityMetaAppActionLabel('install', 'zh'), '安装');
-  assert.equal(getCommunityMetaAppActionLabel('update', 'zh'), '更新');
-  assert.equal(getCommunityMetaAppActionLabel('installed', 'zh'), '已安装');
-  assert.equal(getCommunityMetaAppActionLabel('uninstallable', 'zh'), '不可安装');
+  assert.equal(getCommunityMetaAppActionLabel('install', 'zh'), '运行');
+  assert.equal(getCommunityMetaAppActionLabel('update', 'zh'), '运行');
+  assert.equal(getCommunityMetaAppActionLabel('installed', 'zh'), '运行');
+  assert.equal(getCommunityMetaAppActionLabel('uninstallable', 'zh'), '运行');
 
   assert.equal(getCommunityMetaAppStatusLabel('install', 'en'), 'Install');
-  assert.equal(getCommunityMetaAppActionLabel('update', 'en'), 'Update');
+  assert.equal(getCommunityMetaAppActionLabel('update', 'en'), 'Run');
+  assert.equal(getCommunityMetaAppActionLabel('uninstallable', 'en'), 'Run');
 });
 
 test('getMetaAppVisualModel works for chain community records too', () => {
