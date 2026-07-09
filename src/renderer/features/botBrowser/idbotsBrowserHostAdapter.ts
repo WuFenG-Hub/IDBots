@@ -116,12 +116,6 @@ function safeBridgeMessage(value: unknown, fallback: string): string {
   return message;
 }
 
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
 function createInitialBrowserConfig(): BrowserConfigContainer {
   return {
     browser: {
@@ -181,32 +175,6 @@ function normalizeResolveResultActions(result: BrowserResolveResult): BrowserRes
     actions: result.actions
       .map((action) => normalizeResolveAction(action, result))
       .filter((action): action is BrowserResolveAction => Boolean(action)),
-  };
-}
-
-function isServiceSection(section: unknown): boolean {
-  const record = objectRecord(section);
-  return text(record?.id) === 'services' || text(record?.kind) === 'services';
-}
-
-function removeUnsupportedServiceRendererData(result: BrowserResolveResult): BrowserResolveResult {
-  const rendererData = objectRecord(result.renderer.data);
-  if (!rendererData) {
-    return result;
-  }
-
-  const nextData: Record<string, unknown> = { ...rendererData };
-  delete nextData.services;
-  if (Array.isArray(nextData.sections)) {
-    nextData.sections = nextData.sections.filter((section) => !isServiceSection(section));
-  }
-
-  return {
-    ...result,
-    renderer: {
-      ...result.renderer,
-      data: nextData,
-    },
   };
 }
 
@@ -426,9 +394,7 @@ export function createIdbotsBrowserHostAdapter(
         }
         return {
           ...hostResult,
-          data: removeUnsupportedServiceRendererData(
-            normalizeResolveResultActions(normalizeMetaAppResolveResult(hostResult.data)),
-          ),
+          data: normalizeResolveResultActions(normalizeMetaAppResolveResult(hostResult.data)),
         };
       }
 
@@ -445,9 +411,7 @@ export function createIdbotsBrowserHostAdapter(
 
       return {
         ...result,
-        data: removeUnsupportedServiceRendererData(
-          normalizeResolveResultActions(normalizeMetaAppResolveResult(result.data)),
-        ),
+        data: normalizeResolveResultActions(normalizeMetaAppResolveResult(result.data)),
       };
     },
 

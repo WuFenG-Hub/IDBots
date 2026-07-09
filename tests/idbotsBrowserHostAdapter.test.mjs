@@ -264,7 +264,7 @@ test('resolveResource filters service actions and preserves private-chat actions
   assert.equal(canonical.payload.conversationUri, 'map://simplemsg/conversation?peer=idq1peer');
 });
 
-test('resolveResource removes unsupported renderer service payload while preserving other renderer data', async () => {
+test('resolveResource preserves ABC renderer service payload while filtering unsupported service actions', async () => {
   const adapter = createAdapter({
     fetch: async () =>
       createJsonResponse({
@@ -292,9 +292,12 @@ test('resolveResource removes unsupported renderer service payload while preserv
   assert.equal(result.ok, true);
   assert.equal(result.data.renderer.data.profile.name, 'Peer Bot');
   assert.equal(result.data.renderer.data.identity.globalMetaId, 'idq1peer');
-  assert.equal('services' in result.data.renderer.data, false);
+  assert.deepEqual(result.data.renderer.data.services, [
+    { id: 'svc-1', name: 'Unsupported service' },
+  ]);
   assert.deepEqual(result.data.renderer.data.sections, [
     { id: 'overview', title: 'Overview', items: [{ text: 'keep me' }] },
+    { id: 'services', title: 'Services', items: [{ id: 'svc-2' }] },
   ]);
   assert.equal(result.data.actions.some((action) => action.kind === 'service-list'), false);
 });
@@ -716,7 +719,9 @@ test('resolveResource delegates to host resolve wiring when provided and still n
   assert.equal(result.data.actions.some((action) => action.kind === 'service-call'), false);
   assert.equal(result.data.actions[0].kind, 'private-chat');
   assert.equal(result.data.actions[0].payload.peerGlobalMetaId, 'idq1peer');
-  assert.deepEqual(result.data.renderer.data.sections, []);
+  assert.deepEqual(result.data.renderer.data.sections, [
+    { id: 'services', title: 'Services', items: [{ id: 'svc-1' }] },
+  ]);
 });
 
 test('settings delegate to the host wiring when provided so resolve uses host-owned Browser config', async () => {
