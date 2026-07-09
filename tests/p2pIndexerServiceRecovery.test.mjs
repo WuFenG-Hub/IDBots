@@ -32,7 +32,7 @@ function patchElectron() {
 function loadTestUtils() {
   const originalLoad = patchElectron();
   try {
-    const mod = require('../dist-electron/services/p2pIndexerService.js');
+    const mod = require('../dist-electron/main/services/p2pIndexerService.js');
     return mod.__p2pIndexerServiceTestUtils;
   } finally {
     Module._load = originalLoad;
@@ -93,4 +93,3 @@ test('recoverCorruptedPebbleDataDir moves pebble directory to timestamped backup
   assert.equal(fs.existsSync(result.backupPath), true);
   assert.match(path.basename(result.backupPath), /^man_base_data_pebble\.corrupt\./);
 });
-
