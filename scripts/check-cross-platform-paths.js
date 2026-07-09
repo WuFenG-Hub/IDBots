@@ -78,6 +78,25 @@ function checkFileNotContains(relPath, snippets, checkName) {
   );
 }
 
+function checkSymlinkTarget(relPath, expectedTarget, checkName) {
+  const linkPath = resolveInProject(relPath);
+  let actualTarget;
+  try {
+    actualTarget = fs.readlinkSync(linkPath);
+  } catch (error) {
+    addCheck(checkName, false, `missing or unreadable symlink: ${relPath} (${error.message})`);
+    return;
+  }
+
+  const targetPath = path.resolve(path.dirname(linkPath), actualTarget);
+  const ok = actualTarget === expectedTarget && fs.existsSync(targetPath);
+  addCheck(
+    checkName,
+    ok,
+    ok ? `${relPath} -> ${actualTarget}` : `${relPath} -> ${actualTarget}; expected ${expectedTarget}; targetExists=${fs.existsSync(targetPath)}`
+  );
+}
+
 function runNpmScript(scriptName) {
   const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const result = spawnSync(npmCmd, ['run', scriptName], {
@@ -103,6 +122,12 @@ function runStaticChecks() {
     'src/main/libs/runtimePaths.ts',
     ['export function isPathWithin', 'export function resolveElectronExecutablePath'],
     'runtime path helper exists'
+  );
+
+  checkSymlinkTarget(
+    'libs',
+    'dist-electron/main/libs',
+    'root libs symlink targets current electron output'
   );
 
   checkFileContains(
