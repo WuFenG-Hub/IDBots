@@ -9299,9 +9299,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         return;
       }
       const devPort = process.env.ELECTRON_START_URL?.match(/:(\d+)/)?.[1] || '5175';
+      // Bot Browser renders the upstream browser runtime into an iframe via
+      // srcDoc. Chromium applies the app CSP to that local document, so the
+      // packaged app must allow inline scripts or the Browser shell renders
+      // without any navigation/runtime behavior.
+      const scriptSrc = isDev
+        ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}`
+        : "script-src 'self' 'unsafe-inline'";
       const cspDirectives = [
         "default-src 'self'",
-        isDev ? `script-src 'self' 'unsafe-inline' http://localhost:${devPort} ws://localhost:${devPort}` : "script-src 'self'",
+        scriptSrc,
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: https: http:",
         "connect-src 'self' https: http: ws: wss:",
