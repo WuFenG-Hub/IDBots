@@ -126,7 +126,7 @@ class FakeCoworkStore {
   }
 }
 
-function createFakeSdk() {
+function createFakeSdk(config = {}) {
   const inputs = [];
   const inputWaiters = [];
   const eventQueue = [];
@@ -136,6 +136,10 @@ function createFakeSdk() {
   let consumerDone = false;
   let finishRequested = false;
   let abortObserved = false;
+  let releaseFirstAck;
+  const firstAckGate = new Promise((resolve) => {
+    releaseFirstAck = resolve;
+  });
 
   const wakeInputWaiters = () => {
     for (const waiter of inputWaiters.splice(0)) waiter();
@@ -155,6 +159,7 @@ function createFakeSdk() {
     get queryCalls() { return queryCalls; },
     get inputs() { return inputs; },
     get abortObserved() { return abortObserved; },
+    releaseFirstInputAck() { releaseFirstAck(); },
     createSdkMcpServer: (definition) => definition,
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     async waitForInputCount(count) {
@@ -174,9 +179,19 @@ function createFakeSdk() {
       }, { once: true });
 
       void (async () => {
-        for await (const input of prompt) {
+        const iterator = prompt[Symbol.asyncIterator]();
+        let inputIndex = 0;
+        while (true) {
+          const next = await iterator.next();
+          if (next.done) break;
+          const input = next.value;
+          inputIndex += 1;
           inputs.push(input.message.content[0].text);
           wakeInputWaiters();
+          if (config.resultBeforeFirstAck && inputIndex === 1) {
+            pushEvent({ type: 'result', subtype: 'success', result: 'early-result' });
+            await firstAckGate;
+          }
           if (finishRequested) emitAvailableResults();
         }
       })().finally(() => {
@@ -201,12 +216,72 @@ function createFakeSdk() {
   return sdk;
 }
 
+function createRetrySdk() {
+  const queryInputs = [[], []];
+  const inputWaiters = [];
+  let queryCalls = 0;
+  let activeInputConsumers = 0;
+  let failFirstQuery;
+  let finishSecondQuery;
+  const firstFailure = new Promise((_, reject) => {
+    failFirstQuery = () => reject(new Error('No conversation found with session ID stale-session'));
+  });
+  const secondFinish = new Promise((resolve) => {
+    finishSecondQuery = resolve;
+  });
+
+  const wakeInputWaiters = () => {
+    for (const waiter of inputWaiters.splice(0)) waiter();
+  };
+
+  return {
+    get queryCalls() { return queryCalls; },
+    get activeInputConsumers() { return activeInputConsumers; },
+    createSdkMcpServer: (definition) => definition,
+    tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
+    failFirstQuery() { failFirstQuery(); },
+    finishSecondQuery() { finishSecondQuery(); },
+    async waitForQueryInputCount(queryIndex, count) {
+      while ((queryInputs[queryIndex]?.length ?? 0) < count) {
+        await new Promise((resolve) => inputWaiters.push(resolve));
+      }
+    },
+    query({ prompt }) {
+      const queryIndex = queryCalls;
+      queryCalls += 1;
+      activeInputConsumers += 1;
+      void (async () => {
+        for await (const input of prompt) {
+          queryInputs[queryIndex].push(input.message.content[0].text);
+          wakeInputWaiters();
+        }
+      })().finally(() => {
+        activeInputConsumers -= 1;
+      });
+
+      if (queryIndex === 0) {
+        return {
+          async *[Symbol.asyncIterator]() {
+            await firstFailure;
+          },
+        };
+      }
+      return {
+        async *[Symbol.asyncIterator]() {
+          await secondFinish;
+          yield { type: 'result', subtype: 'success', result: 'retry-result' };
+        },
+      };
+    },
+  };
+}
+
 function createRunnerHarness(overrides = {}) {
   const cwd = path.resolve(process.cwd());
   const store = new FakeCoworkStore(cwd);
   const sessionId = overrides.sessionId ?? 'steer-session';
   store.createSession(sessionId, overrides.session ?? {});
-  const sdk = createFakeSdk();
+  const sdk = overrides.sdk ?? createFakeSdk(overrides.sdkOptions);
   const sqliteConfigStore = {
     get(key) {
       if (key !== 'app_config') return null;
@@ -225,7 +300,9 @@ function createRunnerHarness(overrides = {}) {
     },
   };
   setStoreGetter(() => sqliteConfigStore);
-  const runner = new CoworkRunner(store, { loadClaudeSdk: async () => sdk });
+  const runner = new CoworkRunner(store, {
+    loadClaudeSdk: overrides.loadClaudeSdk ?? (async () => sdk),
+  });
   return { runner, sdk, store, sessionId };
 }
 
@@ -257,6 +334,77 @@ test('initial input and steer share one SDK query and settle in FIFO order', { s
   assert.match(sdk.inputs[2], /keep the tests/);
   assert.deepEqual(settled, ['steer-1', 'steer-2']);
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('result before delivery acknowledgement still closes the local turn', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { resultBeforeFirstAck: true },
+  });
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  await new Promise((resolve) => setImmediate(resolve));
+  sdk.releaseFirstInputAck();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  const resolvedWithoutStop = resolved;
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolvedWithoutStop, true);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('automatic retry fails pending steers and closes the superseded input channel', async () => {
+  const sdk = createRetrySdk();
+  let releaseSecondLoader;
+  let enterSecondLoader;
+  const secondLoaderEntered = new Promise((resolve) => {
+    enterSecondLoader = resolve;
+  });
+  const secondLoaderGate = new Promise((resolve) => {
+    releaseSecondLoader = resolve;
+  });
+  let loadCalls = 0;
+  const { runner, sessionId } = createRunnerHarness({
+    sdk,
+    session: { claudeSessionId: 'stale-session' },
+    loadClaudeSdk: async () => {
+      loadCalls += 1;
+      if (loadCalls === 2) {
+        enterSecondLoader();
+        await secondLoaderGate;
+      }
+      return sdk;
+    },
+  });
+  const failed = [];
+  runner.on('steerFailed', (_sessionId, submissionId, reason) => {
+    failed.push({ submissionId, reason });
+  });
+
+  const run = runner.startSession(sessionId, 'initial task');
+  await sdk.waitForQueryInputCount(0, 1);
+  const accepted = runner.trySubmitSteer(sessionId, 'steer-before-retry', 'preserve tests');
+  assert.equal(accepted.accepted, true);
+  await sdk.waitForQueryInputCount(0, 2);
+  await accepted.delivered;
+
+  sdk.failFirstQuery();
+  await secondLoaderEntered;
+  const duringRetry = runner.trySubmitSteer(sessionId, 'steer-during-retry', 'too late');
+  if (duringRetry.accepted) void duringRetry.delivered.catch(() => undefined);
+  releaseSecondLoader();
+  await sdk.waitForQueryInputCount(1, 1);
+  sdk.finishSecondQuery();
+  await run;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(failed.map((entry) => entry.submissionId), ['steer-before-retry']);
+  assert.match(failed[0].reason, /retry/i);
+  assert.deepEqual(duringRetry, { accepted: false, reason: 'closing' });
+  assert.equal(sdk.activeInputConsumers, 0);
 });
 
 test('continueSession refuses to start a concurrent runner while live input is open', { skip: !hasSteerApi }, async () => {
@@ -301,6 +449,36 @@ test('continueSession refuses a concurrent runner during local turn setup', asyn
   await run;
   assert.equal(observedRunCalls, 1);
   assert.match(concurrentError?.message ?? '', /active local turn/i);
+});
+
+test('sandbox and auto sessions report sandbox capability during setup', async () => {
+  for (const executionMode of ['sandbox', 'auto']) {
+    const { runner, sessionId } = createRunnerHarness({
+      sessionId: `setup-${executionMode}`,
+      session: { executionMode },
+    });
+    let releaseSetup;
+    const setupBlocked = new Promise((resolve) => {
+      releaseSetup = resolve;
+    });
+    let enterSetup;
+    const setupEntered = new Promise((resolve) => {
+      enterSetup = resolve;
+    });
+    runner.runClaudeCode = async () => {
+      enterSetup();
+      await setupBlocked;
+    };
+
+    const run = runner.startSession(sessionId, 'initial task');
+    await setupEntered;
+    assert.equal(runner.getSteerCapability(sessionId), 'sandbox');
+    const concurrent = runner.continueSession(sessionId, 'unsafe setup race')
+      .then(() => null, (error) => error);
+    releaseSetup();
+    assert.match((await concurrent)?.message ?? '', /active local turn/i);
+    await run;
+  }
 });
 
 test('stop aborts the live channel and query without an unhandled rejection', { skip: !hasSteerApi }, async () => {

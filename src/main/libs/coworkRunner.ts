@@ -623,6 +623,7 @@ export interface CoworkRunnerEvents {
   complete: (sessionId: string, claudeSessionId: string | null) => void;
   error: (sessionId: string, error: string) => void;
   steerSettled: (sessionId: string, submissionId: string) => void;
+  steerFailed: (sessionId: string, submissionId: string, reason: string) => void;
   'delegation:requested': (sessionId: string, delegation: DelegationRequest) => void;
 }
 
@@ -666,6 +667,7 @@ interface ActiveSession {
   localSettledInputs: number;
   localPendingSteerIds: string[];
   localTurnState: 'none' | 'starting' | 'open' | 'closing';
+  maybeCloseLocalTurn?: () => void;
   turnSettled: Promise<void>;
   resolveTurnSettled: () => void;
   turnSettlementResolved: boolean;
@@ -874,6 +876,16 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  private transitionLocalTurnForRetry(activeSession: ActiveSession, reason: string): void {
+    activeSession.localTurnState = 'closing';
+    activeSession.localInputChannel?.stop(new Error(`Cowork local turn retry: ${reason}`));
+    activeSession.localInputChannel = undefined;
+    activeSession.maybeCloseLocalTurn = undefined;
+    for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
+      this.emit('steerFailed', activeSession.sessionId, submissionId, reason);
+    }
+  }
+
   trySubmitSteer(
     sessionId: string,
     submissionId: string,
@@ -891,7 +903,10 @@ export class CoworkRunner extends EventEmitter {
     const queued = activeSession.localInputChannel.enqueue(buildCoworkSteerSdkMessage(text));
     // The submission controller observes this promise too, but attach a rejection
     // observer immediately so Stop cannot create a transient unhandled rejection.
-    void queued.delivered.catch(() => undefined);
+    void queued.delivered.then(
+      () => activeSession.maybeCloseLocalTurn?.(),
+      () => undefined,
+    );
     activeSession.localPendingSteerIds.push(submissionId);
     activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
     return { accepted: true, delivered: queued.delivered };
@@ -3127,7 +3142,7 @@ export class CoworkRunner extends EventEmitter {
       staleResumeRetryAllowed: true,
       contextOverflowDetected: false,
       contextOverflowRetryAllowed: false,
-      executionMode: 'local',
+      executionMode: session.executionMode || this.store.getConfig().executionMode || 'local',
       localAcceptedInputs: 0,
       localSettledInputs: 0,
       localPendingSteerIds: [],
@@ -3187,11 +3202,10 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
     if (
-      activeSession.executionMode === 'local'
-      && (
-        activeSession.localTurnState === 'starting'
-        || activeSession.localTurnState === 'open'
-        || activeSession.localTurnState === 'closing'
+      activeSession.localTurnState === 'starting'
+      || (
+        activeSession.executionMode === 'local'
+        && (activeSession.localTurnState === 'open' || activeSession.localTurnState === 'closing')
       )
     ) {
       throw new Error(`Cannot continue session ${sessionId}: active local turn is still running.`);
@@ -3771,6 +3785,7 @@ export class CoworkRunner extends EventEmitter {
       reason: 'result-event' | 'exception',
       errorMessage?: string
     ): Promise<void> => {
+      this.transitionLocalTurnForRetry(activeSession, `automatic context retry (${reason})`);
       const sessionSnapshot = this.store.getSession(sessionId);
       const compacted = buildCoworkCompactedPrompt({
         messages: sessionSnapshot?.messages ?? [],
@@ -4130,8 +4145,19 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localSettledInputs = 0;
       activeSession.localPendingSteerIds = [];
       activeSession.localTurnState = 'open';
+      const maybeCloseLocalTurn = () => {
+        if (activeSession.localInputChannel !== channel) return;
+        if (
+          activeSession.localSettledInputs >= channel.acceptedCount
+          && channel.deliveredCount >= channel.acceptedCount
+        ) {
+          activeSession.localTurnState = 'closing';
+          channel.close();
+        }
+      };
+      activeSession.maybeCloseLocalTurn = maybeCloseLocalTurn;
       const initial = channel.enqueue(buildCoworkSdkUserMessage(promptForQuery));
-      void initial.delivered.catch(() => undefined);
+      void initial.delivered.then(maybeCloseLocalTurn, () => undefined);
       activeSession.localAcceptedInputs = channel.acceptedCount;
 
       const result = await query({ prompt: channel, options } as any);
@@ -4149,13 +4175,7 @@ export class CoworkRunner extends EventEmitter {
               this.emit('steerSettled', sessionId, settledSubmissionId);
             }
           }
-          if (
-            activeSession.localSettledInputs >= channel.acceptedCount
-            && channel.deliveredCount >= channel.acceptedCount
-          ) {
-            activeSession.localTurnState = 'closing';
-            channel.close();
-          }
+          maybeCloseLocalTurn();
         }
       }
 
@@ -4164,6 +4184,7 @@ export class CoworkRunner extends EventEmitter {
         activeSession.claudeSessionId = null;
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
         contextOverflowExceptionRetryAllowed = false;
+        this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
         await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
         return;
       }
@@ -4215,6 +4236,7 @@ export class CoworkRunner extends EventEmitter {
         activeSession.claudeSessionId = null;
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4240,6 +4262,7 @@ export class CoworkRunner extends EventEmitter {
           'DeepSeek thinking 历史缺少 reasoning_content，已自动重置底层模型会话并重试当前输入。'
         );
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic DeepSeek history retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4277,6 +4300,7 @@ export class CoworkRunner extends EventEmitter {
           '模型端拒绝了图片/文档内容块，已自动重置本轮会话并改为文本路径模式重试。'
         );
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic multimodal compatibility retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4390,7 +4414,14 @@ export class CoworkRunner extends EventEmitter {
     // If there's already a running sandbox VM with IPC bridge, send a
     // continuation request to the same VM instead of spawning a new one.
     if (hasActiveSandboxVm) {
-      await this.continueSandboxTurn(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      activeSession.localTurnState = 'starting';
+      try {
+        await this.continueSandboxTurn(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      } finally {
+        if (this.activeSessions.get(sessionId) === activeSession) {
+          activeSession.localTurnState = 'none';
+        }
+      }
       return;
     }
 
@@ -4442,6 +4473,8 @@ export class CoworkRunner extends EventEmitter {
       // Otherwise (VM exited), clean up.
       if (!activeSession.sandboxProcess || activeSession.sandboxProcess.killed) {
         this.removeActiveSession(sessionId, activeSession);
+      } else {
+        activeSession.localTurnState = 'none';
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown sandbox error';
