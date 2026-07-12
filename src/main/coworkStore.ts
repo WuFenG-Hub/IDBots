@@ -418,8 +418,17 @@ export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a';
+export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 export interface CoworkMessageMetadata {
+  interactionKind?: 'steer';
+  submissionId?: string;
+  submissionMode?: 'steer' | 'continue';
+  steerStatus?: CoworkSteerStatus;
+  steerDeliveredAt?: number;
+  steerSettledAt?: number;
+  steerFailedAt?: number;
+  steerErrorCode?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolResult?: string;
@@ -2337,7 +2346,17 @@ export class CoworkStore implements MemoryBackend {
   }
 
   addMessage(sessionId: string, message: Omit<CoworkMessage, 'id' | 'timestamp'>): CoworkMessage {
-    const id = uuidv4();
+    return this.addMessageWithId(sessionId, uuidv4(), message);
+  }
+
+  addMessageWithId(
+    sessionId: string,
+    id: string,
+    message: Omit<CoworkMessage, 'id' | 'timestamp'>
+  ): CoworkMessage {
+    const existing = this.getMessageById(sessionId, id);
+    if (existing) return existing;
+
     const now = Date.now();
 
     const sequenceRow = this.db.exec(`
@@ -2373,6 +2392,27 @@ export class CoworkStore implements MemoryBackend {
     };
     this.enqueueExplicitMemoryUpdate(sessionId, createdMessage);
     return createdMessage;
+  }
+
+  getMessageById(sessionId: string, messageId: string): CoworkMessage | null {
+    const result = this.db.exec(`
+      SELECT id, type, content, metadata, created_at
+      FROM cowork_messages
+      WHERE session_id = ? AND id = ?
+      LIMIT 1
+    `, [sessionId, messageId]);
+    const row = result[0]?.values[0];
+    if (!row) return null;
+
+    return {
+      id: String(row[0]),
+      type: String(row[1]) as CoworkMessage['type'],
+      content: String(row[2] ?? ''),
+      metadata: row[3]
+        ? JSON.parse(String(row[3])) as CoworkMessageMetadata
+        : undefined,
+      timestamp: Number(row[4]),
+    };
   }
 
   updateMessage(sessionId: string, messageId: string, updates: { content?: string; metadata?: CoworkMessageMetadata }): void {

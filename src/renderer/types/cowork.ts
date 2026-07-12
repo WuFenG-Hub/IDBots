@@ -10,8 +10,18 @@ export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 // Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot
 export type CoworkSessionType = 'standard' | 'a2a';
 
+export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
+
 // Cowork message metadata
 export interface CoworkMessageMetadata {
+  interactionKind?: 'steer';
+  submissionId?: string;
+  submissionMode?: 'steer' | 'continue';
+  steerStatus?: CoworkSteerStatus;
+  steerDeliveredAt?: number;
+  steerSettledAt?: number;
+  steerFailedAt?: number;
+  steerErrorCode?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolResult?: string;
