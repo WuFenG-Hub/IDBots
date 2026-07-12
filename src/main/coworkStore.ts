@@ -2248,8 +2248,15 @@ export class CoworkStore implements MemoryBackend {
       const result = this.db.exec(`
         SELECT id, session_id, metadata
         FROM cowork_messages
-        WHERE type = 'user' AND metadata IS NOT NULL
-      `);
+        WHERE type = 'user'
+          AND metadata IS NOT NULL
+          AND metadata LIKE ?
+          AND (metadata LIKE ? OR metadata LIKE ?)
+      `, [
+        '%"interactionKind":"steer"%',
+        '%"steerStatus":"queued"%',
+        '%"steerStatus":"delivered"%',
+      ]);
       const rows = result[0]?.values ?? [];
 
       for (const row of rows) {
@@ -2288,7 +2295,11 @@ export class CoworkStore implements MemoryBackend {
 
       this.db.run('COMMIT');
     } catch (error) {
-      this.db.run('ROLLBACK');
+      try {
+        this.db.run('ROLLBACK');
+      } catch {
+        // Preserve the transaction failure as the authoritative startup error.
+      }
       throw error;
     }
 

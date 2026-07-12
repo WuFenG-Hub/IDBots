@@ -3122,17 +3122,22 @@ const getCoworkStore = () => {
   if (!coworkStore) {
     const sqliteStore = getStore();
     startupLog('cowork store construct begin');
-    coworkStore = new CoworkStore(
+    const candidate = new CoworkStore(
       sqliteStore.getDatabase(),
       sqliteStore.getSaveFunction(),
       { deferHeavyStartupMaintenance: true },
     );
     startupLog('cowork store construct done');
-    const interruptedSteers = coworkStore.markInterruptedSteersAfterRestart();
-    startupLog(`cowork steer restart recovery done (count=${interruptedSteers})`);
-    if (interruptedSteers > 0) {
-      console.info(`[Main] Marked ${interruptedSteers} interrupted Cowork steer(s) as failed`);
+    try {
+      const interruptedSteers = candidate.markInterruptedSteersAfterRestart();
+      startupLog(`cowork steer restart recovery done (count=${interruptedSteers})`);
+      if (interruptedSteers > 0) {
+        console.info(`[Main] Marked ${interruptedSteers} interrupted Cowork steer(s) as failed`);
+      }
+    } catch (error) {
+      console.warn('[Main] Cowork steer restart recovery failed; continuing startup:', error);
     }
+    coworkStore = candidate;
     startupLog('cowork store auto-delete begin');
     const cleaned = coworkStore.autoDeleteNonPersonalMemories();
     startupLog(`cowork store auto-delete done (cleaned=${cleaned})`);

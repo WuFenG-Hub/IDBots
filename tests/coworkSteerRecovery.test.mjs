@@ -41,6 +41,7 @@ async function createStoreHarness() {
   `);
 
   let saves = 0;
+  let saveError = null;
   const originalLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === 'electron') {
@@ -60,14 +61,38 @@ async function createStoreHarness() {
   } finally {
     Module._load = originalLoad;
   }
-  const store = new CoworkStore(db, () => { saves += 1; });
+  const store = new CoworkStore(db, () => {
+    saves += 1;
+    if (saveError) throw saveError;
+  });
   const session = store.createSession('restart recovery', process.cwd());
   return {
     db,
     store,
     session,
     get saves() { return saves; },
+    setSaveError(error) { saveError = error; },
     cleanup: () => db.close(),
+  };
+}
+
+function injectRunFailure(db, predicate, error, options = {}) {
+  const originalRun = db.run.bind(db);
+  const statements = [];
+  db.run = (sql, params) => {
+    const normalized = String(sql).trim();
+    statements.push(normalized);
+    if (options.rollbackError && normalized === 'ROLLBACK') {
+      throw options.rollbackError;
+    }
+    if (predicate(normalized)) {
+      throw error;
+    }
+    return originalRun(sql, params);
+  };
+  return {
+    statements,
+    restore() { db.run = originalRun; },
   };
 }
 
@@ -107,11 +132,26 @@ test('restart marks only unresolved user steers failed and saves once without re
     VALUES (?, ?, 'user', 'malformed visible', '{not-json', 1, 99)
   `, [UUIDS.malformed, harness.session.id]);
 
+  const originalExec = harness.db.exec.bind(harness.db);
+  let candidateQuery = null;
+  harness.db.exec = (sql, params) => {
+    if (String(sql).includes('FROM cowork_messages') && String(sql).includes('metadata')) {
+      candidateQuery = { sql: String(sql), params };
+    }
+    return originalExec(sql, params);
+  };
   const savesBeforeRecovery = harness.saves;
   const changed = harness.store.markInterruptedSteersAfterRestart(5000);
+  harness.db.exec = originalExec;
 
   assert.equal(changed, 2);
   assert.equal(harness.saves, savesBeforeRecovery + 1);
+  assert.match(candidateQuery.sql, /metadata LIKE \?/);
+  assert.deepEqual(candidateQuery.params, [
+    '%"interactionKind":"steer"%',
+    '%"steerStatus":"queued"%',
+    '%"steerStatus":"delivered"%',
+  ]);
   for (const id of [UUIDS.queued, UUIDS.delivered]) {
     const message = harness.store.getMessageById(harness.session.id, id);
     assert.equal(message.content, id === UUIDS.queued ? 'visible-queued' : 'visible-delivered');
@@ -134,6 +174,72 @@ test('restart marks only unresolved user steers failed and saves once without re
   assert.equal(malformedRow, '{not-json');
 });
 
+test('restart recovery rolls back UPDATE and COMMIT failures and preserves the original error', async (t) => {
+  for (const failurePoint of ['UPDATE cowork_messages', 'COMMIT']) {
+    const harness = await createStoreHarness();
+    t.after(harness.cleanup);
+    addSteer(harness.store, harness.session.id, UUIDS.queued, 'queued');
+    const expected = new Error(`${failurePoint} failed`);
+    const injected = injectRunFailure(
+      harness.db,
+      (sql) => sql.includes(failurePoint),
+      expected,
+    );
+
+    assert.throws(
+      () => harness.store.markInterruptedSteersAfterRestart(8000),
+      (error) => error === expected,
+    );
+    assert.ok(injected.statements.includes('ROLLBACK'));
+    injected.restore();
+
+    assert.equal(harness.store.markInterruptedSteersAfterRestart(8001), 1);
+    assert.equal(
+      harness.store.getMessageById(harness.session.id, UUIDS.queued).metadata.steerStatus,
+      'failed',
+    );
+  }
+});
+
+test('restart recovery best-effort rollback never masks the transaction error', async (t) => {
+  const harness = await createStoreHarness();
+  t.after(harness.cleanup);
+  addSteer(harness.store, harness.session.id, UUIDS.queued, 'queued');
+  const updateError = new Error('update is authoritative');
+  const injected = injectRunFailure(
+    harness.db,
+    (sql) => sql.includes('UPDATE cowork_messages'),
+    updateError,
+    { rollbackError: new Error('rollback also failed') },
+  );
+
+  assert.throws(
+    () => harness.store.markInterruptedSteersAfterRestart(8100),
+    (error) => error === updateError,
+  );
+  assert.ok(injected.statements.includes('ROLLBACK'));
+  injected.restore();
+});
+
+test('post-COMMIT save failure is surfaced while the recovered database remains usable', async (t) => {
+  const harness = await createStoreHarness();
+  t.after(harness.cleanup);
+  addSteer(harness.store, harness.session.id, UUIDS.queued, 'queued');
+  const saveError = new Error('save failed');
+  harness.setSaveError(saveError);
+
+  assert.throws(
+    () => harness.store.markInterruptedSteersAfterRestart(8200),
+    (error) => error === saveError,
+  );
+  harness.setSaveError(null);
+  assert.equal(
+    harness.store.getMessageById(harness.session.id, UUIDS.queued).metadata.steerStatus,
+    'failed',
+  );
+  assert.equal(harness.store.markInterruptedSteersAfterRestart(8201), 0);
+});
+
 test('restart recovery is idempotent and does not persist when nothing remains interrupted', async (t) => {
   const harness = await createStoreHarness();
   t.after(harness.cleanup);
@@ -149,7 +255,7 @@ test('restart recovery is idempotent and does not persist when nothing remains i
   );
 });
 
-test('main invokes interrupted-steer recovery exactly once at the shared CoworkStore construction point', () => {
+test('main catches recovery failure before publishing the usable CoworkStore singleton', () => {
   const source = fs.readFileSync(path.join(projectRoot, 'src/main/main.ts'), 'utf8');
   const start = source.indexOf('const getCoworkStore = () =>');
   const end = source.indexOf('\nconst scheduleCoworkStoreHeavyMaintenance', start);
@@ -157,10 +263,17 @@ test('main invokes interrupted-steer recovery exactly once at the shared CoworkS
   const initializer = source.slice(start, end);
   assert.equal((initializer.match(/new CoworkStore\(/g) ?? []).length, 1);
   assert.equal((initializer.match(/markInterruptedSteersAfterRestart\(/g) ?? []).length, 1);
-  assert.ok(
-    initializer.indexOf('markInterruptedSteersAfterRestart(') > initializer.indexOf('new CoworkStore('),
-    'recovery must run after construction',
-  );
+  const constructAt = initializer.indexOf('new CoworkStore(');
+  const recoveryTryAt = initializer.indexOf('try {', constructAt);
+  const recoveryAt = initializer.indexOf('markInterruptedSteersAfterRestart(', constructAt);
+  const recoveryCatchAt = initializer.indexOf('catch (error)', recoveryAt);
+  const publishAt = initializer.indexOf('coworkStore = candidate', recoveryAt);
+  assert.ok(constructAt >= 0);
+  assert.ok(recoveryTryAt > constructAt, 'constructor errors must remain fatal');
+  assert.ok(recoveryAt > recoveryTryAt, 'recovery must be protected by its own try block');
+  assert.ok(recoveryCatchAt > recoveryAt, 'recovery failure must be caught');
+  assert.ok(publishAt > recoveryCatchAt, 'usable store must be published after recovery handling');
+  assert.match(initializer, /Cowork steer restart recovery failed; continuing startup/);
 });
 
 class FakeStore {
