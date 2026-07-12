@@ -123,6 +123,33 @@ interface CoworkMessage {
   };
 }
 
+interface CoworkSubmitInput {
+  sessionId: string;
+  submissionId: string;
+  text: string;
+  systemPrompt?: string;
+  activeSkillIds?: string[];
+}
+
+type CoworkSubmitInputErrorCode =
+  | 'invalid_input'
+  | 'session_not_found'
+  | 'unsupported_session'
+  | 'unsupported_execution'
+  | 'delivery_failed';
+
+type CoworkSubmitInputResult =
+  | {
+      success: true;
+      mode: 'steer' | 'continue';
+      message: CoworkMessage;
+    }
+  | {
+      success: false;
+      code: CoworkSubmitInputErrorCode;
+      error: string;
+    };
+
 interface CoworkServiceOrderSummary {
   role?: 'buyer' | 'seller';
   status: 'awaiting_first_response' | 'in_progress' | 'rating_pending' | 'completed' | 'failed' | 'refund_pending' | 'refunded';
@@ -609,6 +636,7 @@ interface IElectronAPI {
   cowork: {
     startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     endA2APrivateChat: (sessionId: string) => Promise<{ success: boolean; noticeSent?: boolean; error?: string }>;
     ensureA2ASession: (input: CoworkEnsureA2ASessionInput) => Promise<CoworkEnsureA2ASessionResult>;

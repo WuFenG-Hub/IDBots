@@ -276,6 +276,33 @@ export interface CoworkContinueOptions {
   activeSkillIds?: string[];
 }
 
+export interface CoworkSubmitInput {
+  sessionId: string;
+  submissionId: string;
+  text: string;
+  systemPrompt?: string;
+  activeSkillIds?: string[];
+}
+
+export type CoworkSubmitInputErrorCode =
+  | 'invalid_input'
+  | 'session_not_found'
+  | 'unsupported_session'
+  | 'unsupported_execution'
+  | 'delivery_failed';
+
+export type CoworkSubmitInputResult =
+  | {
+      success: true;
+      mode: 'steer' | 'continue';
+      message: CoworkMessage;
+    }
+  | {
+      success: false;
+      code: CoworkSubmitInputErrorCode;
+      error: string;
+    };
+
 // IPC result types
 export interface CoworkSessionResult {
   success: boolean;
