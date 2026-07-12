@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { ChevronDownIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { RootState, store } from '../../store';
-import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId, setDraftPrompt } from '../../store/slices/coworkSlice';
+import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId } from '../../store/slices/coworkSlice';
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
@@ -452,7 +452,6 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       activeSkillIds: sessionSkillIds.length > 0 ? sessionSkillIds : undefined,
     });
     if (result.success === false) {
-      dispatch(setDraftPrompt(prompt));
       submitErrorSessionIdRef.current = currentSession.id;
       setSubmitError(i18nService.t(`coworkSubmitError.${result.code}`));
       return false;

@@ -12,6 +12,12 @@ import { setDraftPrompt } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
 import { getCompactFolderName } from '../../utils/path';
+import {
+  createVersionedComposerField,
+  runComposerSubmission,
+  type VersionedComposerField,
+  type VersionedComposerSnapshot,
+} from './coworkPromptSubmission';
 
 type CoworkAttachment = {
   path: string;
@@ -22,6 +28,7 @@ interface CoworkPromptInputStateOptions {
   value: string;
   isStreaming: boolean;
   disabled: boolean;
+  steerDisabled: boolean;
   attachmentCount: number;
 }
 
@@ -29,11 +36,12 @@ export const deriveCoworkPromptInputState = ({
   value,
   isStreaming,
   disabled,
+  steerDisabled,
   attachmentCount,
 }: CoworkPromptInputStateOptions) => {
   const hasTextInput = Boolean(value.trim());
-  const isSteerSubmit = isStreaming && hasTextInput;
-  const showStopButton = isStreaming && !hasTextInput;
+  const isSteerSubmit = isStreaming && hasTextInput && !steerDisabled;
+  const showStopButton = isStreaming && (!hasTextInput || steerDisabled);
   const canSubmit = !disabled && (!isStreaming
     ? hasTextInput || attachmentCount > 0
     : isSteerSubmit);
@@ -80,7 +88,7 @@ interface CoworkPromptInputProps {
   isStreaming?: boolean;
   placeholder?: string;
   disabled?: boolean;
-  waitForSubmitResult?: boolean;
+  steerDisabled?: boolean;
   size?: 'normal' | 'large';
   workingDirectory?: string;
   onWorkingDirectoryChange?: (dir: string) => void;
@@ -99,7 +107,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       isStreaming = false,
       placeholder = 'Enter your task...',
       disabled = false,
-      waitForSubmitResult = false,
+      steerDisabled = false,
       size = 'normal',
       workingDirectory = '',
       onWorkingDirectoryChange,
@@ -118,12 +126,22 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
-    const submitInFlightRef = useRef(false);
+    const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
+    const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
+    if (!draftFieldRef.current) {
+      draftFieldRef.current = createVersionedComposerField(draftPrompt, () => '', (nextValue) => {
+        setValue(nextValue);
+        dispatch(setDraftPrompt(nextValue));
+      });
+    }
+    if (!attachmentFieldRef.current) {
+      attachmentFieldRef.current = createVersionedComposerField([], () => [], setAttachments);
+    }
 
   // 暴露方法给父组件
   React.useImperativeHandle(ref, () => ({
     setValue: (newValue: string) => {
-      setValue(newValue);
+      draftFieldRef.current?.set(newValue);
       // 触发自动调整高度
       requestAnimationFrame(() => {
         const textarea = textareaRef.current;
@@ -179,8 +197,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       const detail = (event as CustomEvent<{ clear?: boolean }>).detail;
       const shouldClear = detail?.clear ?? true;
       if (shouldClear) {
-        setValue('');
-        setAttachments([]);
+        draftFieldRef.current?.set('');
+        attachmentFieldRef.current?.set([]);
       }
       requestAnimationFrame(() => {
         textareaRef.current?.focus();
@@ -198,22 +216,21 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     }
   }, [workingDirectory]);
 
-  useEffect(() => {
-    if (value !== draftPrompt) {
-      dispatch(setDraftPrompt(value));
-    }
-  }, [value, draftPrompt, dispatch]);
-
   const handleSubmit = useCallback(async () => {
-    if (submitInFlightRef.current || disabled) return;
+    if (disabled || (isStreaming && steerDisabled)) return;
 
-    const trimmedValue = value.trim();
+    const draftField = draftFieldRef.current;
+    const attachmentField = attachmentFieldRef.current;
+    if (!draftField || !attachmentField) return;
+    const submittedValue = draftField.get();
+    const submittedAttachments = attachmentField.get();
+    const trimmedValue = submittedValue.trim();
     if (isStreaming && !trimmedValue) return;
     if (!isStreaming && showFolderSelector && !workingDirectory?.trim()) {
       setShowFolderRequiredWarning(true);
       return;
     }
-    if (!isStreaming && !trimmedValue && attachments.length === 0) return;
+    if (!isStreaming && !trimmedValue && submittedAttachments.length === 0) return;
     setShowFolderRequiredWarning(false);
 
     // Get active skills prompts and combine them
@@ -226,7 +243,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       ? activeSkills.map(buildInlinedSkillPrompt).join('\n\n')
       : undefined;
 
-    const attachmentLines = attachments.map((attachment) =>
+    const attachmentLines = submittedAttachments.map((attachment) =>
       `${inputFileLabel}: ${attachment.path}`
     ).join('\n');
     const finalPrompt = isStreaming
@@ -235,27 +252,27 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
         ? (attachmentLines ? `${trimmedValue}\n\n${attachmentLines}` : trimmedValue)
         : attachmentLines;
 
-    submitInFlightRef.current = true;
-    try {
-      const submissionResult = onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt);
-      const accepted = waitForSubmitResult
-        ? await submissionResult
-        : submissionResult === false ? false : true;
-      if (!waitForSubmitResult && submissionResult instanceof Promise) {
-        void submissionResult.catch((error) => {
-          console.error('Cowork prompt submission failed:', error);
-        });
-      }
-      if (accepted === false) return;
-      setValue('');
-      dispatch(setDraftPrompt(''));
-      if (!isStreaming) {
-        setAttachments([]);
-      }
-    } finally {
-      submitInFlightRef.current = false;
+    const draftSnapshot = draftField.takeAndClear();
+    let attachmentSnapshot: VersionedComposerSnapshot<CoworkAttachment[]> | null = null;
+    if (!isStreaming) {
+      attachmentSnapshot = attachmentField.takeAndClear();
     }
-  }, [value, isStreaming, disabled, waitForSubmitResult, onSubmit, activeSkillIds, skills, attachments, inputFileLabel, showFolderSelector, workingDirectory, dispatch]);
+    try {
+      const accepted = await runComposerSubmission(
+        draftField,
+        draftSnapshot,
+        () => onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt),
+      );
+      if (accepted === false && attachmentSnapshot) {
+        attachmentField.restoreIfUnchanged(attachmentSnapshot);
+      }
+    } catch (error) {
+      if (attachmentSnapshot) {
+        attachmentField.restoreIfUnchanged(attachmentSnapshot);
+      }
+      console.error('Cowork prompt submission failed:', error);
+    }
+  }, [isStreaming, disabled, steerDisabled, onSubmit, activeSkillIds, skills, inputFileLabel, showFolderSelector, workingDirectory]);
 
   const handleSelectSkill = useCallback((skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
@@ -303,12 +320,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   const addAttachment = useCallback((path: string) => {
     if (!path) return;
-    setAttachments((prev) => {
-      if (prev.some((attachment) => attachment.path === path)) {
-        return prev;
-      }
-      return [...prev, { path, name: getFileNameFromPath(path) }];
-    });
+    const field = attachmentFieldRef.current;
+    if (!field) return;
+    const prev = field.get();
+    if (prev.some((attachment) => attachment.path === path)) {
+      return;
+    }
+    field.set([...prev, { path, name: getFileNameFromPath(path) }]);
   }, []);
 
   const fileToBase64 = useCallback((file: File): Promise<string> => {
@@ -391,7 +409,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, [addAttachment]);
 
   const handleRemoveAttachment = useCallback((path: string) => {
-    setAttachments((prev) => prev.filter((attachment) => attachment.path !== path));
+    const field = attachmentFieldRef.current;
+    if (!field) return;
+    field.set(field.get().filter((attachment) => attachment.path !== path));
   }, []);
 
   const hasFileTransfer = (dataTransfer: DataTransfer | null): boolean => {
@@ -449,10 +469,13 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     value,
     isStreaming,
     disabled,
+    steerDisabled,
     attachmentCount: attachments.length,
   });
   const effectivePlaceholder = isStreaming
-    ? i18nService.t('coworkSteerPlaceholder')
+    ? i18nService.t(steerDisabled
+      ? 'coworkSteerSandboxUnavailablePlaceholder'
+      : 'coworkSteerPlaceholder')
     : placeholder;
   const enhancedContainerClass = isDraggingFiles
     ? `${containerClass} ring-2 ring-claude-accent/50 border-claude-accent/60`
@@ -501,11 +524,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             <textarea
               ref={textareaRef}
               value={value}
-              onChange={(e) => setValue(e.target.value)}
+              onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={effectivePlaceholder}
-              disabled={disabled}
+              disabled={disabled || (isStreaming && steerDisabled)}
               rows={isLarge ? 2 : 1}
               className={textareaClass}
               style={{ minHeight: `${minHeight}px` }}
@@ -567,7 +590,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   <button
                     type="button"
                     onClick={handleStopClick}
-                    disabled={disabled}
                     className="p-2 rounded-xl bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
                     aria-label={i18nService.t('stop')}
                   >
@@ -592,11 +614,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             <textarea
               ref={textareaRef}
               value={value}
-              onChange={(e) => setValue(e.target.value)}
+              onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={effectivePlaceholder}
-              disabled={disabled}
+              disabled={disabled || (isStreaming && steerDisabled)}
               rows={1}
               className={textareaClass}
             />
@@ -618,7 +640,6 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               <button
                 type="button"
                 onClick={handleStopClick}
-                disabled={disabled}
                 className="flex-shrink-0 p-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
                 aria-label={i18nService.t('stop')}
               >

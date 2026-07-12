@@ -5,6 +5,7 @@ import { i18nService } from '../../services/i18n';
 import type {
   CoworkMessage,
   CoworkMessageMetadata,
+  CoworkExecutionMode,
   CoworkServiceOrderSummary,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
@@ -1996,6 +1997,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [focusedOrderMessageId, setFocusedOrderMessageId] = useState<string | null>(null);
+  const [liveExecutionMode, setLiveExecutionMode] = useState<{
+    sessionId: string;
+    mode: CoworkExecutionMode;
+  } | null>(null);
 
   // Menu and action states
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
@@ -2060,6 +2065,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       dismissedKeys: dismissedRefundStatusKeys,
     })
   );
+  const resolvedExecutionMode = liveExecutionMode?.sessionId === currentSession?.id
+    ? liveExecutionMode.mode
+    : currentSession?.executionMode;
+  const steerDisabled = Boolean(isStreaming && resolvedExecutionMode !== 'local');
+
+  useEffect(() => {
+    if (!isStreaming || !currentSession?.id) {
+      setLiveExecutionMode(null);
+      return;
+    }
+    let cancelled = false;
+    void window.electron?.cowork?.getSession?.(currentSession.id).then((result) => {
+      if (cancelled || !result?.success || !result.session) return;
+      setLiveExecutionMode({
+        sessionId: currentSession.id,
+        mode: result.session.executionMode,
+      });
+    }).catch(() => {
+      // Keep auto/sandbox conservative until the main process can confirm local execution.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSession?.id, currentSession?.messages.length, isStreaming]);
 
   // Fetch initial delegation blocking state when session changes
   useEffect(() => {
@@ -3169,7 +3198,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onSubmit={onContinue}
               onStop={onStop}
               isStreaming={isStreaming}
-              waitForSubmitResult
+              steerDisabled={steerDisabled}
               placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
               disabled={delegationBlocking}
               onManageSkills={onManageSkills}
@@ -3179,7 +3208,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
             />
             {isStreaming && (
               <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('coworkSteerLocalOnlyHint')}
+                {i18nService.t(steerDisabled
+                  ? 'coworkSteerSandboxUnavailableHint'
+                  : 'coworkSteerLocalOnlyHint')}
               </div>
             )}
             {submitError && (
