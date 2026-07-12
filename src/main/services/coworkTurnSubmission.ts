@@ -199,7 +199,12 @@ export class CoworkTurnSubmissionController {
     const inFlight = this.inFlightSubmissions.get(key);
     if (inFlight) return inFlight;
 
-    const pending = this.submitOnce(input);
+    let resolvePending!: (result: CoworkSubmitInputResult) => void;
+    let rejectPending!: (reason?: unknown) => void;
+    const pending = new Promise<CoworkSubmitInputResult>((resolve, reject) => {
+      resolvePending = resolve;
+      rejectPending = reject;
+    });
     this.inFlightSubmissions.set(key, pending);
     const clear = () => {
       if (this.inFlightSubmissions.get(key) === pending) {
@@ -207,6 +212,9 @@ export class CoworkTurnSubmissionController {
       }
     };
     void pending.then(clear, clear);
+    // Start only after publishing the deferred promise. Store and renderer
+    // callbacks may synchronously reenter submit() with the same UUID.
+    void this.submitOnce(input).then(resolvePending, rejectPending);
     return pending;
   }
 

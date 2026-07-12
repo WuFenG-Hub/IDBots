@@ -85,7 +85,7 @@ class FakeRunner extends EventEmitter {
   }
 }
 
-function createHarness({ capability = 'inactive', sessionOverrides, configureRunner } = {}) {
+function createHarness({ capability = 'inactive', sessionOverrides, configureRunner, onEmitMessage } = {}) {
   const store = new FakeStore(sessionOverrides);
   const runner = new FakeRunner(capability);
   configureRunner?.(runner, store);
@@ -94,7 +94,10 @@ function createHarness({ capability = 'inactive', sessionOverrides, configureRun
   const controller = new CoworkTurnSubmissionController({
     store,
     runner,
-    emitMessage: (sessionId, message) => emitted.push({ sessionId, message }),
+    emitMessage: (sessionId, message) => {
+      emitted.push({ sessionId, message });
+      onEmitMessage?.(sessionId, message);
+    },
     emitMessageUpdate: (sessionId, messageId, content, metadata) => {
       updates.push({ sessionId, messageId, content, metadata });
     },
@@ -197,6 +200,61 @@ test('coalesces concurrent duplicate UUIDs while steer delivery is in flight', a
   assert.deepEqual(second, first);
   assert.equal(harness.runner.steerCalls.length, 1);
   assert.equal(harness.store.session.messages.length, 1);
+});
+
+test('publishes the in-flight promise before synchronous emitMessage reentry', async () => {
+  let deliver;
+  let harness;
+  let reentrantPromise;
+  harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((resolve) => { deliver = resolve; });
+    },
+    onEmitMessage: () => {
+      reentrantPromise = harness.controller.submit(input());
+    },
+  });
+
+  const firstPromise = harness.controller.submit(input());
+  assert.equal(reentrantPromise, firstPromise);
+  assert.equal(harness.runner.steerCalls.length, 1);
+  deliver();
+  const [first, reentrant] = await Promise.all([firstPromise, reentrantPromise]);
+  assert.deepEqual(reentrant, first);
+
+  const afterCompletion = harness.controller.submit(input());
+  assert.notEqual(afterCompletion, firstPromise);
+  assert.deepEqual(await afterCompletion, first);
+  assert.equal(harness.runner.steerCalls.length, 1);
+});
+
+test('cleans a synchronously reentered failed submission so an explicit retry can execute', async () => {
+  let rejectDelivery;
+  let reentrantPromise;
+  let harness;
+  harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((_resolve, reject) => { rejectDelivery = reject; });
+    },
+    onEmitMessage: () => {
+      reentrantPromise = harness.controller.submit(input());
+    },
+  });
+
+  const firstPromise = harness.controller.submit(input());
+  assert.equal(reentrantPromise, firstPromise);
+  rejectDelivery(new Error('shared failure'));
+  const [first, reentrant] = await Promise.all([firstPromise, reentrantPromise]);
+  assert.deepEqual(reentrant, first);
+  assert.equal(first.success, false);
+  assert.equal(harness.runner.steerCalls.length, 1);
+
+  harness.runner.delivery = Promise.resolve();
+  const retried = await harness.controller.submit(input());
+  assert.equal(retried.success, true);
+  assert.equal(harness.runner.steerCalls.length, 2);
 });
 
 test('coalesces concurrent ordinary continues and concurrent delivery failures', async () => {
@@ -379,6 +437,52 @@ test('settlement events update persisted steer status and emit the complete upda
   assert.equal(message.metadata.steerStatus, 'settled');
   assert.equal(harness.updates.at(-1).content, 'next direction');
   assert.equal(harness.updates.at(-1).metadata.steerStatus, 'settled');
+});
+
+test('a steerSettled event wins over a later delivery acknowledgement without duplicate updates', async () => {
+  let deliver;
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((resolve) => { deliver = resolve; });
+    },
+  });
+  const pending = harness.controller.submit(input());
+  harness.runner.emit('steerSettled', 'session-1', UUID);
+  const settled = harness.store.getMessageById('session-1', UUID);
+  const settledAt = settled.metadata.steerSettledAt;
+  const updateCount = harness.updates.length;
+
+  deliver();
+  const result = await pending;
+  assert.equal(result.success, true);
+  assert.equal(result.message.metadata.steerStatus, 'settled');
+  assert.equal(result.message.metadata.steerSettledAt, settledAt);
+  assert.equal(harness.updates.length, updateCount);
+});
+
+test('a steerFailed event wins over a later delivery acknowledgement without terminal downgrade', async () => {
+  let deliver;
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((resolve) => { deliver = resolve; });
+    },
+  });
+  const pending = harness.controller.submit(input());
+  harness.runner.emit('steerFailed', 'session-1', UUID, 'runner retry');
+  const failed = harness.store.getMessageById('session-1', UUID);
+  const failedAt = failed.metadata.steerFailedAt;
+  const updateCount = harness.updates.length;
+
+  deliver();
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'delivery_failed');
+  const finalMessage = harness.store.getMessageById('session-1', UUID);
+  assert.equal(finalMessage.metadata.steerStatus, 'failed');
+  assert.equal(finalMessage.metadata.steerFailedAt, failedAt);
+  assert.equal(harness.updates.length, updateCount);
 });
 
 test('terminal runner events are idempotent and dispose removes the listeners', async () => {
