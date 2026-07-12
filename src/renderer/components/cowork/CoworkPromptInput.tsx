@@ -89,6 +89,7 @@ interface CoworkPromptInputProps {
   placeholder?: string;
   disabled?: boolean;
   steerDisabled?: boolean;
+  scopeKey?: string;
   size?: 'normal' | 'large';
   workingDirectory?: string;
   onWorkingDirectoryChange?: (dir: string) => void;
@@ -108,6 +109,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       placeholder = 'Enter your task...',
       disabled = false,
       steerDisabled = false,
+      scopeKey,
       size = 'normal',
       workingDirectory = '',
       onWorkingDirectoryChange,
@@ -118,7 +120,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     } = props;
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
-    const [value, setValue] = useState(draftPrompt);
+    const initialDraftRef = useRef(scopeKey ? '' : draftPrompt);
+    const [value, setValue] = useState(initialDraftRef.current);
     const [attachments, setAttachments] = useState<CoworkAttachment[]>([]);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
@@ -126,10 +129,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
+    const activeScopeKeyRef = useRef(scopeKey);
     const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
     const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
     if (!draftFieldRef.current) {
-      draftFieldRef.current = createVersionedComposerField(draftPrompt, () => '', (nextValue) => {
+      draftFieldRef.current = createVersionedComposerField(initialDraftRef.current, () => '', (nextValue) => {
         setValue(nextValue);
         dispatch(setDraftPrompt(nextValue));
       });
@@ -191,6 +195,23 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, minHeight), maxHeight)}px`;
     }
   }, [value, minHeight, maxHeight]);
+
+  React.useLayoutEffect(() => () => {
+    draftFieldRef.current?.dispose();
+    attachmentFieldRef.current?.dispose();
+  }, []);
+
+  useEffect(() => {
+    if (activeScopeKeyRef.current !== scopeKey) {
+      draftFieldRef.current?.invalidate();
+      attachmentFieldRef.current?.invalidate();
+      activeScopeKeyRef.current = scopeKey;
+    }
+    if (scopeKey) {
+      draftFieldRef.current?.set('');
+      attachmentFieldRef.current?.set([]);
+    }
+  }, [scopeKey]);
 
   useEffect(() => {
     const handleFocusInput = (event: Event) => {

@@ -1,6 +1,7 @@
 export interface VersionedComposerSnapshot<T> {
   value: T;
   clearedRevision: number;
+  generation: number;
 }
 
 export interface VersionedComposerField<T> {
@@ -8,6 +9,8 @@ export interface VersionedComposerField<T> {
   set: (value: T) => number;
   takeAndClear: () => VersionedComposerSnapshot<T>;
   restoreIfUnchanged: (snapshot: VersionedComposerSnapshot<T>) => boolean;
+  invalidate: () => void;
+  dispose: () => void;
 }
 
 export const createVersionedComposerField = <T>(
@@ -17,8 +20,11 @@ export const createVersionedComposerField = <T>(
 ): VersionedComposerField<T> => {
   let value = initialValue;
   let revision = 0;
+  let generation = 0;
+  let disposed = false;
 
   const set = (nextValue: T): number => {
+    if (disposed) return revision;
     value = nextValue;
     revision += 1;
     publish(nextValue);
@@ -31,12 +37,27 @@ export const createVersionedComposerField = <T>(
     takeAndClear: () => {
       const submittedValue = value;
       const clearedRevision = set(createEmptyValue());
-      return { value: submittedValue, clearedRevision };
+      return { value: submittedValue, clearedRevision, generation };
     },
     restoreIfUnchanged: (snapshot) => {
-      if (revision !== snapshot.clearedRevision) return false;
+      if (
+        disposed
+        || generation !== snapshot.generation
+        || revision !== snapshot.clearedRevision
+      ) return false;
       set(snapshot.value);
       return true;
+    },
+    invalidate: () => {
+      if (disposed) return;
+      generation += 1;
+      revision += 1;
+    },
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      generation += 1;
+      revision += 1;
     },
   };
 };

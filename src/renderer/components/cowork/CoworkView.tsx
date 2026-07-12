@@ -144,6 +144,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const submitErrorSessionIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
   // Track if we're starting a session to prevent duplicate submissions
   const isStartingRef = useRef(false);
   // Track pending start request so stop can cancel delayed startup.
@@ -158,6 +159,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     config,
     preferredMetabotId,
   } = useSelector((state: RootState) => state.cowork);
+  activeSessionIdRef.current = currentSession?.id ?? null;
 
   const activeSkillIds = useSelector((state: RootState) => state.skill.activeSkillIds);
   const skills = useSelector((state: RootState) => state.skill.skills);
@@ -439,20 +441,28 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const handleContinueSession = async (prompt: string, skillPrompt?: string) => {
     if (!currentSession) return false;
 
+    const submittedSessionId = currentSession.id;
     const sessionSkillIds = isStreaming ? [] : [...activeSkillIds];
     const systemPrompt = isStreaming ? undefined : await buildCombinedSystemPrompt(skillPrompt);
-    if (!isStreaming && sessionSkillIds.length > 0) {
+    if (
+      activeSessionIdRef.current === submittedSessionId
+      && !isStreaming
+      && sessionSkillIds.length > 0
+    ) {
       dispatch(clearActiveSkills());
     }
     const result = await coworkService.submitInput({
-      sessionId: currentSession.id,
+      sessionId: submittedSessionId,
       submissionId: crypto.randomUUID(),
       text: prompt,
       systemPrompt,
       activeSkillIds: sessionSkillIds.length > 0 ? sessionSkillIds : undefined,
     });
+    if (activeSessionIdRef.current !== submittedSessionId) {
+      return result.success;
+    }
     if (result.success === false) {
-      submitErrorSessionIdRef.current = currentSession.id;
+      submitErrorSessionIdRef.current = submittedSessionId;
       setSubmitError(i18nService.t(`coworkSubmitError.${result.code}`));
       return false;
     }

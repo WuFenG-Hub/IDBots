@@ -178,15 +178,81 @@ test('a pending steer does not block the next FIFO steer submission', async (t) 
   await pendingFirst;
 });
 
-test('CoworkView submits one UUID, preserves ordinary configuration, and restores failed drafts', () => {
+test('invalidating a shared composer scope isolates the next session draft and attachments', async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-steer-scope-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const outputFile = path.join(tempDir, 'submission-coordinator.mjs');
+  await build({
+    absWorkingDir: projectRoot,
+    stdin: {
+      contents: `export * from './src/renderer/components/cowork/coworkPromptSubmission.ts';`,
+      resolveDir: projectRoot,
+      sourcefile: 'submission-coordinator-entry.ts',
+      loader: 'ts',
+    },
+    outfile: outputFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    logLevel: 'silent',
+  });
+  const { createVersionedComposerField, runComposerSubmission } = await import(
+    `${pathToFileURL(outputFile).href}?test=${Date.now()}`
+  );
+  let rejectSessionA;
+  const sessionAResult = new Promise((_resolve, reject) => { rejectSessionA = reject; });
+  const publishedDrafts = [];
+  const publishedAttachments = [];
+  const draftField = createVersionedComposerField('', () => '', (value) => publishedDrafts.push(value));
+  const attachmentField = createVersionedComposerField([], () => [], (value) => publishedAttachments.push(value));
+
+  draftField.set('session A');
+  attachmentField.set([{ path: '/a.txt', name: 'a.txt' }]);
+  const draftA = draftField.takeAndClear();
+  const attachmentsA = attachmentField.takeAndClear();
+  const pendingA = runComposerSubmission(draftField, draftA, () => sessionAResult);
+
+  draftField.invalidate();
+  attachmentField.invalidate();
+  draftField.set('session B');
+  attachmentField.set([{ path: '/b.txt', name: 'b.txt' }]);
+  const draftPublishCountBeforeFailure = publishedDrafts.length;
+  const attachmentPublishCountBeforeFailure = publishedAttachments.length;
+
+  rejectSessionA(new Error('session A failed late'));
+  await assert.rejects(pendingA, /failed late/);
+  assert.equal(attachmentField.restoreIfUnchanged(attachmentsA), false);
+  assert.equal(draftField.get(), 'session B');
+  assert.deepEqual(attachmentField.get(), [{ path: '/b.txt', name: 'b.txt' }]);
+  assert.equal(publishedDrafts.length, draftPublishCountBeforeFailure);
+  assert.equal(publishedAttachments.length, attachmentPublishCountBeforeFailure);
+
+  draftField.dispose();
+  draftField.set('ignored after unmount');
+  assert.equal(publishedDrafts.length, draftPublishCountBeforeFailure);
+});
+
+test('CoworkView submits one UUID and ignores settlement from a stale session scope', () => {
   assert.match(viewSource, /submissionId:\s*crypto\.randomUUID\(\)/);
   assert.match(viewSource, /coworkService\.submitInput/);
   assert.match(viewSource, /const sessionSkillIds = isStreaming \? \[\] : \[\.\.\.activeSkillIds\]/);
   assert.match(viewSource, /const systemPrompt = isStreaming \? undefined : await buildCombinedSystemPrompt\(skillPrompt\)/);
   assert.doesNotMatch(viewSource, /dispatch\(setDraftPrompt\(prompt\)\)/);
+  assert.match(viewSource, /activeSessionIdRef\.current = currentSession\?\.id \?\? null/);
+  assert.match(viewSource, /const submittedSessionId = currentSession\.id/);
+  assert.match(viewSource, /activeSessionIdRef\.current !== submittedSessionId/);
+  assert.match(viewSource, /sessionId:\s*submittedSessionId/);
   assert.match(viewSource, /setSubmitError\(null\)/);
   assert.match(viewSource, /submitErrorSessionIdRef\.current === currentSession\.id \? submitError : null/);
   assert.doesNotMatch(viewSource, /dispatch\(addMessage/);
+});
+
+test('session detail gives each composer an explicit keyed scope and disposes the old fields', () => {
+  assert.match(detailSource, /<CoworkPromptInput[\s\S]*?key=\{currentSession\.id\}[\s\S]*?scopeKey=\{currentSession\.id\}/);
+  assert.match(inputSource, /scopeKey\?: string/);
+  assert.match(inputSource, /React\.useLayoutEffect/);
+  assert.match(inputSource, /draftFieldRef\.current\?\.dispose\(\)/);
+  assert.match(inputSource, /attachmentFieldRef\.current\?\.dispose\(\)/);
 });
 
 test('running sandbox disables steer text and send while keeping Stop active', () => {

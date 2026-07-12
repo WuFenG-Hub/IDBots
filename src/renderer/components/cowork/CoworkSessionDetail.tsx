@@ -3195,6 +3195,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           )}
           <div className="max-w-3xl mx-auto">
             <CoworkPromptInput
+              key={currentSession.id}
+              scopeKey={currentSession.id}
               onSubmit={onContinue}
               onStop={onStop}
               isStreaming={isStreaming}
