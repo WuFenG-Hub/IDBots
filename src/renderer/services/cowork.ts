@@ -233,11 +233,7 @@ class CoworkService {
     }
 
     try {
-      const result = await cowork.submitInput(input);
-      if (result.success) {
-        store.dispatch(updateSessionStatus({ sessionId: input.sessionId, status: 'running' }));
-      }
-      return result;
+      return await cowork.submitInput(input);
     } catch (error) {
       return {
         success: false,
