@@ -69,6 +69,10 @@ interface SubmissionRunner {
     (event: 'steerSettled', listener: (sessionId: string, submissionId: string) => void): unknown;
     (event: 'steerFailed', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
   };
+  off?: {
+    (event: 'steerSettled', listener: (sessionId: string, submissionId: string) => void): unknown;
+    (event: 'steerFailed', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
+  };
 }
 
 export type CoworkTurnSubmissionDependencies = {
@@ -118,20 +122,46 @@ function resultFromExisting(message: CoworkMessage): CoworkSubmitInputResult {
   };
 }
 
-function toContinueMetadata(metadata: CoworkMessageMetadata | undefined): CoworkMessageMetadata {
+function clearSubmissionState(metadata: CoworkMessageMetadata | undefined): CoworkMessageMetadata {
   const {
     interactionKind: _interactionKind,
+    submissionMode: _submissionMode,
+    submissionResult: _submissionResult,
+    submissionErrorCode: _submissionErrorCode,
+    submissionFailureReason: _submissionFailureReason,
     steerStatus: _steerStatus,
     steerDeliveredAt: _steerDeliveredAt,
     steerSettledAt: _steerSettledAt,
     steerFailedAt: _steerFailedAt,
     steerErrorCode: _steerErrorCode,
+    steerFailureReason: _steerFailureReason,
     ...rest
   } = metadata ?? {};
+  return rest;
+}
+
+function toContinueMetadata(
+  metadata: CoworkMessageMetadata | undefined,
+  submissionResult: 'pending' | 'completed' | 'failed'
+): CoworkMessageMetadata {
   return {
-    ...rest,
+    ...clearSubmissionState(metadata),
     submissionMode: 'continue',
-    submissionResult: 'completed',
+    submissionResult,
+  };
+}
+
+function toQueuedSteerMetadata(
+  metadata: CoworkMessageMetadata | undefined,
+  submissionId: string
+): CoworkMessageMetadata {
+  return {
+    ...clearSubmissionState(metadata),
+    interactionKind: 'steer',
+    submissionId,
+    submissionMode: 'steer',
+    submissionResult: 'pending',
+    steerStatus: 'queued',
   };
 }
 
@@ -140,6 +170,17 @@ export class CoworkTurnSubmissionController {
   private readonly runner: SubmissionRunner;
   private readonly emitMessage: CoworkTurnSubmissionDependencies['emitMessage'];
   private readonly emitMessageUpdate: CoworkTurnSubmissionDependencies['emitMessageUpdate'];
+  private readonly inFlightSubmissions = new Map<string, Promise<CoworkSubmitInputResult>>();
+  private readonly handleSteerSettled = (sessionId: string, submissionId: string): void => {
+    this.markSteerSettled(sessionId, submissionId);
+  };
+  private readonly handleSteerFailed = (
+    sessionId: string,
+    submissionId: string,
+    reason: string
+  ): void => {
+    this.markSteerFailed(sessionId, submissionId, reason);
+  };
 
   constructor(dependencies: CoworkTurnSubmissionDependencies) {
     this.store = dependencies.store;
@@ -147,15 +188,34 @@ export class CoworkTurnSubmissionController {
     this.emitMessage = dependencies.emitMessage;
     this.emitMessageUpdate = dependencies.emitMessageUpdate;
 
-    this.runner.on?.('steerSettled', (sessionId, submissionId) => {
-      this.markSteerSettled(sessionId, submissionId);
-    });
-    this.runner.on?.('steerFailed', (sessionId, submissionId, reason) => {
-      this.markSteerFailed(sessionId, submissionId, reason);
-    });
+    this.runner.on?.('steerSettled', this.handleSteerSettled);
+    this.runner.on?.('steerFailed', this.handleSteerFailed);
   }
 
-  async submit(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
+  submit(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
+    const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+    const submissionId = typeof input?.submissionId === 'string' ? input.submissionId.trim() : '';
+    const key = `${sessionId}\u0000${submissionId}`;
+    const inFlight = this.inFlightSubmissions.get(key);
+    if (inFlight) return inFlight;
+
+    const pending = this.submitOnce(input);
+    this.inFlightSubmissions.set(key, pending);
+    const clear = () => {
+      if (this.inFlightSubmissions.get(key) === pending) {
+        this.inFlightSubmissions.delete(key);
+      }
+    };
+    void pending.then(clear, clear);
+    return pending;
+  }
+
+  dispose(): void {
+    this.runner.off?.('steerSettled', this.handleSteerSettled);
+    this.runner.off?.('steerFailed', this.handleSteerFailed);
+  }
+
+  private async submitOnce(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
     const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
     const submissionId = typeof input?.submissionId === 'string' ? input.submissionId.trim() : '';
     const requestedText = typeof input?.text === 'string' ? input.text.trim() : '';
@@ -206,19 +266,8 @@ export class CoworkTurnSubmissionController {
       this.emitMessage(sessionId, message);
     } else if (message.metadata?.submissionResult !== 'pending') {
       const retryMetadata: CoworkMessageMetadata = interactionKind
-        ? {
-            ...message.metadata,
-            interactionKind,
-            submissionMode: 'steer',
-            submissionResult: 'pending',
-            steerStatus: 'queued',
-            steerErrorCode: undefined,
-            steerFailedAt: undefined,
-          }
-        : {
-            ...toContinueMetadata(message.metadata),
-            submissionResult: 'pending',
-          };
+        ? toQueuedSteerMetadata(message.metadata, submissionId)
+        : toContinueMetadata(message.metadata, 'pending');
       this.persistAndEmit(sessionId, message, retryMetadata);
     }
 
@@ -273,6 +322,13 @@ export class CoworkTurnSubmissionController {
       return currentSessionError;
     }
 
+    const continuing = this.store.getMessageById(sessionId, submissionId) ?? message;
+    this.persistAndEmit(
+      sessionId,
+      continuing,
+      toContinueMetadata(continuing.metadata, 'pending')
+    );
+
     try {
       await this.runner.continueSession(sessionId, text, {
         skipUserMessage: true,
@@ -286,7 +342,7 @@ export class CoworkTurnSubmissionController {
     }
 
     const continued = this.store.getMessageById(sessionId, submissionId) ?? message;
-    const continuedMetadata = toContinueMetadata(continued.metadata);
+    const continuedMetadata = toContinueMetadata(continued.metadata, 'completed');
     this.persistAndEmit(sessionId, continued, continuedMetadata);
     return {
       success: true,
@@ -298,6 +354,7 @@ export class CoworkTurnSubmissionController {
   private markSteerSettled(sessionId: string, submissionId: string): void {
     const message = this.store.getMessageById(sessionId, submissionId);
     if (!message || message.metadata?.interactionKind !== 'steer') return;
+    if (message.metadata.steerStatus === 'settled') return;
     if (message.metadata.steerStatus === 'failed' || message.metadata.steerStatus === 'cancelled') return;
     const metadata: CoworkMessageMetadata = {
       ...message.metadata,
@@ -312,6 +369,7 @@ export class CoworkTurnSubmissionController {
   private markSteerFailed(sessionId: string, submissionId: string, reason: string): void {
     const message = this.store.getMessageById(sessionId, submissionId);
     if (!message || message.metadata?.interactionKind !== 'steer') return;
+    if (message.metadata.steerStatus === 'failed') return;
     if (message.metadata.steerStatus === 'settled') return;
     const metadata: CoworkMessageMetadata = {
       ...message.metadata,
@@ -332,12 +390,25 @@ export class CoworkTurnSubmissionController {
     reason: string
   ): void {
     const current = this.store.getMessageById(sessionId, message.id) ?? message;
-    const metadata: CoworkMessageMetadata = {
-      ...current.metadata,
-      submissionResult: 'failed',
-      submissionErrorCode: code,
-      submissionFailureReason: reason,
-    };
+    const metadata: CoworkMessageMetadata = current.metadata?.interactionKind === 'steer'
+      ? {
+          ...clearSubmissionState(current.metadata),
+          interactionKind: 'steer',
+          submissionId: current.metadata.submissionId,
+          submissionMode: 'steer',
+          submissionResult: 'failed',
+          steerStatus: 'failed',
+          steerFailedAt: Date.now(),
+          steerErrorCode: code,
+          steerFailureReason: reason,
+          submissionErrorCode: code,
+          submissionFailureReason: reason,
+        }
+      : {
+          ...toContinueMetadata(current.metadata, 'failed'),
+          submissionErrorCode: code,
+          submissionFailureReason: reason,
+        };
     this.persistAndEmit(sessionId, current, metadata);
   }
 

@@ -58,6 +58,8 @@ class FakeRunner extends EventEmitter {
     this.delivery = Promise.resolve();
     this.admissionAccepted = true;
     this.turnSettlement = Promise.resolve();
+    this.continueDelivery = Promise.resolve();
+    this.continueError = null;
   }
 
   getSteerCapability() {
@@ -78,6 +80,8 @@ class FakeRunner extends EventEmitter {
 
   async continueSession(sessionId, text, options) {
     this.continueCalls.push({ sessionId, text, options });
+    await this.continueDelivery;
+    if (this.continueError) throw this.continueError;
   }
 }
 
@@ -175,6 +179,56 @@ test('repeating a completed submission UUID does not duplicate execution', async
   assert.equal(harness.emitted.length, 1);
 });
 
+test('coalesces concurrent duplicate UUIDs while steer delivery is in flight', async () => {
+  let deliver;
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((resolve) => { deliver = resolve; });
+    },
+  });
+
+  const firstPending = harness.controller.submit(input());
+  const secondPending = harness.controller.submit(input());
+  assert.equal(harness.runner.steerCalls.length, 1);
+  deliver();
+  const [first, second] = await Promise.all([firstPending, secondPending]);
+
+  assert.deepEqual(second, first);
+  assert.equal(harness.runner.steerCalls.length, 1);
+  assert.equal(harness.store.session.messages.length, 1);
+});
+
+test('coalesces concurrent ordinary continues and concurrent delivery failures', async () => {
+  let continueTurn;
+  const continuing = createHarness({
+    configureRunner: (runner) => {
+      runner.continueDelivery = new Promise((resolve) => { continueTurn = resolve; });
+    },
+  });
+  const firstContinue = continuing.controller.submit(input());
+  const secondContinue = continuing.controller.submit(input());
+  assert.equal(continuing.runner.continueCalls.length, 1);
+  continueTurn();
+  const continueResults = await Promise.all([firstContinue, secondContinue]);
+  assert.deepEqual(continueResults[1], continueResults[0]);
+  assert.equal(continuing.runner.continueCalls.length, 1);
+
+  let rejectDelivery;
+  const failing = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((_resolve, reject) => { rejectDelivery = reject; });
+    },
+  });
+  const firstFailure = failing.controller.submit(input());
+  const secondFailure = failing.controller.submit(input());
+  rejectDelivery(new Error('one shared failure'));
+  const failureResults = await Promise.all([firstFailure, secondFailure]);
+  assert.deepEqual(failureResults[1], failureResults[0]);
+  assert.equal(failing.runner.steerCalls.length, 1);
+});
+
 test('rejects A2A sessions before persistence or execution', async () => {
   const harness = createHarness({ sessionOverrides: { sessionType: 'a2a' } });
   const result = await harness.controller.submit(input());
@@ -236,6 +290,22 @@ test('rechecks the session after settlement before a fallback continue', async (
   assert.equal(result.success, false);
   assert.equal(result.code, 'session_not_found');
   assert.equal(harness.runner.continueCalls.length, 0);
+
+  const changedToA2A = createHarness({
+    capability: 'closing-local',
+    configureRunner: (runner, store) => {
+      runner.turnSettlement = Promise.resolve().then(() => { store.session.sessionType = 'a2a'; });
+    },
+  });
+  const unsupported = await changedToA2A.controller.submit(input());
+  assert.equal(unsupported.success, false);
+  assert.equal(unsupported.code, 'unsupported_session');
+  const metadata = changedToA2A.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.interactionKind, 'steer');
+  assert.equal(metadata.steerStatus, 'failed');
+  assert.equal(metadata.submissionResult, 'failed');
+  assert.equal(metadata.submissionErrorCode, 'unsupported_session');
+  assert.equal(changedToA2A.runner.continueCalls.length, 0);
 });
 
 test('maps channel delivery rejection and steerFailed events to honest failed metadata', async () => {
@@ -256,6 +326,50 @@ test('maps channel delivery rejection and steerFailed events to honest failed me
   assert.equal(evented.updates.at(-1).metadata.steerErrorCode, 'delivery_failed');
 });
 
+test('clears every failure field when an explicit retry succeeds', async () => {
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => { runner.delivery = Promise.reject(new Error('first failure')); },
+  });
+  const failed = await harness.controller.submit(input());
+  assert.equal(failed.success, false);
+
+  harness.runner.delivery = Promise.resolve();
+  const retried = await harness.controller.submit(input());
+  assert.equal(retried.success, true);
+  const metadata = retried.message.metadata;
+  assert.equal(metadata.steerStatus, 'delivered');
+  assert.equal(metadata.submissionResult, 'completed');
+  for (const field of [
+    'steerErrorCode',
+    'steerFailureReason',
+    'steerFailedAt',
+    'submissionErrorCode',
+    'submissionFailureReason',
+  ]) {
+    assert.equal(metadata[field], undefined, `${field} should be cleared`);
+  }
+  assert.equal(harness.runner.steerCalls.length, 2);
+});
+
+test('records closing fallback failures without leaving a queued steer', async () => {
+  const harness = createHarness({
+    capability: 'closing-local',
+    configureRunner: (runner) => { runner.continueError = new Error('continue failed'); },
+  });
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'delivery_failed');
+  const metadata = harness.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.interactionKind, undefined);
+  assert.equal(metadata.steerStatus, undefined);
+  assert.equal(metadata.submissionMode, 'continue');
+  assert.equal(metadata.submissionResult, 'failed');
+  assert.equal(metadata.submissionErrorCode, 'delivery_failed');
+  assert.equal(metadata.submissionFailureReason, 'continue failed');
+});
+
 test('settlement events update persisted steer status and emit the complete update payload', async () => {
   const harness = createHarness({ capability: 'open-local' });
   await harness.controller.submit(input());
@@ -265,6 +379,35 @@ test('settlement events update persisted steer status and emit the complete upda
   assert.equal(message.metadata.steerStatus, 'settled');
   assert.equal(harness.updates.at(-1).content, 'next direction');
   assert.equal(harness.updates.at(-1).metadata.steerStatus, 'settled');
+});
+
+test('terminal runner events are idempotent and dispose removes the listeners', async () => {
+  const settled = createHarness({ capability: 'open-local' });
+  await settled.controller.submit(input());
+  settled.runner.emit('steerSettled', 'session-1', UUID);
+  const updateCount = settled.updates.length;
+  const settledAt = settled.store.getMessageById('session-1', UUID).metadata.steerSettledAt;
+  settled.runner.emit('steerSettled', 'session-1', UUID);
+  assert.equal(settled.updates.length, updateCount);
+  assert.equal(settled.store.getMessageById('session-1', UUID).metadata.steerSettledAt, settledAt);
+
+  const failed = createHarness({ capability: 'open-local' });
+  await failed.controller.submit(input());
+  failed.runner.emit('steerFailed', 'session-1', UUID, 'same terminal failure');
+  const failedUpdates = failed.updates.length;
+  const failedAt = failed.store.getMessageById('session-1', UUID).metadata.steerFailedAt;
+  failed.runner.emit('steerFailed', 'session-1', UUID, 'same terminal failure');
+  assert.equal(failed.updates.length, failedUpdates);
+  assert.equal(failed.store.getMessageById('session-1', UUID).metadata.steerFailedAt, failedAt);
+
+  const disposed = createHarness({ capability: 'open-local' });
+  await disposed.controller.submit(input());
+  disposed.controller.dispose();
+  const disposedUpdates = disposed.updates.length;
+  disposed.runner.emit('steerSettled', 'session-1', UUID);
+  disposed.runner.emit('steerFailed', 'session-1', UUID, 'after dispose');
+  assert.equal(disposed.updates.length, disposedUpdates);
+  assert.equal(disposed.store.getMessageById('session-1', UUID).metadata.steerStatus, 'delivered');
 });
 
 test('rejects blank input and missing sessions without persisting', async () => {
