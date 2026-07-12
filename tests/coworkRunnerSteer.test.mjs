@@ -174,19 +174,15 @@ function createFakeSdk() {
       }, { once: true });
 
       void (async () => {
-        try {
-          for await (const input of prompt) {
-            inputs.push(input.message.content[0].text);
-            wakeInputWaiters();
-            if (finishRequested) emitAvailableResults();
-          }
-        } catch (error) {
-          if (!options.abortController.signal.aborted) throw error;
-        } finally {
-          consumerDone = true;
-          eventWaiters.shift()?.();
+        for await (const input of prompt) {
+          inputs.push(input.message.content[0].text);
+          wakeInputWaiters();
+          if (finishRequested) emitAvailableResults();
         }
-      })();
+      })().finally(() => {
+        consumerDone = true;
+        eventWaiters.shift()?.();
+      });
 
       return {
         async *[Symbol.asyncIterator]() {
@@ -274,6 +270,37 @@ test('continueSession refuses to start a concurrent runner while live input is o
   );
   runner.stopSession(sessionId);
   await run;
+});
+
+test('continueSession refuses a concurrent runner during local turn setup', async () => {
+  const { runner, sessionId } = createRunnerHarness();
+  let runCalls = 0;
+  let releaseSetup;
+  const setupBlocked = new Promise((resolve) => {
+    releaseSetup = resolve;
+  });
+  let setupEntered;
+  const entered = new Promise((resolve) => {
+    setupEntered = resolve;
+  });
+  runner.runClaudeCode = async () => {
+    runCalls += 1;
+    setupEntered();
+    await setupBlocked;
+  };
+
+  const run = runner.startSession(sessionId, 'initial task');
+  await entered;
+  const concurrentOutcome = runner.continueSession(sessionId, 'unsafe setup race')
+    .then(() => null, (error) => error);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const observedRunCalls = runCalls;
+  releaseSetup();
+  const concurrentError = await concurrentOutcome;
+  await run;
+  assert.equal(observedRunCalls, 1);
+  assert.match(concurrentError?.message ?? '', /active local turn/i);
 });
 
 test('stop aborts the live channel and query without an unhandled rejection', { skip: !hasSteerApi }, async () => {

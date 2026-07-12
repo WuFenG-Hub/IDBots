@@ -30,6 +30,22 @@ test('abort rejects queued delivery and ends the iterator', async () => {
   await assert.rejects(channel[Symbol.asyncIterator]().next(), /stopped/);
 });
 
+test('stop rejects undelivered input but ends the SDK iterator normally', async () => {
+  const channel = new CoworkSteerChannel();
+  const inFlight = channel.enqueue(buildCoworkSteerSdkMessage('in flight'));
+  const queued = channel.enqueue(buildCoworkSteerSdkMessage('still queued'));
+  const iterator = channel[Symbol.asyncIterator]();
+  assert.equal((await iterator.next()).done, false);
+  channel.stop(new Error('session stopped'));
+
+  await assert.rejects(inFlight.delivered, /session stopped/);
+  await assert.rejects(queued.delivered, /session stopped/);
+  assert.deepEqual(
+    await iterator.next(),
+    { done: true, value: undefined },
+  );
+});
+
 test('runtime envelope does not alter the visible user text', () => {
   const message = buildCoworkSteerSdkMessage('只修改查询逻辑');
   const runtimeText = message.message.content[0].text;

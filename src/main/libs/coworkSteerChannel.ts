@@ -88,11 +88,27 @@ export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {
     if (this.abortError) return;
     this.closed = true;
     this.abortError = error;
+    this.rejectUndelivered(error);
+    this.waiter?.reject(error);
+    this.waiter = null;
+  }
+
+  /**
+   * Stop host input without rejecting the SDK's detached streamInput loop.
+   * Undelivered submissions still reject so callers can mark them cancelled.
+   */
+  stop(error: Error): void {
+    if (!this.isOpen) return;
+    this.closed = true;
+    this.rejectUndelivered(error);
+    this.waiter?.resolve();
+    this.waiter = null;
+  }
+
+  private rejectUndelivered(error: Error): void {
     this.inFlight?.reject(error);
     this.inFlight = null;
     for (const input of this.pending.splice(0)) input.reject(error);
-    this.waiter?.reject(error);
-    this.waiter = null;
   }
 
   [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {

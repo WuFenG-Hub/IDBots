@@ -665,7 +665,7 @@ interface ActiveSession {
   localAcceptedInputs: number;
   localSettledInputs: number;
   localPendingSteerIds: string[];
-  localTurnState: 'none' | 'open' | 'closing';
+  localTurnState: 'none' | 'starting' | 'open' | 'closing';
   turnSettled: Promise<void>;
   resolveTurnSettled: () => void;
   turnSettlementResolved: boolean;
@@ -3131,7 +3131,7 @@ export class CoworkRunner extends EventEmitter {
       localAcceptedInputs: 0,
       localSettledInputs: 0,
       localPendingSteerIds: [],
-      localTurnState: 'none',
+      localTurnState: 'starting',
       turnSettled,
       resolveTurnSettled,
       turnSettlementResolved: false,
@@ -3188,7 +3188,11 @@ export class CoworkRunner extends EventEmitter {
     }
     if (
       activeSession.executionMode === 'local'
-      && (activeSession.localTurnState === 'open' || activeSession.localTurnState === 'closing')
+      && (
+        activeSession.localTurnState === 'starting'
+        || activeSession.localTurnState === 'open'
+        || activeSession.localTurnState === 'closing'
+      )
     ) {
       throw new Error(`Cannot continue session ${sessionId}: active local turn is still running.`);
     }
@@ -3278,7 +3282,7 @@ export class CoworkRunner extends EventEmitter {
       // do not get stuck with trailing isStreaming=true placeholders.
       this.finalizeStreamingContent(activeSession);
       activeSession.localTurnState = 'closing';
-      activeSession.localInputChannel?.abort(new Error('Cowork session stopped'));
+      activeSession.localInputChannel?.stop(new Error('Cowork session stopped'));
       activeSession.abortController.abort();
       if (activeSession.ipcBridge) {
         try {
