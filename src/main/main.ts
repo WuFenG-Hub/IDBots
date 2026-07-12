@@ -3128,6 +3128,11 @@ const getCoworkStore = () => {
       { deferHeavyStartupMaintenance: true },
     );
     startupLog('cowork store construct done');
+    const interruptedSteers = coworkStore.markInterruptedSteersAfterRestart();
+    startupLog(`cowork steer restart recovery done (count=${interruptedSteers})`);
+    if (interruptedSteers > 0) {
+      console.info(`[Main] Marked ${interruptedSteers} interrupted Cowork steer(s) as failed`);
+    }
     startupLog('cowork store auto-delete begin');
     const cleaned = coworkStore.autoDeleteNonPersonalMemories();
     startupLog(`cowork store auto-delete done (cleaned=${cleaned})`);

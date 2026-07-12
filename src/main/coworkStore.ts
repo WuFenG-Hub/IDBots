@@ -2237,6 +2237,67 @@ export class CoworkStore implements MemoryBackend {
     return modified;
   }
 
+  markInterruptedSteersAfterRestart(now: number = Date.now()): number {
+    if (!this.tableExists('cowork_messages')) {
+      return 0;
+    }
+
+    let changed = 0;
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      const result = this.db.exec(`
+        SELECT id, session_id, metadata
+        FROM cowork_messages
+        WHERE type = 'user' AND metadata IS NOT NULL
+      `);
+      const rows = result[0]?.values ?? [];
+
+      for (const row of rows) {
+        const messageId = String(row[0]);
+        const sessionId = String(row[1]);
+        const rawMetadata = String(row[2]);
+        let metadata: CoworkMessageMetadata;
+        try {
+          const parsed = JSON.parse(rawMetadata) as unknown;
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            continue;
+          }
+          metadata = parsed as CoworkMessageMetadata;
+        } catch {
+          continue;
+        }
+
+        if (metadata.interactionKind !== 'steer') continue;
+        if (metadata.steerStatus !== 'queued' && metadata.steerStatus !== 'delivered') continue;
+
+        const recoveredMetadata: CoworkMessageMetadata = {
+          ...metadata,
+          submissionMode: 'steer',
+          submissionResult: 'failed',
+          steerStatus: 'failed',
+          steerFailedAt: now,
+          steerErrorCode: 'app_restarted',
+        };
+        this.db.run(`
+          UPDATE cowork_messages
+          SET metadata = ?
+          WHERE id = ? AND session_id = ?
+        `, [JSON.stringify(recoveredMetadata), messageId, sessionId]);
+        changed += this.db.getRowsModified?.() || 0;
+      }
+
+      this.db.run('COMMIT');
+    } catch (error) {
+      this.db.run('ROLLBACK');
+      throw error;
+    }
+
+    if (changed > 0) {
+      this.saveDb();
+    }
+    return changed;
+  }
+
   listRecentCwds(limit: number = 8): string[] {
     interface CwdRow {
       cwd: string;
@@ -2413,6 +2474,17 @@ export class CoworkStore implements MemoryBackend {
         : undefined,
       timestamp: Number(row[4]),
     };
+  }
+
+  getMessageOwnerSessionId(messageId: string): string | null {
+    const result = this.db.exec(`
+      SELECT session_id
+      FROM cowork_messages
+      WHERE id = ?
+      LIMIT 1
+    `, [messageId]);
+    const row = result[0]?.values[0];
+    return row ? String(row[0]) : null;
   }
 
   updateMessage(sessionId: string, messageId: string, updates: { content?: string; metadata?: CoworkMessageMetadata }): void {

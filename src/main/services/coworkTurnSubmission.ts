@@ -38,6 +38,7 @@ type SteerCapability = 'open-local' | 'closing-local' | 'sandbox' | 'inactive';
 interface SubmissionStore {
   getSession(sessionId: string): CoworkSession | null;
   getMessageById(sessionId: string, messageId: string): CoworkMessage | null;
+  getMessageOwnerSessionId?(messageId: string): string | null;
   addMessageWithId(
     sessionId: string,
     messageId: string,
@@ -170,7 +171,11 @@ export class CoworkTurnSubmissionController {
   private readonly runner: SubmissionRunner;
   private readonly emitMessage: CoworkTurnSubmissionDependencies['emitMessage'];
   private readonly emitMessageUpdate: CoworkTurnSubmissionDependencies['emitMessageUpdate'];
-  private readonly inFlightSubmissions = new Map<string, Promise<CoworkSubmitInputResult>>();
+  private readonly inFlightSubmissions = new Map<string, {
+    sessionId: string;
+    text: string;
+    promise: Promise<CoworkSubmitInputResult>;
+  }>();
   private readonly handleSteerSettled = (sessionId: string, submissionId: string): void => {
     this.markSteerSettled(sessionId, submissionId);
   };
@@ -195,9 +200,23 @@ export class CoworkTurnSubmissionController {
   submit(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
     const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
     const submissionId = typeof input?.submissionId === 'string' ? input.submissionId.trim() : '';
-    const key = `${sessionId}\u0000${submissionId}`;
-    const inFlight = this.inFlightSubmissions.get(key);
-    if (inFlight) return inFlight;
+    const requestedText = typeof input?.text === 'string' ? input.text.trim() : '';
+    if (!sessionId || !SUBMISSION_ID_RE.test(submissionId) || !requestedText) {
+      return Promise.resolve(
+        errorResult('invalid_input', 'Session ID, submission UUID, and text are required')
+      );
+    }
+
+    const inFlight = this.inFlightSubmissions.get(submissionId);
+    if (inFlight) {
+      if (inFlight.sessionId === sessionId && inFlight.text === requestedText) {
+        return inFlight.promise;
+      }
+      return Promise.resolve(errorResult(
+        'invalid_input',
+        'Submission UUID is already associated with different input'
+      ));
+    }
 
     let resolvePending!: (result: CoworkSubmitInputResult) => void;
     let rejectPending!: (reason?: unknown) => void;
@@ -205,10 +224,10 @@ export class CoworkTurnSubmissionController {
       resolvePending = resolve;
       rejectPending = reject;
     });
-    this.inFlightSubmissions.set(key, pending);
+    this.inFlightSubmissions.set(submissionId, { sessionId, text: requestedText, promise: pending });
     const clear = () => {
-      if (this.inFlightSubmissions.get(key) === pending) {
-        this.inFlightSubmissions.delete(key);
+      if (this.inFlightSubmissions.get(submissionId)?.promise === pending) {
+        this.inFlightSubmissions.delete(submissionId);
       }
     };
     void pending.then(clear, clear);
@@ -231,9 +250,40 @@ export class CoworkTurnSubmissionController {
       return errorResult('invalid_input', 'Session ID, submission UUID, and text are required');
     }
 
+    const ownerSessionId = this.store.getMessageOwnerSessionId?.(submissionId);
+    if (ownerSessionId && ownerSessionId !== sessionId) {
+      return errorResult(
+        'invalid_input',
+        'Submission UUID is already associated with different input'
+      );
+    }
+
     const existing = this.store.getMessageById(sessionId, submissionId);
+    if (existing) {
+      const isMatchingUserInput = existing.type === 'user'
+        && existing.content === requestedText
+        && (!existing.metadata?.submissionId || existing.metadata.submissionId === submissionId);
+      if (!isMatchingUserInput) {
+        return errorResult(
+          'invalid_input',
+          'Submission UUID is already associated with different input'
+        );
+      }
+    }
     if (existing && isCompletedSubmission(existing)) {
       return resultFromExisting(existing);
+    }
+    if (existing) {
+      const isRetryableFailedSteer = existing.metadata?.interactionKind === 'steer'
+        && existing.metadata.submissionMode === 'steer'
+        && existing.metadata.submissionResult === 'failed'
+        && existing.metadata.steerStatus === 'failed';
+      if (!isRetryableFailedSteer) {
+        return errorResult(
+          'invalid_input',
+          'Submission UUID is not retryable'
+        );
+      }
     }
 
     const initialSession = this.store.getSession(sessionId);
