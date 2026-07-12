@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { ChevronDownIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { RootState, store } from '../../store';
-import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId } from '../../store/slices/coworkSlice';
+import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId, setDraftPrompt } from '../../store/slices/coworkSlice';
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
@@ -142,6 +142,8 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const [localMetabotCount, setLocalMetabotCount] = useState(0);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const submitErrorSessionIdRef = useRef<string | null>(null);
   // Track if we're starting a session to prevent duplicate submissions
   const isStartingRef = useRef(false);
   // Track pending start request so stop can cancel delayed startup.
@@ -435,24 +437,29 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const shouldPromptCreateMetabot = shouldRouteFirstMetabotCreationToOnboarding(localMetabotCount);
 
   const handleContinueSession = async (prompt: string, skillPrompt?: string) => {
-    if (!currentSession) return;
+    if (!currentSession) return false;
 
-    // Capture active skill IDs before clearing
-    const sessionSkillIds = [...activeSkillIds];
-
-    // Clear active skills after capturing so they don't persist to next message
-    if (sessionSkillIds.length > 0) {
+    const sessionSkillIds = isStreaming ? [] : [...activeSkillIds];
+    const systemPrompt = isStreaming ? undefined : await buildCombinedSystemPrompt(skillPrompt);
+    if (!isStreaming && sessionSkillIds.length > 0) {
       dispatch(clearActiveSkills());
     }
-
-    const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
-
-    await coworkService.continueSession({
+    const result = await coworkService.submitInput({
       sessionId: currentSession.id,
-      prompt,
-      systemPrompt: combinedSystemPrompt,
+      submissionId: crypto.randomUUID(),
+      text: prompt,
+      systemPrompt,
       activeSkillIds: sessionSkillIds.length > 0 ? sessionSkillIds : undefined,
     });
+    if (result.success === false) {
+      dispatch(setDraftPrompt(prompt));
+      submitErrorSessionIdRef.current = currentSession.id;
+      setSubmitError(i18nService.t(`coworkSubmitError.${result.code}`));
+      return false;
+    }
+    submitErrorSessionIdRef.current = null;
+    setSubmitError(null);
+    return true;
   };
 
   const handleStopSession = async () => {
@@ -547,6 +554,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
           onManageSkills={() => onShowSkills?.()}
           onContinue={handleContinueSession}
           onStop={handleStopSession}
+          submitError={submitErrorSessionIdRef.current === currentSession.id ? submitError : null}
           focusedOrderTxid={focusedOrderTxid}
           onFocusedOrderConsumed={onFocusedOrderConsumed}
           onNavigateHome={() => dispatch(clearCurrentSession())}

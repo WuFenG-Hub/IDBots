@@ -18,6 +18,28 @@ type CoworkAttachment = {
   name: string;
 };
 
+interface CoworkPromptInputStateOptions {
+  value: string;
+  isStreaming: boolean;
+  disabled: boolean;
+  attachmentCount: number;
+}
+
+export const deriveCoworkPromptInputState = ({
+  value,
+  isStreaming,
+  disabled,
+  attachmentCount,
+}: CoworkPromptInputStateOptions) => {
+  const hasTextInput = Boolean(value.trim());
+  const isSteerSubmit = isStreaming && hasTextInput;
+  const showStopButton = isStreaming && !hasTextInput;
+  const canSubmit = !disabled && (!isStreaming
+    ? hasTextInput || attachmentCount > 0
+    : isSteerSubmit);
+  return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
+};
+
 const getFileNameFromPath = (path: string): string => {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
@@ -53,11 +75,12 @@ export interface CoworkPromptInputRef {
 }
 
 interface CoworkPromptInputProps {
-  onSubmit: (prompt: string, skillPrompt?: string) => void;
+  onSubmit: (prompt: string, skillPrompt?: string) => void | boolean | Promise<void | boolean>;
   onStop?: () => void;
   isStreaming?: boolean;
   placeholder?: string;
   disabled?: boolean;
+  waitForSubmitResult?: boolean;
   size?: 'normal' | 'large';
   workingDirectory?: string;
   onWorkingDirectoryChange?: (dir: string) => void;
@@ -76,6 +99,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       isStreaming = false,
       placeholder = 'Enter your task...',
       disabled = false,
+      waitForSubmitResult = false,
       size = 'normal',
       workingDirectory = '',
       onWorkingDirectoryChange,
@@ -94,6 +118,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
+    const submitInFlightRef = useRef(false);
 
   // 暴露方法给父组件
   React.useImperativeHandle(ref, () => ({
@@ -179,20 +204,24 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     }
   }, [value, draftPrompt, dispatch]);
 
-  const handleSubmit = useCallback(() => {
-    if (showFolderSelector && !workingDirectory?.trim()) {
+  const handleSubmit = useCallback(async () => {
+    if (submitInFlightRef.current || disabled) return;
+
+    const trimmedValue = value.trim();
+    if (isStreaming && !trimmedValue) return;
+    if (!isStreaming && showFolderSelector && !workingDirectory?.trim()) {
       setShowFolderRequiredWarning(true);
       return;
     }
-
-    const trimmedValue = value.trim();
-    if ((!trimmedValue && attachments.length === 0) || isStreaming || disabled) return;
+    if (!isStreaming && !trimmedValue && attachments.length === 0) return;
     setShowFolderRequiredWarning(false);
 
     // Get active skills prompts and combine them
-    const activeSkills = activeSkillIds
-      .map(id => skills.find(s => s.id === id))
-      .filter((s): s is Skill => s !== undefined);
+    const activeSkills = isStreaming
+      ? []
+      : activeSkillIds
+        .map(id => skills.find(s => s.id === id))
+        .filter((s): s is Skill => s !== undefined);
     const skillPrompt = activeSkills.length > 0
       ? activeSkills.map(buildInlinedSkillPrompt).join('\n\n')
       : undefined;
@@ -200,15 +229,33 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const attachmentLines = attachments.map((attachment) =>
       `${inputFileLabel}: ${attachment.path}`
     ).join('\n');
-    const finalPrompt = trimmedValue
-      ? (attachmentLines ? `${trimmedValue}\n\n${attachmentLines}` : trimmedValue)
-      : attachmentLines;
+    const finalPrompt = isStreaming
+      ? trimmedValue
+      : trimmedValue
+        ? (attachmentLines ? `${trimmedValue}\n\n${attachmentLines}` : trimmedValue)
+        : attachmentLines;
 
-    onSubmit(finalPrompt, skillPrompt);
-    setValue('');
-    dispatch(setDraftPrompt(''));
-    setAttachments([]);
-  }, [value, isStreaming, disabled, onSubmit, activeSkillIds, skills, attachments, inputFileLabel, showFolderSelector, workingDirectory, dispatch]);
+    submitInFlightRef.current = true;
+    try {
+      const submissionResult = onSubmit(finalPrompt, isStreaming ? undefined : skillPrompt);
+      const accepted = waitForSubmitResult
+        ? await submissionResult
+        : submissionResult === false ? false : true;
+      if (!waitForSubmitResult && submissionResult instanceof Promise) {
+        void submissionResult.catch((error) => {
+          console.error('Cowork prompt submission failed:', error);
+        });
+      }
+      if (accepted === false) return;
+      setValue('');
+      dispatch(setDraftPrompt(''));
+      if (!isStreaming) {
+        setAttachments([]);
+      }
+    } finally {
+      submitInFlightRef.current = false;
+    }
+  }, [value, isStreaming, disabled, waitForSubmitResult, onSubmit, activeSkillIds, skills, attachments, inputFileLabel, showFolderSelector, workingDirectory, dispatch]);
 
   const handleSelectSkill = useCallback((skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
@@ -223,9 +270,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter to submit, Shift+Enter for new line
     const isComposing = event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
-    if (event.key === 'Enter' && !event.shiftKey && !isComposing && !isStreaming && !disabled) {
+    if (event.key === 'Enter' && !event.shiftKey && !isComposing && !disabled) {
       event.preventDefault();
-      handleSubmit();
+      void handleSubmit();
     }
   };
 
@@ -398,7 +445,15 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     void handleIncomingFiles(files);
   }, [disabled, handleIncomingFiles, isStreaming]);
 
-  const canSubmit = !disabled && (!!value.trim() || attachments.length > 0);
+  const { isSteerSubmit, showStopButton, canSubmit } = deriveCoworkPromptInputState({
+    value,
+    isStreaming,
+    disabled,
+    attachmentCount: attachments.length,
+  });
+  const effectivePlaceholder = isStreaming
+    ? i18nService.t('coworkSteerPlaceholder')
+    : placeholder;
   const enhancedContainerClass = isDraggingFiles
     ? `${containerClass} ring-2 ring-claude-accent/50 border-claude-accent/60`
     : containerClass;
@@ -418,6 +473,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 <button
                   type="button"
                   onClick={() => handleRemoveAttachment(attachment.path)}
+                  disabled={disabled || isStreaming}
                   className="ml-0.5 rounded-full p-0.5 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
                   aria-label={i18nService.t('coworkAttachmentRemove')}
                   title={i18nService.t('coworkAttachmentRemove')}
@@ -448,14 +504,17 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={placeholder}
+              placeholder={effectivePlaceholder}
               disabled={disabled}
               rows={isLarge ? 2 : 1}
               className={textareaClass}
               style={{ minHeight: `${minHeight}px` }}
             />
             <div className="flex items-center justify-between px-4 pb-2 pt-1.5">
-              <div className="flex items-center gap-2 relative">
+              <fieldset
+                className="flex items-center gap-2 relative border-0 p-0 m-0 min-w-0"
+                disabled={disabled || isStreaming}
+              >
                 {showFolderSelector && (
                   <>
                     <div className="relative group">
@@ -502,24 +561,25 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onManageSkills={handleManageSkills}
                 />
                 <ActiveSkillBadge />
-              </div>
+              </fieldset>
               <div className="flex items-center gap-2">
-                {isStreaming ? (
+                {showStopButton ? (
                   <button
                     type="button"
                     onClick={handleStopClick}
+                    disabled={disabled}
                     className="p-2 rounded-xl bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
-                    aria-label="Stop"
+                    aria-label={i18nService.t('stop')}
                   >
                     <StopIcon className="h-5 w-5" />
                   </button>
                 ) : (
                   <button
                     type="button"
-                    onClick={handleSubmit}
+                    onClick={() => { void handleSubmit(); }}
                     disabled={!canSubmit}
                     className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-                    aria-label="Send"
+                    aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
                   >
                     <PaperAirplaneIcon className="h-5 w-5" />
                   </button>
@@ -535,7 +595,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={placeholder}
+              placeholder={effectivePlaceholder}
               disabled={disabled}
               rows={1}
               className={textareaClass}
@@ -554,22 +614,23 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               </button>
             </div>
 
-            {isStreaming ? (
+            {showStopButton ? (
               <button
                 type="button"
                 onClick={handleStopClick}
+                disabled={disabled}
                 className="flex-shrink-0 p-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
-                aria-label="Stop"
+                aria-label={i18nService.t('stop')}
               >
                 <StopIcon className="h-4 w-4" />
               </button>
             ) : (
               <button
                 type="button"
-                onClick={handleSubmit}
+                onClick={() => { void handleSubmit(); }}
                 disabled={!canSubmit}
                 className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
-                aria-label="Send"
+                aria-label={isSteerSubmit ? i18nService.t('coworkSendSteer') : i18nService.t('sendMessage')}
               >
                 <PaperAirplaneIcon className="h-4 w-4" />
               </button>

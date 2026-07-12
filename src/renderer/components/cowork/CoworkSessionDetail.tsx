@@ -46,8 +46,9 @@ import {
 
 interface CoworkSessionDetailProps {
   onManageSkills?: () => void;
-  onContinue: (prompt: string, skillPrompt?: string) => void;
+  onContinue: (prompt: string, skillPrompt?: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
+  submitError?: string | null;
   focusedOrderTxid?: string | null;
   onFocusedOrderConsumed?: (orderTxid: string) => void;
   onNavigateHome?: () => void;
@@ -69,6 +70,13 @@ const ORDER_TAG_TXID_RE = /^\[(?:ORDER_STATUS|DELIVERY|NeedsRating):([0-9a-f]{64
 const ORDER_END_TAG_TXID_RE = /^\[ORDER_END:([0-9a-f]{64})(?:\s+[^\]]*)?\]/i;
 const ORDER_START_CONTENT_RE = /^\[ORDER\]/i;
 const ORDER_END_CONTENT_RE = /^\[ORDER_END(?::[0-9a-fA-F]{64})?(?:\s+[A-Za-z0-9_-]+)?\]/i;
+const STEER_STATUS_TRANSLATION_KEYS: Record<string, string> = {
+  queued: 'coworkSteerStatusQueued',
+  delivered: 'coworkSteerStatusDelivered',
+  settled: 'coworkSteerStatusSettled',
+  failed: 'coworkSteerStatusFailed',
+  cancelled: 'coworkSteerStatusCancelled',
+};
 
 const readDismissedRefundStatusKeys = (): Set<string> => {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -1417,6 +1425,10 @@ const renderGigSquareCard = (content: string): React.ReactNode | null => {
 
 const UserMessageItem: React.FC<{ message: CoworkMessage; skills: Skill[] }> = ({ message, skills }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const isSteerMessage = message.metadata?.interactionKind === 'steer';
+  const steerStatusKey = isSteerMessage
+    ? STEER_STATUS_TRANSLATION_KEYS[String(message.metadata?.steerStatus)] ?? null
+    : null;
 
   // Get skills used for this message
   const messageSkillIds = (message.metadata as CoworkMessageMetadata)?.skillIds || [];
@@ -1464,6 +1476,21 @@ const UserMessageItem: React.FC<{ message: CoworkMessage; skills: Skill[] }> = (
                 />
               </div>
               <div className="flex items-center justify-end gap-1.5 mt-1">
+                {isSteerMessage && (
+                  <>
+                    <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent">
+                      {i18nService.t('coworkSteerLabel')}
+                    </span>
+                    {steerStatusKey && (
+                      <span className={`text-[10px] ${message.metadata?.steerStatus === 'failed'
+                        ? 'text-red-500 dark:text-red-400'
+                        : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
+                      }`}>
+                        {i18nService.t(steerStatusKey)}
+                      </span>
+                    )}
+                  </>
+                )}
                 {messageSkills.map(skill => (
                   <div
                     key={skill.id}
@@ -1926,6 +1953,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   onManageSkills,
   onContinue,
   onStop,
+  submitError,
   focusedOrderTxid,
   onFocusedOrderConsumed,
   onNavigateHome,
@@ -3141,6 +3169,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onSubmit={onContinue}
               onStop={onStop}
               isStreaming={isStreaming}
+              waitForSubmitResult
               placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
               disabled={delegationBlocking}
               onManageSkills={onManageSkills}
@@ -3148,6 +3177,16 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               showModelSelector={true}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
             />
+            {isStreaming && (
+              <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('coworkSteerLocalOnlyHint')}
+              </div>
+            )}
+            {submitError && (
+              <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
+                {submitError}
+              </div>
+            )}
           </div>
         </div>
       )}
