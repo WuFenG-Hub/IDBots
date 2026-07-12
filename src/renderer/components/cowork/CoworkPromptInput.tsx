@@ -197,8 +197,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
   }, [value, minHeight, maxHeight]);
 
   React.useLayoutEffect(() => () => {
-    draftFieldRef.current?.dispose();
-    attachmentFieldRef.current?.dispose();
+    draftFieldRef.current?.invalidate();
+    attachmentFieldRef.current?.invalidate();
   }, []);
 
   useEffect(() => {

@@ -232,6 +232,72 @@ test('invalidating a shared composer scope isolates the next session draft and a
   assert.equal(publishedDrafts.length, draftPublishCountBeforeFailure);
 });
 
+test('strict-mode cleanup invalidates old snapshots without disabling the reused field', async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-steer-strict-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const outputFile = path.join(tempDir, 'submission-coordinator.mjs');
+  await build({
+    absWorkingDir: projectRoot,
+    stdin: {
+      contents: `export * from './src/renderer/components/cowork/coworkPromptSubmission.ts';`,
+      resolveDir: projectRoot,
+      sourcefile: 'submission-coordinator-entry.ts',
+      loader: 'ts',
+    },
+    outfile: outputFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    logLevel: 'silent',
+  });
+  const { createVersionedComposerField, runComposerSubmission } = await import(
+    `${pathToFileURL(outputFile).href}?test=${Date.now()}`
+  );
+  const deferred = () => {
+    let resolve;
+    let reject;
+    const promise = new Promise((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    return { promise, resolve, reject };
+  };
+  const published = [];
+  const field = createVersionedComposerField('', () => '', (value) => published.push(value));
+
+  field.set('session A');
+  const snapshotA = field.takeAndClear();
+  const resultA = deferred();
+  const pendingA = runComposerSubmission(field, snapshotA, () => resultA.promise);
+
+  // React StrictMode's simulated cleanup must invalidate, not permanently dispose, the ref.
+  field.invalidate();
+  field.set('session B');
+  assert.equal(field.get(), 'session B');
+  assert.equal(published.at(-1), 'session B');
+  const publishCountBeforeAReject = published.length;
+  resultA.reject(new Error('old A rejected'));
+  await assert.rejects(pendingA, /old A rejected/);
+  assert.equal(field.get(), 'session B');
+  assert.equal(published.length, publishCountBeforeAReject);
+
+  const snapshotB = field.takeAndClear();
+  const acceptedB = await runComposerSubmission(field, snapshotB, () => Promise.resolve(false));
+  assert.equal(acceptedB, false);
+  assert.equal(field.get(), 'session B');
+  assert.equal(published.at(-1), 'session B');
+
+  field.set('unmount pending');
+  const unmountSnapshot = field.takeAndClear();
+  const unmountResult = deferred();
+  const pendingUnmount = runComposerSubmission(field, unmountSnapshot, () => unmountResult.promise);
+  field.invalidate();
+  const publishCountAfterUnmount = published.length;
+  unmountResult.resolve(false);
+  await pendingUnmount;
+  assert.equal(published.length, publishCountAfterUnmount);
+});
+
 test('CoworkView submits one UUID and ignores settlement from a stale session scope', () => {
   assert.match(viewSource, /submissionId:\s*crypto\.randomUUID\(\)/);
   assert.match(viewSource, /coworkService\.submitInput/);
@@ -247,12 +313,12 @@ test('CoworkView submits one UUID and ignores settlement from a stale session sc
   assert.doesNotMatch(viewSource, /dispatch\(addMessage/);
 });
 
-test('session detail gives each composer an explicit keyed scope and disposes the old fields', () => {
+test('session detail gives each composer a keyed scope and invalidates cleanup safely', () => {
   assert.match(detailSource, /<CoworkPromptInput[\s\S]*?key=\{currentSession\.id\}[\s\S]*?scopeKey=\{currentSession\.id\}/);
   assert.match(inputSource, /scopeKey\?: string/);
   assert.match(inputSource, /React\.useLayoutEffect/);
-  assert.match(inputSource, /draftFieldRef\.current\?\.dispose\(\)/);
-  assert.match(inputSource, /attachmentFieldRef\.current\?\.dispose\(\)/);
+  assert.match(inputSource, /React\.useLayoutEffect\(\(\) => \(\) => \{[\s\S]*?draftFieldRef\.current\?\.invalidate\(\)[\s\S]*?attachmentFieldRef\.current\?\.invalidate\(\)/);
+  assert.doesNotMatch(inputSource, /React\.useLayoutEffect\(\(\) => \(\) => \{[\s\S]*?\.dispose\(\)/);
 });
 
 test('running sandbox disables steer text and send while keeping Stop active', () => {
