@@ -26,6 +26,10 @@ test('wires exactly one cowork submitInput handler across the typed Electron bou
   );
   assert.match(mainSource, /ipcMain\.handle\('cowork:session:continue'/);
   assert.doesNotMatch(mainSource, /coworkRunner\.on\('steer(?:Settled|Failed)'/);
+  assert.match(
+    mainSource,
+    /new CoworkTurnSubmissionController\(\{[\s\S]*?store: getCoworkStore\(\),[\s\S]*?runner: getCoworkRunner\(\),[\s\S]*?emitMessage: emitCoworkStreamMessage,[\s\S]*?emitMessageUpdate: \([\s\S]*?sessionId: string,[\s\S]*?messageId: string,[\s\S]*?content: string,[\s\S]*?metadata: CoworkMessageMetadata,[\s\S]*?emitCoworkStreamMessageUpdate\(sessionId, messageId, \{ content, metadata \}\);/,
+  );
   assert.match(preloadSource, /submitInput:[\s\S]*?cowork:session:submitInput/);
   assert.match(electronTypes, /submitInput: \(input: CoworkSubmitInput\) => Promise<CoworkSubmitInputResult>/);
   assert.match(serviceSource, /async submitInput\(input: CoworkSubmitInput\): Promise<CoworkSubmitInputResult>/);
@@ -61,9 +65,36 @@ test('renderer service returns steer, continue, IPC failure, and unavailable fal
     format: 'esm',
     platform: 'node',
     logLevel: 'silent',
+    plugins: [{
+      name: 'observable-cowork-store',
+      setup(esbuild) {
+        esbuild.onResolve({ filter: /^\.\.\/store$/ }, (args) => {
+          if (!args.importer.endsWith('/src/renderer/services/cowork.ts')) return null;
+          return { path: 'cowork-submit-store', namespace: 'cowork-submit-test' };
+        });
+        esbuild.onLoad(
+          { filter: /^cowork-submit-store$/, namespace: 'cowork-submit-test' },
+          () => ({
+            loader: 'js',
+            contents: `
+              export const store = {
+                dispatch(action) {
+                  globalThis.__coworkSubmitDispatches.push(action);
+                  return action;
+                },
+                getState() {
+                  return { cowork: { sessions: [], currentSessionId: null, currentSession: null } };
+                },
+              };
+            `,
+          }),
+        );
+      },
+    }],
   });
 
   const calls = [];
+  globalThis.__coworkSubmitDispatches = [];
   globalThis.window = {
     electron: {
       cowork: {
@@ -78,18 +109,57 @@ test('renderer service returns steer, continue, IPC failure, and unavailable fal
       },
     },
   };
-  t.after(() => { delete globalThis.window; });
+  t.after(() => {
+    delete globalThis.window;
+    delete globalThis.__coworkSubmitDispatches;
+  });
 
   const { coworkService } = await import(`${pathToFileURL(outputFile).href}?test=${Date.now()}`);
   const base = { sessionId: 'session-1', submissionId: '11111111-1111-4111-8111-111111111111' };
   assert.equal((await coworkService.submitInput({ ...base, text: 'steer' })).mode, 'steer');
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, [{
+    type: 'cowork/updateSessionStatus',
+    payload: { sessionId: 'session-1', status: 'running' },
+  }]);
+  globalThis.__coworkSubmitDispatches.length = 0;
   assert.equal((await coworkService.submitInput({ ...base, text: 'continue' })).mode, 'continue');
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, [{
+    type: 'cowork/updateSessionStatus',
+    payload: { sessionId: 'session-1', status: 'running' },
+  }]);
+  assert.equal(globalThis.__coworkSubmitDispatches.some((action) => action.type === 'cowork/addMessage'), false);
+  globalThis.__coworkSubmitDispatches.length = 0;
   assert.deepEqual(await coworkService.submitInput({ ...base, text: 'fail' }), {
     success: false,
     code: 'delivery_failed',
     error: 'transport failed',
   });
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, []);
   assert.equal(calls.length, 3);
+
+  globalThis.window.electron.cowork.submitInput = async () => {
+    throw new Error('IPC rejected');
+  };
+  await assert.doesNotReject(async () => {
+    assert.deepEqual(await coworkService.submitInput({ ...base, text: 'throw' }), {
+      success: false,
+      code: 'delivery_failed',
+      error: 'IPC rejected',
+    });
+  });
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, []);
+
+  globalThis.window.electron.cowork.submitInput = () => {
+    throw new Error('IPC threw synchronously');
+  };
+  await assert.doesNotReject(async () => {
+    assert.deepEqual(await coworkService.submitInput({ ...base, text: 'sync-throw' }), {
+      success: false,
+      code: 'delivery_failed',
+      error: 'IPC threw synchronously',
+    });
+  });
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, []);
 
   delete globalThis.window.electron.cowork.submitInput;
   assert.deepEqual(await coworkService.submitInput({ ...base, text: 'missing' }), {
@@ -97,8 +167,9 @@ test('renderer service returns steer, continue, IPC failure, and unavailable fal
     code: 'delivery_failed',
     error: 'Cowork submit API not available',
   });
+  assert.deepEqual(globalThis.__coworkSubmitDispatches, []);
 
-  const methodBody = serviceSource.match(/async submitInput\([\s\S]*?\n  \}/)?.[0] ?? '';
+  const methodBody = serviceSource.match(/async submitInput\([\s\S]*?\n {2}\}/)?.[0] ?? '';
   assert.doesNotMatch(methodBody, /dispatch\(addMessage/);
 });
 
