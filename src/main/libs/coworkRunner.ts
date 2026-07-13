@@ -933,7 +933,9 @@ export class CoworkRunner extends EventEmitter {
   getSteerCapability(sessionId: string): 'open-local' | 'closing-local' | 'sandbox' | 'inactive' {
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) return 'inactive';
-    if (activeSession.executionMode !== 'local') return 'sandbox';
+    if (activeSession.executionMode !== 'local') {
+      return activeSession.localTurnState === 'none' ? 'inactive' : 'sandbox';
+    }
     return activeSession.localTurnState === 'open' && activeSession.localInputChannel?.isOpen
       ? 'open-local'
       : 'closing-local';

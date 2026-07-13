@@ -733,15 +733,18 @@ test('stop aborts the live channel and query without an unhandled rejection', { 
   }
 });
 
-test('reports sandbox and inactive steer capabilities without changing sandbox routing', { skip: !hasSteerApi }, () => {
+test('reports sandbox only for an active sandbox turn and inactive for a retained idle VM', { skip: !hasSteerApi }, () => {
   const { runner, sessionId } = createRunnerHarness({ session: { executionMode: 'sandbox' } });
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
-  runner.activeSessions.set(sessionId, { executionMode: 'sandbox' });
+  runner.activeSessions.set(sessionId, { executionMode: 'sandbox', localTurnState: 'open' });
   assert.equal(runner.getSteerCapability(sessionId), 'sandbox');
   assert.deepEqual(
     runner.trySubmitSteer(sessionId, 'steer-1', 'not supported'),
     { accepted: false, reason: 'sandbox' },
   );
+
+  runner.activeSessions.get(sessionId).localTurnState = 'none';
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
 test('waitForActiveTurnSettlement resolves after the active turn cleanup', { skip: !hasSteerApi }, async () => {
