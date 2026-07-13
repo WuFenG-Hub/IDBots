@@ -913,10 +913,13 @@ export class CoworkRunner extends EventEmitter {
     activeSession.localInputChannel?.stop(error);
     activeSession.localInputChannel = undefined;
     activeSession.maybeCloseLocalTurn = undefined;
-    for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
+    const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
+      ? activeSession.localPendingSteerIds.splice(0)
+      : [];
+    for (const submissionId of pendingSteerIds) {
       this.emit('steerFailed', activeSession.sessionId, submissionId, reason);
     }
-    activeSession.localDeliveredSteerIds.clear();
+    activeSession.localDeliveredSteerIds?.clear();
   }
 
   private cancelPendingLocalSteers(
@@ -926,12 +929,15 @@ export class CoworkRunner extends EventEmitter {
   ): void {
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.stop(error);
-    for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
-      if (!activeSession.localDeliveredSteerIds.has(submissionId)) {
+    const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
+      ? activeSession.localPendingSteerIds.splice(0)
+      : [];
+    for (const submissionId of pendingSteerIds) {
+      if (!activeSession.localDeliveredSteerIds?.has(submissionId)) {
         this.emit('steerCancelled', activeSession.sessionId, submissionId, reason);
       }
     }
-    activeSession.localDeliveredSteerIds.clear();
+    activeSession.localDeliveredSteerIds?.clear();
   }
 
   trySubmitSteer(
