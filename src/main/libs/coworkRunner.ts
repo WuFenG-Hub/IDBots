@@ -160,11 +160,19 @@ export function isSdkResultEvent(event: unknown): event is { type: 'result' } & 
 function isSdkTerminalAssistantTurnEvent(event: unknown): boolean {
   if (!event || typeof event !== 'object') return false;
   const payload = event as Record<string, unknown>;
-  if (payload.type !== 'assistant' || !payload.message || typeof payload.message !== 'object') {
+  if (
+    payload.type !== 'stream_event'
+    || payload.parent_tool_use_id !== null
+    || !payload.event
+    || typeof payload.event !== 'object'
+  ) {
     return false;
   }
-  return payload.parent_tool_use_id === null
-    && (payload.message as Record<string, unknown>).stop_reason === 'end_turn';
+  const streamEvent = payload.event as Record<string, unknown>;
+  if (streamEvent.type !== 'message_delta' || !streamEvent.delta || typeof streamEvent.delta !== 'object') {
+    return false;
+  }
+  return (streamEvent.delta as Record<string, unknown>).stop_reason === 'end_turn';
 }
 
 function isStaleConversationSessionError(message: string): boolean {
