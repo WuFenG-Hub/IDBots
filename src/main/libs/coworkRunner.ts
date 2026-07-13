@@ -157,6 +157,16 @@ export function isSdkResultEvent(event: unknown): event is { type: 'result' } & 
   return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
 }
 
+function isSdkTerminalAssistantTurnEvent(event: unknown): boolean {
+  if (!event || typeof event !== 'object') return false;
+  const payload = event as Record<string, unknown>;
+  if (payload.type !== 'assistant' || !payload.message || typeof payload.message !== 'object') {
+    return false;
+  }
+  return payload.parent_tool_use_id === null
+    && (payload.message as Record<string, unknown>).stop_reason === 'end_turn';
+}
+
 function isStaleConversationSessionError(message: string): boolean {
   return /No conversation found with session ID/i.test(message);
 }
@@ -4145,6 +4155,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localSettledInputs = 0;
       activeSession.localPendingSteerIds = [];
       activeSession.localTurnState = 'open';
+      let unmatchedTopLevelAssistantBoundaries = 0;
       const maybeCloseLocalTurn = () => {
         if (activeSession.localInputChannel !== channel) return;
         if (
@@ -4153,6 +4164,17 @@ export class CoworkRunner extends EventEmitter {
         ) {
           activeSession.localTurnState = 'closing';
           channel.close();
+        }
+      };
+      const settleNextLocalInput = (requireDelivery: boolean) => {
+        const settlementLimit = requireDelivery ? channel.deliveredCount : channel.acceptedCount;
+        if (activeSession.localSettledInputs >= settlementLimit) return;
+        activeSession.localSettledInputs += 1;
+        if (activeSession.localSettledInputs > 1) {
+          const settledSubmissionId = activeSession.localPendingSteerIds.shift();
+          if (settledSubmissionId) {
+            this.emit('steerSettled', sessionId, settledSubmissionId);
+          }
         }
       };
       activeSession.maybeCloseLocalTurn = maybeCloseLocalTurn;
@@ -4167,13 +4189,18 @@ export class CoworkRunner extends EventEmitter {
           break;
         }
         this.handleClaudeEvent(sessionId, event);
+        if (isSdkTerminalAssistantTurnEvent(event)) {
+          // The SDK's query-level result can wait for the streaming prompt to close.
+          // Each top-level end_turn settles at most one delivered user input.
+          unmatchedTopLevelAssistantBoundaries += 1;
+          settleNextLocalInput(true);
+          maybeCloseLocalTurn();
+        }
         if (isSdkResultEvent(event)) {
-          activeSession.localSettledInputs += 1;
-          if (activeSession.localSettledInputs > 1) {
-            const settledSubmissionId = activeSession.localPendingSteerIds.shift();
-            if (settledSubmissionId) {
-              this.emit('steerSettled', sessionId, settledSubmissionId);
-            }
+          if (unmatchedTopLevelAssistantBoundaries > 0) {
+            unmatchedTopLevelAssistantBoundaries -= 1;
+          } else {
+            settleNextLocalInput(false);
           }
           maybeCloseLocalTurn();
         }

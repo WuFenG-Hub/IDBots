@@ -140,6 +140,10 @@ function createFakeSdk(config = {}) {
   const firstAckGate = new Promise((resolve) => {
     releaseFirstAck = resolve;
   });
+  let releaseSecondAck;
+  const secondAckGate = new Promise((resolve) => {
+    releaseSecondAck = resolve;
+  });
 
   const wakeInputWaiters = () => {
     for (const waiter of inputWaiters.splice(0)) waiter();
@@ -160,6 +164,22 @@ function createFakeSdk(config = {}) {
     get inputs() { return inputs; },
     get abortObserved() { return abortObserved; },
     releaseFirstInputAck() { releaseFirstAck(); },
+    releaseSecondInputAck() { releaseSecondAck(); },
+    emitTerminalAssistant(parentToolUseId = null) {
+      pushEvent({
+        type: 'assistant',
+        parent_tool_use_id: parentToolUseId,
+        message: {
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: 'terminal assistant response' }],
+        },
+      });
+    },
+    emitResult(result = 'manual-result') {
+      pushEvent(typeof result === 'string'
+        ? { type: 'result', subtype: 'success', result }
+        : { type: 'result', ...result });
+    },
     createSdkMcpServer: (definition) => definition,
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     async waitForInputCount(count) {
@@ -192,9 +212,16 @@ function createFakeSdk(config = {}) {
             pushEvent({ type: 'result', subtype: 'success', result: 'early-result' });
             await firstAckGate;
           }
+          if (config.terminalBeforeSecondAck && inputIndex === 2) {
+            sdk.emitTerminalAssistant();
+            await secondAckGate;
+          }
           if (finishRequested) emitAvailableResults();
         }
       })().finally(() => {
+        if (config.resultAfterInputClose) {
+          pushEvent({ type: 'result', subtype: 'success', result: 'closed-input-result' });
+        }
         consumerDone = true;
         eventWaiters.shift()?.();
       });
@@ -353,6 +380,165 @@ test('result before delivery acknowledgement still closes the local turn', async
   if (!resolved) runner.stopSession(sessionId);
   await run;
   assert.equal(resolvedWithoutStop, true);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('each top-level terminal assistant end turn settles at most one delivered input', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { resultAfterInputClose: true },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  const steer = runner.trySubmitSteer(sessionId, 'steer-terminal', 'apply this correction');
+  assert.equal(steer.accepted, true);
+  await steer.delivered;
+  await sdk.waitForInputCount(2);
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.deepEqual(settled, []);
+  assert.equal(runner.getSteerCapability(sessionId), 'open-local');
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const resolvedFromTerminalBoundary = resolved;
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolvedFromTerminalBoundary, true);
+  assert.deepEqual(settled, ['steer-terminal']);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('late delivery acknowledgement waits for a new terminal assistant boundary', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { terminalBeforeSecondAck: true, resultAfterInputClose: true },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  const steer = runner.trySubmitSteer(sessionId, 'steer-late-ack', 'apply after acknowledgement');
+  assert.equal(steer.accepted, true);
+  await sdk.waitForInputCount(2);
+  await new Promise((resolve) => setImmediate(resolve));
+  const capabilityAtTerminalBoundary = runner.getSteerCapability(sessionId);
+  sdk.releaseSecondInputAck();
+  await steer.delivered;
+  await new Promise((resolve) => setImmediate(resolve));
+  const resolvedAfterLateAcknowledgement = resolved;
+  const settledAfterLateAcknowledgement = [...settled];
+  const capabilityAfterLateAcknowledgement = runner.getSteerCapability(sessionId);
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(capabilityAtTerminalBoundary, 'open-local');
+  assert.equal(resolvedAfterLateAcknowledgement, false);
+  assert.deepEqual(settledAfterLateAcknowledgement, []);
+  assert.equal(capabilityAfterLateAcknowledgement, 'open-local');
+  assert.deepEqual(settled, ['steer-late-ack']);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('nested terminal assistant end turn is not a local input boundary', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { resultAfterInputClose: true },
+  });
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+
+  sdk.emitTerminalAssistant('nested-tool-use-id');
+  await new Promise((resolve) => setImmediate(resolve));
+  const resolvedAfterNestedBoundary = resolved;
+  const capabilityAfterNestedBoundary = runner.getSteerCapability(sessionId);
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolvedAfterNestedBoundary, false);
+  assert.equal(capabilityAfterNestedBoundary, 'open-local');
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('result after a top-level terminal assistant boundary does not settle another input', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { resultAfterInputClose: true },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  const steer = runner.trySubmitSteer(sessionId, 'steer-after-result', 'wait for my own boundary');
+  assert.equal(steer.accepted, true);
+  await steer.delivered;
+  await sdk.waitForInputCount(2);
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setImmediate(resolve));
+  sdk.emitResult('query-level-result');
+  await new Promise((resolve) => setImmediate(resolve));
+  const resolvedAfterResult = resolved;
+  const settledAfterResult = [...settled];
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolvedAfterResult, false);
+  assert.deepEqual(settledAfterResult, []);
+  assert.deepEqual(settled, ['steer-after-result']);
+});
+
+test('result consumes one assistant credit before a later result-only steer settles', async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness();
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+  runner.on('error', () => undefined);
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  const steer = runner.trySubmitSteer(sessionId, 'steer-result-only', 'settle from result fallback');
+  assert.equal(steer.accepted, true);
+  await steer.delivered;
+  await sdk.waitForInputCount(2);
+
+  sdk.emitTerminalAssistant();
+  await new Promise((resolve) => setImmediate(resolve));
+  sdk.emitResult('initial-result');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.deepEqual(settled, []);
+
+  sdk.emitResult({ subtype: 'error', error: 'steer failed without assistant boundary' });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const resolvedFromResultFallback = resolved;
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolvedFromResultFallback, true);
+  assert.deepEqual(settled, ['steer-result-only']);
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
