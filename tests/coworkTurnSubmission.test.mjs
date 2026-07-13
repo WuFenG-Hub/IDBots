@@ -60,6 +60,7 @@ class FakeRunner extends EventEmitter {
     this.turnSettlement = Promise.resolve();
     this.continueDelivery = Promise.resolve();
     this.continueError = null;
+    this.sessionStopped = false;
   }
 
   getSteerCapability() {
@@ -76,6 +77,10 @@ class FakeRunner extends EventEmitter {
     this.waitCalls += 1;
     this.waitedSessionId = sessionId;
     return this.turnSettlement;
+  }
+
+  wasSessionStopped() {
+    return this.sessionStopped;
   }
 
   async continueSession(sessionId, text, options) {
@@ -170,6 +175,56 @@ test('waits for the exact closing turn then continues exactly once', async () =>
   assert.equal(harness.runner.waitCalls, 1);
   assert.equal(harness.runner.continueCalls.length, 1);
   assert.equal(harness.store.session.messages.filter((message) => message.id === UUID).length, 1);
+});
+
+test('Stop while waiting for a closing local turn cancels the queued steer without Continue', async () => {
+  let settle;
+  const harness = createHarness({
+    capability: 'closing-local',
+    configureRunner: (runner) => {
+      runner.turnSettlement = new Promise((resolve) => { settle = resolve; });
+    },
+  });
+
+  const pending = harness.controller.submit(input());
+  await Promise.resolve();
+  harness.runner.sessionStopped = true;
+  settle();
+  const result = await pending;
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'cancelled');
+  assert.equal(harness.runner.continueCalls.length, 0);
+  const metadata = harness.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.steerStatus, 'cancelled');
+  assert.equal(metadata.submissionResult, 'failed');
+  assert.equal(metadata.submissionErrorCode, 'cancelled');
+});
+
+test('Stop after open steer admission loses the closing race cancels without Continue', async () => {
+  let settle;
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.admissionAccepted = false;
+      runner.turnSettlement = new Promise((resolve) => { settle = resolve; });
+    },
+  });
+
+  const pending = harness.controller.submit(input());
+  await Promise.resolve();
+  assert.equal(harness.runner.steerCalls.length, 1);
+  harness.runner.sessionStopped = true;
+  settle();
+  const result = await pending;
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'cancelled');
+  assert.equal(harness.runner.continueCalls.length, 0);
+  assert.equal(
+    harness.store.getMessageById('session-1', UUID).metadata.steerStatus,
+    'cancelled',
+  );
 });
 
 test('repeating a completed submission UUID does not duplicate execution', async () => {
@@ -485,6 +540,53 @@ test('a steerFailed event wins over a later delivery acknowledgement without ter
   assert.equal(harness.updates.length, updateCount);
 });
 
+test('a steerCancelled event settles pending delivery as cancelled and remains terminal', async () => {
+  let rejectDelivery;
+  const harness = createHarness({
+    capability: 'open-local',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((_resolve, reject) => { rejectDelivery = reject; });
+    },
+  });
+  const pending = harness.controller.submit(input());
+  harness.runner.emit('steerCancelled', 'session-1', UUID, 'Cowork session stopped');
+  rejectDelivery(new Error('Cowork session stopped'));
+
+  const result = await pending;
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'cancelled');
+  const cancelled = harness.store.getMessageById('session-1', UUID);
+  assert.equal(cancelled.metadata.steerStatus, 'cancelled');
+  assert.equal(cancelled.metadata.submissionResult, 'failed');
+  assert.equal(cancelled.metadata.submissionErrorCode, 'cancelled');
+  assert.equal(cancelled.metadata.steerErrorCode, 'cancelled');
+  assert.equal(typeof cancelled.metadata.steerCancelledAt, 'number');
+  assert.equal(cancelled.metadata.steerFailedAt, undefined);
+
+  const cancelledAt = cancelled.metadata.steerCancelledAt;
+  const updateCount = harness.updates.length;
+  harness.runner.emit('steerFailed', 'session-1', UUID, 'late provider failure');
+  harness.runner.emit('steerSettled', 'session-1', UUID);
+  assert.equal(cancelled.metadata.steerStatus, 'cancelled');
+  assert.equal(cancelled.metadata.steerCancelledAt, cancelledAt);
+  assert.equal(harness.updates.length, updateCount);
+});
+
+test('a late cancellation event cannot downgrade a delivered but unsettled steer', async () => {
+  const harness = createHarness({ capability: 'open-local' });
+  const delivered = await harness.controller.submit(input());
+  assert.equal(delivered.success, true);
+  assert.equal(delivered.message.metadata.steerStatus, 'delivered');
+
+  const updateCount = harness.updates.length;
+  harness.runner.emit('steerCancelled', 'session-1', UUID, 'Cowork session stopped');
+  const retained = harness.store.getMessageById('session-1', UUID);
+  assert.equal(retained.metadata.steerStatus, 'delivered');
+  assert.equal(retained.metadata.submissionResult, 'completed');
+  assert.equal(retained.metadata.steerCancelledAt, undefined);
+  assert.equal(harness.updates.length, updateCount);
+});
+
 test('terminal runner events are idempotent and dispose removes the listeners', async () => {
   const settled = createHarness({ capability: 'open-local' });
   await settled.controller.submit(input());
@@ -510,6 +612,7 @@ test('terminal runner events are idempotent and dispose removes the listeners', 
   const disposedUpdates = disposed.updates.length;
   disposed.runner.emit('steerSettled', 'session-1', UUID);
   disposed.runner.emit('steerFailed', 'session-1', UUID, 'after dispose');
+  disposed.runner.emit('steerCancelled', 'session-1', UUID, 'after dispose');
   assert.equal(disposed.updates.length, disposedUpdates);
   assert.equal(disposed.store.getMessageById('session-1', UUID).metadata.steerStatus, 'delivered');
 });

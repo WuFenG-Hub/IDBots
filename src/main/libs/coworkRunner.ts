@@ -642,6 +642,7 @@ export interface CoworkRunnerEvents {
   error: (sessionId: string, error: string) => void;
   steerSettled: (sessionId: string, submissionId: string) => void;
   steerFailed: (sessionId: string, submissionId: string, reason: string) => void;
+  steerCancelled: (sessionId: string, submissionId: string, reason: string) => void;
   'delegation:requested': (sessionId: string, delegation: DelegationRequest) => void;
 }
 
@@ -684,6 +685,7 @@ interface ActiveSession {
   localAcceptedInputs: number;
   localSettledInputs: number;
   localPendingSteerIds: string[];
+  localDeliveredSteerIds: Set<string>;
   localTurnState: 'none' | 'starting' | 'open' | 'closing';
   maybeCloseLocalTurn?: () => void;
   turnSettled: Promise<void>;
@@ -914,6 +916,22 @@ export class CoworkRunner extends EventEmitter {
     for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
       this.emit('steerFailed', activeSession.sessionId, submissionId, reason);
     }
+    activeSession.localDeliveredSteerIds.clear();
+  }
+
+  private cancelPendingLocalSteers(
+    activeSession: ActiveSession,
+    error: Error,
+    reason: string,
+  ): void {
+    activeSession.localTurnState = 'closing';
+    activeSession.localInputChannel?.stop(error);
+    for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
+      if (!activeSession.localDeliveredSteerIds.has(submissionId)) {
+        this.emit('steerCancelled', activeSession.sessionId, submissionId, reason);
+      }
+    }
+    activeSession.localDeliveredSteerIds.clear();
   }
 
   trySubmitSteer(
@@ -931,15 +949,16 @@ export class CoworkRunner extends EventEmitter {
     }
 
     const queued = activeSession.localInputChannel.enqueue(buildCoworkSteerSdkMessage(text));
+    const delivered = queued.delivered.then(() => {
+      activeSession.localDeliveredSteerIds.add(submissionId);
+      activeSession.maybeCloseLocalTurn?.();
+    });
     // The submission controller observes this promise too, but attach a rejection
     // observer immediately so Stop cannot create a transient unhandled rejection.
-    void queued.delivered.then(
-      () => activeSession.maybeCloseLocalTurn?.(),
-      () => undefined,
-    );
+    void delivered.then(undefined, () => undefined);
     activeSession.localPendingSteerIds.push(submissionId);
     activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
-    return { accepted: true, delivered: queued.delivered };
+    return { accepted: true, delivered };
   }
 
   getSteerCapability(sessionId: string): 'open-local' | 'closing-local' | 'sandbox' | 'inactive' {
@@ -955,6 +974,10 @@ export class CoworkRunner extends EventEmitter {
 
   waitForActiveTurnSettlement(sessionId: string): Promise<void> {
     return this.activeSessions.get(sessionId)?.turnSettled ?? Promise.resolve();
+  }
+
+  wasSessionStopped(sessionId: string): boolean {
+    return this.stoppedSessions.has(sessionId);
   }
 
   private getSessionMemoryPolicy(sessionId: string): {
@@ -3178,6 +3201,7 @@ export class CoworkRunner extends EventEmitter {
       localAcceptedInputs: 0,
       localSettledInputs: 0,
       localPendingSteerIds: [],
+      localDeliveredSteerIds: new Set(),
       localTurnState: 'starting',
       turnSettled,
       resolveTurnSettled,
@@ -3327,8 +3351,8 @@ export class CoworkRunner extends EventEmitter {
       // Flush any partially streamed assistant/thinking text so interrupted sessions
       // do not get stuck with trailing isStreaming=true placeholders.
       this.finalizeStreamingContent(activeSession);
-      activeSession.localTurnState = 'closing';
-      activeSession.localInputChannel?.stop(new Error('Cowork session stopped'));
+      const stopReason = 'Cowork session stopped';
+      this.cancelPendingLocalSteers(activeSession, new Error(stopReason), stopReason);
       activeSession.abortController.abort();
       if (activeSession.ipcBridge) {
         try {
@@ -4176,6 +4200,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localAcceptedInputs = 0;
       activeSession.localSettledInputs = 0;
       activeSession.localPendingSteerIds = [];
+      activeSession.localDeliveredSteerIds = new Set();
       activeSession.localTurnState = 'open';
       let unmatchedTopLevelAssistantBoundaries = 0;
       const maybeCloseLocalTurn = () => {
@@ -4195,6 +4220,7 @@ export class CoworkRunner extends EventEmitter {
         if (activeSession.localSettledInputs > 1) {
           const settledSubmissionId = activeSession.localPendingSteerIds.shift();
           if (settledSubmissionId) {
+            activeSession.localDeliveredSteerIds.delete(settledSubmissionId);
             this.emit('steerSettled', sessionId, settledSubmissionId);
           }
         }

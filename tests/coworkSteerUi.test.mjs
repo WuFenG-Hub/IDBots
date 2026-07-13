@@ -313,6 +313,13 @@ test('CoworkView submits one UUID and ignores settlement from a stale session sc
   assert.doesNotMatch(viewSource, /dispatch\(addMessage/);
 });
 
+test('a Stop-cancelled steer is treated as handled without restoring the draft or showing failure', () => {
+  assert.match(
+    viewSource,
+    /if \(result\.success === false\) \{[\s\S]*?if \(result\.code === 'cancelled'\) \{[\s\S]*?submitErrorSessionIdRef\.current = null;[\s\S]*?setSubmitError\(null\);[\s\S]*?return true;/,
+  );
+});
+
 test('session detail gives each composer a keyed scope and invalidates cleanup safely', () => {
   assert.match(detailSource, /<CoworkPromptInput[\s\S]*?key=\{currentSession\.id\}[\s\S]*?scopeKey=\{currentSession\.id\}/);
   assert.match(inputSource, /scopeKey\?: string/);
@@ -353,6 +360,7 @@ test('submission errors are localized for every typed IPC failure code', () => {
     'session_not_found',
     'unsupported_session',
     'unsupported_execution',
+    'cancelled',
     'delivery_failed',
   ]) {
     assert.match(i18nSource, new RegExp(`coworkSubmitError\\.${code}`));

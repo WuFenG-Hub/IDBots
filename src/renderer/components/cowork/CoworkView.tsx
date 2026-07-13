@@ -462,6 +462,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       return result.success;
     }
     if (result.success === false) {
+      if (result.code === 'cancelled') {
+        submitErrorSessionIdRef.current = null;
+        setSubmitError(null);
+        return true;
+      }
       submitErrorSessionIdRef.current = submittedSessionId;
       setSubmitError(i18nService.t(`coworkSubmitError.${result.code}`));
       return false;

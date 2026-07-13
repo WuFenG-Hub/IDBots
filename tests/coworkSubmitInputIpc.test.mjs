@@ -43,6 +43,7 @@ test('mirrors the exact submit request and discriminated result union without an
       source.indexOf('CoworkSubmitInput'),
       source.indexOf('CoworkSubmitInput') + 1_800,
     );
+    assert.match(boundary, /CoworkSubmitInputErrorCode[\s\S]*?'cancelled'/);
     assert.doesNotMatch(boundary, /\bany\b/);
   }
 });

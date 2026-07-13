@@ -854,6 +854,130 @@ test('stop aborts the live channel and query without an unhandled rejection', { 
   }
 });
 
+test('Stop cancels in-flight and queued controller steers within a bounded time', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness({
+    sdkOptions: { pauseBeforeSecondAck: true },
+  });
+  const controller = new CoworkTurnSubmissionController({
+    store,
+    runner,
+    emitMessage: () => undefined,
+    emitMessageUpdate: () => undefined,
+  });
+  const cancelledIds = [];
+  runner.on('steerCancelled', (_sessionId, submissionId) => cancelledIds.push(submissionId));
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const run = runner.startSession(sessionId, 'initial task');
+    await sdk.waitForInputCount(1);
+    const inFlightId = '44444444-4444-4444-8444-444444444444';
+    const queuedId = '55555555-5555-4555-8555-555555555555';
+    const inFlight = controller.submit({ sessionId, submissionId: inFlightId, text: 'in-flight correction' });
+    await sdk.waitForInputCount(2);
+    const queued = controller.submit({ sessionId, submissionId: queuedId, text: 'queued correction' });
+
+    runner.stopSession(sessionId);
+    const outcome = await Promise.race([
+      Promise.all([inFlight, queued]),
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
+    ]);
+    sdk.releaseSecondInputAck();
+    await run;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.notEqual(outcome, 'timeout');
+    assert.deepEqual(outcome.map((result) => ({ success: result.success, code: result.code })), [
+      { success: false, code: 'cancelled' },
+      { success: false, code: 'cancelled' },
+    ]);
+    assert.deepEqual(cancelledIds, [inFlightId, queuedId]);
+    for (const submissionId of [inFlightId, queuedId]) {
+      const metadata = store.getMessageById(sessionId, submissionId).metadata;
+      assert.equal(metadata.steerStatus, 'cancelled');
+      assert.equal(metadata.submissionResult, 'failed');
+      assert.equal(metadata.submissionErrorCode, 'cancelled');
+      const cancelledAt = metadata.steerCancelledAt;
+      runner.emit('steerFailed', sessionId, submissionId, 'late provider failure');
+      runner.emit('steerSettled', sessionId, submissionId);
+      assert.equal(metadata.steerStatus, 'cancelled');
+      assert.equal(metadata.steerCancelledAt, cancelledAt);
+    }
+    assert.deepEqual(unhandled, []);
+  } finally {
+    controller.dispose();
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('Stop preserves a delivered but unsettled runner steer', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness();
+  const controller = new CoworkTurnSubmissionController({
+    store,
+    runner,
+    emitMessage: () => undefined,
+    emitMessageUpdate: () => undefined,
+  });
+  const cancelledIds = [];
+  runner.on('steerCancelled', (_sessionId, submissionId) => cancelledIds.push(submissionId));
+  try {
+    const run = runner.startSession(sessionId, 'initial task');
+    await sdk.waitForInputCount(1);
+    const submissionId = '66666666-6666-4666-8666-666666666666';
+    const delivered = await controller.submit({ sessionId, submissionId, text: 'delivered correction' });
+    assert.equal(delivered.success, true);
+    assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'delivered');
+
+    runner.stopSession(sessionId);
+    await run;
+
+    const metadata = store.getMessageById(sessionId, submissionId).metadata;
+    assert.equal(metadata.steerStatus, 'delivered');
+    assert.equal(metadata.submissionResult, 'completed');
+    assert.equal(metadata.submissionErrorCode, undefined);
+    assert.deepEqual(cancelledIds, []);
+  } finally {
+    controller.dispose();
+  }
+});
+
+test('Stop while controller waits for a closing local turn cancels without restarting Continue', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness();
+  const controller = new CoworkTurnSubmissionController({
+    store,
+    runner,
+    emitMessage: () => undefined,
+    emitMessageUpdate: () => undefined,
+  });
+  let continueCalls = 0;
+  runner.continueSession = async () => { continueCalls += 1; };
+  try {
+    const run = runner.startSession(sessionId, 'initial task');
+    await sdk.waitForInputCount(1);
+    runner.activeSessions.get(sessionId).localTurnState = 'closing';
+    const submissionId = '77777777-7777-4777-8777-777777777777';
+    const pending = controller.submit({ sessionId, submissionId, text: 'closing correction' });
+    await Promise.resolve();
+
+    assert.equal(runner.wasSessionStopped(sessionId), false);
+    runner.stopSession(sessionId);
+    assert.equal(runner.wasSessionStopped(sessionId), true);
+    const result = await pending;
+    await run;
+
+    assert.equal(result.success, false);
+    assert.equal(result.code, 'cancelled');
+    assert.equal(continueCalls, 0);
+    const metadata = store.getMessageById(sessionId, submissionId).metadata;
+    assert.equal(metadata.steerStatus, 'cancelled');
+    assert.equal(metadata.submissionResult, 'failed');
+    assert.equal(metadata.submissionErrorCode, 'cancelled');
+  } finally {
+    controller.dispose();
+  }
+});
+
 test('reports sandbox only for an active sandbox turn and inactive for a retained idle VM', { skip: !hasSteerApi }, () => {
   const { runner, sessionId } = createRunnerHarness({ session: { executionMode: 'sandbox' } });
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');

@@ -100,3 +100,37 @@ test('updates steer delivery metadata without changing visible content', async (
   assert.equal(updated.metadata.steerStatus, 'delivered');
   assert.equal(updated.metadata.steerDeliveredAt, 123);
 });
+
+test('persists Stop cancellation as a distinct steer terminal state', async (t) => {
+  const { store, cleanup } = await createTestCoworkStore();
+  t.after(cleanup);
+  const session = store.createSession('steer', process.cwd());
+  const message = store.addMessageWithId(session.id, crypto.randomUUID(), {
+    type: 'user',
+    content: 'cancel this steer with the task',
+    metadata: {
+      interactionKind: 'steer',
+      submissionMode: 'steer',
+      submissionResult: 'pending',
+      steerStatus: 'queued',
+    },
+  });
+
+  store.updateMessage(session.id, message.id, {
+    metadata: {
+      ...message.metadata,
+      submissionResult: 'failed',
+      submissionErrorCode: 'cancelled',
+      steerStatus: 'cancelled',
+      steerCancelledAt: 456,
+      steerErrorCode: 'cancelled',
+    },
+  });
+
+  const updated = store.getMessageById(session.id, message.id);
+  assert.equal(updated.metadata.steerStatus, 'cancelled');
+  assert.equal(updated.metadata.submissionResult, 'failed');
+  assert.equal(updated.metadata.submissionErrorCode, 'cancelled');
+  assert.equal(updated.metadata.steerCancelledAt, 456);
+  assert.equal(updated.metadata.steerFailedAt, undefined);
+});

@@ -428,6 +428,7 @@ export interface CoworkMessageMetadata {
   steerDeliveredAt?: number;
   steerSettledAt?: number;
   steerFailedAt?: number;
+  steerCancelledAt?: number;
   steerErrorCode?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;

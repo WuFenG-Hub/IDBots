@@ -17,6 +17,7 @@ export type CoworkSubmitInputErrorCode =
   | 'session_not_found'
   | 'unsupported_session'
   | 'unsupported_execution'
+  | 'cancelled'
   | 'delivery_failed';
 
 export type CoworkSubmitInputResult =
@@ -61,6 +62,7 @@ interface SubmissionRunner {
     | { accepted: true; delivered: Promise<void> }
     | { accepted: false; reason: 'inactive' | 'closing' | 'sandbox' };
   waitForActiveTurnSettlement(sessionId: string): Promise<void>;
+  wasSessionStopped(sessionId: string): boolean;
   continueSession(
     sessionId: string,
     text: string,
@@ -69,10 +71,12 @@ interface SubmissionRunner {
   on?: {
     (event: 'steerSettled', listener: (sessionId: string, submissionId: string) => void): unknown;
     (event: 'steerFailed', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
+    (event: 'steerCancelled', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
   };
   off?: {
     (event: 'steerSettled', listener: (sessionId: string, submissionId: string) => void): unknown;
     (event: 'steerFailed', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
+    (event: 'steerCancelled', listener: (sessionId: string, submissionId: string, reason: string) => void): unknown;
   };
 }
 
@@ -134,6 +138,7 @@ function clearSubmissionState(metadata: CoworkMessageMetadata | undefined): Cowo
     steerDeliveredAt: _steerDeliveredAt,
     steerSettledAt: _steerSettledAt,
     steerFailedAt: _steerFailedAt,
+    steerCancelledAt: _steerCancelledAt,
     steerErrorCode: _steerErrorCode,
     steerFailureReason: _steerFailureReason,
     ...rest
@@ -186,6 +191,13 @@ export class CoworkTurnSubmissionController {
   ): void => {
     this.markSteerFailed(sessionId, submissionId, reason);
   };
+  private readonly handleSteerCancelled = (
+    sessionId: string,
+    submissionId: string,
+    reason: string
+  ): void => {
+    this.markSteerCancelled(sessionId, submissionId, reason);
+  };
 
   constructor(dependencies: CoworkTurnSubmissionDependencies) {
     this.store = dependencies.store;
@@ -195,6 +207,7 @@ export class CoworkTurnSubmissionController {
 
     this.runner.on?.('steerSettled', this.handleSteerSettled);
     this.runner.on?.('steerFailed', this.handleSteerFailed);
+    this.runner.on?.('steerCancelled', this.handleSteerCancelled);
   }
 
   submit(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
@@ -240,6 +253,7 @@ export class CoworkTurnSubmissionController {
   dispose(): void {
     this.runner.off?.('steerSettled', this.handleSteerSettled);
     this.runner.off?.('steerFailed', this.handleSteerFailed);
+    this.runner.off?.('steerCancelled', this.handleSteerCancelled);
   }
 
   private async submitOnce(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
@@ -338,11 +352,24 @@ export class CoworkTurnSubmissionController {
           await admission.delivered;
         } catch (error) {
           const reason = error instanceof Error ? error.message : 'Steer delivery failed';
+          const current = this.store.getMessageById(sessionId, submissionId) ?? message;
+          if (current.metadata?.steerStatus === 'cancelled') {
+            return errorResult(
+              'cancelled',
+              String(current.metadata.steerFailureReason || reason)
+            );
+          }
           this.markSteerFailed(sessionId, submissionId, reason);
           return errorResult('delivery_failed', reason);
         }
 
         const delivered = this.store.getMessageById(sessionId, submissionId) ?? message;
+        if (delivered.metadata?.steerStatus === 'cancelled') {
+          return errorResult(
+            'cancelled',
+            String(delivered.metadata.steerFailureReason || 'Cowork session stopped')
+          );
+        }
         if (delivered.metadata?.steerStatus === 'failed') {
           return errorResult(
             'delivery_failed',
@@ -371,6 +398,12 @@ export class CoworkTurnSubmissionController {
       await this.runner.waitForActiveTurnSettlement(sessionId);
     } else if (capability === 'closing-local') {
       await this.runner.waitForActiveTurnSettlement(sessionId);
+    }
+
+    if (interactionKind === 'steer' && this.runner.wasSessionStopped(sessionId)) {
+      const reason = 'Cowork session stopped';
+      this.markSteerCancelled(sessionId, submissionId, reason);
+      return errorResult('cancelled', reason);
     }
 
     const currentSession = this.store.getSession(sessionId);
@@ -428,7 +461,10 @@ export class CoworkTurnSubmissionController {
     const message = this.store.getMessageById(sessionId, submissionId);
     if (!message || message.metadata?.interactionKind !== 'steer') return;
     if (message.metadata.steerStatus === 'failed') return;
-    if (message.metadata.steerStatus === 'settled') return;
+    if (
+      message.metadata.steerStatus === 'settled'
+      || message.metadata.steerStatus === 'cancelled'
+    ) return;
     const metadata: CoworkMessageMetadata = {
       ...message.metadata,
       submissionMode: 'steer',
@@ -436,6 +472,24 @@ export class CoworkTurnSubmissionController {
       steerStatus: 'failed',
       steerFailedAt: Date.now(),
       steerErrorCode: 'delivery_failed',
+      steerFailureReason: reason,
+    };
+    this.persistAndEmit(sessionId, message, metadata);
+  }
+
+  private markSteerCancelled(sessionId: string, submissionId: string, reason: string): void {
+    const message = this.store.getMessageById(sessionId, submissionId);
+    if (!message || message.metadata?.interactionKind !== 'steer') return;
+    if (message.metadata.steerStatus !== 'queued') return;
+    const metadata: CoworkMessageMetadata = {
+      ...message.metadata,
+      submissionMode: 'steer',
+      submissionResult: 'failed',
+      submissionErrorCode: 'cancelled',
+      submissionFailureReason: reason,
+      steerStatus: 'cancelled',
+      steerCancelledAt: Date.now(),
+      steerErrorCode: 'cancelled',
       steerFailureReason: reason,
     };
     this.persistAndEmit(sessionId, message, metadata);

@@ -136,6 +136,7 @@ type CoworkSubmitInputErrorCode =
   | 'session_not_found'
   | 'unsupported_session'
   | 'unsupported_execution'
+  | 'cancelled'
   | 'delivery_failed';
 
 type CoworkSubmitInputResult =

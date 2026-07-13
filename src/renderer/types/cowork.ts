@@ -21,6 +21,7 @@ export interface CoworkMessageMetadata {
   steerDeliveredAt?: number;
   steerSettledAt?: number;
   steerFailedAt?: number;
+  steerCancelledAt?: number;
   steerErrorCode?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
@@ -289,6 +290,7 @@ export type CoworkSubmitInputErrorCode =
   | 'session_not_found'
   | 'unsupported_session'
   | 'unsupported_execution'
+  | 'cancelled'
   | 'delivery_failed';
 
 export type CoworkSubmitInputResult =
