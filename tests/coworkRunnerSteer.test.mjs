@@ -29,6 +29,7 @@ function loadCompiledModule(modulePath) {
 }
 
 const { CoworkRunner } = loadCompiledModule('../dist-electron/main/libs/coworkRunner.js');
+const { CoworkTurnSubmissionController } = loadCompiledModule('../dist-electron/main/services/coworkTurnSubmission.js');
 const { setStoreGetter } = loadCompiledModule('../dist-electron/main/libs/claudeSettings.js');
 const hasSteerApi = typeof CoworkRunner.prototype.trySubmitSteer === 'function';
 
@@ -87,6 +88,38 @@ class FakeCoworkStore {
     return stored;
   }
 
+  addMessageWithId(sessionId, messageId, message) {
+    const existing = this.getMessageById(sessionId, messageId);
+    if (existing) return existing;
+    const session = this.getSession(sessionId);
+    if (!session) throw new Error(`Session ${sessionId} not found`);
+    const stored = {
+      id: messageId,
+      type: message.type,
+      content: message.content,
+      timestamp: 1_700_000_100_000 + ++this.messageSeq,
+      ...(message.metadata ? { metadata: message.metadata } : {}),
+    };
+    session.messages.push(stored);
+    return stored;
+  }
+
+  getMessageById(sessionId, messageId) {
+    return this.getSession(sessionId)?.messages.find((message) => message.id === messageId) ?? null;
+  }
+
+  getMessageOwnerSessionId(messageId) {
+    for (const [sessionId, session] of this.sessions) {
+      if (session.messages.some((message) => message.id === messageId)) return sessionId;
+    }
+    return null;
+  }
+
+  updateMessage(sessionId, messageId, updates) {
+    const message = this.getMessageById(sessionId, messageId);
+    if (message) Object.assign(message, updates);
+  }
+
   updateSession(id, patch) {
     const session = this.getSession(id);
     if (!session) throw new Error(`Session ${id} not found`);
@@ -136,6 +169,7 @@ function createFakeSdk(config = {}) {
   let consumerDone = false;
   let finishRequested = false;
   let abortObserved = false;
+  let queryError = null;
   let releaseFirstAck;
   const firstAckGate = new Promise((resolve) => {
     releaseFirstAck = resolve;
@@ -163,6 +197,10 @@ function createFakeSdk(config = {}) {
     get queryCalls() { return queryCalls; },
     get inputs() { return inputs; },
     get abortObserved() { return abortObserved; },
+    failQuery(error = new Error('generic provider failure')) {
+      queryError = error;
+      eventWaiters.shift()?.();
+    },
     releaseFirstInputAck() { releaseFirstAck(); },
     releaseSecondInputAck() { releaseSecondAck(); },
     emitTerminalAssistant(parentToolUseId = null) {
@@ -226,6 +264,9 @@ function createFakeSdk(config = {}) {
             sdk.emitTerminalStream();
             await secondAckGate;
           }
+          if (config.pauseBeforeSecondAck && inputIndex === 2) {
+            await secondAckGate;
+          }
           if (finishRequested) emitAvailableResults();
         }
       })().finally(() => {
@@ -239,6 +280,7 @@ function createFakeSdk(config = {}) {
       return {
         async *[Symbol.asyncIterator]() {
           while (true) {
+            if (queryError) throw queryError;
             if (eventQueue.length > 0) {
               yield eventQueue.shift();
               continue;
@@ -585,6 +627,85 @@ test('high-level assistant end turn does not double count a streaming boundary',
   await run;
   assert.equal(resolvedFromSecondStreamingBoundary, true);
   assert.deepEqual(settled, ['steer-dual-provider']);
+});
+
+test('generic runtime failure rejects an unacknowledged steer and allows explicit UUID retry', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness({
+    sdkOptions: { pauseBeforeSecondAck: true },
+  });
+  runner.on('error', () => undefined);
+  const controller = new CoworkTurnSubmissionController({
+    store,
+    runner,
+    emitMessage: () => undefined,
+    emitMessageUpdate: () => undefined,
+  });
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const run = runner.startSession(sessionId, 'initial task');
+    await sdk.waitForInputCount(1);
+    const submissionId = '22222222-2222-4222-8222-222222222222';
+    const submitted = controller.submit({ sessionId, submissionId, text: 'pending correction' });
+    await sdk.waitForInputCount(2);
+    sdk.failQuery(new Error('generic provider failure before delivery ack'));
+
+    const outcome = await Promise.race([
+      submitted,
+      new Promise((resolve) => setTimeout(() => resolve('timeout'), 50)),
+    ]);
+    sdk.releaseSecondInputAck();
+    await run;
+    if (outcome === 'timeout') await submitted;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.notEqual(outcome, 'timeout');
+    assert.equal(outcome.success, false);
+    assert.equal(outcome.code, 'delivery_failed');
+    assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'failed');
+
+    runner.continueSession = async () => undefined;
+    const retried = await controller.submit({ sessionId, submissionId, text: 'pending correction' });
+    assert.equal(retried.success, true);
+    assert.equal(retried.mode, 'continue');
+    assert.deepEqual(unhandled, []);
+  } finally {
+    controller.dispose();
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('generic runtime failure marks a delivered but unsettled steer failed', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness();
+  runner.on('error', () => undefined);
+  const controller = new CoworkTurnSubmissionController({
+    store,
+    runner,
+    emitMessage: () => undefined,
+    emitMessageUpdate: () => undefined,
+  });
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const run = runner.startSession(sessionId, 'initial task');
+    await sdk.waitForInputCount(1);
+    const submissionId = '33333333-3333-4333-8333-333333333333';
+    const delivered = await controller.submit({ sessionId, submissionId, text: 'delivered correction' });
+    assert.equal(delivered.success, true);
+    assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'delivered');
+
+    sdk.failQuery(new Error('generic provider failure after delivery'));
+    await run;
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'failed');
+    assert.deepEqual(unhandled, []);
+  } finally {
+    controller.dispose();
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 test('automatic retry fails pending steers and closes the superseded input channel', async () => {

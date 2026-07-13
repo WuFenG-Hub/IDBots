@@ -895,8 +895,20 @@ export class CoworkRunner extends EventEmitter {
   }
 
   private transitionLocalTurnForRetry(activeSession: ActiveSession, reason: string): void {
+    this.failPendingLocalSteers(
+      activeSession,
+      new Error(`Cowork local turn retry: ${reason}`),
+      reason,
+    );
+  }
+
+  private failPendingLocalSteers(
+    activeSession: ActiveSession,
+    error: Error,
+    reason: string,
+  ): void {
     activeSession.localTurnState = 'closing';
-    activeSession.localInputChannel?.stop(new Error(`Cowork local turn retry: ${reason}`));
+    activeSession.localInputChannel?.stop(error);
     activeSession.localInputChannel = undefined;
     activeSession.maybeCloseLocalTurn = undefined;
     for (const submissionId of activeSession.localPendingSteerIds.splice(0)) {
@@ -4346,6 +4358,11 @@ export class CoworkRunner extends EventEmitter {
           providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
         }
       }
+
+      const localSteerFailure = runtimeError instanceof Error
+        ? runtimeError
+        : new Error(errorMessage);
+      this.failPendingLocalSteers(activeSession, localSteerFailure, errorMessage);
 
       if (isUnsupportedMultimodalContentError(providerErrorSignal)) {
         coworkLog('WARN', 'runClaudeCodeLocal', 'Provider still rejected multimodal content after fallback', {
