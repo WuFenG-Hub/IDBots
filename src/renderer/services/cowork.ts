@@ -30,6 +30,8 @@ import type {
   CoworkA2AGuidanceResult,
   CoworkStartOptions,
   CoworkContinueOptions,
+  CoworkSubmitInput,
+  CoworkSubmitInputResult,
 } from '../types/cowork';
 import {
   shouldMarkSessionRunningFromStreamMessage,
@@ -218,6 +220,27 @@ class CoworkService {
     }
 
     return true;
+  }
+
+  async submitInput(input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.submitInput) {
+      return {
+        success: false,
+        code: 'delivery_failed',
+        error: 'Cowork submit API not available',
+      };
+    }
+
+    try {
+      return await cowork.submitInput(input);
+    } catch (error) {
+      return {
+        success: false,
+        code: 'delivery_failed',
+        error: error instanceof Error ? error.message : 'Failed to submit Cowork input',
+      };
+    }
   }
 
   async stopSession(sessionId: string): Promise<boolean> {

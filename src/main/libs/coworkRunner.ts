@@ -10,6 +10,11 @@ import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-age
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits } from './claudeSettings';
 import { loadClaudeSdk } from './claudeSdk';
+import {
+  CoworkSteerChannel,
+  buildCoworkSdkUserMessage,
+  buildCoworkSteerSdkMessage,
+} from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
@@ -147,6 +152,28 @@ const GIT_CLEAN_COMMAND_RE = /\bgit\s+clean\b/i;
 const MEMORY_REQUEST_TAIL_SPLIT_RE = /[,，。]\s*(?:请|麻烦)?你(?:帮我|帮忙|给我|为我|看下|看一下|查下|查一下)|[,，。]\s*帮我|[,，。]\s*请帮我|[,，。]\s*(?:能|可以)不能?\s*帮我|[,，。]\s*你看|[,，。]\s*请你/i;
 const MEMORY_PROCEDURAL_TEXT_RE = /(执行以下命令|run\s+(?:the\s+)?following\s+command|\b(?:cd|npm|pnpm|yarn|node|python|bash|sh|git|curl|wget)\b|\$[A-Z_][A-Z0-9_]*|&&|--[a-z0-9-]+|\/tmp\/|\.sh\b|\.bat\b|\.ps1\b)/i;
 const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:技能|skill)/i;
+
+export function isSdkResultEvent(event: unknown): event is { type: 'result' } & Record<string, unknown> {
+  return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
+}
+
+function isSdkTerminalAssistantTurnEvent(event: unknown): boolean {
+  if (!event || typeof event !== 'object') return false;
+  const payload = event as Record<string, unknown>;
+  if (
+    payload.type !== 'stream_event'
+    || payload.parent_tool_use_id !== null
+    || !payload.event
+    || typeof payload.event !== 'object'
+  ) {
+    return false;
+  }
+  const streamEvent = payload.event as Record<string, unknown>;
+  if (streamEvent.type !== 'message_delta' || !streamEvent.delta || typeof streamEvent.delta !== 'object') {
+    return false;
+  }
+  return (streamEvent.delta as Record<string, unknown>).stop_reason === 'end_turn';
+}
 
 function isStaleConversationSessionError(message: string): boolean {
   return /No conversation found with session ID/i.test(message);
@@ -613,6 +640,9 @@ export interface CoworkRunnerEvents {
   permissionRequest: (sessionId: string, request: PermissionRequest) => void;
   complete: (sessionId: string, claudeSessionId: string | null) => void;
   error: (sessionId: string, error: string) => void;
+  steerSettled: (sessionId: string, submissionId: string) => void;
+  steerFailed: (sessionId: string, submissionId: string, reason: string) => void;
+  steerCancelled: (sessionId: string, submissionId: string, reason: string) => void;
   'delegation:requested': (sessionId: string, delegation: DelegationRequest) => void;
 }
 
@@ -651,6 +681,16 @@ interface ActiveSession {
   contextOverflowDetected: boolean;
   contextOverflowRetryAllowed: boolean;
   executionMode: CoworkExecutionMode;
+  localInputChannel?: CoworkSteerChannel;
+  localAcceptedInputs: number;
+  localSettledInputs: number;
+  localPendingSteerIds: string[];
+  localDeliveredSteerIds: Set<string>;
+  localTurnState: 'none' | 'starting' | 'open' | 'closing';
+  maybeCloseLocalTurn?: () => void;
+  turnSettled: Promise<void>;
+  resolveTurnSettled: () => void;
+  turnSettlementResolved: boolean;
   disableRemoteServicesPrompt: boolean;
   sandboxProcess?: ChildProcessByStdio<null, Readable, Readable>;
   sandboxIpcDir?: string;
@@ -765,6 +805,8 @@ type CoworkMetabotIdentity = {
 };
 
 export interface CoworkRunnerOptions {
+  /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
+  loadClaudeSdk?: typeof loadClaudeSdk;
   /** When set, env overrides (e.g. Twin wallet for metabot-basic) are merged into session env for tool execution. */
   getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
   /** When set, fetches MetaBot by id for persona injection into system prompt. */
@@ -797,6 +839,7 @@ export class CoworkRunner extends EventEmitter {
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private requestIMSessionReset?: (sessionId: string) => boolean;
+  private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
@@ -820,6 +863,7 @@ export class CoworkRunner extends EventEmitter {
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
+    this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
 
 
@@ -836,6 +880,110 @@ export class CoworkRunner extends EventEmitter {
 
   private isSessionStopRequested(sessionId: string, activeSession?: ActiveSession): boolean {
     return this.stoppedSessions.has(sessionId) || Boolean(activeSession?.abortController.signal.aborted);
+  }
+
+  private removeActiveSession(sessionId: string, activeSession: ActiveSession): void {
+    if (this.activeSessions.get(sessionId) !== activeSession) return;
+    activeSession.localTurnState = 'closing';
+    activeSession.localInputChannel?.close();
+    this.activeSessions.delete(sessionId);
+    if (
+      !activeSession.turnSettlementResolved
+      && typeof activeSession.resolveTurnSettled === 'function'
+    ) {
+      activeSession.turnSettlementResolved = true;
+      activeSession.resolveTurnSettled();
+    }
+  }
+
+  private transitionLocalTurnForRetry(activeSession: ActiveSession, reason: string): void {
+    this.failPendingLocalSteers(
+      activeSession,
+      new Error(`Cowork local turn retry: ${reason}`),
+      reason,
+    );
+  }
+
+  private failPendingLocalSteers(
+    activeSession: ActiveSession,
+    error: Error,
+    reason: string,
+  ): void {
+    activeSession.localTurnState = 'closing';
+    activeSession.localInputChannel?.stop(error);
+    activeSession.localInputChannel = undefined;
+    activeSession.maybeCloseLocalTurn = undefined;
+    const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
+      ? activeSession.localPendingSteerIds.splice(0)
+      : [];
+    for (const submissionId of pendingSteerIds) {
+      this.emit('steerFailed', activeSession.sessionId, submissionId, reason);
+    }
+    activeSession.localDeliveredSteerIds?.clear();
+  }
+
+  private cancelPendingLocalSteers(
+    activeSession: ActiveSession,
+    error: Error,
+    reason: string,
+  ): void {
+    activeSession.localTurnState = 'closing';
+    activeSession.localInputChannel?.stop(error);
+    const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
+      ? activeSession.localPendingSteerIds.splice(0)
+      : [];
+    for (const submissionId of pendingSteerIds) {
+      if (!activeSession.localDeliveredSteerIds?.has(submissionId)) {
+        this.emit('steerCancelled', activeSession.sessionId, submissionId, reason);
+      }
+    }
+    activeSession.localDeliveredSteerIds?.clear();
+  }
+
+  trySubmitSteer(
+    sessionId: string,
+    submissionId: string,
+    text: string
+  ):
+    | { accepted: true; delivered: Promise<void> }
+    | { accepted: false; reason: 'inactive' | 'closing' | 'sandbox' } {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return { accepted: false, reason: 'inactive' };
+    if (activeSession.executionMode !== 'local') return { accepted: false, reason: 'sandbox' };
+    if (!activeSession.localInputChannel?.isOpen || activeSession.localTurnState !== 'open') {
+      return { accepted: false, reason: 'closing' };
+    }
+
+    const queued = activeSession.localInputChannel.enqueue(buildCoworkSteerSdkMessage(text));
+    const delivered = queued.delivered.then(() => {
+      activeSession.localDeliveredSteerIds.add(submissionId);
+      activeSession.maybeCloseLocalTurn?.();
+    });
+    // The submission controller observes this promise too, but attach a rejection
+    // observer immediately so Stop cannot create a transient unhandled rejection.
+    void delivered.then(undefined, () => undefined);
+    activeSession.localPendingSteerIds.push(submissionId);
+    activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
+    return { accepted: true, delivered };
+  }
+
+  getSteerCapability(sessionId: string): 'open-local' | 'closing-local' | 'sandbox' | 'inactive' {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return 'inactive';
+    if (activeSession.executionMode !== 'local') {
+      return activeSession.localTurnState === 'none' ? 'inactive' : 'sandbox';
+    }
+    return activeSession.localTurnState === 'open' && activeSession.localInputChannel?.isOpen
+      ? 'open-local'
+      : 'closing-local';
+  }
+
+  waitForActiveTurnSettlement(sessionId: string): Promise<void> {
+    return this.activeSessions.get(sessionId)?.turnSettled ?? Promise.resolve();
+  }
+
+  wasSessionStopped(sessionId: string): boolean {
+    return this.stoppedSessions.has(sessionId);
   }
 
   private getSessionMemoryPolicy(sessionId: string): {
@@ -3022,6 +3170,10 @@ export class CoworkRunner extends EventEmitter {
       ? path.resolve(options.workspaceRoot)
       : this.inferWorkspaceRootFromSessionCwd(session.cwd);
     const sessionCwd = this.resolveSessionCwdForExecution(sessionId, session.cwd, preferredWorkspaceRoot);
+    let resolveTurnSettled!: () => void;
+    const turnSettled = new Promise<void>((resolve) => {
+      resolveTurnSettled = resolve;
+    });
 
     // Store active session
     const activeSession: ActiveSession = {
@@ -3051,7 +3203,15 @@ export class CoworkRunner extends EventEmitter {
       staleResumeRetryAllowed: true,
       contextOverflowDetected: false,
       contextOverflowRetryAllowed: false,
-      executionMode: 'local',
+      executionMode: session.executionMode || this.store.getConfig().executionMode || 'local',
+      localAcceptedInputs: 0,
+      localSettledInputs: 0,
+      localPendingSteerIds: [],
+      localDeliveredSteerIds: new Set(),
+      localTurnState: 'starting',
+      turnSettled,
+      resolveTurnSettled,
+      turnSettlementResolved: false,
       disableRemoteServicesPrompt: Boolean(options.disableRemoteServicesPrompt),
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
@@ -3102,6 +3262,15 @@ export class CoworkRunner extends EventEmitter {
         skipInitialUserMessage: options.skipUserMessage,
       });
       return;
+    }
+    if (
+      activeSession.localTurnState === 'starting'
+      || (
+        activeSession.executionMode === 'local'
+        && (activeSession.localTurnState === 'open' || activeSession.localTurnState === 'closing')
+      )
+    ) {
+      throw new Error(`Cannot continue session ${sessionId}: active local turn is still running.`);
     }
 
     // Ensure status returns to running for resumed turns on active sessions.
@@ -3188,6 +3357,8 @@ export class CoworkRunner extends EventEmitter {
       // Flush any partially streamed assistant/thinking text so interrupted sessions
       // do not get stuck with trailing isStreaming=true placeholders.
       this.finalizeStreamingContent(activeSession);
+      const stopReason = 'Cowork session stopped';
+      this.cancelPendingLocalSteers(activeSession, new Error(stopReason), stopReason);
       activeSession.abortController.abort();
       if (activeSession.ipcBridge) {
         try {
@@ -3205,7 +3376,7 @@ export class CoworkRunner extends EventEmitter {
         }
       }
       activeSession.pendingPermission = null;
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
     }
     this.clearPendingPermissions(sessionId);
     this.clearSandboxPermissions(sessionId);
@@ -3396,7 +3567,7 @@ export class CoworkRunner extends EventEmitter {
     if (this.isSessionStopRequested(sessionId, activeSession)) {
       this.store.updateSession(sessionId, { status: 'idle' });
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
 
@@ -3423,7 +3594,7 @@ export class CoworkRunner extends EventEmitter {
     if (!apiConfig) {
       this.handleError(sessionId, apiConfigResolution.error ?? 'API configuration not found. Please configure model settings.');
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
     const modelLimits = resolveCurrentModelLimits(apiConfig.model);
@@ -3457,7 +3628,7 @@ export class CoworkRunner extends EventEmitter {
       coworkLog('ERROR', 'runClaudeCodeLocal', errorMsg);
       this.handleError(sessionId, errorMsg);
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
 
@@ -3676,6 +3847,7 @@ export class CoworkRunner extends EventEmitter {
       reason: 'result-event' | 'exception',
       errorMessage?: string
     ): Promise<void> => {
+      this.transitionLocalTurnForRetry(activeSession, `automatic context retry (${reason})`);
       const sessionSnapshot = this.store.getSession(sessionId);
       const compacted = buildCoworkCompactedPrompt({
         messages: sessionSnapshot?.messages ?? [],
@@ -3726,7 +3898,7 @@ export class CoworkRunner extends EventEmitter {
         logFile: getCoworkLogPath(),
       });
 
-      const { query, createSdkMcpServer, tool } = await loadClaudeSdk();
+      const { query, createSdkMcpServer, tool } = await this.loadClaudeSdk();
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude SDK loaded successfully');
 
       const memoryServerName = `user-memory-${sessionId.slice(0, 8)}`;
@@ -4029,13 +4201,63 @@ export class CoworkRunner extends EventEmitter {
         }
       }
 
-      const result = await query({ prompt: promptForQuery, options } as any);
+      const channel = new CoworkSteerChannel();
+      activeSession.localInputChannel = channel;
+      activeSession.localAcceptedInputs = 0;
+      activeSession.localSettledInputs = 0;
+      activeSession.localPendingSteerIds = [];
+      activeSession.localDeliveredSteerIds = new Set();
+      activeSession.localTurnState = 'open';
+      let unmatchedTopLevelAssistantBoundaries = 0;
+      const maybeCloseLocalTurn = () => {
+        if (activeSession.localInputChannel !== channel) return;
+        if (
+          activeSession.localSettledInputs >= channel.acceptedCount
+          && channel.deliveredCount >= channel.acceptedCount
+        ) {
+          activeSession.localTurnState = 'closing';
+          channel.close();
+        }
+      };
+      const settleNextLocalInput = (requireDelivery: boolean) => {
+        const settlementLimit = requireDelivery ? channel.deliveredCount : channel.acceptedCount;
+        if (activeSession.localSettledInputs >= settlementLimit) return;
+        activeSession.localSettledInputs += 1;
+        if (activeSession.localSettledInputs > 1) {
+          const settledSubmissionId = activeSession.localPendingSteerIds.shift();
+          if (settledSubmissionId) {
+            activeSession.localDeliveredSteerIds.delete(settledSubmissionId);
+            this.emit('steerSettled', sessionId, settledSubmissionId);
+          }
+        }
+      };
+      activeSession.maybeCloseLocalTurn = maybeCloseLocalTurn;
+      const initial = channel.enqueue(buildCoworkSdkUserMessage(promptForQuery));
+      void initial.delivered.then(maybeCloseLocalTurn, () => undefined);
+      activeSession.localAcceptedInputs = channel.acceptedCount;
+
+      const result = await query({ prompt: channel, options } as any);
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude Code process started, iterating events');
       for await (const event of result as AsyncIterable<unknown>) {
         if (this.isSessionStopRequested(sessionId, activeSession)) {
           break;
         }
         this.handleClaudeEvent(sessionId, event);
+        if (isSdkTerminalAssistantTurnEvent(event)) {
+          // The SDK's query-level result can wait for the streaming prompt to close.
+          // Each top-level end_turn settles at most one delivered user input.
+          unmatchedTopLevelAssistantBoundaries += 1;
+          settleNextLocalInput(true);
+          maybeCloseLocalTurn();
+        }
+        if (isSdkResultEvent(event)) {
+          if (unmatchedTopLevelAssistantBoundaries > 0) {
+            unmatchedTopLevelAssistantBoundaries -= 1;
+          } else {
+            settleNextLocalInput(false);
+          }
+          maybeCloseLocalTurn();
+        }
       }
 
       if (activeSession.staleResumeDetected && !isRetry) {
@@ -4043,6 +4265,7 @@ export class CoworkRunner extends EventEmitter {
         activeSession.claudeSessionId = null;
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
         contextOverflowExceptionRetryAllowed = false;
+        this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
         await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
         return;
       }
@@ -4094,6 +4317,7 @@ export class CoworkRunner extends EventEmitter {
         activeSession.claudeSessionId = null;
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4119,6 +4343,7 @@ export class CoworkRunner extends EventEmitter {
           'DeepSeek thinking 历史缺少 reasoning_content，已自动重置底层模型会话并重试当前输入。'
         );
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic DeepSeek history retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4156,6 +4381,7 @@ export class CoworkRunner extends EventEmitter {
           '模型端拒绝了图片/文档内容块，已自动重置本轮会话并改为文本路径模式重试。'
         );
         try {
+          this.transitionLocalTurnForRetry(activeSession, 'automatic multimodal compatibility retry');
           await this.runClaudeCodeLocal(activeSession, prompt, cwd, systemPrompt, true);
           return;
         } catch (retryError) {
@@ -4164,6 +4390,11 @@ export class CoworkRunner extends EventEmitter {
           providerErrorSignal = buildProviderErrorSignalForMessage(errorMessage);
         }
       }
+
+      const localSteerFailure = runtimeError instanceof Error
+        ? runtimeError
+        : new Error(errorMessage);
+      this.failPendingLocalSteers(activeSession, localSteerFailure, errorMessage);
 
       if (isUnsupportedMultimodalContentError(providerErrorSignal)) {
         coworkLog('WARN', 'runClaudeCodeLocal', 'Provider still rejected multimodal content after fallback', {
@@ -4193,7 +4424,7 @@ export class CoworkRunner extends EventEmitter {
       throw runtimeError;
     } finally {
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
     }
   }
 
@@ -4207,7 +4438,7 @@ export class CoworkRunner extends EventEmitter {
     if (this.isSessionStopRequested(sessionId, activeSession)) {
       this.store.updateSession(sessionId, { status: 'idle' });
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
     const config = this.store.getConfig();
@@ -4218,7 +4449,7 @@ export class CoworkRunner extends EventEmitter {
     if (!fs.existsSync(resolvedCwd)) {
       this.handleError(sessionId, `Working directory does not exist: ${resolvedCwd}`);
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
 
@@ -4252,7 +4483,7 @@ export class CoworkRunner extends EventEmitter {
           `Attachment paths outside working directory are not available in sandbox mode: ${detail}`
         );
         this.clearPendingPermissions(sessionId);
-        this.activeSessions.delete(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
         return;
       }
 
@@ -4269,7 +4500,14 @@ export class CoworkRunner extends EventEmitter {
     // If there's already a running sandbox VM with IPC bridge, send a
     // continuation request to the same VM instead of spawning a new one.
     if (hasActiveSandboxVm) {
-      await this.continueSandboxTurn(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      activeSession.localTurnState = 'starting';
+      try {
+        await this.continueSandboxTurn(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
+      } finally {
+        if (this.activeSessions.get(sessionId) === activeSession) {
+          activeSession.localTurnState = 'none';
+        }
+      }
       return;
     }
 
@@ -4289,7 +4527,7 @@ export class CoworkRunner extends EventEmitter {
       if (executionMode === 'sandbox') {
         this.handleError(sessionId, errorMessage);
         this.clearPendingPermissions(sessionId);
-        this.activeSessions.delete(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
         return;
       }
 
@@ -4320,13 +4558,15 @@ export class CoworkRunner extends EventEmitter {
       // If the sandbox VM is still alive, keep the activeSession for multi-turn continuation.
       // Otherwise (VM exited), clean up.
       if (!activeSession.sandboxProcess || activeSession.sandboxProcess.killed) {
-        this.activeSessions.delete(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+      } else {
+        activeSession.localTurnState = 'none';
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown sandbox error';
       if (executionMode === 'sandbox') {
         this.handleError(sessionId, message);
-        this.activeSessions.delete(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
         return;
       }
 
@@ -4353,7 +4593,7 @@ export class CoworkRunner extends EventEmitter {
     if (this.isSessionStopRequested(sessionId, activeSession)) {
       this.store.updateSession(sessionId, { status: 'idle' });
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
 
@@ -4361,7 +4601,7 @@ export class CoworkRunner extends EventEmitter {
     if (!apiConfig) {
       this.handleError(sessionId, 'API configuration not found. Please configure model settings.');
       this.clearPendingPermissions(sessionId);
-      this.activeSessions.delete(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
       return;
     }
 

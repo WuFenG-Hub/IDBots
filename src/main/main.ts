@@ -12,7 +12,11 @@ import {
   SqliteDatabaseUnavailableError,
 } from './sqliteRecoveryLifecycle';
 import { SqliteBackgroundJobRunner } from './sqliteBackgroundJobs';
-import { CoworkStore, type CoworkMessage } from './coworkStore';
+import {
+  CoworkStore,
+  type CoworkMessage,
+  type CoworkMessageMetadata,
+} from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import {
@@ -94,6 +98,10 @@ import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
 import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
+import {
+  CoworkTurnSubmissionController,
+  type CoworkSubmitInput,
+} from './services/coworkTurnSubmission';
 import { createPin, getPinData } from './services/metaidCore';
 import {
   listOwnerMetaApps,
@@ -2324,6 +2332,7 @@ let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
+let coworkTurnSubmissionController: CoworkTurnSubmissionController | null = null;
 let skillManager: SkillManager | null = null;
 let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
@@ -2682,6 +2691,8 @@ let sqliteRecoveryRestartState: SqliteBackedRestartState = {
 };
 
 const resetSqliteBackedSingletons = async (): Promise<void> => {
+  coworkTurnSubmissionController?.dispose();
+  coworkTurnSubmissionController = null;
   if (coworkRunner) {
     try {
       coworkRunner.stopAllSessions();
@@ -3111,12 +3122,22 @@ const getCoworkStore = () => {
   if (!coworkStore) {
     const sqliteStore = getStore();
     startupLog('cowork store construct begin');
-    coworkStore = new CoworkStore(
+    const candidate = new CoworkStore(
       sqliteStore.getDatabase(),
       sqliteStore.getSaveFunction(),
       { deferHeavyStartupMaintenance: true },
     );
     startupLog('cowork store construct done');
+    try {
+      const interruptedSteers = candidate.markInterruptedSteersAfterRestart();
+      startupLog(`cowork steer restart recovery done (count=${interruptedSteers})`);
+      if (interruptedSteers > 0) {
+        console.info(`[Main] Marked ${interruptedSteers} interrupted Cowork steer(s) as failed`);
+      }
+    } catch (error) {
+      console.warn('[Main] Cowork steer restart recovery failed; continuing startup:', error);
+    }
+    coworkStore = candidate;
     startupLog('cowork store auto-delete begin');
     const cleaned = coworkStore.autoDeleteNonPersonalMemories();
     startupLog(`cowork store auto-delete done (cleaned=${cleaned})`);
@@ -4010,6 +4031,25 @@ const getCoworkRunner = () => {
     });
   }
   return coworkRunner;
+};
+
+const getCoworkTurnSubmissionController = (): CoworkTurnSubmissionController => {
+  if (!coworkTurnSubmissionController) {
+    coworkTurnSubmissionController = new CoworkTurnSubmissionController({
+      store: getCoworkStore(),
+      runner: getCoworkRunner(),
+      emitMessage: emitCoworkStreamMessage,
+      emitMessageUpdate: (
+        sessionId: string,
+        messageId: string,
+        content: string,
+        metadata: CoworkMessageMetadata,
+      ) => {
+        emitCoworkStreamMessageUpdate(sessionId, messageId, { content, metadata });
+      },
+    });
+  }
+  return coworkTurnSubmissionController;
 };
 
 const getSkillManager = () => {
@@ -5690,6 +5730,12 @@ if (!gotTheLock) {
     }
     });
   });
+
+  ipcMain.handle('cowork:session:submitInput', async (_event, input: CoworkSubmitInput) =>
+    withSqliteRecovery('cowork:session:submitInput', async () =>
+      getCoworkTurnSubmissionController().submit(input)
+    )
+  );
 
   ipcMain.handle('cowork:session:stop', async (_event, sessionId: string) => {
     try {

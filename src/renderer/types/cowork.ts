@@ -10,8 +10,19 @@ export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 // Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot
 export type CoworkSessionType = 'standard' | 'a2a';
 
+export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
+
 // Cowork message metadata
 export interface CoworkMessageMetadata {
+  interactionKind?: 'steer';
+  submissionId?: string;
+  submissionMode?: 'steer' | 'continue';
+  steerStatus?: CoworkSteerStatus;
+  steerDeliveredAt?: number;
+  steerSettledAt?: number;
+  steerFailedAt?: number;
+  steerCancelledAt?: number;
+  steerErrorCode?: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
   toolResult?: string;
@@ -265,6 +276,34 @@ export interface CoworkContinueOptions {
   systemPrompt?: string;
   activeSkillIds?: string[];
 }
+
+export interface CoworkSubmitInput {
+  sessionId: string;
+  submissionId: string;
+  text: string;
+  systemPrompt?: string;
+  activeSkillIds?: string[];
+}
+
+export type CoworkSubmitInputErrorCode =
+  | 'invalid_input'
+  | 'session_not_found'
+  | 'unsupported_session'
+  | 'unsupported_execution'
+  | 'cancelled'
+  | 'delivery_failed';
+
+export type CoworkSubmitInputResult =
+  | {
+      success: true;
+      mode: 'steer' | 'continue';
+      message: CoworkMessage;
+    }
+  | {
+      success: false;
+      code: CoworkSubmitInputErrorCode;
+      error: string;
+    };
 
 // IPC result types
 export interface CoworkSessionResult {

@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { CoworkA2AGuidanceRequest } from '../renderer/types/cowork';
+import type {
+  CoworkA2AGuidanceRequest,
+  CoworkSubmitInput,
+  CoworkSubmitInputResult,
+} from '../renderer/types/cowork';
 
 // 暴露安全的 API 到渲染进程
 contextBridge.exposeInMainWorld('electron', {
@@ -280,6 +284,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
+    submitInput: (input: CoworkSubmitInput): Promise<CoworkSubmitInputResult> =>
+      ipcRenderer.invoke('cowork:session:submitInput', input),
     stopSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     endA2APrivateChat: (sessionId: string) =>

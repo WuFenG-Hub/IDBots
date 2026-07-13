@@ -5,6 +5,7 @@ import { i18nService } from '../../services/i18n';
 import type {
   CoworkMessage,
   CoworkMessageMetadata,
+  CoworkExecutionMode,
   CoworkServiceOrderSummary,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
@@ -46,8 +47,9 @@ import {
 
 interface CoworkSessionDetailProps {
   onManageSkills?: () => void;
-  onContinue: (prompt: string, skillPrompt?: string) => void;
+  onContinue: (prompt: string, skillPrompt?: string) => void | boolean | Promise<void | boolean>;
   onStop: () => void;
+  submitError?: string | null;
   focusedOrderTxid?: string | null;
   onFocusedOrderConsumed?: (orderTxid: string) => void;
   onNavigateHome?: () => void;
@@ -69,6 +71,13 @@ const ORDER_TAG_TXID_RE = /^\[(?:ORDER_STATUS|DELIVERY|NeedsRating):([0-9a-f]{64
 const ORDER_END_TAG_TXID_RE = /^\[ORDER_END:([0-9a-f]{64})(?:\s+[^\]]*)?\]/i;
 const ORDER_START_CONTENT_RE = /^\[ORDER\]/i;
 const ORDER_END_CONTENT_RE = /^\[ORDER_END(?::[0-9a-fA-F]{64})?(?:\s+[A-Za-z0-9_-]+)?\]/i;
+const STEER_STATUS_TRANSLATION_KEYS: Record<string, string> = {
+  queued: 'coworkSteerStatusQueued',
+  delivered: 'coworkSteerStatusDelivered',
+  settled: 'coworkSteerStatusSettled',
+  failed: 'coworkSteerStatusFailed',
+  cancelled: 'coworkSteerStatusCancelled',
+};
 
 const readDismissedRefundStatusKeys = (): Set<string> => {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -1417,6 +1426,10 @@ const renderGigSquareCard = (content: string): React.ReactNode | null => {
 
 const UserMessageItem: React.FC<{ message: CoworkMessage; skills: Skill[] }> = ({ message, skills }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const isSteerMessage = message.metadata?.interactionKind === 'steer';
+  const steerStatusKey = isSteerMessage
+    ? STEER_STATUS_TRANSLATION_KEYS[String(message.metadata?.steerStatus)] ?? null
+    : null;
 
   // Get skills used for this message
   const messageSkillIds = (message.metadata as CoworkMessageMetadata)?.skillIds || [];
@@ -1464,6 +1477,21 @@ const UserMessageItem: React.FC<{ message: CoworkMessage; skills: Skill[] }> = (
                 />
               </div>
               <div className="flex items-center justify-end gap-1.5 mt-1">
+                {isSteerMessage && (
+                  <>
+                    <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent">
+                      {i18nService.t('coworkSteerLabel')}
+                    </span>
+                    {steerStatusKey && (
+                      <span className={`text-[10px] ${message.metadata?.steerStatus === 'failed'
+                        ? 'text-red-500 dark:text-red-400'
+                        : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'
+                      }`}>
+                        {i18nService.t(steerStatusKey)}
+                      </span>
+                    )}
+                  </>
+                )}
                 {messageSkills.map(skill => (
                   <div
                     key={skill.id}
@@ -1926,6 +1954,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   onManageSkills,
   onContinue,
   onStop,
+  submitError,
   focusedOrderTxid,
   onFocusedOrderConsumed,
   onNavigateHome,
@@ -1968,6 +1997,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [focusedOrderMessageId, setFocusedOrderMessageId] = useState<string | null>(null);
+  const [liveExecutionMode, setLiveExecutionMode] = useState<{
+    sessionId: string;
+    mode: CoworkExecutionMode;
+  } | null>(null);
 
   // Menu and action states
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
@@ -2032,6 +2065,30 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       dismissedKeys: dismissedRefundStatusKeys,
     })
   );
+  const resolvedExecutionMode = liveExecutionMode?.sessionId === currentSession?.id
+    ? liveExecutionMode.mode
+    : currentSession?.executionMode;
+  const steerDisabled = Boolean(isStreaming && resolvedExecutionMode !== 'local');
+
+  useEffect(() => {
+    if (!isStreaming || !currentSession?.id) {
+      setLiveExecutionMode(null);
+      return;
+    }
+    let cancelled = false;
+    void window.electron?.cowork?.getSession?.(currentSession.id).then((result) => {
+      if (cancelled || !result?.success || !result.session) return;
+      setLiveExecutionMode({
+        sessionId: currentSession.id,
+        mode: result.session.executionMode,
+      });
+    }).catch(() => {
+      // Keep auto/sandbox conservative until the main process can confirm local execution.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSession?.id, currentSession?.messages.length, isStreaming]);
 
   // Fetch initial delegation blocking state when session changes
   useEffect(() => {
@@ -3138,9 +3195,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           )}
           <div className="max-w-3xl mx-auto">
             <CoworkPromptInput
+              key={currentSession.id}
+              scopeKey={currentSession.id}
               onSubmit={onContinue}
               onStop={onStop}
               isStreaming={isStreaming}
+              steerDisabled={steerDisabled}
               placeholder={delegationBlocking ? i18nService.t('delegationInputDisabledPlaceholder') : i18nService.t('coworkContinuePlaceholder')}
               disabled={delegationBlocking}
               onManageSkills={onManageSkills}
@@ -3148,6 +3208,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               showModelSelector={true}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
             />
+            {isStreaming && (
+              <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t(steerDisabled
+                  ? 'coworkSteerSandboxUnavailableHint'
+                  : 'coworkSteerLocalOnlyHint')}
+              </div>
+            )}
+            {submitError && (
+              <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
+                {submitError}
+              </div>
+            )}
           </div>
         </div>
       )}
