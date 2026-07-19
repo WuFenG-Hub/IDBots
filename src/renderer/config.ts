@@ -120,6 +120,8 @@ export interface AppConfig {
   language: 'zh' | 'en';
   // 语言初始化标记 (用于判断是否是首次启动)
   language_initialized?: boolean;
+  // Provider 预设模型迁移版本号 (升级后自动注入新模型/移除已淘汰模型，详见 services/config.ts)
+  providerModelMigrationVersion?: number;
   // 应用配置
   app: {
     port: number;
@@ -369,8 +371,11 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.openai.com',
       apiFormat: 'openai',
       models: [
-        { id: 'gpt-5.2-2025-12-11', name: 'GPT-5.2', supportsImage: true },
-        { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex', supportsImage: true }
+        { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true },
+        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true }
       ]
     },
     gemini: {
@@ -379,9 +384,9 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
       apiFormat: 'openai',
       models: [
-        { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro', supportsImage: true },
         { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true },
-        { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', supportsImage: true }
+        { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', supportsImage: true },
+        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true }
       ]
     },
     anthropic: {
@@ -390,9 +395,9 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.anthropic.com',
       apiFormat: 'anthropic',
       models: [
-        { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', supportsImage: true },
-        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true },
-        { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsImage: true }
+        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_048_576 }
       ]
     },
     deepseek: {
@@ -408,7 +413,8 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.moonshot.cn/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'kimi-k2.5', name: 'Kimi K2.5', supportsImage: true }
+        { id: 'kimi-k2.6', name: 'Kimi K2.6', supportsImage: true, contextWindow: 262_144 },
+        { id: 'kimi-k2.5', name: 'Kimi K2.5', supportsImage: true, contextWindow: 262_144 }
       ]
     },
     zhipu: {
@@ -417,8 +423,9 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'glm-5', name: 'GLM 5', supportsImage: false },
-        { id: 'glm-4.7', name: 'GLM 4.7', supportsImage: false }
+        { id: 'glm-5.1', name: 'GLM 5.1', supportsImage: false, contextWindow: 202_800 },
+        { id: 'glm-5', name: 'GLM 5', supportsImage: false, contextWindow: 202_800 },
+        { id: 'glm-4.7', name: 'GLM 4.7', supportsImage: false, contextWindow: 204_800 }
       ]
     },
     minimax: {
@@ -427,8 +434,9 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.minimaxi.com/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false },
-        { id: 'MiniMax-M2.1', name: 'MiniMax M2.1', supportsImage: false }
+        { id: 'MiniMax-M3', name: 'MiniMax M3', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'MiniMax-M2.7', name: 'MiniMax M2.7', supportsImage: false, contextWindow: 204_800 },
+        { id: 'MiniMax-M2.5', name: 'MiniMax M2.5', supportsImage: false, contextWindow: 204_800 }
       ]
     },
     qwen: {
@@ -437,8 +445,8 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://dashscope.aliyuncs.com/apps/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true },
-        { id: 'qwen3-coder-plus', name: 'Qwen3 Coder Plus', supportsImage: false }
+        { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'qwen3.5-plus', name: 'Qwen3.5 Plus', supportsImage: true, contextWindow: 1_000_000 }
       ]
     },
     xiaomi: {
@@ -447,7 +455,8 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://api.xiaomimimo.com/anthropic',
       apiFormat: 'anthropic',
       models: [
-        { id: 'mimo-v2-flash', name: 'MiMo V2 Flash', supportsImage: false }
+        { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 }
       ]
     },
     openrouter: {
@@ -456,10 +465,10 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://openrouter.ai/api',
       apiFormat: 'anthropic',
       models: [
-        { id: 'anthropic/claude-sonnet-4.5', name: 'Claude Sonnet 4.5', supportsImage: true },
-        { id: 'anthropic/claude-opus-4.6', name: 'Claude Opus 4.6', supportsImage: true },
-        { id: 'openai/gpt-5.2-codex', name: 'GPT 5.2 Codex', supportsImage: true },
-        { id: 'google/gemini-3-pro-preview', name: 'Gemini 3 Pro', supportsImage: true },
+        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true },
+        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true },
+        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true }
       ]
     },
     ollama: {

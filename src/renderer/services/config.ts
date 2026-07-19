@@ -169,6 +169,154 @@ export const mergeProvidersConfig = (
   ) as AppConfig['providers'];
 };
 
+// ---------------------------------------------------------------------------
+// 版本化 Provider 预设模型迁移
+//
+// 背景：stored config 的 providers.models 优先于 defaultConfig，直接改默认值
+// 不会让老用户拿到新模型。这里参照 LobsterAI 的做法做版本化迁移：
+// - removed：只移除"我们曾作为预设下发、现已淘汰"的模型 ID，用户自定义模型不受影响
+// - added：只注入用户列表中尚不存在的新预设模型（置前，保持旗舰模型在首位）
+// - defaultModelRemap：用户当前默认模型若被淘汰，则映射到对应的新模型
+// 重要：deepseek 不参与迁移，已配置 DeepSeek 的老用户升级后保持完全不变。
+// ---------------------------------------------------------------------------
+
+export const PROVIDER_MODEL_MIGRATION_VERSION = 1;
+
+type ProviderModelEntry = NonNullable<NonNullable<AppConfig['providers']>[string]['models']>[number];
+
+type ProviderModelMigration = {
+  removed: Record<string, string[]>;
+  added: Record<string, ProviderModelEntry[]>;
+  defaultModelRemap: Record<string, string>;
+};
+
+const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
+  // v1：向 LobsterAI 最新模型列表对齐（2026-07）
+  1: {
+    removed: {
+      openai: ['gpt-5.2-2025-12-11', 'gpt-5.2-codex'],
+      gemini: ['gemini-3-pro-preview'],
+      anthropic: ['claude-sonnet-4-5-20250929'],
+      minimax: ['MiniMax-M2.1'],
+      qwen: ['qwen3-coder-plus'],
+      xiaomi: ['mimo-v2-flash'],
+      openrouter: [
+        'anthropic/claude-sonnet-4.5',
+        'anthropic/claude-opus-4.6',
+        'openai/gpt-5.2-codex',
+        'google/gemini-3-pro-preview',
+      ],
+    },
+    added: {
+      openai: [
+        { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true },
+        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true },
+      ],
+      gemini: [
+        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true },
+      ],
+      anthropic: [
+        { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_048_576 },
+      ],
+      moonshot: [
+        { id: 'kimi-k2.6', name: 'Kimi K2.6', supportsImage: true, contextWindow: 262_144 },
+      ],
+      zhipu: [
+        { id: 'glm-5.1', name: 'GLM 5.1', supportsImage: false, contextWindow: 202_800 },
+      ],
+      minimax: [
+        { id: 'MiniMax-M3', name: 'MiniMax M3', supportsImage: true, contextWindow: 1_000_000 },
+        { id: 'MiniMax-M2.7', name: 'MiniMax M2.7', supportsImage: false, contextWindow: 204_800 },
+      ],
+      qwen: [
+        { id: 'qwen3.6-plus', name: 'Qwen3.6 Plus', supportsImage: true, contextWindow: 1_000_000 },
+      ],
+      xiaomi: [
+        { id: 'mimo-v2.5-pro', name: 'MiMo V2.5 Pro', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 },
+      ],
+      openrouter: [
+        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true },
+        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true },
+        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true },
+      ],
+    },
+    defaultModelRemap: {
+      'gpt-5.2-2025-12-11': 'gpt-5.6-sol',
+      'gpt-5.2-codex': 'gpt-5.6-sol',
+      'gemini-3-pro-preview': 'gemini-3.1-pro-preview',
+      'claude-sonnet-4-5-20250929': 'claude-sonnet-4-6',
+      'MiniMax-M2.1': 'MiniMax-M2.5',
+      'qwen3-coder-plus': 'qwen3.5-plus',
+      'mimo-v2-flash': 'mimo-v2.5',
+      'anthropic/claude-sonnet-4.5': 'anthropic/claude-sonnet-4.6',
+      'anthropic/claude-opus-4.6': 'anthropic/claude-opus-4.7',
+      'openai/gpt-5.2-codex': 'openai/gpt-5.5',
+      'google/gemini-3-pro-preview': 'google/gemini-3.1-pro-preview',
+    },
+  },
+};
+
+export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
+  const currentVersion = config.providerModelMigrationVersion ?? 0;
+  if (currentVersion >= PROVIDER_MODEL_MIGRATION_VERSION) {
+    return config;
+  }
+
+  let nextProviders = config.providers;
+  let nextDefaultModel = config.model.defaultModel;
+
+  for (let version = currentVersion + 1; version <= PROVIDER_MODEL_MIGRATION_VERSION; version += 1) {
+    const migration = PROVIDER_MODEL_MIGRATIONS[version];
+    if (!migration) {
+      continue;
+    }
+
+    const providers = { ...(nextProviders ?? {}) } as NonNullable<AppConfig['providers']>;
+    for (const [providerKey, providerConfig] of Object.entries(providers)) {
+      if (providerKey === 'deepseek') {
+        continue;
+      }
+      const removedIds = new Set(migration.removed[providerKey] ?? []);
+      const addedModels = migration.added[providerKey] ?? [];
+      if (removedIds.size === 0 && addedModels.length === 0) {
+        continue;
+      }
+      const existingModels = providerConfig.models ?? [];
+      const keptModels = existingModels.filter((model) => !removedIds.has(model.id));
+      const keptIds = new Set(keptModels.map((model) => model.id));
+      const modelsToAdd = addedModels.filter((model) => !keptIds.has(model.id));
+      if (keptModels.length === existingModels.length && modelsToAdd.length === 0) {
+        continue;
+      }
+      providers[providerKey] = {
+        ...providerConfig,
+        models: [...modelsToAdd, ...keptModels],
+      };
+    }
+    nextProviders = providers;
+
+    const remappedDefault = migration.defaultModelRemap[nextDefaultModel];
+    if (remappedDefault) {
+      nextDefaultModel = remappedDefault;
+    }
+  }
+
+  return {
+    ...config,
+    model: {
+      ...config.model,
+      defaultModel: nextDefaultModel,
+    },
+    providers: nextProviders,
+    providerModelMigrationVersion: PROVIDER_MODEL_MIGRATION_VERSION,
+  };
+};
+
 class ConfigService {
   private config: AppConfig = defaultConfig;
 
@@ -200,7 +348,7 @@ class ConfigService {
           providers: mergedProviders as AppConfig['providers'],
         };
 
-        const normalizedConfig = normalizeDeepSeekAppConfig(mergedConfig);
+        const normalizedConfig = normalizeDeepSeekAppConfig(applyProviderModelMigrations(mergedConfig));
         this.config = normalizedConfig;
 
         if (JSON.stringify(normalizedConfig) !== JSON.stringify(mergedConfig)) {

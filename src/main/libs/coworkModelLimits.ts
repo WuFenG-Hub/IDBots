@@ -31,11 +31,30 @@ type AppConfigLike = {
   providers?: Record<string, ProviderLike> | null;
 };
 
-const KNOWN_MODEL_LIMITS: Record<string, Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>> = {
+const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>>> = {
   'deepseek-v4-pro': {
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
   },
+  // 与 src/renderer/config.ts 预设模型保持一致的大上下文模型（2026-07 向 LobsterAI 对齐）
+  'gpt-5.6-sol': { contextWindow: 1_050_000 },
+  'gpt-5.6-terra': { contextWindow: 1_050_000 },
+  'gpt-5.6-luna': { contextWindow: 1_050_000 },
+  'claude-opus-4-7': { contextWindow: 1_048_576 },
+  'claude-opus-4-6': { contextWindow: 1_048_576 },
+  'claude-sonnet-4-6': { contextWindow: 1_048_576 },
+  'kimi-k2.6': { contextWindow: 262_144 },
+  'kimi-k2.5': { contextWindow: 262_144 },
+  'glm-5.1': { contextWindow: 202_800 },
+  'glm-5': { contextWindow: 202_800 },
+  'glm-4.7': { contextWindow: 204_800 },
+  'MiniMax-M3': { contextWindow: 1_000_000 },
+  'MiniMax-M2.7': { contextWindow: 204_800 },
+  'MiniMax-M2.5': { contextWindow: 204_800 },
+  'qwen3.6-plus': { contextWindow: 1_000_000 },
+  'qwen3.5-plus': { contextWindow: 1_000_000 },
+  'mimo-v2.5-pro': { contextWindow: 1_000_000 },
+  'mimo-v2.5': { contextWindow: 1_000_000 },
 };
 
 function normalizeModelId(value: unknown): string {
