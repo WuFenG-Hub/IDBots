@@ -36,11 +36,11 @@ import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
 import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
-import BotBrowserModeSwitch from './features/botBrowser/BotBrowserModeSwitch';
 import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
 import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
 import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
 import type { BotBrowserConversationRequest } from './features/botBrowser/types';
+import SidebarToggleIcon from './components/icons/SidebarToggleIcon';
 
 type FocusedOrderTarget = {
   sessionId: string;
@@ -80,6 +80,7 @@ const App: React.FC = () => {
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const pendingPermission = pendingPermissions[0] ?? null;
   const isWindows = window.electron.platform === 'win32';
+  const isMac = window.electron.platform === 'darwin';
   const focusedOrderTxid = focusedOrderTarget?.sessionId === currentSessionId
     ? focusedOrderTarget.orderTxid
     : null;
@@ -817,52 +818,67 @@ const App: React.FC = () => {
   );
 
   return (
-    <div className="h-screen overflow-hidden flex flex-col dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
+    <div className="relative h-screen overflow-hidden flex dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
       {toastMessage && (
         <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
       )}
-      <BotBrowserModeSwitch
+      <Sidebar
+        onShowLogin={handleShowLogin}
+        onShowSettings={handleShowSettings}
+        activeView={mainView}
+        onShowMetaApps={handleShowMetaApps}
+        onShowSkills={handleShowSkills}
+        onShowCowork={handleShowCowork}
+        onShowScheduledTasks={handleShowScheduledTasks}
+        onShowGigSquare={handleShowGigSquare}
+        onShowMetabots={handleShowMetabots}
+        onNewChat={handleBlankNewChat}
         mode={botBrowserShell.surfaceMode}
-        isBrowserVisible={botBrowserShell.surfaceMode === 'browser'}
         onSelectHome={botBrowserShell.switchToHome}
         onSelectBrowser={() => {
           void botBrowserShell.openBrowserHome();
         }}
+        onNewBrowserTab={() => {
+          void botBrowserShell.openNewTab();
+        }}
+        isCollapsed={isSidebarCollapsed}
+        onToggleCollapse={handleToggleSidebar}
+        updateBadge={!isSidebarCollapsed ? updateBadge : null}
       />
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
         {botBrowserShell.surfaceMode === 'home' ? (
-          <>
-            <Sidebar
-              onShowLogin={handleShowLogin}
-              onShowSettings={handleShowSettings}
-              activeView={mainView}
-              onShowMetaApps={handleShowMetaApps}
-              onShowSkills={handleShowSkills}
-              onShowCowork={handleShowCowork}
-              onShowScheduledTasks={handleShowScheduledTasks}
-              onShowGigSquare={handleShowGigSquare}
-              onShowMetabots={handleShowMetabots}
-              onNewChat={handleBlankNewChat}
-              isCollapsed={isSidebarCollapsed}
-              onToggleCollapse={handleToggleSidebar}
-              updateBadge={!isSidebarCollapsed ? updateBadge : null}
-            />
-            <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
-              <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
-                {homeContent}
-              </div>
+          <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
+            <div className="h-full rounded-xl dark:bg-claude-darkBg bg-claude-bg overflow-hidden">
+              {homeContent}
             </div>
-          </>
+          </div>
         ) : null}
         {botBrowserShell.hasMountedBrowser ? (
-          <div className={botBrowserShell.surfaceMode === 'browser' ? 'flex-1 min-w-0' : 'hidden'}>
-            <BotBrowserSurface
-              ref={botBrowserShell.browserRef}
-              visible={botBrowserShell.surfaceMode === 'browser'}
-              onOpenConversation={handleBrowserOpenConversation}
-              onError={showToast}
-              onReady={botBrowserShell.onBrowserReady}
-            />
+          <div className={botBrowserShell.surfaceMode === 'browser' ? 'relative flex flex-1 min-w-0 flex-col' : 'hidden'}>
+            {isWindows ? (
+              <div className="draggable relative h-9 shrink-0 dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted">
+                <WindowTitleBar isOverlayActive={isOverlayActive} />
+              </div>
+            ) : null}
+            <div className="flex-1 min-h-0">
+              <BotBrowserSurface
+                ref={botBrowserShell.browserRef}
+                visible={botBrowserShell.surfaceMode === 'browser'}
+                onOpenConversation={handleBrowserOpenConversation}
+                onError={showToast}
+                onReady={botBrowserShell.onBrowserReady}
+              />
+            </div>
+            {isSidebarCollapsed ? (
+              <button
+                type="button"
+                onClick={handleToggleSidebar}
+                className={`non-draggable absolute top-2 z-40 h-8 w-8 inline-flex items-center justify-center rounded-lg border border-claude-border/70 bg-claude-surface/90 text-claude-textSecondary shadow-sm backdrop-blur-sm transition-colors hover:bg-claude-surfaceHover hover:text-claude-text dark:border-claude-darkBorder/70 dark:bg-claude-darkSurface/90 dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover dark:hover:text-claude-darkText ${isMac ? 'left-[76px]' : 'left-2'}`}
+                aria-label={i18nService.t('expand')}
+              >
+                <SidebarToggleIcon className="h-4 w-4" isCollapsed={true} />
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>

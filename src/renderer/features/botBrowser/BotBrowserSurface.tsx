@@ -98,6 +98,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     const buildPromiseRef = useRef<Promise<void> | null>(null);
     const readyRef = useRef(false);
     const pendingOpenUrisRef = useRef<BotBrowserOpenUriInput[]>([]);
+    const pendingNewTabRef = useRef(false);
     const pendingRefreshRuntimeRef = useRef(false);
     const callbacksRef = useRef({
       onOpenConversation,
@@ -181,6 +182,15 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       }
     }, [postOpenUri]);
 
+    const flushPendingNewTab = useCallback(() => {
+      if (!readyRef.current || !pendingNewTabRef.current) return;
+      if (postToIframe({ type: 'open-new-tab' })) {
+        pendingNewTabRef.current = false;
+      } else {
+        readyRef.current = false;
+      }
+    }, [postToIframe]);
+
     const flushPendingRefreshRuntime = useCallback(() => {
       if (!readyRef.current) return;
       if (!pendingRefreshRuntimeRef.current) return;
@@ -234,6 +244,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
           readyRef.current = true;
           callbacksRef.current.onReady?.();
           flushPendingOpenUris();
+          flushPendingNewTab();
           flushPendingRefreshRuntime();
           return;
         }
@@ -254,7 +265,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
 
       window.addEventListener('message', handleMessage);
       return () => window.removeEventListener('message', handleMessage);
-    }, [flushPendingOpenUris, flushPendingRefreshRuntime, postToIframe]);
+    }, [flushPendingNewTab, flushPendingOpenUris, flushPendingRefreshRuntime, postToIframe]);
 
     useImperativeHandle(ref, () => ({
       async openUri(input: BotBrowserOpenUriInput): Promise<void> {
@@ -266,6 +277,17 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         if (postOpenUri(input)) return;
         readyRef.current = false;
         pendingOpenUrisRef.current.push(input);
+        await ensureSrcDoc().catch(() => {});
+      },
+      async openNewTab(): Promise<void> {
+        if (!readyRef.current) {
+          pendingNewTabRef.current = true;
+          await ensureSrcDoc().catch(() => {});
+          return;
+        }
+        if (postToIframe({ type: 'open-new-tab' })) return;
+        readyRef.current = false;
+        pendingNewTabRef.current = true;
         await ensureSrcDoc().catch(() => {});
       },
       async refreshRuntime(): Promise<void> {

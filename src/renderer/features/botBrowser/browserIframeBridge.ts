@@ -241,6 +241,15 @@ export function buildBrowserIframeBridgeScript(): string {
     }
   }
 
+  async function handleOpenNewTab() {
+    try {
+      await ensureRuntimeReady();
+      await globalThis.navigateTo('');
+    } catch (error) {
+      toast(error && error.message ? error.message : String(error));
+    }
+  }
+
   async function handleRefreshRuntime() {
     try {
       await ensureRuntimeReady({ forceReload: true });
@@ -259,6 +268,10 @@ export function buildBrowserIframeBridgeScript(): string {
     }
     if (data.type === 'open-uri') {
       handleOpenUri(data.input);
+      return;
+    }
+    if (data.type === 'open-new-tab') {
+      handleOpenNewTab();
       return;
     }
     if (data.type === 'refresh-runtime') {
