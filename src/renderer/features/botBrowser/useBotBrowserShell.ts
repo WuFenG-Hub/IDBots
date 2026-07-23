@@ -23,8 +23,8 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   const { showToast } = input;
   const browserRef = useRef<BotBrowserSurfaceHandle | null>(null);
   const pendingOpenUriRef = useRef<BotBrowserOpenUriInput | null>(null);
-  const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('home');
-  const [hasMountedBrowser, setHasMountedBrowser] = useState(false);
+  const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('browser');
+  const [hasMountedBrowser, setHasMountedBrowser] = useState(true);
 
   const messageFromError = (error: unknown, fallback: string): string => {
     if (error instanceof Error && error.message) return error.message;
@@ -75,8 +75,15 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   }, []);
 
   const openBrowserHome = useCallback(async () => {
-    await showBrowser();
-  }, [showBrowser]);
+    setHasMountedBrowser(true);
+    setSurfaceMode('browser');
+  }, []);
+
+  const openNewTab = useCallback(async () => {
+    setHasMountedBrowser(true);
+    setSurfaceMode('browser');
+    await browserRef.current?.openNewTab();
+  }, []);
 
   const openLocalMetabot = useCallback(async (metabot: Metabot) => {
     const globalMetaId = metabot.globalmetaid?.trim() || '';
@@ -148,6 +155,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     hasMountedBrowser,
     onBrowserReady,
     openBrowserHome,
+    openNewTab,
     openLocalMetabot,
     openRemoteBot,
     openUri,

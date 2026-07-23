@@ -30,6 +30,7 @@ export interface BotBrowserOpenUriInput {
 
 export interface BotBrowserSurfaceHandle {
   openUri(input: BotBrowserOpenUriInput): Promise<void>;
+  openNewTab(): Promise<void>;
   refreshRuntime(): Promise<void>;
 }
 

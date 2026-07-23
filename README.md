@@ -181,6 +181,7 @@ Notes:
 - `npm run electron:dev` is for development only.
 - Release validation should be done with packaged app builds, not only the dev runtime.
 - On first run after clone, complete onboarding and configure at least one LLM provider before using Cowork and other LLM-dependent features.
+- Pending integrations: [ABC theme integration handoff](docs/integrations/abc-theme-integration.md).
 
 ---
 

@@ -5,6 +5,7 @@
 /* ========== Theme tokens (CSS variables) ========== */
 /* Light mode: aligned with IDChat */
 :root {
+  font-size: 15px;
   --bg-main: #F5F7F9;
   --bg-sidebar: #FFFFFF;
   --bg-panel: #FFFFFF;

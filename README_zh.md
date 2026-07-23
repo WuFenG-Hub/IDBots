@@ -181,6 +181,7 @@ node --test tests/*.test.mjs
 - `npm run electron:dev` 仅用于开发态运行。
 - 发布验证应以打包后的应用构建为准，而不应只依赖 dev runtime。
 - 克隆后首次运行，请先完成 onboarding，并至少配置一个 LLM provider，再使用 Cowork 等依赖 LLM 的功能。
+- 待对接事项：[ABC 主题功能对接文档](docs/integrations/abc-theme-integration.md)。
 
 ---
 

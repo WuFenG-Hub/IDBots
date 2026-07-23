@@ -9,32 +9,31 @@ function renderSwitch(mode: BotBrowserSurfaceMode) {
   return renderToStaticMarkup(
     <BotBrowserModeSwitch
       mode={mode}
-      isBrowserVisible={false}
       onSelectHome={() => {}}
       onSelectBrowser={() => {}}
     />,
   );
 }
 
-test('BotBrowserModeSwitch renders a taller centered segmented toggle bar', () => {
+test('BotBrowserModeSwitch renders a full-width sidebar segmented control', () => {
   const markup = renderSwitch('home');
 
   assert.match(
     markup,
-    /data-slot="bot-browser-mode-bar"[^>]*class="[^"]*\brelative\b[^"]*\bh-11\b[^"]*\bjustify-center\b/,
+    /data-slot="bot-browser-mode-bar"[^>]*class="[^"]*\bw-full\b/,
   );
   assert.match(
     markup,
-    /data-slot="bot-browser-mode-segments"[^>]*class="[^"]*\brounded-full\b[^"]*\bshadow-sm\b/,
+    /data-slot="bot-browser-mode-segments"[^>]*class="[^"]*\bgrid\b[^"]*\bgrid-cols-2\b[^"]*\brounded-lg\b/,
   );
+  assert.ok(markup.indexOf('Bot Browser') < markup.indexOf('Bot Home'));
 });
 
 test('BotBrowserModeSwitch exposes pressed state with the IDBots filled primary style', () => {
   const markup = renderSwitch('browser');
 
-  assert.match(markup, />Bot Home<\/button>/);
   assert.match(markup, />Bot Browser<\/button>/);
-  assert.match(markup, /aria-pressed="false"[^>]*>Bot Home<\/button>/);
   assert.match(markup, /aria-pressed="true"[^>]*class="[^"]*\bbtn-idchat-primary-filled\b[^"]*\bstill\b[^"]*"[^>]*>Bot Browser<\/button>/);
+  assert.match(markup, /aria-pressed="false"[^>]*>Bot Home<\/button>/);
   assert.doesNotMatch(markup, /aria-pressed="true"[^>]*class="[^"]*\bbg-claude-accentMuted\b[^"]*"[^>]*>Bot Browser<\/button>/);
 });

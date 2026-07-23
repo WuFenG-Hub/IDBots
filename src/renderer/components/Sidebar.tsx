@@ -5,11 +5,13 @@ import { coworkService } from '../services/cowork';
 import { i18nService } from '../services/i18n';
 import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
-import { MagnifyingGlassIcon, PuzzlePieceIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, PlusIcon, PuzzlePieceIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import { getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
+import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
+import type { BotBrowserSurfaceMode } from '../features/botBrowser/types';
 
 interface SidebarProps {
   onShowSettings: () => void;
@@ -22,6 +24,10 @@ interface SidebarProps {
   onShowGigSquare: () => void;
   onShowMetabots: () => void;
   onNewChat: () => void;
+  mode: BotBrowserSurfaceMode;
+  onSelectHome: () => void;
+  onSelectBrowser: () => void;
+  onNewBrowserTab: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
   updateBadge?: React.ReactNode;
@@ -37,6 +43,10 @@ const Sidebar: React.FC<SidebarProps> = ({
   onShowGigSquare,
   onShowMetabots,
   onNewChat,
+  mode,
+  onSelectHome,
+  onSelectBrowser,
+  onNewBrowserTab,
   isCollapsed,
   onToggleCollapse,
   updateBadge,
@@ -69,6 +79,12 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (!isCollapsed) return;
     setIsSearchOpen(false);
   }, [isCollapsed]);
+
+  useEffect(() => {
+    if (mode === 'browser') {
+      setIsSearchOpen(false);
+    }
+  }, [mode]);
 
   const handleSelectSession = async (sessionId: string) => {
     onShowCowork();
@@ -183,71 +199,93 @@ const Sidebar: React.FC<SidebarProps> = ({
       }`}
     >
       <div className="pt-3 pb-3">
-        <div className="draggable sidebar-header-drag h-8 flex items-center justify-between px-3">
-          <div className={`${isMac ? 'pl-[68px]' : ''}`}>
-            {updateBadge}
-          </div>
+        <div className="draggable sidebar-header-drag h-8 flex items-center px-3">
           <button
             type="button"
             onClick={onToggleCollapse}
-            className="non-draggable h-8 w-8 inline-flex items-center justify-center rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+            className={`non-draggable h-8 w-8 inline-flex items-center justify-center rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors ${isMac ? 'ml-[68px]' : ''}`}
             aria-label={isCollapsed ? i18nService.t('expand') : i18nService.t('collapse')}
           >
             <SidebarToggleIcon className="h-4 w-4" isCollapsed={isCollapsed} />
           </button>
-        </div>
-        <div className="mt-3 space-y-1 px-3">
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={onNewChat}
-              className="btn-idchat-primary flex-1 inline-flex items-center justify-center gap-2 px-2.5 py-2 text-sm font-medium"
-            >
-              <ComposeIcon className="h-4 w-4" />
-              {i18nService.t('newChat')}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                onShowCowork();
-                setIsSearchOpen(true);
-              }}
-              className="shrink-0 h-[36px] w-[36px] inline-flex items-center justify-center rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-              aria-label={i18nService.t('search')}
-            >
-              <MagnifyingGlassIcon className="h-4 w-4" />
-            </button>
+          <div className="ml-auto">
+            {updateBadge}
           </div>
-          {primaryNavItems.map((item) => (
+        </div>
+        <div className="mt-3 px-3">
+          <BotBrowserModeSwitch
+            mode={mode}
+            onSelectHome={onSelectHome}
+            onSelectBrowser={onSelectBrowser}
+          />
+        </div>
+        {mode === 'browser' ? (
+          <nav aria-label="Bot Browser" className="mt-3 space-y-1 px-3">
             <button
-              key={item.id}
               type="button"
-              onClick={() => handlePrimaryNavClick(item.id)}
-              className={`w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-base font-medium transition-colors ${
-                activeView === item.id
-                  ? 'dark:text-claude-darkText text-claude-text dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
-                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
-              }`}
+              onClick={onNewBrowserTab}
+              className="w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
             >
-              {renderPrimaryNavIcon(item)}
-              {renderNavContent(item)}
+              <PlusIcon className="h-4 w-4" />
+              <span>New Tab</span>
             </button>
-          ))}
-        </div>
+          </nav>
+        ) : (
+          <nav aria-label="Bot Home" className="mt-3 space-y-1 px-3">
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={onNewChat}
+                className="flex-1 inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+              >
+                <ComposeIcon className="h-4 w-4" />
+                {i18nService.t('newChat')}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onShowCowork();
+                  setIsSearchOpen(true);
+                }}
+                className="shrink-0 h-[36px] w-[36px] inline-flex items-center justify-center rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                aria-label={i18nService.t('search')}
+              >
+                <MagnifyingGlassIcon className="h-4 w-4" />
+              </button>
+            </div>
+            {primaryNavItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => handlePrimaryNavClick(item.id)}
+                className={`w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium transition-colors ${
+                  activeView === item.id
+                    ? 'dark:text-claude-darkText text-claude-text dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover'
+                    : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
+                }`}
+              >
+                {renderPrimaryNavIcon(item)}
+                {renderNavContent(item)}
+              </button>
+            ))}
+          </nav>
+        )}
       </div>
-      <div className="flex-1 overflow-y-auto px-2.5 pb-4 pt-2 mt-1">
-        <div className="px-3 pb-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('coworkHistory')}
+      {mode === 'home' ? (
+        <div className="flex-1 overflow-y-auto px-2.5 pb-4 pt-2 mt-1">
+          <div className="px-3 pb-2 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('coworkHistory')}
+          </div>
+          <CoworkSessionList
+            sessions={sessions}
+            currentSessionId={currentSessionId}
+            onSelectSession={handleSelectSession}
+            onDeleteSession={handleDeleteSession}
+            onTogglePin={handleTogglePin}
+            onRenameSession={handleRenameSession}
+          />
         </div>
-        <CoworkSessionList
-          sessions={sessions}
-          currentSessionId={currentSessionId}
-          onSelectSession={handleSelectSession}
-          onDeleteSession={handleDeleteSession}
-          onTogglePin={handleTogglePin}
-          onRenameSession={handleRenameSession}
-        />
-      </div>
+      ) : <div className="flex-1" />}
       <CoworkSearchModal
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
