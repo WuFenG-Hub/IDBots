@@ -23,7 +23,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
   const { showToast } = input;
   const browserRef = useRef<BotBrowserSurfaceHandle | null>(null);
   const pendingOpenUriRef = useRef<BotBrowserOpenUriInput | null>(null);
-  const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('browser');
+  const [surfaceMode, setSurfaceMode] = useState<BotBrowserSurfaceMode>('home');
   const [hasMountedBrowser, setHasMountedBrowser] = useState(true);
 
   const messageFromError = (error: unknown, fallback: string): string => {

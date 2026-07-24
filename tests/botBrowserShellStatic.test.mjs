@@ -37,7 +37,7 @@ test('App gates Home and Browser surfaces with botBrowserShell.surfaceMode', () 
   assert.match(appSource, /visible=\{botBrowserShell\.surfaceMode === 'browser'\}/);
 });
 
-test('shell defaults to a mounted Browser while retaining guarded deep links', () => {
+test('shell defaults to Bot Home with a mounted Browser while retaining guarded deep links', () => {
   assert.match(shellSource, /window\.electron\.metabot\.list\(\)/);
   assert.match(shellSource, /if \(!result\?\.success\) \{/);
   assert.match(shellSource, /showToast\(messageFromError\(result\?\.error, 'Failed to load local Bots\.'\)\);/);
@@ -45,7 +45,7 @@ test('shell defaults to a mounted Browser while retaining guarded deep links', (
   assert.match(shellSource, /showToast\('No local Bot\. Please create a Bot first\.'\);/);
   assert.match(shellSource, /catch \(error\) \{/);
   assert.match(shellSource, /showToast\(messageFromError\(error, 'Failed to load local Bots\.'\)\);/);
-  assert.match(shellSource, /const \[surfaceMode, setSurfaceMode\] = useState<BotBrowserSurfaceMode>\('browser'\);/);
+  assert.match(shellSource, /const \[surfaceMode, setSurfaceMode\] = useState<BotBrowserSurfaceMode>\('home'\);/);
   assert.match(shellSource, /const \[hasMountedBrowser, setHasMountedBrowser\] = useState\(true\);/);
 });
 
