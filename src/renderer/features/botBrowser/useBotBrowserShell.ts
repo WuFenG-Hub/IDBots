@@ -13,6 +13,8 @@ import type {
   BotBrowserOpenUriInput,
   BotBrowserSurfaceHandle,
   BotBrowserSurfaceMode,
+  BotBrowserTabCommand,
+  BotBrowserTabCommandResult,
 } from './types';
 
 interface UseBotBrowserShellInput {
@@ -79,11 +81,29 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     setSurfaceMode('browser');
   }, []);
 
-  const openNewTab = useCallback(async () => {
+  const waitForBrowserSurface = useCallback(async (): Promise<BotBrowserSurfaceHandle> => {
+    const deadline = Date.now() + 5_000;
+    while (!browserRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 25));
+    }
+    if (!browserRef.current) {
+      throw new Error('Bot Browser surface is not available.');
+    }
+    return browserRef.current;
+  }, []);
+
+  const controlTabs = useCallback(async (
+    command: BotBrowserTabCommand,
+  ): Promise<BotBrowserTabCommandResult> => {
     setHasMountedBrowser(true);
     setSurfaceMode('browser');
-    await browserRef.current?.openNewTab();
-  }, []);
+    const browser = await waitForBrowserSurface();
+    return browser.controlTabs(command);
+  }, [waitForBrowserSurface]);
+
+  const openNewTab = useCallback(async () => {
+    await controlTabs({ action: 'open-tab' });
+  }, [controlTabs]);
 
   const openLocalMetabot = useCallback(async (metabot: Metabot) => {
     const globalMetaId = metabot.globalmetaid?.trim() || '';
@@ -156,6 +176,7 @@ export function useBotBrowserShell(input: UseBotBrowserShellInput) {
     onBrowserReady,
     openBrowserHome,
     openNewTab,
+    controlTabs,
     openLocalMetabot,
     openRemoteBot,
     openUri,

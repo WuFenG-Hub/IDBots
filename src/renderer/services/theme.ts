@@ -1,6 +1,8 @@
 import { configService } from './config';
 
-type ThemeType = 'light' | 'dark' | 'system';
+export type ThemeType = 'light' | 'dark' | 'system';
+export type EffectiveTheme = 'light' | 'dark';
+type ThemeListener = (theme: EffectiveTheme) => void;
 
 // Cold modern color palette
 const COLORS = {
@@ -20,6 +22,7 @@ class ThemeService {
   private appliedTheme: 'light' | 'dark' | null = null;
   private initialized = false;
   private mediaQueryListener: ((event: MediaQueryListEvent) => void) | null = null;
+  private listeners = new Set<ThemeListener>();
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -89,6 +92,13 @@ class ThemeService {
     return this.currentTheme;
   }
 
+  subscribe(listener: ThemeListener): () => void {
+    this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
+  }
+
   // 应用主题到DOM
   private applyTheme(theme: 'light' | 'dark'): void {
     // 避免重复应用相同主题
@@ -144,6 +154,14 @@ class ThemeService {
         rootElement.classList.remove('dark');
         rootElement.classList.add('light');
         rootElement.style.backgroundColor = colors.bg;
+      }
+    }
+
+    for (const listener of this.listeners) {
+      try {
+        listener(theme);
+      } catch (error) {
+        console.error('Theme listener failed:', error);
       }
     }
   }

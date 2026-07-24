@@ -406,6 +406,27 @@ const App: React.FC = () => {
     });
   }, [botBrowserShell.openUri]);
 
+  useEffect(() => {
+    return window.electron.botBrowser.onTabCommand(({ requestId, command }) => {
+      void botBrowserShell.controlTabs(command).then(
+        (result) => {
+          window.electron.botBrowser.respondToTabCommand({
+            requestId,
+            success: true,
+            result,
+          });
+        },
+        (error) => {
+          window.electron.botBrowser.respondToTabCommand({
+            requestId,
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        },
+      );
+    });
+  }, [botBrowserShell.controlTabs]);
+
   const handleShowLogin = useCallback(() => {
     showToast(i18nService.t('featureInDevelopment'));
   }, [showToast]);

@@ -51,10 +51,19 @@ test('shell defaults to Bot Home with a mounted Browser while retaining guarded 
 
 test('Browser sidebar exposes a working New Tab bridge to the welcome page', () => {
   assert.match(sidebarSource, />New Tab<\/span>/);
-  assert.match(shellSource, /browserRef\.current\?\.openNewTab\(\)/);
-  assert.match(surfaceSource, /type: 'open-new-tab'/);
-  assert.match(bridgeSource, /if \(data\.type === 'open-new-tab'\)/);
-  assert.match(bridgeSource, /globalThis\.navigateTo\(''\)/);
+  assert.match(shellSource, /controlTabs\(\{ action: 'open-tab' \}\)/);
+  assert.match(surfaceSource, /type: 'tab-command'/);
+  assert.match(bridgeSource, /if \(data\.type === 'tab-command'\)/);
+  assert.match(bridgeSource, /globalThis\.AgentBrowserTabs\.openTab/);
+});
+
+test('App forwards host tab commands through the renderer and iframe response bridge', () => {
+  assert.match(appSource, /window\.electron\.botBrowser\.onTabCommand/);
+  assert.match(appSource, /botBrowserShell\.controlTabs\(command\)/);
+  assert.match(appSource, /window\.electron\.botBrowser\.respondToTabCommand/);
+  assert.match(surfaceSource, /type: 'tab-command-response'/);
+  assert.match(bridgeSource, /globalThis\.AgentBrowserTabs\.getActiveTab\(\)/);
+  assert.match(bridgeSource, /globalThis\.AgentBrowserTabs\.getTabs\(\)/);
 });
 
 test('App routes Browser conversation opens through the Cowork adapter', () => {

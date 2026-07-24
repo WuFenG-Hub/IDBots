@@ -44,7 +44,7 @@ test('surface does not post open-uri before browser-ready', () => {
 test('surface does not post refresh-runtime before browser-ready', () => {
   const refreshRuntimeSection = getSection(
     'async refreshRuntime(): Promise<void> {',
-    '    }), [ensureSrcDoc, postOpenUri, postToIframe]);',
+    '    }), [controlTabs, ensureSrcDoc, postOpenUri, postToIframe]);',
   );
 
   assert.match(refreshRuntimeSection, /if \(!readyRef\.current\) \{/);
@@ -76,5 +76,19 @@ test('surface relaxes MetaAPP iframe sandbox after rendering the packaged Browse
     source,
     /import \{ injectBrowserIframeBridge,\s*relaxMetaAppIframeSandbox \} from '\.\/browserIframeBridge';/,
   );
-  assert.match(source, /const html = relaxMetaAppIframeSandbox\(\s*await renderBrowserPageHtml\(definition, getBrowserLanguagePreference\(\)\),\s*\);/);
+  assert.match(source, /const html = relaxMetaAppIframeSandbox\(\s*await renderBrowserPageHtml\(\s*definition,\s*getBrowserLanguagePreference\(\),\s*\{ theme: themeService\.getEffectiveTheme\(\) \},\s*\),\s*\);/);
+});
+
+test('surface uses the ABC theme contract for initial paint and runtime changes', () => {
+  assert.match(source, /createBrowserThemeMessage/);
+  assert.match(source, /themeService\.subscribe/);
+  assert.match(source, /target\.postMessage\(createBrowserThemeMessage\(themeService\.getEffectiveTheme\(\)\), '\*'\)/);
+  assert.match(source, /postThemeToIframe\(\);\s*callbacksRef\.current\.onReady/);
+});
+
+test('surface exposes request-response tab control without storing tab state', () => {
+  assert.match(source, /controlTabs\(command: BotBrowserTabCommand\)/);
+  assert.match(source, /pendingTabResponsesRef\.current\.get\(data\.id\)/);
+  assert.match(source, /postToIframe\(\{ type: 'tab-command', id, command: pending\.command \}\)/);
+  assert.doesNotMatch(source, /useState<BotBrowserTabInfo/);
 });

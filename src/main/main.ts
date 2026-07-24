@@ -146,6 +146,11 @@ import {
   createBotBrowserHostService,
   type BotBrowserHostService,
 } from './services/botBrowserHostService';
+import {
+  createBotBrowserTabBridge,
+  type BotBrowserTabBridge,
+  type BotBrowserTabCommandResponse,
+} from './services/botBrowserTabBridge';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   type CommunityMetaAppInstallResult,
@@ -2337,6 +2342,7 @@ let skillManager: SkillManager | null = null;
 let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
 let botBrowserHostService: BotBrowserHostService | null = null;
+let botBrowserTabBridge: BotBrowserTabBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
@@ -4117,6 +4123,15 @@ const getBotBrowserHostService = () => {
   return botBrowserHostService;
 };
 
+const getBotBrowserTabBridge = () => {
+  if (!botBrowserTabBridge) {
+    botBrowserTabBridge = createBotBrowserTabBridge({
+      getWindows: () => BrowserWindow.getAllWindows(),
+    });
+  }
+  return botBrowserTabBridge;
+};
+
 const getIMGatewayManager = () => {
   if (!imGatewayManager) {
     const sqliteStore = getStore();
@@ -5202,6 +5217,10 @@ if (!gotTheLock) {
 
   ipcMain.handle('botBrowser:resolveMetaAppPin', async (_event, input: { pinId?: string }) => {
     return getBotBrowserMetaAppCacheService().resolveMetaAppPin(String(input?.pinId ?? ''));
+  });
+
+  ipcMain.on('botBrowser:tab-command:response', (event, response: BotBrowserTabCommandResponse) => {
+    getBotBrowserTabBridge().handleResponse(event.sender, response);
   });
 
   ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
@@ -9594,6 +9613,8 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       console.error('[bot-browser] Failed to stop MetaApp cache server during cleanup:', error);
     });
     botBrowserMetaAppCacheService = null;
+    botBrowserTabBridge?.dispose();
+    botBrowserTabBridge = null;
     await runSharedAppCleanup({
       destroyTray,
       stopSkillWatching: () => {
@@ -9744,7 +9765,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('fee rate store init scheduled');
 
     startupLog('metaid rpc server start begin');
-    metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore);
+    metaidRpcServer = startMetaidRpcServer(getMetabotStore, getStore, {
+      controlBotBrowserTabs: (command) => getBotBrowserTabBridge().execute(command),
+    });
     startupLog('metaid rpc server started');
 
     // Defensive recovery: app may be force-closed during execution and leave

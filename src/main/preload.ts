@@ -67,6 +67,24 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('botBrowser:openUri', handler);
       return () => ipcRenderer.removeListener('botBrowser:openUri', handler);
     },
+    onTabCommand: (callback: (input: {
+      requestId: string;
+      command: {
+        action: 'open-tab' | 'close-tab' | 'switch-tab' | 'get-tabs' | 'get-active-tab';
+        uri?: string;
+        tabId?: number;
+      };
+    }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, input: Parameters<typeof callback>[0]) => callback(input);
+      ipcRenderer.on('botBrowser:tab-command', handler);
+      return () => ipcRenderer.removeListener('botBrowser:tab-command', handler);
+    },
+    respondToTabCommand: (response: {
+      requestId: string;
+      success: boolean;
+      result?: unknown;
+      error?: string;
+    }) => ipcRenderer.send('botBrowser:tab-command:response', response),
     resolveResource: (input: { actorId?: string; uri: string }) =>
       ipcRenderer.invoke('botBrowser:resolveResource', input),
     getProfile: (input: { actorId?: string; globalMetaId: string }) =>

@@ -185,7 +185,13 @@ export function buildBrowserIframeBridgeScript(): string {
 
   function runtimeApisReady() {
     return typeof globalThis.navigateTo === 'function'
-      && typeof globalThis.selectUsingIdentity === 'function';
+      && typeof globalThis.selectUsingIdentity === 'function'
+      && globalThis.AgentBrowserTabs
+      && typeof globalThis.AgentBrowserTabs.openTab === 'function'
+      && typeof globalThis.AgentBrowserTabs.closeTab === 'function'
+      && typeof globalThis.AgentBrowserTabs.switchTab === 'function'
+      && typeof globalThis.AgentBrowserTabs.getTabs === 'function'
+      && typeof globalThis.AgentBrowserTabs.getActiveTab === 'function';
   }
 
   function ensureRuntimeReady(options) {
@@ -244,9 +250,58 @@ export function buildBrowserIframeBridgeScript(): string {
   async function handleOpenNewTab() {
     try {
       await ensureRuntimeReady();
-      await globalThis.navigateTo('');
+      globalThis.AgentBrowserTabs.openTab();
     } catch (error) {
       toast(error && error.message ? error.message : String(error));
+    }
+  }
+
+  function tabCommandResult(action, openedTabId) {
+    var tabs = globalThis.AgentBrowserTabs.getTabs();
+    var activeTab = globalThis.AgentBrowserTabs.getActiveTab();
+    var result = {
+      action: action,
+      tabs: Array.isArray(tabs) ? tabs : [],
+      activeTab: activeTab || null
+    };
+    if (openedTabId !== undefined) {
+      result.openedTabId = openedTabId;
+    }
+    return result;
+  }
+
+  async function handleTabCommand(id, command) {
+    try {
+      await ensureRuntimeReady();
+      var input = command && typeof command === 'object' ? command : {};
+      var action = textValue(input.action);
+      var openedTabId;
+
+      if (action === 'open-tab') {
+        openedTabId = globalThis.AgentBrowserTabs.openTab(textValue(input.uri) || undefined);
+      } else if (action === 'close-tab') {
+        globalThis.AgentBrowserTabs.closeTab(Number(input.tabId));
+      } else if (action === 'switch-tab') {
+        globalThis.AgentBrowserTabs.switchTab(Number(input.tabId));
+      } else if (action !== 'get-tabs' && action !== 'get-active-tab') {
+        throw new Error('Unsupported Bot Browser tab action: ' + action);
+      }
+
+      window.parent.postMessage({
+        source: BRIDGE_SOURCE,
+        type: 'tab-command-response',
+        id: id,
+        success: true,
+        result: tabCommandResult(action, openedTabId)
+      }, targetOrigin);
+    } catch (error) {
+      window.parent.postMessage({
+        source: BRIDGE_SOURCE,
+        type: 'tab-command-response',
+        id: id,
+        success: false,
+        error: error && error.message ? error.message : String(error)
+      }, targetOrigin);
     }
   }
 
@@ -272,6 +327,10 @@ export function buildBrowserIframeBridgeScript(): string {
     }
     if (data.type === 'open-new-tab') {
       handleOpenNewTab();
+      return;
+    }
+    if (data.type === 'tab-command') {
+      handleTabCommand(data.id, data.command);
       return;
     }
     if (data.type === 'refresh-runtime') {

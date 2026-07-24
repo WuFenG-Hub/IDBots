@@ -1,0 +1,147 @@
+export type BotBrowserTabAction =
+  | 'open-tab'
+  | 'close-tab'
+  | 'switch-tab'
+  | 'get-tabs'
+  | 'get-active-tab';
+
+export type BotBrowserTabCommand = {
+  action: BotBrowserTabAction;
+  uri?: string;
+  tabId?: number;
+};
+
+export type BotBrowserTabInfo = {
+  id: number;
+  uri: string | null;
+  title: string | null;
+  isActive: boolean;
+};
+
+export type BotBrowserTabCommandResult = {
+  action: BotBrowserTabAction;
+  openedTabId?: number;
+  tabs: BotBrowserTabInfo[];
+  activeTab: BotBrowserTabInfo | null;
+};
+
+export type BotBrowserTabCommandResponse = {
+  requestId: string;
+  success: boolean;
+  result?: BotBrowserTabCommandResult;
+  error?: string;
+};
+
+type BrowserTabBridgeWebContents = {
+  isDestroyed(): boolean;
+  send(channel: string, payload: unknown): void;
+};
+
+type BrowserTabBridgeWindow = {
+  isDestroyed(): boolean;
+  isMinimized(): boolean;
+  isVisible(): boolean;
+  restore(): void;
+  show(): void;
+  focus(): void;
+  webContents: BrowserTabBridgeWebContents;
+};
+
+type PendingRequest = {
+  target: BrowserTabBridgeWebContents;
+  resolve(result: BotBrowserTabCommandResult): void;
+  reject(error: Error): void;
+  timeout: NodeJS.Timeout;
+};
+
+export type BotBrowserTabBridge = {
+  execute(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult>;
+  handleResponse(
+    source: BrowserTabBridgeWebContents,
+    response: BotBrowserTabCommandResponse,
+  ): void;
+  dispose(): void;
+};
+
+export function createBotBrowserTabBridge(options: {
+  getWindows(): BrowserTabBridgeWindow[];
+  timeoutMs?: number;
+}): BotBrowserTabBridge {
+  const pending = new Map<string, PendingRequest>();
+  const timeoutMs = options.timeoutMs ?? 10_000;
+  let requestSequence = 0;
+  let disposed = false;
+
+  const execute = (command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult> => {
+    if (disposed) {
+      return Promise.reject(new Error('Bot Browser tab bridge is disposed'));
+    }
+
+    const targetWindow = options.getWindows().find((window) => (
+      !window.isDestroyed() && !window.webContents.isDestroyed()
+    ));
+    if (!targetWindow) {
+      return Promise.reject(new Error('No IDBots window is available to control Bot Browser tabs'));
+    }
+
+    const requestId = `bot-browser-tab-${Date.now()}-${++requestSequence}`;
+    const promise = new Promise<BotBrowserTabCommandResult>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pending.delete(requestId);
+        reject(new Error('Bot Browser tab command timed out'));
+      }, timeoutMs);
+      pending.set(requestId, {
+        target: targetWindow.webContents,
+        resolve,
+        reject,
+        timeout,
+      });
+    });
+
+    try {
+      targetWindow.webContents.send('botBrowser:tab-command', { requestId, command });
+      if (targetWindow.isMinimized()) targetWindow.restore();
+      if (!targetWindow.isVisible()) targetWindow.show();
+      targetWindow.focus();
+    } catch (error) {
+      const request = pending.get(requestId);
+      if (request) {
+        clearTimeout(request.timeout);
+        pending.delete(requestId);
+        request.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    return promise;
+  };
+
+  const handleResponse = (
+    source: BrowserTabBridgeWebContents,
+    response: BotBrowserTabCommandResponse,
+  ): void => {
+    const requestId = String(response?.requestId ?? '').trim();
+    if (!requestId) return;
+    const request = pending.get(requestId);
+    if (!request || request.target !== source) return;
+
+    clearTimeout(request.timeout);
+    pending.delete(requestId);
+    if (!response.success || !response.result) {
+      request.reject(new Error(String(response.error || 'Bot Browser tab command failed')));
+      return;
+    }
+    request.resolve(response.result);
+  };
+
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    for (const request of pending.values()) {
+      clearTimeout(request.timeout);
+      request.reject(new Error('Bot Browser tab bridge was closed'));
+    }
+    pending.clear();
+  };
+
+  return { execute, handleResponse, dispose };
+}

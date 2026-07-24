@@ -6,6 +6,8 @@ const fs = require('node:fs');
 
 const DEFAULT_RPC_URL = 'http://127.0.0.1:31200';
 const OPEN_PATH = '/api/idbots/bot-browser/open';
+const TABS_PATH = '/api/idbots/bot-browser/tabs';
+const TAB_ACTIONS = new Set(['open-tab', 'close-tab', 'switch-tab', 'get-tabs', 'get-active-tab']);
 const PIN_ID_RE = /\b[0-9a-f]{64}i0\b/i;
 const GLOBAL_META_ID_RE = /\bid[qprzyt]1[a-z0-9]{20,}\b/i;
 const SUPPORTED_URI_RE = /\b(metaid|pin|metaapp|map|metafile):\/\/[^\s"'<>，。！？、]+/i;
@@ -58,6 +60,34 @@ function pickPayloadTarget(payload) {
   );
 }
 
+function inferTabAction(text) {
+  const value = String(text || '');
+  if (/(?:关闭|close)\s*(?:第\s*)?(?:tab|标签页?)\s*#?\s*\d+/i.test(value)) return 'close-tab';
+  if (/(?:切换(?:到)?|switch(?:\s+to)?)\s*(?:第\s*)?(?:tab|标签页?)\s*#?\s*\d+/i.test(value)) return 'switch-tab';
+  if (/(?:当前|active|current)[^\n]*(?:tab|标签页?)[^\n]*(?:uri|地址|网址)|(?:uri|地址|网址)[^\n]*(?:当前|active|current)[^\n]*(?:tab|标签页?)/i.test(value)) {
+    return 'get-active-tab';
+  }
+  if (/(?:列出|所有|全部|list)[^\n]*(?:tabs?|标签页?)/i.test(value)) return 'get-tabs';
+  if (/(?:新建|新增|新的?|new|another)[^\n]*(?:tab|标签页?)/i.test(value)) return 'open-tab';
+  return 'open';
+}
+
+function normalizeAction(value, text) {
+  const action = String(value || '').trim().toLowerCase();
+  if (action === 'open' || TAB_ACTIONS.has(action)) return action;
+  if (action) return null;
+  return inferTabAction(text);
+}
+
+function pickTabId(input, text) {
+  const explicit = input && typeof input === 'object' && !Array.isArray(input)
+    ? input.tabId ?? input.tab_id ?? input.id
+    : null;
+  const inferred = String(text || '').match(/(?:tab|标签页?)\s*#?\s*(\d+)/i)?.[1];
+  const tabId = Number(explicit ?? inferred);
+  return Number.isInteger(tabId) && tabId > 0 ? tabId : null;
+}
+
 function normalizeBrowserOpenTarget(input) {
   const text = String(pickPayloadTarget(input) || '').trim();
   if (!text) {
@@ -98,6 +128,41 @@ function normalizeBrowserOpenTarget(input) {
   return { success: false, error: 'No supported Browser target found.' };
 }
 
+function normalizeBrowserCommand(input) {
+  const payload = input?.payload;
+  const target = String(pickPayloadTarget(payload) || '').trim();
+  const payloadAction = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload.action
+    : null;
+  const action = normalizeAction(input?.action ?? payloadAction, target);
+  if (!action) {
+    return { success: false, error: 'Unsupported Browser action.' };
+  }
+
+  if (action === 'open') {
+    const normalized = normalizeBrowserOpenTarget(payload);
+    return normalized.success ? { ...normalized, action } : normalized;
+  }
+
+  if (action === 'open-tab') {
+    if (!target || /^(?:新建|新增|新的?|new)(?:\s+(?:tab|标签页?))?\s*$/i.test(target)) {
+      return { success: true, action };
+    }
+    const normalized = normalizeBrowserOpenTarget(payload);
+    return normalized.success ? { ...normalized, action } : normalized;
+  }
+
+  if (action === 'close-tab' || action === 'switch-tab') {
+    const tabId = pickTabId(payload, target) ?? Number(input?.tabId);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      return { success: false, error: 'A positive tab id is required.' };
+    }
+    return { success: true, action, tabId };
+  }
+
+  return { success: true, action };
+}
+
 function parsePayloadRaw() {
   const { values } = parseArgs({
     options: {
@@ -105,6 +170,8 @@ function parsePayloadRaw() {
       target: { type: 'string', short: 't' },
       uri: { type: 'string', short: 'u' },
       'actor-id': { type: 'string' },
+      action: { type: 'string', short: 'a' },
+      'tab-id': { type: 'string' },
       'dry-run': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
@@ -112,7 +179,7 @@ function parsePayloadRaw() {
   });
 
   if (values.help) {
-    process.stdout.write('Usage: node scripts/index.js --target "<target>"\n');
+    process.stdout.write('Usage: node scripts/index.js [--action <action>] [--target "<target>"] [--tab-id <id>]\n');
     process.exit(0);
   }
 
@@ -122,6 +189,8 @@ function parsePayloadRaw() {
       return {
         payload: parsed,
         actorId: typeof parsed?.actorId === 'string' ? parsed.actorId.trim() : '',
+        action: typeof values.action === 'string' ? values.action.trim() : '',
+        tabId: values['tab-id'],
         dryRun: Boolean(values['dry-run']),
       };
     } catch (error) {
@@ -133,6 +202,8 @@ function parsePayloadRaw() {
     return {
       payload: { uri: values.uri.trim() },
       actorId: typeof values['actor-id'] === 'string' ? values['actor-id'].trim() : '',
+      action: typeof values.action === 'string' ? values.action.trim() : '',
+      tabId: values['tab-id'],
       dryRun: Boolean(values['dry-run']),
     };
   }
@@ -141,6 +212,8 @@ function parsePayloadRaw() {
     return {
       payload: { target: values.target.trim() },
       actorId: typeof values['actor-id'] === 'string' ? values['actor-id'].trim() : '',
+      action: typeof values.action === 'string' ? values.action.trim() : '',
+      tabId: values['tab-id'],
       dryRun: Boolean(values['dry-run']),
     };
   }
@@ -149,32 +222,59 @@ function parsePayloadRaw() {
     const stdin = fs.readFileSync(0, 'utf8').trim();
     if (stdin) {
       try {
-        return { payload: JSON.parse(stdin), actorId: '', dryRun: Boolean(values['dry-run']) };
+        return {
+          payload: JSON.parse(stdin),
+          actorId: '',
+          action: typeof values.action === 'string' ? values.action.trim() : '',
+          tabId: values['tab-id'],
+          dryRun: Boolean(values['dry-run']),
+        };
       } catch {
-        return { payload: stdin, actorId: '', dryRun: Boolean(values['dry-run']) };
+        return {
+          payload: stdin,
+          actorId: '',
+          action: typeof values.action === 'string' ? values.action.trim() : '',
+          tabId: values['tab-id'],
+          dryRun: Boolean(values['dry-run']),
+        };
       }
     }
   }
 
-  return { payload: '', actorId: '', dryRun: Boolean(values['dry-run']) };
+  return {
+    payload: '',
+    actorId: '',
+    action: typeof values.action === 'string' ? values.action.trim() : '',
+    tabId: values['tab-id'],
+    dryRun: Boolean(values['dry-run']),
+  };
 }
 
 async function openBotBrowser(input, env = process.env) {
-  const normalized = normalizeBrowserOpenTarget(input.payload);
-  if (!normalized.success) {
-    return normalized;
+  const command = normalizeBrowserCommand(input);
+  if (!command.success) {
+    return command;
   }
 
   const actorId = input.actorId || null;
   if (input.dryRun || env.IDBOTS_BROWSER_OPEN_DRY_RUN === '1') {
-    return { success: true, uri: normalized.uri, actorId, message: `Would open IDBots Bot Browser: ${normalized.uri}` };
+    return {
+      success: true,
+      ...command,
+      actorId,
+      message: `Would run IDBots Bot Browser action: ${command.action}`,
+    };
   }
 
   const rpcBase = String(env.IDBOTS_RPC_URL || DEFAULT_RPC_URL).replace(/\/+$/, '');
-  const response = await fetch(`${rpcBase}${OPEN_PATH}`, {
+  const path = command.action === 'open' ? OPEN_PATH : TABS_PATH;
+  const body = command.action === 'open'
+    ? { uri: command.uri, actorId }
+    : { action: command.action, uri: command.uri, tabId: command.tabId };
+  const response = await fetch(`${rpcBase}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ uri: normalized.uri, actorId }),
+    body: JSON.stringify(body),
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || result.success !== true) {
@@ -186,9 +286,13 @@ async function openBotBrowser(input, env = process.env) {
 
   return {
     success: true,
-    uri: result.uri || normalized.uri,
+    action: command.action,
+    uri: result.uri || command.uri,
     actorId,
-    message: `Opened IDBots Bot Browser: ${result.uri || normalized.uri}`,
+    ...(result.result || {}),
+    message: command.action === 'open'
+      ? `Opened IDBots Bot Browser: ${result.uri || command.uri}`
+      : `Completed IDBots Bot Browser action: ${command.action}`,
   };
 }
 
@@ -210,6 +314,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  normalizeBrowserCommand,
   normalizeBrowserOpenTarget,
   openBotBrowser,
 };

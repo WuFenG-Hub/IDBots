@@ -64,6 +64,7 @@ async function startRpcServerForTestWithOverrides({
   utxoWalletService = null,
   mrc20Service = null,
   onBotBrowserOpen = null,
+  onBotBrowserTabCommand = null,
 } = {}) {
   const originalLoad = Module._load;
   Module._load = function patchedModuleLoad(request, parent, isMain) {
@@ -127,7 +128,12 @@ async function startRpcServerForTestWithOverrides({
         return () => {};
       },
     }),
-    onBotBrowserOpen ? { openBotBrowserUri: onBotBrowserOpen } : undefined,
+    onBotBrowserOpen || onBotBrowserTabCommand
+      ? {
+          openBotBrowserUri: onBotBrowserOpen || undefined,
+          controlBotBrowserTabs: onBotBrowserTabCommand || undefined,
+        }
+      : undefined,
   );
 
   await new Promise((resolve, reject) => {
@@ -213,6 +219,62 @@ test('rpc bot-browser open route rejects unsupported URI schemes', async () => {
     assert.equal(response.status, 400);
     assert.equal(json.success, false);
     assert.equal(opened.length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc bot-browser tabs route validates and relays client-only tab commands', async () => {
+  const commands = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    onBotBrowserTabCommand(command) {
+      commands.push(command);
+      return {
+        action: command.action,
+        openedTabId: command.action === 'open-tab' ? 4 : undefined,
+        tabs: [{ id: 4, uri: command.uri || null, title: null, isActive: true }],
+        activeTab: { id: 4, uri: command.uri || null, title: null, isActive: true },
+      };
+    },
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/idbots/bot-browser/tabs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'open-tab', uri: 'metaid://idq1alice' }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(json.result.openedTabId, 4);
+    assert.deepEqual(commands, [{ action: 'open-tab', uri: 'metaid://idq1alice' }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc bot-browser tabs route rejects invalid ids before renderer dispatch', async () => {
+  const commands = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    onBotBrowserTabCommand(command) {
+      commands.push(command);
+      return { action: command.action, tabs: [], activeTab: null };
+    },
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/idbots/bot-browser/tabs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'switch-tab', tabId: 'not-a-number' }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.equal(json.success, false);
+    assert.equal(commands.length, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

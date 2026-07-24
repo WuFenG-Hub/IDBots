@@ -35,6 +35,10 @@ import type {
   GigSquareService,
   GigSquareServiceMutationResult,
 } from './gigSquare';
+import type {
+  BotBrowserTabCommand,
+  BotBrowserTabCommandResult,
+} from '../features/botBrowser/types';
 
 interface ApiResponse {
   ok: boolean;
@@ -486,6 +490,16 @@ interface IElectronAPI {
   };
   botBrowser: {
     onOpenUri: (callback: (input: { uri: string; actorId?: string | null }) => void) => () => void;
+    onTabCommand: (callback: (input: {
+      requestId: string;
+      command: BotBrowserTabCommand;
+    }) => void) => () => void;
+    respondToTabCommand: (response: {
+      requestId: string;
+      success: boolean;
+      result?: BotBrowserTabCommandResult;
+      error?: string;
+    }) => void;
     resolveResource: (input: BrowserResolveInput) => Promise<HostBrowserCommandResult<BrowserResolveResult>>;
     getProfile: (input: { actorId?: string; globalMetaId: string }) => Promise<HostBrowserCommandResult<Record<string, unknown>>>;
     getSettings: (input?: BrowserSettingsInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;

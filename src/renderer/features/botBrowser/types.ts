@@ -28,9 +28,37 @@ export interface BotBrowserOpenUriInput {
   actorId?: string | null;
 }
 
+export type BotBrowserTabAction =
+  | 'open-tab'
+  | 'close-tab'
+  | 'switch-tab'
+  | 'get-tabs'
+  | 'get-active-tab';
+
+export interface BotBrowserTabCommand {
+  action: BotBrowserTabAction;
+  uri?: string;
+  tabId?: number;
+}
+
+export interface BotBrowserTabInfo {
+  id: number;
+  uri: string | null;
+  title: string | null;
+  isActive: boolean;
+}
+
+export interface BotBrowserTabCommandResult {
+  action: BotBrowserTabAction;
+  openedTabId?: number;
+  tabs: BotBrowserTabInfo[];
+  activeTab: BotBrowserTabInfo | null;
+}
+
 export interface BotBrowserSurfaceHandle {
   openUri(input: BotBrowserOpenUriInput): Promise<void>;
   openNewTab(): Promise<void>;
+  controlTabs(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult>;
   refreshRuntime(): Promise<void>;
 }
 
