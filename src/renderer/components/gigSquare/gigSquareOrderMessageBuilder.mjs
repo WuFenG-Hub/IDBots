@@ -44,9 +44,7 @@ function buildPersonaLine(buyerPersona) {
 
 export function buildBuyerOrderNaturalFallback(requestText) {
   const request = normalizeText(requestText);
-  return request
-    ? `想请你帮我处理这个需求：${request}`
-    : '想请你帮我处理一个需求。';
+  return request || 'Please help me with this service request.';
 }
 
 function normalizeTimeoutMs(timeoutMs) {
@@ -154,6 +152,7 @@ export function buildBuyerOrderMessageSystemPrompt(input) {
     'You are the buyer MetaBot sending a service order to another MetaBot seller.',
     'Write only the natural-language request that should appear before the structured order metadata.',
     'Stay strictly in the buyer role and speak in your own voice.',
+    'Use the same language as the actual user request whenever its language is clear. Do not translate it into another language.',
     requestText ? `Actual user request: "${requestText}"` : '',
     structuredMetadataSummary,
     'Do not say that you received payment, that the seller received an order, or that you are starting to process the task.',

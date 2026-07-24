@@ -392,8 +392,8 @@ export class PrivateChatOrderCowork extends EventEmitter {
     const peerName = request.peerName?.trim();
     const transmittedContent = request.processingNotice?.content?.trim();
     const content = transmittedContent || (peerName
-      ? `${peerName}，已收到你的服务订单，技能执行可能需要一些时间，正在处理，请耐心等待最终结果。`
-      : '已收到服务订单，技能执行可能需要一些时间，正在处理，请耐心等待最终结果。');
+      ? `${peerName}, I received your service order and started processing it. Skill execution may take some time, so please wait for the final result.`
+      : 'I received the service order and started processing it. Skill execution may take some time, so please wait for the final result.');
     const notice = this.coworkStore.addMessage(sessionId, {
       type: 'assistant',
       content,
@@ -455,8 +455,8 @@ export class PrivateChatOrderCowork extends EventEmitter {
 
   private buildVideoLongTaskInitialNotice(request?: OrderCoworkRequest): string {
     const peerName = request?.peerName?.trim();
-    const prefix = peerName ? `${peerName}，` : '';
-    return `${prefix}这是一个视频任务，生成和上传通常会比普通任务更耗时，我会持续处理并同步进度，请耐心等待最终交付。`;
+    const prefix = peerName ? `${peerName}, ` : '';
+    return `${prefix}this video task may take longer than a typical task to generate and upload. I will keep processing it and share progress until final delivery.`;
   }
 
   private buildVideoLongTaskHeartbeatNotice(updateIndex: number): string {
@@ -464,7 +464,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       1,
       Math.round((updateIndex * this.videoStatusIntervalMs) / 60_000),
     );
-    return `视频任务还在处理中，已处理约 ${elapsedMinutes} 分钟；我会继续等待生成结果，并尽快完成交付。`;
+    return `The video task is still processing after about ${elapsedMinutes} minutes. I will keep waiting for the generated result and complete delivery as soon as possible.`;
   }
 
   private handleMessage(sessionId: string, message: CoworkMessage): void {
@@ -545,7 +545,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       }
       accumulator.resolve({
         serviceReply,
-        ratingInvite: this.formatNeedsRatingText(request, '[NeedsRating] 服务已完成，请给个评价吧！'),
+        ratingInvite: this.formatNeedsRatingText(request, '[NeedsRating] The service is complete. Please rate it.'),
         isDeliverable: true,
       });
     });
@@ -733,12 +733,12 @@ export class PrivateChatOrderCowork extends EventEmitter {
 
     if (artifactResult.status !== 'found') {
       const reason = artifactResult.status === 'invalid' && artifactResult.reason === 'file_too_large'
-        ? '生成文件超过 50MB，无法按约定上传链上交付。'
-        : `未找到符合 ${outputType} 交付格式的数字成果。`;
+        ? 'The generated file exceeds 50MB and cannot be uploaded on-chain for delivery.'
+        : `No digital artifact matching the required ${outputType} delivery format was found.`;
       const failureReply = [
-        `服务方未能按约定交付 ${outputType} 数字成果。`,
+        `The service provider could not deliver the agreed ${outputType} result.`,
         reason,
-        '系统将自动转入退款流程，请勿对本次服务进行好评确认。',
+        'The system will start the refund process automatically. Do not submit a positive rating for this service.',
       ].join('\n');
       this.addOrderDeliveryStatusMessage(displaySessionId, failureReply, {
         orderDeliveryFailed: true,
@@ -752,8 +752,8 @@ export class PrivateChatOrderCowork extends EventEmitter {
 
     if (!this.uploadDeliveryArtifact) {
       const failureReply = [
-        `服务方已生成 ${outputType} 数字成果，但当前运行时缺少链上上传能力。`,
-        '系统将自动转入退款流程，请稍后重试或联系服务方。',
+        `The service provider generated the ${outputType} artifact, but the current runtime lacks on-chain upload capability.`,
+        'The system will start the refund process automatically. Please retry later or contact the service provider.',
       ].join('\n');
       this.addOrderDeliveryStatusMessage(displaySessionId, failureReply, {
         orderDeliveryFailed: true,
@@ -765,7 +765,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       };
     }
 
-    const uploadNotice = this.formatOrderStatusText(request, '技能执行完毕，数字成果已生成，正在将数字成果上传链上交付，请耐心等待。');
+    const uploadNotice = this.formatOrderStatusText(request, 'Skill execution is complete and the digital artifact is ready. It is now being uploaded on-chain for delivery; please wait.');
     const uploadNoticeMessage = this.addOrderDeliveryStatusMessage(displaySessionId, uploadNotice, {
       orderDeliveryUploadNotice: true,
     }, request);
@@ -780,7 +780,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
         verifyDeliveryArtifactUpload: this.verifyDeliveryArtifactUpload,
         maxAttempts: 2,
         onRetry: async () => {
-          const retryNotice = this.formatOrderStatusText(request, '数字成果链上上传校验失败，正在重新上传一次。');
+          const retryNotice = this.formatOrderStatusText(request, 'On-chain upload verification failed, so the digital artifact is being uploaded one more time.');
           const retryNoticeMessage = this.addOrderDeliveryStatusMessage(displaySessionId, retryNotice, {
             orderDeliveryUploadRetryNotice: true,
           }, request);
@@ -805,9 +805,9 @@ export class PrivateChatOrderCowork extends EventEmitter {
         throw error;
       }
       const failureReply = [
-        `服务方已生成 ${outputType} 数字成果，但上传链上交付失败。`,
+        `The service provider generated the ${outputType} artifact, but the on-chain delivery upload failed.`,
         error instanceof Error ? error.message : String(error),
-        '系统将自动转入退款流程，请稍后重试或联系服务方。',
+        'The system will start the refund process automatically. Please retry later or contact the service provider.',
       ].filter(Boolean).join('\n');
       this.addOrderDeliveryStatusMessage(displaySessionId, failureReply, {
         orderDeliveryFailed: true,
@@ -1073,26 +1073,26 @@ export class PrivateChatOrderCowork extends EventEmitter {
     const assistantReply = this.extractLatestAssistantDeliverable(messages);
     if (assistantReply) {
       return [
-        '本次服务执行超时，先同步当前可用结果（可能不完整）：',
+        'This service execution timed out. Here is the currently available result, which may be incomplete:',
         '',
         assistantReply,
         '',
-        '若稍后仍未收到正式交付，系统会自动发起退款。',
+        'If no formal delivery arrives later, the system will start a refund automatically.',
       ].join('\n');
     }
 
     const toolSnippet = this.extractLatestToolResultSnippet(messages);
     if (toolSnippet) {
       return [
-        '本次服务执行超时，先同步当前可用信息（可能不完整）：',
+        'This service execution timed out. Here is the currently available information, which may be incomplete:',
         '',
         toolSnippet,
         '',
-        '若稍后仍未收到正式交付，系统会自动发起退款。',
+        'If no formal delivery arrives later, the system will start a refund automatically.',
       ].join('\n');
     }
 
-    return '本次服务执行超时，暂未生成可交付结果。若稍后仍未收到正式交付，系统会自动发起退款。';
+    return 'This service execution timed out without producing a deliverable result. If no formal delivery arrives later, the system will start a refund automatically.';
   }
 
   private extractLatestAssistantDeliverable(messages: CoworkMessage[]): string | null {
@@ -1165,14 +1165,14 @@ export class PrivateChatOrderCowork extends EventEmitter {
     if (text.length <= TIMEOUT_FALLBACK_MAX_CHARS) {
       return text;
     }
-    return `${text.slice(0, TIMEOUT_FALLBACK_MAX_CHARS)}\n...[已截断]`;
+    return `${text.slice(0, TIMEOUT_FALLBACK_MAX_CHARS)}\n...[truncated]`;
   }
 
   private buildMissingTextDeliveryFailureReply(): string {
     return [
-      '服务方未能按约定交付 text 服务结果。',
-      '技能执行结束，但没有生成可交付的最终回复。',
-      '系统将自动转入退款流程，请勿对本次服务进行好评确认。',
+      'The service provider could not deliver the agreed text result.',
+      'Skill execution ended without producing a deliverable final response.',
+      'The system will start the refund process automatically. Do not submit a positive rating for this service.',
     ].join('\n');
   }
 
@@ -1228,13 +1228,15 @@ export class PrivateChatOrderCowork extends EventEmitter {
       personaLines,
       'You just completed a paid service order. Write a short, natural message in your own voice inviting the client to rate your service.',
       'The message should reflect your personality and reference the service you just delivered.',
+      'Use the same language as the client\'s original request whenever its language is clear from the service-order context.',
       'Keep it to 1-2 sentences. Be genuine, not robotic.',
+      request?.prompt ? `Original service-order context: "${request.prompt.slice(0, 500)}"` : '',
       `The service result you delivered: "${serviceReply.slice(0, 200)}"`,
     ].filter(Boolean).join('\n');
 
     const llmId = metabot && typeof metabot.llm_id === 'string' ? metabot.llm_id.trim() || undefined : undefined;
 
-    const text = await performChatCompletionForOrchestrator(systemPrompt, '请生成邀评消息。', llmId);
+    const text = await performChatCompletionForOrchestrator(systemPrompt, 'Write the rating invitation now.', llmId);
     return `[NeedsRating] ${text.trim()}`;
   }
 
@@ -1245,7 +1247,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
       if (isSqliteWasmBoundsError(error)) {
         throw error;
       }
-      return '[NeedsRating] 服务已完成，请给个评价吧！';
+      return '[NeedsRating] The service is complete. Please rate it.';
     }
   }
 }

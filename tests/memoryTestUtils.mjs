@@ -60,9 +60,12 @@ export async function getSqlJs() {
 
 export function getCompiledStores() {
   if (!compiledModules) {
+    const compiledRoot = fs.existsSync(new URL('../dist-electron/main/coworkStore.js', import.meta.url))
+      ? '../dist-electron/main'
+      : '../dist-electron';
     compiledModules = {
-      ...loadCompiledModule('../dist-electron/coworkStore.js'),
-      ...loadCompiledModule('../dist-electron/sqliteStore.js'),
+      ...loadCompiledModule(`${compiledRoot}/coworkStore.js`),
+      ...loadCompiledModule(`${compiledRoot}/sqliteStore.js`),
     };
   }
   return compiledModules;

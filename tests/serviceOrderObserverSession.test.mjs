@@ -8,7 +8,7 @@ import {
 } from './memoryTestUtils.mjs';
 
 const require = createRequire(import.meta.url);
-const { ServiceOrderStore } = require('../dist-electron/serviceOrderStore.js');
+const { ServiceOrderStore } = require('../dist-electron/main/serviceOrderStore.js');
 
 let buildServiceOrderObserverConversationId;
 let buildServiceOrderFallbackPayload;
@@ -20,8 +20,8 @@ try {
     buildServiceOrderObserverConversationId,
     buildServiceOrderFallbackPayload,
     buildServiceOrderObserverMetadata,
-  } = await import('../dist-electron/services/serviceOrderObserverSession.js'));
-  ({ recoverMissingRefundPendingOrderSessions } = await import('../dist-electron/services/serviceOrderSessionRecovery.js'));
+  } = await import('../dist-electron/main/services/serviceOrderObserverSession.js'));
+  ({ recoverMissingRefundPendingOrderSessions } = await import('../dist-electron/main/services/serviceOrderSessionRecovery.js'));
 } catch {
   buildServiceOrderObserverConversationId = undefined;
   buildServiceOrderFallbackPayload = undefined;
@@ -413,7 +413,7 @@ test('buildServiceOrderFallbackPayload includes structured MRC20 settlement line
     peerGlobalMetaId: 'peer-global-metaid',
   });
 
-  assert.match(payload, /支付金额 12\.5 METAID-MRC20/);
+  assert.match(payload, /payment amount 12\.5 METAID-MRC20/i);
   assert.match(payload, /payment chain:\s*btc/i);
   assert.match(payload, /settlement kind:\s*mrc20/i);
   assert.match(payload, /mrc20 ticker:\s*METAID/);

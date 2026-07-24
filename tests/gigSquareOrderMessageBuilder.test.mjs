@@ -33,6 +33,7 @@ test('buildBuyerOrderMessageSystemPrompt keeps the LLM in buyer perspective and 
   assert.match(prompt, /Do not say that you received payment/i);
   assert.match(prompt, /Do not use phrases like "已收到你xx的付款", "你收到一笔订单", "马上处理", or "正在处理"/);
   assert.match(prompt, /Focus only on the task the seller should perform/i);
+  assert.match(prompt, /same language as the actual user request/i);
   assert.match(prompt, /查询东京现在的天气/);
 });
 
@@ -133,6 +134,25 @@ test('generateBuyerOrderNaturalText falls back and cancels when the LLM call han
   assert.equal(cancelCalls, 1);
 });
 
+test('English free orders contain no hardcoded Chinese transport text', () => {
+  const requestText = 'Please provide a detailed weather forecast for Hong Kong for the next three days.';
+  const payload = buildGigSquareOrderPayload({
+    naturalOrderText: buildBuyerOrderNaturalFallback(requestText),
+    rawRequest: requestText,
+    price: '0',
+    currency: 'SPACE',
+    txid: '',
+    orderPinId: 'weather-order-pin-i0',
+    serviceId: 'service-weather',
+    skillName: 'weather',
+  });
+
+  assert.equal(buildBuyerOrderNaturalFallback(requestText), requestText);
+  assert.match(payload, /payment amount 0 SPACE/i);
+  assert.match(payload, /order pin id:\s*weather-order-pin-i0/i);
+  assert.doesNotMatch(payload, /[一-龥]/);
+});
+
 test('buildGigSquareOrderPayload keeps the buyer-facing natural sentence and preserves the exact raw request block', () => {
   const payload = buildGigSquareOrderPayload({
     naturalOrderText: '想请你帮我查询一下东京今晚到明早的天气。',
@@ -150,7 +170,8 @@ test('buildGigSquareOrderPayload keeps the buyer-facing natural sentence and pre
     payload,
     /<raw_request>\n请帮我查询东京今晚到明早的天气，并告诉我是否需要带伞和外套。\n<\/raw_request>/
   );
-  assert.match(payload, /支付金额 0\.00005 SPACE/);
+  assert.match(payload, /payment amount 0\.00005 SPACE/i);
+  assert.doesNotMatch(payload, /支付金额/);
   assert.match(payload, /order pin id:\s*order-pin-i0/i);
   assert.match(payload, new RegExp(`txid:\\s*${'a'.repeat(64)}`, 'i'));
   assert.match(payload, /service id: service-weather/);
@@ -197,7 +218,8 @@ test('buildGigSquareOrderPayload includes order pin id and omits payment settlem
     outputType: 'text',
   });
 
-  assert.match(payload, /支付金额 0 SPACE/);
+  assert.match(payload, /payment amount 0 SPACE/i);
+  assert.doesNotMatch(payload, /支付金额/);
   assert.match(payload, new RegExp(`order pin id:\\s*${orderPinId}`, 'i'));
   assert.doesNotMatch(payload, /order id:\s*legacy-order-id/i);
   assert.doesNotMatch(payload, /txid:/i);

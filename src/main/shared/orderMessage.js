@@ -183,7 +183,7 @@ export function buildOrderPayload(input) {
       : '';
 
   const metadataLines = [
-    `支付金额 ${String(input?.price || '').trim()} ${String(input?.currency || '').trim()}`,
+    `payment amount ${String(input?.price || '').trim()} ${String(input?.currency || '').trim()}`,
   ];
   if (orderPinId) {
     metadataLines.push(`order pin id: ${orderPinId}`);

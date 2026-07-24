@@ -4,9 +4,11 @@ import assert from 'node:assert/strict';
 import {
   buildNonDeliverableSellerFailureNotice,
   buildBuyerRatingSystemPrompt,
+  buildRatingChainConfirmationSystemPrompt,
   deliveryResultHasExpectedArtifact,
   isOrderDeliveryFailureNotice,
   markSellerOrderExecutionFailed,
+  normalizeRatingChainConfirmationText,
   resolveBuyerRatingContext,
   resolveBuyerOrderOutputType,
   resolveSellerOrderOutputType,
@@ -25,6 +27,26 @@ test('buildBuyerRatingSystemPrompt instructs buyer to reject missing image deliv
   assert.match(prompt, /metafile:\/\/.*image/i);
   assert.match(prompt, /reject/i);
   assert.match(prompt, /refund/i);
+  assert.match(prompt, /same language as your original request/i);
+});
+
+test('rating chain confirmation follows the original request language and preserves the pin id', () => {
+  const ratingPinId = `${'a'.repeat(64)}i0`;
+  const prompt = buildRatingChainConfirmationSystemPrompt({
+    originalRequest: 'Please provide a detailed weather forecast for Hong Kong for the next three days.',
+    ratingPinId,
+  });
+
+  assert.match(prompt, /same language as your original service request/i);
+  assert.match(prompt, new RegExp(ratingPinId));
+  assert.equal(
+    normalizeRatingChainConfirmationText(`My rating is now recorded on-chain (pin ID: ${ratingPinId}).`, ratingPinId),
+    `My rating is now recorded on-chain (pin ID: ${ratingPinId}).`,
+  );
+  assert.equal(
+    normalizeRatingChainConfirmationText('评分已记录。', ratingPinId),
+    `My rating was recorded on-chain (pin ID: ${ratingPinId}).`,
+  );
 });
 
 test('buildBuyerRatingSystemPrompt includes complete medium-length text delivery for rating', () => {
@@ -84,6 +106,10 @@ test('isOrderDeliveryFailureNotice detects explicit missing media delivery notic
     isOrderDeliveryFailureNotice('数字成果已生成并上传链上交付。\nPINID: abc123i0'),
     false
   );
+  assert.equal(
+    isOrderDeliveryFailureNotice('The service provider could not deliver the agreed image result.\nThe system will start the refund process automatically.'),
+    true
+  );
 });
 
 test('buildNonDeliverableSellerFailureNotice creates buyer-refundable timeout status text', () => {
@@ -93,9 +119,9 @@ test('buildNonDeliverableSellerFailureNotice creates buyer-refundable timeout st
   });
 
   assert.equal(isOrderDeliveryFailureNotice(notice), true);
-  assert.match(notice, /服务方未能按约定交付 video 数字成果/);
+  assert.match(notice, /could not deliver the agreed video result/i);
   assert.match(notice, /本次服务执行超时/);
-  assert.match(notice, /退款流程/);
+  assert.match(notice, /refund process/i);
   assert.doesNotMatch(notice, /^\[ORDER_STATUS/);
 });
 

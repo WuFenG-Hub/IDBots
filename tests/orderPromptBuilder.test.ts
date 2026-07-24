@@ -28,6 +28,7 @@ test('buildOrderPrompts adds media delivery constraints for image outputs', () =
   assert.match(prompts.systemPrompt, /do not claim success/i);
   assert.match(prompts.systemPrompt, /Do not stop after saying/i);
   assert.match(prompts.systemPrompt, /run the required skill/i);
+  assert.match(prompts.systemPrompt, /same language as the client's original request/i);
 });
 
 test('buildOrderPrompts asks video providers to safely rewrite risky prompts without enumerating examples', () => {

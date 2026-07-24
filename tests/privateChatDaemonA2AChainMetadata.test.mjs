@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 const {
   buildPrivateChatA2AChainMetadata,
   sendSellerOrderAcknowledgement,
-} = require('../dist-electron/services/privateChatDaemon.js');
+} = require('../dist-electron/main/services/privateChatDaemon.js');
 
 test('sendSellerOrderAcknowledgement returns the simplemsg chain metadata from the transmitted acknowledgement', async () => {
   const txid = 'd'.repeat(64);

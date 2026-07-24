@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   resolveDelegationSettlement,
   buildDelegationOrderPayloadFromService,
-} = require('../dist-electron/services/delegationSettlement.js');
+} = require('../dist-electron/main/services/delegationSettlement.js');
 
 test('resolveDelegationSettlement keeps BTC delegation payments on btc native transfer rails', () => {
   const settlement = resolveDelegationSettlement({
@@ -75,7 +75,7 @@ test('buildDelegationOrderPayloadFromService carries structured MRC20 settlement
   });
 
   assert.equal(settlement.paymentMode, 'mrc20');
-  assert.match(payload, /支付金额 12\.5 METAID-MRC20/);
+  assert.match(payload, /payment amount 12\.5 METAID-MRC20/i);
   assert.match(payload, /payment chain:\s*btc/i);
   assert.match(payload, /settlement kind:\s*mrc20/i);
   assert.match(payload, /mrc20 ticker:\s*METAID/);

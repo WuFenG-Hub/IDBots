@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const require = createRequire(import.meta.url);
-const { PrivateChatOrderCowork } = require('../dist-electron/services/privateChatOrderCowork.js');
+const { PrivateChatOrderCowork } = require('../dist-electron/main/services/privateChatOrderCowork.js');
 
 class FakeCoworkRunner extends EventEmitter {
   constructor() {
@@ -190,8 +190,8 @@ test('runOrder uploads image output artifacts and returns a metafile delivery su
   assert.equal(uploadCalls.length, 1);
   assert.deepEqual(deliverySequence, ['status', 'upload']);
   assert.equal(remoteStatusUpdates.length, 1);
-  assert.match(remoteStatusUpdates[0], /数字成果已生成/);
-  assert.match(remoteStatusUpdates[0], /上传链上交付/);
+  assert.match(remoteStatusUpdates[0], /digital artifact is ready/i);
+  assert.match(remoteStatusUpdates[0], /uploaded on-chain for delivery/i);
   assert.equal(uploadCalls[0].filePath, imagePath);
   assert.match(result.serviceReply, /metafile:\/\/aabbccddeeff00112233445566778899i0\.png/);
   assert.match(result.serviceReply, /PINID:\s*aabbccddeeff00112233445566778899i0/);
@@ -199,8 +199,8 @@ test('runOrder uploads image output artifacts and returns a metafile delivery su
   const session = store.getSession(sessionId);
   const uploadNotice = session.messages.find((message) => message.metadata?.orderDeliveryUploadNotice);
   assert.ok(uploadNotice, 'expected upload notice to be added to the session');
-  assert.match(uploadNotice.content, /数字成果已生成/);
-  assert.match(uploadNotice.content, /上传链上交付/);
+  assert.match(uploadNotice.content, /digital artifact is ready/i);
+  assert.match(uploadNotice.content, /uploaded on-chain for delivery/i);
 
   const hasUploadNoticeEvent = rendererEvents.some((event) =>
     event.channel === 'cowork:stream:message' &&
@@ -382,8 +382,8 @@ test('runOrder rejects media delivery after one failed upload retry', async () =
 
   assert.equal(result.isDeliverable, false);
   assert.equal(uploadCalls.length, 2);
-  assert.match(result.serviceReply, /上传链上交付失败/);
-  assert.match(result.serviceReply, /退款流程/);
+  assert.match(result.serviceReply, /on-chain delivery upload failed/i);
+  assert.match(result.serviceReply, /refund process/i);
 });
 
 test('runOrder scopes media artifact resolution to the current order metadata', async () => {
@@ -763,9 +763,9 @@ test('runOrder treats completed text orders without a final assistant reply as n
   assert.equal(result.ratingInvite, '');
   assert.equal(ratingInviteCalls, 0);
   assert.doesNotMatch(result.serviceReply, /处理完成，但没有生成回复/);
-  assert.match(result.serviceReply, /未能按约定交付 text 服务结果/);
-  assert.match(result.serviceReply, /没有生成可交付的最终回复/);
-  assert.match(result.serviceReply, /退款流程/);
+  assert.match(result.serviceReply, /could not deliver the agreed text result/i);
+  assert.match(result.serviceReply, /without producing a deliverable final response/i);
+  assert.match(result.serviceReply, /refund process/i);
 
   const displaySession = store.getSession(displaySessionId);
   const failureNotice = displaySession.messages.find((message) => message.metadata?.orderDeliveryFailed);
@@ -907,7 +907,7 @@ test('runOrder does not continue media execution when the assistant reports an e
   const result = await runPromise;
   assert.equal(runner.startSessionCalls.length, 1);
   assert.equal(result.isDeliverable, false);
-  assert.match(result.serviceReply, /未找到符合 image 交付格式的数字成果/);
+  assert.match(result.serviceReply, /No digital artifact matching the required image delivery format was found/i);
 });
 
 test('runOrder uploads an existing media artifact when the execution timeout fires before completion', async () => {
@@ -1018,7 +1018,7 @@ test('runOrder uploads a generated media artifact from cwd when timeout fires wi
   assert.equal(uploadCalls[0].filePath, imagePath);
   assert.equal(uploadCalls[0].source, 'generated');
   assert.match(result.serviceReply, /metafile:\/\/f{64}i0\.png/);
-  assert.doesNotMatch(result.serviceReply, /本次服务执行超时/);
+  assert.doesNotMatch(result.serviceReply, /service execution timed out/i);
   assert.equal(runner.stopSessionCalls.length, 1);
 });
 
@@ -1077,7 +1077,7 @@ test('runOrder keeps timeout media delivery when rating invite generation fails'
   assert.equal(uploadCalls[0].filePath, imagePath);
   assert.match(result.serviceReply, /metafile:\/\/b{64}i0\.png/);
   assert.match(result.ratingInvite, /\[NeedsRating:/);
-  assert.doesNotMatch(result.serviceReply, /本次服务执行超时/);
+  assert.doesNotMatch(result.serviceReply, /service execution timed out/i);
 });
 
 test('runOrder keeps timeout fallback for non-media other artifacts', async () => {
@@ -1130,7 +1130,7 @@ test('runOrder keeps timeout fallback for non-media other artifacts', async () =
 
   assert.equal(result.isDeliverable, false);
   assert.equal(uploadCalls.length, 0);
-  assert.match(result.serviceReply, /本次服务执行超时/);
+  assert.match(result.serviceReply, /service execution timed out/i);
 });
 
 test('runOrder rejects metaweb_private orders that are missing a canonical peer display session', async () => {

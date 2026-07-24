@@ -163,6 +163,25 @@ test('checkOrderPaymentStatus allows free order messages without on-chain txid',
   assert.equal(result.chain, 'mvc');
 });
 
+test('checkOrderPaymentStatus parses English payment amount metadata', async () => {
+  const result = await checkOrderPaymentStatus({
+    txid: null,
+    plaintext: [
+      '[ORDER] Please provide a three-day weather forecast for Hong Kong.',
+      'payment amount 0 SPACE',
+      'order pin id: weather-order-pin-i0',
+    ].join('\n'),
+    source: 'metaweb_private',
+    metabotId: 1,
+    metabotStore: {} as any,
+  });
+
+  assert.equal(result.paid, true);
+  assert.equal(result.reason, 'free_order_no_payment_required');
+  assert.equal(result.amountSats, 0);
+  assert.equal(result.currency, 'SPACE');
+});
+
 test('checkOrderPaymentStatus allows free order messages with an order id but without txid', async () => {
   const text = [
     '[ORDER] 帮我整理一段文本。',

@@ -252,12 +252,13 @@ test('sendSellerOrderAcknowledgement sends a private acknowledgement and marks t
     skillName: 'weather',
     paymentTxid: 'a'.repeat(64),
     now: () => 1_770_123_456_000,
-    performChat: async (_systemPrompt, userPrompt, llmId) => {
+    performChat: async (systemPrompt, userPrompt, llmId) => {
+      assert.match(systemPrompt, /same language as the original order request/i);
       assert.match(userPrompt, /Shanghai weather/);
       assert.match(userPrompt, /umbrella tonight/);
       assert.doesNotMatch(userPrompt, /\[ORDER\]|<raw_request>|<\/raw_request>|支付金额|txid|service id|skill name/i);
       assert.equal(llmId, 'llm-1');
-      return '我已明确你的需求，正在处理中，请稍候。';
+      return 'I understand your request and have started working on it. Please wait for the final result.';
     },
     sendEncryptedMsg: async (text) => {
       sentMessages.push(text);
@@ -272,8 +273,8 @@ test('sendSellerOrderAcknowledgement sends a private acknowledgement and marks t
     emitLog: () => {},
   });
 
-  assert.equal(result?.text, '我已明确你的需求，正在处理中，请稍候。');
-  assert.deepEqual(sentMessages, ['我已明确你的需求，正在处理中，请稍候。']);
+  assert.equal(result?.text, 'I understand your request and have started working on it. Please wait for the final result.');
+  assert.deepEqual(sentMessages, ['I understand your request and have started working on it. Please wait for the final result.']);
   assert.deepEqual(lifecycleCalls, [{
     localMetabotId: 7,
     counterpartyGlobalMetaId: 'buyer-global-metaid',
@@ -282,7 +283,7 @@ test('sendSellerOrderAcknowledgement sends a private acknowledgement and marks t
   }]);
 });
 
-test('sendSellerOrderAcknowledgement fallback asks the buyer to wait patiently while the skill runs', async () => {
+test('sendSellerOrderAcknowledgement uses an English fallback when language-aware generation fails', async () => {
   const sentMessages = [];
 
   const result = await sendSellerOrderAcknowledgement({
@@ -306,9 +307,10 @@ test('sendSellerOrderAcknowledgement fallback asks the buyer to wait patiently w
     emitLog: () => {},
   });
 
-  assert.match(result.text, /已收到|已明确/);
-  assert.match(result.text, /技能执行可能需要一些时间/);
-  assert.match(result.text, /耐心等待/);
+  assert.match(result.text, /received your request/i);
+  assert.match(result.text, /skill execution may take some time/i);
+  assert.match(result.text, /wait for the final result/i);
+  assert.doesNotMatch(result.text, /[一-龥]/);
   assert.deepEqual(sentMessages, [result.text]);
 });
 
@@ -352,9 +354,10 @@ test('sendSellerOrderImmediateAcknowledgement sends deterministic private order 
   assert.equal(result.pinId, 'ack-pin-id');
   assert.deepEqual(result.txids, ['f'.repeat(64)]);
   assert.match(sentMessages[0], new RegExp(`^\\[ORDER_STATUS:${orderTxid}\\]`));
-  assert.match(sentMessages[0], /已收到/);
-  assert.match(sentMessages[0], /技能执行可能需要一些时间/);
-  assert.match(sentMessages[0], /请稍等/);
+  assert.match(sentMessages[0], /received your service request/i);
+  assert.match(sentMessages[0], /skill execution may take some time/i);
+  assert.match(sentMessages[0], /please wait/i);
+  assert.doesNotMatch(sentMessages[0], /[一-龥]/);
   assert.match(sentMessages[0], new RegExp(`order pin id: ${orderPinId}`));
   assert.deepEqual(lifecycleCalls, [{
     localMetabotId: 7,
@@ -438,7 +441,7 @@ test('CoworkRunner keeps the full common outer prompt for standard cowork sessio
 });
 
 test('cleanServiceResultText strips bot-to-bot wrapper and order metadata from mixed replies', async () => {
-  const protocols = await import('../dist-electron/services/serviceOrderProtocols.js');
+  const protocols = await import('../dist-electron/main/services/serviceOrderProtocols.js');
 
   const mixedReply = `77，你好！我是你的数字主分身 AI_Sunny。我已经成功处理了你的服务订单，并使用 weather 技能查询了上海的天气信息。
 
@@ -469,13 +472,13 @@ test('cleanServiceResultText strips bot-to-bot wrapper and order metadata from m
 });
 
 test('cleanServiceResultText leaves plain service output intact', async () => {
-  const protocols = await import('../dist-electron/services/serviceOrderProtocols.js');
+  const protocols = await import('../dist-electron/main/services/serviceOrderProtocols.js');
   const plainResult = '## 查询结果\n上海当前温度 18°C，阴天转多云。';
   assert.equal(protocols.cleanServiceResultText(plainResult), plainResult);
 });
 
 test('buildCoworkDeliveryResultMessage presents only the seller result to the human-facing cowork session', async () => {
-  const protocols = await import('../dist-electron/services/serviceOrderProtocols.js');
+  const protocols = await import('../dist-electron/main/services/serviceOrderProtocols.js');
 
   assert.equal(
     protocols.buildCoworkDeliveryResultMessage('## 查询结果\n上海当前温度 18°C'),

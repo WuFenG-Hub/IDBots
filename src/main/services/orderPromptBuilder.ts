@@ -88,6 +88,7 @@ export function buildOrderPrompts(params: {
       ? `- If you cannot generate a valid ${expectedOutputType} file, do not claim success. State clearly that the agreed digital deliverable was not produced.`
       : null,
     `- Return only the substantive deliverable that should be forwarded to the end user.`,
+    `- Write the final deliverable in the same language as the client's original request whenever that language is clear.`,
     `- Start directly with the actual result content. If you use markdown, start with the result heading itself.`,
     `- Do not repeat greetings, self-introduction, payment amount, txid, service id, skill name, order confirmation, service-complete boilerplate, rating requests, or other bot-to-bot chatter.`,
     `- If an owner-scoped memory block appears, it describes your owner (the local operator), NOT the current client. Do not apply the owner's personal preferences or name to the client.`,

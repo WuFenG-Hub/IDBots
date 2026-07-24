@@ -219,7 +219,7 @@ export function buildServiceOrderFallbackPayload(input: {
   const lines = [
     '[ORDER] Restored service order context.',
     input.servicePrice || input.serviceCurrency
-      ? `支付金额 ${normalizeText(input.servicePrice) || '0'} ${normalizeText(input.serviceCurrency) || 'SPACE'}`
+      ? `payment amount ${normalizeText(input.servicePrice) || '0'} ${normalizeText(input.serviceCurrency) || 'SPACE'}`
       : '',
     txid ? `txid: ${txid}` : 'txid: pending',
     normalizeText(input.serviceOrderPinId) ? `order pin id: ${normalizeText(input.serviceOrderPinId)}` : '',

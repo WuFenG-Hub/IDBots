@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const {
   buildDelegationOrderPayload,
-} = await import('../dist-electron/services/delegationOrderMessage.js');
+} = await import('../dist-electron/main/services/delegationOrderMessage.js');
 
 test('buildDelegationOrderPayload emits an [ORDER] message that preserves providerSkill metadata', () => {
   const payload = buildDelegationOrderPayload({
@@ -25,7 +25,7 @@ test('buildDelegationOrderPayload emits an [ORDER] message that preserves provid
     /<raw_request>\n请完整查询北京今天的天气，并告诉我是否适合晚上出门散步。\n<\/raw_request>/
   );
   assert.doesNotMatch(payload, /\[ORDER\][^\n]*支付0\.0001 SPACE费用/);
-  assert.match(payload, /支付金额 0\.0001 SPACE/);
+  assert.match(payload, /payment amount 0\.0001 SPACE/i);
   assert.match(payload, new RegExp(`txid: ${'a'.repeat(64)}`));
   assert.match(payload, /service id: service-pin-weather/);
   assert.match(payload, /skill name: weather/);
@@ -48,7 +48,7 @@ test('buildDelegationOrderPayload omits txid for free orders and keeps an order 
   });
 
   assert.match(payload, /^\[ORDER\]\s+/);
-  assert.match(payload, /支付金额 0 SPACE/);
+  assert.match(payload, /payment amount 0 SPACE/i);
   assert.match(payload, new RegExp(`order id: ${orderId}`));
   assert.doesNotMatch(payload, /txid:/i);
   assert.doesNotMatch(payload, /payment chain:/i);
