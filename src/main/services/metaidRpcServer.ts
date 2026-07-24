@@ -39,6 +39,11 @@ import { parseAddressIndexFromPath } from './metabotWalletService';
 import { executeMrc20Transfer } from './mrc20Service';
 import { buildMetaappHomepage } from './metabotHomepage';
 import { METAAPP_PIN_ID_PATTERN } from './metaAppProtocol';
+import type {
+  BotBrowserTabAction,
+  BotBrowserTabCommand,
+  BotBrowserTabCommandResult,
+} from './botBrowserTabBridge';
 
 const RPC_HOST = DEFAULT_METAID_RPC_HOST;
 
@@ -57,6 +62,7 @@ const SIGN_BTC_PSBT_PATH = '/api/idbots/wallet/btc/sign-psbt';
 const UPLOAD_LARGEFILE_PATH = '/api/idbots/files/upload-largefile';
 const EXECUTE_TRANSFER_PATH = '/api/idbots/wallet/transfer';
 const BOT_BROWSER_OPEN_PATH = '/api/idbots/bot-browser/open';
+const BOT_BROWSER_TABS_PATH = '/api/idbots/bot-browser/tabs';
 const SET_METABOT_HOMEPAGE_METAAPP_PATH = '/api/idbots/metabot/homepage/set-metaapp';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
@@ -67,7 +73,43 @@ export type BotBrowserRpcOpenRequest = {
 
 export type MetaidRpcServerOptions = {
   openBotBrowserUri?: (input: BotBrowserRpcOpenRequest) => Promise<void> | void;
+  controlBotBrowserTabs?: (
+    command: BotBrowserTabCommand,
+  ) => Promise<BotBrowserTabCommandResult> | BotBrowserTabCommandResult;
 };
+
+const BOT_BROWSER_TAB_ACTIONS = new Set<BotBrowserTabAction>([
+  'open-tab',
+  'close-tab',
+  'switch-tab',
+  'get-tabs',
+  'get-active-tab',
+]);
+
+function normalizeBotBrowserTabCommand(value: unknown): BotBrowserTabCommand {
+  const input = value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+  const action = String(input.action || '').trim() as BotBrowserTabAction;
+  if (!BOT_BROWSER_TAB_ACTIONS.has(action)) {
+    throw new Error('action must be a supported Bot Browser tab action');
+  }
+
+  if (action === 'open-tab') {
+    const uri = String(input.uri || '').trim();
+    return uri ? { action, uri: normalizeBotBrowserUri(uri) } : { action };
+  }
+
+  if (action === 'close-tab' || action === 'switch-tab') {
+    const tabId = Number(input.tabId);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      throw new Error('tabId must be a positive integer');
+    }
+    return { action, tabId };
+  }
+
+  return { action };
+}
 
 function normalizeBotBrowserUri(value: unknown): string {
   const uri = String(value || '').trim();
@@ -162,6 +204,7 @@ export function startMetaidRpcServer(
 ): http.Server {
   setMetaidCoreStore(getStore);
   const openBotBrowserUri = options.openBotBrowserUri ?? defaultOpenBotBrowserUri;
+  const controlBotBrowserTabs = options.controlBotBrowserTabs;
 
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -198,6 +241,28 @@ export function startMetaidRpcServer(
         await openBotBrowserUri(openRequest);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, ...openRequest }));
+      } catch (err) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === BOT_BROWSER_TABS_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+
+      try {
+        if (!controlBotBrowserTabs) {
+          throw new Error('Bot Browser tab control is unavailable');
+        }
+        const parsed = JSON.parse(body || '{}') as unknown;
+        const command = normalizeBotBrowserTabCommand(parsed);
+        const result = await controlBotBrowserTabs(command);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, result }));
       } catch (err) {
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: String((err as Error)?.message || err) }));

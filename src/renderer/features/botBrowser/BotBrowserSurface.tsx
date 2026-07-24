@@ -8,9 +8,11 @@ import {
 } from 'react';
 import {
   buildBrowserPageDefinition,
+  createBrowserThemeMessage,
   renderBrowserPageHtml,
 } from '@openagentinternet/agent-browser-ui/browser';
 import { i18nService } from '../../services/i18n';
+import { themeService } from '../../services/theme';
 import { createBrowserEndpointShim, type BrowserEndpointShimResponse } from './browserEndpointShim';
 import { createIdbotsBrowserHostAdapter } from './idbotsBrowserHostAdapter';
 import { injectBrowserIframeBridge, relaxMetaAppIframeSandbox } from './browserIframeBridge';
@@ -18,6 +20,8 @@ import type {
   BotBrowserConversationRequest,
   BotBrowserOpenUriInput,
   BotBrowserSurfaceHandle,
+  BotBrowserTabCommand,
+  BotBrowserTabCommandResult,
 } from './types';
 
 export interface BotBrowserSurfaceProps {
@@ -41,7 +45,27 @@ type BrowserIframeMessage =
         method?: string;
         body?: unknown;
       };
+    }
+  | {
+      source: 'idbots-browser-iframe-bridge';
+      type: 'tab-command-response';
+      id: string;
+      success: boolean;
+      result?: BotBrowserTabCommandResult;
+      error?: string;
     };
+
+type PendingTabCommand = {
+  command: BotBrowserTabCommand;
+  resolve(result: BotBrowserTabCommandResult): void;
+  reject(error: Error): void;
+};
+
+type PendingTabResponse = {
+  resolve(result: BotBrowserTabCommandResult): void;
+  reject(error: Error): void;
+  timeout: number;
+};
 
 const PARENT_SOURCE = 'idbots-browser-surface';
 
@@ -98,8 +122,10 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     const buildPromiseRef = useRef<Promise<void> | null>(null);
     const readyRef = useRef(false);
     const pendingOpenUrisRef = useRef<BotBrowserOpenUriInput[]>([]);
-    const pendingNewTabRef = useRef(false);
     const pendingRefreshRuntimeRef = useRef(false);
+    const pendingTabCommandsRef = useRef<PendingTabCommand[]>([]);
+    const pendingTabResponsesRef = useRef(new Map<string, PendingTabResponse>());
+    const tabCommandSequenceRef = useRef(0);
     const callbacksRef = useRef({
       onOpenConversation,
       onError,
@@ -162,6 +188,34 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       return true;
     }, []);
 
+    const postThemeToIframe = useCallback((): boolean => {
+      const target = iframeRef.current?.contentWindow;
+      if (!target) return false;
+      target.postMessage(createBrowserThemeMessage(themeService.getEffectiveTheme()), '*');
+      return true;
+    }, []);
+
+    const postTabCommand = useCallback((pending: PendingTabCommand): boolean => {
+      const id = `tab-command-${++tabCommandSequenceRef.current}`;
+      const timeout = window.setTimeout(() => {
+        const response = pendingTabResponsesRef.current.get(id);
+        if (!response) return;
+        pendingTabResponsesRef.current.delete(id);
+        response.reject(new Error('Bot Browser tab command timed out.'));
+      }, 10_000);
+      pendingTabResponsesRef.current.set(id, {
+        resolve: pending.resolve,
+        reject: pending.reject,
+        timeout,
+      });
+      if (postToIframe({ type: 'tab-command', id, command: pending.command })) {
+        return true;
+      }
+      window.clearTimeout(timeout);
+      pendingTabResponsesRef.current.delete(id);
+      return false;
+    }, [postToIframe]);
+
     const postOpenUri = useCallback((input: BotBrowserOpenUriInput): boolean => {
       return postToIframe({
         type: 'open-uri',
@@ -182,14 +236,17 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       }
     }, [postOpenUri]);
 
-    const flushPendingNewTab = useCallback(() => {
-      if (!readyRef.current || !pendingNewTabRef.current) return;
-      if (postToIframe({ type: 'open-new-tab' })) {
-        pendingNewTabRef.current = false;
-      } else {
-        readyRef.current = false;
+    const flushPendingTabCommands = useCallback(() => {
+      if (!readyRef.current) return;
+      const pending = pendingTabCommandsRef.current.splice(0);
+      for (let index = 0; index < pending.length; index += 1) {
+        if (!postTabCommand(pending[index])) {
+          readyRef.current = false;
+          pendingTabCommandsRef.current.unshift(...pending.slice(index));
+          break;
+        }
       }
-    }, [postToIframe]);
+    }, [postTabCommand]);
 
     const flushPendingRefreshRuntime = useCallback(() => {
       if (!readyRef.current) return;
@@ -210,7 +267,11 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         try {
           const definition = injectBrowserIframeBridge(buildBrowserPageDefinition());
           const html = relaxMetaAppIframeSandbox(
-            await renderBrowserPageHtml(definition, getBrowserLanguagePreference()),
+            await renderBrowserPageHtml(
+              definition,
+              getBrowserLanguagePreference(),
+              { theme: themeService.getEffectiveTheme() },
+            ),
           );
           readyRef.current = false;
           srcDocRef.current = html;
@@ -235,6 +296,14 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
     }, [ensureSrcDoc, visible]);
 
     useEffect(() => {
+      return themeService.subscribe(() => {
+        if (readyRef.current) {
+          postThemeToIframe();
+        }
+      });
+    }, [postThemeToIframe]);
+
+    useEffect(() => {
       const handleMessage = (event: MessageEvent) => {
         if (event.source !== iframeRef.current?.contentWindow) return;
         const data = event.data as BrowserIframeMessage;
@@ -242,10 +311,24 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
 
         if (data.type === 'browser-ready') {
           readyRef.current = true;
+          postThemeToIframe();
           callbacksRef.current.onReady?.();
           flushPendingOpenUris();
-          flushPendingNewTab();
+          flushPendingTabCommands();
           flushPendingRefreshRuntime();
+          return;
+        }
+
+        if (data.type === 'tab-command-response') {
+          const pending = pendingTabResponsesRef.current.get(data.id);
+          if (!pending) return;
+          window.clearTimeout(pending.timeout);
+          pendingTabResponsesRef.current.delete(data.id);
+          if (!data.success || !data.result) {
+            pending.reject(new Error(data.error || 'Bot Browser tab command failed.'));
+            return;
+          }
+          pending.resolve(data.result);
           return;
         }
 
@@ -265,7 +348,45 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
 
       window.addEventListener('message', handleMessage);
       return () => window.removeEventListener('message', handleMessage);
-    }, [flushPendingNewTab, flushPendingOpenUris, flushPendingRefreshRuntime, postToIframe]);
+    }, [
+      flushPendingOpenUris,
+      flushPendingRefreshRuntime,
+      flushPendingTabCommands,
+      postThemeToIframe,
+      postToIframe,
+    ]);
+
+    useEffect(() => {
+      return () => {
+        for (const pending of pendingTabResponsesRef.current.values()) {
+          window.clearTimeout(pending.timeout);
+          pending.reject(new Error('Bot Browser surface was closed.'));
+        }
+        pendingTabResponsesRef.current.clear();
+        const queued = pendingTabCommandsRef.current.splice(0);
+        for (const pending of queued) {
+          pending.reject(new Error('Bot Browser surface was closed.'));
+        }
+      };
+    }, []);
+
+    const controlTabs = useCallback((command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult> => {
+      return new Promise((resolve, reject) => {
+        const pending = { command, resolve, reject };
+        if (readyRef.current && postTabCommand(pending)) {
+          return;
+        }
+        readyRef.current = false;
+        pendingTabCommandsRef.current.push(pending);
+        void ensureSrcDoc().catch((error) => {
+          const index = pendingTabCommandsRef.current.indexOf(pending);
+          if (index !== -1) {
+            pendingTabCommandsRef.current.splice(index, 1);
+            reject(error instanceof Error ? error : new Error(String(error)));
+          }
+        });
+      });
+    }, [ensureSrcDoc, postTabCommand]);
 
     useImperativeHandle(ref, () => ({
       async openUri(input: BotBrowserOpenUriInput): Promise<void> {
@@ -280,15 +401,10 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         await ensureSrcDoc().catch(() => {});
       },
       async openNewTab(): Promise<void> {
-        if (!readyRef.current) {
-          pendingNewTabRef.current = true;
-          await ensureSrcDoc().catch(() => {});
-          return;
-        }
-        if (postToIframe({ type: 'open-new-tab' })) return;
-        readyRef.current = false;
-        pendingNewTabRef.current = true;
-        await ensureSrcDoc().catch(() => {});
+        await controlTabs({ action: 'open-tab' });
+      },
+      async controlTabs(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult> {
+        return controlTabs(command);
       },
       async refreshRuntime(): Promise<void> {
         if (!readyRef.current) {
@@ -301,7 +417,7 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         pendingRefreshRuntimeRef.current = true;
         await ensureSrcDoc().catch(() => {});
       },
-    }), [ensureSrcDoc, postOpenUri, postToIframe]);
+    }), [controlTabs, ensureSrcDoc, postOpenUri, postToIframe]);
 
     const showLoading = loading || !srcDoc;
 

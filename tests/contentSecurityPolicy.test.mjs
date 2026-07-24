@@ -19,7 +19,7 @@ test('production CSP allows Bot Browser srcDoc runtime scripts', () => {
 
   assert.match(
     surfaceSource,
-    /renderBrowserPageHtml\(definition, getBrowserLanguagePreference\(\)\)/,
+    /renderBrowserPageHtml\(\s*definition,\s*getBrowserLanguagePreference\(\),/,
     'Bot Browser should still render the upstream browser HTML into the iframe document',
   );
   assert.match(
