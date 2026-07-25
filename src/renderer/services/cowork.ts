@@ -16,6 +16,11 @@ import {
   setConfig,
   clearCurrentSession,
 } from '../store/slices/coworkSlice';
+import {
+  addBrowserMessage,
+  updateBrowserMessageContent,
+  updateBrowserSessionStatus,
+} from '../store/slices/browserCoworkSlice';
 import type {
   CoworkSession,
   CoworkConfigUpdate,
@@ -106,11 +111,13 @@ class CoworkService {
       // (especially important for IM-triggered turns that do not call continueSession from renderer).
       if (shouldMarkSessionRunningFromStreamMessage(message)) {
         store.dispatch(updateSessionStatus({ sessionId, status: 'running' }));
+        store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'running' }));
       }
 
       // Do not force status back to "running" on arbitrary messages.
       // Late stream chunks can arrive after an error/complete event.
       store.dispatch(addMessage({ sessionId, message }));
+      store.dispatch(addBrowserMessage({ sessionId, message }));
 
       if (message.metadata?.refreshSessionSummary) {
         await this.loadSessions();
@@ -129,6 +136,7 @@ class CoworkService {
     // Message update listener (for streaming content updates)
     const messageUpdateCleanup = cowork.onStreamMessageUpdate(({ sessionId, messageId, content, metadata }) => {
       store.dispatch(updateMessageContent({ sessionId, messageId, content, metadata }));
+      store.dispatch(updateBrowserMessageContent({ sessionId, messageId, content, metadata }));
     });
     this.streamListenerCleanups.push(messageUpdateCleanup);
 
@@ -147,12 +155,14 @@ class CoworkService {
     // Complete listener
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));
+      store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'completed' }));
     });
     this.streamListenerCleanups.push(completeCleanup);
 
     // Error listener
     const errorCleanup = cowork.onStreamError(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'error' }));
+      store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'error' }));
     });
     this.streamListenerCleanups.push(errorCleanup);
   }
