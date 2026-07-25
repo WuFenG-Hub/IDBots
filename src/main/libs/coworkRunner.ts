@@ -34,6 +34,10 @@ import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import { CoworkCrossSessionService } from '../services/coworkCrossSession';
 import {
+  buildBotBrowserAgentTools,
+  type BotBrowserControl,
+} from './botBrowserAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -828,6 +832,19 @@ export interface CoworkRunnerOptions {
    * request without disturbing the current reply.
    */
   requestIMSessionReset?: (sessionId: string) => boolean;
+  /**
+   * When set, returns the Bot Browser context XML block (active tab, open tabs)
+   * to inject into the system prompt. Implementations should return null for
+   * non-browser sessions and degrade gracefully (never throw) when the browser
+   * surface is unavailable.
+   */
+  getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
+  /**
+   * When set, browser-type sessions get inline MCP tools to control the Bot
+   * Browser (open URIs, manage tabs). Implemented in main.ts over the tab
+   * bridge and the open-uri broadcast channel.
+   */
+  controlBotBrowser?: BotBrowserControl;
 }
 
 export class CoworkRunner extends EventEmitter {
@@ -839,6 +856,8 @@ export class CoworkRunner extends EventEmitter {
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private requestIMSessionReset?: (sessionId: string) => boolean;
+  private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
+  private controlBotBrowser?: BotBrowserControl;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
@@ -863,6 +882,8 @@ export class CoworkRunner extends EventEmitter {
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
+    this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
+    this.controlBotBrowser = options?.controlBotBrowser;
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
 
@@ -2812,7 +2833,8 @@ export class CoworkRunner extends EventEmitter {
     memoryEnabled: boolean,
     disableRemoteServicesPrompt: boolean,
     personaBlock?: string,
-    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE
+    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
+    browserContextPrompt?: string | null
   ): string {
     const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
     const localTimePrompt = this.buildLocalTimeContextPrompt(profile.localTimeMode);
@@ -2825,6 +2847,7 @@ export class CoworkRunner extends EventEmitter {
       profile.includeMemoryPromptBlocks ? memoryPromptBlocksXml : null,
       memoryStrategyPrompt,
       trimmedBasePrompt,
+      browserContextPrompt ?? null,
       disableRemoteServicesPrompt ? null : (this.getRemoteServicesPrompt?.() ?? null),
     ];
     return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
@@ -3228,6 +3251,9 @@ export class CoworkRunner extends EventEmitter {
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
       : '';
+    const browserContextPrompt = this.getBrowserContextPrompt
+      ? await this.getBrowserContextPrompt(sessionId).catch(() => null)
+      : null;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -3237,7 +3263,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
       personaBlock,
-      systemPromptProfile
+      systemPromptProfile,
+      browserContextPrompt
     );
 
     // Run claude-code using the SDK
@@ -3320,6 +3347,9 @@ export class CoworkRunner extends EventEmitter {
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
       : '';
+    const browserContextPrompt = this.getBrowserContextPrompt
+      ? await this.getBrowserContextPrompt(sessionId).catch(() => null)
+      : null;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
@@ -3329,7 +3359,8 @@ export class CoworkRunner extends EventEmitter {
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
       personaBlock,
-      systemPromptProfile
+      systemPromptProfile,
+      browserContextPrompt
     );
 
     try {
@@ -4172,6 +4203,11 @@ export class CoworkRunner extends EventEmitter {
               }
             }
           )
+        );
+      }
+      if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
+        memoryTools.push(
+          ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser })
         );
       }
       options.mcpServers = {

@@ -151,6 +151,7 @@ import {
   type BotBrowserTabBridge,
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
+import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   type CommunityMetaAppInstallResult,
@@ -3941,6 +3942,46 @@ const getCoworkRunner = () => {
       requestIMSessionReset: (sessionId: string): boolean => {
         return imGatewayManager?.requestSessionReset(sessionId) ?? false;
       },
+      controlBotBrowser: {
+        openUri: (input) => sendBotBrowserOpenUri(input),
+        execute: (command) => getBotBrowserTabBridge().execute(command),
+      },
+      getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
+        const coworkStoreInstance = getCoworkStore();
+        const session = coworkStoreInstance.getSession(sessionId);
+        if (session?.sessionType !== 'browser') return null;
+        try {
+          const result = await getBotBrowserTabBridge().execute({ action: 'get-tabs' });
+          const active = result.activeTab;
+          if (active?.uri) {
+            coworkStoreInstance.updateSession(sessionId, {
+              browserUri: active.uri,
+              browserTitle: active.title ?? null,
+            });
+          }
+          const escapeXml = (value: string) => value
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
+          const tabLines = result.tabs.map((tab) => (
+            `  <tab id="${tab.id}"${tab.isActive ? ' active="true"' : ''}><title>${escapeXml(tab.title ?? '')}</title><uri>${escapeXml(tab.uri ?? '')}</uri></tab>`
+          ));
+          return [
+            '<browser_context>',
+            'The user is chatting from the Bot Browser side panel. You can control the Bot Browser with the bot_browser_open_uri and bot_browser_tabs tools.',
+            active?.uri
+              ? `<active_tab title="${escapeXml(active.title ?? '')}">${escapeXml(active.uri)}</active_tab>`
+              : '<active_tab />',
+            '<open_tabs>',
+            ...tabLines,
+            '</open_tabs>',
+            '</browser_context>',
+          ].join('\n');
+        } catch (error) {
+          console.warn('[CoworkRunner] Failed to build browser context prompt:', error);
+          return '<browser_context>Bot Browser is not open or did not respond right now. If the user asks you to control the browser, ask them to switch to Bot Browser mode first.</browser_context>';
+        }
+      },
     });
 
     // Set up event listeners to forward to renderer
@@ -5626,13 +5667,22 @@ if (!gotTheLock) {
     title?: string;
     activeSkillIds?: string[];
     metabotId?: number | null;
+    sessionType?: 'standard' | 'browser';
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
       const coworkStoreInstance = getCoworkStore();
       const config = coworkStoreInstance.getConfig();
       const systemPrompt = options.systemPrompt ?? config.systemPrompt;
-      const selectedWorkspaceRoot = (options.cwd || config.workingDirectory || '').trim();
+      const sessionType = options.sessionType === 'browser' ? 'browser' : 'standard';
+      let selectedWorkspaceRoot = (options.cwd || config.workingDirectory || '').trim();
+
+      if (!selectedWorkspaceRoot && sessionType === 'browser') {
+        // Bot Browser panel sessions do not require a user-picked workspace;
+        // fall back to a dedicated directory so the Agent has a sandboxed cwd.
+        selectedWorkspaceRoot = path.join(app.getPath('userData'), 'browser-cowork');
+        fs.mkdirSync(selectedWorkspaceRoot, { recursive: true });
+      }
 
       if (!selectedWorkspaceRoot) {
         return {
@@ -5652,7 +5702,8 @@ if (!gotTheLock) {
         systemPrompt,
         config.executionMode || 'local',
         options.activeSkillIds || [],
-        options.metabotId ?? null
+        options.metabotId ?? null,
+        sessionType
       );
       const runner = getCoworkRunner();
 

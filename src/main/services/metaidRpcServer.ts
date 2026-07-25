@@ -6,7 +6,7 @@
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
-import { app, BrowserWindow } from 'electron';
+import { app } from 'electron';
 import {
   AddressType,
   BtcWallet,
@@ -32,6 +32,7 @@ import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from '.
 import { listenWithRetry } from './httpListenWithRetry';
 import { DEFAULT_METAID_RPC_HOST, getMetaidRpcBase, resolveMetaidRpcPort } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
+import { sendBotBrowserOpenUri } from './botBrowserOpenUriService';
 import { uploadMetaFile } from './metaFileUploadService';
 import { buildMvcFtTransferRawTx, buildMvcOrderedRawTxBundle, buildMvcTransferRawTx } from './walletRawTxService';
 import { executeTransfer } from './transferService';
@@ -155,26 +156,7 @@ function normalizeMetaappPinId(value: unknown): string {
 }
 
 function defaultOpenBotBrowserUri(input: BotBrowserRpcOpenRequest): void {
-  const windows = BrowserWindow.getAllWindows();
-  let delivered = 0;
-
-  for (const win of windows) {
-    if (win.isDestroyed()) continue;
-    if (win.webContents.isDestroyed()) continue;
-    win.webContents.send('botBrowser:openUri', input);
-    delivered += 1;
-  }
-
-  const firstWindow = windows.find((win) => !win.isDestroyed());
-  if (firstWindow) {
-    if (firstWindow.isMinimized()) firstWindow.restore();
-    if (!firstWindow.isVisible()) firstWindow.show();
-    firstWindow.focus();
-  }
-
-  if (delivered === 0) {
-    throw new Error('No IDBots window is available to open Bot Browser');
-  }
+  sendBotBrowserOpenUri(input);
 }
 
 function createMetabotBtcWallet(store: MetabotStore, metabotId: number): BtcWallet {
