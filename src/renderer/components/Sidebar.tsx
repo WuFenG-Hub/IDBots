@@ -11,6 +11,8 @@ import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import { getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
 import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
+import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel';
+import { SIDEBAR_WIDTH_DEFAULT } from '../utils/sidebarWidth';
 import type { BotBrowserSurfaceMode } from '../features/botBrowser/types';
 
 interface SidebarProps {
@@ -30,6 +32,10 @@ interface SidebarProps {
   onNewBrowserTab: () => void;
   isCollapsed: boolean;
   onToggleCollapse: () => void;
+  /** Expanded sidebar width in px (resizable by the user). */
+  width?: number;
+  /** True while the user is dragging the resize handle; disables the width transition for lag-free dragging. */
+  isResizing?: boolean;
   updateBadge?: React.ReactNode;
 }
 
@@ -49,9 +55,14 @@ const Sidebar: React.FC<SidebarProps> = ({
   onNewBrowserTab,
   isCollapsed,
   onToggleCollapse,
+  width = SIDEBAR_WIDTH_DEFAULT,
+  isResizing = false,
   updateBadge,
 }) => {
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
+  // Bot Browser panel sessions live in their own surface; keep them out of the
+  // home history list and the search modal.
+  const homeSessions = sessions.filter((session) => session.sessionType !== 'browser');
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
   const scheduledTasks = useSelector((state: RootState) => state.scheduledTask.tasks);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
@@ -194,9 +205,10 @@ const Sidebar: React.FC<SidebarProps> = ({
 
   return (
     <aside
-      className={`shrink-0 dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted flex flex-col sidebar-transition overflow-hidden ${
-        isCollapsed ? 'w-0' : 'w-72'
+      className={`shrink-0 dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted flex flex-col overflow-hidden ${
+        isResizing ? '' : 'sidebar-transition'
       }`}
+      style={{ width: isCollapsed ? 0 : width }}
     >
       <div className="pt-3 pb-3">
         <div className="draggable sidebar-header-drag h-8 flex items-center px-3">
@@ -277,7 +289,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             {i18nService.t('coworkHistory')}
           </div>
           <CoworkSessionList
-            sessions={sessions}
+            sessions={homeSessions}
             currentSessionId={currentSessionId}
             onSelectSession={handleSelectSession}
             onDeleteSession={handleDeleteSession}
@@ -285,11 +297,15 @@ const Sidebar: React.FC<SidebarProps> = ({
             onRenameSession={handleRenameSession}
           />
         </div>
-      ) : <div className="flex-1" />}
+      ) : (
+        <div className="flex-1 min-h-0 px-2.5 pb-3 pt-2 mt-1 flex flex-col">
+          <BotBrowserCoworkPanel />
+        </div>
+      )}
       <CoworkSearchModal
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
-        sessions={sessions}
+        sessions={homeSessions}
         currentSessionId={currentSessionId}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
