@@ -7,8 +7,8 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 
-// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot
-export type CoworkSessionType = 'standard' | 'a2a';
+// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot, browser = Bot Browser co-work panel
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
 
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
@@ -129,6 +129,10 @@ export interface CoworkSession {
   peerName?: string | null;
   /** Remote peer MetaBot's avatar data URL (A2A sessions only) */
   peerAvatar?: string | null;
+  /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
+  browserUri?: string | null;
+  /** Bot Browser context: title of the tab this session is about (browser sessions only) */
+  browserTitle?: string | null;
   /** Local MetaBot's display name */
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL */
@@ -256,6 +260,10 @@ export interface CoworkSessionSummary {
   sessionType?: CoworkSessionType;
   /** Remote peer MetaBot's display name (A2A sessions only) */
   peerName?: string | null;
+  /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
+  browserUri?: string | null;
+  /** Bot Browser context: title of the tab this session is about (browser sessions only) */
+  browserTitle?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -267,6 +275,8 @@ export interface CoworkStartOptions {
   title?: string;
   activeSkillIds?: string[];
   metabotId?: number | null;
+  /** Only 'standard' (default) and 'browser' sessions can be created from the renderer. */
+  sessionType?: 'standard' | 'browser';
 }
 
 // Continue session options

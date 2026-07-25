@@ -36,6 +36,12 @@ import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
 import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
+import {
+  clampSidebarWidth,
+  loadSidebarWidth,
+  SIDEBAR_WIDTH_DEFAULT,
+  SIDEBAR_WIDTH_STORAGE_KEY,
+} from './utils/sidebarWidth';
 import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
 import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
 import { openBotBrowserConversationInCowork } from './features/botBrowser/conversationNavigationAdapter';
@@ -66,6 +72,9 @@ const App: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [, forceLanguageRefresh] = useState(0);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth((key) => window.localStorage.getItem(key)));
+  const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const sidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [updateModalState, setUpdateModalState] = useState<UpdateModalState>('info');
@@ -363,6 +372,40 @@ const App: React.FC = () => {
   const handleToggleSidebar = useCallback(() => {
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
+
+  const handleSidebarResizeStart = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    sidebarResizeRef.current = { startX: event.clientX, startWidth: sidebarWidth };
+    setIsSidebarResizing(true);
+  }, [sidebarWidth]);
+
+  const handleSidebarResizeReset = useCallback(() => {
+    setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(SIDEBAR_WIDTH_DEFAULT));
+  }, []);
+
+  useEffect(() => {
+    if (!isSidebarResizing) return;
+    const handleMove = (event: MouseEvent) => {
+      const start = sidebarResizeRef.current;
+      if (!start) return;
+      setSidebarWidth(clampSidebarWidth(start.startWidth + event.clientX - start.startX));
+    };
+    const handleUp = () => {
+      setIsSidebarResizing(false);
+      sidebarResizeRef.current = null;
+      setSidebarWidth((width) => {
+        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+        return width;
+      });
+    };
+    document.addEventListener('mousemove', handleMove);
+    document.addEventListener('mouseup', handleUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMove);
+      document.removeEventListener('mouseup', handleUp);
+    };
+  }, [isSidebarResizing]);
 
   const handleNewChat = useCallback((preselectSkillId?: unknown) => {
     const shouldClearInput = mainView === 'cowork' || !!currentSessionId;
@@ -960,8 +1003,19 @@ const App: React.FC = () => {
         }}
         isCollapsed={isSidebarCollapsed}
         onToggleCollapse={handleToggleSidebar}
+        width={sidebarWidth}
+        isResizing={isSidebarResizing}
         updateBadge={!isSidebarCollapsed ? updateBadge : null}
       />
+      {!isSidebarCollapsed ? (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          onMouseDown={handleSidebarResizeStart}
+          onDoubleClick={handleSidebarResizeReset}
+          className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-claude-accent/40"
+        />
+      ) : null}
       <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
         {botBrowserShell.surfaceMode === 'home' ? (
           <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
