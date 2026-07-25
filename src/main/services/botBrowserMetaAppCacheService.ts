@@ -69,6 +69,13 @@ type PreviewSession = {
 
 export type BotBrowserMetaAppCacheService = {
   resolveMetaAppPin(pinId: string): Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
+  /** Preview session for an arbitrary local directory/file (preview-metaapp://localhost). */
+  createLocalPreviewSession(input: {
+    artifactDir: string;
+    indexFile: string;
+  }): Promise<{ previewId: string; localPreviewUrl: string }>;
+  /** Local extracted source directory of a chain MetaApp, when already cached. */
+  getMetaAppArtifactDir(pinId: string): Promise<{ artifactDir: string; indexFile: string } | null>;
   getCache(): Promise<BrowserCommandResult<BrowserCacheSnapshot>>;
   clearCache(input?: BrowserCacheClearInput): Promise<BrowserCommandResult<BrowserCacheClearResult>>;
   stop(): Promise<void>;
@@ -681,6 +688,30 @@ export function createBotBrowserMetaAppCacheService(
     };
   };
 
+  // preview-metaapp://localhost: serve a live local file or directory through
+  // the same preview-asset pipeline used for published MetaApps. Local-dev
+  // only, mirroring the ABC standalone host behavior.
+  const createLocalPreviewSession = async (input: {
+    artifactDir: string;
+    indexFile: string;
+  }): Promise<{ previewId: string; localPreviewUrl: string }> => {
+    const serverBaseUrl = await ensurePreviewServer();
+    const createdAt = now();
+    const previewId = `local-preview-${randomUUID()}`;
+    const session: PreviewSession = {
+      previewId,
+      artifactDir: input.artifactDir,
+      indexFile: input.indexFile,
+      createdAt,
+      expiresAt: createdAt + PREVIEW_SESSION_TTL_MS,
+    };
+    sessions.set(previewId, session);
+    return {
+      previewId,
+      localPreviewUrl: `${serverBaseUrl}${PREVIEW_PREFIX}${encodeURIComponent(previewId)}/${encodePathSegments(session.indexFile)}`,
+    };
+  };
+
   const listPinRecordFiles = async (): Promise<string[]> => {
     const entries = await fs.readdir(pinsRoot, { withFileTypes: true }).catch(() => []);
     return entries
@@ -737,6 +768,15 @@ export function createBotBrowserMetaAppCacheService(
     return text(raw?.cacheKey);
   };
 
+  const getMetaAppArtifactDir = async (pinId: string): Promise<{ artifactDir: string; indexFile: string } | null> => {
+    const raw = readObject(await readJsonFile(pinRecordPath(pinId)));
+    const artifactDir = text(raw?.artifactDir);
+    const indexFile = text(raw?.indexFile) || 'index.html';
+    if (!artifactDir) return null;
+    if (!await fileExists(path.join(artifactDir, indexFile))) return null;
+    return { artifactDir, indexFile };
+  };
+
   const clearByCacheKey = async (cacheKey: string): Promise<{ clearedArtifacts: number; clearedPinRecords: number }> => {
     const normalizedCacheKey = validateCacheKey(cacheKey);
     const pinRecordFiles = await listPinRecordFiles();
@@ -766,6 +806,10 @@ export function createBotBrowserMetaAppCacheService(
         createPreviewSession,
       });
     },
+
+    createLocalPreviewSession,
+
+    getMetaAppArtifactDir,
 
     async getCache() {
       try {

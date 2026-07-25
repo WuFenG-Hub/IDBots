@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import fs from 'fs';
 import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
@@ -7,11 +8,31 @@ import type {
 /**
  * Control surface the host (main.ts) provides for Bot Browser agent tools.
  * `openUri` broadcasts the botBrowser:openUri channel; `execute` goes through
- * the Bot Browser tab bridge.
+ * the Bot Browser tab bridge. `forkMetaApp` copies a MetaApp's source into the
+ * session workspace; `publishMetaApp` (when present) publishes a workspace
+ * directory on-chain after explicit user confirmation.
  */
 export type BotBrowserControl = {
   openUri(input: { uri: string; actorId?: string | null }): Promise<void> | void;
   execute(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult>;
+  forkMetaApp?(input: { sessionId: string; uri?: string | null }): Promise<{
+    dir: string;
+    indexFile: string;
+    sourcePinId: string;
+    sourceUri: string;
+    title: string;
+  }>;
+  publishMetaApp?(input: {
+    sessionId: string;
+    dir: string;
+    title?: string;
+    intro?: string;
+    prompt?: string;
+  }): Promise<{
+    pinId: string;
+    metaappUri: string;
+    totalCost: number;
+  }>;
 };
 
 /** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
@@ -40,14 +61,16 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
 
 /**
  * Inline MCP tools that let a browser-type cowork session drive the Bot
- * Browser: navigate to on-chain URIs and manage tabs. Only registered for
- * `sessionType === 'browser'` sessions (see coworkRunner).
+ * Browser: navigate to on-chain URIs, manage tabs, preview local apps, and
+ * fork/publish MetaApps. Only registered for `sessionType === 'browser'`
+ * sessions (see coworkRunner).
  */
 export function buildBotBrowserAgentTools(deps: {
   tool: SdkToolFactory;
   controlBotBrowser: BotBrowserControl;
+  sessionId: string;
 }): unknown[] {
-  const { tool, controlBotBrowser } = deps;
+  const { tool, controlBotBrowser, sessionId } = deps;
 
   const botBrowserTabs = tool(
     'bot_browser_tabs',
@@ -110,5 +133,114 @@ export function buildBotBrowserAgentTools(deps: {
     }
   );
 
-  return [botBrowserTabs, botBrowserOpenUri];
+  const botBrowserPreviewLocal = tool(
+    'bot_browser_preview_local',
+    'Preview a local HTML app (directory containing index.html, or a single html/pdf/image/video/audio file) in the Bot Browser via preview-metaapp://. Use this to preview a MetaApp you are building or editing locally BEFORE publishing it on-chain. Requires an absolute path. The preview reads live from disk, so the user can reload to see your latest edits.',
+    {
+      path: z.string().min(1),
+      newTab: z.boolean().optional(),
+    },
+    async (args: { path: string; newTab?: boolean }) => {
+      const localPath = args.path.trim();
+      if (!localPath.startsWith('/')) {
+        return textResult(`bot_browser_preview_local requires an absolute path, got: ${localPath}`, true);
+      }
+      try {
+        await fs.promises.stat(localPath);
+      } catch {
+        return textResult(`Local path not found: ${localPath}`, true);
+      }
+      const uri = `preview-metaapp://localhost${localPath}`;
+      try {
+        if (args.newTab === false) {
+          await controlBotBrowser.openUri({ uri });
+          return textResult(`Navigated the active Bot Browser tab to preview ${localPath}. Tell the user to reload the tab after you make further edits.`);
+        }
+        const result = await controlBotBrowser.execute({ action: 'open-tab', uri });
+        return textResult(`Opened a preview of ${localPath} in a new tab. The preview reads live from disk — after you edit files, the user can reload to see changes. Current tabs (* = active):\n${formatBotBrowserTabs(result)}`);
+      } catch (error) {
+        return textResult(`Failed to preview ${localPath} in Bot Browser: ${error instanceof Error ? error.message : String(error)}. ${SURFACE_HINT}`, true);
+      }
+    }
+  );
+
+  const extraTools: unknown[] = [];
+
+  if (controlBotBrowser.forkMetaApp) {
+    const forkMetaApp = controlBotBrowser.forkMetaApp;
+    extraTools.push(
+      tool(
+        'bot_browser_fork_current_app',
+        'Fork the MetaApp currently shown in the Bot Browser (or a given metaapp:// URI) into your workspace as an editable copy. Returns a workspace directory with the full source. Edit files there with your normal file tools, then preview with bot_browser_preview_local and publish with bot_browser_publish_app. Use this when the user asks to modify, remix, or build on top of the app they are viewing.',
+        {
+          uri: z.string().optional(),
+        },
+        async (args: { uri?: string }) => {
+          try {
+            let uri = args.uri?.trim() || '';
+            if (!uri) {
+              const active = await controlBotBrowser.execute({ action: 'get-active-tab' });
+              uri = active.activeTab?.uri ?? '';
+            }
+            if (!uri) {
+              return textResult('No page is currently open in the Bot Browser. Open a metaapp:// page first.', true);
+            }
+            if (!/^metaapp:\/\//i.test(uri)) {
+              return textResult(`The current page (${uri}) is not a MetaApp and cannot be forked. Only metaapp:// pages can be forked.`, true);
+            }
+            const result = await forkMetaApp({ sessionId, uri });
+            const previewPath = result.indexFile === 'index.html' ? result.dir : `${result.dir}/${result.indexFile}`;
+            return textResult([
+              `Forked "${result.title}" (${result.sourceUri}) into your workspace:`,
+              `  Directory: ${result.dir}`,
+              `  Entry file: ${result.indexFile}`,
+              `Next: edit files in that directory, preview with bot_browser_preview_local on "${previewPath}", and when the user confirms, publish with bot_browser_publish_app on the directory.`,
+            ].join('\n'));
+          } catch (error) {
+            return textResult(`Failed to fork MetaApp: ${error instanceof Error ? error.message : String(error)}`, true);
+          }
+        }
+      )
+    );
+  }
+
+  if (controlBotBrowser.publishMetaApp) {
+    const publishMetaApp = controlBotBrowser.publishMetaApp;
+    extraTools.push(
+      tool(
+        'bot_browser_publish_app',
+        'Publish a local MetaApp directory (one forked by bot_browser_fork_current_app, or a new app you built in the workspace) on-chain under the user\'s MetaID. This writes to the blockchain, COSTS fees, and is IRREVERSIBLE — always show the user a preview first (bot_browser_preview_local) and explicitly confirm they want to publish before calling. The host shows a final native confirmation dialog; if the user cancels there, the publish is aborted. forkedFrom provenance is recorded automatically for forked apps.',
+        {
+          dir: z.string().min(1),
+          title: z.string().optional(),
+          intro: z.string().optional(),
+          prompt: z.string().optional(),
+        },
+        async (args: { dir: string; title?: string; intro?: string; prompt?: string }) => {
+          try {
+            const result = await publishMetaApp({
+              sessionId,
+              dir: args.dir,
+              title: args.title,
+              intro: args.intro,
+              prompt: args.prompt,
+            });
+            return textResult([
+              `Published on-chain: ${result.metaappUri}`,
+              `Cost: ${result.totalCost} sats`,
+              `You can open it for the user with bot_browser_open_uri on "${result.metaappUri}".`,
+            ].join('\n'));
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (message.startsWith('user_cancelled')) {
+              return textResult('Publish cancelled by the user in the confirmation dialog. Do not retry unless the user explicitly asks to publish again.');
+            }
+            return textResult(`Failed to publish MetaApp: ${message}`, true);
+          }
+        }
+      )
+    );
+  }
+
+  return [botBrowserTabs, botBrowserOpenUri, botBrowserPreviewLocal, ...extraTools];
 }

@@ -6,7 +6,7 @@ const require = Module.createRequire(import.meta.url);
 const { buildBotBrowserAgentTools, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
 
 function makeHarness(overrides = {}) {
-  const calls = { execute: [], openUri: [] };
+  const calls = { execute: [], openUri: [], forkMetaApp: [] };
   const control = {
     execute: async (command) => {
       calls.execute.push(command);
@@ -23,20 +23,36 @@ function makeHarness(overrides = {}) {
     openUri: async (input) => {
       calls.openUri.push(input);
     },
+    forkMetaApp: async (input) => {
+      calls.forkMetaApp.push(input);
+      return {
+        dir: '/workspace/metaapp-forks/game-b-bbb-20260726',
+        indexFile: 'index.html',
+        sourcePinId: 'bbb',
+        sourceUri: 'metaapp://bbb',
+        title: 'Game B',
+        ...(overrides.forkResult ?? {}),
+      };
+    },
     ...overrides.control,
   };
+  if (overrides.withoutFork) {
+    delete control.forkMetaApp;
+  }
   const tools = buildBotBrowserAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     controlBotBrowser: control,
+    sessionId: 'session-1',
   });
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, tools, byName };
 }
 
-test('builds bot_browser_tabs and bot_browser_open_uri tools', () => {
+test('builds bot_browser_tabs, bot_browser_open_uri and bot_browser_preview_local tools', () => {
   const { byName } = makeHarness();
   assert.ok(byName.bot_browser_tabs);
   assert.ok(byName.bot_browser_open_uri);
+  assert.ok(byName.bot_browser_preview_local);
 });
 
 test('bot_browser_tabs list maps to get-tabs and formats the tab list', async () => {
@@ -105,4 +121,65 @@ test('bridge failures degrade to a friendly error result', async () => {
 
 test('formatBotBrowserTabs handles an empty tab set', () => {
   assert.equal(formatBotBrowserTabs({ tabs: [], activeTab: null }), 'No open tabs.');
+});
+
+test('bot_browser_preview_local opens preview-metaapp URI in a new tab by default', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.bot_browser_preview_local.handler({ path: process.cwd() });
+  assert.deepEqual(calls.execute, [{ action: 'open-tab', uri: `preview-metaapp://localhost${process.cwd()}` }]);
+  assert.equal(calls.openUri.length, 0);
+  assert.match(result.content[0].text, /preview-metaapp|preview/i);
+});
+
+test('bot_browser_preview_local newTab=false navigates the active tab', async () => {
+  const { calls, byName } = makeHarness();
+  await byName.bot_browser_preview_local.handler({ path: process.cwd(), newTab: false });
+  assert.deepEqual(calls.openUri, [{ uri: `preview-metaapp://localhost${process.cwd()}` }]);
+  assert.equal(calls.execute.length, 0);
+});
+
+test('bot_browser_preview_local rejects relative and missing paths before touching the bridge', async () => {
+  const { calls, byName } = makeHarness();
+  const relative = await byName.bot_browser_preview_local.handler({ path: 'some/relative/dir' });
+  assert.equal(relative.isError, true);
+  assert.match(relative.content[0].text, /absolute path/);
+
+  const missing = await byName.bot_browser_preview_local.handler({ path: '/definitely/not/here-12345' });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /not found/);
+
+  assert.equal(calls.execute.length, 0);
+  assert.equal(calls.openUri.length, 0);
+});
+
+test('bot_browser_fork_current_app forks an explicit metaapp URI', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.bot_browser_fork_current_app.handler({ uri: 'metaapp://bbb' });
+  assert.deepEqual(calls.forkMetaApp, [{ sessionId: 'session-1', uri: 'metaapp://bbb' }]);
+  assert.match(result.content[0].text, /Forked "Game B"/);
+  assert.match(result.content[0].text, /metaapp-forks/);
+});
+
+test('bot_browser_fork_current_app falls back to the active tab URI', async () => {
+  const { calls, byName } = makeHarness({
+    executeResult: {
+      activeTab: { id: 3, uri: 'metaapp://ccc', title: 'C', isActive: true },
+    },
+  });
+  await byName.bot_browser_fork_current_app.handler({});
+  assert.deepEqual(calls.execute, [{ action: 'get-active-tab' }]);
+  assert.deepEqual(calls.forkMetaApp, [{ sessionId: 'session-1', uri: 'metaapp://ccc' }]);
+});
+
+test('bot_browser_fork_current_app rejects non-metaapp pages', async () => {
+  const { calls, byName } = makeHarness();
+  const result = await byName.bot_browser_fork_current_app.handler({ uri: 'metaid://aaa' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /not a MetaApp/);
+  assert.equal(calls.forkMetaApp.length, 0);
+});
+
+test('bot_browser_fork_current_app is not registered when the host has no fork support', () => {
+  const { byName } = makeHarness({ withoutFork: true });
+  assert.equal(byName.bot_browser_fork_current_app, undefined);
 });
