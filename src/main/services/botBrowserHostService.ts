@@ -15,6 +15,8 @@ import {
   type MetaAppGalleryRecord,
 } from '@openagentinternet/agent-browser-core';
 import { createBrowserNameAliasProviders } from '@openagentinternet/agent-browser-name-resolvers';
+import fs from 'fs';
+import path from 'path';
 import {
   browserFailure,
   browserSuccess,
@@ -47,6 +49,11 @@ export interface CreateBotBrowserHostServiceInput {
   resolveMetaAppPin?: (pinId: string) => Promise<CoreBrowserCommandResult<MetaAppGalleryRecord>>;
   installCommunityMetaApp?: (sourcePinId: string) => Promise<CommunityMetaAppInstallResult>;
   resolveMetaAppUrl: (app: MetaAppRecord) => Promise<string>;
+  /** Serves an arbitrary local directory/file for preview-metaapp://localhost resolution. */
+  createLocalPreviewSession?: (input: {
+    artifactDir: string;
+    indexFile: string;
+  }) => Promise<{ previewId: string; localPreviewUrl: string }>;
   fetch?: typeof fetch;
   env?: Record<string, string | undefined>;
   nameAliasProviders?: BrowserNameAliasProvider[];
@@ -363,6 +370,73 @@ function createNameAliasProviders(input: {
   });
 }
 
+const PREVIEW_CONTENT_TYPES: Record<string, string> = {
+  '.html': 'text/html',
+  '.htm': 'text/html',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.webp': 'image/webp',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+};
+
+/**
+ * preview-metaapp://localhost resolution: stat the path, resolve the entry
+ * file, and hand the directory to the host's local preview session factory.
+ * Mirrors the ABC standalone host's resolveLocalPreviewPath.
+ */
+async function resolveLocalPreviewPath(
+  input: CreateBotBrowserHostServiceInput,
+  localPath: string,
+): Promise<{ previewId: string; localPreviewUrl: string; contentType: string }> {
+  if (!input.createLocalPreviewSession) {
+    throw new Error('Local preview is not supported by this host.');
+  }
+  let stats: fs.Stats;
+  try {
+    stats = await fs.promises.stat(localPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') throw new Error(`Local path not found: ${localPath}`);
+    if (code === 'EACCES') throw new Error(`Permission denied: ${localPath}`);
+    throw error;
+  }
+
+  let artifactDir: string;
+  let indexFile: string;
+  if (stats.isDirectory()) {
+    const candidates = ['index.html', 'index.htm'];
+    const found = await Promise.all(
+      candidates.map(async (name) => {
+        try {
+          await fs.promises.access(path.join(localPath, name));
+          return name;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    indexFile = found.find((name): name is string => name !== null) ?? '';
+    if (!indexFile) {
+      throw new Error(`No index.html found in directory: ${localPath}`);
+    }
+    artifactDir = localPath;
+  } else {
+    artifactDir = path.dirname(localPath);
+    indexFile = path.basename(localPath);
+  }
+
+  const session = await input.createLocalPreviewSession({ artifactDir, indexFile });
+  const contentType = PREVIEW_CONTENT_TYPES[path.extname(indexFile).toLowerCase()] || 'text/html';
+  return { previewId: session.previewId, localPreviewUrl: session.localPreviewUrl, contentType };
+}
+
 export function createBotBrowserHostService(
   input: CreateBotBrowserHostServiceInput,
 ): BotBrowserHostService {
@@ -384,6 +458,12 @@ export function createBotBrowserHostService(
         fetch: fetchImpl,
         nameAliasProviders,
         metaAppResolve: (pinId) => resolveMetaAppRecord(input, pinId),
+        ...(input.createLocalPreviewSession
+          ? {
+            previewMetaAppLocalResolve: ({ path: localPath }: { path: string }) =>
+              resolveLocalPreviewPath(input, localPath),
+          }
+          : {}),
       });
       return toHostResult(result);
     },

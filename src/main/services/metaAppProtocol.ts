@@ -25,6 +25,8 @@ export interface MetaAppManifestInput {
   title?: string;
   appName?: string;
   prompt?: string;
+  /** Pin id of the MetaApp this one was forked/remixed from (protocol v1.1.0). */
+  forkedFrom?: string;
   icon?: string;
   coverImg?: string;
   introImgs?: string[];
@@ -116,6 +118,7 @@ export function buildMetaAppProtocolPayload(input: MetaAppManifestInput) {
     title: normalizeText(input.title) || appName,
     appName,
     prompt: normalizeText(input.prompt) || undefined,
+    forkedFrom: normalizeText(input.forkedFrom) || undefined,
     icon: normalizeImageRef(input.icon || ''),
     coverImg: normalizeImageRef(input.coverImg || ''),
     introImgs,

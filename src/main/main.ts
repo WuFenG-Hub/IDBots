@@ -152,6 +152,11 @@ import {
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
 import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
+import {
+  forkMetaAppToWorkspace,
+  parseMetaAppPinIdFromUri,
+} from './services/botBrowserMetaAppForkService';
+import { publishMetaAppFromDirectory } from './services/botBrowserMetaAppPublishService';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   type CommunityMetaAppInstallResult,
@@ -2462,6 +2467,35 @@ async function confirmBotBrowserPinWrite(
   return result.response === 1;
 }
 
+async function confirmBotBrowserMetaAppPublish(details: {
+  title: string;
+  appDir: string;
+  entryFile: string;
+  zipBytes: number;
+  forkedFrom: string | null;
+}): Promise<boolean> {
+  const ownerWindow = BrowserWindow.getAllWindows().find((win) => !win.isDestroyed()) ?? null;
+  const detailLines = [
+    `Title: ${details.title}`,
+    `Directory: ${details.appDir}`,
+    `Entry file: ${details.entryFile}`,
+    `Package size: ${details.zipBytes} bytes`,
+    details.forkedFrom ? `Forked from: metaapp://${details.forkedFrom}` : 'Original app (not forked)',
+    'This writes a MetaApp PIN on-chain (costs fees, irreversible).',
+  ];
+  const result = await botBrowserDialogMessageBox(ownerWindow, {
+    type: 'question',
+    title: 'Publish MetaApp On-Chain',
+    message: `Publish "${details.title}" on-chain?`,
+    detail: detailLines.join('\n'),
+    buttons: ['Cancel', 'Publish'],
+    cancelId: 0,
+    defaultId: 1,
+    noLink: true,
+  });
+  return result.response === 1;
+}
+
 async function pickBotBrowserMetaFiles(
   ownerWindow: BrowserWindow | null,
   input: { multiple: boolean; accept: string[]; purpose?: string },
@@ -3945,6 +3979,36 @@ const getCoworkRunner = () => {
       controlBotBrowser: {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),
+        forkMetaApp: async ({ sessionId, uri }) => {
+          const session = getCoworkStore().getSession(sessionId);
+          if (!session?.cwd) throw new Error('Session workspace is not available.');
+          const pinId = parseMetaAppPinIdFromUri(uri);
+          if (!pinId) throw new Error(`Invalid metaapp URI: ${uri}`);
+          const cache = getBotBrowserMetaAppCacheService();
+          return forkMetaAppToWorkspace({
+            pinId,
+            workspaceDir: session.cwd,
+            listMetaApps: () => getMetaAppManager().listMetaApps(),
+            resolveMetaAppPin: (id) => cache.resolveMetaAppPin(id),
+            getMetaAppArtifactDir: (id) => cache.getMetaAppArtifactDir(id),
+          });
+        },
+        publishMetaApp: async ({ sessionId, dir, title, intro, prompt }) => {
+          const session = getCoworkStore().getSession(sessionId);
+          if (!session?.cwd) throw new Error('Session workspace is not available.');
+          const metabotId = session.metabotId ?? getCoworkStore().getDefaultMetabotId();
+          if (metabotId == null) throw new Error('No MetaBot identity is available to publish under.');
+          return publishMetaAppFromDirectory({
+            dir,
+            workspaceDir: session.cwd,
+            metabotId,
+            title,
+            intro,
+            prompt,
+            metabotStore: getMetabotStore(),
+            confirmPublish: (details) => confirmBotBrowserMetaAppPublish(details),
+          });
+        },
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
@@ -4159,6 +4223,7 @@ const getBotBrowserHostService = () => {
         }
         return result.url;
       },
+      createLocalPreviewSession: (input) => getBotBrowserMetaAppCacheService().createLocalPreviewSession(input),
     });
   }
   return botBrowserHostService;

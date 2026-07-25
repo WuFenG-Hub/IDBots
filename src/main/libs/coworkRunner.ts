@@ -4207,7 +4207,7 @@ export class CoworkRunner extends EventEmitter {
       }
       if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
         memoryTools.push(
-          ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser })
+          ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
         );
       }
       options.mcpServers = {

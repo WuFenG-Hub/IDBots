@@ -131,3 +131,5 @@ man_base_data_pebble/
 !tests/botBrowserAgentTools.test.mjs
 !tests/browserCoworkSlice.test.ts
 !tests/sidebarWidth.test.ts
+!tests/botBrowserMetaAppFork.test.mjs
+!tests/botBrowserMetaAppPublish.test.mjs
