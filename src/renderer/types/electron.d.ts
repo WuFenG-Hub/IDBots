@@ -775,6 +775,8 @@ interface IElectronAPI {
     download: (url: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
     cancelDownload: () => Promise<{ success: boolean }>;
     install: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    applySilent: (filePath: string) => Promise<{ success: boolean; permissionDenied?: boolean; error?: string }>;
+    relaunchNow: () => Promise<{ success: boolean }>;
     onDownloadProgress: (callback: (data: AppUpdateDownloadProgress) => void) => () => void;
   };
   im: {

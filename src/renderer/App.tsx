@@ -31,7 +31,7 @@ import { i18nService } from './services/i18n';
 import { matchesShortcut } from './services/shortcuts';
 import { metaAppService } from './services/metaApp';
 import AppUpdateBadge from './components/update/AppUpdateBadge';
-import AppUpdateModal from './components/update/AppUpdateModal';
+import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
 import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
 import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
@@ -52,6 +52,10 @@ const normalizeFocusedOrderTxid = (value: unknown): string | null => {
   return /^[0-9a-f]{64}$/.test(normalized) ? normalized : null;
 };
 
+// 应用更新阶段：idle=无更新或静默下载失败（徽章保底可见）；downloading/applying=静默后台处理中（无 UI）；
+// ready=已下载待安装；restartReady=macOS 已静默替换待重启
+type UpdatePhase = 'idle' | 'downloading' | 'ready' | 'applying' | 'restartReady';
+
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsOptions, setSettingsOptions] = useState<SettingsOpenOptions>({});
@@ -64,9 +68,16 @@ const App: React.FC = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
-  const [updateModalState, setUpdateModalState] = useState<'info' | 'downloading' | 'installing' | 'error'>('info');
+  const [updateModalState, setUpdateModalState] = useState<UpdateModalState>('info');
   const [downloadProgress, setDownloadProgress] = useState<AppUpdateDownloadProgress | null>(null);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  const [updatePhase, setUpdatePhaseState] = useState<UpdatePhase>('idle');
+  const updatePhaseRef = useRef<UpdatePhase>('idle');
+  const downloadedUpdateFileRef = useRef<{ version: string; filePath: string } | null>(null);
+  const changeUpdatePhase = useCallback((phase: UpdatePhase) => {
+    updatePhaseRef.current = phase;
+    setUpdatePhaseState(phase);
+  }, []);
   const [focusedOrderTarget, setFocusedOrderTarget] = useState<FocusedOrderTarget | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const mockUpdateModeRef = useRef(false);
@@ -144,11 +155,12 @@ const App: React.FC = () => {
     };
 
     setUpdateInfo(mockInfo);
-    setUpdateModalState('info');
     setUpdateError(null);
     setDownloadProgress(null);
-    setShowUpdateModal(true);
-  }, [isInitialized]);
+    // 模拟静默下载已完成：Windows 进入待安装，macOS 进入待重启；点击徽章打开对应弹窗
+    downloadedUpdateFileRef.current = { version: mockInfo.latestVersion, filePath: '/tmp/mock-idbots-update' };
+    changeUpdatePhase(window.electron.platform === 'darwin' ? 'restartReady' : 'ready');
+  }, [isInitialized, changeUpdatePhase]);
 
   // 初始化应用
   useEffect(() => {
@@ -431,35 +443,113 @@ const App: React.FC = () => {
     showToast(i18nService.t('featureInDevelopment'));
   }, [showToast]);
 
+  const startSilentDownload = useCallback(async (info: AppUpdateInfo) => {
+    changeUpdatePhase('downloading');
+    try {
+      const downloadResult = await window.electron.appUpdate.download(info.url);
+      if (!downloadResult.success || !downloadResult.filePath) {
+        // 静默下载失败：保留 updateInfo，徽章显示「有新版本」，用户可点击走手动下载保底流程
+        console.warn('[AppUpdate] Silent download failed:', downloadResult.error);
+        changeUpdatePhase('idle');
+        return;
+      }
+      downloadedUpdateFileRef.current = { version: info.latestVersion, filePath: downloadResult.filePath };
+
+      if (window.electron.platform === 'darwin') {
+        changeUpdatePhase('applying');
+        try {
+          const applyResult = await window.electron.appUpdate.applySilent(downloadResult.filePath);
+          if (applyResult.success) {
+            changeUpdatePhase('restartReady');
+            return;
+          }
+          // 权限不足等原因：保留本地下载文件，回退为点击安装（提权）流程
+          console.warn('[AppUpdate] Silent apply failed:', applyResult.error);
+        } catch (applyError) {
+          console.warn('[AppUpdate] Silent apply error:', applyError);
+        }
+      }
+      changeUpdatePhase('ready');
+    } catch (error) {
+      console.warn('[AppUpdate] Silent download error:', error);
+      changeUpdatePhase('idle');
+    }
+  }, [changeUpdatePhase]);
+
   const runUpdateCheck = useCallback(async () => {
     if (mockUpdateModeRef.current) {
       return;
     }
-    try { 
+    const phase = updatePhaseRef.current;
+    // 静默下载/替换进行中，或已替换待重启时，不再重复检查
+    if (phase === 'downloading' || phase === 'applying' || phase === 'restartReady') {
+      return;
+    }
+    try {
       const currentVersion = await window.electron.appInfo.getVersion();
       const nextUpdate = await checkForAppUpdate(currentVersion);
-      setUpdateInfo(nextUpdate);
       if (!nextUpdate) {
-        setShowUpdateModal(false);
+        // 服务器端无更新：仅在本地没有待处理的已下载更新时清理提示
+        if (!downloadedUpdateFileRef.current) {
+          setUpdateInfo(null);
+          setShowUpdateModal(false);
+        }
+        return;
       }
+      if (downloadedUpdateFileRef.current?.version === nextUpdate.latestVersion) {
+        return;
+      }
+      setUpdateInfo(nextUpdate);
+      void startSilentDownload(nextUpdate);
     } catch (error) {
       console.error('Failed to check app update:', error);
-      setUpdateInfo(null);
-      setShowUpdateModal(false);
     }
-  }, []);
+  }, [startSilentDownload]);
 
   const handleOpenUpdateModal = useCallback(() => {
     if (!updateInfo) return;
-    setUpdateModalState('info');
+    setUpdateModalState(updatePhase === 'restartReady' ? 'restart' : 'info');
     setUpdateError(null);
     setDownloadProgress(null);
     setShowUpdateModal(true);
-  }, [updateInfo]);
+  }, [updateInfo, updatePhase]);
 
   const handleConfirmUpdate = useCallback(async () => {
     if (!updateInfo) return;
 
+    if (mockUpdateModeRef.current) {
+      setShowUpdateModal(false);
+      return;
+    }
+
+    // macOS 静默替换已完成：用户确认后重启进入新版本
+    if (updateModalState === 'restart') {
+      await window.electron.appUpdate.relaunchNow();
+      return;
+    }
+
+    const downloadedFile = downloadedUpdateFileRef.current?.version === updateInfo.latestVersion
+      ? downloadedUpdateFileRef.current.filePath
+      : null;
+
+    if (downloadedFile) {
+      // 更新包已在本地：直接安装（mac 提权安装后自动重启 / Windows 退出后运行安装器）
+      setUpdateModalState('installing');
+      setUpdateError(null);
+      try {
+        const installResult = await window.electron.appUpdate.install(downloadedFile);
+        if (!installResult.success) {
+          setUpdateModalState('error');
+          setUpdateError(installResult.error || i18nService.t('updateInstallFailed'));
+        }
+      } catch (error) {
+        setUpdateModalState('error');
+        setUpdateError(error instanceof Error ? error.message : i18nService.t('updateInstallFailed'));
+      }
+      return;
+    }
+
+    // 保底路径：静默下载曾失败，走带进度提示的手动下载
     setUpdateModalState('downloading');
     setDownloadProgress(null);
     setUpdateError(null);
@@ -481,6 +571,10 @@ const App: React.FC = () => {
         return;
       }
 
+      if (downloadResult.filePath) {
+        downloadedUpdateFileRef.current = { version: updateInfo.latestVersion, filePath: downloadResult.filePath };
+      }
+
       setUpdateModalState('installing');
       const installResult = await window.electron.appUpdate.install(downloadResult.filePath!);
 
@@ -497,7 +591,7 @@ const App: React.FC = () => {
       setUpdateModalState('error');
       setUpdateError(msg || i18nService.t('updateDownloadFailed'));
     }
-  }, [updateInfo]);
+  }, [updateInfo, updateModalState]);
 
   const handleCancelDownload = useCallback(async () => {
     await window.electron.appUpdate.cancelDownload();
@@ -719,9 +813,11 @@ const App: React.FC = () => {
   }, [pendingPermission, handlePermissionResponse]);
 
   const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
-  const updateBadge = updateInfo ? (
+  // 静默下载/静默替换进行中不显示任何更新 UI；就绪或待重启时才显示徽章
+  const updateBadge = updateInfo && updatePhase !== 'downloading' && updatePhase !== 'applying' ? (
     <AppUpdateBadge
       latestVersion={updateInfo.latestVersion}
+      label={updatePhase === 'restartReady' ? i18nService.t('updateReadyPill') : undefined}
       onClick={handleOpenUpdateModal}
     />
   ) : null;
@@ -915,9 +1011,10 @@ const App: React.FC = () => {
       {showUpdateModal && updateInfo && (
         <AppUpdateModal
           updateInfo={updateInfo}
+          readyToInstall={updatePhase === 'ready'}
           onConfirm={handleConfirmUpdate}
           onCancel={() => {
-            if (updateModalState === 'info' || updateModalState === 'error') {
+            if (updateModalState === 'info' || updateModalState === 'error' || updateModalState === 'restart') {
               setShowUpdateModal(false);
             }
           }}

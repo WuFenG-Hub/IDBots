@@ -2,10 +2,12 @@ import React from 'react';
 import { i18nService } from '../../services/i18n';
 import type { AppUpdateInfo, AppUpdateDownloadProgress } from '../../services/appUpdate';
 
-export type UpdateModalState = 'info' | 'downloading' | 'installing' | 'error';
+export type UpdateModalState = 'info' | 'downloading' | 'installing' | 'error' | 'restart';
 
 interface AppUpdateModalProps {
   updateInfo: AppUpdateInfo;
+  /** true 表示更新包已静默下载到本地，点击确认后直接本地安装 */
+  readyToInstall?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
   modalState: UpdateModalState;
@@ -28,6 +30,7 @@ function formatSpeed(bytesPerSecond: number | undefined): string {
 
 const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   updateInfo,
+  readyToInstall = false,
   onConfirm,
   onCancel,
   modalState,
@@ -39,7 +42,7 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
   const { latestVersion, date, changeLog } = updateInfo;
   const lang = i18nService.getLanguage();
   const currentLog = changeLog?.[lang] ?? { title: '', content: [] };
-  const isDismissible = modalState === 'info' || modalState === 'error';
+  const isDismissible = modalState === 'info' || modalState === 'error' || modalState === 'restart';
 
   const handleBackdropClick = () => {
     if (isDismissible) {
@@ -61,7 +64,7 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
           <>
             <div className="px-5 pt-5 pb-4">
               <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                {i18nService.t('updateAvailableTitle')}
+                {readyToInstall ? i18nService.t('updateDownloadedTitle') : i18nService.t('updateAvailableTitle')}
               </h3>
               <p className="mt-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 v{latestVersion}{date ? ` · ${date}` : ''}
@@ -98,7 +101,41 @@ const AppUpdateModal: React.FC<AppUpdateModalProps> = ({
                 onClick={onConfirm}
                 className="btn-idchat-primary-filled px-3 py-1.5 text-sm"
               >
-                {i18nService.t('updateAvailableConfirm')}
+                {readyToInstall ? i18nService.t('updateInstallNow') : i18nService.t('updateAvailableConfirm')}
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Restart state - macOS 静默替换完成，等待用户确认重启 */}
+        {modalState === 'restart' && (
+          <>
+            <div className="px-5 pt-5 pb-4">
+              <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
+                {i18nService.t('updateRestartTitle')}
+              </h3>
+              <p className="mt-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                v{latestVersion}
+              </p>
+              <p className="mt-3 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('updateRestartMessage')}
+              </p>
+            </div>
+
+            <div className="px-5 pb-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={onCancel}
+                className="px-3 py-1.5 text-sm rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+              >
+                {i18nService.t('updateLater')}
+              </button>
+              <button
+                type="button"
+                onClick={onConfirm}
+                className="btn-idchat-primary-filled px-3 py-1.5 text-sm"
+              >
+                {i18nService.t('updateRestartNow')}
               </button>
             </div>
           </>

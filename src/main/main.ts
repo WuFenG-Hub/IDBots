@@ -125,7 +125,7 @@ import {
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { encryptGroupMessageECB, computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
-import { cancelActiveDownload, downloadUpdate, installUpdate } from './libs/appUpdateInstaller';
+import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
 import { buildMetafileUri } from './services/metaFileUploadShared';
@@ -9090,6 +9090,31 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Installation failed' };
     }
+  });
+
+  // Silent macOS apply: replace the .app bundle without elevation or relaunch.
+  // On permission failure the renderer falls back to the interactive install.
+  ipcMain.handle('appUpdate:applySilent', async (_event, filePath: string) => {
+    if (process.platform !== 'darwin') {
+      return { success: false, error: 'Silent apply is only supported on macOS' };
+    }
+    try {
+      await applyMacUpdateSilently(filePath);
+      return { success: true };
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      return {
+        success: false,
+        permissionDenied: err.code === 'EACCES',
+        error: err.message || 'Silent apply failed',
+      };
+    }
+  });
+
+  // Relaunch into a silently-applied macOS update (user confirmed the restart).
+  ipcMain.handle('appUpdate:relaunchNow', async () => {
+    const relaunching = await relaunchPendingMacUpdate();
+    return { success: relaunching };
   });
 
   // API 代理处理程序 - 解决 CORS 问题

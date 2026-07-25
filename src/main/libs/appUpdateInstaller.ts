@@ -357,6 +357,134 @@ async function installMacDmg(dmgPath: string): Promise<void> {
   }
 }
 
+/**
+ * Relaunch target recorded after a successful silent macOS apply.
+ * Consumed by relaunchPendingMacUpdate() when the user confirms the restart.
+ */
+let pendingMacRelaunch: { execPath?: string } | null = null;
+
+/** Relaunch into the silently-applied macOS update. Returns false when no update is pending. */
+export async function relaunchPendingMacUpdate(): Promise<boolean> {
+  if (!pendingMacRelaunch) {
+    return false;
+  }
+  const { execPath } = pendingMacRelaunch;
+  pendingMacRelaunch = null;
+  if (execPath) {
+    console.log(`[AppUpdate] Relaunching into updated app: ${execPath}`);
+    app.relaunch({ execPath });
+  } else {
+    console.log('[AppUpdate] Relaunching (default)');
+    app.relaunch();
+  }
+  app.quit();
+  return true;
+}
+
+function isMacPermissionError(message: string): boolean {
+  return /permission denied|operation not permitted|read-only file system/i.test(message);
+}
+
+/**
+ * Silently replace the running .app bundle with the one inside the DMG.
+ * No elevation prompt and no relaunch — on success the relaunch target is
+ * stored for relaunchPendingMacUpdate(). On permission failure the thrown
+ * error carries code 'EACCES' so the caller can fall back to the elevated
+ * interactive install path. The DMG is deleted on success but kept on
+ * failure so the fallback install can reuse it without re-downloading.
+ */
+export async function applyMacUpdateSilently(dmgPath: string): Promise<void> {
+  if (process.platform !== 'darwin') {
+    throw new Error('Silent apply is only supported on macOS');
+  }
+
+  console.log(`[AppUpdate] Silent apply from: ${dmgPath}`);
+  let mountPoint: string | null = null;
+
+  try {
+    const stat = await fs.promises.stat(dmgPath);
+    if (stat.size === 0) {
+      throw new Error('Update file is empty');
+    }
+
+    console.log('[AppUpdate] Mounting DMG...');
+    const mountOutput = await execAsync(
+      `hdiutil attach ${shellEscape(dmgPath)} -nobrowse -noautoopen -noverify`,
+      60_000,
+    );
+    const lines = mountOutput.split('\n').filter((l) => l.trim());
+    const lastLine = lines[lines.length - 1];
+    const mountMatch = lastLine?.match(/\t(\/Volumes\/.+)$/);
+    if (!mountMatch) {
+      throw new Error('Failed to determine mount point from hdiutil output');
+    }
+    mountPoint = mountMatch[1];
+
+    const entries = await fs.promises.readdir(mountPoint);
+    const appBundle = entries.find((e) => e.endsWith('.app'));
+    if (!appBundle) {
+      throw new Error('No .app bundle found in DMG');
+    }
+    const sourceApp = path.join(mountPoint, appBundle);
+
+    const currentAppPath = path.resolve(process.resourcesPath, '..', '..', '..');
+    const targetApp = currentAppPath.endsWith('.app') ? currentAppPath : `/Applications/${appBundle}`;
+    console.log(`[AppUpdate] Target app: ${targetApp}`);
+
+    // Copy to a sibling directory first, then swap via mv: this keeps a valid
+    // .app at the target path at all times (unlike rm -rf && cp -R).
+    const ts = Date.now();
+    const tmpApp = `${targetApp}.idbots-new-${ts}`;
+    const oldApp = `${targetApp}.idbots-old-${ts}`;
+    try {
+      await execAsync(
+        `cp -R ${shellEscape(sourceApp)} ${shellEscape(tmpApp)} && mv ${shellEscape(targetApp)} ${shellEscape(oldApp)} && mv ${shellEscape(tmpApp)} ${shellEscape(targetApp)} && rm -rf ${shellEscape(oldApp)}`,
+        300_000,
+      );
+      console.log('[AppUpdate] Silent swap succeeded');
+    } catch (copyError) {
+      // Best-effort rollback: drop the partial copy, restore the original app
+      // if the swap left the target path empty.
+      await execAsync(
+        `if [ -d ${shellEscape(tmpApp)} ]; then rm -rf ${shellEscape(tmpApp)}; fi; if [ ! -d ${shellEscape(targetApp)} ] && [ -d ${shellEscape(oldApp)} ]; then mv ${shellEscape(oldApp)} ${shellEscape(targetApp)}; fi`,
+        60_000,
+      ).catch(() => {});
+      throw copyError;
+    }
+
+    try {
+      await execAsync(`hdiutil detach ${shellEscape(mountPoint)} -force`, 30_000);
+    } catch {
+      // Best effort
+    }
+    mountPoint = null;
+
+    try {
+      await fs.promises.unlink(dmgPath);
+    } catch {
+      // Best effort
+    }
+
+    const executableDir = path.join(targetApp, 'Contents', 'MacOS');
+    const execEntries = await fs.promises.readdir(executableDir);
+    pendingMacRelaunch = { execPath: execEntries[0] ? path.join(executableDir, execEntries[0]) : undefined };
+    console.log('[AppUpdate] Silent apply complete, update pending restart');
+  } catch (error) {
+    console.error('[AppUpdate] Silent apply error:', error);
+    if (mountPoint) {
+      try {
+        await execAsync(`hdiutil detach ${shellEscape(mountPoint)} -force`, 30_000);
+      } catch {
+        // Best effort
+      }
+    }
+    if (error instanceof Error && isMacPermissionError(error.message)) {
+      (error as NodeJS.ErrnoException).code = 'EACCES';
+    }
+    throw error;
+  }
+}
+
 async function installWindowsNsis(exePath: string): Promise<void> {
   console.log(`[AppUpdate] Windows NSIS install (interactive mode)`);
   console.log(`[AppUpdate]   installer: ${exePath}`);

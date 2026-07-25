@@ -485,6 +485,8 @@ contextBridge.exposeInMainWorld('electron', {
     download: (url: string) => ipcRenderer.invoke('appUpdate:download', url),
     cancelDownload: () => ipcRenderer.invoke('appUpdate:cancelDownload'),
     install: (filePath: string) => ipcRenderer.invoke('appUpdate:install', filePath),
+    applySilent: (filePath: string) => ipcRenderer.invoke('appUpdate:applySilent', filePath),
+    relaunchNow: () => ipcRenderer.invoke('appUpdate:relaunchNow'),
     onDownloadProgress: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('appUpdate:downloadProgress', handler);
