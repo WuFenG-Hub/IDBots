@@ -1,6 +1,7 @@
 ---
 name: metabot-create-wiki
 description: 问答式创建一对一的本地 Wiki 技能。Use when the user wants to turn a specific raw documents directory into a dedicated skill with its own name, description, absorb/index/query, HTML wiki build, and ZIP-first publish workflow, or when updating a dedicated wiki skill after the source docs change.
+official: true
 ---
 
 # metabot-create-wiki

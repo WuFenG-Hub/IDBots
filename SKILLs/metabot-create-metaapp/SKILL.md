@@ -2,6 +2,7 @@
 name: metabot-create-metaapp
 description: MetaBot 专属的 MetaApp 开发与交付套件。基于 IDFramework (No-Build, MVC) 架构，支持从零构建链上前端应用、编写业务指令 (Commands)、组件开发 (Web Components) 以及最终的打包交付 (Zip)。
 dependencies: node.js >= 18, alpine.js, unocss
+official: true
 ---
 
 # metabot-create-metaapp

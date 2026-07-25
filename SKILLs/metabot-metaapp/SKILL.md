@@ -1,6 +1,7 @@
 ---
 name: metabot-metaapp
 description: 统一的 MetaApp 技能。用于指导和执行 Bot Browser 里的静态 MetaApp 开发、Agent Internet 协议链接接入、MetaID PIN 写链、MetaFile 上传，以及 MetaApp 的发布、修改、删除、分享和 Bot homepage/Bot Page 制作。只要用户提到 MetaApp、静态网站上链、Bot Page/homepage、metaid://、pin://、metafile://、metaapp://、map://、MetaApp 发布/修改/分享，就优先使用这个技能，而不是旧的 IDFramework 专用技能或旧的发布单点技能。
+official: true
 ---
 
 # MetaBot MetaApp

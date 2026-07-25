@@ -1,6 +1,7 @@
 ---
 name: metabot-browser-open
 description: Use when a human asks to open, show, display, navigate, or control IDBots Bot Browser, including opening Browser URIs, opening targets in a new tab, listing/switching/closing tabs, and reading the active tab URI.
+official: true
 ---
 
 # Bot Browser Open

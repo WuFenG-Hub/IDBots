@@ -826,7 +826,7 @@ export class SkillManager {
         const shouldBootstrapOfficialUpdate = targetExists
           && !localVersion
           && isOfficial
-          && this.isSkillManifestDifferent(dir, targetDir);
+          && this.isSkillContentDifferent(dir, targetDir);
         const shouldRepairRuntime = targetExists
           && isOfficial
           && canRepairFromBundled
@@ -835,17 +835,19 @@ export class SkillManager {
           && isOfficial
           && !canRepairFromBundled
           && this.isSkillRuntimeBroken(dir, targetDir);
-        const shouldRefreshManifest = targetExists
+        // Compare the whole skill directory (not just SKILL.md) so script-only
+        // updates also reach existing users without requiring a version bump.
+        const shouldRefreshOfficialContent = targetExists
           && isOfficial
           && canRepairFromBundled
-          && this.isSkillManifestDifferent(dir, targetDir);
+          && this.isSkillContentDifferent(dir, targetDir);
         const shouldSync = !targetExists
           || shouldRepair
           || shouldUpgradeByVersion
           || shouldBootstrapOfficialUpdate
           || shouldRepairRuntime
           || shouldPatchRuntimeOnly
-          || shouldRefreshManifest;
+          || shouldRefreshOfficialContent;
         if (!shouldSync) return;
 
         try {
@@ -860,6 +862,11 @@ export class SkillManager {
           }
 
           const forceCopy = targetExists;
+          if (targetExists && isOfficial) {
+            // Official skills are app-managed: replace the whole directory so files
+            // dropped from newer bundles do not linger in the user copy.
+            fs.rmSync(targetDir, { recursive: true, force: true });
+          }
           fs.cpSync(dir, targetDir, {
             recursive: true,
             dereference: true,
@@ -875,8 +882,8 @@ export class SkillManager {
             console.log(`[skills] Refreshed legacy bundled skill "${id}" in user data`);
           } else if (shouldRepairRuntime) {
             console.log(`[skills] Repaired runtime files for bundled skill "${id}" in user data`);
-          } else if (shouldRefreshManifest) {
-            console.log(`[skills] Refreshed bundled skill "${id}" due to manifest drift in user data`);
+          } else if (shouldRefreshOfficialContent) {
+            console.log(`[skills] Refreshed official skill "${id}" due to content drift in user data`);
           }
         } catch (error) {
           console.warn(`[skills] Failed to sync bundled skill "${id}":`, error);
@@ -1709,16 +1716,61 @@ export class SkillManager {
     }
   }
 
-  private isSkillManifestDifferent(bundledSkillDir: string, localSkillDir: string): boolean {
+  /**
+   * Recursively compare a bundled skill directory with the local copy.
+   * Returns true when any file is missing, extra, or has different content,
+   * so script-only updates (SKILL.md unchanged) also trigger a refresh.
+   * OS noise files are ignored; SKILL.md comparison tolerates CRLF drift.
+   */
+  private isSkillContentDifferent(bundledSkillDir: string, localSkillDir: string): boolean {
+    const IGNORED_ENTRIES = new Set(['.DS_Store', 'Thumbs.db', 'thumbs.db']);
+    const collectFiles = (root: string): Map<string, string> => {
+      const files = new Map<string, string>();
+      const walk = (dir: string): void => {
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (IGNORED_ENTRIES.has(entry.name)) continue;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) {
+            walk(full);
+          } else if (entry.isFile() || entry.isSymbolicLink()) {
+            const relative = path.relative(root, full).split(path.sep).join('/');
+            files.set(relative, full);
+          }
+        }
+      };
+      walk(root);
+      return files;
+    };
+
     try {
-      const bundledSkillPath = path.join(bundledSkillDir, SKILL_FILE_NAME);
-      const localSkillPath = path.join(localSkillDir, SKILL_FILE_NAME);
-      if (!fs.existsSync(bundledSkillPath) || !fs.existsSync(localSkillPath)) {
+      const bundledFiles = collectFiles(bundledSkillDir);
+      const localFiles = collectFiles(localSkillDir);
+      if (bundledFiles.size !== localFiles.size) {
         return true;
       }
-      const bundledRaw = fs.readFileSync(bundledSkillPath, 'utf8').replace(/\r\n/g, '\n');
-      const localRaw = fs.readFileSync(localSkillPath, 'utf8').replace(/\r\n/g, '\n');
-      return bundledRaw !== localRaw;
+      for (const [relative, bundledPath] of bundledFiles) {
+        const localPath = localFiles.get(relative);
+        if (!localPath) {
+          return true;
+        }
+        const bundledRaw = fs.readFileSync(bundledPath);
+        const localRaw = fs.readFileSync(localPath);
+        if (relative === SKILL_FILE_NAME) {
+          const normalize = (buf: Buffer): string => buf.toString('utf8').replace(/\r\n/g, '\n');
+          if (normalize(bundledRaw) !== normalize(localRaw)) {
+            return true;
+          }
+        } else if (!bundledRaw.equals(localRaw)) {
+          return true;
+        }
+      }
+      return false;
     } catch {
       return true;
     }
