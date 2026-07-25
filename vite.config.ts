@@ -6,7 +6,9 @@ import path from 'path';
 import { createRequire } from 'node:module';
 
 // https://vitejs.dev/config/
-const devPort = 5175;
+// Override both the HTTP and HMR port for parallel checkouts (e.g. git
+// worktrees) via IDBOTS_VITE_DEV_PORT; the main checkout keeps 5175.
+const devPort = Number(process.env.IDBOTS_VITE_DEV_PORT || 5175);
 const isProductionBuild = process.env.NODE_ENV === 'production';
 const shouldUseVitePolling = process.env.IDBOTS_VITE_USE_POLLING === '1';
 const require = createRequire(import.meta.url);
