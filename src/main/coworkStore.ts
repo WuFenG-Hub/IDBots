@@ -417,7 +417,7 @@ function parsePeerGlobalMetaIdFromMetadata(metadataJson?: string | null): string
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
-export type CoworkSessionType = 'standard' | 'a2a';
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 export interface CoworkMessageMetadata {
@@ -475,6 +475,10 @@ export interface CoworkSession {
   peerName?: string | null;
   /** Remote peer MetaBot's avatar data URL (A2A sessions only) */
   peerAvatar?: string | null;
+  /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
+  browserUri?: string | null;
+  /** Bot Browser context: title of the tab this session is about (browser sessions only) */
+  browserTitle?: string | null;
   hiddenFromSessionList?: boolean;
   /** Local MetaBot's display name (populated from metabots table) */
   metabotName?: string | null;
@@ -506,6 +510,10 @@ export interface CoworkSessionSummary {
   updatedAt: number;
   sessionType?: CoworkSessionType;
   peerName?: string | null;
+  /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
+  browserUri?: string | null;
+  /** Bot Browser context: title of the tab this session is about (browser sessions only) */
+  browserTitle?: string | null;
   hiddenFromSessionList?: boolean;
 }
 
@@ -891,6 +899,14 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!sessionColumns.includes('hidden_from_session_list')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN hidden_from_session_list INTEGER NOT NULL DEFAULT 0;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('browser_uri')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN browser_uri TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('browser_title')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN browser_title TEXT;');
         changed = true;
       }
     } catch (error) {
@@ -1976,6 +1992,8 @@ export class CoworkStore implements MemoryBackend {
       peer_global_metaid?: string | null;
       peer_name?: string | null;
       peer_avatar?: string | null;
+      browser_uri?: string | null;
+      browser_title?: string | null;
       hidden_from_session_list?: number | null;
       created_at: number;
       updated_at: number;
@@ -1983,7 +2001,7 @@ export class CoworkStore implements MemoryBackend {
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, hidden_from_session_list, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2038,6 +2056,8 @@ export class CoworkStore implements MemoryBackend {
       peerName: row.peer_name ?? null,
       peerAvatar: row.peer_avatar ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
+      browserUri: row.browser_uri ?? null,
+      browserTitle: row.browser_title ?? null,
       metabotName,
       metabotAvatar,
     };
@@ -2084,7 +2104,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -2113,6 +2133,14 @@ export class CoworkStore implements MemoryBackend {
     if (updates.executionMode !== undefined) {
       setClauses.push('execution_mode = ?');
       values.push(updates.executionMode);
+    }
+    if (updates.browserUri !== undefined) {
+      setClauses.push('browser_uri = ?');
+      values.push(updates.browserUri);
+    }
+    if (updates.browserTitle !== undefined) {
+      setClauses.push('browser_title = ?');
+      values.push(updates.browserTitle);
     }
 
     values.push(id);
@@ -2179,6 +2207,8 @@ export class CoworkStore implements MemoryBackend {
       pinned: number | null;
       session_type?: string | null;
       peer_name?: string | null;
+      browser_uri?: string | null;
+      browser_title?: string | null;
       hidden_from_session_list?: number | null;
       created_at: number;
       updated_at: number;
@@ -2193,6 +2223,8 @@ export class CoworkStore implements MemoryBackend {
         s.pinned,
         s.session_type,
         s.peer_name,
+        s.browser_uri,
+        s.browser_title,
         s.hidden_from_session_list,
         s.created_at,
         s.updated_at,
@@ -2217,6 +2249,8 @@ export class CoworkStore implements MemoryBackend {
       updatedAt: parseIdNumber(row.activity_at) ?? row.updated_at,
       sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
       peerName: row.peer_name ?? null,
+      browserUri: row.browser_uri ?? null,
+      browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
     }));
   }

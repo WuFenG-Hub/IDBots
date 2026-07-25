@@ -298,7 +298,7 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('get-recent-cwds', limit),
   cowork: {
     // Session management
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null }) =>
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser' }) =>
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
