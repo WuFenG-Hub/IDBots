@@ -4,91 +4,91 @@
   "defaults": {
     "metabot-post-buzz": {
       "order": 5,
-      "version": "1.0.2",
+      "version": "1.0.3",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-chat-groupchat": {
       "order": 8,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-chat-privatechat": {
       "order": 18,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-browser-open": {
       "order": 19,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-omni-caster": {
       "order": 10,
-      "version": "1.0.1",
+      "version": "1.0.2",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-post-skillservice": {
       "order": 12,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-omni-reader": {
       "order": 15,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-upload-largefile": {
       "order": 16,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-trade-metaidmarket": {
       "order": 17,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-metaapp": {
       "order": 20,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-create-metaapp": {
       "order": 23,
-      "version": "1.0.1",
+      "version": "1.0.2",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-post-metaapp": {
       "order": 24,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
     },
     "metabot-create-wiki": {
       "order": 21,
-      "version": "1.0.0",
+      "version": "1.0.1",
       "creator-metaid": "",
       "installedAt": 1740969600000,
       "enabled": true
