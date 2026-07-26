@@ -88,24 +88,24 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
     .join('\n');
 }
 
-/** Compact, context-friendly rendering of MetaApp search candidates. */
+/** Ready-to-quote markdown bullets for MetaApp search candidates: titles and authors are already links. */
 export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
-  return items.map((item, index) => {
+  return items.map((item) => {
     const title = item.title || item.appName || item.pinId;
     const linkTitle = title.replace(/[[\]]/g, '');
     const intro = item.intro
-      ? `\n    ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
+      ? ` — ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
       : '';
     const publisherLabel = (item.publisherName || item.publisherGlobalMetaId || 'unknown').replace(/[[\]]/g, '');
     const publisher = item.publisherGlobalMetaId
-      ? `by: [${publisherLabel}](metaid://${item.publisherGlobalMetaId})${item.isOwn ? ' (your MetaBot)' : ''}`
+      ? `by [${publisherLabel}](metaid://${item.publisherGlobalMetaId})${item.isOwn ? ' (your MetaBot)' : ''}`
       : '';
     const meta = [
-      item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
       publisher,
+      item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
       item.updatedAt ? `updated: ${new Date(item.updatedAt * 1000).toISOString().slice(0, 10)}` : '',
     ].filter(Boolean).join(' | ');
-    return `[${index + 1}] ${title}${intro}\n    ${meta}\n    uri: [${linkTitle}](metaapp://${item.pinId})`;
+    return `- [${linkTitle}](metaapp://${item.pinId})${intro}\n  ${meta}`;
   }).join('\n');
 }
 
@@ -364,7 +364,7 @@ export function buildBotBrowserAgentTools(deps: {
             return textResult([
               `${items.length} on-chain MetaApp candidate(s), best first:`,
               formatMetaAppCandidates(items),
-              'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true), then offer 2–3 alternatives by name in case they wanted a different one. If nothing fits, say so instead of opening a random app.',
+              'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of opening a random app.',
             ].join('\n\n'));
           } catch (error) {
             return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
