@@ -85,6 +85,8 @@ const BOT_BROWSER_TAB_ACTIONS = new Set<BotBrowserTabAction>([
   'switch-tab',
   'get-tabs',
   'get-active-tab',
+  'get-content',
+  'get-tab-info',
 ]);
 
 function normalizeBotBrowserTabCommand(value: unknown): BotBrowserTabCommand {

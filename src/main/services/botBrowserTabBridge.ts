@@ -3,7 +3,9 @@ export type BotBrowserTabAction =
   | 'close-tab'
   | 'switch-tab'
   | 'get-tabs'
-  | 'get-active-tab';
+  | 'get-active-tab'
+  | 'get-content'
+  | 'get-tab-info';
 
 export type BotBrowserTabCommand = {
   action: BotBrowserTabAction;
@@ -18,11 +20,30 @@ export type BotBrowserTabInfo = {
   isActive: boolean;
 };
 
+/** Rendered page content of a tab (ABC getTabContent; empty for opaque MetaApp frames). */
+export type BotBrowserTabContent = {
+  tabId: number;
+  uri: string | null;
+  title: string | null;
+  contentType: string;
+  text: string;
+  html: string;
+  truncated: boolean;
+  extractedAt: number;
+};
+
+/** Full resolve envelope of a tab (ABC getTabInfo). */
+export type BotBrowserTabEnvelope = BotBrowserTabInfo & {
+  current: unknown | null;
+};
+
 export type BotBrowserTabCommandResult = {
   action: BotBrowserTabAction;
   openedTabId?: number;
   tabs: BotBrowserTabInfo[];
   activeTab: BotBrowserTabInfo | null;
+  content?: BotBrowserTabContent | null;
+  info?: BotBrowserTabEnvelope | null;
 };
 
 export type BotBrowserTabCommandResponse = {

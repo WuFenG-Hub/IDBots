@@ -276,6 +276,7 @@ export function buildBrowserIframeBridgeScript(): string {
       var input = command && typeof command === 'object' ? command : {};
       var action = textValue(input.action);
       var openedTabId;
+      var extra;
 
       if (action === 'open-tab') {
         openedTabId = globalThis.AgentBrowserTabs.openTab(textValue(input.uri) || undefined);
@@ -283,6 +284,15 @@ export function buildBrowserIframeBridgeScript(): string {
         globalThis.AgentBrowserTabs.closeTab(Number(input.tabId));
       } else if (action === 'switch-tab') {
         globalThis.AgentBrowserTabs.switchTab(Number(input.tabId));
+      } else if (action === 'get-content' || action === 'get-tab-info') {
+        if (typeof globalThis.AgentBrowserTabs.getTabContent !== 'function'
+          || typeof globalThis.AgentBrowserTabs.getTabInfo !== 'function') {
+          throw new Error('This Bot Browser build does not support tab content extraction.');
+        }
+        var tabIdArg = input.tabId === undefined || input.tabId === null ? undefined : Number(input.tabId);
+        extra = action === 'get-content'
+          ? { content: globalThis.AgentBrowserTabs.getTabContent(tabIdArg) }
+          : { info: globalThis.AgentBrowserTabs.getTabInfo(tabIdArg) };
       } else if (action !== 'get-tabs' && action !== 'get-active-tab') {
         throw new Error('Unsupported Bot Browser tab action: ' + action);
       }
@@ -292,7 +302,7 @@ export function buildBrowserIframeBridgeScript(): string {
         type: 'tab-command-response',
         id: id,
         success: true,
-        result: tabCommandResult(action, openedTabId)
+        result: Object.assign(tabCommandResult(action, openedTabId), extra || {})
       }, targetOrigin);
     } catch (error) {
       window.parent.postMessage({
