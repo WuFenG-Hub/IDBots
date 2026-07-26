@@ -96,6 +96,7 @@ function shortenMetaId(id: string): string {
 export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
   return items.map((item, index) => {
     const title = item.title || item.appName || item.pinId;
+    const linkTitle = title.replace(/[[\]]/g, '');
     const intro = item.intro
       ? `\n    ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
       : '';
@@ -104,7 +105,7 @@ export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string
       item.publisherGlobalMetaId ? `by: ${shortenMetaId(item.publisherGlobalMetaId)}${item.isOwn ? ' (your MetaBot)' : ''}` : '',
       item.updatedAt ? `updated: ${new Date(item.updatedAt * 1000).toISOString().slice(0, 10)}` : '',
     ].filter(Boolean).join(' | ');
-    return `[${index + 1}] ${title}${intro}\n    ${meta}\n    uri: metaapp://${item.pinId}`;
+    return `[${index + 1}] ${title}${intro}\n    ${meta}\n    uri: [${linkTitle}](metaapp://${item.pinId})`;
   }).join('\n');
 }
 

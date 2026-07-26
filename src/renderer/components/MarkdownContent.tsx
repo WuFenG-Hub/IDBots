@@ -16,7 +16,12 @@ const SYNTAX_HIGHLIGHTER_STYLE = {
   borderRadius: 0,
   background: '#282c34',
 };
-const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file']);
+const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'preview-metaapp']);
+
+const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|preview-metaapp):/i;
+
+/** Whether an href points into the Bot Browser (metaid://, metaapp://, …) rather than the external browser. */
+export const isBotBrowserUri = (href: string): boolean => BOT_BROWSER_URI_PROTOCOL_RE.test(href.trim());
 
 const encodeFileUrl = (url: string): string => {
   const encoded = encodeURI(url);
@@ -375,7 +380,8 @@ const findFallbackPathFromContext = (
 };
 
 const createMarkdownComponents = (
-  resolveLocalFilePath?: (href: string, text: string) => string | null
+  resolveLocalFilePath?: (href: string, text: string) => string | null,
+  onOpenBotBrowserUri?: (uri: string) => void
 ) => ({
   p: ({ node, className, children, ...props }: any) => (
     <p className="my-1 first:mt-0 last:mb-0 leading-6 dark:text-claude-darkText text-claude-text" {...props}>
@@ -467,6 +473,27 @@ const createMarkdownComponents = (
     }
 
     const hrefValue = typeof href === 'string' ? href.trim() : '';
+
+    // Agent Internet URIs (metaid://, metaapp://, map://, metafile://, …) open
+    // inside the Bot Browser when the host provides an opener.
+    if (hrefValue && onOpenBotBrowserUri && isBotBrowserUri(hrefValue)) {
+      const handleUriClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
+        e.preventDefault();
+        onOpenBotBrowserUri(hrefValue);
+      };
+      return (
+        <a
+          href={hrefValue}
+          onClick={handleUriClick}
+          className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer break-all"
+          title={hrefValue}
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    }
+
     const isExternalLink = !!hrefValue && isExternalHref(hrefValue);
     const linkText = Array.isArray(children) ? children.join('') : String(children ?? '');
     const resolvedPath = hrefValue && !isExternalLink && resolveLocalFilePath
@@ -572,6 +599,8 @@ interface MarkdownContentProps {
   className?: string;
   /** Compact typography for narrow surfaces (e.g. the Bot Browser side panel). */
   compact?: boolean;
+  /** When set, metaid:// metaapp:// map:// metafile:// preview-metaapp:// links call this instead of navigating. */
+  onOpenBotBrowserUri?: (uri: string) => void;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
 }
 
@@ -579,9 +608,13 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
   content,
   className = '',
   compact = false,
+  onOpenBotBrowserUri,
   resolveLocalFilePath,
 }) => {
-  const components = useMemo(() => createMarkdownComponents(resolveLocalFilePath), [resolveLocalFilePath]);
+  const components = useMemo(
+    () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri),
+    [resolveLocalFilePath, onOpenBotBrowserUri]
+  );
   const normalizedContent = useMemo(() => encodeFileUrlsInMarkdown(content), [content]);
   return (
     <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[15px] leading-6'} ${className}`}>

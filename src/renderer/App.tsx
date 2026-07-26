@@ -475,6 +475,19 @@ const App: React.FC = () => {
     });
   }, [botBrowserShell.openUri]);
 
+  // In-renderer requests (e.g. clickable metaid:// metaapp:// links in the
+  // Co-Work panel) ride a DOM event to reach the shell.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const uri = (event as CustomEvent<{ uri?: unknown }>).detail?.uri;
+      if (typeof uri === 'string' && uri.trim()) {
+        void botBrowserShell.openUri({ uri: uri.trim() });
+      }
+    };
+    window.addEventListener('botBrowser:openUri', handler);
+    return () => window.removeEventListener('botBrowser:openUri', handler);
+  }, [botBrowserShell.openUri]);
+
   useEffect(() => {
     return window.electron.botBrowser.onTabCommand(({ requestId, command }) => {
       void botBrowserShell.controlTabs(command).then(

@@ -43,7 +43,7 @@ export function filterVisiblePanelMessages(messages: CoworkMessage[]): CoworkMes
   });
 }
 
-const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
+const PanelMessage: React.FC<{ message: CoworkMessage; onOpenUri: (uri: string) => void }> = ({ message, onOpenUri }) => {
   if (message.type === 'user') {
     return (
       <div className="flex justify-end">
@@ -56,7 +56,7 @@ const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
   if (message.type !== 'assistant' || !message.content.trim()) return null;
   return (
     <div className="min-w-0 text-[13px] leading-5 dark:text-claude-darkText text-claude-text [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-[13px] [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-[13px] [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-xs [&_code]:break-all [&_a]:break-all">
-      <MarkdownContent content={message.content} compact />
+      <MarkdownContent content={message.content} compact onOpenBotBrowserUri={onOpenUri} />
     </div>
   );
 };
@@ -149,6 +149,14 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     await browserCoworkService.deleteSession(sessionId);
   };
 
+  const handleOpenUri = (uri: string) => {
+    window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri } }));
+  };
+
+  const renderMessage = (message: CoworkMessage) => (
+    <PanelMessage key={message.id} message={message} onOpenUri={handleOpenUri} />
+  );
+
   const handleSelectSkill = (skill: Skill) => {
     dispatch(toggleActiveSkill(skill.id));
   };
@@ -206,7 +214,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
             {i18nService.t('botBrowserCoworkEmpty')}
           </div>
         ) : (
-          visibleMessages.map((message) => <PanelMessage key={message.id} message={message} />)
+          visibleMessages.map(renderMessage)
         )}
         {isStreaming ? (
           <div className="flex items-center gap-1 px-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
