@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import fs from 'fs';
 import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
+import { readRendererFromEnvelope } from '../services/botBrowserSourceLocator';
 import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
@@ -25,6 +26,12 @@ export type BotBrowserControl = {
   }>;
   /** Locate a MetaApp's local source directory (installed app or extracted chain cache) without copying it. */
   locateMetaAppSource?(input: { pinId: string }): Promise<{
+    dir: string;
+    indexFile: string;
+    title: string;
+  } | null>;
+  /** Map a tab's renderer URL (local metaapp server or cache preview URL) back to the app's local source directory. */
+  locateSourceByRenderUrl?(input: { url: string }): Promise<{
     dir: string;
     indexFile: string;
     title: string;
@@ -187,21 +194,52 @@ export function buildBotBrowserAgentTools(deps: {
             : content.text;
           return textResult(`Page: ${content.title ?? '(untitled)'}\nURI: ${content.uri ?? '(none)'}\n--- visible text ---\n${trimmed}`);
         }
+
+        // No extractable text: inspect the tab's ACTUAL renderer. A metaid://
+        // bot page can still be rendered by a MetaApp (custom homepage), which
+        // is an opaque sandboxed frame — never conclude "page is empty" here.
         const uri = content?.uri ?? result.activeTab?.uri ?? '';
-        const pinId = parseMetaAppPinIdFromUri(uri);
-        if (pinId && controlBotBrowser.locateMetaAppSource) {
-          const source = await controlBotBrowser.locateMetaAppSource({ pinId });
-          if (source) {
-            return textResult([
-              `This tab renders the MetaApp "${source.title}" inside a sandboxed frame — its live page text cannot be extracted from outside (even the browser itself cannot read into that frame).`,
-              `The app's full source is on disk:`,
-              `  Directory: ${source.dir}`,
-              `  Entry file: ${source.indexFile}`,
-              `Read the source files there with your file tools to understand what the page shows.`,
-            ].join('\n'));
-          }
+        let renderer: { type?: string; url?: string } = {};
+        try {
+          const infoResult = await controlBotBrowser.execute({ action: 'get-tab-info', tabId: args.tabId });
+          renderer = readRendererFromEnvelope(infoResult.info?.current);
+        } catch {
+          // Older bridges without get-tab-info: fall through with an empty renderer.
         }
-        return textResult(`No readable text on this page (uri: ${uri || 'unknown'}). It may be empty, still loading, or rendered inside an opaque frame.`);
+
+        if (renderer.type === 'html-iframe') {
+          if (renderer.url && controlBotBrowser.locateSourceByRenderUrl) {
+            const source = await controlBotBrowser.locateSourceByRenderUrl({ url: renderer.url });
+            if (source) {
+              return textResult([
+                `This page ("${content?.title ?? result.activeTab?.title ?? uri}") is rendered by the MetaApp "${source.title || 'unknown'}" inside a sandboxed frame — its live page text cannot be extracted from outside.`,
+                `The app's full source is on disk:`,
+                `  Directory: ${source.dir}`,
+                `  Entry file: ${source.indexFile}`,
+                `Read the source files there with your file tools to understand what the page shows. If the source fetches data from remote APIs, you may call those same URLs yourself to get the live data.`,
+              ].join('\n'));
+            }
+          }
+          const pinId = parseMetaAppPinIdFromUri(uri);
+          if (pinId && controlBotBrowser.locateMetaAppSource) {
+            const source = await controlBotBrowser.locateMetaAppSource({ pinId });
+            if (source) {
+              return textResult([
+                `This tab renders the MetaApp "${source.title}" inside a sandboxed frame — its live page text cannot be extracted from outside (even the browser itself cannot read into that frame).`,
+                `The app's full source is on disk:`,
+                `  Directory: ${source.dir}`,
+                `  Entry file: ${source.indexFile}`,
+                `Read the source files there with your file tools to understand what the page shows.`,
+              ].join('\n'));
+            }
+          }
+          if (renderer.url && /^https?:\/\//i.test(renderer.url)) {
+            return textResult(`This page is rendered inside a sandboxed frame from ${renderer.url} — its text cannot be extracted from outside. You can fetch that URL and the APIs it calls (e.g. with curl) to analyze the content yourself.`);
+          }
+          return textResult(`This page is rendered by a MetaApp inside a sandboxed frame (uri: ${uri || 'unknown'}), and its local source could not be located. Open the app, then try again.`);
+        }
+
+        return textResult(`No readable text on this page (uri: ${uri || 'unknown'}${renderer.type ? `, renderer: ${renderer.type}` : ''}). It may be empty or still loading — try again in a moment.`);
       } catch (error) {
         return textResult(`Failed to read the page: ${error instanceof Error ? error.message : String(error)}. ${SURFACE_HINT}`, true);
       }

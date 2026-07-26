@@ -157,6 +157,10 @@ import {
   parseMetaAppPinIdFromUri,
 } from './services/botBrowserMetaAppForkService';
 import { publishMetaAppFromDirectory } from './services/botBrowserMetaAppPublishService';
+import {
+  readRendererFromEnvelope,
+  resolveMetaAppSourceByRenderUrl,
+} from './services/botBrowserSourceLocator';
 import { openMetaApp, resolveMetaAppUrl } from './services/metaAppOpenService';
 import {
   type CommunityMetaAppInstallResult,
@@ -3858,6 +3862,27 @@ const executeDelegationPipeline = async (
 
 const getCoworkRunner = () => {
   if (!coworkRunner) {
+    const resolveMetaAppSourceByPinId = async (pinId: string) => {
+      const normalizedPinId = pinId.trim().toLowerCase();
+      const apps = await getMetaAppManager().listMetaApps();
+      const localApp = apps.find((app) => (app.sourcePinId || '').trim().toLowerCase() === normalizedPinId);
+      if (localApp?.appRoot) {
+        return { dir: localApp.appRoot, indexFile: localApp.entry || 'index.html', title: localApp.name || normalizedPinId };
+      }
+      const cache = getBotBrowserMetaAppCacheService();
+      const resolved = await cache.resolveMetaAppPin(normalizedPinId);
+      if (!resolved.ok) return null;
+      const artifact = await cache.getMetaAppArtifactDir(normalizedPinId);
+      if (!artifact) return null;
+      return { dir: artifact.artifactDir, indexFile: artifact.indexFile, title: resolved.data.title || normalizedPinId };
+    };
+    const resolveRenderUrlSource = async (url: string) => {
+      return resolveMetaAppSourceByRenderUrl({
+        renderUrl: url,
+        listMetaApps: () => getMetaAppManager().listMetaApps(),
+        getPreviewSessionArtifactDir: (id) => getBotBrowserMetaAppCacheService().getPreviewSessionArtifactDir(id),
+      });
+    };
     coworkRunner = new CoworkRunner(getCoworkStore(), {
       getSkillSessionEnvOverrides: async (sessionId: string): Promise<Record<string, string>> => {
         const session = getCoworkStore().getSession(sessionId);
@@ -3994,18 +4019,10 @@ const getCoworkRunner = () => {
           });
         },
         locateMetaAppSource: async ({ pinId }) => {
-          const normalizedPinId = pinId.trim().toLowerCase();
-          const apps = await getMetaAppManager().listMetaApps();
-          const localApp = apps.find((app) => (app.sourcePinId || '').trim().toLowerCase() === normalizedPinId);
-          if (localApp?.appRoot) {
-            return { dir: localApp.appRoot, indexFile: localApp.entry || 'index.html', title: localApp.name || normalizedPinId };
-          }
-          const cache = getBotBrowserMetaAppCacheService();
-          const resolved = await cache.resolveMetaAppPin(normalizedPinId);
-          if (!resolved.ok) return null;
-          const artifact = await cache.getMetaAppArtifactDir(normalizedPinId);
-          if (!artifact) return null;
-          return { dir: artifact.artifactDir, indexFile: artifact.indexFile, title: resolved.data.title || normalizedPinId };
+          return resolveMetaAppSourceByPinId(pinId);
+        },
+        locateSourceByRenderUrl: async ({ url }) => {
+          return resolveRenderUrlSource(url);
         },
         publishMetaApp: async ({ sessionId, dir, title, intro, prompt }) => {
           const session = getCoworkStore().getSession(sessionId);
@@ -4037,6 +4054,30 @@ const getCoworkRunner = () => {
               browserTitle: active.title ?? null,
             });
           }
+          // Resolve the active tab's actual renderer and its local source directory
+          // so the Agent knows where the page's files live (best-effort).
+          let rendererType = '';
+          let activeSource: { dir: string; indexFile: string } | null = null;
+          if (active?.uri) {
+            try {
+              const infoResult = await getBotBrowserTabBridge().execute({ action: 'get-tab-info', tabId: active.id });
+              const renderer = readRendererFromEnvelope(infoResult.info?.current);
+              if (renderer.type) rendererType = renderer.type;
+              if (renderer.type === 'html-iframe') {
+                if (renderer.url) {
+                  activeSource = await resolveRenderUrlSource(renderer.url);
+                }
+                if (!activeSource) {
+                  const pinId = parseMetaAppPinIdFromUri(active.uri);
+                  if (pinId) {
+                    activeSource = await resolveMetaAppSourceByPinId(pinId);
+                  }
+                }
+              }
+            } catch {
+              // Renderer/source resolution is best-effort; never block the turn.
+            }
+          }
           const escapeXml = (value: string) => value
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
@@ -4044,15 +4085,23 @@ const getCoworkRunner = () => {
           const tabLines = result.tabs.map((tab) => (
             `  <tab id="${tab.id}"${tab.isActive ? ' active="true"' : ''}><title>${escapeXml(tab.title ?? '')}</title><uri>${escapeXml(tab.uri ?? '')}</uri></tab>`
           ));
+          const activeTabAttrs = active?.uri
+            ? [
+              `title="${escapeXml(active.title ?? '')}"`,
+              rendererType ? `renderer="${escapeXml(rendererType)}"` : '',
+              activeSource ? `source_dir="${escapeXml(activeSource.dir)}" index_file="${escapeXml(activeSource.indexFile)}"` : '',
+            ].filter(Boolean).join(' ')
+            : '';
           return [
             '<browser_context>',
             'The user is chatting from the Bot Browser side panel. You have bot_browser_* tools to control and READ the Bot Browser.',
-            'How to answer questions about what a page shows:',
-            '- Call bot_browser_read_page to get the visible text of the current page (works for bot homepages and other first-party pages).',
-            '- For MetaApp pages (metaapp://), the rendered frame is opaque by design; bot_browser_read_page will give you the app\'s local source directory — read the source files with your file tools instead.',
+            'How to read what a page shows:',
+            '- If the active tab lists a source_dir, the page\'s full source (HTML/JS/CSS) is on disk there — read it with your file tools. Do NOT conclude a page is empty just because its text cannot be extracted.',
+            '- Page data may load asynchronously from remote APIs: look for fetch/XHR URLs in the source, then call those same URLs yourself (same parameters) to get the live data.',
+            '- Otherwise call bot_browser_read_page: it returns visible text for first-party pages and resolves MetaApp pages to their source directory.',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
-              ? `<active_tab title="${escapeXml(active.title ?? '')}">${escapeXml(active.uri)}</active_tab>`
+              ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`
               : '<active_tab />',
             '<open_tabs>',
             ...tabLines,
