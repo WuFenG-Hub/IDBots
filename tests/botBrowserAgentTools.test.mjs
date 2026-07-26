@@ -6,7 +6,7 @@ const require = Module.createRequire(import.meta.url);
 const { buildBotBrowserAgentTools, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
 
 function makeHarness(overrides = {}) {
-  const calls = { execute: [], openUri: [], forkMetaApp: [] };
+  const calls = { execute: [], openUri: [], forkMetaApp: [], search: [] };
   const control = {
     execute: async (command) => {
       calls.execute.push(command);
@@ -34,10 +34,22 @@ function makeHarness(overrides = {}) {
         ...(overrides.forkResult ?? {}),
       };
     },
+    searchMetaApps: async (input) => {
+      calls.search.push(input);
+      return overrides.searchResult ?? { items: [], hasMore: false };
+    },
+    listMetaAppForks: async (input) => {
+      calls.search.push({ forks: input.pinId });
+      return overrides.forksResult ?? { items: [], hasMore: false };
+    },
     ...overrides.control,
   };
   if (overrides.withoutFork) {
     delete control.forkMetaApp;
+  }
+  if (overrides.withoutSearch) {
+    delete control.searchMetaApps;
+    delete control.listMetaAppForks;
   }
   const tools = buildBotBrowserAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
@@ -47,6 +59,28 @@ function makeHarness(overrides = {}) {
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
   return { calls, tools, byName };
 }
+
+const SEARCH_CANDIDATE = {
+  pinId: 'c'.repeat(64) + 'i0',
+  sourcePinId: 'c'.repeat(64) + 'i0',
+  chainName: 'mvc',
+  title: 'Buzz Client',
+  appName: 'buzz-client',
+  intro: '查看和发布 Buzz 的应用',
+  tags: ['simplebuzz'],
+  runtime: 'browser',
+  version: '1.0.0',
+  content: 'metafile://x.zip',
+  indexFile: 'index.html',
+  forkedFrom: '',
+  disabled: false,
+  publisherGlobalMetaId: 'idq1own123456789',
+  publisherMetaId: '',
+  publisherAddress: '',
+  createdAt: 1768284841,
+  updatedAt: 1768284841,
+  isOwn: true,
+};
 
 test('builds bot_browser_tabs, bot_browser_open_uri and bot_browser_preview_local tools', () => {
   const { byName } = makeHarness();
@@ -295,4 +329,53 @@ test('bot_browser_read_page reports empty only for first-party pages without tex
   const result = await byName.bot_browser_read_page.handler({});
   assert.match(result.content[0].text, /No readable text/);
   assert.match(result.content[0].text, /bot-homepage/);
+});
+
+test('search_metaapps returns formatted candidates with isOwn marking and open guidance', async () => {
+  const { calls, byName } = makeHarness({
+    searchResult: { items: [SEARCH_CANDIDATE], hasMore: false },
+  });
+  const result = await byName.search_metaapps.handler({ query: 'buzz', sinceDays: 7, limit: 5 });
+  assert.deepEqual(calls.search.length, 1);
+  assert.equal(calls.search[0].keyword, 'buzz');
+  assert.equal(typeof calls.search[0].since, 'number');
+  assert.equal(calls.search[0].limit, 5);
+  const text = result.content[0].text;
+  assert.match(text, /Buzz Client/);
+  assert.match(text, /simplebuzz/);
+  assert.match(text, /your MetaBot/);
+  assert.match(text, new RegExp(`metaapp://${SEARCH_CANDIDATE.pinId}`));
+  assert.match(text, /2–3 alternatives/);
+});
+
+test('search_metaapps degrades an empty multi-token query once then reports honestly', async () => {
+  const { calls, byName } = makeHarness({ searchResult: { items: [], hasMore: false } });
+  const result = await byName.search_metaapps.handler({ query: 'buzz video player' });
+  // First attempt with the full query, retry with the last token dropped.
+  assert.deepEqual(calls.search.map((input) => input.keyword), ['buzz video player', 'buzz video']);
+  assert.match(result.content[0].text, /No on-chain MetaApps matched/);
+  assert.match(result.content[0].text, /do NOT invent/);
+});
+
+test('search_metaapps forks mode lists direct remixes of an app', async () => {
+  const pinId = 'd'.repeat(64) + 'i0';
+  const { calls, byName } = makeHarness({
+    forksResult: { items: [{ ...SEARCH_CANDIDATE, isOwn: false }], hasMore: false },
+  });
+  const result = await byName.search_metaapps.handler({ mode: 'forks', pinId: `metaapp://${pinId}` });
+  assert.deepEqual(calls.search, [{ forks: pinId }]);
+  assert.match(result.content[0].text, /direct remix/);
+  assert.match(result.content[0].text, /Buzz Client/);
+});
+
+test('search_metaapps forks mode requires a valid pinId', async () => {
+  const { byName } = makeHarness();
+  const result = await byName.search_metaapps.handler({ mode: 'forks', pinId: 'not-a-pin' });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /valid pinId/);
+});
+
+test('search_metaapps is not registered when the host has no search support', () => {
+  const { byName } = makeHarness({ withoutSearch: true });
+  assert.equal(byName.search_metaapps, undefined);
 });

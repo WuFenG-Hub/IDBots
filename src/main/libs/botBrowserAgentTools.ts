@@ -2,10 +2,14 @@ import { z } from 'zod';
 import fs from 'fs';
 import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
 import { readRendererFromEnvelope } from '../services/botBrowserSourceLocator';
+import type { MetaAppSearchItem } from '../services/metaAppSearchService';
 import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
 } from '../services/botBrowserTabBridge';
+
+/** A search candidate from the MetaApp aggregation API, marked when published by the user's own MetaBot. */
+export type MetaAppSearchCandidate = MetaAppSearchItem & { isOwn?: boolean };
 
 /**
  * Control surface the host (main.ts) provides for Bot Browser agent tools.
@@ -42,11 +46,22 @@ export type BotBrowserControl = {
     title?: string;
     intro?: string;
     prompt?: string;
+    tags?: string[];
   }): Promise<{
     pinId: string;
     metaappUri: string;
     totalCost: number;
   }>;
+  /** Search the MetaApp aggregation API (coarse filter); items are pre-marked with isOwn when published by the user's MetaBots. */
+  searchMetaApps?(input: {
+    keyword?: string;
+    tag?: string;
+    publisher?: string;
+    since?: number;
+    limit?: number;
+  }): Promise<{ items: MetaAppSearchCandidate[]; hasMore: boolean }>;
+  /** List direct remix children of an app from the aggregation API. */
+  listMetaAppForks?(input: { pinId: string; limit?: number }): Promise<{ items: MetaAppSearchCandidate[]; hasMore: boolean }>;
 };
 
 /** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
@@ -71,6 +86,26 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
   return result.tabs
     .map((tab) => `${tab.isActive ? '* ' : '  '}[${tab.id}] ${tab.title || '(untitled)'} — ${tab.uri || '(no uri)'}`)
     .join('\n');
+}
+
+function shortenMetaId(id: string): string {
+  return id.length > 14 ? `${id.slice(0, 10)}…${id.slice(-4)}` : id;
+}
+
+/** Compact, context-friendly rendering of MetaApp search candidates. */
+export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
+  return items.map((item, index) => {
+    const title = item.title || item.appName || item.pinId;
+    const intro = item.intro
+      ? `\n    ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
+      : '';
+    const meta = [
+      item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
+      item.publisherGlobalMetaId ? `by: ${shortenMetaId(item.publisherGlobalMetaId)}${item.isOwn ? ' (your MetaBot)' : ''}` : '',
+      item.updatedAt ? `updated: ${new Date(item.updatedAt * 1000).toISOString().slice(0, 10)}` : '',
+    ].filter(Boolean).join(' | ');
+    return `[${index + 1}] ${title}${intro}\n    ${meta}\n    uri: metaapp://${item.pinId}`;
+  }).join('\n');
 }
 
 /**
@@ -248,6 +283,96 @@ export function buildBotBrowserAgentTools(deps: {
 
   const extraTools: unknown[] = [];
 
+  if (controlBotBrowser.searchMetaApps) {
+    const searchMetaApps = controlBotBrowser.searchMetaApps;
+    const listMetaAppForks = controlBotBrowser.listMetaAppForks;
+    extraTools.push(
+      tool(
+        'search_metaapps',
+        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app. Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.',
+        {
+          query: z.string().optional(),
+          tag: z.string().optional(),
+          publisher: z.string().optional(),
+          sinceDays: z.number().optional(),
+          mode: z.enum(['search', 'forks']).optional(),
+          pinId: z.string().optional(),
+          limit: z.number().optional(),
+        },
+        async (args: {
+          query?: string;
+          tag?: string;
+          publisher?: string;
+          sinceDays?: number;
+          mode?: 'search' | 'forks';
+          pinId?: string;
+          limit?: number;
+        }) => {
+          const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 8)));
+          const mode = args.mode ?? 'search';
+
+          if (mode === 'forks') {
+            if (!listMetaAppForks) {
+              return textResult('Fork listing is not supported by this host.', true);
+            }
+            const pinId = parseMetaAppPinIdFromUri(args.pinId ?? '');
+            if (!pinId) {
+              return textResult('search_metaapps mode="forks" requires a valid pinId (or metaapp://<pinId>).', true);
+            }
+            try {
+              const { items } = await listMetaAppForks({ pinId, limit });
+              if (!items.length) {
+                return textResult(`No remixes (forks) found for metaapp://${pinId}. If the user expected some, the lineage may simply not exist yet — say so honestly.`);
+              }
+              return textResult([
+                `${items.length} direct remix(es) of metaapp://${pinId}:`,
+                formatMetaAppCandidates(items),
+              ].join('\n\n'));
+            } catch (error) {
+              return textResult(`Failed to list forks: ${error instanceof Error ? error.message : String(error)}`, true);
+            }
+          }
+
+          const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
+            ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
+            : undefined;
+          try {
+            let { items } = await searchMetaApps({
+              keyword: args.query,
+              tag: args.tag,
+              publisher: args.publisher,
+              since,
+              limit,
+            });
+            // Empty-result degradation: drop the weakest (last) query token once and retry.
+            if (!items.length && args.query?.trim()) {
+              const tokens = args.query.trim().split(/\s+/);
+              if (tokens.length > 1) {
+                ({ items } = await searchMetaApps({
+                  keyword: tokens.slice(0, -1).join(' '),
+                  tag: args.tag,
+                  publisher: args.publisher,
+                  since,
+                  limit,
+                }));
+              }
+            }
+            if (!items.length) {
+              return textResult(`No on-chain MetaApps matched${args.query ? ` "${args.query}"` : ''}${args.publisher ? ` from ${args.publisher}` : ''}${args.sinceDays ? ` in the last ${args.sinceDays} days` : ''}. Tell the user honestly; do NOT invent apps.`);
+            }
+            return textResult([
+              `${items.length} on-chain MetaApp candidate(s), best first:`,
+              formatMetaAppCandidates(items),
+              'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true), then offer 2–3 alternatives by name in case they wanted a different one. If nothing fits, say so instead of opening a random app.',
+            ].join('\n\n'));
+          } catch (error) {
+            return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
+          }
+        }
+      )
+    );
+  }
+
   if (controlBotBrowser.forkMetaApp) {
     const forkMetaApp = controlBotBrowser.forkMetaApp;
     extraTools.push(
@@ -297,8 +422,9 @@ export function buildBotBrowserAgentTools(deps: {
           title: z.string().optional(),
           intro: z.string().optional(),
           prompt: z.string().optional(),
+          tags: z.array(z.string()).optional(),
         },
-        async (args: { dir: string; title?: string; intro?: string; prompt?: string }) => {
+        async (args: { dir: string; title?: string; intro?: string; prompt?: string; tags?: string[] }) => {
           try {
             const result = await publishMetaApp({
               sessionId,
@@ -306,6 +432,7 @@ export function buildBotBrowserAgentTools(deps: {
               title: args.title,
               intro: args.intro,
               prompt: args.prompt,
+              tags: args.tags,
             });
             return textResult([
               `Published on-chain: ${result.metaappUri}`,

@@ -158,6 +158,10 @@ import {
 } from './services/botBrowserMetaAppForkService';
 import { publishMetaAppFromDirectory } from './services/botBrowserMetaAppPublishService';
 import {
+  searchMetaApps as searchMetaAppsRemote,
+  listMetaAppForks as listMetaAppForksRemote,
+} from './services/metaAppSearchService';
+import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
 } from './services/botBrowserSourceLocator';
@@ -4024,7 +4028,7 @@ const getCoworkRunner = () => {
         locateSourceByRenderUrl: async ({ url }) => {
           return resolveRenderUrlSource(url);
         },
-        publishMetaApp: async ({ sessionId, dir, title, intro, prompt }) => {
+        publishMetaApp: async ({ sessionId, dir, title, intro, prompt, tags }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
           const metabotId = session.metabotId ?? getCoworkStore().getDefaultMetabotId();
@@ -4036,9 +4040,46 @@ const getCoworkRunner = () => {
             title,
             intro,
             prompt,
+            tags,
             metabotStore: getMetabotStore(),
             confirmPublish: (details) => confirmBotBrowserMetaAppPublish(details),
           });
+        },
+        searchMetaApps: async ({ keyword, tag, publisher, since, limit }) => {
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const page = await searchMetaAppsRemote({
+            keyword,
+            tag,
+            publisher,
+            since,
+            size: limit ?? 8,
+          });
+          return {
+            items: page.items.map((item) => ({
+              ...item,
+              isOwn: ownGlobalMetaIds.has(item.publisherGlobalMetaId),
+            })),
+            hasMore: page.hasMore,
+          };
+        },
+        listMetaAppForks: async ({ pinId, limit }) => {
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const page = await listMetaAppForksRemote({ pinId, size: limit ?? 8 });
+          return {
+            items: page.items.map((item) => ({
+              ...item,
+              isOwn: ownGlobalMetaIds.has(item.publisherGlobalMetaId),
+            })),
+            hasMore: page.hasMore,
+          };
         },
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
@@ -4099,6 +4140,8 @@ const getCoworkRunner = () => {
             '- If the active tab lists a source_dir, the page\'s full source (HTML/JS/CSS) is on disk there — read it with your file tools. Do NOT conclude a page is empty just because its text cannot be extracted.',
             '- Page data may load asynchronously from remote APIs: look for fetch/XHR URLs in the source, then call those same URLs yourself (same parameters) to get the live data.',
             '- Otherwise call bot_browser_read_page: it returns visible text for first-party pages and resolves MetaApp pages to their source directory.',
+            'How to FIND apps for the user:',
+            '- When the user wants to find/discover an app (not open a known one), call search_metaapps first (query/tag/publisher/sinceDays), open the best match with bot_browser_open_uri, and offer 2-3 alternatives by name. For remix children of an app, use search_metaapps with mode="forks".',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`
