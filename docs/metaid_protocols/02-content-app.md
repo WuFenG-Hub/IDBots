@@ -71,6 +71,7 @@
   /** Record the prompt when the app is AI-generated. */
   "prompt": "You are an AI...",
   "icon": "metafile://pinid.png",
+  "forkedfrom":"pinid",
   "coverImg": "metafile://pinid.jpg",
   "introImgs": ["metafile://pinid1.png", "metafile://pinid2.jpg"],
   "intro": "Application introduction text...",
