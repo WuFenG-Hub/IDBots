@@ -24,20 +24,38 @@ export function buildBrowserIframeBridgeScript(): string {
   }
   globalThis.__idbotsBrowserIframeBridgeInstalled = true;
 
-  // Let blank areas of the ABC tabstrip/toolbar drag the host window. The host
-  // window is frameless and otherwise only draggable from a small sidebar
-  // strip; interactive children stay clickable via no-drag.
-  try {
-    var dragRegionStyle = document.createElement('style');
-    dragRegionStyle.textContent = [
-      '.browser-tabstrip, .browser-nav { -webkit-app-region: drag; }',
-      '.browser-tabstrip button, .browser-tabstrip input, .browser-tabstrip a, .browser-tabstrip-tabs,',
-      '.browser-nav button, .browser-nav input, .browser-nav a, .browser-nav select, .browser-address-form { -webkit-app-region: no-drag; }',
-    ].join(' ');
-    document.head.appendChild(dragRegionStyle);
-  } catch (error) {
-    // Drag-region styling is best-effort; never block the bridge install.
+  // Window dragging: CSS -webkit-app-region is not honored inside this srcDoc
+  // iframe, so emulate it. Blank areas of the ABC tabstrip/toolbar forward drag
+  // deltas to the host, which moves the window. Interactive children (tabs,
+  // buttons, address form, links) never start a drag.
+  var windowDragState = null;
+  function isDragInteractive(el) {
+    return Boolean(el && el.closest && el.closest('button, input, a, select, textarea, [role="button"], .browser-tabstrip-tabs, .browser-address-form'));
   }
+  function isWindowDragSurface(el) {
+    return Boolean(el && el.closest && el.closest('.browser-tabstrip, .browser-nav')) && !isDragInteractive(el);
+  }
+  document.addEventListener('mousedown', function (event) {
+    if (event.button !== 0 || !isWindowDragSurface(event.target)) return;
+    windowDragState = { x: event.screenX, y: event.screenY };
+    event.preventDefault();
+  }, true);
+  document.addEventListener('mousemove', function (event) {
+    if (!windowDragState) return;
+    var dx = event.screenX - windowDragState.x;
+    var dy = event.screenY - windowDragState.y;
+    if (!dx && !dy) return;
+    windowDragState = { x: event.screenX, y: event.screenY };
+    window.parent.postMessage({
+      source: BRIDGE_SOURCE,
+      type: 'window-drag-move',
+      dx: dx,
+      dy: dy
+    }, targetOrigin);
+  }, true);
+  document.addEventListener('mouseup', function () {
+    windowDragState = null;
+  }, true);
 
   function textValue(value) {
     if (value === null || value === undefined) return '';

@@ -281,6 +281,7 @@ contextBridge.exposeInMainWorld('electron', {
     toggleMaximize: () => ipcRenderer.send('window-maximize'),
     close: () => ipcRenderer.send('window-close'),
     isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+    moveBy: (dx: number, dy: number) => ipcRenderer.send('window:move-by', { dx, dy }),
     showSystemMenu: (position: { x: number; y: number }) => ipcRenderer.send('window:showSystemMenu', position),
     onStateChanged: (callback: (state: { isMaximized: boolean; isFullscreen: boolean; isFocused: boolean }) => void) => {
       const handler = (_event: any, state: { isMaximized: boolean; isFullscreen: boolean; isFocused: boolean }) => callback(state);

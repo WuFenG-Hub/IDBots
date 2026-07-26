@@ -645,6 +645,7 @@ interface IElectronAPI {
     toggleMaximize: () => void;
     close: () => void;
     isMaximized: () => Promise<boolean>;
+    moveBy: (dx: number, dy: number) => void;
     showSystemMenu: (position: { x: number; y: number }) => void;
     onStateChanged: (callback: (state: WindowState) => void) => () => void;
   };

@@ -53,6 +53,12 @@ type BrowserIframeMessage =
       success: boolean;
       result?: BotBrowserTabCommandResult;
       error?: string;
+    }
+  | {
+      source: 'idbots-browser-iframe-bridge';
+      type: 'window-drag-move';
+      dx?: number;
+      dy?: number;
     };
 
 type PendingTabCommand = {
@@ -329,6 +335,17 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
             return;
           }
           pending.resolve(data.result);
+          return;
+        }
+
+        // Blank-area tabstrip/toolbar drags forwarded from the iframe bridge:
+        // move the host window (CSS -webkit-app-region does not reach srcDoc iframes).
+        if (data.type === 'window-drag-move') {
+          const dx = Math.round(Number((data as { dx?: unknown }).dx) || 0);
+          const dy = Math.round(Number((data as { dy?: unknown }).dy) || 0);
+          if (dx || dy) {
+            window.electron.window.moveBy(dx, dy);
+          }
           return;
         }
 
