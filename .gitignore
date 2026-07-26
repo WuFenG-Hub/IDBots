@@ -137,3 +137,4 @@ man_base_data_pebble/
 !tests/botBrowserSourceLocator.test.mjs
 !tests/metaAppSearchService.test.mjs
 !tests/markdownContentBotBrowserUri.test.tsx
+!tests/browserIframeBridgeScript.test.ts

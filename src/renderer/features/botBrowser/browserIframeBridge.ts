@@ -33,7 +33,7 @@ export function buildBrowserIframeBridgeScript(): string {
       '.browser-tabstrip, .browser-nav { -webkit-app-region: drag; }',
       '.browser-tabstrip button, .browser-tabstrip input, .browser-tabstrip a, .browser-tabstrip-tabs,',
       '.browser-nav button, .browser-nav input, .browser-nav a, .browser-nav select, .browser-address-form { -webkit-app-region: no-drag; }',
-    ].join('\n');
+    ].join(' ');
     document.head.appendChild(dragRegionStyle);
   } catch (error) {
     // Drag-region styling is best-effort; never block the bridge install.
