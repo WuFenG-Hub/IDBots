@@ -136,3 +136,4 @@ man_base_data_pebble/
 !tests/botBrowserCoworkPanel.test.ts
 !tests/botBrowserSourceLocator.test.mjs
 !tests/metaAppSearchService.test.mjs
+!tests/markdownContentBotBrowserUri.test.tsx

@@ -4078,7 +4078,10 @@ export class CoworkRunner extends EventEmitter {
           )
         );
       }
-      if (this.openMetaApp) {
+      // Local MetaApp launcher tools are retired for browser-type sessions:
+      // in that surface apps open on-chain via search_metaapps + metaapp:// URIs.
+      const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser';
+      if (this.openMetaApp && !isBrowserSession) {
         memoryTools.push(
           tool(
             'open_metaapp',
@@ -4153,7 +4156,7 @@ export class CoworkRunner extends EventEmitter {
         )
       );
     }
-    if (this.resolveMetaAppUrl) {
+    if (this.resolveMetaAppUrl && !isBrowserSession) {
       memoryTools.push(
         tool(
           'resolve_metaapp_url',
