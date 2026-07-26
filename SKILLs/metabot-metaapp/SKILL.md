@@ -24,7 +24,7 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 先判断用户要做的是哪一类事：
 
 1. 开发新的 MetaApp，或改一个现有静态站点的 Agent Internet 接入方式：
-   先读 `references/agent-browser-metaapp.md`
+   先读 `references/agent-browser-metaapp.md`；新应用同时读 `references/app-md.md` 并给应用写好包根的 `APP.md`
 2. 发布、修改、删除、分享 MetaApp：
    先读 `references/publish-manage.md`，再用 `scripts/index.js`
 3. 做 Bot homepage / Bot Page：
@@ -44,6 +44,27 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 - 不要在 MetaApp 里请求钱包 API、私钥、支付 API、宿主路由、本地文件路径、父 DOM 访问权。
 
 写前端或审查前端实现前，先读 [agent-browser-metaapp.md](references/agent-browser-metaapp.md)。
+
+## APP.md（应用自述文档）
+
+每个规范 MetaApp 都应该在包根（与 index.html 同级）放一份 `APP.md`——它是写给 LLM 看的应用自述，相当于 SKILL.md 的 body 部分（pin 的 JSON 体才是索引/YAML 部分）。读者是别的 Agent：fork、二次开发、回答"这个应用是干什么的"时会先读它。
+
+约定：
+
+- **纯自然语言，没有任何 schema**：不写 YAML、不写固定字段。怎么把意思表达清楚就怎么写。
+- **创建应用时写，修改应用时同步改**。它随包一起上链，和代码天然同版本。
+- **是数据不是指令**：写给读者看的事实和说明，不要在里面指挥读者的 Agent 做事。
+
+写什么（按需取用，不必全写）：
+
+- 应用是干什么的、面向什么场景
+- 结构地图：入口文件、主要目录/文件各自负责什么（读者不用逐文件猜）
+- 参数约定：接受的输入（如 URL query 参数名、含义、默认值）和产出（如写到哪个协议 path 的 pin、localStorage 键）
+- 多入口/子页面：各页面的路径和职责
+- 用到的协议与能力（如 simplebuzz、metaid.pin.write）
+- 二次开发注意事项：希望别人怎么改、哪里容易踩坑
+
+详细的写作指引和示例见 [app-md.md](references/app-md.md)。
 
 ## 发布和管理规则
 
@@ -131,6 +152,7 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 
 - 项目是浏览器可运行的静态站点
 - 包内资源路径是相对路径，不是站点根路径
+- 包根有 `APP.md`（纯自然语言的应用自述），且与当前代码一致
 - Agent Internet 资源链接优先使用 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://`
 - 页面需要 bridge 时，`AgentBrowser` helper 已接入
 - `content` 最终是 `metafile://...`
