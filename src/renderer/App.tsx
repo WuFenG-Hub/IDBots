@@ -38,9 +38,10 @@ import { shouldShowInitialOnboarding } from './components/onboarding/onboardingG
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
 import {
   clampSidebarWidth,
+  defaultSidebarWidth,
   loadSidebarWidth,
-  SIDEBAR_WIDTH_DEFAULT,
-  SIDEBAR_WIDTH_STORAGE_KEY,
+  sidebarWidthStorageKey,
+  type SidebarWidthMode,
 } from './utils/sidebarWidth';
 import { BotBrowserSurface } from './features/botBrowser/BotBrowserSurface';
 import { useBotBrowserShell } from './features/botBrowser/useBotBrowserShell';
@@ -72,9 +73,9 @@ const App: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [, forceLanguageRefresh] = useState(0);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth((key) => window.localStorage.getItem(key)));
+  const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth((key) => window.localStorage.getItem(key), 'home'));
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
-  const sidebarResizeRef = useRef<{ startX: number; startWidth: number } | null>(null);
+  const sidebarResizeRef = useRef<{ startX: number; startWidth: number; mode: SidebarWidthMode } | null>(null);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [updateModalState, setUpdateModalState] = useState<UpdateModalState>('info');
@@ -373,17 +374,6 @@ const App: React.FC = () => {
     setIsSidebarCollapsed((prev) => !prev);
   }, []);
 
-  const handleSidebarResizeStart = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
-    sidebarResizeRef.current = { startX: event.clientX, startWidth: sidebarWidth };
-    setIsSidebarResizing(true);
-  }, [sidebarWidth]);
-
-  const handleSidebarResizeReset = useCallback(() => {
-    setSidebarWidth(SIDEBAR_WIDTH_DEFAULT);
-    window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(SIDEBAR_WIDTH_DEFAULT));
-  }, []);
-
   useEffect(() => {
     if (!isSidebarResizing) return;
     const handleMove = (event: MouseEvent) => {
@@ -392,10 +382,11 @@ const App: React.FC = () => {
       setSidebarWidth(clampSidebarWidth(start.startWidth + event.clientX - start.startX));
     };
     const handleUp = () => {
+      const start = sidebarResizeRef.current;
       setIsSidebarResizing(false);
       sidebarResizeRef.current = null;
       setSidebarWidth((width) => {
-        window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+        window.localStorage.setItem(sidebarWidthStorageKey(start?.mode ?? 'home'), String(width));
         return width;
       });
     };
@@ -454,6 +445,29 @@ const App: React.FC = () => {
   const botBrowserShell = useBotBrowserShell({
     showToast,
   });
+
+  const handleSidebarResizeStart = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    sidebarResizeRef.current = {
+      startX: event.clientX,
+      startWidth: sidebarWidth,
+      mode: botBrowserShell.surfaceMode,
+    };
+    setIsSidebarResizing(true);
+  }, [sidebarWidth, botBrowserShell.surfaceMode]);
+
+  const handleSidebarResizeReset = useCallback(() => {
+    const mode = botBrowserShell.surfaceMode;
+    const width = defaultSidebarWidth(mode);
+    setSidebarWidth(width);
+    window.localStorage.setItem(sidebarWidthStorageKey(mode), String(width));
+  }, [botBrowserShell.surfaceMode]);
+
+  // Bot Home and Bot Browser keep independent widths: restore the surface's own
+  // comfortable width on every mode switch.
+  useEffect(() => {
+    setSidebarWidth(loadSidebarWidth((key) => window.localStorage.getItem(key), botBrowserShell.surfaceMode));
+  }, [botBrowserShell.surfaceMode]);
 
   useEffect(() => {
     return window.electron.botBrowser.onOpenUri((input) => {

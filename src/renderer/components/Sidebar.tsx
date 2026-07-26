@@ -12,7 +12,7 @@ import { P2PStatusBadge } from './p2p/P2PStatusBadge';
 import { getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
 import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
 import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel';
-import { SIDEBAR_WIDTH_DEFAULT } from '../utils/sidebarWidth';
+import { defaultSidebarWidth } from '../utils/sidebarWidth';
 import type { BotBrowserSurfaceMode } from '../features/botBrowser/types';
 
 interface SidebarProps {
@@ -55,7 +55,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   onNewBrowserTab,
   isCollapsed,
   onToggleCollapse,
-  width = SIDEBAR_WIDTH_DEFAULT,
+  width = defaultSidebarWidth('home'),
   isResizing = false,
   updateBadge,
 }) => {
@@ -299,7 +299,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         </div>
       ) : (
         <div className="flex-1 min-h-0 px-2.5 pb-3 pt-2 mt-1 flex flex-col">
-          <BotBrowserCoworkPanel />
+          <BotBrowserCoworkPanel onShowSkills={onShowSkills} />
         </div>
       )}
       <CoworkSearchModal

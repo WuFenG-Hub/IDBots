@@ -1,15 +1,20 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useSelector } from 'react-redux';
-import { ClockIcon, XMarkIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { useDispatch, useSelector } from 'react-redux';
+import { ClockIcon, XMarkIcon, TrashIcon, PaperClipIcon, FolderIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from '../../components/icons/ComposeIcon';
 import MarkdownContent from '../../components/MarkdownContent';
-import CoworkPromptInput from '../../components/cowork/CoworkPromptInput';
+import CoworkPromptInput, { type CoworkPromptInputRef } from '../../components/cowork/CoworkPromptInput';
+import FolderSelectorPopover from '../../components/cowork/FolderSelectorPopover';
 import MetaBotSelector, { type MetaBotForSelector } from '../../components/cowork/MetaBotSelector';
 import ModelSelector from '../../components/ModelSelector';
+import { SkillsButton, ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
+import { toggleActiveSkill } from '../../store/slices/skillSlice';
 import { browserCoworkService } from '../../services/browserCowork';
 import { i18nService } from '../../services/i18n';
+import { getCompactFolderName } from '../../utils/path';
 import type { CoworkMessage } from '../../types/cowork';
+import type { Skill } from '../../types/skill';
 
 const formatRelativeTime = (timestamp: number): string => {
   const deltaMs = Date.now() - timestamp;
@@ -50,11 +55,15 @@ const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
   }
   if (message.type !== 'assistant' || !message.content.trim()) return null;
   return (
-    <div className="min-w-0 text-xs leading-5 dark:text-claude-darkText text-claude-text [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-[11px] [&_code]:break-all [&_a]:break-all">
-      <MarkdownContent content={message.content} />
+    <div className="min-w-0 text-xs leading-5 dark:text-claude-darkText text-claude-text [&_h1]:text-sm [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h2]:text-xs [&_h2]:mt-2.5 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:mt-2 [&_h3]:mb-1 [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-[11px] [&_code]:break-all [&_a]:break-all">
+      <MarkdownContent content={message.content} compact />
     </div>
   );
 };
+
+interface BotBrowserCoworkPanelProps {
+  onShowSkills?: () => void;
+}
 
 /**
  * Co-Work chat panel embedded in the sidebar under the "New Tab" button when
@@ -65,14 +74,19 @@ const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
  * History is a toggleable overlay; sessions remember the browser URI they
  * were about.
  */
-const BotBrowserCoworkPanel: React.FC = () => {
+const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSkills }) => {
+  const dispatch = useDispatch();
   const currentSession = useSelector((state: RootState) => state.browserCowork.currentSession);
   const isStreaming = useSelector((state: RootState) => state.browserCowork.isStreaming);
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
   const [showHistory, setShowHistory] = useState(false);
   const [metabots, setMetabots] = useState<PanelMetabot[]>([]);
   const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
+  const [workingDirectory, setWorkingDirectory] = useState('');
+  const [showFolderMenu, setShowFolderMenu] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+  const promptInputRef = useRef<CoworkPromptInputRef>(null);
+  const folderButtonRef = useRef<HTMLButtonElement>(null);
 
   const browserSessions = useMemo(
     () => sessions.filter((session) => session.sessionType === 'browser'),
@@ -122,7 +136,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
     if (currentSession) {
       await browserCoworkService.send(prompt);
     } else {
-      await browserCoworkService.start(prompt, effectiveMetabotId);
+      await browserCoworkService.start(prompt, effectiveMetabotId, workingDirectory || undefined);
     }
   };
 
@@ -133,6 +147,23 @@ const BotBrowserCoworkPanel: React.FC = () => {
 
   const handleDeleteHistory = async (sessionId: string) => {
     await browserCoworkService.deleteSession(sessionId);
+  };
+
+  const handleSelectSkill = (skill: Skill) => {
+    dispatch(toggleActiveSkill(skill.id));
+  };
+
+  const handleAddFile = async () => {
+    try {
+      const result = await window.electron.dialog.selectFile({
+        title: i18nService.t('coworkAddFile'),
+      });
+      if (result.success && result.path) {
+        promptInputRef.current?.addAttachments([result.path]);
+      }
+    } catch (error) {
+      console.error('Failed to select file:', error);
+    }
   };
 
   return (
@@ -186,8 +217,8 @@ const BotBrowserCoworkPanel: React.FC = () => {
         ) : null}
       </div>
 
-      {metabots.length > 0 ? (
-        <div className="flex items-center gap-1.5 px-1 pb-1.5">
+      <div className="flex items-center gap-0.5 px-1 pb-1.5">
+        {metabots.length > 0 ? (
           <div className="min-w-0 flex-1">
             <MetaBotSelector
               metabots={metabots}
@@ -199,11 +230,47 @@ const BotBrowserCoworkPanel: React.FC = () => {
               dropdownDirection="up"
             />
           </div>
-          <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} />
-        </div>
-      ) : null}
+        ) : null}
+        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} />
+        <button
+          type="button"
+          onClick={() => void handleAddFile()}
+          className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+          title={i18nService.t('coworkAddFile')}
+          aria-label={i18nService.t('coworkAddFile')}
+        >
+          <PaperClipIcon className="h-4 w-4" />
+        </button>
+        <SkillsButton
+          onSelectSkill={handleSelectSkill}
+          onManageSkills={() => onShowSkills?.()}
+          className="shrink-0 !p-1.5 [&_svg]:h-4 [&_svg]:w-4"
+        />
+        <ActiveSkillBadge />
+        <button
+          ref={folderButtonRef}
+          type="button"
+          onClick={() => setShowFolderMenu((value) => !value)}
+          className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+          title={workingDirectory ? getCompactFolderName(workingDirectory, 40) : i18nService.t('coworkSelectFolderFirst')}
+          aria-label={i18nService.t('coworkSelectFolderFirst')}
+        >
+          <FolderIcon className="h-4 w-4" />
+        </button>
+        <FolderSelectorPopover
+          isOpen={showFolderMenu}
+          onClose={() => setShowFolderMenu(false)}
+          onSelectFolder={(folderPath) => {
+            setWorkingDirectory(folderPath);
+            setShowFolderMenu(false);
+          }}
+          anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
+          currentFolder={workingDirectory}
+        />
+      </div>
 
       <CoworkPromptInput
+        ref={promptInputRef}
         onSubmit={handleSubmit}
         onStop={() => void browserCoworkService.stop()}
         isStreaming={isStreaming}

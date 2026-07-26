@@ -80,6 +80,8 @@ export interface CoworkPromptInputRef {
   setValue: (value: string) => void;
   /** 聚焦输入框 */
   focus: () => void;
+  /** 从外部（如宿主面板自带的附件按钮）追加附件 */
+  addAttachments: (paths: string[]) => void;
 }
 
 interface CoworkPromptInputProps {
@@ -157,6 +159,16 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     },
     focus: () => {
       textareaRef.current?.focus();
+    },
+    addAttachments: (paths: string[]) => {
+      const field = attachmentFieldRef.current;
+      if (!field) return;
+      const next = [...field.get()];
+      for (const path of paths) {
+        if (!path || next.some((attachment) => attachment.path === path)) continue;
+        next.push({ path, name: getFileNameFromPath(path) });
+      }
+      field.set(next);
     },
   }));
 

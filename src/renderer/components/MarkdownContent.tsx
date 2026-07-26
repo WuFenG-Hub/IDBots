@@ -570,18 +570,21 @@ const createMarkdownComponents = (
 interface MarkdownContentProps {
   content: string;
   className?: string;
+  /** Compact typography for narrow surfaces (e.g. the Bot Browser side panel). */
+  compact?: boolean;
   resolveLocalFilePath?: (href: string, text: string) => string | null;
 }
 
 const MarkdownContent: React.FC<MarkdownContentProps> = ({
   content,
   className = '',
+  compact = false,
   resolveLocalFilePath,
 }) => {
   const components = useMemo(() => createMarkdownComponents(resolveLocalFilePath), [resolveLocalFilePath]);
   const normalizedContent = useMemo(() => encodeFileUrlsInMarkdown(content), [content]);
   return (
-    <div className={`markdown-content text-[15px] leading-6 ${className}`}>
+    <div className={`markdown-content ${compact ? 'text-xs leading-5' : 'text-[15px] leading-6'} ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={safeUrlTransform}
