@@ -24,6 +24,21 @@ export function buildBrowserIframeBridgeScript(): string {
   }
   globalThis.__idbotsBrowserIframeBridgeInstalled = true;
 
+  // Let blank areas of the ABC tabstrip/toolbar drag the host window. The host
+  // window is frameless and otherwise only draggable from a small sidebar
+  // strip; interactive children stay clickable via no-drag.
+  try {
+    var dragRegionStyle = document.createElement('style');
+    dragRegionStyle.textContent = [
+      '.browser-tabstrip, .browser-nav { -webkit-app-region: drag; }',
+      '.browser-tabstrip button, .browser-tabstrip input, .browser-tabstrip a, .browser-tabstrip-tabs,',
+      '.browser-nav button, .browser-nav input, .browser-nav a, .browser-nav select, .browser-address-form { -webkit-app-region: no-drag; }',
+    ].join('\n');
+    document.head.appendChild(dragRegionStyle);
+  } catch (error) {
+    // Drag-region styling is best-effort; never block the bridge install.
+  }
+
   function textValue(value) {
     if (value === null || value === undefined) return '';
     return String(value).trim();
