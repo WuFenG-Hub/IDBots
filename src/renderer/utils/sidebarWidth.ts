@@ -1,4 +1,4 @@
-export const SIDEBAR_WIDTH_DEFAULT = 288;
+export const SIDEBAR_WIDTH_DEFAULT = 320;
 export const SIDEBAR_WIDTH_MIN = 240;
 export const SIDEBAR_WIDTH_MAX = 480;
 export const SIDEBAR_WIDTH_STORAGE_KEY = 'idbots.sidebarWidth';

@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
-import { ClockIcon, XMarkIcon, TrashIcon, WrenchIcon } from '@heroicons/react/24/outline';
+import { ClockIcon, XMarkIcon, TrashIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from '../../components/icons/ComposeIcon';
 import MarkdownContent from '../../components/MarkdownContent';
 import CoworkPromptInput from '../../components/cowork/CoworkPromptInput';
+import MetaBotSelector, { type MetaBotForSelector } from '../../components/cowork/MetaBotSelector';
+import ModelSelector from '../../components/ModelSelector';
 import { RootState } from '../../store';
 import { browserCoworkService } from '../../services/browserCowork';
 import { i18nService } from '../../services/i18n';
@@ -20,29 +22,35 @@ const formatRelativeTime = (timestamp: number): string => {
   return `${days}d`;
 };
 
+type PanelMetabot = MetaBotForSelector & { llm_id?: string | null };
+
+/**
+ * Minimal rendering contract for the side panel: user messages and final
+ * agent answers only. Tool calls, tool results, system messages, thinking
+ * blocks, and delegation-internal chatter are intentionally hidden.
+ */
+export function filterVisiblePanelMessages(messages: CoworkMessage[]): CoworkMessage[] {
+  return messages.filter((message) => {
+    if (message.metadata?.isDelegationInternal) return false;
+    if (message.type === 'user') return true;
+    if (message.type === 'assistant') return !message.metadata?.isThinking;
+    return false;
+  });
+}
+
 const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
   if (message.type === 'user') {
     return (
       <div className="flex justify-end">
-        <div className="max-w-[90%] whitespace-pre-wrap break-words rounded-xl rounded-br-sm bg-claude-accent/90 px-3 py-2 text-sm text-white">
+        <div className="max-w-[90%] min-w-0 whitespace-pre-wrap break-words rounded-2xl px-3 py-2 text-xs dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text shadow-subtle">
           {message.content}
         </div>
       </div>
     );
   }
-  if (message.type === 'tool_use') {
-    const toolName = message.metadata?.toolName ?? '';
-    return (
-      <div className="flex items-center gap-1.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-        <WrenchIcon className="h-3 w-3 shrink-0" />
-        <span className="truncate">{toolName || 'tool'}</span>
-      </div>
-    );
-  }
-  if (message.type !== 'assistant') return null;
-  if (!message.content.trim()) return null;
+  if (message.type !== 'assistant' || !message.content.trim()) return null;
   return (
-    <div className="text-sm dark:text-claude-darkText text-claude-text [&_pre]:text-xs [&_pre]:max-w-full [&_pre]:overflow-x-auto">
+    <div className="min-w-0 text-xs leading-5 dark:text-claude-darkText text-claude-text [&_pre]:max-w-full [&_pre]:overflow-x-auto [&_pre]:text-[11px] [&_code]:break-all [&_a]:break-all">
       <MarkdownContent content={message.content} />
     </div>
   );
@@ -52,14 +60,18 @@ const PanelMessage: React.FC<{ message: CoworkMessage }> = ({ message }) => {
  * Co-Work chat panel embedded in the sidebar under the "New Tab" button when
  * the Bot Browser surface is active. Talks to the local Agent through
  * `browserCoworkService`; the Agent controls the browser via bot_browser_*
- * tools. History is a toggleable overlay; sessions remember the browser URI
- * they were about.
+ * tools. Rendering is intentionally minimal: user messages and final agent
+ * answers only — tool calls, thinking, and system noise stay out of view.
+ * History is a toggleable overlay; sessions remember the browser URI they
+ * were about.
  */
 const BotBrowserCoworkPanel: React.FC = () => {
   const currentSession = useSelector((state: RootState) => state.browserCowork.currentSession);
   const isStreaming = useSelector((state: RootState) => state.browserCowork.isStreaming);
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
   const [showHistory, setShowHistory] = useState(false);
+  const [metabots, setMetabots] = useState<PanelMetabot[]>([]);
+  const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const browserSessions = useMemo(
@@ -69,12 +81,34 @@ const BotBrowserCoworkPanel: React.FC = () => {
 
   const messages = currentSession?.messages ?? [];
   const visibleMessages = useMemo(
-    () => messages.filter((message) => (
-      (message.type === 'user' || message.type === 'assistant' || message.type === 'tool_use')
-      && !message.metadata?.isDelegationInternal
-    )),
+    () => filterVisiblePanelMessages(messages),
     [messages]
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const result = await window.electron?.metabot?.list?.();
+      if (cancelled || !result?.success || !result.list) return;
+      const selectable = result.list.filter(
+        (metabot) => metabot.enabled && typeof metabot.llm_id === 'string' && metabot.llm_id.trim()
+      );
+      setMetabots(selectable);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // An existing session's MetaBot wins for display; otherwise fall back to the first available.
+  useEffect(() => {
+    if (currentSession?.metabotId != null) {
+      setSelectedMetabotId(currentSession.metabotId);
+    }
+  }, [currentSession?.metabotId]);
+
+  const effectiveMetabotId = selectedMetabotId ?? metabots[0]?.id ?? null;
+  const selectedMetabot = metabots.find((m) => m.id === effectiveMetabotId) ?? null;
 
   useEffect(() => {
     const list = listRef.current;
@@ -88,7 +122,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
     if (currentSession) {
       await browserCoworkService.send(prompt);
     } else {
-      await browserCoworkService.start(prompt);
+      await browserCoworkService.start(prompt, effectiveMetabotId);
     }
   };
 
@@ -111,6 +145,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
           type="button"
           onClick={() => {
             setShowHistory(false);
+            setSelectedMetabotId(null);
             browserCoworkService.startNewDraft();
           }}
           className="h-6 w-6 inline-flex items-center justify-center rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
@@ -134,7 +169,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
         </button>
       </div>
 
-      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-1 pb-2">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-2.5 overflow-y-auto overflow-x-hidden px-1 pb-2">
         {visibleMessages.length === 0 ? (
           <div className="rounded-lg border border-dashed dark:border-claude-darkBorder border-claude-border px-3 py-4 text-xs leading-5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
             {i18nService.t('botBrowserCoworkEmpty')}
@@ -151,6 +186,23 @@ const BotBrowserCoworkPanel: React.FC = () => {
         ) : null}
       </div>
 
+      {metabots.length > 0 ? (
+        <div className="flex items-center gap-1.5 px-1 pb-1.5">
+          <div className="min-w-0 flex-1">
+            <MetaBotSelector
+              metabots={metabots}
+              selectedId={effectiveMetabotId}
+              onSelect={setSelectedMetabotId}
+              label={i18nService.t('coworkMetaBotLabel')}
+              placeholder={i18nService.t('coworkMetaBotPlaceholder')}
+              compact
+              dropdownDirection="up"
+            />
+          </div>
+          <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} />
+        </div>
+      ) : null}
+
       <CoworkPromptInput
         onSubmit={handleSubmit}
         onStop={() => void browserCoworkService.stop()}
@@ -160,6 +212,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
         scopeKey="botBrowser"
         showFolderSelector={false}
         showModelSelector={false}
+        restrictToLlmId={selectedMetabot?.llm_id ?? null}
       />
 
       {showHistory ? (
@@ -175,7 +228,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
               <XMarkIcon className="h-3.5 w-3.5" />
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2">
+          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5 pb-2">
             {browserSessions.length === 0 ? (
               <div className="px-2 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 {i18nService.t('coworkNoSessions')}
@@ -190,7 +243,7 @@ const BotBrowserCoworkPanel: React.FC = () => {
                   onClick={() => void handleSelectHistory(session.id)}
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[13px] dark:text-claude-darkText text-claude-text">
+                    <div className="truncate text-xs dark:text-claude-darkText text-claude-text">
                       {session.title}
                     </div>
                     <div className="mt-0.5 truncate text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">

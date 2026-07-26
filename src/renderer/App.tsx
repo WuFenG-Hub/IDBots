@@ -1016,6 +1016,12 @@ const App: React.FC = () => {
           className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-claude-accent/40"
         />
       ) : null}
+      {/* While resizing, cover the content area so the Bot Browser iframe cannot
+          swallow mousemove/mouseup events mid-drag (iframe event capture made the
+          handle nearly undraggable in browser mode). */}
+      {isSidebarResizing ? (
+        <div className="fixed inset-0 z-50 cursor-col-resize" />
+      ) : null}
       <div className="relative flex flex-1 min-w-0 min-h-0 overflow-hidden">
         {botBrowserShell.surfaceMode === 'home' ? (
           <div className={`flex-1 min-w-0 py-1.5 pr-1.5 ${isSidebarCollapsed ? 'pl-1.5' : ''}`}>
