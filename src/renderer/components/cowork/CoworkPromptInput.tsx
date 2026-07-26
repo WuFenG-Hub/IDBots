@@ -97,6 +97,8 @@ interface CoworkPromptInputProps {
   onWorkingDirectoryChange?: (dir: string) => void;
   showFolderSelector?: boolean;
   showModelSelector?: boolean;
+  /** Show the built-in attachment (paperclip) button. Hosts with their own attachment button can hide it. */
+  showAttachmentButton?: boolean;
   /** When set, restrict model choices to this LLM provider (e.g. from MetaBot llm_id). */
   restrictToLlmId?: string | null;
   onManageSkills?: () => void;
@@ -117,6 +119,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       onWorkingDirectoryChange,
       showFolderSelector = false,
       showModelSelector = false,
+      showAttachmentButton = true,
       restrictToLlmId,
       onManageSkills,
     } = props;
@@ -602,16 +605,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   </>
                 )}
                 {showModelSelector && <ModelSelector dropdownDirection="up" restrictToLlmId={restrictToLlmId} />}
-                <button
-                  type="button"
-                  onClick={handleAddFile}
-                  className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-                  title={i18nService.t('coworkAddFile')}
-                  aria-label={i18nService.t('coworkAddFile')}
-                  disabled={disabled || isStreaming}
-                >
-                  <PaperClipIcon className="h-4 w-4" />
-                </button>
+                {showAttachmentButton ? (
+                  <button
+                    type="button"
+                    onClick={handleAddFile}
+                    className="flex items-center justify-center p-1.5 rounded-lg text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+                    title={i18nService.t('coworkAddFile')}
+                    aria-label={i18nService.t('coworkAddFile')}
+                    disabled={disabled || isStreaming}
+                  >
+                    <PaperClipIcon className="h-4 w-4" />
+                  </button>
+                ) : null}
                 <SkillsButton
                   onSelectSkill={handleSelectSkill}
                   onManageSkills={handleManageSkills}
@@ -657,16 +662,18 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
             />
 
             <div className="flex items-center gap-1">
-              <button
-                type="button"
-                onClick={handleAddFile}
-                className="flex-shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-                title={i18nService.t('coworkAddFile')}
-                aria-label={i18nService.t('coworkAddFile')}
-                disabled={disabled || isStreaming}
-              >
-                <PaperClipIcon className="h-4 w-4" />
-              </button>
+              {showAttachmentButton ? (
+                <button
+                  type="button"
+                  onClick={handleAddFile}
+                  className="flex-shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+                  title={i18nService.t('coworkAddFile')}
+                  aria-label={i18nService.t('coworkAddFile')}
+                  disabled={disabled || isStreaming}
+                >
+                  <PaperClipIcon className="h-4 w-4" />
+                </button>
+              ) : null}
             </div>
 
             {showStopButton ? (

@@ -584,7 +584,7 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
   const components = useMemo(() => createMarkdownComponents(resolveLocalFilePath), [resolveLocalFilePath]);
   const normalizedContent = useMemo(() => encodeFileUrlsInMarkdown(content), [content]);
   return (
-    <div className={`markdown-content ${compact ? 'text-xs leading-5' : 'text-[15px] leading-6'} ${className}`}>
+    <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[15px] leading-6'} ${className}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         urlTransform={safeUrlTransform}
