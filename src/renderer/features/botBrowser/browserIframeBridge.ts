@@ -30,7 +30,7 @@ export function buildBrowserIframeBridgeScript(): string {
   // buttons, address form, links) never start a drag.
   var windowDragState = null;
   function isDragInteractive(el) {
-    return Boolean(el && el.closest && el.closest('button, input, a, select, textarea, [role="button"], .browser-tabstrip-tabs, .browser-address-form'));
+    return Boolean(el && el.closest && el.closest('button, input, a, select, textarea, [role="button"], .browser-tab, .browser-tab-close, .browser-tab-new, .browser-address-form'));
   }
   function isWindowDragSurface(el) {
     return Boolean(el && el.closest && el.closest('.browser-tabstrip, .browser-nav')) && !isDragInteractive(el);
