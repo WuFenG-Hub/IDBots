@@ -88,10 +88,6 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
     .join('\n');
 }
 
-function shortenMetaId(id: string): string {
-  return id.length > 14 ? `${id.slice(0, 10)}…${id.slice(-4)}` : id;
-}
-
 /** Compact, context-friendly rendering of MetaApp search candidates. */
 export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
   return items.map((item, index) => {
@@ -100,9 +96,13 @@ export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string
     const intro = item.intro
       ? `\n    ${item.intro.length > 120 ? `${item.intro.slice(0, 120)}…` : item.intro}`
       : '';
+    const publisherLabel = (item.publisherName || item.publisherGlobalMetaId || 'unknown').replace(/[[\]]/g, '');
+    const publisher = item.publisherGlobalMetaId
+      ? `by: [${publisherLabel}](metaid://${item.publisherGlobalMetaId})${item.isOwn ? ' (your MetaBot)' : ''}`
+      : '';
     const meta = [
       item.tags.length ? `tags: ${item.tags.join(', ')}` : '',
-      item.publisherGlobalMetaId ? `by: ${shortenMetaId(item.publisherGlobalMetaId)}${item.isOwn ? ' (your MetaBot)' : ''}` : '',
+      publisher,
       item.updatedAt ? `updated: ${new Date(item.updatedAt * 1000).toISOString().slice(0, 10)}` : '',
     ].filter(Boolean).join(' | ');
     return `[${index + 1}] ${title}${intro}\n    ${meta}\n    uri: [${linkTitle}](metaapp://${item.pinId})`;
