@@ -16,6 +16,8 @@ export type PublishMetaAppFromDirectoryInput = {
   intro?: string;
   /** Short description of what the app is / what was changed; recorded on-chain as the AI generation prompt. */
   prompt?: string;
+  /** Capability/protocol tags (e.g. simplebuzz, game); forked apps inherit the source tags when omitted. */
+  tags?: string[];
   metabotStore: MetabotStore;
   /** Native confirmation gate; must resolve true before any chain write happens. */
   confirmPublish: (details: {
@@ -119,6 +121,7 @@ export async function publishMetaAppFromDirectory(
     content: `metafile://${zipPinId}.zip`,
     indexFile: entryFile,
     codeType: 'application/zip',
+    tags: input.tags?.length ? input.tags : marker?.tags,
   }, { confirm: true });
 
   return {

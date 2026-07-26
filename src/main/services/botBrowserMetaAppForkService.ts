@@ -12,6 +12,8 @@ export type MetaAppForkMarker = {
   sourceUri: string;
   title: string;
   indexFile: string;
+  /** Capability/protocol tags inherited from the source app, when known. */
+  tags?: string[];
   forkedAt: number;
 };
 
@@ -62,6 +64,7 @@ export async function forkMetaAppToWorkspace(input: {
   let sourceDir = '';
   let indexFile = 'index.html';
   let title = '';
+  let sourceTags: string[] | undefined;
 
   const apps = await input.listMetaApps();
   const localApp = apps.find((app) => (app.sourcePinId || '').trim().toLowerCase() === pinId);
@@ -82,6 +85,9 @@ export async function forkMetaAppToWorkspace(input: {
     sourceDir = artifact.artifactDir;
     indexFile = artifact.indexFile || 'index.html';
     title = resolved.data.title || resolved.data.appName || pinId;
+    if (Array.isArray(resolved.data.tags) && resolved.data.tags.length) {
+      sourceTags = resolved.data.tags.map((tag) => String(tag)).filter(Boolean);
+    }
   }
 
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
@@ -98,6 +104,9 @@ export async function forkMetaAppToWorkspace(input: {
 
   const sourceUri = `metaapp://${pinId}`;
   const marker: MetaAppForkMarker = { sourcePinId: pinId, sourceUri, title, indexFile, forkedAt: Date.now() };
+  if (sourceTags?.length) {
+    marker.tags = sourceTags;
+  }
   await fs.promises.writeFile(
     path.join(destDir, METAAPP_FORK_MARKER),
     JSON.stringify(marker, null, 2),
@@ -118,6 +127,7 @@ export async function readMetaAppForkMarker(dir: string): Promise<MetaAppForkMar
       sourceUri: typeof parsed.sourceUri === 'string' ? parsed.sourceUri : `metaapp://${parsed.sourcePinId}`,
       title: typeof parsed.title === 'string' ? parsed.title : '',
       indexFile: typeof parsed.indexFile === 'string' && parsed.indexFile ? parsed.indexFile : 'index.html',
+      tags: Array.isArray(parsed.tags) ? parsed.tags.map((tag) => String(tag)).filter(Boolean) : undefined,
       forkedAt: typeof parsed.forkedAt === 'number' ? parsed.forkedAt : 0,
     };
   } catch {
