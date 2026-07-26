@@ -38,6 +38,8 @@ export type PublishMetaAppFromDirectoryResult = {
   pinId: string;
   metaappUri: string;
   totalCost: number;
+  /** Whether the package ships an APP.md self-description at its root. */
+  hasAppDoc: boolean;
 };
 
 async function addDirectoryToZip(zip: AdmZip, absDir: string, prefix: string): Promise<void> {
@@ -79,6 +81,7 @@ export async function publishMetaAppFromDirectory(
   if (!entryStat?.isFile()) {
     throw new Error(`Entry file not found: ${path.join(dir, entryFile)}`);
   }
+  const hasAppDoc = await fs.promises.stat(path.join(dir, 'APP.md')).then((stat) => stat.isFile()).catch(() => false);
 
   const title = (input.title ?? '').trim() || marker?.title || path.basename(dir);
   const appName = title.slice(0, 60);
@@ -128,5 +131,6 @@ export async function publishMetaAppFromDirectory(
     pinId: result.pinId,
     metaappUri: result.metaappUri,
     totalCost: result.chainWrite.totalCost,
+    hasAppDoc,
   };
 }
