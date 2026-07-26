@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import MarkdownContent, { isBotBrowserUri } from '../src/renderer/components/MarkdownContent';
+import MarkdownContent, { isBotBrowserUri, linkifyAgentInternetUris } from '../src/renderer/components/MarkdownContent';
 
 test('isBotBrowserUri recognizes agent internet schemes', () => {
   assert.equal(isBotBrowserUri('metaapp://abc123i0'), true);
@@ -42,4 +42,25 @@ test('dangerous schemes are stripped by the url transform', () => {
     }),
   );
   assert.doesNotMatch(markup, /javascript:/);
+});
+
+test('bare agent internet uris are linkified; existing links and code are untouched', () => {
+  const input = [
+    'play metaapp://6185c9f340c0be92c0466503c53c8c1b54e91dbd472c70c852aa127c35c72ecbi0 now',
+    'already [linked](metaid://idq1xyz)',
+    '`code metaapp://aaa`',
+    'see https://example.com',
+  ].join('\n');
+  const output = linkifyAgentInternetUris(input);
+  assert.match(output, /\[metaapp:\/\/6185c9f340c0be92c0466503c53c8c1b54e91dbd472c70c852aa127c35c72ecbi0\]\(metaapp:\/\/6185c9f340c0be92c0466503c53c8c1b54e91dbd472c70c852aa127c35c72ecbi0\)/);
+  // No double-wrapping of existing markdown links
+  assert.equal((output.match(/\[linked\]\(metaid:\/\/idq1xyz\)/g) || []).length, 1);
+  assert.match(output, /`code metaapp:\/\/aaa`/);
+  assert.doesNotMatch(output, /\[https:\/\/example\.com\]/);
+});
+
+test('linkify trims trailing punctuation and covers all agent internet schemes', () => {
+  const output = linkifyAgentInternetUris('open metaid://idq1abc, then pin://deadbeef.');
+  assert.match(output, /\[metaid:\/\/idq1abc\]\(metaid:\/\/idq1abc\),/);
+  assert.match(output, /\[pin:\/\/deadbeef\]\(pin:\/\/deadbeef\)\./);
 });

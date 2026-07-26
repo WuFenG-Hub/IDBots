@@ -19,5 +19,5 @@ test('generated bridge script contains the expected install markers and features
   assert.match(script, /idbots-browser-iframe-bridge/);
   assert.match(script, /get-content/);
   assert.match(script, /get-tab-info/);
-  assert.match(script, /-webkit-app-region: drag/);
+  assert.match(script, /window-drag-move/);
 });

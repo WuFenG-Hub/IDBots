@@ -16,12 +16,43 @@ const SYNTAX_HIGHLIGHTER_STYLE = {
   borderRadius: 0,
   background: '#282c34',
 };
-const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'preview-metaapp']);
+const SAFE_URL_PROTOCOLS = new Set(['http', 'https', 'mailto', 'tel', 'file', 'metaid', 'metaapp', 'map', 'metafile', 'pin', 'preview-metaapp']);
 
-const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|preview-metaapp):/i;
+const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-metaapp):/i;
 
 /** Whether an href points into the Bot Browser (metaid://, metaapp://, …) rather than the external browser. */
 export const isBotBrowserUri = (href: string): boolean => BOT_BROWSER_URI_PROTOCOL_RE.test(href.trim());
+
+const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\/[A-Za-z0-9][A-Za-z0-9._~%/@-]*/gi;
+const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\//i;
+const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`\n]*`)/g;
+const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
+
+const linkifyPlainSegment = (segment: string): string => (
+  segment.replace(AGENT_INTERNET_URI_RE, (rawMatch: string, offset: number, full: string) => {
+    // Already a markdown link/image destination — leave it alone.
+    if (full.slice(Math.max(0, offset - 2), offset) === '](') return rawMatch;
+    // Already inside a <uri> autolink — leave it alone.
+    if (full[offset - 1] === '<') return rawMatch;
+    const match = rawMatch.replace(TRAILING_URI_PUNCTUATION_RE, '');
+    if (!match) return rawMatch;
+    return `[${match}](${match})${rawMatch.slice(match.length)}`;
+  })
+);
+
+/**
+ * Turn bare Agent Internet URIs (metaid://, metaapp://, map://, metafile://,
+ * pin://, preview-metaapp://) in markdown text into markdown links so they
+ * render clickable everywhere (CoWork, A2A, Bot Browser panel). Existing
+ * markdown links and code spans/blocks are left untouched.
+ */
+export const linkifyAgentInternetUris = (content: string): string => {
+  if (!content || !AGENT_INTERNET_URI_HINT_RE.test(content)) return content;
+  return content
+    .split(CODE_SEGMENT_RE)
+    .map((segment) => (segment.startsWith('`') ? segment : linkifyPlainSegment(segment)))
+    .join('');
+};
 
 const encodeFileUrl = (url: string): string => {
   const encoded = encodeURI(url);
@@ -475,11 +506,15 @@ const createMarkdownComponents = (
     const hrefValue = typeof href === 'string' ? href.trim() : '';
 
     // Agent Internet URIs (metaid://, metaapp://, map://, metafile://, …) open
-    // inside the Bot Browser when the host provides an opener.
-    if (hrefValue && onOpenBotBrowserUri && isBotBrowserUri(hrefValue)) {
+    // inside the Bot Browser. Without an explicit opener, fall back to the
+    // app-wide DOM event so this works in every markdown surface.
+    if (hrefValue && isBotBrowserUri(hrefValue)) {
+      const openUri = onOpenBotBrowserUri ?? ((uri: string) => {
+        window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri } }));
+      });
       const handleUriClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
         e.preventDefault();
-        onOpenBotBrowserUri(hrefValue);
+        openUri(hrefValue);
       };
       return (
         <a
@@ -615,7 +650,10 @@ const MarkdownContent: React.FC<MarkdownContentProps> = ({
     () => createMarkdownComponents(resolveLocalFilePath, onOpenBotBrowserUri),
     [resolveLocalFilePath, onOpenBotBrowserUri]
   );
-  const normalizedContent = useMemo(() => encodeFileUrlsInMarkdown(content), [content]);
+  const normalizedContent = useMemo(
+    () => encodeFileUrlsInMarkdown(linkifyAgentInternetUris(content)),
+    [content]
+  );
   return (
     <div className={`markdown-content ${compact ? 'text-[13px] leading-5' : 'text-[15px] leading-6'} ${className}`}>
       <ReactMarkdown

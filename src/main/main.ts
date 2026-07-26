@@ -5359,6 +5359,17 @@ if (!gotTheLock) {
     return mainWindow?.isMaximized() ?? false;
   });
 
+  // Emulated drag from the Bot Browser iframe (CSS app-region can't reach it).
+  ipcMain.on('window:move-by', (_event, input: { dx?: unknown; dy?: unknown } | undefined) => {
+    const dx = Math.round(Number(input?.dx) || 0);
+    const dy = Math.round(Number(input?.dy) || 0);
+    if (!dx && !dy) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
+    const [x, y] = mainWindow.getPosition();
+    mainWindow.setPosition(x + dx, y + dy);
+  });
+
   ipcMain.on('window:showSystemMenu', (_event, position: { x?: number; y?: number } | undefined) => {
     showSystemMenu(position);
   });
