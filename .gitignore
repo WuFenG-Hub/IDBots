@@ -135,3 +135,4 @@ man_base_data_pebble/
 !tests/botBrowserMetaAppPublish.test.mjs
 !tests/botBrowserCoworkPanel.test.ts
 !tests/botBrowserSourceLocator.test.mjs
+!tests/metaAppSearchService.test.mjs
