@@ -111,6 +111,27 @@ test('publish zips the directory, excludes the fork marker, and maps manifest fi
   assert.equal(calls.manifest.title, 'Cool Game');
   assert.deepEqual(calls.options, { confirm: true });
   assert.equal(result.totalCost, 1234);
+  // Directory written by writeAppDir has no APP.md
+  assert.equal(result.hasAppDoc, false);
+});
+
+test('publish reports hasAppDoc=true when APP.md exists at the package root', async () => {
+  const workspace = makeTempDir();
+  const dir = writeAppDir(workspace);
+  fs.writeFileSync(path.join(dir, 'APP.md'), '# My App\n\nWhat it does and how to remix it.');
+  const calls = {};
+  const result = await publishMetaAppFromDirectory({
+    dir,
+    workspaceDir: workspace,
+    metabotId: 1,
+    metabotStore: {},
+    confirmPublish: async () => true,
+    deps: makeDeps(calls),
+  });
+  assert.equal(result.hasAppDoc, true);
+  // APP.md ships inside the zip
+  const entries = new AdmZip(calls.upload.data).getEntries().map((entry) => entry.entryName).sort();
+  assert.deepEqual(entries, ['APP.md', 'assets/app.js', 'index.html']);
 });
 
 test('publish aborts cleanly when the user cancels the confirmation dialog', async () => {
