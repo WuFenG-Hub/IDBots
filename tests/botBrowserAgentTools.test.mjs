@@ -183,3 +183,61 @@ test('bot_browser_fork_current_app is not registered when the host has no fork s
   const { byName } = makeHarness({ withoutFork: true });
   assert.equal(byName.bot_browser_fork_current_app, undefined);
 });
+
+test('bot_browser_read_page returns visible text for first-party pages', async () => {
+  const { byName } = makeHarness({
+    executeResult: {
+      content: {
+        tabId: 1,
+        uri: 'metaid://aaa',
+        title: 'Agent A',
+        contentType: 'text/html',
+        text: 'Hello from the homepage',
+        html: '<p>Hello</p>',
+        truncated: false,
+        extractedAt: 1,
+      },
+    },
+  });
+  const result = await byName.bot_browser_read_page.handler({});
+  assert.match(result.content[0].text, /Agent A/);
+  assert.match(result.content[0].text, /Hello from the homepage/);
+  assert.equal(result.isError, undefined);
+});
+
+test('bot_browser_read_page points MetaApp tabs at their local source directory', async () => {
+  const { byName } = makeHarness({
+    executeResult: {
+      content: {
+        tabId: 2,
+        uri: 'metaapp://' + 'b'.repeat(64) + 'i0',
+        title: 'Game B',
+        contentType: 'text/html',
+        text: '',
+        html: '',
+        truncated: false,
+        extractedAt: 1,
+      },
+    },
+    control: {
+      locateMetaAppSource: async () => ({
+        dir: '/cache/artifacts/game-b',
+        indexFile: 'index.html',
+        title: 'Game B',
+      }),
+    },
+  });
+  const result = await byName.bot_browser_read_page.handler({});
+  assert.match(result.content[0].text, /sandboxed frame/);
+  assert.match(result.content[0].text, /\/cache\/artifacts\/game-b/);
+});
+
+test('bot_browser_read_page reports when a page has no readable text', async () => {
+  const { byName } = makeHarness({
+    executeResult: {
+      content: { tabId: 1, uri: 'metaid://empty', title: null, contentType: 'text/html', text: '', html: '', truncated: false, extractedAt: 1 },
+    },
+  });
+  const result = await byName.bot_browser_read_page.handler({});
+  assert.match(result.content[0].text, /No readable text/);
+});

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import fs from 'fs';
+import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
 import type {
   BotBrowserTabCommand,
   BotBrowserTabCommandResult,
@@ -22,6 +23,12 @@ export type BotBrowserControl = {
     sourceUri: string;
     title: string;
   }>;
+  /** Locate a MetaApp's local source directory (installed app or extracted chain cache) without copying it. */
+  locateMetaAppSource?(input: { pinId: string }): Promise<{
+    dir: string;
+    indexFile: string;
+    title: string;
+  } | null>;
   publishMetaApp?(input: {
     sessionId: string;
     dir: string;
@@ -164,6 +171,43 @@ export function buildBotBrowserAgentTools(deps: {
     }
   );
 
+  const botBrowserReadPage = tool(
+    'bot_browser_read_page',
+    'Read the visible text content of a Bot Browser tab (the current tab by default). Works fully for first-party pages like bot homepages and pin inspectors. For MetaApps (metaapp:// URIs), the page renders inside a sandboxed frame that cannot be read from outside — this tool then returns the app\'s local SOURCE directory instead; read the source files with your file tools. Use this whenever the user asks what a page says or means, or before modifying a page. NEVER use Playwright or external browser automation — the Bot Browser is not a Playwright browser.',
+    {
+      tabId: z.number().optional(),
+    },
+    async (args: { tabId?: number }) => {
+      try {
+        const result = await controlBotBrowser.execute({ action: 'get-content', tabId: args.tabId });
+        const content = result.content;
+        if (content && typeof content.text === 'string' && content.text.trim()) {
+          const trimmed = content.text.length > 12000
+            ? `${content.text.slice(0, 12000)}\n…(truncated)`
+            : content.text;
+          return textResult(`Page: ${content.title ?? '(untitled)'}\nURI: ${content.uri ?? '(none)'}\n--- visible text ---\n${trimmed}`);
+        }
+        const uri = content?.uri ?? result.activeTab?.uri ?? '';
+        const pinId = parseMetaAppPinIdFromUri(uri);
+        if (pinId && controlBotBrowser.locateMetaAppSource) {
+          const source = await controlBotBrowser.locateMetaAppSource({ pinId });
+          if (source) {
+            return textResult([
+              `This tab renders the MetaApp "${source.title}" inside a sandboxed frame — its live page text cannot be extracted from outside (even the browser itself cannot read into that frame).`,
+              `The app's full source is on disk:`,
+              `  Directory: ${source.dir}`,
+              `  Entry file: ${source.indexFile}`,
+              `Read the source files there with your file tools to understand what the page shows.`,
+            ].join('\n'));
+          }
+        }
+        return textResult(`No readable text on this page (uri: ${uri || 'unknown'}). It may be empty, still loading, or rendered inside an opaque frame.`);
+      } catch (error) {
+        return textResult(`Failed to read the page: ${error instanceof Error ? error.message : String(error)}. ${SURFACE_HINT}`, true);
+      }
+    }
+  );
+
   const extraTools: unknown[] = [];
 
   if (controlBotBrowser.forkMetaApp) {
@@ -242,5 +286,5 @@ export function buildBotBrowserAgentTools(deps: {
     );
   }
 
-  return [botBrowserTabs, botBrowserOpenUri, botBrowserPreviewLocal, ...extraTools];
+  return [botBrowserTabs, botBrowserOpenUri, botBrowserPreviewLocal, botBrowserReadPage, ...extraTools];
 }

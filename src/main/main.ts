@@ -3993,6 +3993,20 @@ const getCoworkRunner = () => {
             getMetaAppArtifactDir: (id) => cache.getMetaAppArtifactDir(id),
           });
         },
+        locateMetaAppSource: async ({ pinId }) => {
+          const normalizedPinId = pinId.trim().toLowerCase();
+          const apps = await getMetaAppManager().listMetaApps();
+          const localApp = apps.find((app) => (app.sourcePinId || '').trim().toLowerCase() === normalizedPinId);
+          if (localApp?.appRoot) {
+            return { dir: localApp.appRoot, indexFile: localApp.entry || 'index.html', title: localApp.name || normalizedPinId };
+          }
+          const cache = getBotBrowserMetaAppCacheService();
+          const resolved = await cache.resolveMetaAppPin(normalizedPinId);
+          if (!resolved.ok) return null;
+          const artifact = await cache.getMetaAppArtifactDir(normalizedPinId);
+          if (!artifact) return null;
+          return { dir: artifact.artifactDir, indexFile: artifact.indexFile, title: resolved.data.title || normalizedPinId };
+        },
         publishMetaApp: async ({ sessionId, dir, title, intro, prompt }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
@@ -4032,7 +4046,11 @@ const getCoworkRunner = () => {
           ));
           return [
             '<browser_context>',
-            'The user is chatting from the Bot Browser side panel. You can control the Bot Browser with the bot_browser_open_uri and bot_browser_tabs tools.',
+            'The user is chatting from the Bot Browser side panel. You have bot_browser_* tools to control and READ the Bot Browser.',
+            'How to answer questions about what a page shows:',
+            '- Call bot_browser_read_page to get the visible text of the current page (works for bot homepages and other first-party pages).',
+            '- For MetaApp pages (metaapp://), the rendered frame is opaque by design; bot_browser_read_page will give you the app\'s local source directory — read the source files with your file tools instead.',
+            '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab title="${escapeXml(active.title ?? '')}">${escapeXml(active.uri)}</active_tab>`
               : '<active_tab />',
