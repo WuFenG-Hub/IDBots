@@ -4142,6 +4142,8 @@ const getCoworkRunner = () => {
             '- Otherwise call bot_browser_read_page: it returns visible text for first-party pages and resolves MetaApp pages to their source directory.',
             'How to FIND apps for the user:',
             '- When the user wants to find/discover an app (not open a known one), call search_metaapps first (query/tag/publisher/sinceDays), open the best match with bot_browser_open_uri, and offer 2-3 alternatives by name. For remix children of an app, use search_metaapps with mode="forks".',
+            '- Opening apps in the Bot Browser ALWAYS goes through search_metaapps and metaapp:// URIs. NEVER use open_metaapp or resolve_metaapp_url here: the local MetaApp launcher is retired in this surface.',
+            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser.',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`

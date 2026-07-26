@@ -5,7 +5,6 @@ import {
   clearBrowserSession,
 } from '../store/slices/browserCoworkSlice';
 import { coworkService } from './cowork';
-import { metaAppService } from './metaApp';
 import { skillService } from './skill';
 import type { CoworkSession } from '../types/cowork';
 
@@ -23,11 +22,11 @@ class BrowserCoworkService {
 
   private async buildCombinedSystemPrompt(): Promise<string | undefined> {
     const config = store.getState().cowork.config;
-    const [metaAppPrompt, skillPrompt] = await Promise.all([
-      metaAppService.getAutoRoutingPrompt(),
-      skillService.getAutoRoutingPrompt(),
-    ]);
-    return [metaAppPrompt, skillPrompt, config.systemPrompt]
+    // NOTE: the local MetaApp auto-routing prompt (<available_metaapps> →
+    // open_metaapp) is deliberately excluded for browser sessions — in this
+    // surface apps are opened on-chain via search_metaapps + metaapp:// URIs.
+    const skillPrompt = await skillService.getAutoRoutingPrompt();
+    return [skillPrompt, config.systemPrompt]
       .filter((part) => part?.trim())
       .join('\n\n') || undefined;
   }
