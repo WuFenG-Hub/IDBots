@@ -25,6 +25,10 @@ export type MetaAppSearchItem = {
   publisherGlobalMetaId: string;
   publisherMetaId: string;
   publisherAddress: string;
+  /** Publisher display name (aggregation API; not in the written contract but present in production). */
+  publisherName: string;
+  /** Publisher avatar pin id (metafile reference), when indexed. */
+  publisherAvatarId: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -83,6 +87,8 @@ function normalizeItem(raw: unknown): MetaAppSearchItem {
     publisherGlobalMetaId: text(record.publisherGlobalMetaId),
     publisherMetaId: text(record.publisherMetaId),
     publisherAddress: text(record.publisherAddress),
+    publisherName: text(record.publisherName),
+    publisherAvatarId: text(record.publisherAvatarId),
     createdAt: Number(record.createdAt) || 0,
     updatedAt: Number(record.updatedAt) || 0,
   };

@@ -77,6 +77,8 @@ const SEARCH_CANDIDATE = {
   publisherGlobalMetaId: 'idq1own123456789',
   publisherMetaId: '',
   publisherAddress: '',
+  publisherName: 'Loop Bot',
+  publisherAvatarId: '',
   createdAt: 1768284841,
   updatedAt: 1768284841,
   isOwn: true,
@@ -345,6 +347,9 @@ test('search_metaapps returns formatted candidates with isOwn marking and open g
   assert.match(text, /simplebuzz/);
   assert.match(text, /your MetaBot/);
   assert.match(text, new RegExp(`metaapp://${SEARCH_CANDIDATE.pinId}`));
+  // Publisher renders as a full-length metaid link with the display name — never shortened.
+  assert.match(text, new RegExp(`\\[Loop Bot\\]\\(metaid://${SEARCH_CANDIDATE.publisherGlobalMetaId}\\)`));
+  assert.doesNotMatch(text, /…/);
   assert.match(text, /2–3 alternatives/);
 });
 

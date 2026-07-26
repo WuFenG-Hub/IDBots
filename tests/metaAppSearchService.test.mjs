@@ -26,6 +26,8 @@ const SAMPLE_ITEM = {
   publisherGlobalMetaId: 'idq1abc',
   publisherMetaId: 'metaId1',
   publisherAddress: 'addr1',
+  publisherName: 'BOT-007',
+  publisherAvatarId: 'a275356ai0',
   createdAt: 1768284841,
   updatedAt: 1768284841,
 };
@@ -57,6 +59,8 @@ test('searchMetaApps builds the list URL and normalizes items', async () => {
   assert.equal(page.items.length, 1);
   assert.equal(page.items[0].title, '番茄钟');
   assert.deepEqual(page.items[0].tags, ['tool', 'timer']);
+  assert.equal(page.items[0].publisherName, 'BOT-007');
+  assert.equal(page.items[0].publisherAvatarId, 'a275356ai0');
   assert.equal(page.nextCursor, 'abc');
   assert.equal(page.hasMore, true);
 });
