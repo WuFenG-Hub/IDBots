@@ -206,11 +206,12 @@ test('bot_browser_read_page returns visible text for first-party pages', async (
 });
 
 test('bot_browser_read_page points MetaApp tabs at their local source directory', async () => {
+  const metaappUri = 'metaapp://' + 'b'.repeat(64) + 'i0';
   const { byName } = makeHarness({
     executeResult: {
       content: {
         tabId: 2,
-        uri: 'metaapp://' + 'b'.repeat(64) + 'i0',
+        uri: metaappUri,
         title: 'Game B',
         contentType: 'text/html',
         text: '',
@@ -218,9 +219,13 @@ test('bot_browser_read_page points MetaApp tabs at their local source directory'
         truncated: false,
         extractedAt: 1,
       },
+      info: {
+        id: 2, uri: metaappUri, title: 'Game B', isActive: false,
+        current: { renderer: { type: 'html-iframe', url: 'http://127.0.0.1:9123/browser-cache/metaapp-preview/p-1/index.html' } },
+      },
     },
     control: {
-      locateMetaAppSource: async () => ({
+      locateSourceByRenderUrl: async () => ({
         dir: '/cache/artifacts/game-b',
         indexFile: 'index.html',
         title: 'Game B',
@@ -232,12 +237,62 @@ test('bot_browser_read_page points MetaApp tabs at their local source directory'
   assert.match(result.content[0].text, /\/cache\/artifacts\/game-b/);
 });
 
-test('bot_browser_read_page reports when a page has no readable text', async () => {
+test('bot_browser_read_page resolves metaapp-rendered bot pages (metaid:// uri) to source', async () => {
+  const { calls, byName } = makeHarness({
+    executeResult: {
+      content: {
+        tabId: 1,
+        uri: 'metaid://idq1w8ye5psdkqrn6ugxxwvf5p4kkeuzufa6n9tt47',
+        title: 'Bob',
+        contentType: 'text/html',
+        text: '',
+        html: '',
+        truncated: false,
+        extractedAt: 1,
+      },
+      info: {
+        id: 1, uri: 'metaid://idq1w8ye5psdkqrn6ugxxwvf5p4kkeuzufa6n9tt47', title: 'Bob', isActive: true,
+        current: { renderer: { type: 'html-iframe', url: 'http://127.0.0.1:8899/bob-homepage/index.html' } },
+      },
+    },
+    control: {
+      locateSourceByRenderUrl: async ({ url }) => {
+        calls.renderUrl = url;
+        return { dir: '/METAAPPs/bob-homepage', indexFile: 'index.html', title: 'Bob Homepage' };
+      },
+    },
+  });
+  const result = await byName.bot_browser_read_page.handler({});
+  // Must NOT conclude the page is empty: the renderer is a MetaApp.
+  assert.doesNotMatch(result.content[0].text, /No readable text/);
+  assert.match(result.content[0].text, /Bob Homepage/);
+  assert.match(result.content[0].text, /\/METAAPPs\/bob-homepage/);
+  assert.equal(calls.renderUrl, 'http://127.0.0.1:8899/bob-homepage/index.html');
+});
+
+test('bot_browser_read_page suggests fetching remote renderer URLs when no local source exists', async () => {
+  const { byName } = makeHarness({
+    executeResult: {
+      content: { tabId: 1, uri: 'map://x', title: 'Remote', contentType: 'text/html', text: '', html: '', truncated: false, extractedAt: 1 },
+      info: { id: 1, uri: 'map://x', title: 'Remote', isActive: true, current: { renderer: { type: 'html-iframe', url: 'https://example.com/app/index.html' } } },
+    },
+    control: {
+      locateSourceByRenderUrl: async () => null,
+    },
+  });
+  const result = await byName.bot_browser_read_page.handler({});
+  assert.match(result.content[0].text, /https:\/\/example\.com\/app\/index\.html/);
+  assert.match(result.content[0].text, /fetch/i);
+});
+
+test('bot_browser_read_page reports empty only for first-party pages without text', async () => {
   const { byName } = makeHarness({
     executeResult: {
       content: { tabId: 1, uri: 'metaid://empty', title: null, contentType: 'text/html', text: '', html: '', truncated: false, extractedAt: 1 },
+      info: { id: 1, uri: 'metaid://empty', title: null, isActive: true, current: { renderer: { type: 'bot-homepage' } } },
     },
   });
   const result = await byName.bot_browser_read_page.handler({});
   assert.match(result.content[0].text, /No readable text/);
+  assert.match(result.content[0].text, /bot-homepage/);
 });
