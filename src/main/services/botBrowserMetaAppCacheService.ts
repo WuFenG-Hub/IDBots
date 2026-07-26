@@ -76,6 +76,8 @@ export type BotBrowserMetaAppCacheService = {
   }): Promise<{ previewId: string; localPreviewUrl: string }>;
   /** Local extracted source directory of a chain MetaApp, when already cached. */
   getMetaAppArtifactDir(pinId: string): Promise<{ artifactDir: string; indexFile: string } | null>;
+  /** Resolve a live preview session id (from a /browser-cache/metaapp-preview/ URL) to its source directory. */
+  getPreviewSessionArtifactDir(previewId: string): Promise<{ artifactDir: string; indexFile: string } | null>;
   getCache(): Promise<BrowserCommandResult<BrowserCacheSnapshot>>;
   clearCache(input?: BrowserCacheClearInput): Promise<BrowserCommandResult<BrowserCacheClearResult>>;
   stop(): Promise<void>;
@@ -777,6 +779,13 @@ export function createBotBrowserMetaAppCacheService(
     return { artifactDir, indexFile };
   };
 
+  const getPreviewSessionArtifactDir = async (previewId: string): Promise<{ artifactDir: string; indexFile: string } | null> => {
+    const session = sessions.get(previewId);
+    if (!session || session.expiresAt <= now()) return null;
+    if (!await fileExists(path.join(session.artifactDir, session.indexFile))) return null;
+    return { artifactDir: session.artifactDir, indexFile: session.indexFile };
+  };
+
   const clearByCacheKey = async (cacheKey: string): Promise<{ clearedArtifacts: number; clearedPinRecords: number }> => {
     const normalizedCacheKey = validateCacheKey(cacheKey);
     const pinRecordFiles = await listPinRecordFiles();
@@ -810,6 +819,8 @@ export function createBotBrowserMetaAppCacheService(
     createLocalPreviewSession,
 
     getMetaAppArtifactDir,
+
+    getPreviewSessionArtifactDir,
 
     async getCache() {
       try {
