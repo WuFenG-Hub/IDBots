@@ -86,9 +86,14 @@ import { startOrchestrator as startCognitiveOrchestrator, stopOrchestrator as st
 import {
   endPrivateChatA2AConversation,
   interruptPrivateChatA2AGuidanceTurnBeforeOutput,
+  recordOutgoingPrivateChatA2ADisplay,
   startPrivateChatDaemon,
   stopPrivateChatDaemon,
 } from './services/privateChatDaemon';
+import {
+  startPrivateChatBackfill,
+  stopPrivateChatBackfill,
+} from './services/privateChatBackfillService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -2994,6 +2999,25 @@ const startSqliteDaemons = (): void => {
     undefined,
     (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null
   );
+
+  // Periodically reconcile private chat history with the MetaSO API so
+  // messages missed by the socket push are recovered and processed.
+  startPrivateChatBackfill({
+    db: getStore().getDatabase(),
+    saveDb: getStore().getSaveFunction(),
+    getLocalIdentities: () => getMetabotStore().listMetabots()
+      .filter((metabot) => metabot.enabled !== false && toSafeString(metabot.globalmetaid).trim())
+      .map((metabot) => ({
+        metabotId: metabot.id,
+        globalMetaId: toSafeString(metabot.globalmetaid).trim(),
+      })),
+    historySync: getPrivateChatHistorySyncService(),
+    shouldRun: () => {
+      const config = getListenerConfigFromStore();
+      return config.enabled !== false && config.privateChats !== false;
+    },
+    emitLog: (msg) => console.log(msg),
+  });
 };
 
 const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestartState> => {
@@ -3011,6 +3035,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   }
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
+  stopPrivateChatBackfill();
   await resetSqliteBackedSingletons();
   return restartState;
 };
@@ -5570,11 +5595,43 @@ if (!gotTheLock) {
         createPin: async (id, payload) => createPin(metabotStoreInst, id, payload),
       });
 
+      // Make the sent message visible in the local A2A session right away.
+      // Without this the outgoing bubble only appears if the socket echo or a
+      // later history backfill re-imports the pin. Display failures must not
+      // fail the send itself — the pin is already on-chain.
+      let a2aSessionId: string | null = null;
+      let a2aExternalConversationId: string | null = null;
+      try {
+        const recorded = recordOutgoingPrivateChatA2ADisplay({
+          coworkStore: getCoworkStore(),
+          getMetabotById: (id) => metabotStoreInst.getMetabotById(id),
+          metabotId,
+          peerGlobalMetaId,
+          content,
+          chain: { txids: sent.txids, pinId: sent.pinId },
+          extraMetadata: {
+            privateChatDeliveryStatus: 'sent',
+            suppressRunningStatus: true,
+          },
+        });
+        if (recorded) {
+          a2aSessionId = recorded.sessionId;
+          a2aExternalConversationId = recorded.externalConversationId;
+          if (recorded.message) {
+            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+          }
+        }
+      } catch (displayError) {
+        console.warn('[BotBrowser] Failed to display outgoing private chat message:', displayError);
+      }
+
       return {
         success: true,
         pinId: sent.pinId,
         txids: sent.txids,
         peerGlobalMetaId,
+        sessionId: a2aSessionId,
+        externalConversationId: a2aExternalConversationId,
       };
     } catch (error) {
       return {

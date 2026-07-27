@@ -33,6 +33,7 @@ import {
   type ServiceOrderOutputType,
 } from './orderPayment';
 import type { MetabotStore } from '../metabotStore';
+import type { Metabot } from '../types/metabot';
 import type { CoworkConversationMapping, CoworkMessage, CoworkMessageMetadata, CoworkStore } from '../coworkStore';
 import type { MemoryBackend } from '../memory/memoryBackend';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
@@ -80,6 +81,7 @@ import {
   classifySimplemsgContent,
   type SimplemsgProtocolTag,
 } from './simplemsgPeerConversation';
+import { ensureCoworkA2ASession } from './coworkEnsureA2ASession';
 
 const POLL_INTERVAL_MS = 5_000;
 const PRIVATE_CHAT_SESSION_GAP_MS = 5 * 60 * 1000;
@@ -1694,6 +1696,93 @@ export function appendPrivateChatA2AMessage(params: {
   return message;
 }
 
+export interface RecordOutgoingPrivateChatA2ADisplayResult {
+  sessionId: string;
+  externalConversationId: string;
+  message: CoworkMessage | null;
+  duplicate: boolean;
+}
+
+/**
+ * Make a locally sent private-chat message visible in the peer's A2A session.
+ * Ensures the canonical metaweb_private session/mapping exists (creating it
+ * for conversations started from the Bot Browser), appends the outgoing
+ * assistant turn, and dedupes by chain identity so the later socket echo or
+ * history backfill of the same pin does not produce a second bubble.
+ */
+export function recordOutgoingPrivateChatA2ADisplay(params: {
+  coworkStore: CoworkStore;
+  getMetabotById: (metabotId: number) => Pick<Metabot, 'id' | 'name' | 'globalmetaid'> | null;
+  metabotId: number;
+  peerGlobalMetaId: string;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+  content: string;
+  chain?: { txId?: unknown; txids?: unknown; pinId?: unknown };
+  extraMetadata?: CoworkMessageMetadata;
+  emitToRenderer?: RendererEmitter;
+}): RecordOutgoingPrivateChatA2ADisplayResult | null {
+  const content = String(params.content ?? '');
+  if (!content.trim()) return null;
+
+  const ensured = ensureCoworkA2ASession({
+    coworkStore: params.coworkStore,
+    getMetabotById: params.getMetabotById,
+    input: {
+      localMetabotId: params.metabotId,
+      peerGlobalMetaId: params.peerGlobalMetaId,
+      peerName: params.peerName,
+      peerAvatar: params.peerAvatar,
+    },
+  });
+
+  const chainMetadata = buildPrivateChatA2AChainMetadata(params.chain ?? {});
+  const chainPinId = normalizePrivateChatPinId(chainMetadata.pinId);
+  const chainTxid = normalizeA2AChainTxid(chainMetadata.txid);
+  if (chainPinId || chainTxid) {
+    const identityRow = { pin_id: chainPinId, tx_id: chainTxid } as PrivateChatMessageRow;
+    const alreadyTracked = params.coworkStore.getSession(ensured.session.id)?.messages.some((message) => (
+      message.type === 'assistant'
+      && message.metadata?.sourceChannel === 'metaweb_private'
+      && metadataHasPrivateChatChainIdentity(message.metadata, identityRow)
+    )) ?? false;
+    if (alreadyTracked) {
+      return {
+        sessionId: ensured.session.id,
+        externalConversationId: ensured.externalConversationId,
+        message: null,
+        duplicate: true,
+      };
+    }
+  }
+
+  const message = appendPrivateChatA2AMessage({
+    coworkStore: params.coworkStore,
+    sessionId: ensured.session.id,
+    externalConversationId: ensured.externalConversationId,
+    type: 'assistant',
+    content,
+    extraMetadata: {
+      simplemsgKind: 'private_chat',
+      ...chainMetadata,
+      ...(params.extraMetadata ?? {}),
+    },
+    emitToRenderer: params.emitToRenderer,
+  });
+  params.coworkStore.touchConversationMapping(
+    'metaweb_private',
+    ensured.externalConversationId,
+    params.metabotId,
+  );
+
+  return {
+    sessionId: ensured.session.id,
+    externalConversationId: ensured.externalConversationId,
+    message,
+    duplicate: false,
+  };
+}
+
 function getPrivateChatSkillWaitNoticeKey(row: PrivateChatMessageRow): string {
   return String(row.pin_id || row.id || '').trim();
 }
@@ -2522,70 +2611,47 @@ async function processOne(
       ? metabotStore.getMetabotByGlobalMetaId(outgoingFromMetaId)
       : null;
     if (senderMetabot) {
-      const externalConversationId = buildCanonicalPrivateConversationExternalConversationId(toGlobalMetaId);
-      const mapping = coworkStore.getConversationMapping(
-        'metaweb_private',
-        externalConversationId,
-        senderMetabot.id
-      );
-      if (mapping) {
-        const plaintext = await resolveOutgoingPrivateChatPlaintext({
-          db,
-          row,
-          metabot: senderMetabot,
-          metabotStore,
-          toGlobalMetaId,
-          emitLog,
-        });
-        if (plaintext) {
-          const isHandshake = isPrivateChatHandshakePlaintext(plaintext);
-          const chainMetadata = buildPrivateChatA2AChainMetadata({
-            txId: row.tx_id,
-            pinId: row.pin_id,
-          });
-          const chainPinId = chainMetadata.pinId ?? '';
-          const chainTxid = chainMetadata.txid ?? '';
-          const session = coworkStore.getSession(mapping.coworkSessionId);
-          const alreadySynced = chainPinId || chainTxid
-            ? session?.messages.some((m) => {
-                const meta = (m.metadata ?? {}) as Record<string, unknown>;
-                const mp = typeof meta.pinId === 'string' ? meta.pinId.trim() : '';
-                const mt = typeof meta.txid === 'string' ? (meta.txid as string).trim() : '';
-                return (chainPinId && mp === chainPinId) || (chainTxid && mt === chainTxid);
-              })
-            : false;
-          if (isHandshake) {
-            emitLog(
-              `[PrivateChat] Outgoing sync: skipping transport handshake ${normalizeHandshakeWord(plaintext)}.`
-            );
-          } else if (alreadySynced) {
-            emitLog(
-              `[PrivateChat] Outgoing sync: message already tracked in session, skipping duplicate.`
-            );
-          } else {
-            appendPrivateChatA2AMessage({
+      // Resolve the plaintext even when no A2A session mapping exists yet:
+      // conversations started from the Bot Browser send path have no mapping
+      // until the first inbound message, and the outgoing echo must still
+      // become visible locally.
+      const plaintext = await resolveOutgoingPrivateChatPlaintext({
+        db,
+        row,
+        metabot: senderMetabot,
+        metabotStore,
+        toGlobalMetaId,
+        emitLog,
+      });
+      if (plaintext) {
+        if (isPrivateChatHandshakePlaintext(plaintext)) {
+          emitLog(
+            `[PrivateChat] Outgoing sync: skipping transport handshake ${normalizeHandshakeWord(plaintext)}.`
+          );
+        } else {
+          try {
+            const recorded = recordOutgoingPrivateChatA2ADisplay({
               coworkStore,
-              sessionId: mapping.coworkSessionId,
-              externalConversationId,
-              type: 'assistant',
+              getMetabotById: (metabotId) => metabotStore.getMetabotById(metabotId),
+              metabotId: senderMetabot.id,
+              peerGlobalMetaId: toGlobalMetaId,
               content: plaintext,
-              senderGlobalMetaId: outgoingFromMetaId,
-              senderName: senderMetabot.name ?? null,
-              extraMetadata: {
-                simplemsgKind: 'private_chat',
-                ...chainMetadata,
-              },
+              chain: { txId: row.tx_id, pinId: row.pin_id },
               emitToRenderer,
             });
+            if (recorded?.duplicate) {
+              emitLog(
+                `[PrivateChat] Outgoing sync: message already tracked in session, skipping duplicate.`
+              );
+            } else if (recorded) {
+              emitLog(
+                `[PrivateChat] Synced outgoing message to A2A session for peer ${toGlobalMetaId.slice(0, 12)}…`
+              );
+            }
+          } catch (error) {
+            rethrowSqliteWasmBoundsError(error);
             emitLog(
-              `[PrivateChat] Synced outgoing message to A2A session for peer ${toGlobalMetaId.slice(0, 12)}…`
-            );
-          }
-          if (!isHandshake) {
-            coworkStore.touchConversationMapping(
-              'metaweb_private',
-              externalConversationId,
-              senderMetabot.id
+              `[PrivateChat] Outgoing sync failed for peer ${toGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
             );
           }
         }

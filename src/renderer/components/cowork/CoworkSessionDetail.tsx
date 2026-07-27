@@ -11,6 +11,7 @@ import type {
 import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
 import A2AMessageItem from './A2AMessageItem';
+import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
 import {
   CheckIcon,
@@ -2031,7 +2032,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     && NON_TEXT_SERVICE_OUTPUT_TYPES.includes(serviceOrderOutputType)
   );
   const visibleA2AMessages = useMemo(() => (
-    currentSession?.messages.filter((message) => !shouldHideControlMessage(message)) ?? []
+    currentSession?.messages.filter((message) => (
+      !shouldHideControlMessage(message) && !shouldHideA2AInternalMessage(message)
+    )) ?? []
   ), [currentSession?.messages]);
   const a2aPeerGlobalMetaId = useMemo(() => {
     if (currentSession?.sessionType !== 'a2a') return null;
