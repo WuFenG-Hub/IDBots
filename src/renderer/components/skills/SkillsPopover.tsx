@@ -1,9 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import { MagnifyingGlassIcon, Cog6ToothIcon, PuzzlePieceIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { RootState } from '../../store';
 import { Skill } from '../../types/skill';
+import { placePopoverAbove } from '../../utils/anchoredPopover';
+
+const SKILLS_POPOVER_WIDTH = 288; // w-72
 
 interface SkillsPopoverProps {
   isOpen: boolean;
@@ -22,6 +25,7 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [maxListHeight, setMaxListHeight] = useState(256); // default max-h-64 = 256px
+  const [popoverStyle, setPopoverStyle] = useState<React.CSSProperties | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const skills = useSelector((state: RootState) => state.skill.skills);
@@ -34,6 +38,43 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       s.description.toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+  // Position the popover with position:fixed so it escapes the sidebar's
+  // relative/overflow-hidden ancestors and is anchored purely to the button.
+  // It grows to the left by default (right edge aligned to the button) and
+  // flips to the right when there isn't enough room on the left.
+  const updatePlacement = useCallback(() => {
+    if (!anchorRef.current || !popoverRef.current) return;
+    const anchorRect = anchorRef.current.getBoundingClientRect();
+    const popoverRect = popoverRef.current.getBoundingClientRect();
+    const placement = placePopoverAbove(
+      anchorRect,
+      { width: popoverRect.width, height: popoverRect.height },
+      SKILLS_POPOVER_WIDTH,
+    );
+    setPopoverStyle({
+      position: 'fixed',
+      top: placement.top,
+      left: placement.left,
+      width: placement.width,
+    });
+  }, [anchorRef]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    updatePlacement();
+  }, [isOpen, updatePlacement, filteredSkills.length]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handle = () => updatePlacement();
+    window.addEventListener('resize', handle);
+    window.addEventListener('scroll', handle, true);
+    return () => {
+      window.removeEventListener('resize', handle);
+      window.removeEventListener('scroll', handle, true);
+    };
+  }, [isOpen, updatePlacement]);
 
   // Calculate available height and focus search input when popover opens
   useEffect(() => {
@@ -52,6 +93,7 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
     }
     if (!isOpen) {
       setSearchQuery('');
+      setPopoverStyle(null);
     }
   }, [isOpen, anchorRef]);
 
@@ -102,7 +144,8 @@ const SkillsPopover: React.FC<SkillsPopoverProps> = ({
   return (
     <div
       ref={popoverRef}
-      className="absolute bottom-full left-0 mb-2 w-72 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-xl z-50"
+      className="fixed w-72 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-xl z-50"
+      style={popoverStyle ?? { visibility: 'hidden' }}
     >
       {/* Search input */}
       <div className="p-3 border-b dark:border-claude-darkBorder border-claude-border">

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
 import { FolderPlusIcon, ClockIcon, ChevronRightIcon, FolderIcon, FolderOpenIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { coworkService } from '../../services/cowork';
 import { getCompactFolderName } from '../../utils/path';
+import { placePopoverAbove } from '../../utils/anchoredPopover';
 
 // Custom tooltip for folder paths
 interface PathTooltipProps {
@@ -64,6 +65,46 @@ const FolderSelectorPopover: React.FC<FolderSelectorPopoverProps> = ({
   const submenuRef = useRef<HTMLDivElement>(null);
   const recentFoldersRef = useRef<HTMLDivElement>(null);
   const tooltipTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [popoverStyle, setPopoverStyle] = useState<React.CSSProperties | null>(null);
+
+  const FOLDER_POPOVER_WIDTH = 224; // w-56
+
+  // Position the main popover with position:fixed so it is anchored purely to
+  // the folder button and escapes the sidebar's relative/overflow-hidden
+  // ancestors (otherwise it lands at the panel's top-left). Grows to the left by
+  // default and flips to the right when space is tight.
+  const updatePlacement = useCallback(() => {
+    if (!anchorRef.current || !popoverRef.current) return;
+    const anchorRect = anchorRef.current.getBoundingClientRect();
+    const popoverRect = popoverRef.current.getBoundingClientRect();
+    const placement = placePopoverAbove(
+      anchorRect,
+      { width: popoverRect.width, height: popoverRect.height },
+      FOLDER_POPOVER_WIDTH,
+    );
+    setPopoverStyle({
+      position: 'fixed',
+      top: placement.top,
+      left: placement.left,
+      width: placement.width,
+    });
+  }, [anchorRef]);
+
+  useLayoutEffect(() => {
+    if (!isOpen) return;
+    updatePlacement();
+  }, [isOpen, updatePlacement]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const handle = () => updatePlacement();
+    window.addEventListener('resize', handle);
+    window.addEventListener('scroll', handle, true);
+    return () => {
+      window.removeEventListener('resize', handle);
+      window.removeEventListener('scroll', handle, true);
+    };
+  }, [isOpen, updatePlacement]);
 
   // Cleanup tooltip timer on unmount
   useEffect(() => {
@@ -216,7 +257,8 @@ const FolderSelectorPopover: React.FC<FolderSelectorPopoverProps> = ({
       {/* Main popover */}
       <div
         ref={popoverRef}
-        className="absolute bottom-full left-0 mb-2 w-56 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg z-50"
+        className="fixed w-56 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg z-50"
+        style={popoverStyle ?? { visibility: 'hidden' }}
       >
         {showOpenCurrentFolder && (
           <button
