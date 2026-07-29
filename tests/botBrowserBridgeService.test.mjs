@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -93,15 +94,10 @@ test('sanitizeMetaAppBridgeActor exposes only MetaID actor display fields', () =
   assert.equal('capabilities' in actor, false);
 });
 
-test('writeMetaIdPin validates payload before confirmation and signer execution', async () => {
-  let confirmCalls = 0;
+test('writeMetaIdPin validates payload before issuing authorization or executing the signer', async () => {
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
-    confirmPinWrite: async () => {
-      confirmCalls += 1;
-      return true;
-    },
     createPin: async () => {
       createPinCalls += 1;
       return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
@@ -110,6 +106,7 @@ test('writeMetaIdPin validates payload before confirmation and signer execution'
 
   const result = await service.writeMetaIdPin({
     actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
     payload: {
       operation: 'create',
       path: '/protocols/simplebuzz',
@@ -122,20 +119,25 @@ test('writeMetaIdPin validates payload before confirmation and signer execution'
 
   assert.equal(result.ok, false);
   assert.equal(result.code, 'invalid_params');
-  assert.equal(confirmCalls, 0);
   assert.equal(createPinCalls, 0);
 });
 
-test('writeMetaIdPin requires a current actor and handles user cancellation', async () => {
+test('phase 1 returns confirmation plus the exact host confirmRequest and Cancel performs no write', async () => {
+  let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
-    confirmPinWrite: async () => false,
     createPin: async () => {
-      throw new Error('signer should not run');
+      createPinCalls += 1;
+      return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
     },
+    now: () => 1_700_000_000_000,
+    confirmationTtlMs: 60_000,
+    createConfirmationId: () => 'confirmation-1',
+    createConfirmationToken: () => 'opaque-token-1',
   });
 
   const missingActor = await service.writeMetaIdPin({
+    resourceUri: 'metaapp://app123i0',
     payload: {
       operation: 'create',
       path: '/protocols/simplebuzz',
@@ -148,8 +150,36 @@ test('writeMetaIdPin requires a current actor and handles user cancellation', as
   assert.equal(missingActor.ok, false);
   assert.equal(missingActor.code, 'actor_required');
 
-  const cancelled = await service.writeMetaIdPin({
+  const phaseOne = await service.writeMetaIdPin({
     actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload({
+      contentType: 'text/plain',
+      payload: { encoding: 'utf8', value: 'hello' },
+      display: { title: 'Publish demo', summary: 'Writes one PIN.' },
+    }),
+  });
+
+  assert.equal(phaseOne.ok, false);
+  assert.equal(phaseOne.state, 'manual_action_required');
+  assert.equal(phaseOne.code, 'manual_action_required');
+  assert.deepEqual(phaseOne.data.confirmation, {
+    actor: {
+      uri: 'metaid://idq1abc',
+      globalMetaId: 'idq1abc',
+      name: 'Alpha Bot',
+    },
+    operation: 'create',
+    path: '/protocols/simplebuzz',
+    contentType: 'text/plain',
+    payloadSize: 5,
+    confirmationId: 'confirmation-1',
+    expiresAt: 1_700_000_060_000,
+    display: { title: 'Publish demo', summary: 'Writes one PIN.' },
+  });
+  assert.deepEqual(phaseOne.data.confirmRequest, {
+    resourceUri: 'metaapp://app123i0',
+    kind: 'metaid-pin-write',
     payload: {
       operation: 'create',
       path: '/protocols/simplebuzz',
@@ -158,21 +188,22 @@ test('writeMetaIdPin requires a current actor and handles user cancellation', as
       contentType: 'text/plain',
       payload: { encoding: 'utf8', value: 'hello' },
       display: { title: 'Publish demo', summary: 'Writes one PIN.' },
+      confirmed: true,
+      hostConfirmation: { id: 'confirmation-1', token: 'opaque-token-1' },
     },
   });
-  assert.equal(cancelled.ok, false);
-  assert.equal(cancelled.code, 'user_cancelled');
+  // ABC Cancel ends here: no confirmed request is sent to the host.
+  assert.equal(createPinCalls, 0);
 });
 
-test('writeMetaIdPin confirms and writes create, modify, and revoke with operation-specific path semantics', async () => {
-  const confirmations = [];
+test('phase 2 accepts only the exact confirmRequest and writes create, modify, and revoke once each', async () => {
+  const issuedConfirmRequests = [];
   const writes = [];
+  let confirmationSequence = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
-    confirmPinWrite: async (details) => {
-      confirmations.push(details);
-      return true;
-    },
+    createConfirmationId: () => `confirmation-${++confirmationSequence}`,
+    createConfirmationToken: () => `opaque-token-${confirmationSequence}`,
     createPin: async (_store, metabotId, metaidPayload, options) => {
       writes.push({ metabotId, metaidPayload, options });
       return { pinId: `${metaidPayload.operation}-pin`, txids: [`${metaidPayload.operation}-tx`], totalCost: 1 };
@@ -200,10 +231,18 @@ test('writeMetaIdPin confirms and writes create, modify, and revoke with operati
   ];
 
   for (const request of requests) {
+    const phaseOne = await service.writeMetaIdPin({
+      actorId: 'idbots-metabot-7',
+      resourceUri: 'metaapp://app123i0',
+      payload: request,
+    });
+    assert.equal(phaseOne.state, 'manual_action_required');
+    assert.equal(writes.length, requests.indexOf(request));
+    issuedConfirmRequests.push(phaseOne.data.confirmRequest);
+
     const result = await service.writeMetaIdPin({
       actorId: 'idbots-metabot-7',
-      network: 'mvc',
-      payload: request,
+      ...phaseOne.data.confirmRequest,
     });
 
     assert.equal(result.ok, true);
@@ -240,7 +279,7 @@ test('writeMetaIdPin confirms and writes create, modify, and revoke with operati
         payload: '{"ok":true}',
         hasOriginalId: false,
         hasAppAction: false,
-        network: 'mvc',
+        network: undefined,
       },
       {
         metabotId: 7,
@@ -250,7 +289,7 @@ test('writeMetaIdPin confirms and writes create, modify, and revoke with operati
         payload: '{"ok":true}',
         hasOriginalId: false,
         hasAppAction: false,
-        network: 'mvc',
+        network: undefined,
       },
       {
         metabotId: 7,
@@ -260,46 +299,196 @@ test('writeMetaIdPin confirms and writes create, modify, and revoke with operati
         payload: '',
         hasOriginalId: false,
         hasAppAction: false,
-        network: 'mvc',
+        network: undefined,
       },
     ],
   );
-  assert.equal(confirmations.length, 3);
-  assert.deepEqual(confirmations[0], {
-    actor: {
-      uri: 'metaid://idq1abc',
-      globalMetaId: 'idq1abc',
-      name: 'Alpha Bot',
-    },
-    operation: 'create',
-    path: '/protocols/simplebuzz',
-    contentType: 'application/json',
-    payloadSize: 11,
-    display: {
-      title: 'Demo title',
-      summary: 'Demo summary',
-    },
+  assert.equal(issuedConfirmRequests[1].payload.originalId, MODIFY_TARGET_PIN_ID);
+  assert.equal(issuedConfirmRequests[1].payload.appAction, 'update-profile');
+  assert.deepEqual(issuedConfirmRequests[2].payload.payload, {
+    encoding: 'utf8',
+    value: '',
   });
-  assert.deepEqual(confirmations[1].bridgeMetadata, {
-    originalId: MODIFY_TARGET_PIN_ID,
-    appAction: 'update-profile',
+  assert.deepEqual(issuedConfirmRequests[2].payload.hostConfirmation, {
+    id: 'confirmation-3',
+    token: 'opaque-token-3',
   });
-  assert.deepEqual(confirmations[2].bridgeMetadata, {
-    originalId: REVOKE_TARGET_PIN_ID,
-    appAction: 'remove-profile',
-  });
-  assert.equal(confirmations[2].payloadSize, 0);
+  assert.equal(writes.length, 3);
 });
 
-test('writeMetaIdPin rejects modify and revoke slash paths before confirmation or signer execution', async () => {
-  let confirmCalls = 0;
+test('invalid and expired confirmations are rejected, and a consumed token cannot replay', async () => {
+  let currentTime = 1_000;
+  let confirmationSequence = 0;
   let createPinCalls = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
-    confirmPinWrite: async () => {
-      confirmCalls += 1;
-      return true;
+    now: () => currentTime,
+    confirmationTtlMs: 1_000,
+    createConfirmationId: () => `confirmation-${++confirmationSequence}`,
+    createConfirmationToken: () => `opaque-token-${confirmationSequence}`,
+    createPin: async () => {
+      createPinCalls += 1;
+      return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
     },
+  });
+
+  const forged = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: { ...createPinWritePayload(), confirmed: true },
+  });
+  assert.equal(forged.ok, false);
+  assert.equal(forged.code, 'invalid_request');
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  const badTokenPayload = structuredClone(phaseOne.data.confirmRequest.payload);
+  badTokenPayload.hostConfirmation.token = 'wrong-token';
+  const invalid = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: badTokenPayload,
+  });
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.code, 'invalid_request');
+  assert.equal(createPinCalls, 0);
+
+  const success = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(success.ok, true);
+  assert.equal(createPinCalls, 1);
+
+  const replay = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(replay.ok, false);
+  assert.equal(replay.code, 'invalid_request');
+  assert.equal(createPinCalls, 1);
+
+  const expiring = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload({ payload: { encoding: 'utf8', value: 'expires' } }),
+  });
+  currentTime = expiring.data.confirmation.expiresAt;
+  const renewed = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...expiring.data.confirmRequest,
+  });
+  assert.equal(renewed.ok, false);
+  assert.equal(renewed.state, 'manual_action_required');
+  assert.notEqual(renewed.data.confirmation.confirmationId, expiring.data.confirmation.confirmationId);
+  assert.equal(createPinCalls, 1);
+});
+
+test('authorization is consumed before createPin starts so in-flight replay is rejected', async () => {
+  let createPinCalls = 0;
+  let phaseTwoInput;
+  let replayDuringCreatePin;
+  let service;
+  service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    createPin: async () => {
+      createPinCalls += 1;
+      replayDuringCreatePin = await service.writeMetaIdPin(phaseTwoInput);
+      return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
+    },
+  });
+
+  const phaseOne = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  phaseTwoInput = {
+    actorId: 'idbots-metabot-7',
+    ...phaseOne.data.confirmRequest,
+  };
+  const result = await service.writeMetaIdPin(phaseTwoInput);
+
+  assert.equal(result.ok, true);
+  assert.equal(createPinCalls, 1);
+  assert.equal(replayDuringCreatePin.ok, false);
+  assert.equal(replayDuringCreatePin.code, 'invalid_request');
+});
+
+test('actor, resourceUri, or normalized write changes invalidate the authorization', async () => {
+  const metabot = createMetabot();
+  let createPinCalls = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(metabot),
+    createPin: async () => {
+      createPinCalls += 1;
+      return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
+    },
+  });
+
+  const actorBound = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  metabot.globalmetaid = 'idq1changed';
+  const actorChanged = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...actorBound.data.confirmRequest,
+  });
+  assert.equal(actorChanged.code, 'invalid_request');
+  metabot.globalmetaid = 'IDQ1ABC';
+  const actorRetry = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...actorBound.data.confirmRequest,
+  });
+  assert.equal(actorRetry.code, 'invalid_request');
+
+  const resourceBound = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  const resourceChanged = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...resourceBound.data.confirmRequest,
+    resourceUri: 'metaapp://other456i0',
+  });
+  assert.equal(resourceChanged.code, 'invalid_request');
+  const resourceRetry = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...resourceBound.data.confirmRequest,
+  });
+  assert.equal(resourceRetry.code, 'invalid_request');
+
+  const contentBound = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: createPinWritePayload(),
+  });
+  const changedPayload = structuredClone(contentBound.data.confirmRequest.payload);
+  changedPayload.payload.value = '{"ok":false}';
+  const contentChanged = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: changedPayload,
+  });
+  assert.equal(contentChanged.code, 'invalid_request');
+  const contentRetry = await service.writeMetaIdPin({
+    actorId: 'idbots-metabot-7',
+    ...contentBound.data.confirmRequest,
+  });
+  assert.equal(contentRetry.code, 'invalid_request');
+  assert.equal(createPinCalls, 0);
+});
+
+test('writeMetaIdPin rejects modify and revoke slash paths before authorization or signer execution', async () => {
+  let createPinCalls = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
     createPin: async () => {
       createPinCalls += 1;
       return { pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 };
@@ -309,6 +498,7 @@ test('writeMetaIdPin rejects modify and revoke slash paths before confirmation o
   for (const operation of ['modify', 'revoke']) {
     const result = await service.writeMetaIdPin({
       actorId: 'idbots-metabot-7',
+      resourceUri: 'metaapp://app123i0',
       payload: createPinWritePayload({
         operation,
         path: '/protocols/simplebuzz',
@@ -321,6 +511,7 @@ test('writeMetaIdPin rejects modify and revoke slash paths before confirmation o
 
   const malformedTarget = await service.writeMetaIdPin({
     actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
     payload: createPinWritePayload({
       operation: 'modify',
       path: '@not-a-pin',
@@ -329,8 +520,31 @@ test('writeMetaIdPin rejects modify and revoke slash paths before confirmation o
 
   assert.equal(malformedTarget.ok, false);
   assert.equal(malformedTarget.code, 'invalid_params');
-  assert.equal(confirmCalls, 0);
   assert.equal(createPinCalls, 0);
+});
+
+test('installed ABC routes Browser Share and MetaApp iframe writes through one shared modal with no native PIN dialog', () => {
+  const abcBrowserSource = readFileSync(
+    new URL('../node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js', import.meta.url),
+    'utf8',
+  );
+  const mainSource = readFileSync(new URL('../src/main/main.ts', import.meta.url), 'utf8');
+
+  assert.match(
+    abcBrowserSource,
+    /async function handleBridgePinWrite[\s\S]*?await submitMetaIdPinWrite\(/u,
+  );
+  assert.match(
+    abcBrowserSource,
+    /async function confirmAppShareBuzz[\s\S]*?await submitMetaIdPinWrite\(/u,
+  );
+  assert.match(
+    abcBrowserSource,
+    /async function submitMetaIdPinWrite[\s\S]*?await promptMetaIdPinWrite\(/u,
+  );
+  assert.equal((abcBrowserSource.match(/function promptMetaIdPinWrite\(/gu) ?? []).length, 1);
+  assert.match(mainSource, /new WeakMap<BrowserWindow, BotBrowserBridgeService>\(\)/u);
+  assert.doesNotMatch(mainSource, /confirmBotBrowserPinWrite|confirmPinWrite|Confirm MetaID PIN Write/u);
 });
 
 test('uploadMetaFile supports only host-picker and never returns local paths or preview URLs', async () => {

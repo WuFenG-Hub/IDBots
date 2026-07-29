@@ -512,6 +512,55 @@ test('runTrustedAction forwards metaid-pin-write to the trusted host writer', as
   ]);
 });
 
+test('runTrustedAction preserves the complete manual_action_required PIN write result', async () => {
+  const manualAction = {
+    ok: false,
+    state: 'manual_action_required',
+    code: 'manual_action_required',
+    message: 'Confirm this MetaID PIN write before the host signs or broadcasts it.',
+    data: {
+      confirmation: {
+        actor: {
+          uri: 'metaid://idq1abc',
+          globalMetaId: 'idq1abc',
+          name: 'Alpha',
+        },
+        operation: 'create',
+        path: '/protocols/simplebuzz',
+        contentType: 'application/json;utf-8',
+        payloadSize: 19,
+        confirmationId: 'confirmation-1',
+        expiresAt: 1_700_000_060_000,
+        display: { title: 'Share MetaApp', summary: 'hello' },
+      },
+      confirmRequest: {
+        resourceUri: 'metaapp://app123i0',
+        kind: 'metaid-pin-write',
+        payload: {
+          operation: 'create',
+          path: '/protocols/simplebuzz',
+          confirmed: true,
+          hostConfirmation: { id: 'confirmation-1', token: 'opaque-token-1' },
+        },
+      },
+    },
+  };
+  const adapter = createAdapter({
+    writeMetaIdPin: async () => manualAction,
+  });
+
+  const result = await adapter.runTrustedAction({
+    actorId: 'idbots-metabot-1',
+    resourceUri: 'metaapp://app123i0',
+    kind: 'metaid-pin-write',
+    payload: { operation: 'create' },
+  });
+
+  assert.deepEqual(result, manualAction);
+  assert.equal(result.state, 'manual_action_required');
+  assert.equal(result.data.confirmRequest.payload.hostConfirmation.token, 'opaque-token-1');
+});
+
 test('runTrustedAction forwards metafile-upload and returns stable unsupported errors when unimplemented', async () => {
   const uploads = [];
   const adapter = createAdapter({

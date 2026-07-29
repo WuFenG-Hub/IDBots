@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { browserFailure, browserSuccess } from '@openagentinternet/agent-browser-host-contract';
+import {
+  browserFailure,
+  browserManualActionRequired,
+  browserSuccess,
+} from '@openagentinternet/agent-browser-host-contract';
 import { createBrowserEndpointShim } from '../src/renderer/features/botBrowser/browserEndpointShim.ts';
 
 function createAdapter() {
@@ -92,6 +96,61 @@ test('endpoint shim returns raw command result shapes for runtime, settings, res
       },
     ],
   ]);
+});
+
+test('endpoint shim returns manual_action_required as HTTP 200 without changing state or data', async () => {
+  const manualAction = browserManualActionRequired(
+    'manual_action_required',
+    'Confirm this MetaID PIN write before the host signs or broadcasts it.',
+    {
+      data: {
+        confirmation: {
+          actor: {
+            uri: 'metaid://idq1abc',
+            globalMetaId: 'idq1abc',
+            name: 'Alpha',
+          },
+          operation: 'create',
+          path: '/protocols/simplebuzz',
+          contentType: 'application/json;utf-8',
+          payloadSize: 19,
+          confirmationId: 'confirmation-1',
+          expiresAt: 1_700_000_060_000,
+        },
+        confirmRequest: {
+          resourceUri: 'metaapp://app123i0',
+          kind: 'metaid-pin-write',
+          payload: {
+            operation: 'create',
+            confirmed: true,
+            hostConfirmation: { id: 'confirmation-1', token: 'opaque-token-1' },
+          },
+        },
+      },
+    },
+  );
+  const { adapter } = createAdapter();
+  const shim = createBrowserEndpointShim({
+    ...adapter,
+    async runTrustedAction() {
+      return manualAction;
+    },
+  });
+
+  const response = await shim({
+    url: '/api/browser/actions?actorId=idbots-metabot-1',
+    method: 'POST',
+    body: {
+      resourceUri: 'metaapp://app123i0',
+      kind: 'metaid-pin-write',
+      payload: { operation: 'create' },
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, manualAction);
+  assert.equal(response.body.state, 'manual_action_required');
+  assert.equal(response.body.data.confirmRequest.payload.hostConfirmation.token, 'opaque-token-1');
 });
 
 test('endpoint shim forwards Browser info profile lookups', async () => {

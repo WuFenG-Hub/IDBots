@@ -142,9 +142,9 @@ import { ensureMetaAppServerReady, stopMetaAppServer } from './services/metaAppL
 import { createBotBrowserMetaAppCacheService, type BotBrowserMetaAppCacheService } from './services/botBrowserMetaAppCacheService';
 import {
   createBotBrowserBridgeService,
+  type BotBrowserBridgeService,
   type BotBrowserHostPickedFile,
   type BotBrowserMetaFileUploadInput,
-  type BotBrowserPinWriteConfirmDetails,
   type BotBrowserPinWriteInput,
 } from './services/botBrowserBridgeService';
 import {
@@ -2447,43 +2447,6 @@ function buildBotBrowserUploadFilters(accept: string[]): FileFilter[] | undefine
   return [{ name: 'Accepted files', extensions }];
 }
 
-async function confirmBotBrowserPinWrite(
-  ownerWindow: BrowserWindow | null,
-  details: BotBrowserPinWriteConfirmDetails,
-): Promise<boolean> {
-  const detailLines = [
-    `Actor: ${details.actor.name} (${details.actor.globalMetaId})`,
-    `Operation: ${details.operation}`,
-    `Path: ${details.path}`,
-    `Content-Type: ${details.contentType}`,
-    `Payload Size: ${details.payloadSize} bytes`,
-  ];
-  if (details.display.title) {
-    detailLines.push(`Title: ${details.display.title}`);
-  }
-  if (details.display.summary) {
-    detailLines.push(`Summary: ${details.display.summary}`);
-  }
-  if (details.bridgeMetadata?.originalId) {
-    detailLines.push(`Original PIN: ${details.bridgeMetadata.originalId}`);
-  }
-  if (details.bridgeMetadata?.appAction) {
-    detailLines.push(`App Action: ${details.bridgeMetadata.appAction}`);
-  }
-
-  const result = await botBrowserDialogMessageBox(ownerWindow, {
-    type: 'question',
-    title: 'Confirm MetaID PIN Write',
-    message: details.display.title || 'Confirm MetaID PIN write',
-    detail: detailLines.join('\n'),
-    buttons: ['Cancel', 'Write PIN'],
-    cancelId: 0,
-    defaultId: 1,
-    noLink: true,
-  });
-  return result.response === 1;
-}
-
 async function confirmBotBrowserMetaAppPublish(details: {
   title: string;
   appDir: string;
@@ -2528,17 +2491,32 @@ async function pickBotBrowserMetaFiles(
   return result.filePaths.map((filePath) => ({ filePath }));
 }
 
-function createBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null) {
-  return createBotBrowserBridgeService({
+const botBrowserBridgeServices = new WeakMap<BrowserWindow, BotBrowserBridgeService>();
+let fallbackBotBrowserBridgeService: BotBrowserBridgeService | null = null;
+
+function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null): BotBrowserBridgeService {
+  const existing = ownerWindow
+    ? botBrowserBridgeServices.get(ownerWindow)
+    : fallbackBotBrowserBridgeService;
+  if (existing) {
+    return existing;
+  }
+
+  const service = createBotBrowserBridgeService({
     metabotStore: getMetabotStore(),
     createPin,
     uploadMetaFile: async (...args) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);
     },
-    confirmPinWrite: (details) => confirmBotBrowserPinWrite(ownerWindow, details),
     pickFiles: (input) => pickBotBrowserMetaFiles(ownerWindow, input),
   });
+  if (ownerWindow) {
+    botBrowserBridgeServices.set(ownerWindow, service);
+  } else {
+    fallbackBotBrowserBridgeService = service;
+  }
+  return service;
 }
 
 function botBrowserBridgeInput<T extends BotBrowserPinWriteInput | BotBrowserMetaFileUploadInput>(
@@ -5552,14 +5530,14 @@ if (!gotTheLock) {
 
   ipcMain.handle('botBrowser:writeMetaIdPin', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-    return createBotBrowserBridgeServiceForWindow(ownerWindow).writeMetaIdPin(
+    return getBotBrowserBridgeServiceForWindow(ownerWindow).writeMetaIdPin(
       botBrowserBridgeInput<BotBrowserPinWriteInput>(input),
     );
   });
 
   ipcMain.handle('botBrowser:uploadMetaFile', async (event, input: unknown) => {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-    return createBotBrowserBridgeServiceForWindow(ownerWindow).uploadMetaFile(
+    return getBotBrowserBridgeServiceForWindow(ownerWindow).uploadMetaFile(
       botBrowserBridgeInput<BotBrowserMetaFileUploadInput>(input),
     );
   });

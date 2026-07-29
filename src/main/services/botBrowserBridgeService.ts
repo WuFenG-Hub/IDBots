@@ -1,6 +1,8 @@
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import path from 'path';
 import {
   browserFailure,
+  browserManualActionRequired,
   browserSuccess,
   type BrowserCommandResult,
 } from '@openagentinternet/agent-browser-host-contract';
@@ -10,6 +12,8 @@ import type { MetaidDataPayload } from './metaidCore';
 
 const MAX_PIN_PAYLOAD_BYTES = 512 * 1024;
 const PIN_ID_PATTERN = /^[0-9a-f]{64}i\d+$/iu;
+const PIN_WRITE_CONFIRMATION_TTL_MS = 60_000;
+const MAX_PENDING_PIN_WRITE_CONFIRMATIONS = 256;
 
 export type BotBrowserBridgeErrorCode =
   | 'invalid_request'
@@ -50,20 +54,29 @@ export interface BotBrowserMetaFileUploadResult {
   files: BotBrowserMetaFileUploadResultFile[];
 }
 
-export interface BotBrowserPinWriteConfirmDetails {
+export interface BotBrowserPinWriteConfirmation {
   actor: MetaAppBridgeActor;
   operation: 'create' | 'modify' | 'revoke';
   path: string;
   contentType: string;
   payloadSize: number;
+  confirmationId: string;
+  expiresAt: number;
   display: {
     title?: string;
     summary?: string;
   };
-  bridgeMetadata?: {
-    originalId?: string;
-    appAction?: string;
-  };
+}
+
+export interface BotBrowserPinWriteConfirmRequest {
+  resourceUri: string;
+  kind: 'metaid-pin-write';
+  payload: Record<string, unknown>;
+}
+
+export interface BotBrowserPinWriteManualActionData {
+  confirmation: BotBrowserPinWriteConfirmation;
+  confirmRequest: BotBrowserPinWriteConfirmRequest;
 }
 
 export interface BotBrowserPinWriteInput {
@@ -107,12 +120,15 @@ export interface BotBrowserBridgeServiceDeps {
   metabotStore: MetabotStore;
   createPin?: CreatePinFn;
   uploadMetaFile?: UploadMetaFileFn;
-  confirmPinWrite?: (details: BotBrowserPinWriteConfirmDetails) => Promise<boolean>;
   pickFiles?: (input: {
     multiple: boolean;
     accept: string[];
     purpose?: string;
   }) => Promise<BotBrowserHostPickedFile[]>;
+  now?: () => number;
+  confirmationTtlMs?: number;
+  createConfirmationId?: () => string;
+  createConfirmationToken?: () => string;
 }
 
 export interface BotBrowserBridgeService {
@@ -147,6 +163,13 @@ function objectRecord(value: unknown): Record<string, unknown> | null {
 
 function failure<T>(code: BotBrowserBridgeErrorCode, message: string): BrowserCommandResult<T> {
   return browserFailure(code, message) as BrowserCommandResult<T>;
+}
+
+function invalidConfirmation<T>(): BrowserCommandResult<T> {
+  return failure(
+    'invalid_request',
+    'MetaID PIN write confirmation is invalid or has already been used.',
+  );
 }
 
 function parseLocalMetabotActorId(actorId: unknown): number | null {
@@ -311,6 +334,7 @@ function decodePayload(
 
 function validatePinWritePayload(payload: unknown): {
   metaidPayload: MetaidDataPayload;
+  normalizedPayload: Record<string, unknown>;
   operation: 'create' | 'modify' | 'revoke';
   path: string;
   contentType: string;
@@ -358,6 +382,29 @@ function validatePinWritePayload(payload: unknown): {
     summary: text(displayRecord?.summary) || undefined,
   };
 
+  const normalizedPayload: Record<string, unknown> = {
+    operation,
+    path: pathValidation.path,
+    encryption,
+    version,
+    contentType,
+    payload: {
+      encoding: decoded.encoding === 'utf-8' ? 'utf8' : 'base64',
+      value: decoded.encoding === 'utf-8'
+        ? decoded.payload as string
+        : (decoded.payload as Buffer).toString('base64'),
+    },
+  };
+  if (bridgeMetadata?.originalId) {
+    normalizedPayload.originalId = bridgeMetadata.originalId;
+  }
+  if (bridgeMetadata?.appAction) {
+    normalizedPayload.appAction = bridgeMetadata.appAction;
+  }
+  if (display.title || display.summary) {
+    normalizedPayload.display = display;
+  }
+
   return {
     metaidPayload: {
       operation,
@@ -368,6 +415,7 @@ function validatePinWritePayload(payload: unknown): {
       payload: decoded.payload,
       encoding: decoded.encoding,
     },
+    normalizedPayload,
     operation,
     path: pathValidation.path,
     contentType,
@@ -375,6 +423,63 @@ function validatePinWritePayload(payload: unknown): {
     display,
     ...(bridgeMetadata ? { bridgeMetadata } : {}),
   };
+}
+
+interface PendingPinWriteAuthorization {
+  actorId: number;
+  actorGlobalMetaId: string;
+  resourceUri: string;
+  requestHash: string;
+  tokenHash: Buffer;
+  expiresAt: number;
+}
+
+interface HostConfirmationAttempt {
+  id: string;
+  token: string;
+}
+
+function parseHostConfirmationAttempt(payload: unknown):
+  | HostConfirmationAttempt
+  | BrowserCommandResult<never>
+  | null {
+  const body = objectRecord(payload);
+  if (!body) return null;
+
+  const hasConfirmed = Object.prototype.hasOwnProperty.call(body, 'confirmed');
+  const hasHostConfirmation = Object.prototype.hasOwnProperty.call(body, 'hostConfirmation');
+  if (!hasConfirmed && !hasHostConfirmation) {
+    return null;
+  }
+
+  const hostConfirmation = objectRecord(body.hostConfirmation);
+  const id = text(hostConfirmation?.id);
+  const token = text(hostConfirmation?.token);
+  if (body.confirmed !== true || !id || !token) {
+    return invalidConfirmation();
+  }
+  return { id, token };
+}
+
+function normalizedResourceUri(value: unknown): string {
+  const resourceUri = text(value);
+  if (!resourceUri || resourceUri.length > 4096 || /[\r\n]/u.test(resourceUri)) {
+    return '';
+  }
+  return resourceUri;
+}
+
+function requestHash(payload: Record<string, unknown>): string {
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function tokenHash(token: string): Buffer {
+  return createHash('sha256').update(token).digest();
+}
+
+function tokenMatches(token: string, expectedHash: Buffer): boolean {
+  const actualHash = tokenHash(token);
+  return actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash);
 }
 
 function validateUploadPayload(payload: unknown): {
@@ -439,10 +544,101 @@ function mapUploadResult(
 export function createBotBrowserBridgeService(
   deps: BotBrowserBridgeServiceDeps,
 ): BotBrowserBridgeService {
+  const pendingPinWrites = new Map<string, PendingPinWriteAuthorization>();
+  const now = deps.now ?? Date.now;
+  const confirmationTtlMs = typeof deps.confirmationTtlMs === 'number'
+    && Number.isFinite(deps.confirmationTtlMs)
+    && deps.confirmationTtlMs >= 0
+    ? deps.confirmationTtlMs
+    : PIN_WRITE_CONFIRMATION_TTL_MS;
+  const createConfirmationId = deps.createConfirmationId ?? randomUUID;
+  const createConfirmationToken = deps.createConfirmationToken
+    ?? (() => randomBytes(32).toString('base64url'));
+
+  const removeExpiredPinWrites = (currentTime: number) => {
+    for (const [confirmationId, authorization] of pendingPinWrites) {
+      if (authorization.expiresAt <= currentTime) {
+        pendingPinWrites.delete(confirmationId);
+      }
+    }
+  };
+
+  const issuePinWriteConfirmation = (
+    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    resourceUri: string,
+    validation: Exclude<ReturnType<typeof validatePinWritePayload>, BrowserCommandResult<never>>,
+  ): BrowserCommandResult<BotBrowserPinWriteResult> => {
+    const issuedAt = now();
+    removeExpiredPinWrites(issuedAt);
+    if (pendingPinWrites.size >= MAX_PENDING_PIN_WRITE_CONFIRMATIONS) {
+      const oldestConfirmationId = pendingPinWrites.keys().next().value;
+      if (typeof oldestConfirmationId === 'string') {
+        pendingPinWrites.delete(oldestConfirmationId);
+      }
+    }
+
+    const confirmationId = createConfirmationId();
+    const opaqueToken = createConfirmationToken();
+    const expiresAt = issuedAt + confirmationTtlMs;
+    pendingPinWrites.set(confirmationId, {
+      actorId: actorResult.metabot.id,
+      actorGlobalMetaId: actorResult.actor.globalMetaId,
+      resourceUri,
+      requestHash: requestHash(validation.normalizedPayload),
+      tokenHash: tokenHash(opaqueToken),
+      expiresAt,
+    });
+
+    return browserManualActionRequired(
+      'manual_action_required',
+      'Confirm this MetaID PIN write before the host signs or broadcasts it.',
+      {
+        data: {
+          confirmation: {
+            actor: actorResult.actor,
+            operation: validation.operation,
+            path: validation.path,
+            contentType: validation.contentType,
+            payloadSize: validation.payloadSize,
+            confirmationId,
+            expiresAt,
+            display: validation.display,
+          },
+          confirmRequest: {
+            resourceUri,
+            kind: 'metaid-pin-write',
+            payload: {
+              ...validation.normalizedPayload,
+              confirmed: true,
+              hostConfirmation: {
+                id: confirmationId,
+                token: opaqueToken,
+              },
+            },
+          },
+        },
+      },
+    );
+  };
+
   return {
     async writeMetaIdPin(input: BotBrowserPinWriteInput): Promise<BrowserCommandResult<BotBrowserPinWriteResult>> {
       const actorResult = resolveActor(deps.metabotStore, input.actorId);
-      if (isCommandFailure(actorResult)) return actorResult;
+      if (isCommandFailure(actorResult)) {
+        const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
+        if (!isCommandFailure(confirmationAttempt) && confirmationAttempt) {
+          const authorization = pendingPinWrites.get(confirmationAttempt.id);
+          if (authorization && tokenMatches(confirmationAttempt.token, authorization.tokenHash)) {
+            pendingPinWrites.delete(confirmationAttempt.id);
+          }
+        }
+        return actorResult;
+      }
+
+      const resourceUri = normalizedResourceUri(input.resourceUri);
+      if (!resourceUri) {
+        return failure('invalid_request', 'MetaID PIN write resourceUri is required.');
+      }
 
       const validation = validatePinWritePayload(input.payload);
       if (isCommandFailure(validation)) return validation;
@@ -450,22 +646,37 @@ export function createBotBrowserBridgeService(
       if (!deps.createPin) {
         return failure('unsupported_method', 'MetaID PIN write is not supported in this IDBots build.');
       }
-      if (!deps.confirmPinWrite) {
-        return failure('manual_action_required', 'MetaID PIN write requires host confirmation.');
+
+      const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
+      if (isCommandFailure(confirmationAttempt)) return confirmationAttempt;
+      if (!confirmationAttempt) {
+        return issuePinWriteConfirmation(actorResult, resourceUri, validation);
       }
 
-      const confirmed = await deps.confirmPinWrite({
-        actor: actorResult.actor,
-        operation: validation.operation,
-        path: validation.path,
-        contentType: validation.contentType,
-        payloadSize: validation.payloadSize,
-        display: validation.display,
-        ...(validation.bridgeMetadata ? { bridgeMetadata: validation.bridgeMetadata } : {}),
-      });
-      if (!confirmed) {
-        return failure('user_cancelled', 'MetaID PIN write was cancelled.');
+      const authorization = pendingPinWrites.get(confirmationAttempt.id);
+      if (!authorization || !tokenMatches(confirmationAttempt.token, authorization.tokenHash)) {
+        return invalidConfirmation();
       }
+
+      const currentTime = now();
+      if (authorization.expiresAt <= currentTime) {
+        pendingPinWrites.delete(confirmationAttempt.id);
+        return issuePinWriteConfirmation(actorResult, resourceUri, validation);
+      }
+
+      if (
+        authorization.actorId !== actorResult.metabot.id
+        || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
+        || authorization.resourceUri !== resourceUri
+        || authorization.requestHash !== requestHash(validation.normalizedPayload)
+      ) {
+        pendingPinWrites.delete(confirmationAttempt.id);
+        return invalidConfirmation();
+      }
+
+      // Consume before signing so a retry cannot replay an authorization even
+      // when transaction construction or broadcast later fails.
+      pendingPinWrites.delete(confirmationAttempt.id);
 
       try {
         const result = await deps.createPin(

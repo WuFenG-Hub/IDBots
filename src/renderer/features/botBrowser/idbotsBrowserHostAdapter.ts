@@ -249,6 +249,9 @@ async function runBridgeTrustedAction(
   try {
     const result = await invoke(input);
     if (!result.ok) {
+      if (result.state === 'manual_action_required') {
+        return result as BrowserCommandResult<BrowserTrustedActionResult>;
+      }
       return trustedActionFailureFromResult(result, fallbackCode, fallbackMessage);
     }
     return trustedActionSuccess(kind, result.data);
