@@ -375,6 +375,9 @@ test('dev IDBOTS_METAAPPS_ROOT still receives bundled MetaApps for local testing
         getPath: () => tempDir,
         getAppPath: () => projectRoot,
       },
+      // The compiled test layout resolves the dev bundled root to
+      // dist-electron/METAAPPs; point it at the real repository apps instead.
+      bundledMetaAppsRoot: path.join(projectRoot, 'METAAPPs'),
     });
     manager.syncBundledMetaAppsToUserData();
     const apps = manager.listMetaApps().sort((left, right) => left.id.localeCompare(right.id));

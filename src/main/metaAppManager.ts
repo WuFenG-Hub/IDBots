@@ -18,6 +18,8 @@ type AppLike = {
 type MetaAppManagerOptions = {
   app?: AppLike;
   resourcesPath?: string;
+  /** Test hook: override the bundled MetaApps root (defaults to resources dir or the dev checkout). */
+  bundledMetaAppsRoot?: string;
 };
 
 type FrontmatterParseResult = {
@@ -416,10 +418,12 @@ export class MetaAppManager {
   private notifyTimer: NodeJS.Timeout | null = null;
   private readonly runtimeApp: AppLike | undefined;
   private readonly runtimeResourcesPath: string | undefined;
+  private readonly runtimeBundledRoot: string | undefined;
 
   constructor(options?: MetaAppManagerOptions) {
     this.runtimeApp = options?.app ?? ((app as unknown) as AppLike | undefined);
     this.runtimeResourcesPath = options?.resourcesPath;
+    this.runtimeBundledRoot = options?.bundledMetaAppsRoot;
   }
 
   getMetaAppsRoot(): string {
@@ -445,6 +449,9 @@ export class MetaAppManager {
   }
 
   getBundledMetaAppsRoot(): string {
+    if (this.runtimeBundledRoot) {
+      return path.resolve(this.runtimeBundledRoot);
+    }
     const packaged = Boolean(this.runtimeApp?.isPackaged);
     if (packaged) {
       const runtimeResourcesPath = this.runtimeResourcesPath || process.resourcesPath;
@@ -492,6 +499,15 @@ export class MetaAppManager {
           const localDefault = userDefaults[appId];
 
           if (!isIdbotsManagedSource(bundledSourceType)) {
+            // Dev checkouts run with IDBOTS_METAAPPS_ROOT outside the repo:
+            // seed the curated chain-community apps shipped in the repository
+            // once, so the dev catalog still matches the repo. Never overwrite
+            // an existing local copy — community apps update via their own
+            // install flow, not via bundled sync.
+            if (!this.runtimeApp?.isPackaged && hasMetaAppsRootOverride && !fs.existsSync(targetDir)) {
+              replaceMetaAppDirSafely(dir, targetDir);
+              syncedAppIds.add(appId);
+            }
             return;
           }
 

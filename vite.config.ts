@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
 import path from 'path';
+import os from 'os';
 import { createRequire } from 'node:module';
 
 // https://vitejs.dev/config/
@@ -11,6 +12,14 @@ import { createRequire } from 'node:module';
 const devPort = Number(process.env.IDBOTS_VITE_DEV_PORT || 5175);
 const isProductionBuild = process.env.NODE_ENV === 'production';
 const shouldUseVitePolling = process.env.IDBOTS_VITE_USE_POLLING === '1';
+
+// In dev, keep MetaApp installs (community auto-installs triggered by Bot
+// Browser opens) outside the repository so the working tree stays clean.
+// MetaAppManager syncs the repo's bundled apps into this root on startup and
+// packaged builds keep using the Electron userData dir instead.
+if (!isProductionBuild && !process.env.IDBOTS_METAAPPS_ROOT) {
+  process.env.IDBOTS_METAAPPS_ROOT = path.join(os.homedir(), '.idbots', 'dev-METAAPPs');
+}
 const require = createRequire(import.meta.url);
 const { createElectronMainExternalPredicate } = require('./scripts/electron-main-externals.cjs');
 const { createDepsCacheBusterPlugin } = require('./scripts/vite-deps-cache-buster.cjs');
