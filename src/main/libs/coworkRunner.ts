@@ -38,6 +38,10 @@ import {
   type BotBrowserControl,
 } from './botBrowserAgentTools';
 import {
+  buildMetaIdSearchAgentTools,
+  type MetaIdSearchControl,
+} from './metaIdSearchAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -845,6 +849,13 @@ export interface CoworkRunnerOptions {
    * bridge and the open-uri broadcast channel.
    */
   controlBotBrowser?: BotBrowserControl;
+  /**
+   * When set, every cowork session gets MetaID search tools (search_metaids +
+   * metaid_profile) backed by the metaso-p2p MetaID aggregation API. Browser
+   * sessions additionally open the best match via bot_browser_open_uri; other
+   * sessions only present clickable metaid:// links.
+   */
+  metaIdSearch?: MetaIdSearchControl;
 }
 
 export class CoworkRunner extends EventEmitter {
@@ -858,6 +869,7 @@ export class CoworkRunner extends EventEmitter {
   private requestIMSessionReset?: (sessionId: string) => boolean;
   private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
   private controlBotBrowser?: BotBrowserControl;
+  private metaIdSearch?: MetaIdSearchControl;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
@@ -884,6 +896,7 @@ export class CoworkRunner extends EventEmitter {
     this.requestIMSessionReset = options?.requestIMSessionReset;
     this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
     this.controlBotBrowser = options?.controlBotBrowser;
+    this.metaIdSearch = options?.metaIdSearch;
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
 
@@ -4211,6 +4224,18 @@ export class CoworkRunner extends EventEmitter {
       if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
         memoryTools.push(
           ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+        );
+      }
+      // MetaID search is registered for every cowork surface: browser sessions
+      // open the best match in the Bot Browser directly; other sessions only
+      // present clickable metaid:// links so the user stays in their flow.
+      if (this.metaIdSearch) {
+        memoryTools.push(
+          ...buildMetaIdSearchAgentTools({
+            tool,
+            metaIdSearch: this.metaIdSearch,
+            openBestMatchInBrowser: isBrowserSession,
+          })
         );
       }
       options.mcpServers = {

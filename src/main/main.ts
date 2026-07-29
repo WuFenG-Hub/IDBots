@@ -167,6 +167,10 @@ import {
   listMetaAppForks as listMetaAppForksRemote,
 } from './services/metaAppSearchService';
 import {
+  searchMetaIds as searchMetaIdsRemote,
+  getMetaIdDetail as getMetaIdDetailRemote,
+} from './services/metaIdSearchService';
+import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
 } from './services/botBrowserSourceLocator';
@@ -4107,6 +4111,40 @@ const getCoworkRunner = () => {
           };
         },
       },
+      metaIdSearch: {
+        search: async ({ keyword, skill, chainName, hasChatPubkey, hasHomepage, since, until, limit, cursor }) => {
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const page = await searchMetaIdsRemote({
+            keyword,
+            skill,
+            chainName,
+            hasChatPubkey,
+            hasHomepage,
+            since,
+            until,
+            size: limit ?? 8,
+            cursor,
+          });
+          return {
+            items: page.items.map((item) => ({
+              ...item,
+              isOwn: ownGlobalMetaIds.has(item.globalMetaId),
+            })),
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
+        },
+        detail: async (identity) => {
+          const profile = await getMetaIdDetailRemote(identity);
+          const isOwn = getMetabotStore().listMetabots()
+            .some((metabot) => metabot.globalmetaid?.trim() === profile.globalMetaId);
+          return { ...profile, isOwn };
+        },
+      },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
@@ -4169,7 +4207,9 @@ const getCoworkRunner = () => {
             'How to FIND apps for the user:',
             '- When the user wants to find/discover an app (not open a known one), call search_metaapps first (query/tag/publisher/sinceDays), open the best match with bot_browser_open_uri, and offer 2-3 alternatives by name. For remix children of an app, use search_metaapps with mode="forks".',
             '- Opening apps in the Bot Browser ALWAYS goes through search_metaapps and metaapp:// URIs. NEVER use open_metaapp or resolve_metaapp_url here: the local MetaApp launcher is retired in this surface.',
-            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps returns bullet lines, reuse them VERBATIM — never restate an app or an author as plain text.',
+            'How to FIND people and bots for the user:',
+            '- When the user wants to find a person or bot on-chain (view someone\'s bot page, look up who someone is, find users/bots by personality or skill, find someone to chat with), call search_metaids first (query/skill/chainName/chatOnly/sinceDays), open the best match\'s bot page with bot_browser_open_uri on metaid://<globalMetaId>, and offer 2-3 alternatives by name. Use metaid_profile for a specific identity\'s full profile.',
+            '- When you mention a specific app or bot in your reply, write it as a markdown link: [title](metaapp://<pinId>) or [name](metaid://<globalMetaId>) — these render as clickable links that open in the Bot Browser. NEVER shorten, truncate, or ellipsis a globalMetaId or pinId; always output them in full inside the link. Prefer the publisher\'s display name (and avatar when available) for authors, but the full globalMetaId must always be the link target. When search_metaapps or search_metaids returns bullet lines, reuse them VERBATIM — never restate an app, an author, or a person as plain text.',
             '- NEVER use Playwright, screenshots, or any external browser automation: the Bot Browser is not a Playwright browser and needs none.',
             active?.uri
               ? `<active_tab ${activeTabAttrs}>${escapeXml(active.uri)}</active_tab>`
