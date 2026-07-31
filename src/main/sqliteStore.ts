@@ -1477,6 +1477,10 @@ export class SqliteStore {
       if (!columns.includes('metabot_info_pinid')) return;
 
       const hasAvatarBlob = columns.includes('avatar_blob');
+      // Columns added by later ALTER migrations may already exist on the source table;
+      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
+      const hasHomepage = columns.includes('homepage');
+      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1506,7 +1510,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1537,6 +1541,10 @@ export class SqliteStore {
       if (!columns.includes('chat_public_key_pin_id')) return;
 
       const hasAvatarBlob = columns.includes('avatar_blob');
+      // Columns added by later ALTER migrations may already exist on the source table;
+      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
+      const hasHomepage = columns.includes('homepage');
+      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1566,7 +1574,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
