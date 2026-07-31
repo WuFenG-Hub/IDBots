@@ -26,6 +26,7 @@ interface EditSyncPlan {
   syncLlm: boolean;
   syncChatSkills: boolean;
   syncHomepage: boolean;
+  syncOwner?: boolean;
   syncStepKeys: SyncStepKey[];
 }
 
@@ -43,6 +44,7 @@ const buildRemainingEditSyncPlan = (
     syncLlm: plan.syncLlm && !synced.has('llm'),
     syncChatSkills: plan.syncChatSkills && !synced.has('chatSkills'),
     syncHomepage: plan.syncHomepage && !synced.has('homepage'),
+    syncOwner: plan.syncOwner === true && !synced.has('owner'),
     syncStepKeys: plan.syncStepKeys.filter((step) => !synced.has(step)),
   };
 };
@@ -56,6 +58,7 @@ const buildEditSyncIpcInput = (plan: EditSyncPlan) => ({
   syncLlm: plan.syncLlm,
   syncChatSkills: plan.syncChatSkills,
   syncHomepage: plan.syncHomepage,
+  syncOwner: plan.syncOwner === true,
 });
 
 const providerRequiresApiKey = (provider: string) => provider !== 'ollama';
@@ -70,8 +73,12 @@ const parseOptionalBossId = (value: string): number | null => {
 };
 const formatMetabotLimitReached = () =>
   i18nService.t('metabotLimitReached').replace('{limit}', String(DEFAULT_METABOT_LIMIT));
-const resolveMetabotActionError = (error?: string): string =>
-  error === METABOT_LIMIT_REACHED_ERROR ? formatMetabotLimitReached() : (error || i18nService.t('metabotSaveFailed'));
+const resolveMetabotActionError = (error?: string): string => {
+  if (error === METABOT_LIMIT_REACHED_ERROR) return formatMetabotLimitReached();
+  if (error === 'OWNER_IDENTITY_MISSING') return i18nService.t('metabotErrorOwnerIdentityMissing');
+  if (error === 'OWNER_IDENTITY_MISMATCH') return i18nService.t('metabotErrorOwnerMismatch');
+  return error || i18nService.t('metabotSaveFailed');
+};
 
 interface MetabotsManagerProps {
   onRequestModelSettings?: () => void;
@@ -266,9 +273,11 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const oldLlmRaw = (current.llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
     const oldHomepage = current.homepage ?? null;
+    const oldBossGlobalMetaId = (current.boss_global_metaid ?? '').trim() || null;
 
     const syncName = nextName !== oldName;
     const syncAvatar = nextAvatarRaw !== oldAvatarRaw;
+    const syncOwner = nextBossGlobalMetaId !== oldBossGlobalMetaId;
     const syncBio = nextBioRaw !== oldBioRaw;
     const syncPersona =
       nextRole !== oldRole ||
@@ -286,6 +295,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     if (syncLlm) syncStepKeys.push('llm');
     if (syncChatSkills) syncStepKeys.push('chatSkills');
     if (syncHomepage) syncStepKeys.push('homepage');
+    if (syncOwner) syncStepKeys.push('owner');
 
     const result = await window.electron.metabot.update(editId, {
       name: nextName,
@@ -302,7 +312,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       homepage: nextHomepage,
     });
     if (!result.success) {
-      throw new Error(result.error || i18nService.t('metabotSaveFailed'));
+      throw new Error(resolveMetabotActionError(result.error));
     }
     const updatedMetabot = result.metabot ?? {
       ...current,
@@ -338,6 +348,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       syncLlm,
       syncChatSkills,
       syncHomepage,
+      syncOwner,
       syncStepKeys,
     };
     setSyncStatus('syncing');
@@ -505,6 +516,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onCheckNameExists={handleCheckNameExists}
           excludeIdForNameCheck={editId}
           metabotId={editId}
+          ownerBindingPinId={editMetabot.owner_binding_pinid ?? null}
           onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
           onRequestMetaApps={onRequestMetaApps}

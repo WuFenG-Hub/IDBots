@@ -631,6 +631,7 @@ contextBridge.exposeInMainWorld('electron', {
       syncLlm?: boolean;
       syncChatSkills?: boolean;
       syncHomepage?: boolean;
+      syncOwner?: boolean;
     }) => ipcRenderer.invoke('idbots:syncMetaBotEditChanges', input),
     createMetaBotOnChain: (input: {
       name: string;
@@ -655,6 +656,17 @@ contextBridge.exposeInMainWorld('electron', {
       base64: string;
       network?: string;
     }) => ipcRenderer.invoke('idbots:uploadMetabotHomepageFile', input),
+  },
+  userIdentity: {
+    get: () => ipcRenderer.invoke('userIdentity:get'),
+    create: (input: { name: string; avatar?: string | null }) =>
+      ipcRenderer.invoke('userIdentity:create', input),
+    importFromMnemonic: (input: { mnemonic: string; path?: string }) =>
+      ipcRenderer.invoke('userIdentity:import', input),
+    updateName: (input: { name: string }) => ipcRenderer.invoke('userIdentity:updateName', input),
+    logout: () => ipcRenderer.invoke('userIdentity:logout'),
+    revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
+    retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
   },
   metaWebListener: {
     getListenerConfig: () => ipcRenderer.invoke('idbots:getListenerConfig'),

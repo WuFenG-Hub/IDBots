@@ -48,6 +48,16 @@ import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
 import { shouldAcquireSingleInstanceLock } from './libs/singleInstanceLock';
 import { mockCreateWalletAndFund, mockPushConfigToChain, mockUpdateConfigOnChain } from './services/chainActionMock';
 import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/metabotWalletService';
+import { UserIdentityStore } from './userIdentityStore';
+import type { UserIdentity } from './types/userIdentity';
+import {
+  createUserIdentity,
+  importUserIdentity,
+  logoutUserIdentity,
+  syncUserIdentityToChain,
+  updateUserIdentityName,
+} from './services/userIdentityService';
+import { signOwnerBinding } from './services/ownerBindingService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
 import { getAddressBalance } from './services/addressBalanceService';
@@ -4489,6 +4499,45 @@ const getMetabotStore = () => {
   return metabotStore;
 };
 
+let userIdentityStore: UserIdentityStore | null = null;
+const getUserIdentityStore = () => {
+  if (!userIdentityStore) {
+    const sqliteStore = getStore();
+    userIdentityStore = new UserIdentityStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return userIdentityStore;
+};
+
+/** Strip the mnemonic before handing an identity to the renderer. */
+const toPublicUserIdentity = (identity: UserIdentity | null): Omit<UserIdentity, 'mnemonic'> | null => {
+  if (!identity) return null;
+  const { mnemonic: _mnemonic, ...rest } = identity;
+  return rest;
+};
+
+/**
+ * Sign an owner-binding payload with the local user identity for the given
+ * MetaBot. Fails unless the requested boss GlobalMetaID belongs to the local
+ * user (only the local user can consent to the binding).
+ */
+const signOwnerBindingForLocalUser = async (
+  bossGlobalMetaId: string,
+  botGlobalMetaId: string | null | undefined,
+): Promise<{ payload?: string; error?: string }> => {
+  const user = getUserIdentityStore().get();
+  if (!user) return { error: 'OWNER_IDENTITY_MISSING' };
+  if (!botGlobalMetaId) return { error: 'METABOT_GLOBALMETAID_MISSING' };
+  if ((user.globalmetaid ?? '').toLowerCase() !== bossGlobalMetaId.toLowerCase()) {
+    return { error: 'OWNER_IDENTITY_MISMATCH' };
+  }
+  try {
+    const signed = await signOwnerBinding(user, botGlobalMetaId);
+    return { payload: signed.payload };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+};
+
 function getIdchatPresenceService(): IdchatPresenceService {
   if (!idchatPresenceService) {
     idchatPresenceService = new IdchatPresenceService();
@@ -7442,6 +7491,17 @@ if (!gotTheLock) {
   }) => {
     try {
       await mockUpdateConfigOnChain();
+      // Owner claims must belong to the local user identity; anything else is
+      // an unsigned unilateral claim, which this feature removes.
+      if (input.boss_global_metaid !== undefined) {
+        const trimmedBoss = (input.boss_global_metaid ?? '').trim();
+        if (trimmedBoss) {
+          const user = getUserIdentityStore().get();
+          if (!user || (user.globalmetaid ?? '').toLowerCase() !== trimmedBoss.toLowerCase()) {
+            return { success: false, error: 'OWNER_IDENTITY_MISMATCH' };
+          }
+        }
+      }
       const store = getMetabotStore();
       const metabot = store.updateMetabot(id, {
         ...input,
@@ -7601,8 +7661,21 @@ if (!gotTheLock) {
       });
       metabotId = metabot.id;
 
-      // 4. Publish to chain (name + avatar + chatpubkey + bio)
-      const syncResult = await syncMetaBotToChain(store, metabot.id);
+      // 4. Sign the owner binding when a boss GlobalMetaID was requested; it
+      // must belong to the local user identity (signed consent).
+      let ownerBindingPayload: string | undefined;
+      const bossGlobalMetaId = (input.boss_global_metaid ?? '').trim();
+      if (bossGlobalMetaId) {
+        const signResult = await signOwnerBindingForLocalUser(bossGlobalMetaId, metabot.globalmetaid);
+        if (signResult.error) {
+          store.deleteMetabot(metabot.id);
+          return { success: false, error: signResult.error, canSkip: false };
+        }
+        ownerBindingPayload = signResult.payload;
+      }
+
+      // 5. Publish to chain (name + avatar + chatpubkey + bio [+ owner])
+      const syncResult = await syncMetaBotToChain(store, metabot.id, {}, { ownerBindingPayload });
 
       if (!syncResult.success && !syncResult.canSkip) {
         // Mandatory steps (name) failed — roll back DB records
@@ -7627,6 +7700,113 @@ if (!gotTheLock) {
       }
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:get', async () => {
+    try {
+      return { success: true, identity: toPublicUserIdentity(getUserIdentityStore().get()) };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:get failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
+    try {
+      const result = await createUserIdentity(getUserIdentityStore(), input ?? { name: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        // Returned only here so the renderer can show the one-time backup step.
+        mnemonic: result.mnemonic,
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:create failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:import', async (_event, input: { mnemonic: string; path?: string }) => {
+    try {
+      const result = await importUserIdentity(getUserIdentityStore(), input ?? { mnemonic: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        profileSource: result.profileSource,
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:import failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:updateName', async (_event, input: { name: string }) => {
+    try {
+      const result = await updateUserIdentityName(getUserIdentityStore(), input ?? { name: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:updateName failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:logout', async () => {
+    try {
+      const removed = logoutUserIdentity(getUserIdentityStore());
+      return removed ? { success: true } : { success: false, error: 'USER_IDENTITY_MISSING' };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:logout failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:revealMnemonic', async () => {
+    try {
+      const identity = getUserIdentityStore().get();
+      if (!identity) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      return { success: true, mnemonic: identity.mnemonic };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:revealMnemonic failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:retryChainSync', async () => {
+    try {
+      const store = getUserIdentityStore();
+      if (!store.get()) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      const chainSync = await syncUserIdentityToChain(store, { includeProfileSteps: false });
+      return { success: true, identity: toPublicUserIdentity(store.get()), chainSync };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:retryChainSync failed:', errMsg);
       return { success: false, error: errMsg };
     }
   });
@@ -7762,11 +7942,29 @@ if (!gotTheLock) {
     syncLlm?: boolean;
     syncChatSkills?: boolean;
     syncHomepage?: boolean;
+    syncOwner?: boolean;
   }) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBotEditChanges requested', input);
       const store = getMetabotStore();
-      const result = await syncMetaBotEditChangesToChain(store, input);
+      let ownerBindingPayload: string | undefined;
+      if (input.syncOwner) {
+        const metabot = store.getMetabotById(input.metabotId);
+        if (!metabot) {
+          return { success: false, error: `MetaBot ${input.metabotId} not found` };
+        }
+        const bossGlobalMetaId = (metabot.boss_global_metaid ?? '').trim();
+        if (bossGlobalMetaId) {
+          const signResult = await signOwnerBindingForLocalUser(bossGlobalMetaId, metabot.globalmetaid);
+          if (signResult.error) {
+            return { success: false, error: signResult.error };
+          }
+          ownerBindingPayload = signResult.payload;
+        } else {
+          ownerBindingPayload = ''; // empty /info/owner payload = unbind
+        }
+      }
+      const result = await syncMetaBotEditChangesToChain(store, { ...input, ownerBindingPayload });
       console.log('[MetaBot] idbots:syncMetaBotEditChanges result', {
         success: result.success,
         error: result.error,

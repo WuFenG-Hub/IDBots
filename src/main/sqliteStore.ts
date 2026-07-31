@@ -1019,6 +1019,28 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_metaapp_owner_cache_mvc ON metaapp_owner_cache(mvc_address);
     `);
 
+    // Human user identity: single-row table (CHECK id = 1). Holds the local
+    // human user's mnemonic-derived MetaID identity used for owner binding.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS user_identity (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        mnemonic TEXT NOT NULL,
+        path TEXT DEFAULT "m/44'/10001'/0'/0/0",
+        mvc_address TEXT NOT NULL,
+        btc_address TEXT NOT NULL,
+        doge_address TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        chat_public_key TEXT NOT NULL,
+        chat_public_key_pin_id TEXT,
+        metaid TEXT NOT NULL,
+        globalmetaid TEXT,
+        name TEXT NOT NULL,
+        avatar TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
     // Migration: existing DBs with old schema (metabot_wallets.metabot_id, metabots without wallet_id, avatar TEXT)
     this.migrateMetabotWalletRelationAndAvatar(basePath);
 
@@ -1235,6 +1257,19 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('Failed to migrate metabots homepage:', error);
+    }
+
+    // Migration: Add owner_binding_pinid column to metabots (pin id of the
+    // signed /info/owner binding; null = no signed owner binding)
+    try {
+      const obColsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const obColumns = (obColsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!obColumns.includes('owner_binding_pinid')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN owner_binding_pinid TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('Failed to migrate metabots owner_binding_pinid:', error);
     }
 
     // Migration: Add payment_address column to remote_skill_service
@@ -1477,6 +1512,14 @@ export class SqliteStore {
       if (!columns.includes('metabot_info_pinid')) return;
 
       const hasAvatarBlob = columns.includes('avatar_blob');
+      // Columns added by later ALTER migrations may already exist on the source table;
+      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
+      const hasHomepage = columns.includes('homepage');
+      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
+      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      // A leftover metabots_new can only be debris from an earlier failed run of
+      // this migration (success renames it away); drop it before recreating.
+      this.db.run('DROP TABLE IF EXISTS metabots_new');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1506,7 +1549,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1537,6 +1580,14 @@ export class SqliteStore {
       if (!columns.includes('chat_public_key_pin_id')) return;
 
       const hasAvatarBlob = columns.includes('avatar_blob');
+      // Columns added by later ALTER migrations may already exist on the source table;
+      // carry them into the rebuilt table so INSERT ... SELECT does not fail.
+      const hasHomepage = columns.includes('homepage');
+      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
+      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      // A leftover metabots_new can only be debris from an earlier failed run of
+      // this migration (success renames it away); drop it before recreating.
+      this.db.run('DROP TABLE IF EXISTS metabots_new');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1566,7 +1617,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);

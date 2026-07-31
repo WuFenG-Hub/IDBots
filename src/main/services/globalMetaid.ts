@@ -383,3 +383,43 @@ export function convertToGlobalMetaId(address: string): string {
 export function validateGlobalMetaId(globalMetaId: string): boolean {
   return normalizeRawGlobalMetaId(globalMetaId) !== null;
 }
+
+/**
+ * Decode a GlobalMetaId back into its version and payload (pubkey hash /
+ * script hash / witness program). Inverse of encodeIDAddress.
+ * Returns null for malformed input or checksum mismatch.
+ */
+export function decodeGlobalMetaIdPayload(globalMetaId: string): { version: number; payload: Uint8Array } | null {
+  const normalized = normalizeRawGlobalMetaId(globalMetaId);
+  if (!normalized) return null;
+
+  const version = VERSION_CHARS.indexOf(normalized[2]);
+  if (version < 0) return null;
+
+  // Strip 'id' + versionChar + '1'; the last 6 values are the checksum.
+  const body = normalized.slice(4);
+  if (!body || body.length <= 6) return null;
+
+  const values: number[] = [];
+  for (const char of body) {
+    const idx = IDADDRESS_CHARSET.indexOf(char);
+    if (idx === -1) return null;
+    values.push(idx);
+  }
+
+  const data = values.slice(0, -6);
+  const checksum = values.slice(-6);
+  const expectedChecksum = createIdChecksum(data, version as AddressVersion);
+  for (let i = 0; i < 6; i++) {
+    if (checksum[i] !== expectedChecksum[i]) return null;
+  }
+
+  let payload: Uint8Array;
+  try {
+    payload = convertBits(new Uint8Array(data), 5, 8, false);
+  } catch {
+    return null;
+  }
+  if (payload.length === 0) return null;
+  return { version, payload };
+}

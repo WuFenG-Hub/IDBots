@@ -20,6 +20,8 @@ export interface Metabot {
   background: string | null;
   boss_id: number | null;
   boss_global_metaid: string | null;
+  /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
+  owner_binding_pinid?: string | null;
   llm_id: string | null;
   tools: string[];
   skills: string[];

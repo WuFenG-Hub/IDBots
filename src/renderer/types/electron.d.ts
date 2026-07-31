@@ -56,6 +56,32 @@ interface ApiStreamResponse {
   error?: string;
 }
 
+/** Local human user identity as exposed to the renderer (mnemonic stripped). */
+interface PublicUserIdentity {
+  id: number;
+  path: string;
+  mvc_address: string;
+  btc_address: string;
+  doge_address: string;
+  public_key: string;
+  chat_public_key: string;
+  chat_public_key_pin_id: string | null;
+  metaid: string;
+  globalmetaid: string | null;
+  name: string;
+  avatar: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+interface UserIdentityChainSyncResult {
+  success: boolean;
+  txids: string[];
+  chatPublicKeyPinId?: string;
+  failedSteps: Array<'name' | 'avatar' | 'chatpubkey'>;
+  error?: string;
+}
+
 interface AppUpdateDownloadProgress {
   received: number;
   total: number | undefined;
@@ -352,6 +378,8 @@ interface Metabot {
   background: string | null;
   boss_id: number | null;
   boss_global_metaid: string | null;
+  /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
+  owner_binding_pinid?: string | null;
   llm_id: string | null;
   tools: string[];
   skills: string[];
@@ -944,12 +972,13 @@ interface IElectronAPI {
       syncLlm?: boolean;
       syncChatSkills?: boolean;
       syncHomepage?: boolean;
+      syncOwner?: boolean;
     }) => Promise<{
       success: boolean;
       error?: string;
       metabotInfoPinId?: string;
       txids?: string[];
-      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage'>;
+      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner'>;
     }>;
     createMetaBotOnChain: (input: {
       name: string;
@@ -988,6 +1017,33 @@ interface IElectronAPI {
       metafileUri?: string;
       contentType?: string;
     }>;
+  };
+  userIdentity: {
+    get: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; error?: string }>;
+    create: (input: { name: string; avatar?: string | null }) => Promise<{
+      success: boolean;
+      identity?: PublicUserIdentity | null;
+      /** Present only on create, for the one-time backup step. */
+      mnemonic?: string;
+      chainSync?: UserIdentityChainSyncResult;
+      error?: string;
+    }>;
+    importFromMnemonic: (input: { mnemonic: string; path?: string }) => Promise<{
+      success: boolean;
+      identity?: PublicUserIdentity | null;
+      profileSource?: 'chain' | 'local';
+      chainSync?: UserIdentityChainSyncResult;
+      error?: string;
+    }>;
+    updateName: (input: { name: string }) => Promise<{
+      success: boolean;
+      identity?: PublicUserIdentity | null;
+      chainSync?: UserIdentityChainSyncResult;
+      error?: string;
+    }>;
+    logout: () => Promise<{ success: boolean; error?: string }>;
+    revealMnemonic: () => Promise<{ success: boolean; mnemonic?: string; error?: string }>;
+    retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; chainSync?: UserIdentityChainSyncResult; error?: string }>;
   };
   metaWebListener: {
     getListenerConfig: () => Promise<{ success: boolean; config?: { enabled: boolean; groupChats: boolean; privateChats: boolean; serviceRequests: boolean; respondToStrangerPrivateChats: boolean }; error?: string }>;

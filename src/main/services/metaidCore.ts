@@ -30,6 +30,7 @@ import {
   filterRecoveredCandidatesByProvider,
 } from './mvcFundingRecoveryService';
 import { buildMetabotInfoPayloads, buildMetabotHomepagePayload } from './metabotInfoPayload';
+import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -74,7 +75,7 @@ export interface MetaidDataPayload {
 /** Supported network for createPin. Default 'mvc' for backward compatibility. */
 export type CreatePinNetwork = 'mvc' | 'doge' | 'btc';
 
-interface CreatePinWorkerSuccess {
+export interface CreatePinWorkerSuccess {
   txids: string[];
   pinId: string;
   totalCost: number;
@@ -88,7 +89,7 @@ interface CreatePinWorkerOutput {
   exitCode: number | null;
 }
 
-type MvcCreatePinSessionSnapshot = {
+export type MvcCreatePinSessionSnapshot = {
   excludeOutpoints: string[];
   preferredFundingUtxos: MvcCachedFundingUtxo[];
 };
@@ -411,24 +412,29 @@ export async function runMvcCreatePinWorkerWithSessionRecovery(params: {
   }
 }
 
+function resolveCreatePinNetwork(network?: CreatePinNetwork | string): CreatePinNetwork {
+  return (
+    (network != null && String(network).trim() !== '')
+      ? String(network).toLowerCase().trim()
+      : 'mvc'
+  ) as CreatePinNetwork;
+}
+
+export interface SpawnCreatePinWorkerParams {
+  mnemonic: string;
+  walletPath: string;
+  metaidData: MetaidDataPayload;
+  options?: { feeRate?: number; network?: CreatePinNetwork | string };
+  sessionSnapshot?: MvcCreatePinSessionSnapshot;
+}
+
 /**
- * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
- * @param options.network - Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'.
+ * Low-level createPin worker spawn shared by MetaBot pins (createPin) and
+ * non-MetaBot identity pins (createPinForIdentity). Resolves the worker
+ * bundle, forwards the mnemonic via env, spawns, and parses the result.
  */
-export async function createPin(
-  metabotStore: MetabotStore,
-  metabot_id: number,
-  metaidData: MetaidDataPayload,
-  options?: { feeRate?: number; network?: CreatePinNetwork | string }
-): Promise<{ txids: string[]; pinId: string; totalCost: number }> {
-  const wallet = metabotStore.getMetabotWalletByMetabotId(metabot_id);
-  if (!wallet) {
-    throw new Error(`MetaBot ${metabot_id} has no wallet`);
-  }
-  const mnemonic = wallet.mnemonic?.trim();
-  if (!mnemonic) {
-    throw new Error(`MetaBot ${metabot_id} wallet mnemonic is empty`);
-  }
+export async function spawnCreatePinWorker(params: SpawnCreatePinWorkerParams): Promise<CreatePinWorkerSuccess> {
+  const { mnemonic, walletPath, metaidData, options, sessionSnapshot } = params;
 
   // Worker lives under dist-electron/main/libs in Vite dev builds; keep legacy fallbacks for packaging.
   const appPath = app.getAppPath();
@@ -460,7 +466,7 @@ export async function createPin(
     ...baseEnv,
     ELECTRON_RUN_AS_NODE: '1',
     IDBOTS_METABOT_MNEMONIC: mnemonic,
-    IDBOTS_METABOT_PATH: wallet.path || "m/44'/10001'/0'/0/0",
+    IDBOTS_METABOT_PATH: walletPath,
   };
 
   const serializedPayload =
@@ -472,11 +478,7 @@ export async function createPin(
   const encoding: 'utf-8' | 'base64' =
     Buffer.isBuffer(metaidData.payload) ? 'base64' : (metaidData.encoding ?? 'utf-8');
 
-  const network = (
-    (options?.network != null && String(options.network).trim() !== '')
-      ? String(options.network).toLowerCase().trim()
-      : 'mvc'
-  ) as CreatePinNetwork;
+  const network = resolveCreatePinNetwork(options?.network);
   const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000 };
   const payloadStr = JSON.stringify({
     feeRate: options?.feeRate ?? FALLBACK_FEE_RATES[network] ?? 1,
@@ -509,9 +511,7 @@ export async function createPin(
   // Never use app.getAppPath() as cwd in packaged mode (it may be app.asar file).
   // A file cwd makes spawn fail with ENOENT/ENOTDIR on Windows first-run paths.
   const spawnCwd = app.getPath('userData');
-  const runWorker = (
-    sessionSnapshot?: { excludeOutpoints: string[]; preferredFundingUtxos: MvcCachedFundingUtxo[] },
-  ) => new Promise<CreatePinWorkerSuccess>((resolve, reject) => {
+  return new Promise<CreatePinWorkerSuccess>((resolve, reject) => {
     const child = spawn(electronExe, [workerPath], {
       cwd: spawnCwd,
       env,
@@ -547,6 +547,55 @@ export async function createPin(
       }
     });
   });
+}
+
+/**
+ * Create a pin for a non-MetaBot identity (e.g. the local human user identity).
+ * Unlike createPin this bypasses the per-MetaBot MVC spend coordinator: the
+ * caller owns serialization for the identity wallet and may thread
+ * sessionSnapshot excludeOutpoints/preferredFundingUtxos between sequential pins.
+ */
+export async function createPinForIdentity(params: {
+  mnemonic: string;
+  path?: string;
+  metaidData: MetaidDataPayload;
+  options?: { feeRate?: number; network?: CreatePinNetwork | string };
+  sessionSnapshot?: MvcCreatePinSessionSnapshot;
+}): Promise<CreatePinWorkerSuccess> {
+  const mnemonic = params.mnemonic?.trim();
+  if (!mnemonic) {
+    throw new Error('Identity mnemonic is empty');
+  }
+  return spawnCreatePinWorker({
+    mnemonic,
+    walletPath: params.path || "m/44'/10001'/0'/0/0",
+    metaidData: params.metaidData,
+    options: params.options,
+    sessionSnapshot: params.sessionSnapshot,
+  });
+}
+
+/**
+ * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
+ * @param options.network - Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'.
+ */
+export async function createPin(
+  metabotStore: MetabotStore,
+  metabot_id: number,
+  metaidData: MetaidDataPayload,
+  options?: { feeRate?: number; network?: CreatePinNetwork | string }
+): Promise<{ txids: string[]; pinId: string; totalCost: number }> {
+  const wallet = metabotStore.getMetabotWalletByMetabotId(metabot_id);
+  if (!wallet) {
+    throw new Error(`MetaBot ${metabot_id} has no wallet`);
+  }
+  const mnemonic = wallet.mnemonic?.trim();
+  if (!mnemonic) {
+    throw new Error(`MetaBot ${metabot_id} wallet mnemonic is empty`);
+  }
+
+  const walletPath = wallet.path || "m/44'/10001'/0'/0/0";
+  const network = resolveCreatePinNetwork(options?.network);
 
   if (network === 'mvc') {
     appendMetaidLog('INFO', 'Queueing governed MVC createPin job', {
@@ -594,7 +643,8 @@ export async function createPin(
               });
               return true;
             },
-            runWorkerForSession: runWorker,
+            runWorkerForSession: (sessionSnapshot) =>
+              spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options, sessionSnapshot }),
           });
           const result = workerSessionResult.workerResult;
           if (workerSessionResult.retriedAfterStaleFunding) {
@@ -635,7 +685,7 @@ export async function createPin(
     });
   }
 
-  return runWorker();
+  return spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options });
 }
 
 /** Sleep for ms milliseconds. Used between sequential chain ops to avoid UTXO double-spend. */
@@ -644,7 +694,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Extract MIME type and raw base64 from data URL or return null. */
-function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; base64: string; buffer: Buffer } | null {
+export function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; base64: string; buffer: Buffer } | null {
   if (!avatar || typeof avatar !== 'string') return null;
   const match = /^data:([^;]+);base64,(.+)$/.exec(avatar);
   if (!match) return null;
@@ -680,7 +730,7 @@ export interface SyncMetaBotResult {
   txids?: string[];
 }
 
-export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage';
+export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner';
 export type SyncMetaBotEditStep = Exclude<SyncMetaBotStep, 'chatpubkey'>;
 
 export interface SyncMetaBotEditChangesInput {
@@ -692,6 +742,9 @@ export interface SyncMetaBotEditChangesInput {
   syncLlm?: boolean;
   syncChatSkills?: boolean;
   syncHomepage?: boolean;
+  /** Publish an /info/owner pin: signed binding payload, or '' to unbind. */
+  syncOwner?: boolean;
+  ownerBindingPayload?: string | null;
 }
 
 export interface SyncMetaBotEditChangesResult {
@@ -757,7 +810,7 @@ function buildEditAvatarSyncStep(avatar: string | null | undefined): MetabotInfo
   return avatarStep;
 }
 
-export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[] {
+export function buildFullMetabotInfoSyncPlan(metabot: any, options?: { ownerBindingPayload?: string | null }): MetabotInfoSyncStep[] {
   const steps: MetabotInfoSyncStep[] = [{
     key: 'name',
     path: '/info/name',
@@ -800,6 +853,16 @@ export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[
     payload: homepagePayload.payload,
   });
 
+  // Owner binding is an optional trailing step ('' payload = unbind).
+  if (typeof options?.ownerBindingPayload === 'string') {
+    steps.push({
+      key: 'owner',
+      path: OWNER_BINDING_PATH,
+      contentType: 'application/json',
+      payload: options.ownerBindingPayload,
+    });
+  }
+
   return steps;
 }
 
@@ -826,6 +889,17 @@ export function buildEditMetabotInfoSyncPlan(
     steps.splice(insertIndex, 0, avatarStep);
   }
 
+  // Owner binding (signed payload, or '' to unbind) is published as an
+  // independent trailing step.
+  if (input.syncOwner) {
+    steps.push({
+      key: 'owner',
+      path: OWNER_BINDING_PATH,
+      contentType: 'application/json',
+      payload: typeof input.ownerBindingPayload === 'string' ? input.ownerBindingPayload : '',
+    });
+  }
+
   return steps;
 }
 
@@ -837,7 +911,8 @@ export function buildEditMetabotInfoSyncPlan(
 export async function syncMetaBotToChain(
   metabotStore: MetabotStore,
   metabot_id: number,
-  deps: SyncMetaBotToChainDeps = {}
+  deps: SyncMetaBotToChainDeps = {},
+  options: { ownerBindingPayload?: string | null } = {}
 ): Promise<SyncMetaBotResult> {
   const createPinRunner = deps.createPin ?? createPin;
   const sleepRunner = deps.sleep ?? sleep;
@@ -866,6 +941,7 @@ export async function syncMetaBotToChain(
   const txids: string[] = [];
   let chatPublicKeyPinId: string | null = null;
   let metabotInfoPinId: string | null = null;
+  let ownerBindingPinId: string | null = null;
   let someStepFailed = false;
   let lastError = '';
   const chatPubKey = typeof metabot.chat_public_key === 'string' ? metabot.chat_public_key.trim() : '';
@@ -875,7 +951,7 @@ export async function syncMetaBotToChain(
     logErr('Missing chat public key; continuing with skippable profile sync');
   }
 
-  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot);
+  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot, options);
   log('Prepared full sync plan', { plannedSteps: plannedSteps.map((step) => step.key) });
 
   for (let index = 0; index < plannedSteps.length; index += 1) {
@@ -909,6 +985,8 @@ export async function syncMetaBotToChain(
           chatPublicKeyPinId = result.pinId ?? `${txid}i0`;
         } else if (isProfileSyncStep(step.key)) {
           metabotInfoPinId = result.pinId ?? `${txid}i0`;
+        } else if (step.key === 'owner') {
+          ownerBindingPinId = result.pinId ?? `${txid}i0`;
         }
         log(`${step.key} pin success`, { txid, pinId: result.pinId });
       }
@@ -932,9 +1010,10 @@ export async function syncMetaBotToChain(
   if (someStepFailed) {
     log('Some steps failed; updating DB with partial results and returning canSkip=true');
     try {
-      const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null } = {};
+      const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null; owner_binding_pinid?: string | null } = {};
       if (chatPublicKeyPinId) updateInput.chat_public_key_pin_id = chatPublicKeyPinId;
       if (metabotInfoPinId) updateInput.metabot_info_pinid = metabotInfoPinId;
+      if (ownerBindingPinId) updateInput.owner_binding_pinid = ownerBindingPinId;
       log('DB update payload', updateInput);
       metabotStore.updateMetabot(metabot_id, updateInput);
     } catch (dbErr) {
@@ -953,9 +1032,10 @@ export async function syncMetaBotToChain(
   // Database update
   log('Updating database with PinIDs');
   try {
-    const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null } = {};
+    const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null; owner_binding_pinid?: string | null } = {};
     if (chatPublicKeyPinId) updateInput.chat_public_key_pin_id = chatPublicKeyPinId;
     if (metabotInfoPinId) updateInput.metabot_info_pinid = metabotInfoPinId;
+    if (ownerBindingPinId) updateInput.owner_binding_pinid = ownerBindingPinId;
 
     log('DB update payload', updateInput);
 
@@ -1088,6 +1168,17 @@ export async function syncMetaBotEditChangesToChain(
             syncedSteps,
             metabotInfoPinId,
           };
+        }
+      }
+      if (step.key === 'owner') {
+        // '' payload = unbind: clear the stored binding pin id.
+        const ownerPinId = String(step.payload) === '' ? null : (result.pinId ?? `${txid}i0`);
+        try {
+          metabotStore.updateMetabot(metabotId, { owner_binding_pinid: ownerPinId });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logErr('Owner pin sync succeeded but database update failed', { error: msg });
+          return { success: false, error: `Owner sync succeeded but database update failed: ${msg}`, txids, syncedSteps };
         }
       }
       syncedSteps.push(step.key as SyncMetaBotEditStep);
