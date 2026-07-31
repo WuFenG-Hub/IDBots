@@ -74,7 +74,7 @@ export interface MetaidDataPayload {
 /** Supported network for createPin. Default 'mvc' for backward compatibility. */
 export type CreatePinNetwork = 'mvc' | 'doge' | 'btc';
 
-interface CreatePinWorkerSuccess {
+export interface CreatePinWorkerSuccess {
   txids: string[];
   pinId: string;
   totalCost: number;
@@ -88,7 +88,7 @@ interface CreatePinWorkerOutput {
   exitCode: number | null;
 }
 
-type MvcCreatePinSessionSnapshot = {
+export type MvcCreatePinSessionSnapshot = {
   excludeOutpoints: string[];
   preferredFundingUtxos: MvcCachedFundingUtxo[];
 };
@@ -411,24 +411,29 @@ export async function runMvcCreatePinWorkerWithSessionRecovery(params: {
   }
 }
 
+function resolveCreatePinNetwork(network?: CreatePinNetwork | string): CreatePinNetwork {
+  return (
+    (network != null && String(network).trim() !== '')
+      ? String(network).toLowerCase().trim()
+      : 'mvc'
+  ) as CreatePinNetwork;
+}
+
+export interface SpawnCreatePinWorkerParams {
+  mnemonic: string;
+  walletPath: string;
+  metaidData: MetaidDataPayload;
+  options?: { feeRate?: number; network?: CreatePinNetwork | string };
+  sessionSnapshot?: MvcCreatePinSessionSnapshot;
+}
+
 /**
- * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
- * @param options.network - Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'.
+ * Low-level createPin worker spawn shared by MetaBot pins (createPin) and
+ * non-MetaBot identity pins (createPinForIdentity). Resolves the worker
+ * bundle, forwards the mnemonic via env, spawns, and parses the result.
  */
-export async function createPin(
-  metabotStore: MetabotStore,
-  metabot_id: number,
-  metaidData: MetaidDataPayload,
-  options?: { feeRate?: number; network?: CreatePinNetwork | string }
-): Promise<{ txids: string[]; pinId: string; totalCost: number }> {
-  const wallet = metabotStore.getMetabotWalletByMetabotId(metabot_id);
-  if (!wallet) {
-    throw new Error(`MetaBot ${metabot_id} has no wallet`);
-  }
-  const mnemonic = wallet.mnemonic?.trim();
-  if (!mnemonic) {
-    throw new Error(`MetaBot ${metabot_id} wallet mnemonic is empty`);
-  }
+export async function spawnCreatePinWorker(params: SpawnCreatePinWorkerParams): Promise<CreatePinWorkerSuccess> {
+  const { mnemonic, walletPath, metaidData, options, sessionSnapshot } = params;
 
   // Worker lives under dist-electron/main/libs in Vite dev builds; keep legacy fallbacks for packaging.
   const appPath = app.getAppPath();
@@ -460,7 +465,7 @@ export async function createPin(
     ...baseEnv,
     ELECTRON_RUN_AS_NODE: '1',
     IDBOTS_METABOT_MNEMONIC: mnemonic,
-    IDBOTS_METABOT_PATH: wallet.path || "m/44'/10001'/0'/0/0",
+    IDBOTS_METABOT_PATH: walletPath,
   };
 
   const serializedPayload =
@@ -472,11 +477,7 @@ export async function createPin(
   const encoding: 'utf-8' | 'base64' =
     Buffer.isBuffer(metaidData.payload) ? 'base64' : (metaidData.encoding ?? 'utf-8');
 
-  const network = (
-    (options?.network != null && String(options.network).trim() !== '')
-      ? String(options.network).toLowerCase().trim()
-      : 'mvc'
-  ) as CreatePinNetwork;
+  const network = resolveCreatePinNetwork(options?.network);
   const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000 };
   const payloadStr = JSON.stringify({
     feeRate: options?.feeRate ?? FALLBACK_FEE_RATES[network] ?? 1,
@@ -509,9 +510,7 @@ export async function createPin(
   // Never use app.getAppPath() as cwd in packaged mode (it may be app.asar file).
   // A file cwd makes spawn fail with ENOENT/ENOTDIR on Windows first-run paths.
   const spawnCwd = app.getPath('userData');
-  const runWorker = (
-    sessionSnapshot?: { excludeOutpoints: string[]; preferredFundingUtxos: MvcCachedFundingUtxo[] },
-  ) => new Promise<CreatePinWorkerSuccess>((resolve, reject) => {
+  return new Promise<CreatePinWorkerSuccess>((resolve, reject) => {
     const child = spawn(electronExe, [workerPath], {
       cwd: spawnCwd,
       env,
@@ -547,6 +546,55 @@ export async function createPin(
       }
     });
   });
+}
+
+/**
+ * Create a pin for a non-MetaBot identity (e.g. the local human user identity).
+ * Unlike createPin this bypasses the per-MetaBot MVC spend coordinator: the
+ * caller owns serialization for the identity wallet and may thread
+ * sessionSnapshot excludeOutpoints/preferredFundingUtxos between sequential pins.
+ */
+export async function createPinForIdentity(params: {
+  mnemonic: string;
+  path?: string;
+  metaidData: MetaidDataPayload;
+  options?: { feeRate?: number; network?: CreatePinNetwork | string };
+  sessionSnapshot?: MvcCreatePinSessionSnapshot;
+}): Promise<CreatePinWorkerSuccess> {
+  const mnemonic = params.mnemonic?.trim();
+  if (!mnemonic) {
+    throw new Error('Identity mnemonic is empty');
+  }
+  return spawnCreatePinWorker({
+    mnemonic,
+    walletPath: params.path || "m/44'/10001'/0'/0/0",
+    metaidData: params.metaidData,
+    options: params.options,
+    sessionSnapshot: params.sessionSnapshot,
+  });
+}
+
+/**
+ * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
+ * @param options.network - Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'.
+ */
+export async function createPin(
+  metabotStore: MetabotStore,
+  metabot_id: number,
+  metaidData: MetaidDataPayload,
+  options?: { feeRate?: number; network?: CreatePinNetwork | string }
+): Promise<{ txids: string[]; pinId: string; totalCost: number }> {
+  const wallet = metabotStore.getMetabotWalletByMetabotId(metabot_id);
+  if (!wallet) {
+    throw new Error(`MetaBot ${metabot_id} has no wallet`);
+  }
+  const mnemonic = wallet.mnemonic?.trim();
+  if (!mnemonic) {
+    throw new Error(`MetaBot ${metabot_id} wallet mnemonic is empty`);
+  }
+
+  const walletPath = wallet.path || "m/44'/10001'/0'/0/0";
+  const network = resolveCreatePinNetwork(options?.network);
 
   if (network === 'mvc') {
     appendMetaidLog('INFO', 'Queueing governed MVC createPin job', {
@@ -594,7 +642,8 @@ export async function createPin(
               });
               return true;
             },
-            runWorkerForSession: runWorker,
+            runWorkerForSession: (sessionSnapshot) =>
+              spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options, sessionSnapshot }),
           });
           const result = workerSessionResult.workerResult;
           if (workerSessionResult.retriedAfterStaleFunding) {
@@ -635,7 +684,7 @@ export async function createPin(
     });
   }
 
-  return runWorker();
+  return spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options });
 }
 
 /** Sleep for ms milliseconds. Used between sequential chain ops to avoid UTXO double-spend. */
@@ -644,7 +693,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 /** Extract MIME type and raw base64 from data URL or return null. */
-function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; base64: string; buffer: Buffer } | null {
+export function parseDataUrlAvatar(avatar: string | null | undefined): { mime: string; base64: string; buffer: Buffer } | null {
   if (!avatar || typeof avatar !== 'string') return null;
   const match = /^data:([^;]+);base64,(.+)$/.exec(avatar);
   if (!match) return null;
