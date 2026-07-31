@@ -142,3 +142,4 @@ man_base_data_pebble/
 !tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts
 !tests/sqliteStoreFreshMigrations.test.mjs
+!tests/userIdentityStore.test.mjs

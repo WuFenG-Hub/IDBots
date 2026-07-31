@@ -1019,6 +1019,28 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_metaapp_owner_cache_mvc ON metaapp_owner_cache(mvc_address);
     `);
 
+    // Human user identity: single-row table (CHECK id = 1). Holds the local
+    // human user's mnemonic-derived MetaID identity used for owner binding.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS user_identity (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        mnemonic TEXT NOT NULL,
+        path TEXT DEFAULT "m/44'/10001'/0'/0/0",
+        mvc_address TEXT NOT NULL,
+        btc_address TEXT NOT NULL,
+        doge_address TEXT NOT NULL,
+        public_key TEXT NOT NULL,
+        chat_public_key TEXT NOT NULL,
+        chat_public_key_pin_id TEXT,
+        metaid TEXT NOT NULL,
+        globalmetaid TEXT,
+        name TEXT NOT NULL,
+        avatar TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
     // Migration: existing DBs with old schema (metabot_wallets.metabot_id, metabots without wallet_id, avatar TEXT)
     this.migrateMetabotWalletRelationAndAvatar(basePath);
 
