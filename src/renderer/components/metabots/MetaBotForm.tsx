@@ -93,6 +93,8 @@ interface MetaBotFormProps {
   excludeIdForNameCheck?: number | null;
   /** Metabot id for homepage file upload (edit mode). Null/undefined in create mode disables metafile upload. */
   metabotId?: number | null;
+  /** Signed /info/owner binding pin id of the bot being edited (edit mode only). */
+  ownerBindingPinId?: string | null;
   /** Open the current Bot's default template homepage in Bot Browser. */
   onOpenDefaultHomepage?: () => void;
   /** Open a MetaApp homepage preview by its pin id (best-effort; browser may fail to resolve). */
@@ -113,6 +115,7 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
   onCheckNameExists,
   excludeIdForNameCheck,
   metabotId,
+  ownerBindingPinId,
   onOpenDefaultHomepage,
   onPreviewMetaAppHomepage,
   onRequestMetaApps,
@@ -207,6 +210,20 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
     if (!name || !onCheckNameExists) return;
     const exists = await onCheckNameExists(name, excludeIdForNameCheck ?? undefined);
     setNameDuplicate(exists);
+  };
+
+  const handleGetOwnerMetaId = async () => {
+    try {
+      const result = await window.electron.userIdentity.get();
+      const globalMetaId = result.success && result.identity ? (result.identity.globalmetaid ?? '').trim() : '';
+      if (!globalMetaId) {
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotOwnerNeedUserIdentity') }));
+        return;
+      }
+      handleChange('boss_global_metaid', globalMetaId);
+    } catch {
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotOwnerNeedUserIdentity') }));
+    }
   };
 
   const handleAvatarFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -539,21 +556,42 @@ const MetaBotForm: React.FC<MetaBotFormProps> = ({
               id="metabot-boss-metaid"
               type="text"
               value={values.boss_global_metaid}
-              onChange={(e) => handleChange('boss_global_metaid', e.target.value)}
+              readOnly
               placeholder={i18nService.t('metabotBossMetaIdPlaceholder')}
-              className={`${inputClass} flex-1 min-w-0 font-mono`}
+              className={`${inputClass} flex-1 min-w-0 font-mono opacity-80`}
             />
             <button
               type="button"
-              onClick={() => {/* TODO: fetch my MetaID */}}
+              onClick={() => { void handleGetOwnerMetaId(); }}
               className="shrink-0 px-3 py-2 text-xs rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors whitespace-nowrap"
             >
-              {i18nService.t('metabotGetMyMetaId')}
+              {i18nService.t('metabotGetOwnerMetaId')}
             </button>
+            {values.boss_global_metaid.trim() && (
+              <button
+                type="button"
+                onClick={() => handleChange('boss_global_metaid', '')}
+                className="shrink-0 px-3 py-2 text-xs rounded-xl border dark:border-claude-darkBorder border-claude-border text-red-500 dark:text-red-400 dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors whitespace-nowrap"
+              >
+                {i18nService.t('metabotClearOwner')}
+              </button>
+            )}
           </div>
-          <p className={`${hintClass} opacity-70`}>
-            {i18nService.t('metabotBossMetaIdHint')}
-          </p>
+          {values.boss_global_metaid.trim() ? (
+            isEdit && ownerBindingPinId ? (
+              <p className="text-xs mt-1 text-green-600 dark:text-green-400">
+                {i18nService.t('metabotOwnerSigned')}
+              </p>
+            ) : (
+              <p className="text-xs mt-1 text-amber-600 dark:text-amber-400">
+                {i18nService.t(isEdit ? 'metabotOwnerUnsigned' : 'metabotOwnerWillSignOnSave')}
+              </p>
+            )
+          ) : (
+            <p className={`${hintClass} opacity-70`}>
+              {i18nService.t('metabotBossMetaIdHint')}
+            </p>
+          )}
         </div>
       </div>
 
