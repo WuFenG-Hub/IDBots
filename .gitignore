@@ -143,3 +143,4 @@ man_base_data_pebble/
 !tests/browserIframeBridgeScript.test.ts
 !tests/sqliteStoreFreshMigrations.test.mjs
 !tests/userIdentityStore.test.mjs
+!tests/userIdentityService.test.mjs
