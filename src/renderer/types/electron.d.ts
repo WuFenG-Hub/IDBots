@@ -1028,10 +1028,16 @@ interface IElectronAPI {
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;
-    importFromMnemonic: (input: { mnemonic: string; path?: string; name?: string; avatar?: string | null }) => Promise<{
+    importFromMnemonic: (input: { mnemonic: string; path?: string }) => Promise<{
       success: boolean;
       identity?: PublicUserIdentity | null;
       profileSource?: 'chain' | 'local';
+      chainSync?: UserIdentityChainSyncResult;
+      error?: string;
+    }>;
+    updateName: (input: { name: string }) => Promise<{
+      success: boolean;
+      identity?: PublicUserIdentity | null;
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;

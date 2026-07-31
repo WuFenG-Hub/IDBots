@@ -55,6 +55,7 @@ import {
   importUserIdentity,
   logoutUserIdentity,
   syncUserIdentityToChain,
+  updateUserIdentityName,
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
@@ -7733,7 +7734,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('userIdentity:import', async (_event, input: { mnemonic: string; path?: string; name?: string; avatar?: string | null }) => {
+  ipcMain.handle('userIdentity:import', async (_event, input: { mnemonic: string; path?: string }) => {
     try {
       const result = await importUserIdentity(getUserIdentityStore(), input ?? { mnemonic: '' });
       if (!result.success) {
@@ -7748,6 +7749,24 @@ if (!gotTheLock) {
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[UserIdentity] userIdentity:import failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:updateName', async (_event, input: { name: string }) => {
+    try {
+      const result = await updateUserIdentityName(getUserIdentityStore(), input ?? { name: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:updateName failed:', errMsg);
       return { success: false, error: errMsg };
     }
   });

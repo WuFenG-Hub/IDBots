@@ -661,8 +661,9 @@ contextBridge.exposeInMainWorld('electron', {
     get: () => ipcRenderer.invoke('userIdentity:get'),
     create: (input: { name: string; avatar?: string | null }) =>
       ipcRenderer.invoke('userIdentity:create', input),
-    importFromMnemonic: (input: { mnemonic: string; path?: string; name?: string; avatar?: string | null }) =>
+    importFromMnemonic: (input: { mnemonic: string; path?: string }) =>
       ipcRenderer.invoke('userIdentity:import', input),
+    updateName: (input: { name: string }) => ipcRenderer.invoke('userIdentity:updateName', input),
     logout: () => ipcRenderer.invoke('userIdentity:logout'),
     revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),

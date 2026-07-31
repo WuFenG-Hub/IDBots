@@ -234,15 +234,17 @@ export async function createUserIdentity(
 }
 
 /**
- * Import a user identity from an existing mnemonic. When the account already
- * has an on-chain profile, its name/avatar win and are not re-published; the
- * derived chat key must match the on-chain /info/chatpubkey (mismatch means a
- * wrong derivation path). Otherwise the caller-provided name/avatar are used
- * and published.
+ * Import a user identity from an existing mnemonic (12 or 24 words, matching
+ * Metalet's import algorithm: plain BIP39 validation + identical derivation).
+ * When the account already has an on-chain profile, its name/avatar win and
+ * are not re-published; the derived chat key must match the on-chain
+ * /info/chatpubkey (mismatch means a wrong derivation path). Without an
+ * on-chain profile the identity imports with an empty name — the user sets it
+ * later from the profile panel (which publishes /info/name).
  */
 export async function importUserIdentity(
   userStore: UserIdentityStore,
-  input: { mnemonic: string; path?: string; name?: string; avatar?: string | null },
+  input: { mnemonic: string; path?: string },
   deps: UserIdentityServiceDeps = {},
 ): Promise<UserIdentityResult> {
   if (userStore.get()) {
@@ -250,7 +252,7 @@ export async function importUserIdentity(
   }
   const mnemonic = (input.mnemonic ?? '').trim().toLowerCase().split(/\s+/).join(' ');
   const words = mnemonic ? mnemonic.split(' ') : [];
-  if (words.length !== 12 || !bip39.validateMnemonic(mnemonic, wordlist)) {
+  if ((words.length !== 12 && words.length !== 24) || !bip39.validateMnemonic(mnemonic, wordlist)) {
     return { success: false, error: 'INVALID_MNEMONIC' };
   }
   const path = (input.path ?? '').trim() || "m/44'/10001'/0'/0/0";
@@ -282,14 +284,10 @@ export async function importUserIdentity(
     chatPublicKeyPinId = profile.chatpubkeyPinId ?? null;
     profileSource = 'chain';
   } else {
-    name = (input.name ?? '').trim();
-    if (!name) {
-      return { success: false, error: 'NAME_EMPTY' };
-    }
-    avatar = (input.avatar ?? '').trim() || null;
-    if (avatar && !parseDataUrlAvatar(avatar)) {
-      return { success: false, error: 'INVALID_AVATAR' };
-    }
+    // No on-chain profile: import with an empty name; the user sets (and
+    // publishes) it later from the profile panel.
+    name = '';
+    avatar = null;
     profileSource = 'local';
   }
 
@@ -317,7 +315,7 @@ export async function importUserIdentity(
 
   const chainSync = await syncUserIdentityToChain(
     userStore,
-    { includeProfileSteps: profileSource === 'local' },
+    { includeProfileSteps: false },
     deps,
   );
   return { success: true, identity, chainSync, profileSource };
@@ -326,4 +324,56 @@ export async function importUserIdentity(
 /** Log out: delete the local identity (on-chain pins stay as-is). */
 export function logoutUserIdentity(userStore: UserIdentityStore): boolean {
   return userStore.remove();
+}
+
+/**
+ * Set/rename the user's name and publish it as /info/name (Bot Info
+ * semantics: latest pin wins). The pin is published FIRST; the local record
+ * is updated only on success, so local state never claims an unpublished
+ * name.
+ */
+export async function updateUserIdentityName(
+  userStore: UserIdentityStore,
+  input: { name: string },
+  deps: UserIdentityServiceDeps = {},
+): Promise<UserIdentityResult> {
+  const identity = userStore.get();
+  if (!identity) {
+    return { success: false, error: 'USER_IDENTITY_MISSING' };
+  }
+  const name = (input.name ?? '').trim();
+  if (!name) {
+    return { success: false, error: 'NAME_EMPTY' };
+  }
+  if (name === identity.name) {
+    return { success: true, identity, profileSource: 'local' };
+  }
+
+  const createPin = deps.createPin ?? createPinForIdentity;
+  let result: Awaited<ReturnType<typeof createPinForIdentity>>;
+  try {
+    result = await createPin({
+      mnemonic: identity.mnemonic,
+      path: identity.path,
+      metaidData: {
+        operation: 'create',
+        path: '/info/name',
+        contentType: 'text/plain',
+        payload: name,
+      },
+    });
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  if (!result.txids[0]) {
+    return { success: false, error: 'name pin failed: no txid' };
+  }
+
+  const updated = userStore.update({ name });
+  return {
+    success: true,
+    identity: updated ?? undefined,
+    chainSync: { success: true, txids: result.txids, failedSteps: [] },
+    profileSource: 'local',
+  };
 }

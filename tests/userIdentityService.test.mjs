@@ -14,9 +14,12 @@ const {
   logoutUserIdentity,
   syncUserIdentityToChain,
   buildUserInfoSyncSteps,
+  updateUserIdentityName,
 } = await import('../dist-electron/main/services/userIdentityService.js');
 
 const TEST_MNEMONIC = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
+// Official BIP39 24-word test vector (256-bit zero entropy).
+const TEST_MNEMONIC_24 = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
 const AVATAR_DATA_URL = `data:image/png;base64,${Buffer.from('fake-png').toString('base64')}`;
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-user-identity-svc-'));
@@ -132,7 +135,7 @@ test('importUserIdentity with on-chain profile reuses it and publishes nothing',
   store.close();
 });
 
-test('importUserIdentity without on-chain profile needs a name and publishes profile pins', async () => {
+test('importUserIdentity without on-chain profile imports with empty name, publishes only chatpubkey', async () => {
   const { store, userStore } = await makeStores();
   const pinMock = makePinMock();
   const deps = {
@@ -140,15 +143,38 @@ test('importUserIdentity without on-chain profile needs a name and publishes pro
     fetchProfile: async () => { throw new Error('CHAIN_INFO_EMPTY'); },
   };
 
-  const missing = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC }, deps);
-  assert.equal(missing.success, false);
-  assert.equal(missing.error, 'NAME_EMPTY');
-
-  const result = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC, name: 'Imported Alice' }, deps);
+  const result = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC }, deps);
   assert.equal(result.success, true);
   assert.equal(result.profileSource, 'local');
+  assert.equal(result.identity.name, '');
+  assert.equal(result.identity.avatar, null);
   const paths = pinMock.calls.map((c) => c.metaidData.path);
-  assert.deepEqual(paths, ['/info/name', '/info/chatpubkey']);
+  assert.deepEqual(paths, ['/info/chatpubkey']);
+  store.close();
+});
+
+test('importUserIdentity accepts a valid 24-word mnemonic (Metalet-compatible)', async () => {
+  const { store, userStore } = await makeStores();
+  const wallet24 = await createMetaBotWallet({ mnemonic: TEST_MNEMONIC_24 });
+  const pinMock = makePinMock();
+  const result = await importUserIdentity(
+    userStore,
+    { mnemonic: TEST_MNEMONIC_24 },
+    {
+      ...baseDeps(pinMock),
+      fetchProfile: async () => ({
+        name: 'Twenty Four',
+        avatarDataUrl: null,
+        metabotInfoPinId: null,
+        chatpubkeyPinId: 'chat-pin-24',
+        bio: {},
+        raw: { chatpubkey: wallet24.chat_public_key },
+      }),
+    },
+  );
+  assert.equal(result.success, true);
+  assert.equal(result.identity.name, 'Twenty Four');
+  assert.equal(userStore.get()?.mvc_address, wallet24.mvc_address);
   store.close();
 });
 
@@ -190,7 +216,15 @@ test('importUserIdentity rejects invalid mnemonics and surfaces fetch failures',
   );
   assert.equal(wrongChecksum.error, 'INVALID_MNEMONIC');
 
-  const fetchDown = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC, name: 'X' }, {
+  // 15 words is a valid BIP39 length but intentionally unsupported (12/24 only).
+  const fifteenWords = await importUserIdentity(
+    userStore,
+    { mnemonic: 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon admit' },
+    baseDeps(pinMock),
+  );
+  assert.equal(fifteenWords.error, 'INVALID_MNEMONIC');
+
+  const fetchDown = await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC }, {
     ...baseDeps(pinMock),
     fetchProfile: async () => { throw new Error('network down'); },
   });
@@ -227,5 +261,55 @@ test('buildUserInfoSyncSteps only republishes missing chatpubkey on retry', asyn
   assert.equal(retry.success, true);
   assert.equal(retryMock.calls.length, 1);
   assert.equal(userStore.get().chat_public_key_pin_id, 'pin-1');
+  store.close();
+});
+
+test('updateUserIdentityName publishes /info/name first, then updates local', async () => {
+  const { store, userStore } = await makeStores();
+  const createPinMock = makePinMock();
+  await importUserIdentity(userStore, { mnemonic: TEST_MNEMONIC }, {
+    ...baseDeps(createPinMock),
+    fetchProfile: async () => { throw new Error('CHAIN_INFO_EMPTY'); },
+  });
+  assert.equal(userStore.get().name, '');
+
+  const renameMock = makePinMock();
+  const result = await updateUserIdentityName(userStore, { name: '  Alice Named  ' }, baseDeps(renameMock));
+  assert.equal(result.success, true);
+  assert.equal(result.identity.name, 'Alice Named');
+  assert.equal(renameMock.calls.length, 1);
+  assert.equal(renameMock.calls[0].metaidData.path, '/info/name');
+  assert.equal(renameMock.calls[0].metaidData.payload, 'Alice Named');
+  assert.equal(userStore.get().name, 'Alice Named');
+  store.close();
+});
+
+test('updateUserIdentityName keeps local name when the pin fails', async () => {
+  const { store, userStore } = await makeStores();
+  const createPinMock = makePinMock();
+  await createUserIdentity(userStore, { name: 'Original' }, baseDeps(createPinMock));
+
+  const failMock = { fn: async () => { throw new Error('worker died'); }, calls: [] };
+  const result = await updateUserIdentityName(userStore, { name: 'New Name' }, baseDeps(failMock));
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'worker died');
+  assert.equal(userStore.get().name, 'Original');
+  store.close();
+});
+
+test('updateUserIdentityName validates input and identity presence', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+
+  const missing = await updateUserIdentityName(userStore, { name: 'X' }, baseDeps(pinMock));
+  assert.equal(missing.error, 'USER_IDENTITY_MISSING');
+
+  await createUserIdentity(userStore, { name: 'Original' }, baseDeps(pinMock));
+  const empty = await updateUserIdentityName(userStore, { name: '   ' }, baseDeps(pinMock));
+  assert.equal(empty.error, 'NAME_EMPTY');
+
+  const same = await updateUserIdentityName(userStore, { name: 'Original' }, baseDeps(pinMock));
+  assert.equal(same.success, true);
+  assert.equal(userStore.get().name, 'Original');
   store.close();
 });
