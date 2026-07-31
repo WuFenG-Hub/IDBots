@@ -38,14 +38,14 @@ const showToast = (message: string) => {
 };
 
 /** Map IPC error codes to localized copy; unknown/free-text errors are shown as-is. */
-const resolveErrorMessage = (raw: string | undefined, context: 'create' | 'import'): string => {
+const resolveErrorMessage = (raw: string | undefined): string => {
   switch (raw) {
     case 'INVALID_MNEMONIC':
       return i18nService.t('userSettingsErrorInvalidMnemonic');
     case 'CHAT_PUBKEY_MISMATCH':
       return i18nService.t('userSettingsErrorChatPubkeyMismatch');
     case 'NAME_EMPTY':
-      return i18nService.t(context === 'import' ? 'userSettingsErrorNameEmptyImport' : 'userSettingsErrorNameEmpty');
+      return i18nService.t('userSettingsErrorNameEmpty');
     case 'USER_IDENTITY_EXISTS':
       return i18nService.t('userSettingsErrorExists');
     case 'INVALID_AVATAR':
@@ -145,16 +145,18 @@ const UserSettings: React.FC = () => {
   const [createChainSyncFailed, setCreateChainSyncFailed] = useState(false);
 
   // Import flow
+  const [importWordCount, setImportWordCount] = useState<12 | 24>(12);
   const [importWords, setImportWords] = useState<string[]>(Array.from({ length: 12 }, () => ''));
   const [importPath, setImportPath] = useState(DEFAULT_DERIVATION_PATH);
-  const [importName, setImportName] = useState('');
-  const [importAvatar, setImportAvatar] = useState('');
   const [importError, setImportError] = useState('');
   const [importing, setImporting] = useState(false);
 
   // Profile
   const [partialSyncWarning, setPartialSyncWarning] = useState(false);
   const [retryingSync, setRetryingSync] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const [nameSaving, setNameSaving] = useState(false);
+  const [nameError, setNameError] = useState('');
 
   // Logout
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
@@ -195,6 +197,12 @@ const UserSettings: React.FC = () => {
     void loadIdentity();
   }, []);
 
+  // Keep the name draft in sync whenever a (different) identity is loaded
+  useEffect(() => {
+    setNameDraft(identity?.name ?? '');
+    setNameError('');
+  }, [identity?.id]);
+
   // Close the logout confirmation with Escape
   useEffect(() => {
     if (!logoutModalOpen) {
@@ -227,8 +235,21 @@ const UserSettings: React.FC = () => {
   const canImport = useMemo(() => {
     if (importing) return false;
     const normalizedWords = importWords.map((w) => w.trim()).filter(Boolean);
-    return normalizedWords.length === 12 && importPath.trim().length > 0;
-  }, [importWords, importPath, importing]);
+    return normalizedWords.length === importWordCount && importPath.trim().length > 0;
+  }, [importWords, importPath, importing, importWordCount]);
+
+  const canSaveName = useMemo(() => {
+    if (!identity || nameSaving) return false;
+    const next = nameDraft.trim();
+    return next.length > 0 && next !== identity.name.trim();
+  }, [identity, nameDraft, nameSaving]);
+
+  const handleImportWordCountChange = (raw: string) => {
+    const count: 12 | 24 = raw === '24' ? 24 : 12;
+    setImportWordCount(count);
+    // Reset all cells on count switch (same behavior as Metalet)
+    setImportWords(Array.from({ length: count }, () => ''));
+  };
 
   const handleImportWordChange = (index: number, value: string) => {
     setImportWords((prev) => {
@@ -238,14 +259,15 @@ const UserSettings: React.FC = () => {
     });
   };
 
-  const handleImportPasteMnemonic = (value: string) => {
+  /** Fill the whole grid from a pasted phrase; only when the word count matches the current mode. */
+  const handleImportPasteMnemonic = (value: string): boolean => {
     const parts = value
       .trim()
       .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 12);
-    if (parts.length === 0) return;
-    setImportWords(() => Array.from({ length: 12 }, (_, i) => (parts[i] ? parts[i].toLowerCase() : '')));
+      .filter(Boolean);
+    if (parts.length !== importWordCount) return false;
+    setImportWords(Array.from({ length: importWordCount }, (_, i) => parts[i].toLowerCase()));
+    return true;
   };
 
   const handleCopy = async (text: string) => {
@@ -268,7 +290,7 @@ const UserSettings: React.FC = () => {
         avatar: createAvatar || undefined,
       });
       if (!result.success || !result.identity || !result.mnemonic) {
-        setCreateError(resolveErrorMessage(result.error, 'create'));
+        setCreateError(resolveErrorMessage(result.error));
         return;
       }
       setIdentity(result.identity);
@@ -276,7 +298,7 @@ const UserSettings: React.FC = () => {
       setCreateChainSyncFailed(result.chainSync ? !result.chainSync.success : false);
       setView('backup');
     } catch (error: any) {
-      setCreateError(resolveErrorMessage(error?.message, 'create'));
+      setCreateError(resolveErrorMessage(error?.message));
     } finally {
       setCreating(false);
     }
@@ -300,26 +322,44 @@ const UserSettings: React.FC = () => {
       const result = await window.electron.userIdentity.importFromMnemonic({
         mnemonic: normalizedImportMnemonic,
         path: importPath.trim(),
-        name: importName.trim() || undefined,
-        avatar: importAvatar || undefined,
       });
       if (!result.success || !result.identity) {
-        setImportError(resolveErrorMessage(result.error, 'import'));
+        setImportError(resolveErrorMessage(result.error));
         return;
       }
       setIdentity(result.identity);
       const chainSyncFailed = result.chainSync ? !result.chainSync.success : false;
       setPartialSyncWarning(result.profileSource === 'local' && chainSyncFailed);
+      setImportWordCount(12);
       setImportWords(Array.from({ length: 12 }, () => ''));
       setImportPath(DEFAULT_DERIVATION_PATH);
-      setImportName('');
-      setImportAvatar('');
       setView('profile');
       showToast(i18nService.t('userSettingsImportSuccess'));
     } catch (error: any) {
-      setImportError(resolveErrorMessage(error?.message, 'import'));
+      setImportError(resolveErrorMessage(error?.message));
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleSaveName = async () => {
+    const name = nameDraft.trim();
+    if (!name || !canSaveName) return;
+    setNameSaving(true);
+    setNameError('');
+    try {
+      const result = await window.electron.userIdentity.updateName({ name });
+      if (!result.success || !result.identity) {
+        setNameError(resolveErrorMessage(result.error));
+        return;
+      }
+      setIdentity(result.identity);
+      setNameDraft(result.identity.name);
+      showToast(i18nService.t('userSettingsNameSaveSuccess'));
+    } catch (error: any) {
+      setNameError(resolveErrorMessage(error?.message));
+    } finally {
+      setNameSaving(false);
     }
   };
 
@@ -578,6 +618,21 @@ const UserSettings: React.FC = () => {
     <div className="space-y-4">
       {renderSubViewHeader('userSettingsImportTitle', () => setView('empty'))}
 
+      <div className="space-y-1.5">
+        <label className={labelClass}>
+          {i18nService.t('userSettingsWordCountLabel')}
+        </label>
+        <select
+          value={String(importWordCount)}
+          onChange={(e) => handleImportWordCountChange(e.target.value)}
+          disabled={importing}
+          className={`${inputClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+        >
+          <option value="12">{i18nService.t('userSettingsWordCount12')}</option>
+          <option value="24">{i18nService.t('userSettingsWordCount24')}</option>
+        </select>
+      </div>
+
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         {importWords.map((word, index) => (
           <label key={`import-word-${index}`} className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
@@ -588,8 +643,7 @@ const UserSettings: React.FC = () => {
               disabled={importing}
               onChange={(e) => handleImportWordChange(index, e.target.value)}
               onPaste={(e) => {
-                if (index === 0) {
-                  handleImportPasteMnemonic(e.clipboardData.getData('text'));
+                if (index === 0 && handleImportPasteMnemonic(e.clipboardData.getData('text'))) {
                   e.preventDefault();
                 }
               }}
@@ -611,35 +665,6 @@ const UserSettings: React.FC = () => {
           disabled={importing}
           className={`${inputClass} font-mono disabled:opacity-50 disabled:cursor-not-allowed`}
         />
-      </div>
-
-      <div className="space-y-1.5">
-        <label className={labelClass}>
-          {`${i18nService.t('userSettingsNameLabel')} ${i18nService.t('userSettingsOptional')}`}
-        </label>
-        <input
-          type="text"
-          value={importName}
-          onChange={(e) => setImportName(e.target.value)}
-          disabled={importing}
-          placeholder={i18nService.t('userSettingsNamePlaceholder')}
-          className={`${inputClass} disabled:opacity-50 disabled:cursor-not-allowed`}
-        />
-      </div>
-
-      <div className="space-y-1.5">
-        <label className={labelClass}>
-          {`${i18nService.t('userSettingsAvatarLabel')} ${i18nService.t('userSettingsOptional')}`}
-        </label>
-        <AvatarPicker
-          value={importAvatar}
-          disabled={importing}
-          onChange={setImportAvatar}
-          onError={setImportError}
-        />
-        <p className={hintClass}>
-          {i18nService.t('userSettingsImportProfileHint')}
-        </p>
       </div>
 
       {importError && (
@@ -707,6 +732,7 @@ const UserSettings: React.FC = () => {
   const renderProfile = () => {
     if (!identity) return null;
     const avatarUrl = identity.avatar && identity.avatar.startsWith('data:') ? identity.avatar : null;
+    const nameMissing = !identity.name.trim();
     const nameInitial = identity.name.trim().charAt(0).toUpperCase() || '?';
     return (
       <div className="space-y-4">
@@ -724,8 +750,18 @@ const UserSettings: React.FC = () => {
           </button>
         </div>
 
-        {/* Identity card */}
-        <div className="flex items-center gap-4">
+        {/* Name missing warning */}
+        {nameMissing && (
+          <div className="flex items-start gap-3 rounded-xl border border-red-500/40 bg-red-500/10 px-4 py-3">
+            <ExclamationTriangleIcon className="h-5 w-5 shrink-0 text-red-500" />
+            <p className="text-sm text-red-600 dark:text-red-400">
+              {i18nService.t('userSettingsNameMissingWarning')}
+            </p>
+          </div>
+        )}
+
+        {/* Identity card with editable name */}
+        <div className="flex items-start gap-4">
           <div className="w-16 h-16 rounded-full dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border overflow-hidden flex-shrink-0 flex items-center justify-center">
             {avatarUrl ? (
               <img src={avatarUrl} alt="" className="w-full h-full object-cover" />
@@ -735,10 +771,36 @@ const UserSettings: React.FC = () => {
               </span>
             )}
           </div>
-          <div className="min-w-0">
-            <div className="text-base font-semibold truncate dark:text-claude-darkText text-claude-text">
-              {identity.name}
+          <div className="flex-1 min-w-0 space-y-1.5">
+            <label className={labelClass}>
+              {i18nService.t('userSettingsNameLabel')}
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={nameDraft}
+                onChange={(e) => {
+                  setNameDraft(e.target.value);
+                  if (nameError) setNameError('');
+                }}
+                disabled={nameSaving}
+                placeholder={i18nService.t('userSettingsNamePlaceholder')}
+                className={`${inputClass} ${nameMissing ? 'border-red-500 dark:border-red-500' : ''} disabled:opacity-50 disabled:cursor-not-allowed`}
+              />
+              <button
+                type="button"
+                onClick={() => { void handleSaveName(); }}
+                disabled={!canSaveName}
+                className="btn-idchat-primary-filled shrink-0 px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {nameSaving ? i18nService.t('saving') : i18nService.t('save')}
+              </button>
             </div>
+            {nameError && (
+              <div className="text-xs text-red-500 bg-red-500/10 px-3 py-2 rounded-lg">
+                {nameError}
+              </div>
+            )}
           </div>
         </div>
 
