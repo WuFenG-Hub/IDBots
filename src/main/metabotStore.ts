@@ -51,6 +51,7 @@ interface MetabotRow {
   background: string | null;
   boss_id: number | null;
   boss_global_metaid: string | null;
+  owner_binding_pinid?: string | null;
   llm_id: string | null;
   tools: string;
   skills: string;
@@ -120,6 +121,7 @@ function rowToMetabot(row: MetabotRow): Metabot {
     background: row.background ?? null,
     boss_id: row.boss_id ?? null,
     boss_global_metaid: row.boss_global_metaid ?? null,
+    owner_binding_pinid: row.owner_binding_pinid ?? null,
     llm_id: row.llm_id ?? null,
     tools: parseJsonArray(row.tools),
     skills: parseJsonArray(row.skills),
@@ -333,6 +335,7 @@ export class MetabotStore {
       deprecatedBackground,
       bossId,
       input.boss_global_metaid ?? null,
+      input.owner_binding_pinid ?? null,
       input.llm_id ?? null,
       toolsJson,
       skillsJson,
@@ -346,8 +349,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar_blob, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     } else {
@@ -355,8 +358,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     }
@@ -393,6 +396,7 @@ export class MetabotStore {
       background: deprecatedBackground,
       boss_id: bossId,
       boss_global_metaid: input.boss_global_metaid ?? null,
+      owner_binding_pinid: input.owner_binding_pinid ?? null,
       llm_id: input.llm_id ?? null,
       tools: input.tools ?? [],
       skills: input.skills ?? [],
@@ -445,7 +449,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar_blob = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -470,6 +474,7 @@ export class MetabotStore {
           nextDeprecatedBackground,
           bossId,
           input.boss_global_metaid !== undefined ? input.boss_global_metaid : existing.boss_global_metaid,
+          input.owner_binding_pinid !== undefined ? input.owner_binding_pinid : existing.owner_binding_pinid,
           input.llm_id !== undefined ? input.llm_id : existing.llm_id,
           toolsJson,
           skillsJson,
@@ -484,7 +489,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -509,6 +514,7 @@ export class MetabotStore {
           nextDeprecatedBackground,
           bossId,
           input.boss_global_metaid !== undefined ? input.boss_global_metaid : existing.boss_global_metaid,
+          input.owner_binding_pinid !== undefined ? input.owner_binding_pinid : existing.owner_binding_pinid,
           input.llm_id !== undefined ? input.llm_id : existing.llm_id,
           toolsJson,
           skillsJson,

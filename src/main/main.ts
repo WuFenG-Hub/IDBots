@@ -56,6 +56,7 @@ import {
   logoutUserIdentity,
   syncUserIdentityToChain,
 } from './services/userIdentityService';
+import { signOwnerBinding } from './services/ownerBindingService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
 import { getAddressBalance } from './services/addressBalanceService';
@@ -4513,6 +4514,29 @@ const toPublicUserIdentity = (identity: UserIdentity | null): Omit<UserIdentity,
   return rest;
 };
 
+/**
+ * Sign an owner-binding payload with the local user identity for the given
+ * MetaBot. Fails unless the requested boss GlobalMetaID belongs to the local
+ * user (only the local user can consent to the binding).
+ */
+const signOwnerBindingForLocalUser = async (
+  bossGlobalMetaId: string,
+  botGlobalMetaId: string | null | undefined,
+): Promise<{ payload?: string; error?: string }> => {
+  const user = getUserIdentityStore().get();
+  if (!user) return { error: 'OWNER_IDENTITY_MISSING' };
+  if (!botGlobalMetaId) return { error: 'METABOT_GLOBALMETAID_MISSING' };
+  if ((user.globalmetaid ?? '').toLowerCase() !== bossGlobalMetaId.toLowerCase()) {
+    return { error: 'OWNER_IDENTITY_MISMATCH' };
+  }
+  try {
+    const signed = await signOwnerBinding(user, botGlobalMetaId);
+    return { payload: signed.payload };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+};
+
 function getIdchatPresenceService(): IdchatPresenceService {
   if (!idchatPresenceService) {
     idchatPresenceService = new IdchatPresenceService();
@@ -7466,6 +7490,17 @@ if (!gotTheLock) {
   }) => {
     try {
       await mockUpdateConfigOnChain();
+      // Owner claims must belong to the local user identity; anything else is
+      // an unsigned unilateral claim, which this feature removes.
+      if (input.boss_global_metaid !== undefined) {
+        const trimmedBoss = (input.boss_global_metaid ?? '').trim();
+        if (trimmedBoss) {
+          const user = getUserIdentityStore().get();
+          if (!user || (user.globalmetaid ?? '').toLowerCase() !== trimmedBoss.toLowerCase()) {
+            return { success: false, error: 'OWNER_IDENTITY_MISMATCH' };
+          }
+        }
+      }
       const store = getMetabotStore();
       const metabot = store.updateMetabot(id, {
         ...input,
@@ -7625,8 +7660,21 @@ if (!gotTheLock) {
       });
       metabotId = metabot.id;
 
-      // 4. Publish to chain (name + avatar + chatpubkey + bio)
-      const syncResult = await syncMetaBotToChain(store, metabot.id);
+      // 4. Sign the owner binding when a boss GlobalMetaID was requested; it
+      // must belong to the local user identity (signed consent).
+      let ownerBindingPayload: string | undefined;
+      const bossGlobalMetaId = (input.boss_global_metaid ?? '').trim();
+      if (bossGlobalMetaId) {
+        const signResult = await signOwnerBindingForLocalUser(bossGlobalMetaId, metabot.globalmetaid);
+        if (signResult.error) {
+          store.deleteMetabot(metabot.id);
+          return { success: false, error: signResult.error, canSkip: false };
+        }
+        ownerBindingPayload = signResult.payload;
+      }
+
+      // 5. Publish to chain (name + avatar + chatpubkey + bio [+ owner])
+      const syncResult = await syncMetaBotToChain(store, metabot.id, {}, { ownerBindingPayload });
 
       if (!syncResult.success && !syncResult.canSkip) {
         // Mandatory steps (name) failed — roll back DB records
@@ -7875,11 +7923,29 @@ if (!gotTheLock) {
     syncLlm?: boolean;
     syncChatSkills?: boolean;
     syncHomepage?: boolean;
+    syncOwner?: boolean;
   }) => {
     try {
       console.log('[MetaBot] idbots:syncMetaBotEditChanges requested', input);
       const store = getMetabotStore();
-      const result = await syncMetaBotEditChangesToChain(store, input);
+      let ownerBindingPayload: string | undefined;
+      if (input.syncOwner) {
+        const metabot = store.getMetabotById(input.metabotId);
+        if (!metabot) {
+          return { success: false, error: `MetaBot ${input.metabotId} not found` };
+        }
+        const bossGlobalMetaId = (metabot.boss_global_metaid ?? '').trim();
+        if (bossGlobalMetaId) {
+          const signResult = await signOwnerBindingForLocalUser(bossGlobalMetaId, metabot.globalmetaid);
+          if (signResult.error) {
+            return { success: false, error: signResult.error };
+          }
+          ownerBindingPayload = signResult.payload;
+        } else {
+          ownerBindingPayload = ''; // empty /info/owner payload = unbind
+        }
+      }
+      const result = await syncMetaBotEditChangesToChain(store, { ...input, ownerBindingPayload });
       console.log('[MetaBot] idbots:syncMetaBotEditChanges result', {
         success: result.success,
         error: result.error,

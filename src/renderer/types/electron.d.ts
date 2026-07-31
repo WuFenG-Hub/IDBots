@@ -970,12 +970,13 @@ interface IElectronAPI {
       syncLlm?: boolean;
       syncChatSkills?: boolean;
       syncHomepage?: boolean;
+      syncOwner?: boolean;
     }) => Promise<{
       success: boolean;
       error?: string;
       metabotInfoPinId?: string;
       txids?: string[];
-      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage'>;
+      syncedSteps?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner'>;
     }>;
     createMetaBotOnChain: (input: {
       name: string;

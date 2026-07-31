@@ -30,6 +30,7 @@ import {
   filterRecoveredCandidatesByProvider,
 } from './mvcFundingRecoveryService';
 import { buildMetabotInfoPayloads, buildMetabotHomepagePayload } from './metabotInfoPayload';
+import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -729,7 +730,7 @@ export interface SyncMetaBotResult {
   txids?: string[];
 }
 
-export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage';
+export type SyncMetaBotStep = 'name' | 'avatar' | 'chatpubkey' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner';
 export type SyncMetaBotEditStep = Exclude<SyncMetaBotStep, 'chatpubkey'>;
 
 export interface SyncMetaBotEditChangesInput {
@@ -741,6 +742,9 @@ export interface SyncMetaBotEditChangesInput {
   syncLlm?: boolean;
   syncChatSkills?: boolean;
   syncHomepage?: boolean;
+  /** Publish an /info/owner pin: signed binding payload, or '' to unbind. */
+  syncOwner?: boolean;
+  ownerBindingPayload?: string | null;
 }
 
 export interface SyncMetaBotEditChangesResult {
@@ -806,7 +810,7 @@ function buildEditAvatarSyncStep(avatar: string | null | undefined): MetabotInfo
   return avatarStep;
 }
 
-export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[] {
+export function buildFullMetabotInfoSyncPlan(metabot: any, options?: { ownerBindingPayload?: string | null }): MetabotInfoSyncStep[] {
   const steps: MetabotInfoSyncStep[] = [{
     key: 'name',
     path: '/info/name',
@@ -849,6 +853,16 @@ export function buildFullMetabotInfoSyncPlan(metabot: any): MetabotInfoSyncStep[
     payload: homepagePayload.payload,
   });
 
+  // Owner binding is an optional trailing step ('' payload = unbind).
+  if (typeof options?.ownerBindingPayload === 'string') {
+    steps.push({
+      key: 'owner',
+      path: OWNER_BINDING_PATH,
+      contentType: 'application/json',
+      payload: options.ownerBindingPayload,
+    });
+  }
+
   return steps;
 }
 
@@ -875,6 +889,17 @@ export function buildEditMetabotInfoSyncPlan(
     steps.splice(insertIndex, 0, avatarStep);
   }
 
+  // Owner binding (signed payload, or '' to unbind) is published as an
+  // independent trailing step.
+  if (input.syncOwner) {
+    steps.push({
+      key: 'owner',
+      path: OWNER_BINDING_PATH,
+      contentType: 'application/json',
+      payload: typeof input.ownerBindingPayload === 'string' ? input.ownerBindingPayload : '',
+    });
+  }
+
   return steps;
 }
 
@@ -886,7 +911,8 @@ export function buildEditMetabotInfoSyncPlan(
 export async function syncMetaBotToChain(
   metabotStore: MetabotStore,
   metabot_id: number,
-  deps: SyncMetaBotToChainDeps = {}
+  deps: SyncMetaBotToChainDeps = {},
+  options: { ownerBindingPayload?: string | null } = {}
 ): Promise<SyncMetaBotResult> {
   const createPinRunner = deps.createPin ?? createPin;
   const sleepRunner = deps.sleep ?? sleep;
@@ -915,6 +941,7 @@ export async function syncMetaBotToChain(
   const txids: string[] = [];
   let chatPublicKeyPinId: string | null = null;
   let metabotInfoPinId: string | null = null;
+  let ownerBindingPinId: string | null = null;
   let someStepFailed = false;
   let lastError = '';
   const chatPubKey = typeof metabot.chat_public_key === 'string' ? metabot.chat_public_key.trim() : '';
@@ -924,7 +951,7 @@ export async function syncMetaBotToChain(
     logErr('Missing chat public key; continuing with skippable profile sync');
   }
 
-  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot);
+  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot, options);
   log('Prepared full sync plan', { plannedSteps: plannedSteps.map((step) => step.key) });
 
   for (let index = 0; index < plannedSteps.length; index += 1) {
@@ -958,6 +985,8 @@ export async function syncMetaBotToChain(
           chatPublicKeyPinId = result.pinId ?? `${txid}i0`;
         } else if (isProfileSyncStep(step.key)) {
           metabotInfoPinId = result.pinId ?? `${txid}i0`;
+        } else if (step.key === 'owner') {
+          ownerBindingPinId = result.pinId ?? `${txid}i0`;
         }
         log(`${step.key} pin success`, { txid, pinId: result.pinId });
       }
@@ -981,9 +1010,10 @@ export async function syncMetaBotToChain(
   if (someStepFailed) {
     log('Some steps failed; updating DB with partial results and returning canSkip=true');
     try {
-      const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null } = {};
+      const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null; owner_binding_pinid?: string | null } = {};
       if (chatPublicKeyPinId) updateInput.chat_public_key_pin_id = chatPublicKeyPinId;
       if (metabotInfoPinId) updateInput.metabot_info_pinid = metabotInfoPinId;
+      if (ownerBindingPinId) updateInput.owner_binding_pinid = ownerBindingPinId;
       log('DB update payload', updateInput);
       metabotStore.updateMetabot(metabot_id, updateInput);
     } catch (dbErr) {
@@ -1002,9 +1032,10 @@ export async function syncMetaBotToChain(
   // Database update
   log('Updating database with PinIDs');
   try {
-    const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null } = {};
+    const updateInput: { chat_public_key_pin_id?: string | null; metabot_info_pinid?: string | null; owner_binding_pinid?: string | null } = {};
     if (chatPublicKeyPinId) updateInput.chat_public_key_pin_id = chatPublicKeyPinId;
     if (metabotInfoPinId) updateInput.metabot_info_pinid = metabotInfoPinId;
+    if (ownerBindingPinId) updateInput.owner_binding_pinid = ownerBindingPinId;
 
     log('DB update payload', updateInput);
 
@@ -1137,6 +1168,17 @@ export async function syncMetaBotEditChangesToChain(
             syncedSteps,
             metabotInfoPinId,
           };
+        }
+      }
+      if (step.key === 'owner') {
+        // '' payload = unbind: clear the stored binding pin id.
+        const ownerPinId = String(step.payload) === '' ? null : (result.pinId ?? `${txid}i0`);
+        try {
+          metabotStore.updateMetabot(metabotId, { owner_binding_pinid: ownerPinId });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logErr('Owner pin sync succeeded but database update failed', { error: msg });
+          return { success: false, error: `Owner sync succeeded but database update failed: ${msg}`, txids, syncedSteps };
         }
       }
       syncedSteps.push(step.key as SyncMetaBotEditStep);

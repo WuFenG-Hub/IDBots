@@ -1259,6 +1259,19 @@ export class SqliteStore {
       console.warn('Failed to migrate metabots homepage:', error);
     }
 
+    // Migration: Add owner_binding_pinid column to metabots (pin id of the
+    // signed /info/owner binding; null = no signed owner binding)
+    try {
+      const obColsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const obColumns = (obColsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!obColumns.includes('owner_binding_pinid')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN owner_binding_pinid TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('Failed to migrate metabots owner_binding_pinid:', error);
+    }
+
     // Migration: Add payment_address column to remote_skill_service
     try {
       const rssColsResult = this.db.exec('PRAGMA table_info(remote_skill_service)');
@@ -1503,6 +1516,7 @@ export class SqliteStore {
       // carry them into the rebuilt table so INSERT ... SELECT does not fail.
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
+      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1532,7 +1546,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1567,6 +1581,7 @@ export class SqliteStore {
       // carry them into the rebuilt table so INSERT ... SELECT does not fail.
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
+      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1596,7 +1611,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);

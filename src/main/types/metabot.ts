@@ -35,6 +35,8 @@ export interface Metabot {
   boss_id: number | null;
   /** External BOSS globalmetaid (on-chain identity of the supervisor) */
   boss_global_metaid: string | null;
+  /** Pin id of the signed /info/owner binding; null = no signed binding (legacy unsigned claim). */
+  owner_binding_pinid: string | null;
   llm_id: string | null;
   /** Allowed tool ids; stored as JSON array in DB */
   tools: string[];
@@ -73,6 +75,7 @@ export interface MetabotInsert {
   background?: string | null;
   boss_id?: number | null;
   boss_global_metaid?: string | null;
+  owner_binding_pinid?: string | null;
   llm_id?: string | null;
   tools?: string[];
   skills?: string[];
@@ -106,6 +109,7 @@ export interface MetabotUpdate {
   background?: string | null;
   boss_id?: number | null;
   boss_global_metaid?: string | null;
+  owner_binding_pinid?: string | null;
   llm_id?: string | null;
   tools?: string[];
   skills?: string[];

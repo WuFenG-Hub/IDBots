@@ -631,6 +631,7 @@ contextBridge.exposeInMainWorld('electron', {
       syncLlm?: boolean;
       syncChatSkills?: boolean;
       syncHomepage?: boolean;
+      syncOwner?: boolean;
     }) => ipcRenderer.invoke('idbots:syncMetaBotEditChanges', input),
     createMetaBotOnChain: (input: {
       name: string;
