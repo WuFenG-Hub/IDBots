@@ -38,6 +38,53 @@ test('fresh DB: pinid-optional migrations preserve homepage/boss_global_metaid a
   reopened.close();
 });
 
+test('rebuild migrations drop debris metabots_new from an earlier failed run', async () => {
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at) VALUES (?, ?, ?, ?)`,
+    [1, 'abandon ability able about above absent absorb abstract absurd abuse access accident', "m/44'/10001'/0'/0/0", 1700000000000]
+  );
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, metabot_type, created_by, role, soul, homepage,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [1, 1, 'mvc-1', 'btc-1', 'doge-1', 'pub-1', 'chat-1', 'Bot One', 1, 'metaid-1', 'worker', '0000', 'r', 's', '{"uri":"metaapp://x"}', 1700000000000, 1700000000000]
+  );
+
+  // Simulate debris from a pre-fix failed migration: a stale metabots_new
+  // without the homepage column, plus unset migration flags.
+  db.run(`CREATE TABLE metabots_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_id INTEGER NOT NULL,
+    mvc_address TEXT UNIQUE NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  store.set('metabot_info_pinid_optional_migrated', false);
+  store.set('chat_public_key_pin_id_optional_migrated', false);
+  store.save();
+  store.close();
+
+  const reopened = await SqliteStore.create(tempDir);
+  const rdb = reopened.getDatabase();
+  assert.equal(reopened.get('metabot_info_pinid_optional_migrated'), true);
+  assert.equal(reopened.get('chat_public_key_pin_id_optional_migrated'), true);
+  // Debris is gone and data survived the rebuild.
+  assert.equal(rdb.exec("SELECT name FROM sqlite_master WHERE type='table' AND name='metabots_new'")[0]?.values.length ?? 0, 0);
+  assert.deepEqual(
+    rdb.exec('SELECT name, homepage FROM metabots WHERE id = 1')[0].values,
+    [['Bot One', '{"uri":"metaapp://x"}']],
+  );
+  reopened.close();
+});
+
 test('rebuild migrations keep rows and homepage values intact', async () => {
   const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
   const tempDir = makeTempDir();

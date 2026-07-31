@@ -1517,6 +1517,9 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      // A leftover metabots_new can only be debris from an earlier failed run of
+      // this migration (success renames it away); drop it before recreating.
+      this.db.run('DROP TABLE IF EXISTS metabots_new');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1582,6 +1585,9 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      // A leftover metabots_new can only be debris from an earlier failed run of
+      // this migration (success renames it away); drop it before recreating.
+      this.db.run('DROP TABLE IF EXISTS metabots_new');
       this.db.run('PRAGMA foreign_keys = OFF');
       this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
