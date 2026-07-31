@@ -48,6 +48,14 @@ import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
 import { shouldAcquireSingleInstanceLock } from './libs/singleInstanceLock';
 import { mockCreateWalletAndFund, mockPushConfigToChain, mockUpdateConfigOnChain } from './services/chainActionMock';
 import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/metabotWalletService';
+import { UserIdentityStore } from './userIdentityStore';
+import type { UserIdentity } from './types/userIdentity';
+import {
+  createUserIdentity,
+  importUserIdentity,
+  logoutUserIdentity,
+  syncUserIdentityToChain,
+} from './services/userIdentityService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
 import { getAddressBalance } from './services/addressBalanceService';
@@ -4489,6 +4497,22 @@ const getMetabotStore = () => {
   return metabotStore;
 };
 
+let userIdentityStore: UserIdentityStore | null = null;
+const getUserIdentityStore = () => {
+  if (!userIdentityStore) {
+    const sqliteStore = getStore();
+    userIdentityStore = new UserIdentityStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return userIdentityStore;
+};
+
+/** Strip the mnemonic before handing an identity to the renderer. */
+const toPublicUserIdentity = (identity: UserIdentity | null): Omit<UserIdentity, 'mnemonic'> | null => {
+  if (!identity) return null;
+  const { mnemonic: _mnemonic, ...rest } = identity;
+  return rest;
+};
+
 function getIdchatPresenceService(): IdchatPresenceService {
   if (!idchatPresenceService) {
     idchatPresenceService = new IdchatPresenceService();
@@ -7627,6 +7651,95 @@ if (!gotTheLock) {
       }
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:get', async () => {
+    try {
+      return { success: true, identity: toPublicUserIdentity(getUserIdentityStore().get()) };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:get failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:create', async (_event, input: { name: string; avatar?: string | null }) => {
+    try {
+      const result = await createUserIdentity(getUserIdentityStore(), input ?? { name: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        // Returned only here so the renderer can show the one-time backup step.
+        mnemonic: result.mnemonic,
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:create failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:import', async (_event, input: { mnemonic: string; path?: string; name?: string; avatar?: string | null }) => {
+    try {
+      const result = await importUserIdentity(getUserIdentityStore(), input ?? { mnemonic: '' });
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        profileSource: result.profileSource,
+        chainSync: result.chainSync,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:import failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:logout', async () => {
+    try {
+      const removed = logoutUserIdentity(getUserIdentityStore());
+      return removed ? { success: true } : { success: false, error: 'USER_IDENTITY_MISSING' };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:logout failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:revealMnemonic', async () => {
+    try {
+      const identity = getUserIdentityStore().get();
+      if (!identity) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      return { success: true, mnemonic: identity.mnemonic };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:revealMnemonic failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  ipcMain.handle('userIdentity:retryChainSync', async () => {
+    try {
+      const store = getUserIdentityStore();
+      if (!store.get()) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      const chainSync = await syncUserIdentityToChain(store, { includeProfileSteps: false });
+      return { success: true, identity: toPublicUserIdentity(store.get()), chainSync };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:retryChainSync failed:', errMsg);
       return { success: false, error: errMsg };
     }
   });

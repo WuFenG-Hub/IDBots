@@ -656,6 +656,16 @@ contextBridge.exposeInMainWorld('electron', {
       network?: string;
     }) => ipcRenderer.invoke('idbots:uploadMetabotHomepageFile', input),
   },
+  userIdentity: {
+    get: () => ipcRenderer.invoke('userIdentity:get'),
+    create: (input: { name: string; avatar?: string | null }) =>
+      ipcRenderer.invoke('userIdentity:create', input),
+    importFromMnemonic: (input: { mnemonic: string; path?: string; name?: string; avatar?: string | null }) =>
+      ipcRenderer.invoke('userIdentity:import', input),
+    logout: () => ipcRenderer.invoke('userIdentity:logout'),
+    revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
+    retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
+  },
   metaWebListener: {
     getListenerConfig: () => ipcRenderer.invoke('idbots:getListenerConfig'),
     getListenerStatus: () => ipcRenderer.invoke('idbots:getListenerStatus'),
