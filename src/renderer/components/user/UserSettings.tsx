@@ -17,6 +17,8 @@ import {
   ArrowLeftIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import MnemonicWordGrid from './MnemonicWordGrid';
+import UserBackupMnemonicModal from './UserBackupMnemonicModal';
 
 type ViewState = 'loading' | 'empty' | 'create' | 'backup' | 'import' | 'profile';
 
@@ -157,6 +159,7 @@ const UserSettings: React.FC = () => {
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
   const [nameError, setNameError] = useState('');
+  const [backupModalOpen, setBackupModalOpen] = useState(false);
 
   // Logout
   const [logoutModalOpen, setLogoutModalOpen] = useState(false);
@@ -456,20 +459,6 @@ const UserSettings: React.FC = () => {
     </div>
   );
 
-  const renderMnemonicGrid = (words: string[]) => (
-    <ol className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-      {words.map((word, index) => (
-        <li
-          key={`${index}-${word}`}
-          className="rounded-md border dark:border-claude-darkBorder border-claude-border px-2 py-1.5 text-sm dark:text-claude-darkText text-claude-text font-mono"
-        >
-          <span className="opacity-60 mr-1.5">{index + 1}.</span>
-          <span>{word}</span>
-        </li>
-      ))}
-    </ol>
-  );
-
   const renderLoading = () => (
     <div className="flex h-full items-center justify-center">
       <div className="flex items-center gap-2 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -522,7 +511,7 @@ const UserSettings: React.FC = () => {
   );
 
   const renderCreate = () => (
-    <div className="space-y-4">
+    <div className="space-y-4 relative">
       {renderSubViewHeader('userSettingsCreateTitle', () => setView('empty'))}
 
       <div className="space-y-1.5">
@@ -567,6 +556,23 @@ const UserSettings: React.FC = () => {
           {creating ? i18nService.t('userSettingsCreating') : i18nService.t('userSettingsCreateSubmit')}
         </button>
       </div>
+
+      {/* Blocking overlay while creating (wallet derivation + gas + on-chain pins) */}
+      {creating && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center rounded-2xl bg-[var(--bg-main)]/90 dark:bg-claude-darkBg/90 backdrop-blur-sm">
+          <div className="w-full max-w-sm mx-4 rounded-2xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface p-6 shadow-xl text-center space-y-4">
+            <div className="flex justify-center">
+              <ArrowPathIcon className="h-10 w-10 text-claude-accent animate-spin" />
+            </div>
+            <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+              {i18nService.t('userSettingsCreatingOnChain')}
+            </p>
+            <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('userSettingsCreatingOnChainHint')}
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -591,7 +597,7 @@ const UserSettings: React.FC = () => {
       )}
 
       <div className="rounded-lg bg-claude-surface dark:bg-claude-darkSurface border dark:border-claude-darkBorder border-claude-border p-4">
-        {renderMnemonicGrid(createdWords)}
+        <MnemonicWordGrid words={createdWords} />
       </div>
 
       <div className="flex items-center justify-end gap-3">
@@ -736,18 +742,28 @@ const UserSettings: React.FC = () => {
     const nameInitial = identity.name.trim().charAt(0).toUpperCase() || '?';
     return (
       <div className="space-y-4">
-        {/* Header with logout */}
+        {/* Header with backup + logout */}
         <div className="flex items-center justify-between gap-3 pb-3 border-b dark:border-claude-darkBorder/60 border-claude-border/60">
           <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
             {i18nService.t('userSettingsProfileTitle')}
           </h3>
-          <button
-            type="button"
-            onClick={openLogoutModal}
-            className="px-3 py-1.5 text-xs font-medium rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors active:scale-[0.98]"
-          >
-            {i18nService.t('userSettingsLogout')}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setBackupModalOpen(true)}
+              className="inline-flex items-center px-3 py-1.5 text-xs font-medium rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors active:scale-[0.98]"
+            >
+              <KeyIcon className="h-3.5 w-3.5 mr-1.5" />
+              {i18nService.t('userSettingsBackupMnemonic')}
+            </button>
+            <button
+              type="button"
+              onClick={openLogoutModal}
+              className="px-3 py-1.5 text-xs font-medium rounded-xl bg-red-600 hover:bg-red-700 text-white transition-colors active:scale-[0.98]"
+            >
+              {i18nService.t('userSettingsLogout')}
+            </button>
+          </div>
         </div>
 
         {/* Name missing warning */}
@@ -856,7 +872,7 @@ const UserSettings: React.FC = () => {
                   )}
                   {revealedWords.length > 0 && (
                     <div className="mt-3 rounded-lg bg-claude-surface dark:bg-claude-darkBg border dark:border-claude-darkBorder border-claude-border p-4">
-                      {renderMnemonicGrid(revealedWords)}
+                      <MnemonicWordGrid words={revealedWords} />
                     </div>
                   )}
                 </div>
@@ -888,6 +904,11 @@ const UserSettings: React.FC = () => {
               </div>
             </div>
           </div>
+        )}
+
+        {/* Backup mnemonic modal */}
+        {backupModalOpen && (
+          <UserBackupMnemonicModal onClose={() => setBackupModalOpen(false)} />
         )}
       </div>
     );
