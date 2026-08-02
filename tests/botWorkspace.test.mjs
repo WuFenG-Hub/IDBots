@@ -10,12 +10,14 @@ let formatBotWorkspaceDate;
 let resolveBotWorkspaceCwd;
 let resolveSessionWorkingDirectory;
 let isWorkspaceMetabotId;
+let shouldUseBotWorkspaceCwd;
 try {
   ({
     formatBotWorkspaceDate,
     resolveBotWorkspaceCwd,
     resolveSessionWorkingDirectory,
     isWorkspaceMetabotId,
+    shouldUseBotWorkspaceCwd,
   } = await import('../dist-electron/main/libs/botWorkspace.js'));
 } catch {
   ({
@@ -23,6 +25,7 @@ try {
     resolveBotWorkspaceCwd,
     resolveSessionWorkingDirectory,
     isWorkspaceMetabotId,
+    shouldUseBotWorkspaceCwd,
   } = await import('../dist-electron/libs/botWorkspace.js'));
 }
 
@@ -87,6 +90,33 @@ test('resolveSessionWorkingDirectory falls back to the plain base without a meta
   const withoutBot = resolveSessionWorkingDirectory(base, null, new Date(2026, 7, 2));
   assert.equal(withoutBot, path.resolve(base));
   assert.equal(fs.existsSync(path.join(base, 'bots', '4', '2026-08-03')), false);
+});
+
+test('shouldUseBotWorkspaceCwd treats the pre-filled default as no explicit pick', () => {
+  const defaultDir = path.join(os.homedir(), 'idbots', 'project');
+
+  // No bot → never bot workspace.
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: null, defaultWorkingDirectory: defaultDir, metabotId: null }), false);
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: null, defaultWorkingDirectory: defaultDir, metabotId: 0 }), false);
+
+  // Bot + nothing sent → bot workspace.
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: undefined, defaultWorkingDirectory: defaultDir, metabotId: 3 }), true);
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: '  ', defaultWorkingDirectory: defaultDir, metabotId: 3 }), true);
+
+  // Bot + pre-filled default (what the renderer actually sends) → bot workspace.
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: defaultDir, defaultWorkingDirectory: defaultDir, metabotId: 3 }), true);
+  assert.equal(
+    shouldUseBotWorkspaceCwd({ explicitCwd: `${defaultDir}${path.sep}`, defaultWorkingDirectory: defaultDir, metabotId: 3 }),
+    true,
+    'trailing separator still counts as the default'
+  );
+
+  // Bot + a genuinely different folder → user choice wins.
+  const custom = makeTempBase();
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: custom, defaultWorkingDirectory: defaultDir, metabotId: 3 }), false);
+
+  // Explicit cwd with no configured default to compare against → user choice wins.
+  assert.equal(shouldUseBotWorkspaceCwd({ explicitCwd: custom, defaultWorkingDirectory: '', metabotId: 3 }), false);
 });
 
 test('listRecentCwds collapses per-bot dated folders back to the workspace root', async () => {
