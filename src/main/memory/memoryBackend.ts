@@ -1,5 +1,6 @@
 import type { CoworkMemoryGuardLevel } from '../libs/coworkMemoryExtractor';
 import type {
+  MemoryOrigin,
   MemoryScope,
   MemoryScopeKind,
   MemoryUsageClass,
@@ -18,6 +19,7 @@ export interface MemoryUserMemory {
   scopeKey?: string;
   usageClass?: MemoryUsageClass;
   visibility?: MemoryVisibility;
+  origin?: MemoryOrigin;
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
@@ -58,6 +60,8 @@ export interface MemoryListUserMemoriesOptions extends MemoryScopeSelectorInput 
   metabotId: number;
   query?: string;
   status?: MemoryUserMemoryStatus | 'all';
+  usageClass?: MemoryUsageClass;
+  origin?: MemoryOrigin;
   limit?: number;
   offset?: number;
   includeDeleted?: boolean;
@@ -68,6 +72,7 @@ export interface MemoryCreateUserMemoryInput extends MemoryScopeSelectorInput, M
   text: string;
   confidence?: number;
   isExplicit?: boolean;
+  origin?: MemoryOrigin;
   source?: MemoryUserMemorySourceInput;
   metabotId: number;
 }
@@ -79,11 +84,15 @@ export interface MemoryUpdateUserMemoryInput extends MemoryScopeSelectorInput, M
   confidence?: number;
   status?: MemoryUserMemoryStatus;
   isExplicit?: boolean;
+  /** Internal escape hatch: only the dream service may touch protected entries (self_identity). */
+  allowProtected?: boolean;
 }
 
 export interface MemoryDeleteUserMemoryInput extends MemoryScopeSelectorInput {
   id: string;
   metabotId: number;
+  /** Internal escape hatch: only the dream service may touch protected entries (self_identity). */
+  allowProtected?: boolean;
 }
 
 export interface MemoryPolicy {
@@ -93,6 +102,7 @@ export interface MemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  dreamEnabled: boolean;
   updatedAt: number;
 }
 
@@ -103,6 +113,7 @@ export interface MemoryEffectivePolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  dreamEnabled: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -113,6 +124,7 @@ export type MemoryPolicyUpdates = Partial<Pick<
   | 'memoryLlmJudgeEnabled'
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
+  | 'dreamEnabled'
 >>;
 
 export interface ApplyTurnMemoryUpdatesOptions {

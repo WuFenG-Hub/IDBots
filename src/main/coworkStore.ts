@@ -26,6 +26,7 @@ import {
   normalizeMemoryScopeSelector,
   normalizeScopeChannel,
   normalizeScopeIdentity,
+  type MemoryOrigin,
   type MemoryScope,
   type MemoryUsageClass,
   type MemoryVisibility,
@@ -89,7 +90,7 @@ const METAWEB_ORDER_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebOrderSimplem
 const METAWEB_PRIVATE_SIMPLEMSG_BACKFILL_KEY = 'cowork.backfillMetawebPrivateSimplemsgMetadata.v1.completed';
 const MEMORY_ROW_SELECT_COLUMNS = `
   id, text, fingerprint, confidence, is_explicit, status,
-  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility
+  created_at, updated_at, last_used_at, scope_kind, scope_key, usage_class, visibility, origin
 `;
 const PRIVATE_CHAT_SIMPLEMSG_BACKFILL_TIME_WINDOW_MS = 10 * 60 * 1000;
 
@@ -373,10 +374,19 @@ function shouldAutoDeleteMemoryText(text: string): boolean {
 }
 
 function normalizeMemoryUsageClass(value?: string | null): MemoryUsageClass {
-  if (value === 'preference' || value === 'operational_preference') {
+  if (
+    value === 'preference'
+    || value === 'operational_preference'
+    || value === 'self_identity'
+    || value === 'work_review'
+  ) {
     return value;
   }
   return 'profile_fact';
+}
+
+function normalizeMemoryOrigin(value?: string | null): MemoryOrigin {
+  return value === 'dream' ? 'dream' : 'conversation';
 }
 
 function normalizeMemoryVisibility(value?: string | null): MemoryVisibility {
@@ -542,6 +552,7 @@ export interface CoworkUserMemory {
   scopeKey?: string;
   usageClass?: MemoryUsageClass;
   visibility?: MemoryVisibility;
+  origin?: MemoryOrigin;
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
@@ -603,6 +614,7 @@ export interface CoworkMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  dreamEnabled: boolean;
   updatedAt: number;
 }
 
@@ -613,6 +625,7 @@ export interface CoworkEffectiveMemoryPolicy {
   memoryLlmJudgeEnabled: boolean;
   memoryGuardLevel: CoworkMemoryGuardLevel;
   memoryUserMemoriesMaxItems: number;
+  dreamEnabled: boolean;
   source: 'global' | 'metabot';
 }
 
@@ -759,6 +772,7 @@ interface CoworkUserMemoryRow {
   scope_key?: string | null;
   usage_class?: string | null;
   visibility?: string | null;
+  origin?: string | null;
 }
 
 interface CoworkUserMemorySourceRow {
@@ -775,6 +789,7 @@ interface CoworkMemoryPolicyRow {
   memory_llm_judge_enabled: number | string | null;
   memory_guard_level: string | null;
   memory_user_memories_max_items: number | string | null;
+  dream_enabled?: number | string | null;
   updated_at: number | string | null;
 }
 
@@ -969,6 +984,10 @@ export class CoworkStore implements MemoryBackend {
         this.db.run("ALTER TABLE user_memories ADD COLUMN visibility TEXT NOT NULL DEFAULT 'local_only';");
         changed = true;
       }
+      if (!memoryColumns.includes('origin')) {
+        this.db.run("ALTER TABLE user_memories ADD COLUMN origin TEXT NOT NULL DEFAULT 'conversation';");
+        changed = true;
+      }
       this.db.run(`
         CREATE INDEX IF NOT EXISTS idx_user_memories_scope_status_updated
         ON user_memories(metabot_id, scope_kind, scope_key, status, updated_at DESC)
@@ -1086,6 +1105,10 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!columns.includes('memory_user_memories_max_items')) {
         this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN memory_user_memories_max_items INTEGER NOT NULL DEFAULT 12');
+        changed = true;
+      }
+      if (!columns.includes('dream_enabled')) {
+        this.db.run('ALTER TABLE metabot_memory_policies ADD COLUMN dream_enabled INTEGER NOT NULL DEFAULT 1');
         changed = true;
       }
       if (!columns.includes('updated_at')) {
@@ -1482,13 +1505,14 @@ export class CoworkStore implements MemoryBackend {
         memoryLlmJudgeEnabled: config.memoryLlmJudgeEnabled,
         memoryGuardLevel: config.memoryGuardLevel,
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
+        dreamEnabled: true,
         source: 'global',
       };
     }
 
     const row = this.getOne<CoworkMemoryPolicyRow>(`
       SELECT metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-             memory_guard_level, memory_user_memories_max_items, updated_at
+             memory_guard_level, memory_user_memories_max_items, dream_enabled, updated_at
       FROM metabot_memory_policies
       WHERE metabot_id = ?
       LIMIT 1
@@ -1502,6 +1526,7 @@ export class CoworkStore implements MemoryBackend {
         memoryLlmJudgeEnabled: config.memoryLlmJudgeEnabled,
         memoryGuardLevel: config.memoryGuardLevel,
         memoryUserMemoriesMaxItems: config.memoryUserMemoriesMaxItems,
+        dreamEnabled: true,
         source: 'global',
       };
     }
@@ -1518,6 +1543,7 @@ export class CoworkStore implements MemoryBackend {
       memoryUserMemoriesMaxItems: clampMemoryUserMemoriesMaxItems(
         Number(row.memory_user_memories_max_items ?? config.memoryUserMemoriesMaxItems)
       ),
+      dreamEnabled: normalizeDbBoolean(row.dream_enabled, true),
       source: 'metabot',
     };
   }
@@ -1536,6 +1562,7 @@ export class CoworkStore implements MemoryBackend {
       | 'memoryLlmJudgeEnabled'
       | 'memoryGuardLevel'
       | 'memoryUserMemoriesMaxItems'
+      | 'dreamEnabled'
     >>
   ): CoworkMemoryPolicy {
     const resolvedMetabotId = parseIdNumber(metabotId);
@@ -1566,19 +1593,23 @@ export class CoworkStore implements MemoryBackend {
     const nextMaxItems = updates.memoryUserMemoriesMaxItems !== undefined
       ? clampMemoryUserMemoriesMaxItems(Number(updates.memoryUserMemoriesMaxItems))
       : base.memoryUserMemoriesMaxItems;
+    const nextDreamEnabled = updates.dreamEnabled !== undefined
+      ? Boolean(updates.dreamEnabled)
+      : base.dreamEnabled;
     const now = Date.now();
 
     this.db.run(`
       INSERT INTO metabot_memory_policies (
         metabot_id, memory_enabled, memory_implicit_update_enabled, memory_llm_judge_enabled,
-        memory_guard_level, memory_user_memories_max_items, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        memory_guard_level, memory_user_memories_max_items, dream_enabled, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(metabot_id) DO UPDATE SET
         memory_enabled = excluded.memory_enabled,
         memory_implicit_update_enabled = excluded.memory_implicit_update_enabled,
         memory_llm_judge_enabled = excluded.memory_llm_judge_enabled,
         memory_guard_level = excluded.memory_guard_level,
         memory_user_memories_max_items = excluded.memory_user_memories_max_items,
+        dream_enabled = excluded.dream_enabled,
         updated_at = excluded.updated_at
     `, [
       resolvedMetabotId,
@@ -1587,6 +1618,7 @@ export class CoworkStore implements MemoryBackend {
       nextJudge ? 1 : 0,
       nextGuard,
       nextMaxItems,
+      nextDreamEnabled ? 1 : 0,
       now,
     ]);
     this.saveDb();
@@ -1598,6 +1630,7 @@ export class CoworkStore implements MemoryBackend {
       memoryLlmJudgeEnabled: nextJudge,
       memoryGuardLevel: nextGuard,
       memoryUserMemoriesMaxItems: nextMaxItems,
+      dreamEnabled: nextDreamEnabled,
       updatedAt: now,
     };
   }
@@ -4046,6 +4079,7 @@ export class CoworkStore implements MemoryBackend {
       scopeKey: normalizeScopeIdentity(row.scope_key) || OWNER_SCOPE_KEY,
       usageClass: normalizeMemoryUsageClass(row.usage_class),
       visibility: normalizeMemoryVisibility(row.visibility),
+      origin: normalizeMemoryOrigin(row.origin),
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
       lastUsedAt: row.last_used_at === null ? null : Number(row.last_used_at),
@@ -4180,11 +4214,12 @@ export class CoworkStore implements MemoryBackend {
     }
 
     const id = uuidv4();
+    const origin = normalizeMemoryOrigin(input.origin);
     this.db.run(`
       INSERT INTO user_memories (
         id, metabot_id, text, fingerprint, confidence, is_explicit, status,
-        scope_kind, scope_key, usage_class, visibility, created_at, updated_at, last_used_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, NULL)
+        scope_kind, scope_key, usage_class, visibility, origin, created_at, updated_at, last_used_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'created', ?, ?, ?, ?, ?, ?, ?, NULL)
     `, [
       id,
       metabotId,
@@ -4196,6 +4231,7 @@ export class CoworkStore implements MemoryBackend {
       scope.key,
       classification.usageClass,
       classification.visibility,
+      origin,
       now,
       now,
     ]);
@@ -4235,6 +4271,14 @@ export class CoworkStore implements MemoryBackend {
     if (query) {
       clauses.push('LOWER(text) LIKE ?');
       params.push(`%${query.toLowerCase()}%`);
+    }
+    if (options.usageClass) {
+      clauses.push('usage_class = ?');
+      params.push(normalizeMemoryUsageClass(options.usageClass));
+    }
+    if (options.origin) {
+      clauses.push('origin = ?');
+      params.push(normalizeMemoryOrigin(options.origin));
     }
 
     const whereClause = `WHERE ${clauses.join(' AND ')}`;
@@ -4284,6 +4328,11 @@ export class CoworkStore implements MemoryBackend {
       WHERE id = ? AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
     `, [input.id, input.metabotId, scope.kind, scope.key]);
     if (!current) return null;
+    // self_identity entries belong to the dream service; refuse edits from
+    // tools, IPC and implicit pipelines unless explicitly allowed internally.
+    if (normalizeMemoryUsageClass(current.usage_class) === 'self_identity' && !input.allowProtected) {
+      return null;
+    }
 
     const now = Date.now();
     const nextText = input.text !== undefined ? truncate(normalizeMemoryText(input.text), 360) : current.text;
@@ -4345,6 +4394,18 @@ export class CoworkStore implements MemoryBackend {
       : this.resolveMemoryScopeSelector(inputOrId);
     if (!id || !Number.isFinite(metabotId)) {
       return false;
+    }
+    // self_identity entries belong to the dream service; refuse deletion from
+    // tools, IPC and implicit pipelines unless explicitly allowed internally.
+    const allowProtected = typeof inputOrId === 'string' ? false : Boolean(inputOrId.allowProtected);
+    if (!allowProtected) {
+      const target = this.getOne<{ usage_class?: string | null }>(
+        'SELECT usage_class FROM user_memories WHERE id = ? AND metabot_id = ? AND scope_kind = ? AND scope_key = ?',
+        [id, metabotId, scope.kind, scope.key]
+      );
+      if (target && normalizeMemoryUsageClass(target.usage_class) === 'self_identity') {
+        return false;
+      }
     }
     const now = Date.now();
     this.db.run(`
