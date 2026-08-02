@@ -6679,11 +6679,11 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:list', async () => {
+  ipcMain.handle('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
     return withSqliteRecovery('cowork:session:list', async () => {
       try {
         repairSelfDirectedServiceOrders();
-        const sessions = getCoworkStore().listSessions().map((session) =>
+        const sessions = getCoworkStore().listSessions(options).map((session) =>
           enrichCoworkSessionWithServiceOrderSummary(session)
         );
         return { success: true, sessions };

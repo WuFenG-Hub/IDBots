@@ -147,3 +147,4 @@ man_base_data_pebble/
 !tests/ownerBindingService.test.mjs
 !tests/ownerBindingSyncSteps.test.mjs
 !tests/botWorkspace.test.mjs
+!tests/coworkSessionMetabotFilter.test.mjs

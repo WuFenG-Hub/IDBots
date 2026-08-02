@@ -520,6 +520,7 @@ export interface CoworkSessionSummary {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  metabotId?: number | null;
   sessionType?: CoworkSessionType;
   peerName?: string | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
@@ -850,6 +851,7 @@ export class CoworkStore implements MemoryBackend {
     this.ensureMemoryPolicySchemaCompatibility();
     this.ensureConversationMappingSchemaCompatibility();
     this.ensureCoworkMessageIndexes();
+    this.ensureCoworkSessionIndexes();
     this.backfillScopedMemoryMetadata();
     if (deferHeavyStartupMaintenance) {
       return;
@@ -881,6 +883,21 @@ export class CoworkStore implements MemoryBackend {
       this.saveDb();
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify cowork_messages indexes:', error);
+    }
+  }
+
+  private ensureCoworkSessionIndexes(): void {
+    if (!this.tableExists('cowork_sessions')) {
+      return;
+    }
+    try {
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_cowork_sessions_metabot_updated
+        ON cowork_sessions(metabot_id, updated_at DESC)
+      `);
+      this.saveDb();
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to verify cowork_sessions indexes:', error);
     }
   }
 
@@ -2211,12 +2228,13 @@ export class CoworkStore implements MemoryBackend {
     return Boolean(row?.hidden_from_session_list);
   }
 
-  listSessions(): CoworkSessionSummary[] {
+  listSessions(options?: { metabotId?: number | null }): CoworkSessionSummary[] {
     interface SessionSummaryRow {
       id: string;
       title: string;
       status: string;
       pinned: number | null;
+      metabot_id?: number | null;
       session_type?: string | null;
       peer_name?: string | null;
       browser_uri?: string | null;
@@ -2227,12 +2245,15 @@ export class CoworkStore implements MemoryBackend {
       activity_at?: number | null;
     }
 
+    const metabotId = options?.metabotId;
+    const filterByMetabot = typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0;
     const rows = this.getAll<SessionSummaryRow>(`
       SELECT
         s.id,
         s.title,
         s.status,
         s.pinned,
+        s.metabot_id,
         s.session_type,
         s.peer_name,
         s.browser_uri,
@@ -2249,8 +2270,9 @@ export class CoworkStore implements MemoryBackend {
         ), s.updated_at) AS activity_at
       FROM cowork_sessions s
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
+      ${filterByMetabot ? 'AND s.metabot_id = ?' : ''}
       ORDER BY s.pinned DESC, activity_at DESC, s.updated_at DESC
-    `);
+    `, filterByMetabot ? [metabotId] : []);
 
     return rows.map(row => ({
       id: row.id,
@@ -2259,6 +2281,7 @@ export class CoworkStore implements MemoryBackend {
       pinned: Boolean(row.pinned),
       createdAt: row.created_at,
       updatedAt: parseIdNumber(row.activity_at) ?? row.updated_at,
+      metabotId: parseIdNumber(row.metabot_id),
       sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
       peerName: row.peer_name ?? null,
       browserUri: row.browser_uri ?? null,
