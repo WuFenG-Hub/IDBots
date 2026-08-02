@@ -2994,7 +2994,8 @@ const startSqliteDaemons = (): void => {
       });
     },
     undefined,
-    (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null
+    (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null,
+    (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit)
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
@@ -4014,6 +4015,7 @@ const getCoworkRunner = () => {
           return getSkillManager().buildRemoteServicesPrompt(services);
         } catch { return null; }
       },
+      experienceStore: getDreamStore(),
       mcpServerProvider: () => getMcpStore().getEnabledServers(),
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);

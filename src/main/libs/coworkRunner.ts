@@ -18,6 +18,10 @@ import {
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
+import {
+  buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
+  RECENT_SUMMARIES_PROMPT_DAYS,
+} from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
@@ -812,6 +816,15 @@ type CoworkMetabotIdentity = {
   globalmetaid?: string | null;
 };
 
+/** Structural view of DreamStore consumed by the runner (DI seam). */
+export interface CoworkExperienceStore {
+  listDailySummaries(metabotId: number, limit?: number): Array<{ summaryDate: string; summaryText: string }>;
+  searchDailySummaries(
+    metabotId: number,
+    options: { query?: string; dateFrom?: string; dateTo?: string; limit?: number }
+  ): Array<{ summaryDate: string; summaryText: string }>;
+}
+
 export interface CoworkRunnerOptions {
   /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
   loadClaudeSdk?: typeof loadClaudeSdk;
@@ -850,6 +863,13 @@ export interface CoworkRunnerOptions {
    */
   controlBotBrowser?: BotBrowserControl;
   /**
+   * When set, provides the dream-consolidation daily summaries used for the
+   * hot-layer experience injection (recent summaries in the system prompt)
+   * and the experience_recall tool (warm/cold retrieval). Implemented by
+   * DreamStore in main.ts; absent in tests that do not need experience data.
+   */
+  experienceStore?: CoworkExperienceStore;
+  /**
    * When set, every cowork session gets MetaID search tools (search_metaids +
    * metaid_profile) backed by the metaso-p2p MetaID aggregation API. Browser
    * sessions additionally open the best match via bot_browser_open_uri; other
@@ -869,6 +889,7 @@ export class CoworkRunner extends EventEmitter {
   private requestIMSessionReset?: (sessionId: string) => boolean;
   private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
   private controlBotBrowser?: BotBrowserControl;
+  private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -896,6 +917,7 @@ export class CoworkRunner extends EventEmitter {
     this.requestIMSessionReset = options?.requestIMSessionReset;
     this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
     this.controlBotBrowser = options?.controlBotBrowser;
+    this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
@@ -2817,6 +2839,32 @@ export class CoworkRunner extends EventEmitter {
     return `${identityBlock}\n${instructionBlock}`;
   }
 
+  /**
+   * Hot-layer experience injection: the bot's protected self-identity entry
+   * plus its last few days of dream summaries. Returns '' when the session
+   * has no attributed bot (strict, no cross-bot guessing) or no experience
+   * data exists yet.
+   */
+  private buildExperiencePromptBlocksXml(sessionId: string): string {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) return '';
+
+    const identityEntry = this.getMemoryBackend().listUserMemories({
+      metabotId,
+      scope: createOwnerMemoryScope(),
+      usageClass: 'self_identity',
+      status: 'created',
+      includeDeleted: false,
+      limit: 1,
+      offset: 0,
+    })[0];
+    const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
+    return composeExperiencePromptBlocks({
+      identityText: identityEntry?.text ?? null,
+      summaries,
+    });
+  }
+
   private getSessionAutomationModelOverride(sessionId: string): string | null {
     if (!this.getMetabotById) return null;
     const session = this.store.getSession(sessionId);
@@ -3260,6 +3308,14 @@ export class CoworkRunner extends EventEmitter {
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+    // Hot-layer experience injection (self-identity + recent dream summaries),
+    // gated on the same memory switch as the user-fact memory blocks.
+    const experiencePromptBlocksXml = sessionMemoryEnabled
+      ? this.buildExperiencePromptBlocksXml(sessionId)
+      : '';
+    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+      .filter((section) => section?.trim())
+      .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
@@ -3275,7 +3331,7 @@ export class CoworkRunner extends EventEmitter {
       memoryPromptBlocksXml,
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
-      personaBlock,
+      personaWithExperience,
       systemPromptProfile,
       browserContextPrompt
     );
@@ -3356,6 +3412,14 @@ export class CoworkRunner extends EventEmitter {
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+    // Hot-layer experience injection (self-identity + recent dream summaries),
+    // gated on the same memory switch as the user-fact memory blocks.
+    const experiencePromptBlocksXml = sessionMemoryEnabled
+      ? this.buildExperiencePromptBlocksXml(sessionId)
+      : '';
+    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+      .filter((section) => section?.trim())
+      .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
@@ -3371,7 +3435,7 @@ export class CoworkRunner extends EventEmitter {
       memoryPromptBlocksXml,
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
-      personaBlock,
+      personaWithExperience,
       systemPromptProfile,
       browserContextPrompt
     );

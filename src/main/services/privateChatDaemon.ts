@@ -43,6 +43,10 @@ import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import {
+  buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
+  RECENT_SUMMARIES_PROMPT_DAYS,
+} from '../libs/experiencePromptBlocks';
+import {
   SERVICE_ORDER_DELIVERY_ARTIFACT_FAILED_REASON,
   SERVICE_ORDER_SKILL_SCOPE_UNRESOLVED_REASON,
   type ServiceOrderLifecycleService,
@@ -2587,7 +2591,8 @@ async function processOne(
   getChatSkillsRoutingPrompt?: GetChatSkillsRoutingPromptFn,
   runPrivateChatSkillTurn?: RunPrivateChatSkillTurnFn,
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
-  consumeA2AGuidance?: ConsumeA2AGuidanceFn
+  consumeA2AGuidance?: ConsumeA2AGuidanceFn,
+  getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -3867,6 +3872,24 @@ async function processOne(
       skillWaitNoticeAlreadySent,
       operatorGuidance,
     });
+    // Hot-layer experience injection (self-identity + recent dream summaries).
+    // These describe the bot itself, not the user, so they are intentionally
+    // present in A2A contexts; gated on the same memory policy.
+    const experienceContext = memoryPolicy.memoryEnabled
+      ? composeExperiencePromptBlocks({
+          identityText: memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'self_identity',
+            status: 'created',
+            includeDeleted: false,
+            limit: 1,
+            offset: 0,
+          })[0]?.text ?? null,
+          summaries: getRecentDailySummaries?.(metabot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [],
+        })
+      : '';
+    const systemPromptWithExperience = experienceContext ? `${systemPrompt}\n\n${experienceContext}` : systemPrompt;
     let reply = '';
     let trimmed = '';
     let skillAssistantMessageId: string | null = null;
@@ -3882,7 +3905,7 @@ async function processOne(
         } else if (canRunChatSkills && runPrivateChatSkillTurn) {
           const skillTurnResult = await runPrivateChatSkillTurn({
             sessionId,
-            systemPrompt,
+            systemPrompt: systemPromptWithExperience,
             userMessage: plaintext,
             metabotId: metabot.id,
             activeSkillIds: chatSkillsRouting.activeSkillIds,
@@ -3892,7 +3915,7 @@ async function processOne(
           skillAssistantMessageId = skillTurnResult.assistantMessageId ?? null;
         } else {
           await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
-          reply = await performChat(systemPrompt, plaintext, llmId, {
+          reply = await performChat(systemPromptWithExperience, plaintext, llmId, {
             signal: guidanceTurn.abortController.signal,
           });
         }
@@ -4122,6 +4145,7 @@ export function startPrivateChatDaemon(
   runPrivateChatSkillTurn?: RunPrivateChatSkillTurnFn,
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
+  getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -4186,6 +4210,7 @@ export function startPrivateChatDaemon(
               runPrivateChatSkillTurn,
               generatePrivateChatSkillWaitNotice,
               consumeA2AGuidance,
+              getRecentDailySummaries,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
