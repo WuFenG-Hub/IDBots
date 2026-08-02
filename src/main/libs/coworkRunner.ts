@@ -20,7 +20,10 @@ import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
+  formatExperienceRecallResults,
+  resolveExperienceRecallQuery,
   RECENT_SUMMARIES_PROMPT_DAYS,
+  type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
@@ -1465,6 +1468,37 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * experience_recall tool: warm/cold retrieval over the bot's dream-written
+   * daily summaries. Bare call = last 30 days (warm); keyword query = full
+   * history LIKE search (cold). See libs/experiencePromptBlocks for the
+   * defaults and result formatting.
+   */
+  private runExperienceRecallTool(args: ExperienceRecallArgs, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'experience_recall failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.experienceStore) {
+      return { text: 'experience_recall unavailable: experience store is not configured', isError: true };
+    }
+    try {
+      const resolved = resolveExperienceRecallQuery(args);
+      const results = this.experienceStore.searchDailySummaries(metabotId, {
+        query: resolved.query,
+        dateFrom: resolved.dateFrom,
+        dateTo: resolved.dateTo,
+        limit: resolved.limit,
+      });
+      return { text: formatExperienceRecallResults(results), isError: false };
+    } catch (error) {
+      return {
+        text: `experience_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
   private runMemoryUserEditsTool(args: {
     action: 'list' | 'add' | 'update' | 'delete';
     id?: string;
@@ -2787,6 +2821,7 @@ export class CoworkRunner extends EventEmitter {
         '- Memories may be injected as scoped blocks such as <ownerMemories>, <contactMemories>, <conversationMemories>, or <ownerOperationalPreferences>.',
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
         '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
+        '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
       );
     }
@@ -3611,6 +3646,19 @@ export class CoworkRunner extends EventEmitter {
         };
       }
 
+      if (toolName === 'experience_recall') {
+        const result = this.runExperienceRecallTool({
+          query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
+          date_from: typeof toolInput.date_from === 'string' ? toolInput.date_from : undefined,
+          date_to: typeof toolInput.date_to === 'string' ? toolInput.date_to : undefined,
+          limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
+        }, sessionId);
+        return {
+          success: !result.isError,
+          text: result.text,
+        };
+      }
+
       return { success: false, text: `Unsupported host tool: ${toolName || '(empty)'}` };
     } catch (error) {
       return {
@@ -4151,6 +4199,27 @@ export class CoworkRunner extends EventEmitter {
                   isError: true,
                 } as any;
               }
+            }
+          )
+        );
+      }
+      if (sessionMemoryEnabled && this.experienceStore) {
+        memoryTools.push(
+          tool(
+            'experience_recall',
+            'Recall your own past experiences as daily summaries. Bare call returns the last 30 days; provide query for a full-history keyword search; optional date_from/date_to (YYYY-MM-DD) pin a range.',
+            {
+              query: z.string().optional(),
+              date_from: z.string().optional(),
+              date_to: z.string().optional(),
+              limit: z.number().int().min(1).max(30).optional(),
+            },
+            async (args: ExperienceRecallArgs) => {
+              const result = this.runExperienceRecallTool(args, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: result.isError,
+              } as any;
             }
           )
         );
