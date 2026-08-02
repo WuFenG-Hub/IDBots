@@ -146,7 +146,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
   };
 
   const handleDeleteHistory = async (sessionId: string) => {
-    await browserCoworkService.deleteSession(sessionId);
+    await browserCoworkService.archiveSession(sessionId);
   };
 
   const handleOpenUri = (uri: string) => {

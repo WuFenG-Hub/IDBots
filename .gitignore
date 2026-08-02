@@ -157,3 +157,4 @@ man_base_data_pebble/
 !tests/dreamStoreSearch.test.mjs
 !tests/experiencePromptInjection.test.mjs
 !tests/experienceRecallTool.test.mjs
+!tests/sessionArchive.test.mjs

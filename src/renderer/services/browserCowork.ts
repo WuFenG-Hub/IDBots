@@ -89,8 +89,8 @@ class BrowserCoworkService {
     }
   }
 
-  async deleteSession(sessionId: string): Promise<void> {
-    await coworkService.deleteSession(sessionId);
+  async archiveSession(sessionId: string): Promise<void> {
+    await coworkService.archiveSession(sessionId);
     if (store.getState().browserCowork.currentSession?.id === sessionId) {
       store.dispatch(clearBrowserSession());
     }

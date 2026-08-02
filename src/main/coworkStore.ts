@@ -945,6 +945,10 @@ export class CoworkStore implements MemoryBackend {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN hidden_from_session_list INTEGER NOT NULL DEFAULT 0;');
         changed = true;
       }
+      if (!sessionColumns.includes('archived_at')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN archived_at INTEGER;');
+        changed = true;
+      }
       if (!sessionColumns.includes('browser_uri')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN browser_uri TEXT;');
         changed = true;
@@ -2247,6 +2251,42 @@ export class CoworkStore implements MemoryBackend {
     this.saveDb();
   }
 
+  /**
+   * Archive a session: it disappears from the UI list, but all raw records
+   * (messages, mappings, derived memories) are preserved and remain visible
+   * to the dream consolidation and experience retrieval. Archiving — not
+   * deletion — is the user-facing way to put a conversation away, because a
+   * bot's history is part of who it is.
+   */
+  archiveSession(id: string): void {
+    this.db.run('UPDATE cowork_sessions SET archived_at = ?, updated_at = ? WHERE id = ?', [
+      Date.now(),
+      Date.now(),
+      id,
+    ]);
+    if ((this.db.getRowsModified?.() || 0) > 0) {
+      this.saveDb();
+    }
+  }
+
+  unarchiveSession(id: string): void {
+    this.db.run('UPDATE cowork_sessions SET archived_at = NULL, updated_at = ? WHERE id = ?', [
+      Date.now(),
+      id,
+    ]);
+    if ((this.db.getRowsModified?.() || 0) > 0) {
+      this.saveDb();
+    }
+  }
+
+  isSessionArchived(id: string): boolean {
+    const row = this.getOne<{ archived_at?: number | null }>(
+      'SELECT archived_at FROM cowork_sessions WHERE id = ? LIMIT 1',
+      [id],
+    );
+    return row?.archived_at != null;
+  }
+
   setSessionHiddenFromList(id: string, hidden: boolean): void {
     this.db.run('UPDATE cowork_sessions SET hidden_from_session_list = ?, updated_at = ? WHERE id = ?', [
       hidden ? 1 : 0,
@@ -2308,6 +2348,7 @@ export class CoworkStore implements MemoryBackend {
         ), s.updated_at) AS activity_at
       FROM cowork_sessions s
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
+      AND s.archived_at IS NULL
       ${filterByMetabot ? 'AND s.metabot_id = ?' : ''}
       ORDER BY s.pinned DESC, activity_at DESC, s.updated_at DESC
     `, filterByMetabot ? [metabotId] : []);
