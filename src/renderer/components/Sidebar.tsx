@@ -103,7 +103,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   };
 
   const handleDeleteSession = async (sessionId: string) => {
-    await coworkService.deleteSession(sessionId);
+    await coworkService.archiveSession(sessionId);
   };
 
   const handleTogglePin = async (sessionId: string, pinned: boolean) => {

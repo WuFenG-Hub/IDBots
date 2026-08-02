@@ -21,7 +21,7 @@ import {
   PencilSquareIcon,
   DocumentDuplicateIcon,
   ShareIcon,
-  TrashIcon,
+  ArchiveBoxIcon,
   ExclamationTriangleIcon,
   ChevronRightIcon,
   StopCircleIcon,
@@ -2607,7 +2607,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
 
   const handleConfirmDelete = async () => {
     if (!currentSession) return;
-    await coworkService.deleteSession(currentSession.id);
+    await coworkService.archiveSession(currentSession.id);
     setShowConfirmDelete(false);
     if (onNavigateHome) {
       onNavigateHome();
@@ -3024,15 +3024,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           <button
             type="button"
             onClick={handleDeleteClick}
-            className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm text-red-500 hover:bg-red-500/10 transition-colors"
+            className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
           >
-            <TrashIcon className="h-4 w-4" />
-            {i18nService.t('deleteSession')}
+            <ArchiveBoxIcon className="h-4 w-4" />
+            {i18nService.t('archiveSession')}
           </button>
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
+      {/* Archive Confirmation Modal */}
       {showConfirmDelete && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop"
@@ -3044,18 +3044,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
           >
             {/* Header */}
             <div className="flex items-center gap-3 px-5 py-4">
-              <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
-                <ExclamationTriangleIcon className="h-5 w-5 text-red-600 dark:text-red-500" />
+              <div className="p-2 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover">
+                <ArchiveBoxIcon className="h-5 w-5 text-claude-accent dark:text-claude-darkAccent" />
               </div>
               <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                {i18nService.t('deleteTaskConfirmTitle')}
+                {i18nService.t('archiveTaskConfirmTitle')}
               </h2>
             </div>
 
             {/* Content */}
             <div className="px-5 pb-4">
               <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('deleteTaskConfirmMessage')}
+                {i18nService.t('archiveTaskConfirmMessage')}
               </p>
             </div>
 
@@ -3069,9 +3069,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               </button>
               <button
                 onClick={handleConfirmDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-500 hover:bg-red-600 text-gray-900 transition-colors"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-claude-accent hover:opacity-90 text-white transition-colors"
               >
-                {i18nService.t('deleteSession')}
+                {i18nService.t('archiveSession')}
               </button>
             </div>
           </div>

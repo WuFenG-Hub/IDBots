@@ -351,17 +351,22 @@ class CoworkService {
     }
   }
 
-  async deleteSession(sessionId: string): Promise<boolean> {
+  /**
+   * Archive a session: it leaves the UI list but every record is preserved
+   * (dream consolidation and experience retrieval still see it). Hard delete
+   * is intentionally not exposed to users — experience data is valuable.
+   */
+  async archiveSession(sessionId: string): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;
 
-    const result = await cowork.deleteSession(sessionId);
+    const result = await cowork.archiveSession(sessionId);
     if (result.success) {
       store.dispatch(deleteSessionAction(sessionId));
       return true;
     }
 
-    console.error('Failed to delete session:', result.error);
+    console.error('Failed to archive session:', result.error);
     return false;
   }
 

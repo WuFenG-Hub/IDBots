@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import type { CoworkSessionSummary, CoworkSessionStatus } from '../../types/cowork';
-import { ClipboardDocumentIcon, EllipsisHorizontalIcon, ExclamationTriangleIcon, PencilSquareIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { ArchiveBoxIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSquareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
@@ -252,7 +252,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   const actionLabel = i18nService.t('coworkSessionActions');
   const copySessionIdLabel = i18nService.t('coworkCopySessionId');
   const renameLabel = i18nService.t('renameConversation');
-  const deleteLabel = i18nService.t('deleteSession');
+  const archiveLabel = i18nService.t('archiveSession');
   const relativeTime = formatRelativeTime(session.updatedAt);
   const showRunningIndicator = session.status === 'running';
   const showUnreadIndicator = !showRunningIndicator && hasUnread;
@@ -264,14 +264,14 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     || i18nService.t('coworkNewSession');
   const menuItems = useMemo(() => {
     return [
-      { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick, tone: 'neutral' as const },
-      { key: 'rename', label: renameLabel, onClick: handleRenameClick, tone: 'neutral' as const },
-      { key: 'pin', label: pinButtonLabel, onClick: handleTogglePin, tone: 'neutral' as const },
-      { key: 'delete', label: deleteLabel, onClick: handleDeleteClick, tone: 'danger' as const },
+      { key: 'copy-session-id', label: copySessionIdLabel, onClick: handleCopySessionIdClick },
+      { key: 'rename', label: renameLabel, onClick: handleRenameClick },
+      { key: 'pin', label: pinButtonLabel, onClick: handleTogglePin },
+      { key: 'archive', label: archiveLabel, onClick: handleDeleteClick },
     ];
   }, [
     copySessionIdLabel,
-    deleteLabel,
+    archiveLabel,
     handleCopySessionIdClick,
     handleDeleteClick,
     handleRenameClick,
@@ -386,11 +386,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
               key={item.key}
               type="button"
               onClick={item.onClick}
-              className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors ${
-                item.tone === 'danger'
-                  ? 'text-red-500 hover:bg-red-500/10'
-                  : 'dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover'
-              }`}
+              className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover"
             >
               {item.key === 'copy-session-id' && <ClipboardDocumentIcon className="h-4 w-4" />}
               {item.key === 'rename' && <PencilSquareIcon className="h-4 w-4" />}
@@ -400,14 +396,14 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
                   className={`h-4 w-4 ${session.pinned ? 'opacity-60' : ''}`}
                 />
               )}
-              {item.key === 'delete' && <TrashIcon className="h-4 w-4" />}
+              {item.key === 'archive' && <ArchiveBoxIcon className="h-4 w-4" />}
               {item.label}
             </button>
           ))}
         </div>
       )}
 
-      {/* Delete Confirmation Modal */}
+      {/* Archive Confirmation Modal */}
       {showConfirmDelete && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
@@ -419,18 +415,18 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
           >
             {/* Header */}
             <div className="flex items-center gap-3 px-5 py-4">
-              <div className="p-2 rounded-full bg-red-100 dark:bg-red-900/30">
-                <ExclamationTriangleIcon className="h-5 w-5 text-red-600 dark:text-red-500" />
+              <div className="p-2 rounded-full bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover">
+                <ArchiveBoxIcon className="h-5 w-5 text-claude-accent dark:text-claude-darkAccent" />
               </div>
               <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                {i18nService.t('deleteTaskConfirmTitle')}
+                {i18nService.t('archiveTaskConfirmTitle')}
               </h2>
             </div>
 
             {/* Content */}
             <div className="px-5 pb-4">
               <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t('deleteTaskConfirmMessage')}
+                {i18nService.t('archiveTaskConfirmMessage')}
               </p>
             </div>
 
@@ -444,9 +440,9 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
               </button>
               <button
                 onClick={handleConfirmDelete}
-                className="px-4 py-2 text-sm font-medium rounded-lg bg-red-500 hover:bg-red-600 text-white transition-colors"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-claude-accent hover:opacity-90 text-white transition-colors"
               >
-                {i18nService.t('deleteSession')}
+                {i18nService.t('archiveSession')}
               </button>
             </div>
           </div>

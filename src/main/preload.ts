@@ -321,8 +321,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:queueA2AGuidance', input),
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) =>
       ipcRenderer.invoke('cowork:session:resendA2ADeliveryArtifact', input),
-    deleteSession: (sessionId: string) =>
-      ipcRenderer.invoke('cowork:session:delete', sessionId),
+    archiveSession: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:archive', sessionId),
+    unarchiveSession: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:unarchive', sessionId),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
     renameSession: (options: { sessionId: string; title: string }) =>

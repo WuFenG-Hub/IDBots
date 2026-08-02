@@ -6647,17 +6647,35 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('cowork:session:delete', async (_event, sessionId: string) => {
-    return withSqliteRecovery('cowork:session:delete', async () => {
+  // Archiving replaces deletion for user-facing session management: raw
+  // records are experience data and are never destroyed from the UI.
+  ipcMain.handle('cowork:session:archive', async (_event, sessionId: string) => {
+    return withSqliteRecovery('cowork:session:archive', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();
-        coworkStoreInstance.deleteSession(sessionId);
+        coworkStoreInstance.archiveSession(sessionId);
         return { success: true };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {
           success: false,
-          error: error instanceof Error ? error.message : 'Failed to delete session',
+          error: error instanceof Error ? error.message : 'Failed to archive session',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:unarchive', async (_event, sessionId: string) => {
+    return withSqliteRecovery('cowork:session:unarchive', async () => {
+      try {
+        const coworkStoreInstance = getCoworkStore();
+        coworkStoreInstance.unarchiveSession(sessionId);
+        return { success: true };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to unarchive session',
         };
       }
     });
