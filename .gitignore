@@ -153,3 +153,5 @@ man_base_data_pebble/
 !tests/dreamMemoryWrites.test.mjs
 !tests/dreamPrompt.test.mjs
 !tests/dreamService.test.mjs
+!tests/experiencePromptBlocks.test.mjs
+!tests/dreamStoreSearch.test.mjs

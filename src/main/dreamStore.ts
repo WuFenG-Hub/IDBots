@@ -344,6 +344,47 @@ export class DreamStore {
   }
 
   /**
+   * Warm/cold experience retrieval over daily summaries. Without a query this
+   * is a date-range lookup (warm layer); with a query it is a LIKE search
+   * across the bot's full summary history (cold/deep layer). LIKE is used
+   * deliberately: the sql.js fallback backend has no FTS5, and this table is
+   * small by design (one row per bot per day).
+   */
+  searchDailySummaries(
+    metabotId: number,
+    options: { query?: string; dateFrom?: string; dateTo?: string; limit?: number } = {}
+  ): DailySummary[] {
+    const clauses: string[] = ['metabot_id = ?'];
+    const params: Array<string | number> = [metabotId];
+
+    const dateFrom = options.dateFrom?.trim();
+    if (dateFrom) {
+      clauses.push('summary_date >= ?');
+      params.push(dateFrom);
+    }
+    const dateTo = options.dateTo?.trim();
+    if (dateTo) {
+      clauses.push('summary_date <= ?');
+      params.push(dateTo);
+    }
+    const query = options.query?.trim();
+    if (query) {
+      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`);
+      clauses.push(`(summary_text LIKE ? ESCAPE '\\' OR sections_json LIKE ? ESCAPE '\\')`);
+      params.push(`%${escaped}%`, `%${escaped}%`);
+    }
+
+    const limit = Math.max(1, Math.min(50, Math.floor(options.limit ?? 30)));
+    const rows = this.getAll<DailySummaryRow>(`
+      SELECT * FROM metabot_daily_summaries
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY summary_date DESC
+      LIMIT ?
+    `, [...params, limit]);
+    return rows.map((row) => this.mapSummaryRow(row));
+  }
+
+  /**
    * Everything the bot did on [dayStartMs, dayEndMs): cowork sessions with
    * user/assistant messages that day (orders flagged via service_orders) plus
    * scheduled task runs. Hidden sessions are included on purpose — order
