@@ -718,6 +718,18 @@ contextBridge.exposeInMainWorld('electron', {
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
   },
+  dream: {
+    getStatus: () => ipcRenderer.invoke('dream:getStatus'),
+    listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) =>
+      ipcRenderer.invoke('dream:listDailySummaries', options),
+    runNow: (options: { metabotId: number; date?: string }) =>
+      ipcRenderer.invoke('dream:runNow', options),
+    onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { metabotId: number; dreaming: boolean }) => callback(payload);
+      ipcRenderer.on('metabot:dreamStatusChanged', handler);
+      return () => ipcRenderer.removeListener('metabot:dreamStatusChanged', handler);
+    },
+  },
   networkStatus: {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),
   },

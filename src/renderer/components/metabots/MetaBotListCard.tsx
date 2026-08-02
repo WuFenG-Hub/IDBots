@@ -5,7 +5,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, TrashIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, MoonIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
 import MetaBotBackupMnemonicModal from './MetaBotBackupMnemonicModal';
@@ -262,6 +262,15 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
               </span>
             </div>
           </div>
+          {metabot.dreaming && (
+            <span
+              className="inline-flex items-center justify-center text-claude-accent dark:text-claude-darkAccent shrink-0"
+              title={i18nService.t('metabotDreaming')}
+              aria-label={i18nService.t('metabotDreaming')}
+            >
+              <MoonIcon className="h-5 w-5 animate-pulse" aria-hidden />
+            </span>
+          )}
           <div
             className={enabledToggleView.trackClass}
             onClick={(e) => {

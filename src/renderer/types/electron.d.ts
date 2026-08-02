@@ -1062,6 +1062,42 @@ interface IElectronAPI {
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
   };
+  dream: {
+    getStatus: () => Promise<{ success: boolean; dreamingBotIds?: number[]; error?: string }>;
+    listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) => Promise<{
+      success: boolean;
+      summaries?: Array<{
+        id: string;
+        metabotId: number;
+        summaryDate: string;
+        summaryText: string;
+        sections: Record<string, string>;
+        stats: Record<string, number>;
+        llmId: string | null;
+        createdAt: number;
+        updatedAt: number;
+      }>;
+      error?: string;
+    }>;
+    runNow: (options: { metabotId: number; date?: string }) => Promise<{
+      success: boolean;
+      metabotId?: number;
+      date?: string;
+      run?: {
+        id: string;
+        metabotId: number;
+        dreamDate: string;
+        status: 'running' | 'completed' | 'failed';
+        attemptCount: number;
+        llmId: string | null;
+        error: string | null;
+        startedAt: number;
+        completedAt: number | null;
+      } | null;
+      error?: string;
+    }>;
+    onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => () => void;
+  };
   permissions: {
     checkCalendar: () => Promise<{ success: boolean; status?: string; error?: string; autoRequested?: boolean }>;
     requestCalendar: () => Promise<{ success: boolean; granted?: boolean; status?: string; error?: string }>;
