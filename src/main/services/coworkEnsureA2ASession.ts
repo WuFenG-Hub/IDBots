@@ -1,6 +1,7 @@
 import type { CoworkSession, CoworkStore } from '../coworkStore';
 import type { Metabot } from '../types/metabot';
 import { buildCanonicalPrivateConversationExternalConversationId } from './simplemsgPeerConversation';
+import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 
 const RAW_GLOBAL_META_ID_VERSION_CHARS = new Set(['q', 'p', 'z', 'r', 'y', 't']);
 
@@ -140,7 +141,10 @@ export function ensureCoworkA2ASession(
   }
 
   const config = params.coworkStore.getConfig();
-  const workspaceRoot = text(config.workingDirectory) || process.cwd();
+  const workspaceRoot = resolveSessionWorkingDirectory(
+    text(config.workingDirectory) || process.cwd(),
+    normalized.localMetabotId,
+  );
   const title = normalized.peerName || `Private-${normalized.peerGlobalMetaId.slice(0, 12)}`;
   const session = params.coworkStore.createSession(
     title,

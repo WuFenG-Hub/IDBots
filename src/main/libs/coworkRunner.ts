@@ -18,6 +18,13 @@ import {
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
+import {
+  buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
+  formatExperienceRecallResults,
+  resolveExperienceRecallQuery,
+  RECENT_SUMMARIES_PROMPT_DAYS,
+  type ExperienceRecallArgs,
+} from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
@@ -812,6 +819,15 @@ type CoworkMetabotIdentity = {
   globalmetaid?: string | null;
 };
 
+/** Structural view of DreamStore consumed by the runner (DI seam). */
+export interface CoworkExperienceStore {
+  listDailySummaries(metabotId: number, limit?: number): Array<{ summaryDate: string; summaryText: string }>;
+  searchDailySummaries(
+    metabotId: number,
+    options: { query?: string; dateFrom?: string; dateTo?: string; limit?: number }
+  ): Array<{ summaryDate: string; summaryText: string }>;
+}
+
 export interface CoworkRunnerOptions {
   /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
   loadClaudeSdk?: typeof loadClaudeSdk;
@@ -850,6 +866,13 @@ export interface CoworkRunnerOptions {
    */
   controlBotBrowser?: BotBrowserControl;
   /**
+   * When set, provides the dream-consolidation daily summaries used for the
+   * hot-layer experience injection (recent summaries in the system prompt)
+   * and the experience_recall tool (warm/cold retrieval). Implemented by
+   * DreamStore in main.ts; absent in tests that do not need experience data.
+   */
+  experienceStore?: CoworkExperienceStore;
+  /**
    * When set, every cowork session gets MetaID search tools (search_metaids +
    * metaid_profile) backed by the metaso-p2p MetaID aggregation API. Browser
    * sessions additionally open the best match via bot_browser_open_uri; other
@@ -869,6 +892,7 @@ export class CoworkRunner extends EventEmitter {
   private requestIMSessionReset?: (sessionId: string) => boolean;
   private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
   private controlBotBrowser?: BotBrowserControl;
+  private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -896,6 +920,7 @@ export class CoworkRunner extends EventEmitter {
     this.requestIMSessionReset = options?.requestIMSessionReset;
     this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
     this.controlBotBrowser = options?.controlBotBrowser;
+    this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
@@ -1439,6 +1464,37 @@ export class CoworkRunner extends EventEmitter {
           warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
           error: error instanceof Error ? error.message : String(error),
         }),
+      };
+    }
+  }
+
+  /**
+   * experience_recall tool: warm/cold retrieval over the bot's dream-written
+   * daily summaries. Bare call = last 30 days (warm); keyword query = full
+   * history LIKE search (cold). See libs/experiencePromptBlocks for the
+   * defaults and result formatting.
+   */
+  private runExperienceRecallTool(args: ExperienceRecallArgs, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'experience_recall failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.experienceStore) {
+      return { text: 'experience_recall unavailable: experience store is not configured', isError: true };
+    }
+    try {
+      const resolved = resolveExperienceRecallQuery(args);
+      const results = this.experienceStore.searchDailySummaries(metabotId, {
+        query: resolved.query,
+        dateFrom: resolved.dateFrom,
+        dateTo: resolved.dateTo,
+        limit: resolved.limit,
+      });
+      return { text: formatExperienceRecallResults(results), isError: false };
+    } catch (error) {
+      return {
+        text: `experience_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
       };
     }
   }
@@ -2765,6 +2821,7 @@ export class CoworkRunner extends EventEmitter {
         '- Memories may be injected as scoped blocks such as <ownerMemories>, <contactMemories>, <conversationMemories>, or <ownerOperationalPreferences>.',
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
         '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
+        '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
       );
     }
@@ -2815,6 +2872,32 @@ export class CoworkRunner extends EventEmitter {
     const instructionBlock =
       '<instruction>\nYou must strictly adhere to the persona, soul, and bio defined in the &lt;metabot_identity&gt; block above for all responses in this session.\n</instruction>';
     return `${identityBlock}\n${instructionBlock}`;
+  }
+
+  /**
+   * Hot-layer experience injection: the bot's protected self-identity entry
+   * plus its last few days of dream summaries. Returns '' when the session
+   * has no attributed bot (strict, no cross-bot guessing) or no experience
+   * data exists yet.
+   */
+  private buildExperiencePromptBlocksXml(sessionId: string): string {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) return '';
+
+    const identityEntry = this.getMemoryBackend().listUserMemories({
+      metabotId,
+      scope: createOwnerMemoryScope(),
+      usageClass: 'self_identity',
+      status: 'created',
+      includeDeleted: false,
+      limit: 1,
+      offset: 0,
+    })[0];
+    const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
+    return composeExperiencePromptBlocks({
+      identityText: identityEntry?.text ?? null,
+      summaries,
+    });
   }
 
   private getSessionAutomationModelOverride(sessionId: string): string | null {
@@ -3260,6 +3343,14 @@ export class CoworkRunner extends EventEmitter {
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+    // Hot-layer experience injection (self-identity + recent dream summaries),
+    // gated on the same memory switch as the user-fact memory blocks.
+    const experiencePromptBlocksXml = sessionMemoryEnabled
+      ? this.buildExperiencePromptBlocksXml(sessionId)
+      : '';
+    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+      .filter((section) => section?.trim())
+      .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
@@ -3275,7 +3366,7 @@ export class CoworkRunner extends EventEmitter {
       memoryPromptBlocksXml,
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
-      personaBlock,
+      personaWithExperience,
       systemPromptProfile,
       browserContextPrompt
     );
@@ -3356,6 +3447,14 @@ export class CoworkRunner extends EventEmitter {
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+    // Hot-layer experience injection (self-identity + recent dream summaries),
+    // gated on the same memory switch as the user-fact memory blocks.
+    const experiencePromptBlocksXml = sessionMemoryEnabled
+      ? this.buildExperiencePromptBlocksXml(sessionId)
+      : '';
+    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+      .filter((section) => section?.trim())
+      .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
     const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
       ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
@@ -3371,7 +3470,7 @@ export class CoworkRunner extends EventEmitter {
       memoryPromptBlocksXml,
       sessionMemoryEnabled,
       activeSession.disableRemoteServicesPrompt,
-      personaBlock,
+      personaWithExperience,
       systemPromptProfile,
       browserContextPrompt
     );
@@ -3540,6 +3639,19 @@ export class CoworkRunner extends EventEmitter {
           is_explicit: typeof toolInput.is_explicit === 'boolean' ? toolInput.is_explicit : undefined,
           limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
           query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
+        }, sessionId);
+        return {
+          success: !result.isError,
+          text: result.text,
+        };
+      }
+
+      if (toolName === 'experience_recall') {
+        const result = this.runExperienceRecallTool({
+          query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
+          date_from: typeof toolInput.date_from === 'string' ? toolInput.date_from : undefined,
+          date_to: typeof toolInput.date_to === 'string' ? toolInput.date_to : undefined,
+          limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
         }, sessionId);
         return {
           success: !result.isError,
@@ -4087,6 +4199,27 @@ export class CoworkRunner extends EventEmitter {
                   isError: true,
                 } as any;
               }
+            }
+          )
+        );
+      }
+      if (sessionMemoryEnabled && this.experienceStore) {
+        memoryTools.push(
+          tool(
+            'experience_recall',
+            'Recall your own past experiences as daily summaries. Bare call returns the last 30 days; provide query for a full-history keyword search; optional date_from/date_to (YYYY-MM-DD) pin a range.',
+            {
+              query: z.string().optional(),
+              date_from: z.string().optional(),
+              date_to: z.string().optional(),
+              limit: z.number().int().min(1).max(30).optional(),
+            },
+            async (args: ExperienceRecallArgs) => {
+              const result = this.runExperienceRecallTool(args, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: result.isError,
+              } as any;
             }
           )
         );

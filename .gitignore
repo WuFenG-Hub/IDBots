@@ -146,3 +146,14 @@ man_base_data_pebble/
 !tests/userIdentityService.test.mjs
 !tests/ownerBindingService.test.mjs
 !tests/ownerBindingSyncSteps.test.mjs
+!tests/botWorkspace.test.mjs
+!tests/coworkSessionMetabotFilter.test.mjs
+!tests/metabotAttribution.test.mjs
+!tests/dreamStore.test.mjs
+!tests/dreamMemoryWrites.test.mjs
+!tests/dreamPrompt.test.mjs
+!tests/dreamService.test.mjs
+!tests/experiencePromptBlocks.test.mjs
+!tests/dreamStoreSearch.test.mjs
+!tests/experiencePromptInjection.test.mjs
+!tests/experienceRecallTool.test.mjs

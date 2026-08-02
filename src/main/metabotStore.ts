@@ -533,6 +533,9 @@ export class MetabotStore {
     const existing = this.getMetabotById(id);
     if (!existing) return false;
     this.db.run('UPDATE metabots SET boss_id = NULL, updated_at = ? WHERE boss_id = ?', [Date.now(), id]);
+    // Deliberately no cascade into cowork_sessions / user_memories: those rows
+    // keep the deleted bot's metabot_id as the historical record of which bot
+    // produced them (experience data survives the bot itself).
     this.db.run('DELETE FROM metabots WHERE id = ?', [id]);
     this.saveDb();
     return true;

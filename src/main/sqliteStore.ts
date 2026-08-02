@@ -354,6 +354,7 @@ export class SqliteStore {
         scope_key TEXT NOT NULL DEFAULT '${OWNER_SCOPE_KEY}',
         usage_class TEXT NOT NULL DEFAULT 'profile_fact',
         visibility TEXT NOT NULL DEFAULT 'local_only',
+        origin TEXT NOT NULL DEFAULT 'conversation',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         last_used_at INTEGER
@@ -423,8 +424,41 @@ export class SqliteStore {
         memory_llm_judge_enabled INTEGER NOT NULL DEFAULT 1,
         memory_guard_level TEXT NOT NULL DEFAULT 'strict',
         memory_user_memories_max_items INTEGER NOT NULL DEFAULT 12,
+        dream_enabled INTEGER NOT NULL DEFAULT 1,
         updated_at INTEGER NOT NULL,
         FOREIGN KEY (metabot_id) REFERENCES metabots(id) ON DELETE CASCADE
+      );
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_daily_summaries (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        summary_date TEXT NOT NULL,
+        summary_text TEXT NOT NULL,
+        sections_json TEXT NOT NULL DEFAULT '{}',
+        stats_json TEXT NOT NULL DEFAULT '{}',
+        llm_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, summary_date)
+      );
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_dream_runs (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        llm_id TEXT,
+        error TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, dream_date)
       );
     `);
 

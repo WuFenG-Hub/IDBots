@@ -28,6 +28,8 @@ export interface Metabot {
   allow_chat_skills: string[];
   /** Homepage pointer JSON string (serialized {uri,renderer,contentType}); null = Default template. */
   homepage?: string | null;
+  /** Runtime flag merged by main: this bot is currently running its dream consolidation. */
+  dreaming?: boolean;
   created_at: number;
   updated_at: number;
 }

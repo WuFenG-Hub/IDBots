@@ -256,6 +256,8 @@ export interface CoworkSessionSummary {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  /** Owning MetaBot id (null for legacy/unattributed sessions) */
+  metabotId?: number | null;
   /** Session type: 'standard' = human↔MetaBot, 'a2a' = MetaBot↔MetaBot */
   sessionType?: CoworkSessionType;
   /** Remote peer MetaBot's display name (A2A sessions only) */

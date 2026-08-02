@@ -10,6 +10,7 @@ import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkRunner, PermissionRequest } from '../libs/coworkRunner';
 import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { IMStore } from './imStore';
+import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import type { IMMessage, IMPlatform, IMMediaAttachment } from './types';
 
 interface MessageAccumulator {
@@ -328,10 +329,11 @@ export class IMCoworkHandler extends EventEmitter {
     if (!fs.existsSync(resolvedWorkspaceRoot) || !fs.statSync(resolvedWorkspaceRoot).isDirectory()) {
       throw new Error(`IM 工作目录不存在或无效: ${resolvedWorkspaceRoot}`);
     }
+    const sessionWorkingDirectory = resolveSessionWorkingDirectory(resolvedWorkspaceRoot, targetMetabotId);
 
     const session = this.coworkStore.createSession(
       title,
-      resolvedWorkspaceRoot,
+      sessionWorkingDirectory,
       systemPrompt,
       'local', // IM always uses local mode
       [],

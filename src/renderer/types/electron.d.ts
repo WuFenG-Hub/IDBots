@@ -200,6 +200,7 @@ interface CoworkSessionSummary {
   pinned: boolean;
   createdAt: number;
   updatedAt: number;
+  metabotId?: number | null;
   sessionType?: 'standard' | 'a2a';
   peerName?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
@@ -690,7 +691,7 @@ interface IElectronAPI {
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
-    listSessions: () => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
+    listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;
       refundTxid?: string;
@@ -1060,6 +1061,42 @@ interface IElectronAPI {
     update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
+  };
+  dream: {
+    getStatus: () => Promise<{ success: boolean; dreamingBotIds?: number[]; error?: string }>;
+    listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) => Promise<{
+      success: boolean;
+      summaries?: Array<{
+        id: string;
+        metabotId: number;
+        summaryDate: string;
+        summaryText: string;
+        sections: Record<string, string>;
+        stats: Record<string, number>;
+        llmId: string | null;
+        createdAt: number;
+        updatedAt: number;
+      }>;
+      error?: string;
+    }>;
+    runNow: (options: { metabotId: number; date?: string }) => Promise<{
+      success: boolean;
+      metabotId?: number;
+      date?: string;
+      run?: {
+        id: string;
+        metabotId: number;
+        dreamDate: string;
+        status: 'running' | 'completed' | 'failed';
+        attemptCount: number;
+        llmId: string | null;
+        error: string | null;
+        startedAt: number;
+        completedAt: number | null;
+      } | null;
+      error?: string;
+    }>;
+    onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => () => void;
   };
   permissions: {
     checkCalendar: () => Promise<{ success: boolean; status?: string; error?: string; autoRequested?: boolean }>;

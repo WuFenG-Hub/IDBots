@@ -1,6 +1,11 @@
 export type MemoryScopeKind = 'owner' | 'contact' | 'conversation';
-export type MemoryUsageClass = 'profile_fact' | 'preference' | 'operational_preference';
+// 'self_identity' = the bot's own dream-time "who am I" entry (protected,
+// one per bot); 'work_review' = dream-time summary of one piece of work and
+// the counterparty's evaluation. Both are written exclusively by the dream
+// consolidation service with origin='dream'.
+export type MemoryUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review';
 export type MemoryVisibility = 'local_only' | 'external_safe';
+export type MemoryOrigin = 'conversation' | 'dream';
 
 export interface MemoryScope {
   kind: MemoryScopeKind;

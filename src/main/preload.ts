@@ -329,8 +329,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:rename', options),
     getSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:get', sessionId),
-    listSessions: () =>
-      ipcRenderer.invoke('cowork:session:list'),
+    listSessions: (options?: { metabotId?: number | null }) =>
+      ipcRenderer.invoke('cowork:session:list', options),
     processServiceRefund: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:processServiceRefund', sessionId),
     readLocalImage: (options: { path: string; maxBytes?: number }) =>
@@ -717,6 +717,18 @@ contextBridge.exposeInMainWorld('electron', {
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
+  },
+  dream: {
+    getStatus: () => ipcRenderer.invoke('dream:getStatus'),
+    listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) =>
+      ipcRenderer.invoke('dream:listDailySummaries', options),
+    runNow: (options: { metabotId: number; date?: string }) =>
+      ipcRenderer.invoke('dream:runNow', options),
+    onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { metabotId: number; dreaming: boolean }) => callback(payload);
+      ipcRenderer.on('metabot:dreamStatusChanged', handler);
+      return () => ipcRenderer.removeListener('metabot:dreamStatusChanged', handler);
+    },
   },
   networkStatus: {
     send: (status: 'online' | 'offline') => ipcRenderer.send('network:status-change', status),

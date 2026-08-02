@@ -137,6 +137,17 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     loadList();
   }, [loadList]);
 
+  // Live dream-consolidation status: patch the card's moon indicator as bots
+  // enter/leave their nightly dream run (initial state comes with metabot:list).
+  useEffect(() => {
+    const off = window.electron.dream?.onStatusChanged(({ metabotId, dreaming }) => {
+      setList((prev) => prev.map((m) => (m.id === metabotId ? { ...m, dreaming } : m)));
+    });
+    return () => {
+      off?.();
+    };
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     const loadSkillOptions = async () => {
