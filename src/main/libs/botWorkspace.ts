@@ -72,3 +72,22 @@ export function resolveSessionWorkingDirectory(
   }
   return path.resolve(baseWorkingDirectory);
 }
+
+/**
+ * Decide whether a session-start request should land in the per-bot dated
+ * workspace. An explicit cwd only counts as a user choice when it differs
+ * from the configured default working directory — the renderer pre-fills the
+ * default into start requests, so equality means "no real pick was made".
+ */
+export function shouldUseBotWorkspaceCwd(input: {
+  explicitCwd?: string | null;
+  defaultWorkingDirectory?: string | null;
+  metabotId?: number | null;
+}): boolean {
+  if (!isWorkspaceMetabotId(input.metabotId)) return false;
+  const explicit = input.explicitCwd?.trim();
+  if (!explicit) return true;
+  const fallback = input.defaultWorkingDirectory?.trim();
+  if (!fallback) return false;
+  return path.resolve(explicit) === path.resolve(fallback);
+}
