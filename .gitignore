@@ -151,3 +151,5 @@ man_base_data_pebble/
 !tests/metabotAttribution.test.mjs
 !tests/dreamStore.test.mjs
 !tests/dreamMemoryWrites.test.mjs
+!tests/dreamPrompt.test.mjs
+!tests/dreamService.test.mjs

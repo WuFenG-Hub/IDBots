@@ -112,6 +112,8 @@ import {
 } from './services/a2aGuidanceRestart';
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
 import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
+import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
+import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
@@ -2367,6 +2369,7 @@ process.on('unhandledRejection', (error) => {
 
 let store: SqliteStore | null = null;
 let coworkStore: CoworkStore | null = null;
+let dreamStore: DreamStore | null = null;
 let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
@@ -2757,6 +2760,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
     providerDiscoveryService.dispose();
   }
   coworkStore = null;
+  dreamStore = null;
   mcpStore = null;
   coworkRunner = null;
   imGatewayManager = null;
@@ -3011,6 +3015,21 @@ const startSqliteDaemons = (): void => {
     },
     emitLog: (msg) => console.log(msg),
   });
+
+  // Nightly dream consolidation: each enabled MetaBot reviews its previous
+  // day's experiences with its own LLM (summaries, dream memories, identity).
+  startDreamService({
+    coworkStore: getCoworkStore(),
+    metabotStore: getMetabotStore(),
+    dreamStore: getDreamStore(),
+    emitToRenderer: (channel, data) => {
+      BrowserWindow.getAllWindows().forEach(win => {
+        if (!win.isDestroyed()) {
+          try { win.webContents.send(channel as string, data); } catch { /* ignore */ }
+        }
+      });
+    },
+  });
 };
 
 const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestartState> => {
@@ -3028,6 +3047,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   }
   await stopCognitiveOrchestrator({ waitForTick: true });
   await stopPrivateChatDaemon({ waitForTick: true });
+  stopDreamService();
   stopPrivateChatBackfill();
   await resetSqliteBackedSingletons();
   return restartState;
@@ -3213,6 +3233,14 @@ const getCoworkStore = () => {
     }
   }
   return coworkStore;
+};
+
+const getDreamStore = (): DreamStore => {
+  if (!dreamStore) {
+    const sqliteStore = getStore();
+    dreamStore = new DreamStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return dreamStore;
 };
 
 const scheduleCoworkStoreHeavyMaintenance = (): void => {
@@ -7369,13 +7397,61 @@ if (!gotTheLock) {
 
   ipcMain.handle('metabot:list', async () => withSqliteRecovery('metabot:list', async () => {
     try {
-      const list = getMetabotStore().listMetabots();
+      const dreamService = getDreamService();
+      const list = getMetabotStore().listMetabots().map((metabot) => ({
+        ...metabot,
+        dreaming: dreamService?.isDreaming(metabot.id) ?? false,
+      }));
       return { success: true, list };
     } catch (error) {
       rethrowSqliteWasmBoundsError(error);
       return { success: false, error: error instanceof Error ? error.message : 'Failed to list metabots' };
     }
   }));
+
+  ipcMain.handle('dream:getStatus', async () => {
+    try {
+      return { success: true, dreamingBotIds: getDreamService()?.getDreamingBotIds() ?? [] };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get dream status' };
+    }
+  });
+
+  ipcMain.handle('dream:listDailySummaries', async (_event, options: { metabotId: number; limit?: number; offset?: number }) => {
+    return withSqliteRecovery('dream:listDailySummaries', async () => {
+      try {
+        const metabotId = Number(options?.metabotId);
+        if (!Number.isInteger(metabotId) || metabotId <= 0) {
+          return { success: false, error: 'Invalid metabotId' };
+        }
+        const summaries = getDreamStore().listDailySummaries(metabotId, options?.limit, options?.offset);
+        return { success: true, summaries };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list daily summaries' };
+      }
+    });
+  });
+
+  ipcMain.handle('dream:runNow', async (_event, options: { metabotId: number; date?: string }) => {
+    return withSqliteRecovery('dream:runNow', async () => {
+      try {
+        const metabotId = Number(options?.metabotId);
+        if (!Number.isInteger(metabotId) || metabotId <= 0) {
+          return { success: false, error: 'Invalid metabotId' };
+        }
+        const dreamService = getDreamService();
+        if (!dreamService) {
+          return { success: false, error: 'Dream service is not running' };
+        }
+        const result = await dreamService.runNow(metabotId, options?.date);
+        return { success: true, ...result, run: getDreamStore().getRun(result.metabotId, result.date) };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to run dream' };
+      }
+    });
+  });
 
   ipcMain.handle('metabot:checkNameExists', async (_event, options: { name: string; excludeId?: number }) => {
     try {
@@ -10192,6 +10268,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         }
       },
       stopCognitiveOrchestrator,
+      stopDreamService,
       stopP2P: () => p2pIndexerService.stop(),
       stopProviderDiscovery: () => {
         if (providerDiscoveryService) {

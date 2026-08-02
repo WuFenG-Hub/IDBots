@@ -56,7 +56,7 @@ function maskBaseURL(url: string): string {
  */
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
-  options: { llmId?: string | null; tools?: OpenAITool[]; signal?: AbortSignal } = {}
+  options: { llmId?: string | null; tools?: OpenAITool[]; signal?: AbortSignal; maxTokens?: number } = {}
 ): Promise<ChatCompletionResult> {
   const { config, error } = resolveApiConfigForModel(options.llmId ?? undefined);
   if (error || !config) {
@@ -85,7 +85,8 @@ export async function chatCompletionWithTools(
         config.apiKey ?? '',
         messages,
         options.tools,
-        options.signal
+        options.signal,
+        options.maxTokens
       );
     }
     return await callOpenAIStyleWithTools(
@@ -94,7 +95,8 @@ export async function chatCompletionWithTools(
       config.apiKey ?? '',
       messages,
       options.tools,
-      options.signal
+      options.signal,
+      options.maxTokens
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -111,13 +113,13 @@ export async function performChatCompletionForOrchestrator(
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options: { signal?: AbortSignal } = {}
+  options: { signal?: AbortSignal; maxTokens?: number } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage },
   ];
-  const result = await chatCompletionWithTools(messages, { llmId, signal: options.signal });
+  const result = await chatCompletionWithTools(messages, { llmId, signal: options.signal, maxTokens: options.maxTokens });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
     console.warn('[Orchestrator] performChatCompletionForOrchestrator: LLM returned tool_calls but no tools were requested; ignoring tool_calls');
@@ -153,7 +155,8 @@ async function callAnthropicStyleWithTools(
   apiKey: string,
   messages: ChatMessage[],
   tools?: OpenAITool[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/messages`;
   const systemParts: string[] = [];
@@ -193,7 +196,7 @@ async function callAnthropicStyleWithTools(
 
   const body: Record<string, unknown> = {
     model,
-    max_tokens: 2048,
+    max_tokens: maxTokens ?? 2048,
     messages: anthropicMessages,
     system: systemParts.join('\n\n'),
   };
@@ -257,13 +260,14 @@ async function callOpenAIStyleWithTools(
   apiKey: string,
   messages: ChatMessage[],
   tools?: OpenAITool[],
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  maxTokens?: number
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/chat/completions`;
   const body: Record<string, unknown> = {
     model,
     messages: toOpenAIMessages(messages),
-    max_tokens: 2048,
+    max_tokens: maxTokens ?? 2048,
   };
   if (Array.isArray(tools) && tools.length > 0) {
     body.tools = tools;

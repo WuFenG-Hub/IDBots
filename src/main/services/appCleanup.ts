@@ -8,6 +8,7 @@ export interface AppCleanupDeps {
   stopIMGateways: () => Promise<void>;
   stopScheduler: () => void;
   stopCognitiveOrchestrator: () => void;
+  stopDreamService: () => void;
   stopP2P: () => Promise<void>;
   stopProviderDiscovery: () => void;
   deactivateGroupChatTasks: () => void;
@@ -40,6 +41,7 @@ export async function runAppCleanup(deps: AppCleanupDeps): Promise<void> {
 
   deps.stopScheduler();
   deps.stopCognitiveOrchestrator();
+  deps.stopDreamService();
   deps.stopProviderDiscovery();
   deps.deactivateGroupChatTasks();
 }

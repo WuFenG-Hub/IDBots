@@ -258,6 +258,19 @@ export class DreamStore {
     return states;
   }
 
+  /** Raw cowork_config lookup (e.g. the dreamLlmId global override). */
+  getCoworkConfigValue(key: string): string | null {
+    try {
+      const row = this.getOne<{ value: string }>(
+        'SELECT value FROM cowork_config WHERE key = ? LIMIT 1',
+        [key]
+      );
+      return row?.value ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** Runs left in 'running' by an app restart are marked failed. */
   resetStaleRunningRuns(): number {
     this.db.run(`
