@@ -2,6 +2,7 @@ import { BrowserWindow } from 'electron';
 import { ScheduledTaskStore, ScheduledTask, ScheduledTaskRun, Schedule, NotifyPlatform } from '../scheduledTaskStore';
 import type { CoworkStore } from '../coworkStore';
 import type { CoworkRunner } from './coworkRunner';
+import { resolveSessionWorkingDirectory } from './botWorkspace';
 import type { IMGatewayManager } from '../im/imGatewayManager';
 
 interface SchedulerDeps {
@@ -287,7 +288,9 @@ export class Scheduler {
   private async startCoworkSession(task: ScheduledTask, executionGeneration: number): Promise<string> {
     this.assertExecutionCurrent(executionGeneration);
     const config = this.coworkStore.getConfig();
-    const cwd = task.workingDirectory || config.workingDirectory;
+    // A per-task folder override always wins; otherwise metabot tasks run
+    // inside their per-bot dated workspace.
+    const cwd = task.workingDirectory || resolveSessionWorkingDirectory(config.workingDirectory, task.metabotId ?? null);
     const baseSystemPrompt = task.systemPrompt || config.systemPrompt;
     let skillsPrompt: string | null = null;
     if (this.getSkillsPrompt) {

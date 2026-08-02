@@ -8,6 +8,7 @@ import type { MetabotStore } from '../metabotStore';
 import type { OrderSource } from './orderPayment';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { generateSessionTitle } from '../libs/coworkUtil';
+import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import {
   buildNeedsRatingMessage,
@@ -268,7 +269,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
   }
 
   private createExecutionSession(request: OrderCoworkRequest): string {
-    const resolvedRoot = this.resolveWorkspaceRoot();
+    const resolvedRoot = resolveSessionWorkingDirectory(this.resolveWorkspaceRoot(), request.metabotId);
     const fallbackTitle = request.prompt.split('\n')[0].slice(0, 50) || 'Order Execution';
     const session = this.coworkStore.createSession(
       request.title?.trim() || fallbackTitle,
@@ -289,7 +290,7 @@ export class PrivateChatOrderCowork extends EventEmitter {
   }
 
   private async createOrderSession(request: OrderCoworkRequest): Promise<string> {
-    const resolvedRoot = this.resolveWorkspaceRoot();
+    const resolvedRoot = resolveSessionWorkingDirectory(this.resolveWorkspaceRoot(), request.metabotId);
 
     const fallbackTitle = request.prompt.split('\n')[0].slice(0, 50) || 'New Session';
     const generatedTitle = await generateSessionTitle(request.prompt).catch((error) => {

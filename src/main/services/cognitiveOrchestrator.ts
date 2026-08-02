@@ -645,6 +645,10 @@ async function runReplyPipeline(
   if (useToolLoop && allowedRoots.length > 0) {
     if (runSkillTurnViaCowork) {
       // Use the last root (typically project/bundled SKILLs) so cwd contains the skill scripts; first root is often userData which may be empty in dev.
+      // NOTE: intentionally NOT routed through the per-bot dated workspace
+      // (libs/botWorkspace) — this cwd exists so the agent can execute skill
+      // scripts in place. Artifacts produced here land in the SKILLs tree;
+      // revisit when skill execution is decoupled from the workspace.
       const cwdForCowork = allowedRoots.length > 1 ? allowedRoots[allowedRoots.length - 1]! : allowedRoots[0]!;
       try {
         if (isLatestFromPrivileged) {

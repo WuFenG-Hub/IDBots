@@ -34,6 +34,7 @@ import { generateSessionTitle } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
 import { startCoworkOpenAICompatProxy, stopCoworkOpenAICompatProxy, setScheduledTaskDeps } from './libs/coworkOpenAICompatProxy';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
+import { isWorkspaceMetabotId, resolveBotWorkspaceCwd } from './libs/botWorkspace';
 import { IMGatewayManager, IMPlatform, IMGatewayConfig } from './im';
 import { APP_NAME } from './appConstants';
 import { getSkillServiceManager } from './skillServices';
@@ -6007,7 +6008,11 @@ if (!gotTheLock) {
       // Generate title from first line of prompt
       const fallbackTitle = options.prompt.split('\n')[0].slice(0, 50) || 'New Session';
       const title = options.title?.trim() || fallbackTitle;
-      const taskWorkingDirectory = resolveTaskWorkingDirectory(selectedWorkspaceRoot);
+      // A user-picked folder always wins; without an explicit pick, metabot
+      // sessions run inside their per-bot dated workspace.
+      const taskWorkingDirectory = !options.cwd?.trim() && isWorkspaceMetabotId(options.metabotId)
+        ? resolveBotWorkspaceCwd(selectedWorkspaceRoot, options.metabotId)
+        : resolveTaskWorkingDirectory(selectedWorkspaceRoot);
 
       const session = coworkStoreInstance.createSession(
         title,

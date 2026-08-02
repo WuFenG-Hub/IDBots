@@ -31,6 +31,7 @@ import {
   type MemoryVisibility,
 } from './memory/memoryScope';
 import { resolveMemoryScopes, type ResolveMemoryScopesInput } from './memory/memoryScopeResolver';
+import { BOT_WORKSPACE_DIR_NAME } from './libs/botWorkspace';
 import {
   buildA2AChainMetadata,
   extractTxidFromA2AChainPinId,
@@ -49,12 +50,23 @@ const getDefaultWorkingDirectory = (): string => {
 
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';
 
+// Matches the per-bot dated workspace layout produced by libs/botWorkspace:
+// <root>/bots/<metabotId>/<YYYY-MM-DD>. Recent-workspace entries normalize
+// back to the root so date folders do not flood the picker list.
+const BOT_DATED_WORKSPACE_RE = new RegExp(
+  `[\\\\/]${BOT_WORKSPACE_DIR_NAME}[\\\\/]\\d+[\\\\/]\\d{4}-\\d{2}-\\d{2}(?=[\\\\/]|$)`
+);
+
 const normalizeRecentWorkspacePath = (cwd: string): string => {
   const resolved = path.resolve(cwd);
   const marker = `${path.sep}${TASK_WORKSPACE_CONTAINER_DIR}${path.sep}`;
   const markerIndex = resolved.lastIndexOf(marker);
   if (markerIndex > 0) {
     return resolved.slice(0, markerIndex);
+  }
+  const botWorkspaceMatch = BOT_DATED_WORKSPACE_RE.exec(resolved);
+  if (botWorkspaceMatch && botWorkspaceMatch.index > 0) {
+    return resolved.slice(0, botWorkspaceMatch.index);
   }
   return resolved;
 };

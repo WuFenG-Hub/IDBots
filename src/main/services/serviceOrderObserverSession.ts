@@ -1,5 +1,6 @@
 import type { CoworkMessage, CoworkStore } from '../coworkStore';
 import { generateSessionTitle } from '../libs/coworkUtil';
+import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 import { buildA2AChainMetadata, normalizeA2AChainTxid } from './a2aChainMetadata';
 import {
@@ -145,7 +146,10 @@ async function ensureCanonicalPeerSession(
   }
 
   const config = coworkStore.getConfig();
-  const workspaceRoot = normalizeText(config.workingDirectory) || process.cwd();
+  const workspaceRoot = resolveSessionWorkingDirectory(
+    normalizeText(config.workingDirectory) || process.cwd(),
+    input.metabotId,
+  );
   const fallbackTitle = normalizeText(input.peerName)
     || firstMessage.split('\n')[0].slice(0, 50)
     || `Private-${peerGlobalMetaId.slice(0, 12)}`;

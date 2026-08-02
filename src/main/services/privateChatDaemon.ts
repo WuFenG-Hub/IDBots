@@ -41,6 +41,7 @@ import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
+import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import {
   SERVICE_ORDER_DELIVERY_ARTIFACT_FAILED_REASON,
   SERVICE_ORDER_SKILL_SCOPE_UNRESOLVED_REASON,
@@ -1619,7 +1620,7 @@ async function resolvePrivateConversationSession(
     }
   }
 
-  const workspace = coworkStore.getConfig().workingDirectory;
+  const workspace = resolveSessionWorkingDirectory(coworkStore.getConfig().workingDirectory, metabotId);
   const fallbackTitle = firstMessage.split('\n')[0].slice(0, 50) || `Private-${peerId.slice(0, 12)}`;
   let generatedTitle: string | null = null;
   try {
