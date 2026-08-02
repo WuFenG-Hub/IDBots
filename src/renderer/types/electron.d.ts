@@ -250,6 +250,9 @@ interface CoworkUserMemoryEntry {
   confidence: number;
   isExplicit: boolean;
   status: 'created' | 'stale' | 'deleted';
+  /** 'self_identity' entries are dream-written and protected from edit/delete. */
+  usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review';
+  origin?: 'conversation' | 'dream';
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;

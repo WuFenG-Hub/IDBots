@@ -2228,27 +2228,38 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                               <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
                                 {getMemoryStatusLabel(entry.status)}
                               </span>
+                              {entry.usageClass === 'self_identity' && (
+                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
+                                  {i18nService.t('coworkMemorySelfIdentity')}
+                                </span>
+                              )}
                               <span>
                                 {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
                               </span>
                             </div>
                           </div>
                           <div className="flex items-center gap-1 flex-shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleEditCoworkMemoryEntry(entry)}
-                              className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                            >
-                              {i18nService.t('edit')}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
-                              className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
-                              disabled={coworkMemoryListLoading}
-                            >
-                              {i18nService.t('delete')}
-                            </button>
+                            {/* self_identity entries are maintained exclusively by the dream
+                                service; the store rejects edits/deletes, so hide the actions. */}
+                            {entry.usageClass !== 'self_identity' && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditCoworkMemoryEntry(entry)}
+                                  className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                                >
+                                  {i18nService.t('edit')}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
+                                  className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
+                                  disabled={coworkMemoryListLoading}
+                                >
+                                  {i18nService.t('delete')}
+                                </button>
+                              </>
+                            )}
                           </div>
                         </div>
                       </div>
