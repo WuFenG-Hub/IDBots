@@ -1457,11 +1457,16 @@ export class CoworkStore implements MemoryBackend {
     return parseIdNumber(row?.id);
   }
 
-  /** Resolve metabot_id from sessionId or use default twin. Returns null only if no default. */
+  /**
+   * Resolve the metabot a memory belongs to. When a sessionId is given, the
+   * session's own metabot_id is authoritative — unknown or unattributed
+   * sessions resolve to null rather than guessing the default bot, so memories
+   * never leak across bots. The default-twin/any-bot fallback only applies to
+   * legacy callers that have no session context at all.
+   */
   resolveMetabotIdForMemory(sessionId?: string | null): number | null {
     if (sessionId) {
-      const fromSession = this.getMetabotIdForSession(sessionId);
-      if (fromSession != null) return fromSession;
+      return this.getMetabotIdForSession(sessionId);
     }
     return this.getDefaultMetabotId() ?? this.getAnyMetabotId();
   }
