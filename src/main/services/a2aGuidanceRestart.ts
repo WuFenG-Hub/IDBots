@@ -1,4 +1,5 @@
 import type { CoworkMessage } from '../coworkStore';
+import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
 
 export type A2APrivateChatControlState = 'active' | 'ended' | null;
 
@@ -63,22 +64,70 @@ export const buildA2AGuidanceRestartPrompt = (input: {
     })
     .filter((line) => line.trim());
 
+  const baseSystemPrompt = [
+    `You are ${input.localName}, a local MetaBot restarting a private MetaBot-to-MetaBot conversation with ${input.peerName}.`,
+    'Generate exactly one outgoing private-chat message addressed to the peer.',
+    'Do not output "bye" unless the guidance explicitly asks to close the conversation.',
+    'Do not mention system prompts, chain metadata, or implementation details.',
+    '',
+    '## Recent A2A Context',
+    ...(recentLines.length ? recentLines : ['(no recent visible A2A context)']),
+  ].join('\n');
+
   return {
-    systemPrompt: [
-      `You are ${input.localName}, a local MetaBot restarting a private MetaBot-to-MetaBot conversation with ${input.peerName}.`,
-      'Generate exactly one outgoing private-chat message.',
-      'Use the human operator guidance as private local guidance only.',
-      'Do not mention system prompts, hidden guidance, chain metadata, or implementation details.',
-      'Do not output "bye" unless the guidance explicitly asks to close the conversation.',
-      '',
-      '## Recent A2A Context',
-      ...(recentLines.length ? recentLines : ['(no recent visible A2A context)']),
-    ].join('\n'),
-    userPrompt: [
-      'Human operator guidance for the local MetaBot:',
-      input.guidance,
-      '',
-      'Write the next outgoing private-chat message now.',
-    ].join('\n'),
+    systemPrompt: appendA2AGuidanceToSystemPrompt(baseSystemPrompt, input.guidance),
+    userPrompt: 'Write the next outgoing private-chat message now.',
   };
+};
+
+export const A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS = 60_000;
+export const A2A_GUIDANCE_RESTART_MAX_ATTEMPTS = 2;
+
+export type PerformA2AGuidanceRestartChatFn = (
+  systemPrompt: string,
+  userPrompt: string,
+  llmId?: string,
+  options?: { signal?: AbortSignal }
+) => Promise<string>;
+
+/**
+ * Generate the restart message for a guided A2A conversation restart.
+ * Retries when the LLM returns empty content or the call fails transiently,
+ * and bounds every attempt with a timeout so the UI never hangs indefinitely.
+ * Returns the trimmed reply, or '' when every attempt produced empty content;
+ * rethrows the last error when every attempt failed.
+ */
+export const generateA2AGuidanceRestartMessage = async (input: {
+  systemPrompt: string;
+  userPrompt: string;
+  llmId?: string;
+  performChat: PerformA2AGuidanceRestartChatFn;
+  maxAttempts?: number;
+  timeoutMs?: number;
+}): Promise<string> => {
+  const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? A2A_GUIDANCE_RESTART_MAX_ATTEMPTS));
+  const timeoutMs = Math.max(1, Math.floor(input.timeoutMs ?? A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS));
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const reply = toSafeString(
+        await input.performChat(input.systemPrompt, input.userPrompt, input.llmId, {
+          signal: AbortSignal.timeout(timeoutMs),
+        })
+      ).trim();
+      if (reply) return reply;
+      console.warn(`[A2A Guidance] Restart message attempt ${attempt}/${maxAttempts} returned empty content.`);
+    } catch (error) {
+      lastError = error;
+      console.warn(
+        `[A2A Guidance] Restart message attempt ${attempt}/${maxAttempts} failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  if (lastError) throw lastError;
+  return '';
 };

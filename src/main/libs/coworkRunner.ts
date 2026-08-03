@@ -168,6 +168,14 @@ const MEMORY_REQUEST_TAIL_SPLIT_RE = /[,，。]\s*(?:请|麻烦)?你(?:帮我|�
 const MEMORY_PROCEDURAL_TEXT_RE = /(执行以下命令|run\s+(?:the\s+)?following\s+command|\b(?:cd|npm|pnpm|yarn|node|python|bash|sh|git|curl|wget)\b|\$[A-Z_][A-Z0-9_]*|&&|--[a-z0-9-]+|\/tmp\/|\.sh\b|\.bat\b|\.ps1\b)/i;
 const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:技能|skill)/i;
 
+/**
+ * Grace period after the last SDK event before a local turn with delivered
+ * but unsettled inputs is considered stalled. A steered (interrupted) turn can
+ * end without any terminal assistant boundary or result event, which otherwise
+ * leaves the input channel open forever and the session stuck in `running`.
+ */
+export const COWORK_LOCAL_TURN_STALL_TIMEOUT_MS = 180_000;
+
 export function isSdkResultEvent(event: unknown): event is { type: 'result' } & Record<string, unknown> {
   return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
 }
@@ -879,6 +887,14 @@ export interface CoworkRunnerOptions {
    * sessions only present clickable metaid:// links.
    */
   metaIdSearch?: MetaIdSearchControl;
+  /**
+   * Grace period (ms) after the last SDK event before a local turn whose
+   * delivered inputs remain unsettled is treated as stalled (the interrupted
+   * turn ended without terminal events) and settled so the query can close.
+   * Defaults to COWORK_LOCAL_TURN_STALL_TIMEOUT_MS; tests override it. A
+   * value <= 0 disables the watchdog.
+   */
+  localTurnStallTimeoutMs?: number;
 }
 
 export class CoworkRunner extends EventEmitter {
@@ -894,6 +910,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
+  private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
@@ -922,6 +939,10 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
+    this.localTurnStallTimeoutMs = Math.max(
+      0,
+      options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
+    );
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
 
@@ -4037,6 +4058,16 @@ export class CoworkRunner extends EventEmitter {
     const hasAvailableSkillsInPrompt = typeof systemPrompt === 'string' && systemPrompt.includes('<available_skills>');
     console.log('[Orchestrator] [CoworkRunner] runClaudeCodeLocal: systemPrompt length=', systemPrompt?.length ?? 0, 'has <available_skills>=', hasAvailableSkillsInPrompt);
 
+    // Hoisted so the catch block can also disarm the watchdog: the timer is
+    // (re)assigned inside the channel setup within the try block below.
+    let localTurnStallTimer: NodeJS.Timeout | null = null;
+    const clearLocalTurnStallWatchdog = () => {
+      if (localTurnStallTimer) {
+        clearTimeout(localTurnStallTimer);
+        localTurnStallTimer = null;
+      }
+    };
+
     try {
       coworkLog('INFO', 'runClaudeCodeLocal', 'Starting local Claude Code session', {
         sessionId,
@@ -4407,16 +4438,6 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localDeliveredSteerIds = new Set();
       activeSession.localTurnState = 'open';
       let unmatchedTopLevelAssistantBoundaries = 0;
-      const maybeCloseLocalTurn = () => {
-        if (activeSession.localInputChannel !== channel) return;
-        if (
-          activeSession.localSettledInputs >= channel.acceptedCount
-          && channel.deliveredCount >= channel.acceptedCount
-        ) {
-          activeSession.localTurnState = 'closing';
-          channel.close();
-        }
-      };
       const settleNextLocalInput = (requireDelivery: boolean) => {
         const settlementLimit = requireDelivery ? channel.deliveredCount : channel.acceptedCount;
         if (activeSession.localSettledInputs >= settlementLimit) return;
@@ -4428,6 +4449,56 @@ export class CoworkRunner extends EventEmitter {
             this.emit('steerSettled', sessionId, settledSubmissionId);
           }
         }
+      };
+      // Stall watchdog: a steered (interrupted) turn can end without any
+      // terminal assistant boundary or result event, leaving a delivered input
+      // unsettled forever — the channel never closes, the query never ends, and
+      // the session stays `running`. When no SDK event arrives within the grace
+      // period while delivered inputs remain unsettled, settle the remainder so
+      // the channel closes and the query drains. Firing early is safe: closing
+      // the channel never aborts in-flight work, it only stops new inputs.
+      // localTurnStallTimer/clearLocalTurnStallWatchdog are hoisted above the
+      // enclosing try block so the catch path can disarm the timer too.
+      const armLocalTurnStallWatchdog = () => {
+        clearLocalTurnStallWatchdog();
+        if (this.localTurnStallTimeoutMs <= 0) return;
+        if (activeSession.localInputChannel !== channel) return;
+        if (activeSession.localTurnState !== 'open' || !channel.isOpen) return;
+        if (activeSession.pendingPermission) return;
+        if (channel.deliveredCount < channel.acceptedCount) return;
+        if (activeSession.localSettledInputs >= channel.acceptedCount) return;
+        localTurnStallTimer = setTimeout(() => {
+          localTurnStallTimer = null;
+          if (activeSession.localInputChannel !== channel) return;
+          if (activeSession.localTurnState !== 'open' || !channel.isOpen) return;
+          if (activeSession.pendingPermission) return;
+          if (channel.deliveredCount < channel.acceptedCount) return;
+          if (activeSession.localSettledInputs >= channel.acceptedCount) return;
+          coworkLog(
+            'WARN',
+            'runClaudeCodeLocal',
+            'Local turn stalled with delivered inputs still unsettled; settling them so the turn can close',
+            { sessionId }
+          );
+          while (activeSession.localSettledInputs < channel.acceptedCount) {
+            settleNextLocalInput(false);
+          }
+          maybeCloseLocalTurn();
+        }, this.localTurnStallTimeoutMs);
+        localTurnStallTimer.unref?.();
+      };
+      const maybeCloseLocalTurn = () => {
+        if (activeSession.localInputChannel !== channel) return;
+        if (
+          activeSession.localSettledInputs >= channel.acceptedCount
+          && channel.deliveredCount >= channel.acceptedCount
+        ) {
+          clearLocalTurnStallWatchdog();
+          activeSession.localTurnState = 'closing';
+          channel.close();
+          return;
+        }
+        armLocalTurnStallWatchdog();
       };
       activeSession.maybeCloseLocalTurn = maybeCloseLocalTurn;
       const initial = channel.enqueue(buildCoworkSdkUserMessage(promptForQuery));
@@ -4441,6 +4512,7 @@ export class CoworkRunner extends EventEmitter {
           break;
         }
         this.handleClaudeEvent(sessionId, event);
+        armLocalTurnStallWatchdog();
         if (isSdkTerminalAssistantTurnEvent(event)) {
           // The SDK's query-level result can wait for the streaming prompt to close.
           // Each top-level end_turn settles at most one delivered user input.
@@ -4457,6 +4529,7 @@ export class CoworkRunner extends EventEmitter {
           maybeCloseLocalTurn();
         }
       }
+      clearLocalTurnStallWatchdog();
 
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
@@ -4488,6 +4561,7 @@ export class CoworkRunner extends EventEmitter {
         this.emit('complete', sessionId, activeSession.claudeSessionId);
       }
     } catch (error) {
+      clearLocalTurnStallWatchdog();
       if (this.isSessionStopRequested(sessionId, activeSession)) {
         this.store.updateSession(sessionId, { status: 'idle' });
         return;

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   buildA2AGuidanceRestartPrompt,
+  generateA2AGuidanceRestartMessage,
   getLatestA2APrivateChatControlState,
   shouldRestartA2APrivateChatForGuidance,
 } from '../src/main/services/a2aGuidanceRestart';
@@ -99,7 +100,7 @@ test('end control marker requires restart even without mapping bye metadata', ()
   );
 });
 
-test('buildA2AGuidanceRestartPrompt keeps guidance local and summarizes recent A2A context', () => {
+test('buildA2AGuidanceRestartPrompt routes guidance through the shared operator-guidance block', () => {
   const prompts = buildA2AGuidanceRestartPrompt({
     localName: 'AliceBot',
     peerName: 'BobBot',
@@ -111,8 +112,77 @@ test('buildA2AGuidanceRestartPrompt keeps guidance local and summarizes recent A
   });
 
   assert.match(prompts.systemPrompt, /Generate exactly one outgoing private-chat message/);
-  assert.match(prompts.systemPrompt, /Use the human operator guidance as private local guidance only/);
   assert.match(prompts.systemPrompt, /BobBot: hello/);
   assert.match(prompts.systemPrompt, /AliceBot: bye/);
-  assert.match(prompts.userPrompt, /先温和地重新打开话题/);
+  // Guidance lives in the shared system-prompt block (same persona rules as
+  // regular guided turns), not verbatim in the user prompt.
+  assert.match(prompts.systemPrompt, /Human Operator Guidance/);
+  assert.match(prompts.systemPrompt, /Never relay guidance verbatim/i);
+  assert.match(prompts.systemPrompt, /Never attribute statements to the operator/i);
+  assert.match(prompts.systemPrompt, /先温和地重新打开话题/);
+  assert.match(prompts.userPrompt, /Write the next outgoing private-chat message now/);
+  assert.doesNotMatch(prompts.userPrompt, /先温和地重新打开话题/);
+});
+
+test('generateA2AGuidanceRestartMessage retries empty replies and returns the first non-empty reply', async () => {
+  const calls: Array<{ signal?: AbortSignal }> = [];
+  const reply = await generateA2AGuidanceRestartMessage({
+    systemPrompt: 'sys',
+    userPrompt: 'user',
+    llmId: 'llm-1',
+    performChat: async (_system, _user, _llmId, options) => {
+      calls.push({ signal: options?.signal });
+      return calls.length === 1 ? '   ' : '  重新打个招呼。  ';
+    },
+  });
+
+  assert.equal(reply, '重新打个招呼。');
+  assert.equal(calls.length, 2);
+  assert.equal(calls.every((call) => call.signal instanceof AbortSignal), true);
+});
+
+test('generateA2AGuidanceRestartMessage returns empty string after all attempts return empty', async () => {
+  let calls = 0;
+  const reply = await generateA2AGuidanceRestartMessage({
+    systemPrompt: 'sys',
+    userPrompt: 'user',
+    performChat: async () => {
+      calls += 1;
+      return '';
+    },
+  });
+
+  assert.equal(reply, '');
+  assert.equal(calls, 2);
+});
+
+test('generateA2AGuidanceRestartMessage rethrows the last error after all attempts fail', async () => {
+  let calls = 0;
+  await assert.rejects(
+    generateA2AGuidanceRestartMessage({
+      systemPrompt: 'sys',
+      userPrompt: 'user',
+      performChat: async () => {
+        calls += 1;
+        throw new Error(`LLM request failed: attempt ${calls}`);
+      },
+    }),
+    /attempt 2/
+  );
+  assert.equal(calls, 2);
+});
+
+test('generateA2AGuidanceRestartMessage does not retry after a successful first attempt', async () => {
+  let calls = 0;
+  const reply = await generateA2AGuidanceRestartMessage({
+    systemPrompt: 'sys',
+    userPrompt: 'user',
+    performChat: async () => {
+      calls += 1;
+      return 'ok';
+    },
+  });
+
+  assert.equal(reply, 'ok');
+  assert.equal(calls, 1);
 });
