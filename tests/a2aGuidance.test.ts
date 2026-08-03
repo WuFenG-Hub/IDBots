@@ -101,6 +101,34 @@ test('formatA2AGuidanceBlock labels local-only operator intent and escapes closi
   assert.doesNotMatch(block, /和\s*<\/guidance\s*>/i);
 });
 
+test('formatA2AGuidanceBlock enforces representative persona rules for guided A2A turns', () => {
+  const block = formatA2AGuidanceBlock('跟对方探讨一下 poly 的 metaweb 版本。');
+
+  // Scenario framing: A2A conversation, replies go to the remote peer,
+  // the bot acts as the operator's trusted representative.
+  assert.match(block, /agent-to-agent \(A2A\) conversation with a remote MetaBot/i);
+  assert.match(block, /trusted representative/i);
+
+  // Rule 1: own every word, never attribute statements to the operator.
+  assert.match(block, /Own every word/i);
+  assert.match(block, /Never attribute statements to the operator/i);
+  assert.match(block, /owner\/master\/boss\/user/i);
+
+  // Rule 2: never relay guidance verbatim.
+  assert.match(block, /Never relay guidance verbatim/i);
+  assert.match(block, /re-express it naturally in your own voice/i);
+
+  // Rule 3: resolve three-party references from context before acting.
+  assert.match(block, /Resolve references before acting/i);
+  assert.match(block, /either yourself or the remote peer/i);
+  assert.match(block, /meant for you alone/i);
+
+  // Rule 4: stay in the peer dialogue; do not answer the operator mid-conversation.
+  assert.match(block, /Stay in the peer dialogue/i);
+  assert.match(block, /do not answer or relay them/i);
+  assert.match(block, /action instructions and conversation steering/i);
+});
+
 test('appendA2AGuidanceToSystemPrompt skips blank guidance and appends a guidance block when present', () => {
   const basePrompt = 'Base system prompt.';
 
