@@ -16,9 +16,15 @@ export const RECALL_WARM_DAYS = 30;
 export const RECALL_MAX_LIMIT = 30;
 const RECALL_ENTRY_MAX_CHARS = 600;
 
+export interface ExperienceSummarySessionRef {
+  sessionId: string;
+  title: string;
+}
+
 export interface ExperienceSummaryLike {
   summaryDate: string;
   summaryText: string;
+  sessionRefs?: ExperienceSummarySessionRef[];
 }
 
 const escapeXml = (value: string): string =>
@@ -42,10 +48,32 @@ export function buildSelfIdentityBlock(identityText: string): string {
     escapeXml(trimmed),
     '</metabot_self_identity>',
     '<instruction>',
-    'The &lt;metabot_self_identity&gt; block above is your own self-summary, written by yourself',
-    'during your nightly dream consolidation. It is one of your most important entries:',
-    'read it, live up to it, and do NOT rewrite or delete it casually — it only changes',
-    'when your experiences have genuinely changed who you are.',
+    'The &lt;metabot_self_identity&gt; block above is your own self-cognition, written and refined by',
+    'yourself in your nightly dreams: its core is stable, its details evolve with your experiences.',
+    'Do not recite it to the user — ALIGN your behavior with it. Let what you say and do live up to',
+    'who you believe you are.',
+    '</instruction>',
+  ].join('\n');
+}
+
+/**
+ * The bot's self-grown code of conduct: abstract value boundaries distilled
+ * from its own experiences during nightly dreams. Injected so they actively
+ * constrain behavior, not just sit in storage.
+ */
+export function buildValueBoundariesBlock(entries: Array<{ text: string }>, maxItems = 5): string {
+  const items = entries
+    .map((entry) => entry.text?.trim())
+    .filter((text): text is string => Boolean(text))
+    .slice(0, Math.max(1, maxItems));
+  if (items.length === 0) return '';
+  return [
+    '<value_boundaries>',
+    ...items.map((text) => `  <rule>${escapeXml(text)}</rule>`),
+    '</value_boundaries>',
+    '<instruction>',
+    'The &lt;value_boundaries&gt; block lists rules you distilled from your own past experiences.',
+    'They are your self-grown code of conduct: honor them in how you act and respond.',
     '</instruction>',
   ].join('\n');
 }
@@ -87,10 +115,12 @@ export function buildRecentDailySummariesBlock(
 export function buildExperiencePromptBlocksXml(input: {
   identityText?: string | null;
   summaries: ExperienceSummaryLike[];
+  valueBoundaries?: Array<{ text: string }>;
   maxChars?: number;
 }): string {
   return [
     input.identityText ? buildSelfIdentityBlock(input.identityText) : '',
+    buildValueBoundariesBlock(input.valueBoundaries ?? []),
     buildRecentDailySummariesBlock(input.summaries, input.maxChars),
   ]
     .filter((block) => block.trim())
@@ -138,14 +168,19 @@ export function formatExperienceRecallResults(summaries: ExperienceSummaryLike[]
   if (!summaries.length) {
     return 'No experience summaries found for the given range or query. Days before your first dream run have no summary; recent days may not have been consolidated yet.';
   }
-  const lines = summaries.map((summary) => {
+  const lines: string[] = [];
+  for (const summary of summaries) {
     const text = summary.summaryText.replace(/\s+/g, ' ').trim();
     const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${text.slice(0, RECALL_ENTRY_MAX_CHARS)}…` : text;
-    return `${summary.summaryDate}: ${truncated}`;
-  });
+    lines.push(`${summary.summaryDate}: ${truncated}`);
+    for (const ref of summary.sessionRefs ?? []) {
+      const title = ref.title?.trim();
+      lines.push(`  - IDBots://${ref.sessionId}${title ? ` ${title}` : ''}`);
+    }
+  }
   return [
     ...lines,
     '',
-    'These daily summaries index your full experience records. To dig into a specific day, recall that date again for its summary, then look up the related conversation or artifact in your workspace if needed.',
+    'These daily summaries index your full experience records, and the IDBots:// links above point at the complete conversations behind them. When a task resembles something you did before, read the relevant session with idbots_session_read_all first: reuse the approaches that worked, and avoid the pitfalls you already stepped into.',
   ].join('\n');
 }
