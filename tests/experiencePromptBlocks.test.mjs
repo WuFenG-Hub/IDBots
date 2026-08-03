@@ -54,6 +54,7 @@ test('buildRecentDailySummariesBlock keeps newest days and drops oldest over bud
   assert.ok(full.includes('2026-08-01'));
   assert.ok(full.includes('<recent_daily_summaries>'));
   assert.ok(full.includes('experience_recall'));
+  assert.ok(full.includes('做梦'), 'summaries are framed as the bot\'s dreams');
 
   const tight = buildRecentDailySummariesBlock(summaries, 60);
   assert.ok(tight.includes('2026-08-03'), 'newest survives');
