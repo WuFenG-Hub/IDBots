@@ -18,6 +18,14 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Before committing, make sure the relevant local tests or verification steps pass for your changes.
 - When merging completed work into `main`, use `git merge --no-ff` to preserve the feature merge point.
 
+## Language Conventions
+
+- Write all documentation in English: Markdown docs, design notes, code comments, and commit messages.
+- Default UI copy (labels, messages, and prompts shown in the app) must be in English.
+- Development-journal entries posted on-chain via the `metabot-post-buzz` skill must be written in English.
+- The defaults above apply unless the user explicitly requests another language for that specific artifact.
+- When replying to the user or otherwise communicating with them, always use the user's own language.
+
 ## Important Runtime Rules
 
 - Windows NSIS uninstall policy is to preserve user data (`electron-builder.json` -> `nsis.deleteAppDataOnUninstall=false`); do not flip this unless a release explicitly requires destructive uninstall behavior.
