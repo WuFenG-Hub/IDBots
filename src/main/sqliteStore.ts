@@ -1554,6 +1554,7 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      const hasFallbackLlmId = columns.includes('fallback_llm_id');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1586,7 +1587,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1622,6 +1623,7 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      const hasFallbackLlmId = columns.includes('fallback_llm_id');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1654,7 +1656,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
