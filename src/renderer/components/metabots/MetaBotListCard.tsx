@@ -254,9 +254,19 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <span className="text-base font-medium dark:text-claude-darkText text-claude-text block truncate">
-                {metabot.name}
-              </span>
+              <div className="flex items-center gap-1.5 min-w-0">
+                <span className="text-base font-medium dark:text-claude-darkText text-claude-text truncate">
+                  {metabot.name}
+                </span>
+                {metabot.metabot_type === 'twin' && (
+                  <span
+                    data-slot="metabot-twin-badge"
+                    className="inline-flex shrink-0 items-center rounded-full bg-claude-accent/15 dark:bg-claude-accent/20 px-1.5 py-0.5 text-[10px] font-semibold leading-3 text-claude-accent"
+                  >
+                    {i18nService.t('metabotTwinBadge')}
+                  </span>
+                )}
+              </div>
               <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate block">
                 {metabot.role || '—'}
               </span>

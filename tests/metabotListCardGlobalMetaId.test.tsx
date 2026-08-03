@@ -46,3 +46,23 @@ test('MetaBotListCard renders global meta id summary below the avatar with a cop
   assert.match(markup, /metaid:idq14h\.\.\.\.g9xz/);
   assert.match(markup, /title="复制 metaid"/);
 });
+
+test('MetaBotListCard shows the Twin badge only on the Twin bot', () => {
+  const renderCard = (metabot: Metabot) =>
+    renderToStaticMarkup(
+      <MetaBotListCard
+        metabot={metabot}
+        onEdit={() => {}}
+        onToggleEnabled={() => {}}
+        onDelete={() => {}}
+        isChainSynced
+        onSyncToChain={() => {}}
+      />,
+    );
+
+  const workerMarkup = renderCard(baseMetabot);
+  assert.doesNotMatch(workerMarkup, /data-slot="metabot-twin-badge"/);
+
+  const twinMarkup = renderCard({ ...baseMetabot, metabot_type: 'twin' });
+  assert.match(twinMarkup, /data-slot="metabot-twin-badge"/);
+});

@@ -2,10 +2,11 @@ function compact(parts) {
   return parts.filter(Boolean).join(' ');
 }
 
-export function buildMetaBotToggleViewModel({ enabled, variant = 'enable' }) {
+export function buildMetaBotToggleViewModel({ enabled, variant = 'enable', disabled = false }) {
   const trackClass = compact([
     'w-9 h-5',
-    'rounded-full flex items-center transition-colors cursor-pointer flex-shrink-0',
+    'rounded-full flex items-center transition-colors flex-shrink-0',
+    disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer',
     enabled
       ? 'bg-claude-accent'
       : 'dark:bg-claude-darkBorder bg-claude-border',

@@ -19,6 +19,7 @@ type ChangePayload<T = unknown> = {
 };
 
 const USER_MEMORIES_MIGRATION_KEY = 'userMemories.migration.v1.completed';
+const METABOT_TWIN_BACKFILL_MIGRATION_KEY = 'metabot_twin_backfill_migrated';
 const SQL_JS_WASM_RELATIVE_PATH = path.join('node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
 // Get the path to sql.js WASM file
@@ -1091,6 +1092,9 @@ export class SqliteStore {
     this.migrateMetabotFallbackLlmId();
     // Migration: clear legacy local boss_id values that point at missing/self rows.
     this.migrateOrphanMetabotBossIds();
+    // One-shot migration: normalize metabot_type, collapse duplicate twins, and
+    // promote the earliest bot when no twin exists (unique-Twin backfill).
+    this.migrateMetabotTwinBackfill();
 
     // Migrations - safely add columns if they don't exist
     try {
@@ -1554,6 +1558,7 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      const hasFallbackLlmId = columns.includes('fallback_llm_id');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1586,7 +1591,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1622,6 +1627,7 @@ export class SqliteStore {
       const hasHomepage = columns.includes('homepage');
       const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
       const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      const hasFallbackLlmId = columns.includes('fallback_llm_id');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1654,7 +1660,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1748,6 +1754,47 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOrphanMetabotBossIds:', error);
+    }
+  }
+
+  /**
+   * One-shot backfill for the machine-wide unique-Twin rule:
+   * a) normalize missing/unknown metabot_type values to 'worker';
+   * b) when several twins exist, keep the earliest-created one (lowest id on ties);
+   * c) when no twin exists, promote the earliest-created bot (lowest id on ties).
+   * Guarded by a kv flag so a user's later manual twin transfer is never
+   * overwritten by a re-run.
+   */
+  private migrateMetabotTwinBackfill(): void {
+    if (this.get<boolean>(METABOT_TWIN_BACKFILL_MIGRATION_KEY) === true) return;
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('metabot_type')) {
+        this.set(METABOT_TWIN_BACKFILL_MIGRATION_KEY, true);
+        return;
+      }
+      this.db.run(
+        "UPDATE metabots SET metabot_type = 'worker' WHERE metabot_type IS NULL OR metabot_type NOT IN ('twin', 'worker')"
+      );
+      this.db.run(`
+        UPDATE metabots SET metabot_type = 'worker'
+        WHERE metabot_type = 'twin'
+          AND id NOT IN (
+            SELECT id FROM metabots WHERE metabot_type = 'twin' ORDER BY created_at ASC, id ASC LIMIT 1
+          )
+      `);
+      this.db.run(`
+        UPDATE metabots SET metabot_type = 'twin'
+        WHERE id = (
+          SELECT id FROM metabots ORDER BY created_at ASC, id ASC LIMIT 1
+        )
+          AND NOT EXISTS (SELECT 1 FROM metabots WHERE metabot_type = 'twin')
+      `);
+      // set() persists via its own save().
+      this.set(METABOT_TWIN_BACKFILL_MIGRATION_KEY, true);
+    } catch (error) {
+      console.warn('migrateMetabotTwinBackfill:', error);
     }
   }
 

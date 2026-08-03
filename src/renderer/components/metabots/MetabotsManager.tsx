@@ -366,6 +366,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const syncLlm = nextLlmRaw !== oldLlmRaw || (hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw);
     const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
     const syncHomepage = nextHomepage !== oldHomepage;
+    // metabot_type never goes on-chain; it is a local-only change tracked
+    // separately so a Twin transfer alone still counts as a save-worthy edit.
+    const metabotTypeChanged = scopedValues.metabot_type !== current.metabot_type;
 
     const syncStepKeys: SyncStepKey[] = [];
     if (syncName) syncStepKeys.push('name');
@@ -380,7 +383,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     // Gate the sync to the step groups this tab owns. With the value scoping
     // above the other flags are already false; this makes the contract explicit.
     const tabSyncStepKeys = syncStepKeys.filter((key) => EDIT_TAB_SYNC_GROUPS[tab].includes(key));
-    if (tabSyncStepKeys.length === 0) {
+    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged) {
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotNoChanges') }));
       return;
     }
@@ -423,6 +426,17 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     setList((prev) => prev.map((m) => (m.id === editId ? updatedMetabot : m)));
     // Stay in the edit view after a tab save so the user can keep editing
     // other tabs; the sync progress modal renders there too.
+    // A Twin transfer also demotes the previous Twin main-process side, so
+    // reload the whole list to refresh every card's type.
+    if (metabotTypeChanged) {
+      await loadList();
+    }
+
+    if (tabSyncStepKeys.length === 0) {
+      // Local-only change (metabot_type): persisted above, nothing to publish.
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotSaveSuccess') }));
+      return;
+    }
 
     const syncPlan: EditSyncPlan = {
       metabotId: editId,
@@ -551,6 +565,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           skillOptions={skillOptions}
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
+          currentTwinName={list.find((m) => m.metabot_type === 'twin' && m.id !== editMetabot.id)?.name ?? null}
           onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
           onRequestMetaApps={onRequestMetaApps}
