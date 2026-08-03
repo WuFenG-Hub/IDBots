@@ -7725,8 +7725,8 @@ if (!gotTheLock) {
   ipcMain.handle('idbots:createMetaBotOnChain', async (_event, input: {
     name: string;
     avatar?: string | null;
-    role: string;
-    soul: string;
+    role?: string;
+    soul?: string;
     goal?: string | null;
     bio?: string | null;
     /** Deprecated compatibility input; use bio. */
@@ -7786,8 +7786,10 @@ if (!gotTheLock) {
         metabot_info_pinid: null,
         metabot_type: metabotType,
         created_by: '0000',
-        role: input.role,
-        soul: input.soul,
+        // Minimal creation may omit persona fields; store empty strings and let
+        // the sync plan skip the empty persona/bio pins.
+        role: (input.role ?? '').trim(),
+        soul: (input.soul ?? '').trim(),
         goal: input.goal ?? null,
         bio: input.bio !== undefined ? input.bio : (input.background ?? null),
         boss_id: null,

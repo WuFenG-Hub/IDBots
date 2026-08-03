@@ -8,6 +8,7 @@ import { ALL_PROVIDER_KEYS } from '../../config';
 import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
 import MetaBotForm, { type MetaBotFormValues, type LlmOption } from './MetaBotForm';
+import MetaBotCreateForm, { type MetaBotCreateFormValues } from './MetaBotCreateForm';
 import MetaBotCreateSuccessModal, { type SyncStepKey } from './MetaBotCreateSuccessModal';
 import MetaBotDeleteConfirmModal from './MetaBotDeleteConfirmModal';
 import MetaBotRestoreMnemonicModal from './MetaBotRestoreMnemonicModal';
@@ -118,7 +119,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   const [showRestoreModal, setShowRestoreModal] = useState(false);
   const [showLimitModal, setShowLimitModal] = useState(false);
   // Chain-first creation state
-  const [pendingCreateValues, setPendingCreateValues] = useState<MetaBotFormValues | null>(null);
+  const [pendingCreateValues, setPendingCreateValues] = useState<MetaBotCreateFormValues | null>(null);
   const [createChainStatus, setCreateChainStatus] = useState<'idle' | 'publishing' | 'error'>('idle');
   const [createChainError, setCreateChainError] = useState<string>('');
 
@@ -216,25 +217,16 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     setPendingCreateValues(null);
   };
 
-  const handleSaveNew = async (values: MetaBotFormValues) => {
+  const handleSaveNew = async (values: MetaBotCreateFormValues) => {
     setPendingCreateValues(values);
     setCreateChainStatus('publishing');
     setCreateChainError('');
+    // Minimal creation: only name + primary/fallback LLM go on-chain now;
+    // the remaining profile fields are filled in later via the edit view.
     const result = await window.electron.idbots.createMetaBotOnChain({
       name: values.name.trim(),
-      avatar: values.avatar.trim() || null,
-      role: values.role.trim(),
-      soul: values.soul.trim(),
-      goal: values.goal.trim() || null,
-      bio: values.bio.trim() || null,
-      boss_id: parseOptionalBossId(values.boss_id),
-      boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
-      fallback_llm_id: typeof (values as MetaBotFormValues & { fallback_llm_id?: string | null }).fallback_llm_id === 'string'
-        ? ((values as MetaBotFormValues & { fallback_llm_id?: string | null }).fallback_llm_id as string).trim() || null
-        : null,
-      allow_chat_skills: normalizeAllowChatSkills(values.allow_chat_skills),
-      homepage: values.homepage ?? null,
+      fallback_llm_id: values.fallback_llm_id.trim() || null,
     });
     if (!result.success || !result.metabot) {
       setCreateChainStatus('error');
@@ -250,6 +242,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       subsidySuccess: result.subsidy?.success ?? false,
       subsidyError: result.subsidy?.error,
       mode: 'create',
+      // Only the steps a minimal creation actually publishes (empty profile
+      // steps are skipped by the full sync plan).
+      syncStepKeys: ['name', 'chatpubkey', 'llm'],
       showSubsidyStatus: true,
     });
     setSyncStatus('success');
@@ -414,19 +409,13 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
         <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
           {i18nService.t('metabotAddTitle')}
         </h2>
-        <MetaBotForm
-          isEdit={false}
+        <MetaBotCreateForm
           onCancel={handleCancelForm}
           onSave={handleSaveNew}
           saveLabel={i18nService.t('save')}
           llmOptions={llmOptions}
-          skillOptions={skillOptions}
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
-          excludeIdForNameCheck={null}
-          metabotId={null}
-          onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
-          onRequestMetaApps={onRequestMetaApps}
         />
         {/* Chain publishing overlay */}
         {createChainStatus !== 'idle' && (
@@ -761,6 +750,15 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
               mode={createSuccessModal.mode}
               syncStepKeys={createSuccessModal.syncStepKeys}
               showSubsidyStatus={createSuccessModal.showSubsidyStatus}
+              onContinueEditing={
+                createSuccessModal.mode === 'create'
+                  ? () => {
+                      const createdId = createSuccessModal.metabot.id;
+                      handleCloseSuccessModal();
+                      handleEdit(createdId);
+                    }
+                  : undefined
+              }
               onClose={handleCloseSuccessModal}
               onSyncToChain={handleSyncToChain}
             />

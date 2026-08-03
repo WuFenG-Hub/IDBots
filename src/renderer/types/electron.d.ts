@@ -991,8 +991,8 @@ interface IElectronAPI {
     createMetaBotOnChain: (input: {
       name: string;
       avatar?: string | null;
-      role: string;
-      soul: string;
+      role?: string;
+      soul?: string;
       goal?: string | null;
       bio?: string | null;
       /** Deprecated compatibility input; use bio. */
