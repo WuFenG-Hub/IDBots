@@ -78,8 +78,14 @@ test('daily summary upsert keeps one row per bot and date', async () => {
       summaryText: '第一版概要',
       sections: { human: '和用户聊了发布计划' },
       stats: { sessionCount: 1 },
+      sessionRefs: [{ sessionId: 'sess-1', title: '和用户聊发布', sessionType: 'standard', isOrder: false }],
       llmId: 'deepseek-v4-flash',
     });
+    const withRefs = store.getDailySummary(5, '2026-07-30');
+    assert.deepEqual(withRefs.sessionRefs, [
+      { sessionId: 'sess-1', title: '和用户聊发布', sessionType: 'standard', isOrder: false },
+    ], 'session refs round-trip');
+
     const updated = store.upsertDailySummary({
       metabotId: 5,
       summaryDate: '2026-07-30',
@@ -91,6 +97,7 @@ test('daily summary upsert keeps one row per bot and date', async () => {
 
     assert.equal(updated.summaryText, '修订版概要');
     assert.deepEqual(updated.sections, { human: '和用户聊了发布计划', a2a: '和 PeerBot 对了接口' });
+    assert.deepEqual(updated.sessionRefs, [], 'conflicting upsert without refs resets them');
 
     store.upsertDailySummary({
       metabotId: 5,

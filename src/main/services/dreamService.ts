@@ -326,6 +326,12 @@ export class DreamService {
         taskRunCount: activity.taskRuns.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
       },
+      sessionRefs: activity.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        title: session.title,
+        sessionType: session.sessionType,
+        isOrder: session.isOrder,
+      })),
       llmId,
     });
 
@@ -336,6 +342,20 @@ export class DreamService {
         scopeKind: 'owner',
         scopeKey: 'owner:self',
         usageClass: 'profile_fact',
+        origin: 'dream',
+        isExplicit: true,
+        source: { sourceType: 'dream', sourceChannel: 'dream' },
+      });
+    }
+
+    for (const lesson of output.valueLessons) {
+      const text = lesson.source ? `${lesson.rule}(源自:${lesson.source})` : lesson.rule;
+      this.deps.coworkStore.createUserMemory({
+        metabotId,
+        text,
+        scopeKind: 'owner',
+        scopeKey: 'owner:self',
+        usageClass: 'value_boundary',
         origin: 'dream',
         isExplicit: true,
         source: { sourceType: 'dream', sourceChannel: 'dream' },
