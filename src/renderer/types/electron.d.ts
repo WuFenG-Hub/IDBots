@@ -201,6 +201,7 @@ interface CoworkSessionSummary {
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;
+  archivedAt?: number | null;
   sessionType?: 'standard' | 'a2a';
   peerName?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
@@ -692,6 +693,7 @@ interface IElectronAPI {
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) => Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }>;
     archiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     unarchiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
+    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;

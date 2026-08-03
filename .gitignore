@@ -158,3 +158,4 @@ man_base_data_pebble/
 !tests/experiencePromptInjection.test.mjs
 !tests/experienceRecallTool.test.mjs
 !tests/sessionArchive.test.mjs
+!tests/archivedSessionList.test.mjs
