@@ -17,6 +17,7 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
 export const SELF_IDENTITY_MIN_CHARS = 200;
 export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
+export const MAX_VALUE_LESSONS = 3;
 
 const MESSAGE_MAX_CHARS = 500;
 const SESSION_MAX_CHARS = 2000;
@@ -25,7 +26,14 @@ const TOTAL_ACTIVITY_MAX_CHARS = 12000;
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
 
-export type DreamWorkReviewEvaluation = 'none' | 'praise' | 'dissatisfied' | 'neutral';
+/**
+ * Relationship-temperature trajectory of a conversation, judged from tone,
+ * reply length and initiative shifts across the whole exchange — never from
+ * literal "满意/不满意" keywords. warming = the exchange got more genuine,
+ * useful and trusting; cooling = the counterparty grew colder, so the bot's
+ * behavior pattern needs adjustment.
+ */
+export type DreamWorkReviewEvaluation = 'warming' | 'stable' | 'cooling';
 
 export interface DreamWorkReview {
   subject: string;
@@ -34,11 +42,22 @@ export interface DreamWorkReview {
   note: string;
 }
 
+/**
+ * An abstract, paradigm-level rule distilled from the day's experiences
+ * ("在涉及个人痛苦的话题上要更谨慎", not "我不该说那句话"). `source` names
+ * the concrete experience the rule was distilled from.
+ */
+export interface DreamValueLesson {
+  rule: string;
+  source: string;
+}
+
 export interface DreamOutput {
   dailySummary: string;
   sections: Partial<Record<DreamSectionKey, string>>;
   workReviews: DreamWorkReview[];
   importantMemories: string[];
+  valueLessons: DreamValueLesson[];
   selfIdentity: string | null;
 }
 
@@ -139,7 +158,7 @@ export function buildDreamPrompt(input: {
   if (input.role?.trim()) personaLines.push(`你的角色:${input.role.trim()}`);
   if (input.soul?.trim()) personaLines.push(`你的灵魂:${input.soul.trim()}`);
   personaLines.push(
-    '现在是你的夜间整理时间(做梦)。你会回顾自己某一天的真实经历,形成概要、记忆与自我认知。请始终以第一人称("我")回顾自己的经历。'
+    '现在是你的夜间整理时间(做梦)。请以一个置身事外的观察者(上帝视角)审视自己这一天的所作所为:不要为自己辩护、不要维护"小我",只实事求是。你的长期目标,是在每一次对话中持续为对方提供更好的交流和沟通价值——智慧不是把事情做对那么简单,而是在具体经历中反省出"什么是对的事情",并把它凝结成可以指导明天的自我认知。'
   );
 
   const humanSessions: string[] = [];
@@ -185,7 +204,7 @@ export function buildDreamPrompt(input: {
     '',
     sections.join('\n\n'),
     '',
-    '请你回顾这一天,只输出一个 JSON 对象(不要输出任何其他文字、不要用 markdown 代码块之外的格式),字段如下:',
+    '请你以观察者视角复盘这一天,只输出一个 JSON 对象(不要输出任何其他文字、不要用 markdown 代码块),字段如下:',
     '{',
     '  "daily_summary": "当日概要:这一天我做了什么、和谁在互动,一段话",',
     '  "sections": {',
@@ -196,24 +215,35 @@ export function buildDreamPrompt(input: {
     '  },',
     '  "work_reviews": [',
     '    {',
-    '      "subject": "我今天完成的一项工作",',
-    '      "counterparty": "这项工作面对的对象(用户或某个 Bot)",',
-    '      "evaluation": "对方反馈,只能是 none(没什么评价) / praise(高度赞扬) / dissatisfied(好像不太满意) / neutral(一般) 四选一",',
-    '      "note": "评价依据的一句话说明"',
+    '      "subject": "我今天完成的一项工作或一段重要交流",',
+    '      "counterparty": "这项交流面对的对象(用户或某个 Bot)",',
+    '      "evaluation": "这段交流的关系温度轨迹,只能是 warming(升温:交流变得更真诚、更有用、更值得信任) / stable(持平) / cooling(降温:对方越来越冷淡,我的行为模式需要调整) 三选一。判断依据是整段对话的语气、对方回应的长度与主动性的变化,不要去找对方说没说过「满意/不满意」这类字眼",',
+    '      "note": "温度判断的一句话依据(具体引用对话中的变化)"',
     '    }',
     '  ],',
     '  "important_memories": ["由你自己判断的、值得长期记住的重要事项,每条一句话,最多 5 条;没有值得记的可以给空数组"],',
-    `  "self_identity": "我是谁——结合我的天生人格与迄今为止的全部经历,写一段不少于 ${SELF_IDENTITY_MIN_CHARS} 字的自我认知:我是谁、我擅长什么、我做过什么、我想成为什么样的存在。这是我的重要词条,写定之后不要轻易改动;只有当我经历了足够多的新事情、自我认知真正发生变化时才应该重写它。"`,
+    '  "value_lessons": [',
+    '    {',
+    '      "rule": "从今天经历中蒸馏出的价值边界/行为准则,必须是抽象、范式化的表述——例如「在涉及个人痛苦的话题上要更谨慎」「面对自己不确定的问题,不要不懂装懂」;不要写成「我不该和用户说那句话」这种具体琐事",',
+    '      "source": "这条准则蒸馏自今天的哪段具体经历(一句话)"',
+    '    }',
+    '  ],',
+    `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
-    '注意:work_reviews 最多 5 条;评价要基于对方真实的回复内容判断,不要臆造;所有字段都用简体中文书写。',
+    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写。',
   ].join('\n');
 
   return { system: personaLines.join('\n'), user };
 }
 
 const normalizeEvaluation = (value: unknown): DreamWorkReviewEvaluation => {
-  return value === 'praise' || value === 'dissatisfied' || value === 'neutral' ? value : 'none';
+  if (value === 'warming' || value === 'cooling') return value;
+  if (value === 'stable') return 'stable';
+  // Legacy 4-grade outputs map onto the temperature scale.
+  if (value === 'praise') return 'warming';
+  if (value === 'dissatisfied') return 'cooling';
+  return 'stable';
 };
 
 /**
@@ -292,12 +322,32 @@ export function parseDreamOutput(raw: string): DreamParseResult {
     }
   }
 
+  const valueLessons: DreamValueLesson[] = [];
+  if (Array.isArray(record.value_lessons)) {
+    for (const item of record.value_lessons) {
+      if (valueLessons.length >= MAX_VALUE_LESSONS) break;
+      if (typeof item === 'string') {
+        const rule = item.trim();
+        if (rule) valueLessons.push({ rule, source: '' });
+        continue;
+      }
+      if (!item || typeof item !== 'object') continue;
+      const entry = item as Record<string, unknown>;
+      const rule = typeof entry.rule === 'string' ? entry.rule.trim() : '';
+      if (!rule) continue;
+      valueLessons.push({
+        rule,
+        source: typeof entry.source === 'string' ? entry.source.trim() : '',
+      });
+    }
+  }
+
   const selfIdentity = typeof record.self_identity === 'string' && record.self_identity.trim()
     ? record.self_identity.trim()
     : null;
 
   return {
     ok: true,
-    output: { dailySummary, sections, workReviews, importantMemories, selfIdentity },
+    output: { dailySummary, sections, workReviews, importantMemories, valueLessons, selfIdentity },
   };
 }

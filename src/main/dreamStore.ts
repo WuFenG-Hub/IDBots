@@ -29,6 +29,13 @@ export interface DreamRun {
   completedAt: number | null;
 }
 
+export interface DailySummarySessionRef {
+  sessionId: string;
+  title: string;
+  sessionType: string;
+  isOrder: boolean;
+}
+
 export interface DailySummary {
   id: string;
   metabotId: number;
@@ -36,6 +43,9 @@ export interface DailySummary {
   summaryText: string;
   sections: Record<string, string>;
   stats: Record<string, number>;
+  /** Sessions that fed this summary — the index from a recalled day back to
+   * the full conversations (read them via idbots_session_read_all). */
+  sessionRefs: DailySummarySessionRef[];
   llmId: string | null;
   createdAt: number;
   updatedAt: number;
@@ -87,6 +97,7 @@ interface DailySummaryRow {
   summary_text: string;
   sections_json: string | null;
   stats_json: string | null;
+  session_refs_json?: string | null;
   llm_id: string | null;
   created_at: number | string;
   updated_at: number | string;
@@ -107,6 +118,24 @@ const parseJsonObject = <T = string>(raw: string | null): Record<string, T> => {
   }
 };
 
+const parseSessionRefs = (raw: string | null | undefined): DailySummarySessionRef[] => {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item === 'object' && typeof item.sessionId === 'string')
+      .map((item) => ({
+        sessionId: item.sessionId as string,
+        title: typeof item.title === 'string' ? item.title : '',
+        sessionType: typeof item.sessionType === 'string' ? item.sessionType : 'standard',
+        isOrder: Boolean(item.isOrder),
+      }));
+  } catch {
+    return [];
+  }
+};
+
 export class DreamStore {
   constructor(
     private db: Database,
@@ -124,6 +153,7 @@ export class DreamStore {
         summary_text TEXT NOT NULL,
         sections_json TEXT NOT NULL DEFAULT '{}',
         stats_json TEXT NOT NULL DEFAULT '{}',
+        session_refs_json TEXT NOT NULL DEFAULT '[]',
         llm_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -146,6 +176,15 @@ export class DreamStore {
         UNIQUE(metabot_id, dream_date)
       );
     `);
+    try {
+      const cols = this.db.exec('PRAGMA table_info(metabot_daily_summaries);');
+      const columns = (cols[0]?.values || []).map((row) => String(row[1]));
+      if (!columns.includes('session_refs_json')) {
+        this.db.run("ALTER TABLE metabot_daily_summaries ADD COLUMN session_refs_json TEXT NOT NULL DEFAULT '[]';");
+      }
+    } catch (error) {
+      console.warn('[DreamStore] Failed to verify metabot_daily_summaries columns:', error);
+    }
   }
 
   private getAll<T>(sql: string, params: (string | number | null)[] = []): T[] {
@@ -187,6 +226,7 @@ export class DreamStore {
       summaryText: row.summary_text,
       sections: parseJsonObject<string>(row.sections_json),
       stats: parseJsonObject<number>(row.stats_json),
+      sessionRefs: parseSessionRefs(row.session_refs_json),
       llmId: row.llm_id ?? null,
       createdAt: Number(row.created_at),
       updatedAt: Number(row.updated_at),
@@ -291,17 +331,19 @@ export class DreamStore {
     summaryText: string;
     sections: Record<string, string>;
     stats: Record<string, number>;
+    sessionRefs?: DailySummarySessionRef[];
     llmId: string | null;
   }): DailySummary {
     const now = Date.now();
     this.db.run(`
       INSERT INTO metabot_daily_summaries (
-        id, metabot_id, summary_date, summary_text, sections_json, stats_json, llm_id, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, metabot_id, summary_date, summary_text, sections_json, stats_json, session_refs_json, llm_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(metabot_id, summary_date) DO UPDATE SET
         summary_text = excluded.summary_text,
         sections_json = excluded.sections_json,
         stats_json = excluded.stats_json,
+        session_refs_json = excluded.session_refs_json,
         llm_id = excluded.llm_id,
         updated_at = excluded.updated_at
     `, [
@@ -311,6 +353,7 @@ export class DreamStore {
       input.summaryText,
       JSON.stringify(input.sections ?? {}),
       JSON.stringify(input.stats ?? {}),
+      JSON.stringify(input.sessionRefs ?? []),
       input.llmId,
       now,
       now,

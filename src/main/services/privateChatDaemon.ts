@@ -3872,9 +3872,9 @@ async function processOne(
       skillWaitNoticeAlreadySent,
       operatorGuidance,
     });
-    // Hot-layer experience injection (self-identity + recent dream summaries).
-    // These describe the bot itself, not the user, so they are intentionally
-    // present in A2A contexts; gated on the same memory policy.
+    // Hot-layer experience injection (self-identity + value boundaries + recent
+    // dream summaries). These describe the bot itself, not the user, so they
+    // are intentionally present in A2A contexts; gated on the same memory policy.
     const experienceContext = memoryPolicy.memoryEnabled
       ? composeExperiencePromptBlocks({
           identityText: memoryBackend.listUserMemories({
@@ -3886,6 +3886,15 @@ async function processOne(
             limit: 1,
             offset: 0,
           })[0]?.text ?? null,
+          valueBoundaries: memoryBackend.listUserMemories({
+            metabotId: metabot.id,
+            scope: createOwnerMemoryScope(),
+            usageClass: 'value_boundary',
+            status: 'created',
+            includeDeleted: false,
+            limit: 5,
+            offset: 0,
+          }),
           summaries: getRecentDailySummaries?.(metabot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [],
         })
       : '';

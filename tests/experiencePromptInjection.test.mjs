@@ -36,9 +36,19 @@ const buildExperienceBlock = (coworkStore, experienceStore, metabotId) => {
     includeDeleted: false,
     limit: 1,
   })[0];
+  const valueBoundaries = coworkStore.listUserMemories({
+    metabotId,
+    scopeKind: 'owner',
+    scopeKey: 'owner:self',
+    usageClass: 'value_boundary',
+    status: 'created',
+    includeDeleted: false,
+    limit: 5,
+  });
   const summaries = experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
   return composeExperiencePromptBlocks({
     identityText: identityEntry?.text ?? null,
+    valueBoundaries,
     summaries,
   });
 };
@@ -57,6 +67,14 @@ test('experience injection renders self-identity and the 7 newest summaries only
       usageClass: 'self_identity',
       origin: 'dream',
     });
+    coworkStore.createUserMemory({
+      metabotId: 5,
+      text: '在涉及个人痛苦的话题上要更谨慎(源自:用户提到家人住院)',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'value_boundary',
+      origin: 'dream',
+    });
 
     for (let day = 1; day <= 9; day++) {
       dreamStore.upsertDailySummary({
@@ -72,6 +90,8 @@ test('experience injection renders self-identity and the 7 newest summaries only
     const block = buildExperienceBlock(coworkStore, dreamStore, 5);
     assert.ok(block.includes('<metabot_self_identity>'));
     assert.ok(block.includes('专注视频创作'));
+    assert.ok(block.includes('<value_boundaries>'));
+    assert.ok(block.includes('在涉及个人痛苦的话题上要更谨慎'));
     assert.ok(block.includes('<recent_daily_summaries>'));
     assert.ok(block.includes('2026-08-09'), 'newest day present');
     assert.ok(block.includes('2026-08-03'), '7th newest day present');

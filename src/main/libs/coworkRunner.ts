@@ -829,11 +829,14 @@ type CoworkMetabotIdentity = {
 
 /** Structural view of DreamStore consumed by the runner (DI seam). */
 export interface CoworkExperienceStore {
-  listDailySummaries(metabotId: number, limit?: number): Array<{ summaryDate: string; summaryText: string }>;
+  listDailySummaries(
+    metabotId: number,
+    limit?: number
+  ): Array<{ summaryDate: string; summaryText: string; sessionRefs?: Array<{ sessionId: string; title: string }> }>;
   searchDailySummaries(
     metabotId: number,
     options: { query?: string; dateFrom?: string; dateTo?: string; limit?: number }
-  ): Array<{ summaryDate: string; summaryText: string }>;
+  ): Array<{ summaryDate: string; summaryText: string; sessionRefs?: Array<{ sessionId: string; title: string }> }>;
 }
 
 export interface CoworkRunnerOptions {
@@ -2843,6 +2846,7 @@ export class CoworkRunner extends EventEmitter {
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
         '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
         '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
+        '- When a task resembles something you have done before, first search it with `experience_recall` (keyword), then read the referenced IDBots:// session with `idbots_session_read_all`: reuse the approaches that worked last time and avoid the pitfalls you already hit.',
         '- When <recent_daily_summaries> is present, those summaries are your own nightly dreams (做梦): questions like "did you dream / what did you dream about / do you remember that day" should be answered from them first.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
       );
@@ -2915,9 +2919,19 @@ export class CoworkRunner extends EventEmitter {
       limit: 1,
       offset: 0,
     })[0];
+    const valueBoundaryEntries = this.getMemoryBackend().listUserMemories({
+      metabotId,
+      scope: createOwnerMemoryScope(),
+      usageClass: 'value_boundary',
+      status: 'created',
+      includeDeleted: false,
+      limit: 5,
+      offset: 0,
+    });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
     return composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
+      valueBoundaries: valueBoundaryEntries,
       summaries,
     });
   }

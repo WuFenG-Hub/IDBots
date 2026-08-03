@@ -98,10 +98,17 @@ test('parseDreamOutput parses clean, fenced and prose-wrapped JSON', () => {
     daily_summary: '今天和用户敲定了发布计划。',
     sections: { human: '和用户聊发布', unknown_key: '应被忽略' },
     work_reviews: [
-      { subject: '制作演示视频', counterparty: '用户', evaluation: 'praise', note: '用户连说三个好' },
+      { subject: '制作演示视频', counterparty: '用户', evaluation: 'warming', note: '用户从只回表情到主动追问细节' },
       { subject: '整理文档', counterparty: 'PeerBot', evaluation: 'bogus', note: '' },
+      { subject: '旧格式评价映射', counterparty: '用户', evaluation: 'praise', note: 'legacy' },
+      { subject: '旧格式差评映射', counterparty: '用户', evaluation: 'dissatisfied', note: 'legacy' },
     ],
     important_memories: ['用户偏好周五发布', { text: '对象形态也要支持' }, '', { nope: true }],
+    value_lessons: [
+      { rule: '在涉及个人痛苦的话题上要更谨慎', source: '用户提到家人住院时我仍在开玩笑' },
+      '面对不确定的问题不要不懂装懂',
+      { nope: true },
+    ],
     self_identity: '我是一个专注交付的 MetaBot……',
   };
 
@@ -114,10 +121,16 @@ test('parseDreamOutput parses clean, fenced and prose-wrapped JSON', () => {
     assert.equal(result.ok, true, raw.slice(0, 30));
     assert.equal(result.output.dailySummary, '今天和用户敲定了发布计划。');
     assert.deepEqual(result.output.sections, { human: '和用户聊发布' });
-    assert.equal(result.output.workReviews.length, 2);
-    assert.equal(result.output.workReviews[0].evaluation, 'praise');
-    assert.equal(result.output.workReviews[1].evaluation, 'none', 'invalid evaluation normalizes to none');
+    assert.equal(result.output.workReviews.length, 4);
+    assert.equal(result.output.workReviews[0].evaluation, 'warming');
+    assert.equal(result.output.workReviews[1].evaluation, 'stable', 'invalid evaluation normalizes to stable');
+    assert.equal(result.output.workReviews[2].evaluation, 'warming', 'legacy praise maps to warming');
+    assert.equal(result.output.workReviews[3].evaluation, 'cooling', 'legacy dissatisfied maps to cooling');
     assert.deepEqual(result.output.importantMemories, ['用户偏好周五发布', '对象形态也要支持']);
+    assert.deepEqual(result.output.valueLessons, [
+      { rule: '在涉及个人痛苦的话题上要更谨慎', source: '用户提到家人住院时我仍在开玩笑' },
+      { rule: '面对不确定的问题不要不懂装懂', source: '' },
+    ]);
     assert.ok(result.output.selfIdentity?.startsWith('我是一个'));
   }
 });
@@ -132,11 +145,13 @@ test('parseDreamOutput rejects unusable output and caps list sizes', () => {
     daily_summary: '概要',
     work_reviews: Array.from({ length: 8 }, (_, i) => ({ subject: `工作${i}`, evaluation: 'none' })),
     important_memories: Array.from({ length: 9 }, (_, i) => `记忆${i}`),
+    value_lessons: Array.from({ length: 6 }, (_, i) => `准则${i}`),
   };
   const result = parseDreamOutput(JSON.stringify(many));
   assert.equal(result.ok, true);
   assert.equal(result.output.workReviews.length, 5);
   assert.equal(result.output.importantMemories.length, 5);
+  assert.equal(result.output.valueLessons.length, 3, 'value lessons capped at 3');
   assert.equal(result.output.selfIdentity, null);
 });
 
@@ -182,6 +197,7 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
 
   assert.ok(system.includes('小火'));
   assert.ok(system.includes('视频创作者'));
+  assert.ok(system.includes('上帝视角'), 'observer framing in the system prompt');
   assert.ok(user.includes('2026-08-01'));
   assert.ok(user.includes('与人类用户的对话'));
   assert.ok(user.includes('和用户聊发布'));
@@ -191,6 +207,12 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
   assert.ok(user.includes('每日巡检'));
   assert.ok(user.includes('self_identity'));
   assert.ok(user.includes('200'));
+  assert.ok(user.includes('value_lessons'));
+  assert.ok(user.includes('warming'), 'temperature enum in the contract');
+  assert.ok(user.includes('关系温度'), 'temperature judging guidance');
+  assert.ok(user.includes('活感'), 'aliveness scaffold in the identity section');
+  assert.ok(user.includes('最稳定的面貌'), 'steady-persona scaffold');
+  assert.ok(!user.includes('不要轻易改动'), 'old rigid identity wording removed');
 });
 
 test('buildDreamPrompt truncates oversized activity within budget', () => {

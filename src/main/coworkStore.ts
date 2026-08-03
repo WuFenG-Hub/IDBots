@@ -379,6 +379,7 @@ function normalizeMemoryUsageClass(value?: string | null): MemoryUsageClass {
     || value === 'operational_preference'
     || value === 'self_identity'
     || value === 'work_review'
+    || value === 'value_boundary'
   ) {
     return value;
   }

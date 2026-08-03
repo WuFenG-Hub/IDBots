@@ -51,7 +51,13 @@ const setup = async (withExperienceStore = true) => {
   const recentDate = dateDaysAgo(5);
   const oldDate = dateDaysAgo(60);
   dreamStore.upsertDailySummary({
-    metabotId: 5, summaryDate: recentDate, summaryText: '最近和用户聊了发布计划', sections: {}, stats: {}, llmId: null,
+    metabotId: 5,
+    summaryDate: recentDate,
+    summaryText: '最近和用户聊了发布计划',
+    sections: {},
+    stats: {},
+    sessionRefs: [{ sessionId: 'sess-release-1', title: '发布 MetaApp 实战', sessionType: 'standard', isOrder: false }],
+    llmId: null,
   });
   dreamStore.upsertDailySummary({
     metabotId: 5, summaryDate: oldDate, summaryText: '两个月前帮用户剪过周年庆视频', sections: {}, stats: {}, llmId: null,
@@ -78,14 +84,15 @@ test('experience_recall fails clearly without bot attribution or experience stor
   }
 });
 
-test('bare recall returns only the warm 30-day window', async () => {
+test('bare recall returns only the warm 30-day window with session refs attached', async () => {
   const { cleanup, runner, session, recentDate, oldDate } = await setup();
   try {
     const result = runner.runExperienceRecallTool({}, session.id);
     assert.equal(result.isError, false);
     assert.ok(result.text.includes(recentDate), 'recent summary included');
     assert.ok(!result.text.includes(oldDate), '60-day-old summary outside the warm window');
-    assert.ok(result.text.includes('index your full experience records'));
+    assert.ok(result.text.includes('IDBots://sess-release-1 发布 MetaApp 实战'), 'session ref closes the reuse loop');
+    assert.ok(result.text.includes('idbots_session_read_all'));
   } finally {
     cleanup();
   }

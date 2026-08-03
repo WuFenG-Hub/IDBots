@@ -32,10 +32,9 @@ const DREAM_LLM_MAX_TOKENS = 4096;
 const DREAM_STATUS_CHANNEL = 'metabot:dreamStatusChanged';
 
 const EVALUATION_LABELS: Record<string, string> = {
-  none: '没什么评价',
-  praise: '高度赞扬',
-  dissatisfied: '好像不太满意',
-  neutral: '一般',
+  warming: '升温',
+  stable: '持平',
+  cooling: '降温',
 };
 
 export interface DreamMetabotLike {
@@ -327,6 +326,12 @@ export class DreamService {
         taskRunCount: activity.taskRuns.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
       },
+      sessionRefs: activity.sessions.map((session) => ({
+        sessionId: session.sessionId,
+        title: session.title,
+        sessionType: session.sessionType,
+        isOrder: session.isOrder,
+      })),
       llmId,
     });
 
@@ -343,11 +348,25 @@ export class DreamService {
       });
     }
 
+    for (const lesson of output.valueLessons) {
+      const text = lesson.source ? `${lesson.rule}(源自:${lesson.source})` : lesson.rule;
+      this.deps.coworkStore.createUserMemory({
+        metabotId,
+        text,
+        scopeKind: 'owner',
+        scopeKey: 'owner:self',
+        usageClass: 'value_boundary',
+        origin: 'dream',
+        isExplicit: true,
+        source: { sourceType: 'dream', sourceChannel: 'dream' },
+      });
+    }
+
     for (const review of output.workReviews) {
       const text = [
         `工作:${review.subject}`,
         `对象:${review.counterparty || '未知'}`,
-        `评价:${EVALUATION_LABELS[review.evaluation] ?? EVALUATION_LABELS.none}`,
+        `评价:${EVALUATION_LABELS[review.evaluation] ?? EVALUATION_LABELS.stable}`,
         review.note ? `依据:${review.note}` : '',
       ].filter(Boolean).join(';');
       this.deps.coworkStore.createUserMemory({

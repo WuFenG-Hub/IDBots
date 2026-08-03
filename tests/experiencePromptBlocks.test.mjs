@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 let buildSelfIdentityBlock;
+let buildValueBoundariesBlock;
 let buildRecentDailySummariesBlock;
 let buildExperiencePromptBlocksXml;
 let resolveExperienceRecallQuery;
@@ -11,6 +12,7 @@ let RECALL_WARM_DAYS;
 try {
   ({
     buildSelfIdentityBlock,
+    buildValueBoundariesBlock,
     buildRecentDailySummariesBlock,
     buildExperiencePromptBlocksXml,
     resolveExperienceRecallQuery,
@@ -21,6 +23,7 @@ try {
 } catch {
   ({
     buildSelfIdentityBlock,
+    buildValueBoundariesBlock,
     buildRecentDailySummariesBlock,
     buildExperiencePromptBlocksXml,
     resolveExperienceRecallQuery,
@@ -30,16 +33,35 @@ try {
   } = await import('../dist-electron/libs/experiencePromptBlocks.js'));
 }
 
-test('buildSelfIdentityBlock renders the protected identity block with guidance', () => {
+test('buildSelfIdentityBlock renders the identity block with behavior-alignment guidance', () => {
   const block = buildSelfIdentityBlock('我是一个 <专注> 视频创作的 MetaBot & 喜欢先验证');
   assert.ok(block.includes('<metabot_self_identity>'));
   assert.ok(block.includes('&lt;专注&gt;'));
   assert.ok(block.includes('&amp;'));
   assert.ok(!block.includes('<专注>'), 'raw XML must be escaped');
-  assert.ok(block.includes('do NOT rewrite or delete it casually'));
+  assert.ok(block.includes('ALIGN your behavior with it'), 'alignment wording present');
+  assert.ok(!block.includes('casually'), 'old rigid wording removed');
 
   assert.equal(buildSelfIdentityBlock(''), '');
   assert.equal(buildSelfIdentityBlock('   '), '');
+});
+
+test('buildValueBoundariesBlock renders the rules block capped by maxItems', () => {
+  const block = buildValueBoundariesBlock([
+    { text: '在涉及个人痛苦的话题上要更谨慎' },
+    { text: '面对不确定的问题,不要不懂装懂' },
+    { text: '  ' },
+  ]);
+  assert.ok(block.includes('<value_boundaries>'));
+  assert.equal((block.match(/<rule>/g) || []).length, 2, 'blank entries skipped');
+  assert.ok(block.includes('self-grown code of conduct'));
+
+  const capped = buildValueBoundariesBlock(
+    Array.from({ length: 8 }, (_, i) => ({ text: `准则${i}` })),
+    3
+  );
+  assert.equal((capped.match(/<rule>/g) || []).length, 3);
+  assert.equal(buildValueBoundariesBlock([]), '');
 });
 
 test('buildRecentDailySummariesBlock keeps newest days and drops oldest over budget', () => {
@@ -72,13 +94,16 @@ test('buildExperiencePromptBlocksXml joins non-empty blocks', () => {
   const both = buildExperiencePromptBlocksXml({
     identityText: '我是谁……',
     summaries: [{ summaryDate: '2026-08-03', summaryText: '概要' }],
+    valueBoundaries: [{ text: '在涉及个人痛苦的话题上要更谨慎' }],
   });
   assert.ok(both.includes('<metabot_self_identity>'));
   assert.ok(both.includes('<recent_daily_summaries>'));
+  assert.ok(both.includes('<value_boundaries>'));
 
   const identityOnly = buildExperiencePromptBlocksXml({ identityText: '我是谁……', summaries: [] });
   assert.ok(identityOnly.includes('<metabot_self_identity>'));
   assert.ok(!identityOnly.includes('<recent_daily_summaries>'));
+  assert.ok(!identityOnly.includes('<value_boundaries>'));
 
   assert.equal(buildExperiencePromptBlocksXml({ summaries: [] }), '');
 });
@@ -104,12 +129,22 @@ test('resolveExperienceRecallQuery: bare call is warm, keyword goes cold, dates 
   assert.equal(invalidDate.dateFrom, '2026-07-16', 'invalid date falls back to warm default');
 });
 
-test('formatExperienceRecallResults renders entries plus the index hint', () => {
+test('formatExperienceRecallResults renders entries, session refs and the reuse hint', () => {
   const text = formatExperienceRecallResults([
-    { summaryDate: '2026-08-03', summaryText: '第三天\n做了很多事\n按行分开' },
+    {
+      summaryDate: '2026-08-03',
+      summaryText: '第三天\n做了很多事\n按行分开',
+      sessionRefs: [
+        { sessionId: 'abc-123', title: '发布 MetaApp' },
+        { sessionId: 'def-456', title: '' },
+      ],
+    },
   ]);
   assert.ok(text.startsWith('2026-08-03: 第三天 做了很多事 按行分开'));
-  assert.ok(text.includes('index your full experience records'));
+  assert.ok(text.includes('IDBots://abc-123 发布 MetaApp'), 'session ref with title');
+  assert.ok(text.includes('IDBots://def-456'), 'session ref without title');
+  assert.ok(text.includes('idbots_session_read_all'), 'reuse hint points at reading sessions');
+  assert.ok(text.includes('avoid the pitfalls'));
 
   const empty = formatExperienceRecallResults([]);
   assert.ok(empty.includes('No experience summaries found'));

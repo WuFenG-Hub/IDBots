@@ -64,9 +64,10 @@ const makePayload = (overrides = {}) => JSON.stringify({
   daily_summary: '今天为用户交付了演示视频,获得高度赞扬。',
   sections: { human: '和用户确认视频效果' },
   work_reviews: [
-    { subject: '制作演示视频', counterparty: '用户', evaluation: 'praise', note: '用户说太棒了' },
+    { subject: '制作演示视频', counterparty: '用户', evaluation: 'warming', note: '用户从只回表情到主动追问细节' },
   ],
   important_memories: ['用户喜欢先验证再交付的节奏'],
+  value_lessons: [{ rule: '交付前先自己验证一遍', source: '用户连续追问了两处细节' }],
   self_identity: LONG_IDENTITY,
   ...overrides,
 });
@@ -110,6 +111,9 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(summary.sections.human, '和用户确认视频效果');
     assert.equal(summary.stats.sessionCount, 1);
     assert.equal(summary.stats.messageCount, 3);
+    assert.equal(summary.sessionRefs.length, 1);
+    assert.equal(summary.sessionRefs[0].title, '和用户聊发布');
+    assert.equal(summary.sessionRefs[0].sessionType, 'standard');
 
     const dreamMemories = coworkStore.listUserMemories({
       metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', origin: 'dream', status: 'all',
@@ -118,7 +122,11 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(byClass('profile_fact').length, 1);
     assert.equal(byClass('profile_fact')[0].text, '用户喜欢先验证再交付的节奏');
     assert.equal(byClass('work_review').length, 1);
-    assert.ok(byClass('work_review')[0].text.includes('高度赞扬'));
+    assert.ok(byClass('work_review')[0].text.includes('升温'));
+    assert.equal(byClass('value_boundary').length, 1);
+    assert.ok(byClass('value_boundary')[0].text.includes('交付前先自己验证一遍'));
+    assert.ok(byClass('value_boundary')[0].text.includes('源自:'));
+    assert.equal(byClass('value_boundary')[0].origin, 'dream');
     assert.equal(byClass('self_identity').length, 1);
     assert.equal(byClass('self_identity')[0].text, LONG_IDENTITY);
     assert.equal(byClass('self_identity')[0].origin, 'dream');
