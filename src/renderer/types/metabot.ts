@@ -23,6 +23,8 @@ export interface Metabot {
   /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
   owner_binding_pinid?: string | null;
   llm_id: string | null;
+  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  fallback_llm_id?: string | null;
   tools: string[];
   skills: string[];
   allow_chat_skills: string[];

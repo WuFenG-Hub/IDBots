@@ -38,6 +38,8 @@ export interface Metabot {
   /** Pin id of the signed /info/owner binding; null = no signed binding (legacy unsigned claim). */
   owner_binding_pinid: string | null;
   llm_id: string | null;
+  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  fallback_llm_id?: string | null;
   /** Allowed tool ids; stored as JSON array in DB */
   tools: string[];
   /** Allowed skill ids; stored as JSON array in DB */
@@ -77,6 +79,8 @@ export interface MetabotInsert {
   boss_global_metaid?: string | null;
   owner_binding_pinid?: string | null;
   llm_id?: string | null;
+  /** Optional fallback LLM provider key. */
+  fallback_llm_id?: string | null;
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];
@@ -111,6 +115,8 @@ export interface MetabotUpdate {
   boss_global_metaid?: string | null;
   owner_binding_pinid?: string | null;
   llm_id?: string | null;
+  /** Optional fallback LLM provider key. */
+  fallback_llm_id?: string | null;
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];

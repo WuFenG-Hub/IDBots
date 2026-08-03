@@ -15,6 +15,7 @@ test('buildMetabotInfoPayloads emits protocol info payload steps', () => {
     soul: ' helpful ',
     goal: ' ship protocol alignment ',
     llm_id: ' openai ',
+    fallback_llm_id: ' gemini ',
     allow_chat_skills: ['alpha', 'beta'],
   });
 
@@ -39,7 +40,7 @@ test('buildMetabotInfoPayloads emits protocol info payload steps', () => {
   });
   assert.deepEqual(JSON.parse(payloads[2].payload), {
     primaryProvider: 'openai',
-    fallbackProvider: null,
+    fallbackProvider: 'gemini',
   });
   assert.deepEqual(JSON.parse(payloads[3].payload), {
     allowPrivateChatSkills: ['alpha', 'beta'],
@@ -55,6 +56,7 @@ test('buildMetabotInfoPayloads clears nullish values to protocol defaults', () =
     soul: undefined,
     goal: null,
     llm_id: '',
+    fallback_llm_id: '   ',
     allow_chat_skills: null,
   });
 
@@ -67,6 +69,26 @@ test('buildMetabotInfoPayloads clears nullish values to protocol defaults', () =
   assert.deepEqual(JSON.parse(payloads[3].payload), {
     allowPrivateChatSkills: [],
     allowGroupChatSkills: [],
+  });
+});
+
+test('buildMetabotInfoPayloads maps fallback_llm_id to fallbackProvider with trimming', () => {
+  const withFallback = buildMetabotInfoPayloads({ llm_id: 'openai', fallback_llm_id: ' ollama ' });
+  assert.deepEqual(JSON.parse(withFallback[2].payload), {
+    primaryProvider: 'openai',
+    fallbackProvider: 'ollama',
+  });
+
+  const withoutFallback = buildMetabotInfoPayloads({ llm_id: 'openai' });
+  assert.deepEqual(JSON.parse(withoutFallback[2].payload), {
+    primaryProvider: 'openai',
+    fallbackProvider: null,
+  });
+
+  const nullFallback = buildMetabotInfoPayloads({ llm_id: 'openai', fallback_llm_id: null });
+  assert.deepEqual(JSON.parse(nullFallback[2].payload), {
+    primaryProvider: 'openai',
+    fallbackProvider: null,
   });
 });
 

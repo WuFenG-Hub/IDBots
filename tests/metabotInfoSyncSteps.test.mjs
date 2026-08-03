@@ -26,6 +26,7 @@ const metabot = {
   bio: ' Bio ',
   background: ' Deprecated background ',
   llm_id: ' codex ',
+  fallback_llm_id: ' ollama ',
   allow_chat_skills: ['metabot-help', ' metabot-wallet-manage ', 'metabot-help'],
 };
 
@@ -90,7 +91,7 @@ test('sync plans expose protocol payload content for profile steps', () => {
   assert.equal(byKey.get('llm').contentType, 'application/json');
   assert.deepEqual(JSON.parse(byKey.get('llm').payload), {
     primaryProvider: 'codex',
-    fallbackProvider: null,
+    fallbackProvider: 'ollama',
   });
 
   assert.equal(byKey.get('chatSkills').contentType, 'application/json');
@@ -328,7 +329,7 @@ test('renderer edit sync splits Bot Info protocol flags and forwards them to IPC
   assert.match(source, /syncBio:\s*boolean;\s*syncPersona:\s*boolean;\s*syncLlm:\s*boolean;\s*syncChatSkills:\s*boolean;/);
   assert.match(source, /const syncBio =\s*nextBioRaw !== oldBioRaw;/);
   assert.match(source, /const syncPersona =\s*nextRole !== oldRole \|\|\s*nextSoul !== oldSoul \|\|\s*nextGoalRaw !== oldGoalRaw;/);
-  assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw;/);
+  assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw \|\| \(hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw\);/);
   assert.match(source, /const syncChatSkills =\s*JSON\.stringify\(nextAllowChatSkills\) !== JSON\.stringify\(oldAllowChatSkills\);/);
 
   const syncBioSection = source.slice(source.indexOf('const syncBio ='), source.indexOf('const syncStepKeys'));

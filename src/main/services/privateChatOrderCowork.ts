@@ -7,6 +7,7 @@ import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import type { OrderSource } from './orderPayment';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
+import { normalizeMetabotLlmId } from './llmFallback';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
@@ -1236,8 +1237,9 @@ export class PrivateChatOrderCowork extends EventEmitter {
     ].filter(Boolean).join('\n');
 
     const llmId = metabot && typeof metabot.llm_id === 'string' ? metabot.llm_id.trim() || undefined : undefined;
+    const fallbackLlmId = metabot ? normalizeMetabotLlmId(metabot.fallback_llm_id) : null;
 
-    const text = await performChatCompletionForOrchestrator(systemPrompt, 'Write the rating invitation now.', llmId);
+    const text = await performChatCompletionForOrchestrator(systemPrompt, 'Write the rating invitation now.', llmId, { fallbackLlmId });
     return `[NeedsRating] ${text.trim()}`;
   }
 

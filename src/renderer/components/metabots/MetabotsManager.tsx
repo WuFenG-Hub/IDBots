@@ -230,6 +230,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: parseOptionalBossId(values.boss_id),
       boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
+      fallback_llm_id: typeof (values as MetaBotFormValues & { fallback_llm_id?: string | null }).fallback_llm_id === 'string'
+        ? ((values as MetaBotFormValues & { fallback_llm_id?: string | null }).fallback_llm_id as string).trim() || null
+        : null,
       allow_chat_skills: normalizeAllowChatSkills(values.allow_chat_skills),
       homepage: values.homepage ?? null,
     });
@@ -272,6 +275,11 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextBossId = parseOptionalBossId(values.boss_id);
     const nextBossGlobalMetaId = values.boss_global_metaid.trim() || null;
     const nextLlmRaw = values.llm_id.trim();
+    // The form UI for fallback_llm_id ships in a later commit; when the field
+    // is absent from form values it is treated as "no change" and never cleared.
+    const valuesFallbackLlm = (values as MetaBotFormValues & { fallback_llm_id?: string | null }).fallback_llm_id;
+    const hasFallbackLlmValue = valuesFallbackLlm !== undefined;
+    const nextFallbackLlmRaw = hasFallbackLlmValue ? (valuesFallbackLlm ?? '').trim() : '';
     const nextAllowChatSkills = normalizeAllowChatSkills(values.allow_chat_skills);
     const nextHomepage = values.homepage ?? null;
 
@@ -282,6 +290,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const oldGoalRaw = (current.goal || '').trim();
     const oldBioRaw = (current.bio || current.background || '').trim();
     const oldLlmRaw = (current.llm_id || '').trim();
+    const oldFallbackLlmRaw = (current.fallback_llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
     const oldHomepage = current.homepage ?? null;
     const oldBossGlobalMetaId = (current.boss_global_metaid ?? '').trim() || null;
@@ -294,7 +303,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       nextRole !== oldRole ||
       nextSoul !== oldSoul ||
       nextGoalRaw !== oldGoalRaw;
-    const syncLlm = nextLlmRaw !== oldLlmRaw;
+    const syncLlm = nextLlmRaw !== oldLlmRaw || (hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw);
     const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
     const syncHomepage = nextHomepage !== oldHomepage;
 
@@ -319,6 +328,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
+      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
       homepage: nextHomepage,
     });
@@ -338,6 +348,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
+      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
       homepage: nextHomepage,
     };

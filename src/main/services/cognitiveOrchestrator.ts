@@ -70,6 +70,8 @@ export interface MetabotInfo {
   role: string;
   soul: string;
   llm_id: string | null;
+  /** Optional fallback LLM provider key; retried once when the primary LLM fails. */
+  fallback_llm_id?: string | null;
   globalmetaid: string | null;
   metaid?: string;
   /** Human owner GlobalMetaID (metabots.boss_global_metaid); privileged for Boss skill path when sender matches. */
@@ -80,11 +82,12 @@ export interface MetabotInfo {
 
 type GetMetabotByIdFn = (id: number) => MetabotInfo | null;
 type SaveDbFn = () => void;
-/** (systemPrompt, userMessage, llmId?) => reply text */
+/** (systemPrompt, userMessage, llmId?, options?) => reply text */
 export type PerformChatCompletionFn = (
   systemPrompt: string,
   userMessage: string,
-  llmId?: string | null
+  llmId?: string | null,
+  options?: { fallbackLlmId?: string | null }
 ) => Promise<string>;
 /** (metabotId, groupId, nickName, content) => void; signs and broadcasts via create-pin */
 export type BroadcastGroupChatFn = (
@@ -97,7 +100,7 @@ export type BroadcastGroupChatFn = (
 /** Optional override for tool-loop LLM (e.g. test mock). Same signature as chatCompletionWithTools. */
 export type ChatWithToolsFn = (
   messages: ChatMessage[],
-  options: { llmId?: string | null; tools?: OpenAITool[] }
+  options: { llmId?: string | null; fallbackLlmId?: string | null; tools?: OpenAITool[] }
 ) => Promise<{ content?: string; tool_calls?: ToolCallResult[] }>;
 
 /** Build skill-list prompt for given ids (from SkillManager.buildAutoRoutingPromptForSkillIds). */
@@ -688,6 +691,7 @@ async function runReplyPipeline(
         try {
           result = await chatWithTools(chatMessages, {
             llmId: metabot.llm_id ?? undefined,
+            fallbackLlmId: metabot.fallback_llm_id ?? undefined,
             tools,
           });
         } catch (err) {
@@ -744,7 +748,9 @@ async function runReplyPipeline(
     }
   } else {
     try {
-      replyText = await performChatCompletion(systemPrompt, userMessage, metabot.llm_id ?? undefined);
+      replyText = await performChatCompletion(systemPrompt, userMessage, metabot.llm_id ?? undefined, {
+        fallbackLlmId: metabot.fallback_llm_id ?? undefined,
+      });
     } catch (err) {
       rethrowSqliteWasmBoundsError(err);
       console.error('[Orchestrator] LLM call failed:', err instanceof Error ? err.message : err);

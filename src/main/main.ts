@@ -113,6 +113,7 @@ import {
 } from './services/a2aGuidanceRestart';
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
 import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
+import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
@@ -6266,7 +6267,11 @@ if (!gotTheLock) {
             systemPrompt: prompts.systemPrompt,
             userPrompt: prompts.userPrompt,
             llmId: metabot.llm_id ?? undefined,
-            performChat: performChatCompletionForOrchestrator,
+            performChat: (systemPrompt, userMessage, llmId, options) =>
+              performChatCompletionForOrchestrator(systemPrompt, userMessage, llmId, {
+                ...options,
+                fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+              }),
           });
           if (!replyText) throw new Error('Local MetaBot did not generate a restart message');
 
@@ -7612,6 +7617,7 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    fallback_llm_id?: string | null;
     allow_chat_skills?: string[];
     homepage?: string | null;
   }) => {
@@ -7635,6 +7641,10 @@ if (!gotTheLock) {
           input.boss_global_metaid === undefined
             ? undefined
             : ((input.boss_global_metaid ?? '').trim() || null),
+        fallback_llm_id:
+          input.fallback_llm_id === undefined
+            ? undefined
+            : normalizeMetabotLlmId(input.fallback_llm_id),
       });
       return { success: true, metabot };
     } catch (error) {
@@ -7724,6 +7734,8 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    /** Optional fallback LLM provider key (unlike llm_id it is never required). */
+    fallback_llm_id?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker';
     homepage?: string | null;
@@ -7734,6 +7746,7 @@ if (!gotTheLock) {
     try {
       assertCanCreateMetabot(store);
       const llmId = requireMetabotLlmIdForCreate(input.llm_id);
+      const fallbackLlmId = normalizeMetabotLlmId(input.fallback_llm_id);
       // 1. Generate wallet (in-memory)
       const walletResult = await createMetaBotWallet({});
       const metabotType = input.metabot_type === 'twin' ? 'twin' : 'worker';
@@ -7780,6 +7793,7 @@ if (!gotTheLock) {
         boss_id: null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
+        fallback_llm_id: fallbackLlmId,
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],

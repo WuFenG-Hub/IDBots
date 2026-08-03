@@ -1021,6 +1021,7 @@ export class SqliteStore {
         background TEXT,
         boss_id INTEGER,
         llm_id TEXT,
+        fallback_llm_id TEXT,
         tools TEXT DEFAULT '[]',
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
@@ -1086,6 +1087,8 @@ export class SqliteStore {
     this.migrateMetabotAllowChatSkills();
     // Migration: add v3 public bio column and backfill from deprecated background.
     this.migrateMetabotBioColumn();
+    // Migration: add fallback_llm_id for the optional fallback (secondary) LLM provider.
+    this.migrateMetabotFallbackLlmId();
     // Migration: clear legacy local boss_id values that point at missing/self rows.
     this.migrateOrphanMetabotBossIds();
 
@@ -1707,6 +1710,18 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateMetabotBioColumn:', error);
+    }
+  }
+
+  private migrateMetabotFallbackLlmId(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('fallback_llm_id')) return;
+      this.db.run('ALTER TABLE metabots ADD COLUMN fallback_llm_id TEXT');
+      this.save();
+    } catch (error) {
+      console.warn('migrateMetabotFallbackLlmId:', error);
     }
   }
 
