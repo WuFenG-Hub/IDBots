@@ -1036,6 +1036,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  // Drill-down: jump from an experience record into the full conversation.
+  // App listens for cowork:viewSession (switching to the cowork view and
+  // loading the session); close Settings first so it does not stay overlaid.
+  const handleOpenCoworkSession = (sessionId: string) => {
+    const trimmed = sessionId?.trim();
+    if (!trimmed) return;
+    onClose();
+    window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: trimmed } }));
+  };
+
   const loadDreamDiary = useCallback(async () => {
     if (dreamDiaryMetabotId == null) {
       setDreamDiarySummaries([]);
@@ -2440,9 +2450,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       <div key={session.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex-1 space-y-1 min-w-0">
-                            <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenCoworkSession(session.id)}
+                              className="font-medium text-claude-accent dark:text-claude-darkAccent hover:underline break-words text-left"
+                              title={i18nService.t('dreamDiaryOpenSessionHint')}
+                            >
                               {session.title?.trim() || session.peerName || i18nService.t('coworkNewSession')}
-                            </div>
+                            </button>
                             <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
                               <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
                                 {session.sessionType === 'a2a' ? i18nService.t('archivedChatsTypeA2A') : i18nService.t('archivedChatsTypeHuman')}
@@ -2551,9 +2566,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                                     {i18nService.t('dreamDiaryRelatedSessions')}
                                   </div>
                                   {(summary.sessionRefs ?? []).map((ref) => (
-                                    <div key={ref.sessionId} className="dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                                    <button
+                                      key={ref.sessionId}
+                                      type="button"
+                                      onClick={() => handleOpenCoworkSession(ref.sessionId)}
+                                      className="block text-claude-accent dark:text-claude-darkAccent hover:underline break-all text-left"
+                                      title={i18nService.t('dreamDiaryOpenSessionHint')}
+                                    >
                                       {`IDBots://${ref.sessionId}${ref.title ? ` ${ref.title}` : ''}`}
-                                    </div>
+                                    </button>
                                   ))}
                                 </div>
                               )}
