@@ -569,6 +569,25 @@ export class MetabotStore {
     return true;
   }
 
+  /**
+   * Restore the machine-wide "exactly one Twin" invariant after events that can
+   * leave zero Twins (mnemonic restore hardcodes 'worker'; deleting the Twin).
+   * No-op when a Twin already exists or no bots remain; otherwise promotes the
+   * earliest-created bot (lowest id on ties), mirroring the one-shot backfill.
+   */
+  ensureTwinExists(): void {
+    const twin = this.getOne<{ id: number }>(
+      "SELECT id FROM metabots WHERE metabot_type = 'twin' LIMIT 1"
+    );
+    if (twin) return;
+    this.db.run(
+      `UPDATE metabots SET metabot_type = 'twin', updated_at = ?
+       WHERE id = (SELECT id FROM metabots ORDER BY created_at ASC, id ASC LIMIT 1)`,
+      [Date.now()]
+    );
+    this.saveDb();
+  }
+
   // --- Metabot wallets (append-only: insert + query only) ---
 
   insertMetabotWallet(input: MetabotWalletInsert): MetabotWallet {

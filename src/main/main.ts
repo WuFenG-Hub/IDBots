@@ -8061,8 +8061,11 @@ if (!gotTheLock) {
       });
 
       console.log('[MetaBot] restore success', { id: metabot.id, name: metabot.name });
+      // Restore hardcodes 'worker'; heal the zero-Twin edge (e.g. first-ever bot).
+      store.ensureTwinExists();
       await syncP2PRuntimeConfigForCurrentMetabots();
-      return { success: true, metabot };
+      // Re-read: ensureTwinExists may have promoted this bot to twin.
+      return { success: true, metabot: store.getMetabotById(metabot.id) ?? metabot };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] restore failed:', errMsg);
@@ -8203,6 +8206,8 @@ if (!gotTheLock) {
       const store = getMetabotStore();
       const ok = store.deleteMetabot(metabotId);
       if (ok) {
+        // Deleting the Twin must transfer Twin status to the earliest remaining bot.
+        store.ensureTwinExists();
         await syncP2PRuntimeConfigForCurrentMetabots();
       }
       return { success: ok };
