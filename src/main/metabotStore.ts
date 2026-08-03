@@ -174,6 +174,17 @@ export class MetabotStore {
     return row ? id : null;
   }
 
+  /**
+   * Demote every Twin except `exceptId` to Worker, preserving the machine-wide
+   * "at most one Twin" invariant. The caller is responsible for saveDb().
+   */
+  private demoteOtherTwins(exceptId: number): void {
+    this.db.run(
+      "UPDATE metabots SET metabot_type = 'worker', updated_at = ? WHERE metabot_type = 'twin' AND id != ?",
+      [Date.now(), exceptId]
+    );
+  }
+
   private getOne<T>(sql: string, params: (string | number | null)[] = []): T | undefined {
     const result = this.db.exec(sql, params);
     if (!result[0]?.values[0]) return undefined;
@@ -372,6 +383,10 @@ export class MetabotStore {
     if (!id || id <= 0) {
       throw new Error(`createMetabot failed: last_insert_rowid returned invalid id (raw=${JSON.stringify(rawId)})`);
     }
+    if (input.metabot_type === 'twin') {
+      // Machine-wide unique Twin: creating a new twin demotes the previous one.
+      this.demoteOtherTwins(id);
+    }
     this.saveDb();
 
     // Build return object from input (avoid getMetabotById which may fail if db.exec does not bind params)
@@ -449,6 +464,11 @@ export class MetabotStore {
     const homepage = input.homepage !== undefined ? input.homepage : existing.homepage;
     const fallbackLlmId =
       input.fallback_llm_id !== undefined ? input.fallback_llm_id : (existing.fallback_llm_id ?? null);
+
+    if (input.metabot_type === 'twin' && existing.metabot_type !== 'twin') {
+      // Machine-wide unique Twin: promoting this bot first demotes the old twin.
+      this.demoteOtherTwins(id);
+    }
 
     if (useBlob) {
       this.db.run(

@@ -106,7 +106,7 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
 });
 
 test('tab field and sync group mappings pin each editable field to its tab', () => {
-  assert.deepEqual(EDIT_TAB_FIELDS.basic, ['name', 'avatar', 'bio', 'boss_global_metaid', 'llm_id', 'fallback_llm_id']);
+  assert.deepEqual(EDIT_TAB_FIELDS.basic, ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id']);
   assert.deepEqual(EDIT_TAB_FIELDS.persona, ['role', 'soul', 'goal']);
   assert.deepEqual(EDIT_TAB_FIELDS.chatSettings, ['allow_chat_skills']);
   assert.deepEqual(EDIT_TAB_FIELDS.advanced, ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin']);
@@ -115,6 +115,23 @@ test('tab field and sync group mappings pin each editable field to its tab', () 
   assert.deepEqual(EDIT_TAB_SYNC_GROUPS.persona, ['persona']);
   assert.deepEqual(EDIT_TAB_SYNC_GROUPS.chatSettings, ['chatSkills']);
   assert.deepEqual(EDIT_TAB_SYNC_GROUPS.advanced, ['homepage']);
+
+  // The Twin/Worker role is editable on the Basic tab but never published on-chain.
+  const allSyncGroups = Object.values(EDIT_TAB_SYNC_GROUPS).flat();
+  assert.ok(!allSyncGroups.includes('metabot_type'), 'metabot_type must stay out of the chain sync groups');
+});
+
+test('Basic panel renders the Twin switch, locked on for the current Twin', () => {
+  const workerPanel = panelMarkup(renderTabsMarkup({ metabot_type: 'worker' }), 'basic');
+  assert.match(workerPanel, /data-slot="metabot-twin-switch"/);
+  assert.match(workerPanel, /role="switch"/);
+  assert.match(workerPanel, /aria-checked="false"/);
+  assert.doesNotMatch(workerPanel, /aria-disabled="true"/);
+
+  const twinPanel = panelMarkup(renderTabsMarkup({ metabot_type: 'twin' }), 'basic');
+  assert.match(twinPanel, /data-slot="metabot-twin-switch"/);
+  assert.match(twinPanel, /aria-checked="true"/);
+  assert.match(twinPanel, /aria-disabled="true"/);
 });
 
 test('composeHomepageForSave builds protocol JSON and rejects invalid pins', () => {

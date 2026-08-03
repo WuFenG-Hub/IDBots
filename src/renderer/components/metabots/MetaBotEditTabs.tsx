@@ -25,6 +25,7 @@ import {
   removeAllowChatSkill,
 } from './allowChatSkills.ts';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
+import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
 
@@ -61,12 +62,14 @@ export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'advanced
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
 export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]> = {
-  basic: ['name', 'avatar', 'bio', 'boss_global_metaid', 'llm_id', 'fallback_llm_id'],
+  basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id'],
   persona: ['role', 'soul', 'goal'],
   chatSettings: ['allow_chat_skills'],
   advanced: ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin'],
 };
 
+// metabot_type is deliberately absent from EDIT_TAB_SYNC_GROUPS: the Twin/Worker
+// role is a local-only setting and is never published on-chain.
 /** On-chain sync step groups each tab is allowed to publish on save. */
 export const EDIT_TAB_SYNC_GROUPS: Record<MetaBotEditTabKey, readonly SyncStepKey[]> = {
   basic: ['name', 'avatar', 'bio', 'owner', 'llm'],
@@ -132,6 +135,8 @@ interface MetaBotEditTabsProps {
   onRequestModelSettings?: () => void;
   /** Check if name already exists (for uniqueness). Returns true if duplicate. */
   onCheckNameExists?: (name: string, excludeId?: number) => Promise<boolean>;
+  /** Name of the bot that currently holds the Twin role (excluding the one being edited); null when none. */
+  currentTwinName?: string | null;
   /** Signed /info/owner binding pin id of the bot being edited. */
   ownerBindingPinId?: string | null;
   /** Open the current Bot's default template homepage in Bot Browser. */
@@ -151,6 +156,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   skillOptions,
   onRequestModelSettings,
   onCheckNameExists,
+  currentTwinName,
   ownerBindingPinId,
   onOpenDefaultHomepage,
   onPreviewMetaAppHomepage,
@@ -303,6 +309,15 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
           return;
         }
       }
+      // Transferring the Twin role demotes the current Twin; confirm first.
+      if (
+        values.metabot_type === 'twin' &&
+        baseline.metabot_type !== 'twin' &&
+        currentTwinName
+      ) {
+        const message = i18nService.t('metabotTwinTransferConfirm').replace('{name}', currentTwinName);
+        if (!window.confirm(message)) return;
+      }
     }
     let homepageForSave: string | null = null;
     if (tab === 'advanced') {
@@ -341,6 +356,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   };
 
   const hasNoAvailableLlm = llmOptions.length === 0;
+  // Twin switch: the bot that currently holds the Twin role is locked on —
+  // the only Twin cannot be turned off here, transfer it from another Bot.
+  const isTwin = values.metabot_type === 'twin';
+  const twinToggleView = buildMetaBotToggleViewModel({ enabled: isTwin, disabled: isTwin });
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
@@ -487,6 +506,33 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
               rows={2}
               className={`${inputClass} resize-y`}
             />
+          </div>
+        </div>
+
+        <div className={rowClass}>
+          <label id="metabot-twin-switch-label" className={labelClass}>
+            {i18nService.t('metabotTwinSwitchLabel')}
+          </label>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 pt-1">
+              <div
+                role="switch"
+                aria-checked={isTwin}
+                aria-disabled={isTwin}
+                aria-labelledby="metabot-twin-switch-label"
+                data-slot="metabot-twin-switch"
+                title={isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
+                className={twinToggleView.trackClass}
+                onClick={() => {
+                  if (!isTwin) handleChange('metabot_type', 'twin');
+                }}
+              >
+                <div className={twinToggleView.knobClass} />
+              </div>
+            </div>
+            <p className={hintClass}>
+              {isTwin ? i18nService.t('metabotTwinSwitchHintCurrent') : i18nService.t('metabotTwinSwitchHint')}
+            </p>
           </div>
         </div>
 
