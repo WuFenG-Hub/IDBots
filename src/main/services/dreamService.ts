@@ -32,10 +32,9 @@ const DREAM_LLM_MAX_TOKENS = 4096;
 const DREAM_STATUS_CHANNEL = 'metabot:dreamStatusChanged';
 
 const EVALUATION_LABELS: Record<string, string> = {
-  none: '没什么评价',
-  praise: '高度赞扬',
-  dissatisfied: '好像不太满意',
-  neutral: '一般',
+  warming: '升温',
+  stable: '持平',
+  cooling: '降温',
 };
 
 export interface DreamMetabotLike {
@@ -347,7 +346,7 @@ export class DreamService {
       const text = [
         `工作:${review.subject}`,
         `对象:${review.counterparty || '未知'}`,
-        `评价:${EVALUATION_LABELS[review.evaluation] ?? EVALUATION_LABELS.none}`,
+        `评价:${EVALUATION_LABELS[review.evaluation] ?? EVALUATION_LABELS.stable}`,
         review.note ? `依据:${review.note}` : '',
       ].filter(Boolean).join(';');
       this.deps.coworkStore.createUserMemory({
