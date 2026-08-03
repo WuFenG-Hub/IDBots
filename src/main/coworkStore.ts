@@ -532,6 +532,8 @@ export interface CoworkSessionSummary {
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;
+  /** Only populated by listArchivedSessions. */
+  archivedAt?: number | null;
   sessionType?: CoworkSessionType;
   peerName?: string | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
@@ -2362,6 +2364,78 @@ export class CoworkStore implements MemoryBackend {
       createdAt: row.created_at,
       updatedAt: parseIdNumber(row.activity_at) ?? row.updated_at,
       metabotId: parseIdNumber(row.metabot_id),
+      sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
+      peerName: row.peer_name ?? null,
+      browserUri: row.browser_uri ?? null,
+      browserTitle: row.browser_title ?? null,
+      hiddenFromSessionList: Boolean(row.hidden_from_session_list),
+    }));
+  }
+
+  /**
+   * Archived conversations for the Settings "Archived Chats" panel: sessions
+   * put away by the user (records preserved), newest archive first. Separate
+   * from listSessions, which deliberately excludes archived rows.
+   */
+  listArchivedSessions(options?: {
+    metabotId?: number | null;
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }): CoworkSessionSummary[] {
+    interface ArchivedSessionRow {
+      id: string;
+      title: string;
+      status: string;
+      pinned: number | null;
+      metabot_id?: number | null;
+      session_type?: string | null;
+      peer_name?: string | null;
+      browser_uri?: string | null;
+      browser_title?: string | null;
+      hidden_from_session_list?: number | null;
+      archived_at: number;
+      created_at: number;
+      updated_at: number;
+    }
+
+    const clauses: string[] = ['s.archived_at IS NOT NULL'];
+    const params: Array<string | number> = [];
+
+    const metabotId = options?.metabotId;
+    if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
+      clauses.push('s.metabot_id = ?');
+      params.push(metabotId);
+    }
+    const query = options?.query?.trim();
+    if (query) {
+      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`).toLowerCase();
+      clauses.push(`(LOWER(s.title) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.peer_name, '')) LIKE ? ESCAPE '\\')`);
+      params.push(`%${escaped}%`, `%${escaped}%`);
+    }
+    const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 50)));
+    const offset = Math.max(0, Math.floor(options?.offset ?? 0));
+
+    const rows = this.getAll<ArchivedSessionRow>(`
+      SELECT
+        s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list,
+        s.archived_at, s.created_at, s.updated_at
+      FROM cowork_sessions s
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY s.archived_at DESC
+      LIMIT ? OFFSET ?
+    `, [...params, limit, offset]);
+
+    return rows.map(row => ({
+      id: row.id,
+      title: row.title,
+      status: row.status as CoworkSessionStatus,
+      pinned: Boolean(row.pinned),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      metabotId: parseIdNumber(row.metabot_id),
+      archivedAt: Number(row.archived_at),
       sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
       peerName: row.peer_name ?? null,
       browserUri: row.browser_uri ?? null,

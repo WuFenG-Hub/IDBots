@@ -6698,6 +6698,21 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) => {
+    return withSqliteRecovery('cowork:session:listArchived', async () => {
+      try {
+        const sessions = getCoworkStore().listArchivedSessions(options);
+        return { success: true, sessions };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list archived sessions',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:pin', async (_event, options: { sessionId: string; pinned: boolean }) => {
     return withSqliteRecovery('cowork:session:pin', async () => {
       try {
