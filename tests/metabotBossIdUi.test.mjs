@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const managerPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetabotsManager.tsx');
-const formPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetaBotForm.tsx');
+const formPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetaBotEditTabs.tsx');
 
 test('MetaBot form uses an empty boss id by default', () => {
   const source = fs.readFileSync(formPath, 'utf8');

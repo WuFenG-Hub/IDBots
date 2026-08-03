@@ -9,7 +9,7 @@
 
 import React, { useState } from 'react';
 import { i18nService } from '../../services/i18n';
-import type { LlmOption } from './MetaBotForm';
+import type { LlmOption } from './MetaBotEditTabs';
 
 export interface MetaBotCreateFormValues {
   name: string;
