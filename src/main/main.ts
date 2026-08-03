@@ -108,6 +108,7 @@ import {
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
+  generateA2AGuidanceRestartMessage,
   shouldRestartA2APrivateChatForGuidance,
 } from './services/a2aGuidanceRestart';
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
@@ -6260,58 +6261,74 @@ if (!gotTheLock) {
           guidance,
           messages: session.messages,
         });
-        const rawReply = await performChatCompletionForOrchestrator(
-          prompts.systemPrompt,
-          prompts.userPrompt,
-          metabot.llm_id ?? undefined,
-        );
-        const replyText = toSafeString(rawReply).trim();
-        if (!replyText) throw new Error('Local MetaBot did not generate a restart message');
+        try {
+          const replyText = await generateA2AGuidanceRestartMessage({
+            systemPrompt: prompts.systemPrompt,
+            userPrompt: prompts.userPrompt,
+            llmId: metabot.llm_id ?? undefined,
+            performChat: performChatCompletionForOrchestrator,
+          });
+          if (!replyText) throw new Error('Local MetaBot did not generate a restart message');
 
-        const sent = await sendEncryptedSimplemsg({
-          metabotId: session.metabotId,
-          wallet,
-          peerGlobalMetaId,
-          peerChatPubkey: chatPubkey,
-          plaintext: replyText,
-          replyPin,
-          createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload),
-        });
-
-        coworkStoreInst.updateConversationMappingMetadata(
-          'metaweb_private',
-          sourceContext.externalConversationId,
-          session.metabotId,
-          {
-            ...currentMetadata,
-            byeSent: false,
-            endedByHuman: false,
-            endedByAutoPolicy: false,
-            restartedAt: Date.now(),
+          const sent = await sendEncryptedSimplemsg({
+            metabotId: session.metabotId,
+            wallet,
             peerGlobalMetaId,
-          },
-        );
+            peerChatPubkey: chatPubkey,
+            plaintext: replyText,
+            replyPin,
+            createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload),
+          });
 
-        const message = coworkStoreInst.addMessage(sessionId, {
-          type: 'assistant',
-          content: replyText,
-          metadata: {
-            sourceChannel: 'metaweb_private',
-            externalConversationId: sourceContext.externalConversationId,
-            direction: 'outgoing',
-            a2aConversationRestarted: true,
-            suppressRunningStatus: true,
-            ...buildA2AChainMetadata({
-              txids: sent.txids,
-              pinId: sent.pinId,
-            }),
-          },
-        });
-        emitCoworkStreamMessage(sessionId, message);
-        coworkStoreInst.updateSession(sessionId, { status: 'completed' });
-        a2aGuidanceQueue.clear(sessionId, session.metabotId);
+          coworkStoreInst.updateConversationMappingMetadata(
+            'metaweb_private',
+            sourceContext.externalConversationId,
+            session.metabotId,
+            {
+              ...currentMetadata,
+              byeSent: false,
+              endedByHuman: false,
+              endedByAutoPolicy: false,
+              restartedAt: Date.now(),
+              peerGlobalMetaId,
+            },
+          );
 
-        return { success: true, mode: 'restart_started' as const, messageId: message.id };
+          const message = coworkStoreInst.addMessage(sessionId, {
+            type: 'assistant',
+            content: replyText,
+            metadata: {
+              sourceChannel: 'metaweb_private',
+              externalConversationId: sourceContext.externalConversationId,
+              direction: 'outgoing',
+              a2aConversationRestarted: true,
+              suppressRunningStatus: true,
+              ...buildA2AChainMetadata({
+                txids: sent.txids,
+                pinId: sent.pinId,
+              }),
+            },
+          });
+          emitCoworkStreamMessage(sessionId, message);
+          coworkStoreInst.updateSession(sessionId, { status: 'completed' });
+          a2aGuidanceQueue.clear(sessionId, session.metabotId);
+
+          return { success: true, mode: 'restart_started' as const, messageId: message.id };
+        } catch (restartError) {
+          // Preserve the operator's guidance so a later local turn (for example
+          // after the conversation reopens) can still consume it instead of
+          // silently dropping it when the restart fails.
+          try {
+            a2aGuidanceQueue.queue({ sessionId, metabotId: session.metabotId, guidance });
+          } catch (queueError) {
+            console.warn(
+              `[A2A Guidance] Failed to preserve guidance after restart failure: ${
+                queueError instanceof Error ? queueError.message : String(queueError)
+              }`
+            );
+          }
+          throw restartError;
+        }
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {
