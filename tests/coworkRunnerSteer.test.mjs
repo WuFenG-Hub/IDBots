@@ -381,6 +381,7 @@ function createRunnerHarness(overrides = {}) {
   setStoreGetter(() => sqliteConfigStore);
   const runner = new CoworkRunner(store, {
     loadClaudeSdk: overrides.loadClaudeSdk ?? (async () => sdk),
+    ...(overrides.runnerOptions ?? {}),
   });
   return { runner, sdk, store, sessionId };
 }
@@ -595,6 +596,45 @@ test('result consumes one assistant credit before a later result-only steer sett
   assert.equal(resolvedFromResultFallback, true);
   assert.deepEqual(settled, ['steer-result-only']);
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('steered turn whose interrupted predecessor emits no terminal events is settled by the stall watchdog', async () => {
+  const { runner, sdk, store, sessionId } = createRunnerHarness({
+    runnerOptions: { localTurnStallTimeoutMs: 40 },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+  const steer = runner.trySubmitSteer(sessionId, 'steer-silent-interrupt', 'stop that and do this instead');
+  assert.equal(steer.accepted, true);
+  await steer.delivered;
+  await sdk.waitForInputCount(2);
+
+  // The interrupted first turn ends silently: no end_turn, no result. The
+  // steered turn then produces exactly one boundary and one result, which
+  // settles only the initial input and leaves the delivered steer unsettled.
+  sdk.emitTerminalStream();
+  await new Promise((resolve) => setImmediate(resolve));
+  sdk.emitResult('steer-turn-result');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.deepEqual(settled, []);
+  assert.equal(runner.getSteerCapability(sessionId), 'open-local');
+
+  // Without the watchdog the query would hang here forever; the watchdog
+  // settles the remaining delivered input, closes the channel, and lets the
+  // query drain so the session reaches completed.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.equal(resolved, true);
+  assert.deepEqual(settled, ['steer-silent-interrupt']);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+  assert.equal(store.getSession(sessionId).status, 'completed');
 });
 
 test('high-level assistant end turn does not double count a streaming boundary', async () => {
