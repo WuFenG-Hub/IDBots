@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels } from '../store/slices/modelSlice';
@@ -21,6 +21,7 @@ import type {
   CoworkMemoryPolicy,
   CoworkSandboxProgress,
   CoworkSandboxStatus,
+  CoworkSessionSummary,
 } from '../types/cowork';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
@@ -28,7 +29,7 @@ import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 
-type TabType = 'user' | 'general' | 'model' | 'coworkSandbox' | 'coworkMemory' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -452,6 +453,31 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [coworkSandboxLoading, setCoworkSandboxLoading] = useState(true);
   const [coworkSandboxProgress, setCoworkSandboxProgress] = useState<CoworkSandboxProgress | null>(null);
   const [coworkSandboxInstalling, setCoworkSandboxInstalling] = useState(false);
+
+  // Archived Chats panel (P4): archived conversations with search + restore.
+  const [archivedChats, setArchivedChats] = useState<CoworkSessionSummary[]>([]);
+  const [archivedChatsLoading, setArchivedChatsLoading] = useState<boolean>(false);
+  const [archivedChatsQuery, setArchivedChatsQuery] = useState<string>('');
+  const [archivedChatsMetabotId, setArchivedChatsMetabotId] = useState<number | null>(null);
+  const [archivedChatsNotice, setArchivedChatsNotice] = useState<string | null>(null);
+
+  // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
+  type DreamDiarySummary = {
+    id: string;
+    metabotId: number;
+    summaryDate: string;
+    summaryText: string;
+    sections: Record<string, string>;
+    stats: Record<string, number>;
+    sessionRefs?: Array<{ sessionId: string; title: string; sessionType: string; isOrder: boolean }>;
+    llmId: string | null;
+    createdAt: number;
+    updatedAt: number;
+  };
+  const [dreamDiarySummaries, setDreamDiarySummaries] = useState<DreamDiarySummary[]>([]);
+  const [dreamDiaryLoading, setDreamDiaryLoading] = useState<boolean>(false);
+  const [dreamDiaryMetabotId, setDreamDiaryMetabotId] = useState<number | null>(null);
+  const [dreamDiaryExpandedId, setDreamDiaryExpandedId] = useState<string | null>(null);
 
   useEffect(() => {
     window.electron.appInfo
@@ -966,6 +992,89 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     if (activeTab !== 'coworkMemory') return;
     void loadCoworkMemoryData();
   }, [activeTab, loadCoworkMemoryData]);
+
+  const loadArchivedChats = useCallback(async () => {
+    setArchivedChatsLoading(true);
+    try {
+      const result = await window.electron?.cowork?.listArchivedSessions({
+        metabotId: archivedChatsMetabotId,
+        query: archivedChatsQuery.trim() || undefined,
+        limit: 100,
+      });
+      setArchivedChats(result?.success && Array.isArray(result.sessions) ? result.sessions : []);
+    } catch (loadError) {
+      console.error('Failed to load archived chats:', loadError);
+      setArchivedChats([]);
+    } finally {
+      setArchivedChatsLoading(false);
+    }
+  }, [archivedChatsQuery, archivedChatsMetabotId]);
+
+  useEffect(() => {
+    if (activeTab !== 'archivedChats') return;
+    const debounce = setTimeout(() => {
+      void loadArchivedChats();
+    }, 300);
+    return () => clearTimeout(debounce);
+  }, [activeTab, loadArchivedChats]);
+
+  useEffect(() => {
+    if (archivedChatsNotice == null) return;
+    const timer = setTimeout(() => setArchivedChatsNotice(null), 3000);
+    return () => clearTimeout(timer);
+  }, [archivedChatsNotice]);
+
+  const handleUnarchiveChat = async (sessionId: string) => {
+    try {
+      const result = await window.electron?.cowork?.unarchiveSession(sessionId);
+      if (result?.success) {
+        setArchivedChats((current) => current.filter((session) => session.id !== sessionId));
+        setArchivedChatsNotice(i18nService.t('archivedChatsRestored'));
+      }
+    } catch (unarchiveError) {
+      console.error('Failed to unarchive session:', unarchiveError);
+    }
+  };
+
+  const loadDreamDiary = useCallback(async () => {
+    if (dreamDiaryMetabotId == null) {
+      setDreamDiarySummaries([]);
+      return;
+    }
+    setDreamDiaryLoading(true);
+    try {
+      const result = await window.electron?.dream?.listDailySummaries({
+        metabotId: dreamDiaryMetabotId,
+        limit: 60,
+      });
+      setDreamDiarySummaries(
+        (result?.success && Array.isArray(result.summaries) ? result.summaries : []) as DreamDiarySummary[]
+      );
+    } catch (loadError) {
+      console.error('Failed to load dream diary:', loadError);
+      setDreamDiarySummaries([]);
+    } finally {
+      setDreamDiaryLoading(false);
+    }
+  }, [dreamDiaryMetabotId]);
+
+  useEffect(() => {
+    if (activeTab !== 'dreamDiary') return;
+    // Default to the twin bot (same fallback as the memory tab).
+    setDreamDiaryMetabotId((current) => {
+      if (current != null && coworkMemoryMetabots.some((item) => item.id === current)) {
+        return current;
+      }
+      const defaultTwin = coworkMemoryMetabots.find((item) => item.metabot_type === 'twin');
+      if (defaultTwin) return defaultTwin.id;
+      return coworkMemoryMetabots.length > 0 ? coworkMemoryMetabots[0].id : null;
+    });
+  }, [activeTab, coworkMemoryMetabots]);
+
+  useEffect(() => {
+    if (activeTab !== 'dreamDiary') return;
+    void loadDreamDiary();
+  }, [activeTab, loadDreamDiary]);
 
   const resetCoworkMemoryEditor = () => {
     setCoworkMemoryEditingId(null);
@@ -1682,6 +1791,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'email',          label: i18nService.t('emailTab'),       icon: <EnvelopeIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
+    { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
+    { key: 'dreamDiary',     label: i18nService.t('dreamDiaryTab'),     icon: <MoonIcon className="h-5 w-5" /> },
     { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
     { key: 'p2p',             label: 'P2P',                           icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg> },
@@ -2269,6 +2380,197 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               </div>
             </div>
 
+          </div>
+        );
+
+      case 'archivedChats':
+        return (
+          <div className="space-y-6">
+            <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('archivedChatsTab')}
+                  </div>
+                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('archivedChatsHint')}
+                  </div>
+                </div>
+                <select
+                  value={archivedChatsMetabotId ?? ''}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setArchivedChatsMetabotId(Number.isFinite(next) && next > 0 ? next : null);
+                  }}
+                  className="min-w-[160px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                >
+                  <option value="">{i18nService.t('archivedChatsAllBots')}</option>
+                  {coworkMemoryMetabots.map((metabot) => (
+                    <option key={metabot.id} value={metabot.id}>
+                      {metabot.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <input
+                type="text"
+                value={archivedChatsQuery}
+                onChange={(event) => setArchivedChatsQuery(event.target.value)}
+                placeholder={i18nService.t('archivedChatsSearchPlaceholder')}
+                className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+              />
+
+              {archivedChatsNotice && (
+                <div className="text-xs text-green-600 dark:text-green-400">{archivedChatsNotice}</div>
+              )}
+
+              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                {archivedChatsLoading ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('loading')}
+                  </div>
+                ) : archivedChats.length === 0 ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('archivedChatsEmpty')}
+                  </div>
+                ) : (
+                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                    {archivedChats.map((session) => (
+                      <div key={session.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                              {session.title?.trim() || session.peerName || i18nService.t('coworkNewSession')}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                              <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                {session.sessionType === 'a2a' ? i18nService.t('archivedChatsTypeA2A') : i18nService.t('archivedChatsTypeHuman')}
+                              </span>
+                              {session.peerName && <span>{session.peerName}</span>}
+                              <span>{`${i18nService.t('archivedChatsArchivedAt')}: ${formatMemoryUpdatedAt(session.archivedAt ?? 0)}`}</span>
+                              <span>{`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(session.updatedAt)}`}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => { void handleUnarchiveChat(session.id); }}
+                            className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex-shrink-0"
+                          >
+                            {i18nService.t('archivedChatsRestore')}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+
+      case 'dreamDiary':
+        return (
+          <div className="space-y-6">
+            <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('dreamDiaryTab')}
+                  </div>
+                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('dreamDiaryHint')}
+                  </div>
+                </div>
+                <select
+                  value={dreamDiaryMetabotId ?? ''}
+                  onChange={(event) => {
+                    const next = Number(event.target.value);
+                    setDreamDiaryMetabotId(Number.isFinite(next) && next > 0 ? next : null);
+                  }}
+                  className="min-w-[160px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                  disabled={coworkMemoryMetabots.length === 0}
+                >
+                  {coworkMemoryMetabots.length === 0 ? (
+                    <option value="">{i18nService.t('coworkMemoryNoMetabotAvailable')}</option>
+                  ) : (
+                    coworkMemoryMetabots.map((metabot) => (
+                      <option key={metabot.id} value={metabot.id}>
+                        {metabot.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                {dreamDiaryLoading ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('loading')}
+                  </div>
+                ) : dreamDiarySummaries.length === 0 ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('dreamDiaryEmpty')}
+                  </div>
+                ) : (
+                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                    {dreamDiarySummaries.map((summary) => {
+                      const expanded = dreamDiaryExpandedId === summary.id;
+                      const sectionEntries = Object.entries(summary.sections ?? {}).filter(([, text]) => typeof text === 'string' && text.trim());
+                      return (
+                        <div key={summary.id} className="px-3 py-3 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setDreamDiaryExpandedId(expanded ? null : summary.id)}
+                            className="w-full flex items-start gap-2 text-left"
+                          >
+                            <ChevronRightIcon className={`h-4 w-4 mt-0.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+                            <span className="flex-1 min-w-0">
+                              <span className="font-medium dark:text-claude-darkText text-claude-text">{summary.summaryDate}</span>
+                              <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                                {summary.summaryText}
+                              </span>
+                            </span>
+                          </button>
+                          {expanded && (
+                            <div className="mt-2 ml-6 space-y-2 border-l-2 pl-3 dark:border-claude-darkBorder border-claude-border">
+                              {sectionEntries.map(([key, text]) => (
+                                <div key={key}>
+                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                    {i18nService.t(`dreamDiarySection_${key}`)}
+                                  </span>
+                                  <span className="ml-2 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">{text}</span>
+                                </div>
+                              ))}
+                              <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                {`${i18nService.t('dreamDiaryStatsSessions')}: ${summary.stats?.sessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsOrders')}: ${summary.stats?.orderSessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsTasks')}: ${summary.stats?.taskRunCount ?? 0} · ${i18nService.t('dreamDiaryStatsMessages')}: ${summary.stats?.messageCount ?? 0}`}
+                              </div>
+                              {(summary.sessionRefs ?? []).length > 0 && (
+                                <div className="space-y-1">
+                                  <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                    {i18nService.t('dreamDiaryRelatedSessions')}
+                                  </div>
+                                  {(summary.sessionRefs ?? []).map((ref) => (
+                                    <div key={ref.sessionId} className="dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+                                      {`IDBots://${ref.sessionId}${ref.title ? ` ${ref.title}` : ''}`}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              {summary.llmId && (
+                                <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  {`LLM: ${summary.llmId}`}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         );
 
