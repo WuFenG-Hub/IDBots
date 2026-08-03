@@ -2822,6 +2822,7 @@ export class CoworkRunner extends EventEmitter {
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
         '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
         '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
+        '- When <recent_daily_summaries> is present, those summaries are your own nightly dreams (做梦): questions like "did you dream / what did you dream about / do you remember that day" should be answered from them first.',
         '- Never write transient conversation facts, news content, or source citations into user memory unless the user explicitly asks.'
       );
     }

@@ -75,9 +75,11 @@ export function buildRecentDailySummariesBlock(
     ...dayBlocks,
     '</recent_daily_summaries>',
     '<instruction>',
-    'The &lt;recent_daily_summaries&gt; block lists what you did on each recent day, written by',
-    'yourself during your nightly dream consolidation. Earlier days and older history are NOT',
-    'lost: call the experience_recall tool to look up any date range or search your full history.',
+    'The &lt;recent_daily_summaries&gt; block lists what you did on each recent day — these summaries',
+    'ARE your dreams (做梦), written by yourself during the nightly dream consolidation. When the user',
+    'asks whether you dreamed, what you dreamed about, or whether you remember a certain day',
+    '(做梦/梦境/梦到/还记得), answer from these summaries, and call the experience_recall tool for',
+    'any earlier date range or a full-history search.',
     '</instruction>',
   ].join('\n');
 }
