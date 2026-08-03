@@ -258,3 +258,50 @@ test('migration does not re-run after the user transfers the twin manually', asy
     reopened.store.close();
   }
 });
+
+test('ensureTwinExists promotes the earliest bot when no twin exists', async () => {
+  const tempDir = makeTempDir();
+  const { store, metabotStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Newer Worker', type: 'worker', createdAt: 3000 });
+    insertMetabot(db, { id: 2, walletId: 1, name: 'Older Worker', type: 'worker', createdAt: 1000 });
+
+    metabotStore.ensureTwinExists();
+
+    assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'twin');
+    assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'worker');
+    assert.equal(countTwins(db), 1);
+  } finally {
+    store.close();
+  }
+});
+
+test('ensureTwinExists is a no-op when a twin already exists', async () => {
+  const tempDir = makeTempDir();
+  const { store, metabotStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Current Twin', type: 'twin', createdAt: 2000 });
+    insertMetabot(db, { id: 2, walletId: 1, name: 'Older Worker', type: 'worker', createdAt: 1000 });
+
+    metabotStore.ensureTwinExists();
+
+    assert.equal(metabotStore.getMetabotById(1)?.metabot_type, 'twin');
+    assert.equal(metabotStore.getMetabotById(2)?.metabot_type, 'worker');
+    assert.equal(countTwins(db), 1);
+  } finally {
+    store.close();
+  }
+});
+
+test('ensureTwinExists is a no-op when no bots remain', async () => {
+  const tempDir = makeTempDir();
+  const { store, metabotStore, db } = await openStores(tempDir);
+  try {
+    metabotStore.ensureTwinExists();
+    assert.equal(countTwins(db), 0);
+  } finally {
+    store.close();
+  }
+});
