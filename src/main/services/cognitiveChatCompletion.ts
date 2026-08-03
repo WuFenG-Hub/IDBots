@@ -7,6 +7,7 @@
  */
 
 import { resolveApiConfigForModel } from '../libs/claudeSettings';
+import { runWithLlmFallback } from './llmFallback';
 
 /** OpenAI-style tool definition for function calling. */
 export interface OpenAITool {
@@ -50,13 +51,33 @@ function maskBaseURL(url: string): string {
   }
 }
 
+/** Options for one chat completion request (with optional fallback LLM retry). */
+export interface ChatCompletionOptions {
+  llmId?: string | null;
+  /** Optional fallback provider key: retried once when the primary resolution or call fails. */
+  fallbackLlmId?: string | null;
+  tools?: OpenAITool[];
+  signal?: AbortSignal;
+  maxTokens?: number;
+}
+
 /**
  * Chat completion with optional tools. Returns content and/or tool_calls.
  * Used by Cognitive Orchestrator for multi-turn tool loop (Task 12.4).
+ * When options.fallbackLlmId is set (and differs from llmId), a failed primary
+ * attempt (config resolution or API call) is retried once with the fallback.
  */
 export async function chatCompletionWithTools(
   messages: ChatMessage[],
-  options: { llmId?: string | null; tools?: OpenAITool[]; signal?: AbortSignal; maxTokens?: number } = {}
+  options: ChatCompletionOptions = {}
+): Promise<ChatCompletionResult> {
+  return runWithLlmFallback(options, (attemptOptions) => chatCompletionSingleAttempt(messages, attemptOptions));
+}
+
+/** Single chat completion attempt against the resolved config for options.llmId. */
+async function chatCompletionSingleAttempt(
+  messages: ChatMessage[],
+  options: ChatCompletionOptions
 ): Promise<ChatCompletionResult> {
   const { config, error } = resolveApiConfigForModel(options.llmId ?? undefined);
   if (error || !config) {
@@ -113,13 +134,18 @@ export async function performChatCompletionForOrchestrator(
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options: { signal?: AbortSignal; maxTokens?: number } = {}
+  options: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: userMessage },
   ];
-  const result = await chatCompletionWithTools(messages, { llmId, signal: options.signal, maxTokens: options.maxTokens });
+  const result = await chatCompletionWithTools(messages, {
+    llmId,
+    fallbackLlmId: options.fallbackLlmId,
+    signal: options.signal,
+    maxTokens: options.maxTokens,
+  });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
     console.warn('[Orchestrator] performChatCompletionForOrchestrator: LLM returned tool_calls but no tools were requested; ignoring tool_calls');

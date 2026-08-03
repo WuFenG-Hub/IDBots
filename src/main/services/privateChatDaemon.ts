@@ -14,6 +14,7 @@ import {
   ecdhEncrypt,
 } from './metaWebCrypto';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
+import { normalizeMetabotLlmId } from './llmFallback';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
@@ -174,6 +175,7 @@ type GeneratePrivateChatSkillWaitNoticeFn = (params: {
   };
   userMessage: string;
   llmId?: string | null;
+  fallbackLlmId?: string | null;
 }) => Promise<string>;
 type ConsumeA2AGuidanceFn = (sessionId: string, metabotId: number) => string | null;
 type GetListenerConfigFn = () => Partial<ListenerConfig> | null | undefined;
@@ -181,7 +183,7 @@ type PrivateChatPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal }
+  options?: { signal?: AbortSignal; fallbackLlmId?: string | null }
 ) => Promise<string>;
 
 export interface PrivateChatA2AContextMessage {
@@ -1176,6 +1178,7 @@ export async function sendSellerOrderAcknowledgement(params: {
     /** Deprecated compatibility field; use bio. */
     background?: string | null;
     llm_id?: string | null;
+    fallback_llm_id?: string | null;
   };
   peerGlobalMetaId: string;
   peerName?: string | null;
@@ -1184,14 +1187,15 @@ export async function sendSellerOrderAcknowledgement(params: {
   paymentTxid?: string | null;
   orderPinId?: string | null;
   orderTxid?: string | null;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null) => Promise<string>;
+  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null }) => Promise<string>;
   sendEncryptedMsg: (text: string) => Promise<{ pinId?: string | null; txids?: string[] | null }>;
   serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFirstResponseSent'> | null;
   emitLog?: (msg: string) => void;
   now?: () => number;
 }): Promise<{ text: string; pinId: string | null; txids: string[] }> {
   const peerName = params.peerName?.trim() || 'the client';
-  const llmId = typeof params.metabot.llm_id === 'string' ? params.metabot.llm_id.trim() || undefined : undefined;
+  const llmId = normalizeMetabotLlmId(params.metabot.llm_id) ?? undefined;
+  const fallbackLlmId = normalizeMetabotLlmId(params.metabot.fallback_llm_id);
   const ackSystemPrompt = buildSellerOrderAcknowledgementSystemPrompt(params.metabot);
   const requestText = extractOrderRequestText(params.plaintext) || String(params.plaintext || '').trim();
   const ackUserPrompt = [
@@ -1205,7 +1209,7 @@ export async function sendSellerOrderAcknowledgement(params: {
   try {
     acknowledgementText = normalizeSellerOrderAcknowledgementText(
       await waitForSellerOrderAcknowledgement(
-        params.performChat(ackSystemPrompt, ackUserPrompt, llmId)
+        params.performChat(ackSystemPrompt, ackUserPrompt, llmId, { fallbackLlmId })
       )
     );
   } catch (error) {
@@ -1953,14 +1957,14 @@ export function endPrivateChatA2AConversation(params: {
 }
 
 interface RatingFlowParams {
-  metabot: { id: number; name: string; llm_id?: string | null };
+  metabot: { id: number; name: string; llm_id?: string | null; fallback_llm_id?: string | null };
   metabotStore: MetabotStore;
   coworkStore: CoworkStore;
   buyerOrderMapping: import('../coworkStore').CoworkConversationMapping;
   sellerGlobalMetaId: string;
   sharedSecretForReply: string;
   createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null) => Promise<string>;
+  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null }) => Promise<string>;
   serviceOrderLifecycle?: ServiceOrderLifecycleService | null;
   emitLog: (msg: string) => void;
   emitToRenderer?: (channel: string, data: unknown) => void;
@@ -2038,6 +2042,7 @@ async function generateRatingChainConfirmation(params: {
   originalRequest: string;
   ratingPinId: string;
   llmId?: string;
+  fallbackLlmId?: string | null;
   performChat: RatingFlowParams['performChat'];
   emitLog: (msg: string) => void;
 }): Promise<string> {
@@ -2049,6 +2054,7 @@ async function generateRatingChainConfirmation(params: {
       }),
       'Write the on-chain rating confirmation now.',
       params.llmId,
+      { fallbackLlmId: params.fallbackLlmId },
     );
     return normalizeRatingChainConfirmationText(text, params.ratingPinId);
   } catch (error) {
@@ -2345,9 +2351,10 @@ async function handleRatingFlow(params: RatingFlowParams): Promise<void> {
     expectedOutputType: serviceOutputType || extractOrderOutputType(originalRequest),
   });
 
-  const llmId = typeof metabot.llm_id === 'string' ? metabot.llm_id.trim() || undefined : undefined;
+  const llmId = normalizeMetabotLlmId(metabot.llm_id) ?? undefined;
+  const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
 
-  const ratingText = await performChat(ratingSystemPrompt, 'Write your rating, numeric score, and farewell now.', llmId);
+  const ratingText = await performChat(ratingSystemPrompt, 'Write your rating, numeric score, and farewell now.', llmId, { fallbackLlmId });
 
   // Extract rate (1-5) from the generated text
   const rateMatch = ratingText.match(/[1-5]\s*分|评分[：:]\s*([1-5])|([1-5])\s*(?:out of|\/)\s*5|([1-5])\s*星/i)
@@ -2394,6 +2401,7 @@ async function handleRatingFlow(params: RatingFlowParams): Promise<void> {
       originalRequest,
       ratingPinId,
       llmId,
+      fallbackLlmId,
       performChat,
       emitLog,
     })
@@ -3758,9 +3766,8 @@ async function processOne(
         })
       : '';
 
-    const llmId = typeof metabot.llm_id === 'string' && metabot.llm_id.trim()
-      ? metabot.llm_id.trim()
-      : null;
+    const llmId = normalizeMetabotLlmId(metabot.llm_id);
+    const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
     if (llmId) {
       emitLog(`[PrivateChat] Auto-reply with MetaBot(${metabot.name}) llm_id=${llmId}`);
     } else {
@@ -3818,6 +3825,7 @@ async function processOne(
               },
               userMessage: plaintext,
               llmId,
+              fallbackLlmId,
             })
           : await performChat(
               buildPrivateChatSkillWaitNoticeSystemPrompt({
@@ -3828,7 +3836,8 @@ async function processOne(
                 bio: metabot.bio,
               }),
               plaintext,
-              llmId
+              llmId,
+              { fallbackLlmId }
             );
         waitNoticeText = normalizePrivateChatSkillWaitNoticeText(rawWaitNotice);
       } catch (error) {
@@ -3926,6 +3935,7 @@ async function processOne(
           await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
           reply = await performChat(systemPromptWithExperience, plaintext, llmId, {
             signal: guidanceTurn.abortController.signal,
+            fallbackLlmId,
           });
         }
       } catch (e) {

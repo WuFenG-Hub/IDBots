@@ -386,6 +386,8 @@ interface Metabot {
   /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
   owner_binding_pinid?: string | null;
   llm_id: string | null;
+  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  fallback_llm_id?: string | null;
   tools: string[];
   skills: string[];
   allow_chat_skills: string[];
@@ -423,6 +425,7 @@ interface MetabotUpdateInput {
   boss_id?: number | null;
   boss_global_metaid?: string | null;
   llm_id?: string | null;
+  fallback_llm_id?: string | null;
   allow_chat_skills?: string[];
   homepage?: string | null;
 }
@@ -990,8 +993,8 @@ interface IElectronAPI {
     createMetaBotOnChain: (input: {
       name: string;
       avatar?: string | null;
-      role: string;
-      soul: string;
+      role?: string;
+      soul?: string;
       goal?: string | null;
       bio?: string | null;
       /** Deprecated compatibility input; use bio. */
@@ -999,6 +1002,7 @@ interface IElectronAPI {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      fallback_llm_id?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
       homepage?: string | null;

@@ -11,6 +11,7 @@ import {
 } from '../libs/dreamPrompt';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
+import { normalizeMetabotLlmId } from './llmFallback';
 
 /**
  * Dream consolidation service — the nightly "做梦" pipeline.
@@ -43,6 +44,7 @@ export interface DreamMetabotLike {
   role?: string | null;
   soul?: string | null;
   llm_id?: string | null;
+  fallback_llm_id?: string | null;
   enabled?: boolean;
 }
 
@@ -54,7 +56,7 @@ export type DreamPerformChat = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; maxTokens?: number }
+  options?: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null }
 ) => Promise<string>;
 
 export interface DreamServiceDeps {
@@ -202,6 +204,13 @@ export class DreamService {
     return own || null;
   }
 
+  /** The bot's fallback llm_id; skipped when the global dreamLlmId override is in effect. */
+  private resolveDreamFallbackLlmId(metabot: DreamMetabotLike): string | null {
+    const override = this.deps.dreamStore.getCoworkConfigValue('dreamLlmId');
+    if (override?.trim()) return null;
+    return normalizeMetabotLlmId(metabot.fallback_llm_id);
+  }
+
   private emitDreaming(metabotId: number, dreaming: boolean): void {
     try {
       this.deps.emitToRenderer?.(DREAM_STATUS_CHANNEL, { metabotId, dreaming });
@@ -210,13 +219,14 @@ export class DreamService {
     }
   }
 
-  private async callDreamLlm(systemPrompt: string, userMessage: string, llmId: string | null): Promise<string> {
+  private async callDreamLlm(systemPrompt: string, userMessage: string, llmId: string | null, fallbackLlmId: string | null = null): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS);
     try {
       return await this.performChat(systemPrompt, userMessage, llmId, {
         signal: controller.signal,
         maxTokens: DREAM_LLM_MAX_TOKENS,
+        fallbackLlmId,
       });
     } finally {
       clearTimeout(timeout);
@@ -234,6 +244,7 @@ export class DreamService {
     this.dreamingBots.add(metabotId);
     this.emitDreaming(metabotId, true);
     const llmId = this.resolveDreamLlmId(metabot);
+    const fallbackLlmId = this.resolveDreamFallbackLlmId(metabot);
     this.deps.dreamStore.beginRun(metabotId, date, llmId);
     try {
       const { startMs, endMs } = getDayBoundsMs(date);
@@ -252,8 +263,8 @@ export class DreamService {
         activity,
       });
 
-      let output = await this.generateAndParse(prompt.system, prompt.user, llmId);
-      output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId);
+      let output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId);
+      output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId, fallbackLlmId);
       this.writeDreamResults(metabotId, date, output, activity, llmId);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}`);
@@ -268,8 +279,8 @@ export class DreamService {
   }
 
   /** First attempt + one retry when the output is not parseable JSON. */
-  private async generateAndParse(system: string, user: string, llmId: string | null): Promise<DreamOutput> {
-    const firstRaw = await this.callDreamLlm(system, user, llmId);
+  private async generateAndParse(system: string, user: string, llmId: string | null, fallbackLlmId: string | null = null): Promise<DreamOutput> {
+    const firstRaw = await this.callDreamLlm(system, user, llmId, fallbackLlmId);
     const first = parseDreamOutput(firstRaw);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
@@ -277,7 +288,8 @@ export class DreamService {
     const retryRaw = await this.callDreamLlm(
       system,
       `${user}\n\n(上一次输出无法解析:${firstError}。请严格只输出一个 JSON 对象,不要输出任何其他文字。)`,
-      llmId
+      llmId,
+      fallbackLlmId
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok) return retry.output;
@@ -289,7 +301,8 @@ export class DreamService {
     output: DreamOutput,
     system: string,
     user: string,
-    llmId: string | null
+    llmId: string | null,
+    fallbackLlmId: string | null = null
   ): Promise<DreamOutput> {
     const validation = validateSelfIdentity(output.selfIdentity);
     if (validation.valid) return output;
@@ -297,7 +310,8 @@ export class DreamService {
     const retryRaw = await this.callDreamLlm(
       system,
       `${user}\n\n(上一次的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请重新输出完整 JSON,其中 self_identity 不少于 200 个非空白字符,认真写一段「我是谁」。)`,
-      llmId
+      llmId,
+      fallbackLlmId
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok && validateSelfIdentity(retry.output.selfIdentity).valid) {

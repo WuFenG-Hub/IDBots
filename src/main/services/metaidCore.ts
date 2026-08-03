@@ -29,7 +29,7 @@ import {
   fetchMvcAddressUtxos,
   filterRecoveredCandidatesByProvider,
 } from './mvcFundingRecoveryService';
-import { buildMetabotInfoPayloads, buildMetabotHomepagePayload } from './metabotInfoPayload';
+import { buildMetabotInfoPayloads, buildMetabotHomepagePayload, type MetabotInfoPayload } from './metabotInfoPayload';
 import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
@@ -810,7 +810,37 @@ function buildEditAvatarSyncStep(avatar: string | null | undefined): MetabotInfo
   return avatarStep;
 }
 
-export function buildFullMetabotInfoSyncPlan(metabot: any, options?: { ownerBindingPayload?: string | null }): MetabotInfoSyncStep[] {
+/**
+ * True when a Bot Info profile payload carries no content (empty bio, persona
+ * with all blank fields, or chatSkills with empty arrays). The llm step always
+ * counts as content so it is never skipped.
+ */
+function isEmptyMetabotInfoPayload(payload: MetabotInfoPayload): boolean {
+  if (payload.step === 'llm') return false;
+  if (payload.step === 'bio') return !payload.payload.trim();
+  try {
+    const parsed = JSON.parse(payload.payload) as Record<string, unknown>;
+    if (payload.step === 'persona') {
+      return !String(parsed?.role ?? '').trim()
+        && !String(parsed?.soul ?? '').trim()
+        && !String(parsed?.goal ?? '').trim();
+    }
+    if (payload.step === 'chatSkills') {
+      const privateSkills = Array.isArray(parsed?.allowPrivateChatSkills) ? parsed.allowPrivateChatSkills : [];
+      const groupSkills = Array.isArray(parsed?.allowGroupChatSkills) ? parsed.allowGroupChatSkills : [];
+      return privateSkills.length === 0 && groupSkills.length === 0;
+    }
+  } catch {
+    // Keep the step when the payload cannot be inspected.
+  }
+  return false;
+}
+
+export function buildFullMetabotInfoSyncPlan(
+  metabot: any,
+  options?: { ownerBindingPayload?: string | null; skipEmptyInfoSteps?: boolean }
+): MetabotInfoSyncStep[] {
+  const skipEmptyInfoSteps = options?.skipEmptyInfoSteps === true;
   const steps: MetabotInfoSyncStep[] = [{
     key: 'name',
     path: '/info/name',
@@ -836,6 +866,7 @@ export function buildFullMetabotInfoSyncPlan(metabot: any, options?: { ownerBind
   }
 
   for (const payload of buildMetabotInfoPayloads(metabot ?? {})) {
+    if (skipEmptyInfoSteps && isEmptyMetabotInfoPayload(payload)) continue;
     steps.push({
       key: payload.step,
       path: payload.path,
@@ -844,14 +875,18 @@ export function buildFullMetabotInfoSyncPlan(metabot: any, options?: { ownerBind
     });
   }
 
-  // Homepage is an independent /info/homepage step (always included in full sync).
+  // Homepage is an independent /info/homepage step. In skip-empty mode (create
+  // and manual resync) an empty/Default homepage is not pinned; otherwise the
+  // step is always present (edit plan relies on that to publish cleared values).
   const homepagePayload = buildMetabotHomepagePayload(metabot?.homepage);
-  steps.push({
-    key: 'homepage',
-    path: homepagePayload.path,
-    contentType: homepagePayload.contentType,
-    payload: homepagePayload.payload,
-  });
+  if (!skipEmptyInfoSteps || homepagePayload.payload.trim()) {
+    steps.push({
+      key: 'homepage',
+      path: homepagePayload.path,
+      contentType: homepagePayload.contentType,
+      payload: homepagePayload.payload,
+    });
+  }
 
   // Owner binding is an optional trailing step ('' payload = unbind).
   if (typeof options?.ownerBindingPayload === 'string') {
@@ -951,7 +986,7 @@ export async function syncMetaBotToChain(
     logErr('Missing chat public key; continuing with skippable profile sync');
   }
 
-  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot, options);
+  const plannedSteps = buildFullMetabotInfoSyncPlan(metabot, { ...options, skipEmptyInfoSteps: true });
   log('Prepared full sync plan', { plannedSteps: plannedSteps.map((step) => step.key) });
 
   for (let index = 0; index < plannedSteps.length; index += 1) {

@@ -3,41 +3,30 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import MetaBotForm, { type MetaBotFormValues } from '../src/renderer/components/metabots/MetaBotForm';
+import MetaBotHomepageSection, {
+  type HomepageSectionValues,
+} from '../src/renderer/components/metabots/MetaBotHomepageSection';
 
-const metaBotFormPath = new URL('../src/renderer/components/metabots/MetaBotForm.tsx', import.meta.url);
+const homepageSectionPath = new URL('../src/renderer/components/metabots/MetaBotHomepageSection.tsx', import.meta.url);
 
-const baseInitialValues: Partial<MetaBotFormValues> = {
-  name: 'Alice Bot',
-  role: 'Assistant',
-  soul: 'Direct',
-  llm_id: 'codex',
+const baseValues: HomepageSectionValues = {
   homepage_source: 'default',
   homepage_metaapp_pin: '',
   homepage_metafile_uri: '',
   homepage_metafile_content_type: '',
-  homepage_initial: null,
 };
 
-function renderFormMarkup(initialValues: Partial<MetaBotFormValues>, isEdit = true) {
+function renderHomepageMarkup(values: Partial<HomepageSectionValues>) {
   return renderToStaticMarkup(
-    <MetaBotForm
-      initialValues={{ ...baseInitialValues, ...initialValues }}
-      isEdit={isEdit}
-      onCancel={() => {}}
-      onSave={async () => {}}
-      saveLabel="Save"
-      llmOptions={[{ id: 'codex', label: 'Codex' }]}
-      skillOptions={[]}
+    <MetaBotHomepageSection
+      values={{ ...baseValues, ...values }}
+      onChange={() => {}}
       metabotId={1}
       onOpenDefaultHomepage={() => {}}
       onPreviewMetaAppHomepage={() => true}
+      onRequestMetaApps={() => {}}
     />,
   );
-}
-
-function renderHomepageMarkup(initialValues: Partial<MetaBotFormValues>) {
-  return renderFormMarkup(initialValues, true);
 }
 
 function homepageControlRow(markup: string): string {
@@ -45,14 +34,6 @@ function homepageControlRow(markup: string): string {
   assert.ok(match, 'Homepage controls should render in a dedicated row before the hint');
   return match[0];
 }
-
-test('MetaBot create form hides homepage controls', () => {
-  const markup = renderFormMarkup({}, false);
-
-  assert.doesNotMatch(markup, /id="metabot-homepage"/);
-  assert.doesNotMatch(markup, /data-slot="metabot-homepage-control-row"/);
-  assert.doesNotMatch(markup, /data-slot="metabot-homepage-hint"/);
-});
 
 test('MetaBot Homepage default template keeps source and view action in one control row', () => {
   const row = homepageControlRow(renderHomepageMarkup({ homepage_source: 'default' }));
@@ -90,7 +71,7 @@ test('MetaBot Homepage MetaFile source keeps pin input and upload action next to
 });
 
 test('MetaBot Homepage MetaApp selector loads the current bot owner MetaApps', () => {
-  const source = fs.readFileSync(metaBotFormPath, 'utf8');
+  const source = fs.readFileSync(homepageSectionPath, 'utf8');
 
   assert.match(source, /window\.electron\.metaappOwner\.list\(\{\s*metabotId,\s*size:\s*24\s*\}\)/);
   assert.match(source, /setHomepageMetaAppPickerOpen\(true\)/);

@@ -7,7 +7,14 @@ import { configService } from '../../services/config';
 import { ALL_PROVIDER_KEYS } from '../../config';
 import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
-import MetaBotForm, { type MetaBotFormValues, type LlmOption } from './MetaBotForm';
+import MetaBotEditTabs, {
+  EDIT_TAB_FIELDS,
+  EDIT_TAB_SYNC_GROUPS,
+  type LlmOption,
+  type MetaBotEditTabKey,
+  type MetaBotEditValues,
+} from './MetaBotEditTabs';
+import MetaBotCreateForm, { type MetaBotCreateFormValues } from './MetaBotCreateForm';
 import MetaBotCreateSuccessModal, { type SyncStepKey } from './MetaBotCreateSuccessModal';
 import MetaBotDeleteConfirmModal from './MetaBotDeleteConfirmModal';
 import MetaBotRestoreMnemonicModal from './MetaBotRestoreMnemonicModal';
@@ -71,6 +78,52 @@ const parseOptionalBossId = (value: string): number | null => {
   const parsed = Number.parseInt(trimmed, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 };
+
+/** Map a Metabot row to edit-form values; shared by the edit view and the per-tab save scoping. */
+const buildEditFormValues = (editMetabot: Metabot): MetaBotEditValues => ({
+  name: editMetabot.name,
+  avatar: editMetabot.avatar || '',
+  metabot_type: editMetabot.metabot_type,
+  role: editMetabot.role,
+  soul: editMetabot.soul,
+  goal: editMetabot.goal || '',
+  bio: editMetabot.bio || editMetabot.background || '',
+  boss_id: editMetabot.boss_id != null ? String(editMetabot.boss_id) : '',
+  boss_global_metaid: editMetabot.boss_global_metaid || '',
+  llm_id: editMetabot.llm_id || '',
+  fallback_llm_id: editMetabot.fallback_llm_id || '',
+  allow_chat_skills: editMetabot.allow_chat_skills || [],
+  homepage: editMetabot.homepage ?? null,
+  homepage_initial: editMetabot.homepage ?? null,
+  homepage_source: ((): MetaBotEditValues['homepage_source'] => {
+    const hp = editMetabot.homepage;
+    if (!hp) return 'default';
+    try {
+      const obj = JSON.parse(hp);
+      if (obj?.uri?.startsWith('metaapp://')) return 'metaapp';
+      if (obj?.uri?.startsWith('metafile://')) return 'metafile';
+    } catch { /* ignore */ }
+    return 'default';
+  })(),
+  homepage_metafile_uri: (() => {
+    try {
+      const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+      return obj?.uri?.startsWith('metafile://') ? obj.uri : '';
+    } catch { return ''; }
+  })(),
+  homepage_metafile_content_type: (() => {
+    try {
+      const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+      return obj?.contentType ?? '';
+    } catch { return ''; }
+  })(),
+  homepage_metaapp_pin: (() => {
+    try {
+      const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
+      return obj?.uri?.startsWith('metaapp://') ? String(obj.uri).slice('metaapp://'.length) : '';
+    } catch { return ''; }
+  })(),
+});
 const formatMetabotLimitReached = () =>
   i18nService.t('metabotLimitReached').replace('{limit}', String(DEFAULT_METABOT_LIMIT));
 const resolveMetabotActionError = (error?: string): string => {
@@ -118,7 +171,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   const [showRestoreModal, setShowRestoreModal] = useState(false);
   const [showLimitModal, setShowLimitModal] = useState(false);
   // Chain-first creation state
-  const [pendingCreateValues, setPendingCreateValues] = useState<MetaBotFormValues | null>(null);
+  const [pendingCreateValues, setPendingCreateValues] = useState<MetaBotCreateFormValues | null>(null);
   const [createChainStatus, setCreateChainStatus] = useState<'idle' | 'publishing' | 'error'>('idle');
   const [createChainError, setCreateChainError] = useState<string>('');
 
@@ -216,22 +269,16 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     setPendingCreateValues(null);
   };
 
-  const handleSaveNew = async (values: MetaBotFormValues) => {
+  const handleSaveNew = async (values: MetaBotCreateFormValues) => {
     setPendingCreateValues(values);
     setCreateChainStatus('publishing');
     setCreateChainError('');
+    // Minimal creation: only name + primary/fallback LLM go on-chain now;
+    // the remaining profile fields are filled in later via the edit view.
     const result = await window.electron.idbots.createMetaBotOnChain({
       name: values.name.trim(),
-      avatar: values.avatar.trim() || null,
-      role: values.role.trim(),
-      soul: values.soul.trim(),
-      goal: values.goal.trim() || null,
-      bio: values.bio.trim() || null,
-      boss_id: parseOptionalBossId(values.boss_id),
-      boss_global_metaid: values.boss_global_metaid.trim() || null,
       llm_id: values.llm_id.trim() || null,
-      allow_chat_skills: normalizeAllowChatSkills(values.allow_chat_skills),
-      homepage: values.homepage ?? null,
+      fallback_llm_id: values.fallback_llm_id.trim() || null,
     });
     if (!result.success || !result.metabot) {
       setCreateChainStatus('error');
@@ -247,6 +294,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       subsidySuccess: result.subsidy?.success ?? false,
       subsidyError: result.subsidy?.error,
       mode: 'create',
+      // Only the steps a minimal creation actually publishes (empty profile
+      // steps are skipped by the full sync plan).
+      syncStepKeys: ['name', 'chatpubkey', 'llm'],
       showSubsidyStatus: true,
     });
     setSyncStatus('success');
@@ -258,22 +308,40 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     return result.success && result.exists === true;
   }, []);
 
-  const handleSaveEdit = async (values: MetaBotFormValues) => {
+  /**
+   * Per-tab edit save. Only the saved tab's fields are taken from `values`;
+   * everything else is pinned to the current DB state so the diff below (and
+   * the chain sync plan) covers exactly the sync groups that tab owns.
+   */
+  const saveEditFields = async (tab: MetaBotEditTabKey, values: MetaBotEditValues) => {
     if (editId == null) return;
     const current = list.find((m) => m.id === editId);
     if (!current) throw new Error(i18nService.t('metabotLoadFailed'));
 
-    const nextName = values.name.trim();
-    const nextAvatarRaw = values.avatar.trim();
-    const nextRole = values.role.trim();
-    const nextSoul = values.soul.trim();
-    const nextGoalRaw = values.goal.trim();
-    const nextBioRaw = values.bio.trim();
-    const nextBossId = parseOptionalBossId(values.boss_id);
-    const nextBossGlobalMetaId = values.boss_global_metaid.trim() || null;
-    const nextLlmRaw = values.llm_id.trim();
-    const nextAllowChatSkills = normalizeAllowChatSkills(values.allow_chat_skills);
-    const nextHomepage = values.homepage ?? null;
+    const scopedValues: MetaBotEditValues = { ...buildEditFormValues(current) };
+    for (const field of EDIT_TAB_FIELDS[tab]) {
+      (scopedValues as unknown as Record<string, unknown>)[field] = values[field];
+    }
+    if (tab === 'advanced') {
+      scopedValues.homepage = values.homepage ?? null;
+    }
+
+    const nextName = scopedValues.name.trim();
+    const nextAvatarRaw = scopedValues.avatar.trim();
+    const nextRole = scopedValues.role.trim();
+    const nextSoul = scopedValues.soul.trim();
+    const nextGoalRaw = scopedValues.goal.trim();
+    const nextBioRaw = scopedValues.bio.trim();
+    const nextBossId = parseOptionalBossId(scopedValues.boss_id);
+    const nextBossGlobalMetaId = scopedValues.boss_global_metaid.trim() || null;
+    const nextLlmRaw = scopedValues.llm_id.trim();
+    // fallback_llm_id is a first-class Basic-tab field now; the undefined guard
+    // stays so the sync expression below keeps its defensive shape.
+    const valuesFallbackLlm = scopedValues.fallback_llm_id;
+    const hasFallbackLlmValue = valuesFallbackLlm !== undefined;
+    const nextFallbackLlmRaw = hasFallbackLlmValue ? (valuesFallbackLlm ?? '').trim() : '';
+    const nextAllowChatSkills = normalizeAllowChatSkills(scopedValues.allow_chat_skills);
+    const nextHomepage = scopedValues.homepage ?? null;
 
     const oldName = (current.name || '').trim();
     const oldAvatarRaw = (current.avatar || '').trim();
@@ -282,6 +350,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const oldGoalRaw = (current.goal || '').trim();
     const oldBioRaw = (current.bio || current.background || '').trim();
     const oldLlmRaw = (current.llm_id || '').trim();
+    const oldFallbackLlmRaw = (current.fallback_llm_id || '').trim();
     const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
     const oldHomepage = current.homepage ?? null;
     const oldBossGlobalMetaId = (current.boss_global_metaid ?? '').trim() || null;
@@ -294,7 +363,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       nextRole !== oldRole ||
       nextSoul !== oldSoul ||
       nextGoalRaw !== oldGoalRaw;
-    const syncLlm = nextLlmRaw !== oldLlmRaw;
+    const syncLlm = nextLlmRaw !== oldLlmRaw || (hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw);
     const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
     const syncHomepage = nextHomepage !== oldHomepage;
 
@@ -308,10 +377,18 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     if (syncHomepage) syncStepKeys.push('homepage');
     if (syncOwner) syncStepKeys.push('owner');
 
+    // Gate the sync to the step groups this tab owns. With the value scoping
+    // above the other flags are already false; this makes the contract explicit.
+    const tabSyncStepKeys = syncStepKeys.filter((key) => EDIT_TAB_SYNC_GROUPS[tab].includes(key));
+    if (tabSyncStepKeys.length === 0) {
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotNoChanges') }));
+      return;
+    }
+
     const result = await window.electron.metabot.update(editId, {
       name: nextName,
       avatar: nextAvatarRaw || null,
-      metabot_type: values.metabot_type,
+      metabot_type: scopedValues.metabot_type,
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
@@ -319,6 +396,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
+      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
       homepage: nextHomepage,
     });
@@ -329,7 +407,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       ...current,
       name: nextName,
       avatar: nextAvatarRaw || null,
-      metabot_type: values.metabot_type,
+      metabot_type: scopedValues.metabot_type,
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
@@ -338,29 +416,25 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
+      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
       homepage: nextHomepage,
     };
     setList((prev) => prev.map((m) => (m.id === editId ? updatedMetabot : m)));
-    setViewMode('list');
-    setEditId(null);
-
-    if (syncStepKeys.length === 0) {
-      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotSaveSuccess') }));
-      return;
-    }
+    // Stay in the edit view after a tab save so the user can keep editing
+    // other tabs; the sync progress modal renders there too.
 
     const syncPlan: EditSyncPlan = {
       metabotId: editId,
-      syncName,
-      syncAvatar,
-      syncBio,
-      syncPersona,
-      syncLlm,
-      syncChatSkills,
-      syncHomepage,
-      syncOwner,
-      syncStepKeys,
+      syncName: syncName && tabSyncStepKeys.includes('name'),
+      syncAvatar: syncAvatar && tabSyncStepKeys.includes('avatar'),
+      syncBio: syncBio && tabSyncStepKeys.includes('bio'),
+      syncPersona: syncPersona && tabSyncStepKeys.includes('persona'),
+      syncLlm: syncLlm && tabSyncStepKeys.includes('llm'),
+      syncChatSkills: syncChatSkills && tabSyncStepKeys.includes('chatSkills'),
+      syncHomepage: syncHomepage && tabSyncStepKeys.includes('homepage'),
+      syncOwner: syncOwner === true && tabSyncStepKeys.includes('owner'),
+      syncStepKeys: tabSyncStepKeys,
     };
     setSyncStatus('syncing');
     setSyncError('');
@@ -369,7 +443,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       metabot: updatedMetabot,
       subsidySuccess: true,
       mode: 'editSync',
-      syncStepKeys,
+      syncStepKeys: tabSyncStepKeys,
       showSubsidyStatus: false,
     });
     void performEditSyncToChain(syncPlan);
@@ -403,19 +477,13 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
         <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
           {i18nService.t('metabotAddTitle')}
         </h2>
-        <MetaBotForm
-          isEdit={false}
+        <MetaBotCreateForm
           onCancel={handleCancelForm}
           onSave={handleSaveNew}
           saveLabel={i18nService.t('save')}
           llmOptions={llmOptions}
-          skillOptions={skillOptions}
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
-          excludeIdForNameCheck={null}
-          metabotId={null}
-          onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
-          onRequestMetaApps={onRequestMetaApps}
         />
         {/* Chain publishing overlay */}
         {createChainStatus !== 'idle' && (
@@ -473,75 +541,62 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
         <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
           {i18nService.t('metabotEditTitle')}
         </h2>
-        <MetaBotForm
-          initialValues={{
-            name: editMetabot.name,
-            avatar: editMetabot.avatar || '',
-            metabot_type: editMetabot.metabot_type,
-            role: editMetabot.role,
-            soul: editMetabot.soul,
-            goal: editMetabot.goal || '',
-            bio: editMetabot.bio || editMetabot.background || '',
-            boss_id: editMetabot.boss_id != null ? String(editMetabot.boss_id) : '',
-            boss_global_metaid: editMetabot.boss_global_metaid || '',
-            llm_id: editMetabot.llm_id || '',
-            allow_chat_skills: editMetabot.allow_chat_skills || [],
-            homepage: editMetabot.homepage ?? null,
-            homepage_initial: editMetabot.homepage ?? null,
-            homepage_source: ((): MetaBotFormValues['homepage_source'] => {
-              const hp = editMetabot.homepage;
-              if (!hp) return 'default';
-              try {
-                const obj = JSON.parse(hp);
-                if (obj?.uri?.startsWith('metaapp://')) return 'metaapp';
-                if (obj?.uri?.startsWith('metafile://')) return 'metafile';
-              } catch { /* ignore */ }
-              return 'default';
-            })(),
-            homepage_metafile_uri: (() => {
-              try {
-                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
-                return obj?.uri?.startsWith('metafile://') ? obj.uri : '';
-              } catch { return ''; }
-            })(),
-            homepage_metafile_content_type: (() => {
-              try {
-                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
-                return obj?.contentType ?? '';
-              } catch { return ''; }
-            })(),
-            homepage_metaapp_pin: (() => {
-              try {
-                const obj = editMetabot.homepage ? JSON.parse(editMetabot.homepage) : null;
-                return obj?.uri?.startsWith('metaapp://') ? String(obj.uri).slice('metaapp://'.length) : '';
-              } catch { return ''; }
-            })(),
-          }}
-          isEdit={true}
+        <MetaBotEditTabs
+          initialValues={buildEditFormValues(editMetabot)}
+          metabotId={editMetabot.id}
+          ownerBindingPinId={editMetabot.owner_binding_pinid ?? null}
           onCancel={handleCancelForm}
-          onSave={handleSaveEdit}
-          saveLabel={i18nService.t('metabotSaveAndSyncChain')}
+          onSaveTab={saveEditFields}
           llmOptions={llmOptions}
           skillOptions={skillOptions}
           onRequestModelSettings={onRequestModelSettings}
           onCheckNameExists={handleCheckNameExists}
-          excludeIdForNameCheck={editId}
-          metabotId={editId}
-          ownerBindingPinId={editMetabot.owner_binding_pinid ?? null}
           onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
           onRequestMetaApps={onRequestMetaApps}
         />
+        {renderSuccessModal()}
       </div>
     );
   }
 
-  const handleCloseSuccessModal = () => {
+  function handleCloseSuccessModal() {
     setCreateSuccessModal(null);
     setEditSyncPlan(null);
     setSyncStatus('idle');
     setSyncError('');
-  };
+  }
+
+  // Shared by the list view and the edit view: per-tab saves stay in the edit
+  // view, so the sync progress modal must be able to appear there too. Kept as
+  // hoisted function declarations because the edit view returns before the
+  // textual position of these definitions.
+  function renderSuccessModal() {
+    if (!createSuccessModal) return null;
+    return (
+      <MetaBotCreateSuccessModal
+        metabot={createSuccessModal.metabot}
+        subsidySuccess={createSuccessModal.subsidySuccess}
+        subsidyError={createSuccessModal.subsidyError}
+        syncStatus={syncStatus}
+        syncError={syncError}
+        mode={createSuccessModal.mode}
+        syncStepKeys={createSuccessModal.syncStepKeys}
+        showSubsidyStatus={createSuccessModal.showSubsidyStatus}
+        onContinueEditing={
+          createSuccessModal.mode === 'create'
+            ? () => {
+                const createdId = createSuccessModal.metabot.id;
+                handleCloseSuccessModal();
+                handleEdit(createdId);
+              }
+            : undefined
+        }
+        onClose={handleCloseSuccessModal}
+        onSyncToChain={handleSyncToChain}
+      />
+    );
+  }
   const handleDeleteRequest = (metabot: Metabot) => setDeleteTarget(metabot);
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
@@ -627,7 +682,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     }
   }
 
-  const handleSyncToChain = async () => {
+  async function handleSyncToChain() {
     if (!createSuccessModal) return;
     if (createSuccessModal.mode === 'editSync') {
       if (!editSyncPlan) {
@@ -639,7 +694,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       return;
     }
     await performSyncToChain(createSuccessModal.metabot);
-  };
+  }
 
   const handleSyncUnsyncedMetabot = (metabot: Metabot) => {
     setCreateSuccessModal({
@@ -740,20 +795,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
               />
             ))}
           </div>
-          {createSuccessModal && (
-            <MetaBotCreateSuccessModal
-              metabot={createSuccessModal.metabot}
-              subsidySuccess={createSuccessModal.subsidySuccess}
-              subsidyError={createSuccessModal.subsidyError}
-              syncStatus={syncStatus}
-              syncError={syncError}
-              mode={createSuccessModal.mode}
-              syncStepKeys={createSuccessModal.syncStepKeys}
-              showSubsidyStatus={createSuccessModal.showSubsidyStatus}
-              onClose={handleCloseSuccessModal}
-              onSyncToChain={handleSyncToChain}
-            />
-          )}
+          {renderSuccessModal()}
           {deleteTarget && (
             <MetaBotDeleteConfirmModal
               metabot={deleteTarget}

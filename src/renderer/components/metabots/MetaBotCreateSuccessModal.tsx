@@ -21,6 +21,8 @@ export interface MetaBotCreateSuccessModalProps {
   mode?: 'create' | 'syncOnly' | 'editSync';
   syncStepKeys?: SyncStepKey[];
   showSubsidyStatus?: boolean;
+  /** Create mode only: jump straight into the edit view to complete the profile. */
+  onContinueEditing?: () => void;
   onClose: () => void;
   onSyncToChain: () => void;
 }
@@ -47,6 +49,7 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
   mode = 'create',
   syncStepKeys,
   showSubsidyStatus = true,
+  onContinueEditing,
   onClose,
   onSyncToChain,
 }) => {
@@ -244,6 +247,16 @@ const MetaBotCreateSuccessModal: React.FC<MetaBotCreateSuccessModalProps> = ({
           >
             {i18nService.t('metabotClose')}
           </button>
+          {isCreateMode && onContinueEditing && (
+            <button
+              type="button"
+              onClick={onContinueEditing}
+              disabled={isSyncing}
+              className="px-4 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {i18nService.t('metabotContinueEditing')}
+            </button>
+          )}
           {showPrimaryAction && (
             <button
               type="button"

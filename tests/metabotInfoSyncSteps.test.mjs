@@ -26,6 +26,7 @@ const metabot = {
   bio: ' Bio ',
   background: ' Deprecated background ',
   llm_id: ' codex ',
+  fallback_llm_id: ' ollama ',
   allow_chat_skills: ['metabot-help', ' metabot-wallet-manage ', 'metabot-help'],
 };
 
@@ -90,7 +91,7 @@ test('sync plans expose protocol payload content for profile steps', () => {
   assert.equal(byKey.get('llm').contentType, 'application/json');
   assert.deepEqual(JSON.parse(byKey.get('llm').payload), {
     primaryProvider: 'codex',
-    fallbackProvider: null,
+    fallbackProvider: 'ollama',
   });
 
   assert.equal(byKey.get('chatSkills').contentType, 'application/json');
@@ -316,7 +317,8 @@ test('full sync reports partial failure when chatpubkey is missing before bootst
   assert.match(result.error, /chat public key/i);
   assert.equal(result.chatPublicKeyPinId, undefined);
   assert.equal(result.metabotInfoPinId, 'chatSkills-pin');
-  assert.deepEqual(createPinPaths, ['/info/name', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills', '/info/homepage']);
+  // homepage step is skipped in full sync when the bot has no homepage set.
+  assert.deepEqual(createPinPaths, ['/info/name', '/info/bio', '/info/persona', '/info/llm', '/info/chatSkills']);
   assert.deepEqual(updateCalls, [
     { id: 8, input: { metabot_info_pinid: 'chatSkills-pin' } },
   ]);
@@ -328,7 +330,7 @@ test('renderer edit sync splits Bot Info protocol flags and forwards them to IPC
   assert.match(source, /syncBio:\s*boolean;\s*syncPersona:\s*boolean;\s*syncLlm:\s*boolean;\s*syncChatSkills:\s*boolean;/);
   assert.match(source, /const syncBio =\s*nextBioRaw !== oldBioRaw;/);
   assert.match(source, /const syncPersona =\s*nextRole !== oldRole \|\|\s*nextSoul !== oldSoul \|\|\s*nextGoalRaw !== oldGoalRaw;/);
-  assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw;/);
+  assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw \|\| \(hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw\);/);
   assert.match(source, /const syncChatSkills =\s*JSON\.stringify\(nextAllowChatSkills\) !== JSON\.stringify\(oldAllowChatSkills\);/);
 
   const syncBioSection = source.slice(source.indexOf('const syncBio ='), source.indexOf('const syncStepKeys'));
@@ -397,4 +399,93 @@ test('edit sync plan includes homepage only when syncHomepage', () => {
   assert.ok(withHp.some((s) => s.key === 'homepage'));
   const withoutHp = buildEditMetabotInfoSyncPlan({ metabotId: 1, syncName: true, metabot: baseMetabot });
   assert.equal(withoutHp.some((s) => s.key === 'homepage'), false);
+});
+
+test('full sync plan with skipEmptyInfoSteps omits empty bio/persona/chatSkills/homepage pins', () => {
+  const minimalBot = {
+    name: 'Minimal Bot',
+    avatar: '',
+    chat_public_key: ' 04abcdef ',
+    chat_public_key_pin_id: null,
+    role: '',
+    soul: '',
+    goal: '',
+    bio: '',
+    llm_id: ' openai ',
+    allow_chat_skills: [],
+    homepage: null,
+  };
+
+  const steps = buildFullMetabotInfoSyncPlan(minimalBot, { skipEmptyInfoSteps: true });
+  assert.deepEqual(
+    steps.map((step) => step.key),
+    ['name', 'chatpubkey', 'llm'],
+  );
+  assert.deepEqual(JSON.parse(steps.find((step) => step.key === 'llm').payload), {
+    primaryProvider: 'openai',
+    fallbackProvider: null,
+  });
+
+  // Without the flag the full plan keeps publishing every step (edit plan relies on this).
+  const defaultSteps = buildFullMetabotInfoSyncPlan(minimalBot);
+  assert.deepEqual(
+    defaultSteps.map((step) => step.key),
+    ['name', 'chatpubkey', 'bio', 'persona', 'llm', 'chatSkills', 'homepage'],
+  );
+});
+
+test('full sync plan with skipEmptyInfoSteps keeps steps that have content', () => {
+  const steps = buildFullMetabotInfoSyncPlan(
+    {
+      name: 'Rich Bot',
+      avatar: '',
+      chat_public_key: '04abcdef',
+      chat_public_key_pin_id: 'chat-pin',
+      role: ' Assistant ',
+      soul: '',
+      goal: '',
+      bio: ' Bio ',
+      llm_id: 'openai',
+      fallback_llm_id: 'ollama',
+      allow_chat_skills: ['metabot-help'],
+      homepage: '{"uri":"metaapp://p","renderer":"metaapp","contentType":"application/vnd.metaapp"}',
+    },
+    { skipEmptyInfoSteps: true },
+  );
+
+  assert.deepEqual(
+    steps.map((step) => step.key),
+    ['name', 'bio', 'persona', 'llm', 'chatSkills', 'homepage'],
+  );
+  assert.deepEqual(JSON.parse(steps.find((step) => step.key === 'llm').payload), {
+    primaryProvider: 'openai',
+    fallbackProvider: 'ollama',
+  });
+});
+
+test('edit sync plan still publishes cleared (empty) profile values', () => {
+  const clearedBot = {
+    name: 'Bot',
+    avatar: '',
+    chat_public_key: 'k',
+    chat_public_key_pin_id: 'chat-pin',
+    role: '',
+    soul: '',
+    goal: '',
+    bio: '',
+    llm_id: 'openai',
+    allow_chat_skills: [],
+    homepage: null,
+  };
+  const steps = buildEditMetabotInfoSyncPlan({
+    metabotId: 1,
+    metabot: clearedBot,
+    syncBio: true,
+    syncPersona: true,
+    syncChatSkills: true,
+    syncHomepage: true,
+  });
+
+  assert.deepEqual(steps.map((step) => step.key), ['bio', 'persona', 'chatSkills', 'homepage']);
+  assert.equal(steps.find((step) => step.key === 'bio').payload, '');
 });
