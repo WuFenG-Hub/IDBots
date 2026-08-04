@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { getP2PStatusBadgeView } from './p2pStatusBadgeState.js';
+import Tooltip from '../ui/Tooltip';
 
 interface P2PStatus {
   running?: boolean;
@@ -56,48 +57,70 @@ export const P2PStatusBadge: React.FC = () => {
 
   const view = getP2PStatusBadgeView(status);
 
+  // Extra detail (mode / data-source) that used to render inline and caused
+  // multi-line wrapping in the narrow sidebar. Shown only inside the hover
+  // tooltip so the compact row stays on a single line.
+  const detailBadges = (
+    <span className='inline-flex items-center gap-1.5'>
+      {status.runtimeMode && renderModeBadge(status.runtimeMode)}
+      {status.dataSource && renderDataSourceBadge(status.dataSource)}
+    </span>
+  );
+  const hasDetail = Boolean(status.runtimeMode) || Boolean(status.dataSource);
+
   if (status.storageLimitReached) {
     return (
-      <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400'>
-        {renderDot(view.dotColorClass, view.animate)}
-        {view.label}
-        {status.runtimeMode && renderModeBadge(status.runtimeMode)}
-      </span>
+      <Tooltip content={detailBadges} disabled={!hasDetail} position='top'>
+        <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-default'>
+          {renderDot(view.dotColorClass, view.animate)}
+          {view.label}
+        </span>
+      </Tooltip>
     );
   }
 
   if (!status.running) {
     return (
-      <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400'>
-        {renderDot('bg-gray-400')}
-        P2P offline
-        {status.error ? (
-          <span className='text-xs text-red-500 dark:text-red-400 max-w-32 truncate' title={status.error}>
-            {status.error}
+      <Tooltip
+        content={
+          <span className='inline-flex flex-col gap-1'>
+            <span className='inline-flex items-center gap-1.5'>
+              {renderDot('bg-gray-400')}
+              P2P offline
+            </span>
+            {status.runtimeMode && renderModeBadge(status.runtimeMode)}
+            {status.dataSource && renderDataSourceBadge(status.dataSource)}
+            {status.error ? <span className='text-xs text-red-400'>{status.error}</span> : null}
           </span>
-        ) : null}
-      </span>
+        }
+        position='top'
+      >
+        <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-default'>
+          {renderDot('bg-gray-400')}
+          P2P offline
+        </span>
+      </Tooltip>
     );
   }
 
   if (status.peerCount === 0 || status.peerCount === undefined) {
     return (
-      <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400'>
-        {renderDot(view.dotColorClass, view.animate)}
-        {view.label}
-        {status.runtimeMode && renderModeBadge(status.runtimeMode)}
-        {status.dataSource && renderDataSourceBadge(status.dataSource)}
-      </span>
+      <Tooltip content={detailBadges} disabled={!hasDetail} position='top'>
+        <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-default'>
+          {renderDot(view.dotColorClass, view.animate)}
+          {view.label}
+        </span>
+      </Tooltip>
     );
   }
 
   return (
-    <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400'>
-      {renderDot(view.dotColorClass, view.animate)}
-      {view.label}
-      {status.runtimeMode && renderModeBadge(status.runtimeMode)}
-      {status.dataSource && renderDataSourceBadge(status.dataSource)}
-    </span>
+    <Tooltip content={detailBadges} disabled={!hasDetail} position='top'>
+      <span className='inline-flex items-center gap-1.5 text-xs text-gray-600 dark:text-gray-400 cursor-default'>
+        {renderDot(view.dotColorClass, view.animate)}
+        {view.label}
+      </span>
+    </Tooltip>
   );
 };
 
