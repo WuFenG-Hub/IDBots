@@ -124,6 +124,7 @@ const createHarness = async (overrides = {}) => {
   const routingCalls = [];
   const skillTurnCalls = [];
   const events = [];
+  const ownerReportCalls = [];
   const state = {
     nowMs: 1_000_000_000_000,
     chatError: overrides.chatError ?? null,
@@ -131,6 +132,8 @@ const createHarness = async (overrides = {}) => {
     routing: overrides.routing ?? null,
     chatReply: overrides.chatReply ?? null,
     skillReply: overrides.skillReply ?? null,
+    ownerReportFails: overrides.ownerReportFails ?? false,
+    pinOutcomes: overrides.pinOutcomes ?? {},
   };
   const seenChatErrors = new Set();
 
@@ -167,6 +170,16 @@ const createHarness = async (overrides = {}) => {
     emitTaskEvent: (payload) => {
       events.push(payload);
     },
+    sendOwnerPrivateReport: async (params) => {
+      ownerReportCalls.push(params);
+      if (state.ownerReportFails) {
+        throw new Error('owner chat public key unavailable');
+      }
+      return { pinId: `owner-report-pin-${ownerReportCalls.length}` };
+    },
+    readPinForVerification: async (pinId) => state.pinOutcomes[pinId] ?? 'unavailable',
+    ...(overrides.listUserMemories ? { listUserMemories: overrides.listUserMemories } : {}),
+    ...(overrides.listDailySummaries ? { listDailySummaries: overrides.listDailySummaries } : {}),
     emitLog: () => {},
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
@@ -192,7 +205,7 @@ const createHarness = async (overrides = {}) => {
 
   return {
     store, db, metabotStore, groupTaskStore, coworkStore, loop,
-    chatCalls, sends, routingCalls, skillTurnCalls, events, state, createTask,
+    chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
     cleanup: () => store.close(),
   };
 };
@@ -745,7 +758,11 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
       [[2, 'reply-for-llm-2']],
       'worker answered the pre-flip mention only; the post-flip mention is gated silent',
     );
-    assert.equal(h.chatCalls.length, 1, 'no LLM call for the post-flip message');
+    assert.equal(
+      h.chatCalls.filter((c) => c.llmId === 'llm-2').length, 1,
+      'no LLM call for the post-flip message (the other call is the owner-report turn)',
+    );
+    assert.equal(h.ownerReportCalls.length, 1, 'review transition fired the owner report');
   } finally {
     h.cleanup();
   }
@@ -984,4 +1001,239 @@ test('prompts: roster profiles include bio/role/goal with the length cap', () =>
   const bioLine = prompt.split('\n').find((line) => line.startsWith('- Coder Bot (worker) — Bio:'));
   const renderedBio = bioLine.replace('- Coder Bot (worker) — Bio: ', '');
   assert.ok(renderedBio.length <= 200, `bio capped at 200 chars (got ${renderedBio.length})`);
+});
+
+// ---------------------------------------------------------------------------
+// Worldview/time/experience prompts, deliverable verification, owner report
+// ---------------------------------------------------------------------------
+
+test('prompts: worldview block, time line, honesty and chair boundary', () => {
+  const prompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members: [
+      { name: 'Twin Bot', role: 'chair' },
+      { name: 'Coder Bot', role: 'worker' },
+    ],
+    botRole: 'chair',
+    ownerGlobalMetaId: 'gmid-boss',
+    currentTimeText: 'Current time: 2026-08-04 23:52 (UTC+8, Asia/Shanghai); today is Tuesday, August 4, 2026.',
+    experienceBlock: '<self_identity>I am the twin.</self_identity>',
+  });
+
+  assert.match(prompt, /## Group task environment/);
+  assert.match(prompt, /OWNER \(a human, globalMetaId `gmid-boss`\)/);
+  assert.match(prompt, /Twin Bot \(the owner's digital twin\) chairs the group/);
+  assert.match(prompt, /a pinid is exactly 64 lowercase hex chars \+ `i0`/);
+  assert.match(prompt, /\/protocols\/simplebuzz/);
+  assert.match(prompt, /Current time: 2026-08-04 23:52 \(UTC\+8, Asia\/Shanghai\); today is Tuesday, August 4, 2026\./);
+  assert.match(prompt, /NEVER fabricate results, pinids, txids/);
+  assert.match(prompt, /honest failure is acceptable, a fabricated success is a critical fault/);
+  assert.match(prompt, /you NEVER execute task work yourself/);
+  assert.match(prompt, /VERIFY it \(format, plausibility, any daemon verification notes/);
+  assert.match(prompt, /<self_identity>I am the twin\.<\/self_identity>/);
+});
+
+test('turn prompts include the fresh current-time line from the injected now()', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'time-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot hi',
+    });
+    await h.loop.runTick();
+
+    const date = new Date(h.state.nowMs);
+    const pad = (v) => String(v).padStart(2, '0');
+    const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    assert.ok(
+      h.chatCalls[0].systemPrompt.includes(`Current time: ${local} (`),
+      `prompt carries the injected-now local time (expected prefix "Current time: ${local} (")`,
+    );
+    assert.match(h.chatCalls[0].systemPrompt, /today is \w+day, /);
+    assert.match(h.chatCalls[0].systemPrompt, /## Group task environment/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('experience block: memory/dream deps feed the A2A builder; absent deps omit it', async () => {
+  const withMemory = await createHarness({
+    listUserMemories: (metabotId, input) =>
+      input.usageClass === 'self_identity' ? [{ text: 'I am the search specialist.' }] : [],
+    listDailySummaries: () => [{ summaryDate: '2026-08-03', summaryText: 'Searched the web for the owner.' }],
+  });
+  try {
+    withMemory.createTask([2]);
+    insertGroupMessage(withMemory.db, {
+      pinId: 'mem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot go',
+    });
+    await withMemory.loop.runTick();
+    assert.match(withMemory.chatCalls[0].systemPrompt, /I am the search specialist\./);
+    assert.match(withMemory.chatCalls[0].systemPrompt, /Searched the web for the owner\./);
+  } finally {
+    withMemory.cleanup();
+  }
+
+  const withoutMemory = await createHarness();
+  try {
+    withoutMemory.createTask([2]);
+    insertGroupMessage(withoutMemory.db, {
+      pinId: 'nomem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot go',
+    });
+    await withoutMemory.loop.runTick();
+    assert.ok(!withoutMemory.chatCalls[0].systemPrompt.includes('self_identity'));
+  } finally {
+    withoutMemory.cleanup();
+  }
+});
+
+test('deliverable verification: fabricated pinid warns the chair in context', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'fake-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] buzz posted: 0x8f3a2b1c done!',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'chair triggered by the deliverable');
+    assert.equal(h.chatCalls[0].llmId, 'llm-1');
+    assert.match(
+      h.chatCalls[0].userMessage,
+      /⚠ Host verification: reported pinid "0x8f3a2b1c" FAILS format validation/,
+    );
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'row still recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('deliverable verification: uppercase hex candidate fails format', async () => {
+  const UPPER = 'ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789';
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'up-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metafile://${UPPER}i0`,
+    });
+    await h.loop.runTick();
+    assert.match(h.chatCalls[0].userMessage, /FAILS format validation/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('deliverable verification: valid pinid reports found / not-found / unavailable', async () => {
+  const VALID = `${'a'.repeat(64)}i0`;
+  const runCase = async (pinOutcomes) => {
+    const h = await createHarness({ pinOutcomes });
+    try {
+      h.createTask([2]);
+      insertGroupMessage(h.db, {
+        pinId: 'v-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+        senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${VALID}`,
+      });
+      await h.loop.runTick();
+      return h.chatCalls[0].userMessage;
+    } finally {
+      h.cleanup();
+    }
+  };
+
+  assert.match(await runCase({ [VALID]: 'found' }), /✓ Host verification: pinid format valid; pin found on-chain/);
+  assert.match(await runCase({ [VALID]: 'not_found' }), /⚠ Host verification: pinid format valid but pin NOT found on-chain/);
+  assert.match(await runCase({}), /… Host verification: pinid format valid; on-chain check unavailable/);
+});
+
+test('owner report: review transition sends exactly one private report to the boss', async () => {
+  const h = await createHarness({ chatReply: 'Report: goal met, deliverables verified.' });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'd-rep-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${'b'.repeat(64)}i0`,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'rev-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] all done',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.ownerReportCalls.length, 1, 'exactly one private report');
+    assert.equal(h.ownerReportCalls[0].metabotId, 1, 'from the chair bot');
+    assert.equal(h.ownerReportCalls[0].ownerGlobalMetaId, BOSS_GMID, 'to the owner');
+    assert.match(h.ownerReportCalls[0].text, /Report: goal met, deliverables verified\./);
+
+    const reportCall = h.chatCalls.find((c) => /owner-report directive/.test(c.userMessage));
+    assert.ok(reportCall, 'report turn used the owner-report directive');
+    assert.match(reportCall.userMessage, /Goal: Build and publish the intro MetaApp/);
+    assert.match(reportCall.userMessage, /metaapp:\/\//);
+
+    assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1', 'guard set');
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'no duplicate on the next tick');
+
+    // the report never goes through the group send fn; only the deliverable ack did
+    assert.deepEqual(h.sends.map((s) => s.metabotId), [1], 'only the chair deliverable ack hit the group');
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
+    const sessionText = h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.content).join('\n');
+    assert.match(sessionText, /\[Private report sent to the owner/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('owner report: rework hatch clears the guard and the next review reports again', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const chairMsg = (pinId, content) => insertGroupMessage(h.db, {
+      pinId, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content,
+    });
+
+    chairMsg('rw1-i0', '[STATUS:REVIEW] done');
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1);
+
+    chairMsg('rw2-i0', '[STATUS:EXECUTING] rework needed');
+    chairMsg('rw3-i0', '[STATUS:REVIEW] done for real');
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 2, 're-review after rework reports again');
+    assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('owner report: send failure is logged and does not block the tick', async () => {
+  const h = await createHarness({ ownerReportFails: true });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'rf1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] done',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'rf2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: 'unrelated chatter',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.ownerReportCalls.length, 1, 'send was attempted');
+    assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), undefined, 'guard not set on failure');
+    const afterId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['rf2-i0'])[0].values[0][0];
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, afterId,
+      'tick processed the rest of the batch despite the send failure',
+    );
+  } finally {
+    h.cleanup();
+  }
 });
