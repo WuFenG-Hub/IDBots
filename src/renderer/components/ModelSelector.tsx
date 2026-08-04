@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../store';
-import { ChevronDownIcon, CheckIcon } from '@heroicons/react/24/outline';
+import { ChevronDownIcon, CheckIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { setSelectedModel } from '../store/slices/modelSlice';
 import { i18nService } from '../services/i18n';
 import type { Model } from '../store/slices/modelSlice';
@@ -10,9 +10,15 @@ interface ModelSelectorProps {
   dropdownDirection?: 'up' | 'down';
   /** When set, only show models from this LLM provider (e.g. "deepseek"). */
   restrictToLlmId?: string | null;
+  /**
+   * When true, the trigger renders as an icon-only button (no model name text),
+   * matching the icon-only buttons in the Bot Browser toolbar. The current model
+   * name is still surfaced via the tooltip and stays selected in the dropdown.
+   */
+  compact?: boolean;
 }
 
-const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down', restrictToLlmId }) => {
+const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down', restrictToLlmId, compact = false }) => {
   const dispatch = useDispatch();
   const [isOpen, setIsOpen] = React.useState(false);
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -77,15 +83,26 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
     ? 'bottom-full mb-1'
     : 'top-full mt-1';
 
+  const currentModelName = displayModels.some((m) => m.id === selectedModel.id)
+    ? selectedModel.name
+    : displayModels[0]?.name ?? selectedModel.name;
+
   return (
     <div ref={containerRef} className="relative cursor-pointer">
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center space-x-2 px-3 py-1.5 rounded-xl dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors cursor-pointer ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover' : ''}`}
+        className={compact
+          ? `shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors cursor-pointer ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text' : ''}`
+          : `flex items-center space-x-2 px-3 py-1.5 rounded-xl dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors cursor-pointer ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover' : ''}`
+        }
+        title={currentModelName}
+        aria-label={currentModelName}
       >
-        <span className="font-medium text-sm">
-          {displayModels.some((m) => m.id === selectedModel.id) ? selectedModel.name : displayModels[0]?.name ?? selectedModel.name}
-        </span>
+        {compact ? (
+          <CpuChipIcon className="h-4 w-4" />
+        ) : (
+          <span className="font-medium text-sm">{currentModelName}</span>
+        )}
         <ChevronDownIcon className="h-4 w-4 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
       </button>
 

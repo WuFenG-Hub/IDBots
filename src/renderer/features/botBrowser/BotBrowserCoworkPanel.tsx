@@ -239,7 +239,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
             />
           </div>
         ) : null}
-        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} />
+        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} compact />
         <button
           type="button"
           onClick={() => void handleAddFile()}
