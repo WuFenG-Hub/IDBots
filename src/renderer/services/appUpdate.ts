@@ -10,6 +10,8 @@ type ChangeLogLang = {
 
 type PlatformDownload = {
   url?: string;
+  /** Optional payload checksum; verified by the downloader when present. */
+  sha256?: string;
 };
 
 type UpdateApiResponse = {
@@ -36,6 +38,8 @@ export interface AppUpdateDownloadProgress {
   total: number | undefined;
   percent: number | undefined;
   speed: number | undefined;
+  /** True when this download run resumed from a previously saved partial file. */
+  resumed?: boolean;
 }
 
 export interface AppUpdateInfo {
@@ -43,6 +47,8 @@ export interface AppUpdateInfo {
   date: string;
   changeLog: { zh: ChangeLogEntry; en: ChangeLogEntry };
   url: string;
+  /** Optional payload checksum; verified by the downloader when present. */
+  sha256?: string;
 }
 
 const toVersionParts = (version: string): number[] => (
@@ -75,19 +81,25 @@ const isNewerVersion = (latestVersion: string, currentVersion: string): boolean 
 
 type UpdateValue = NonNullable<NonNullable<UpdateApiResponse['data']>['value']>;
 
-const getPlatformDownloadUrl = (value: UpdateValue | undefined): string => {
+const getPlatformDownload = (value: UpdateValue | undefined): { url: string; sha256?: string } => {
   const { platform, arch } = window.electron;
 
   if (platform === 'darwin') {
     const download = arch === 'arm64' ? value?.macArm : value?.macIntel;
-    return download?.url?.trim() || getFallbackDownloadUrl();
+    return {
+      url: download?.url?.trim() || getFallbackDownloadUrl(),
+      sha256: download?.sha256?.trim() || undefined,
+    };
   }
 
   if (platform === 'win32') {
-    return value?.windowsX64?.url?.trim() || getFallbackDownloadUrl();
+    return {
+      url: value?.windowsX64?.url?.trim() || getFallbackDownloadUrl(),
+      sha256: value?.windowsX64?.sha256?.trim() || undefined,
+    };
   }
 
-  return getFallbackDownloadUrl();
+  return { url: getFallbackDownloadUrl() };
 };
 
 export const checkForAppUpdate = async (currentVersion: string): Promise<AppUpdateInfo | null> => {
@@ -127,8 +139,8 @@ export const checkForAppUpdate = async (currentVersion: string): Promise<AppUpda
     return null;
   }
 
-  const url = getPlatformDownloadUrl(value);
-  if (!url) {
+  const download = getPlatformDownload(value);
+  if (!download.url) {
     return null;
   }
 
@@ -144,6 +156,7 @@ export const checkForAppUpdate = async (currentVersion: string): Promise<AppUpda
       zh: toEntry(value?.changeLog?.ch),
       en: toEntry(value?.changeLog?.en),
     },
-    url,
+    url: download.url,
+    sha256: download.sha256,
   };
 };

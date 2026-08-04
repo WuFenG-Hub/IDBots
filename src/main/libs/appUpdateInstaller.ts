@@ -1,5 +1,6 @@
 import { app, session } from 'electron';
 import { exec, spawn } from 'child_process';
+import { createHash } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { Readable } from 'stream';
@@ -10,9 +11,33 @@ export interface AppUpdateDownloadProgress {
   total: number | undefined;
   percent: number | undefined;
   speed: number | undefined;
+  /** True when this download run resumed from a previously saved partial file. */
+  resumed?: boolean;
+}
+
+export interface DownloadUpdateOptions {
+  /** Target app version — part of the stable temp-file identity. */
+  version?: string;
+  /** Optional SHA-256 of the full payload, verified when the manifest provides it. */
+  expectedSha256?: string;
+  /** Optional SHA-512 of the full payload, verified when the manifest provides it. */
+  expectedSha512?: string;
+}
+
+/** Sidecar metadata persisted next to the partial download file. */
+interface DownloadMeta {
+  url: string;
+  version: string;
+  platform: string;
+  arch: string;
+  etag?: string;
+  totalSize?: number;
+  downloadedSize: number;
+  updatedAt: number;
 }
 
 let activeDownloadController: AbortController | null = null;
+let activeDownloadStableId: string | null = null;
 
 export function cancelActiveDownload(): boolean {
   if (activeDownloadController) {
@@ -47,9 +72,150 @@ const PROGRESS_THROTTLE_MS = 200;
 /** Abort download if no data received for this duration (ms). */
 const DOWNLOAD_INACTIVITY_TIMEOUT_MS = 60_000;
 
+/** Remove stale download artifacts older than this (ms). */
+const STALE_DOWNLOAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Stable identity for a download target (version + platform + arch + URL).
+ * The same target always maps to the same temp files, so an interrupted
+ * download can be resumed after an app restart.
+ */
+export function computeStableDownloadId(url: string, version?: string): string {
+  const key = `${version ?? ''}|${process.platform}|${process.arch}|${url}`;
+  return createHash('sha256').update(key).digest('hex').slice(0, 16);
+}
+
+async function readDownloadMeta(metaPath: string): Promise<DownloadMeta | null> {
+  try {
+    const raw = await fs.promises.readFile(metaPath, 'utf8');
+    const parsed = JSON.parse(raw) as DownloadMeta;
+    if (typeof parsed.url !== 'string' || typeof parsed.downloadedSize !== 'number') {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function writeDownloadMeta(metaPath: string, meta: DownloadMeta): Promise<void> {
+  await fs.promises.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+}
+
+/**
+ * Remove stale `idbots-update-*` artifacts (partials, metadata, completed
+ * installers) older than STALE_DOWNLOAD_TTL_MS. Failed partial files are kept
+ * for resume until they age out; the in-flight download is never touched.
+ */
+export async function cleanupStaleDownloads(): Promise<number> {
+  const tempDir = app.getPath('temp');
+  let entries: string[];
+  try {
+    entries = await fs.promises.readdir(tempDir);
+  } catch {
+    return 0;
+  }
+
+  const now = Date.now();
+  let removed = 0;
+  for (const entry of entries) {
+    // New stable-named artifacts (16 hex chars), plus legacy timestamp-named
+    // installers/partials from older releases (13-digit timestamps).
+    const match = entry.match(/^idbots-update-([0-9a-f]{16})/);
+    const legacy = /^idbots-update-\d+\.(dmg|exe|zip)(\.download)?$/.test(entry);
+    if (!match && !legacy) {
+      continue;
+    }
+    if (match && match[1] === activeDownloadStableId) {
+      continue;
+    }
+    const fullPath = path.join(tempDir, entry);
+    try {
+      const stat = await fs.promises.stat(fullPath);
+      if (now - stat.mtimeMs < STALE_DOWNLOAD_TTL_MS) {
+        continue;
+      }
+      await fs.promises.unlink(fullPath);
+      removed += 1;
+    } catch {
+      // Best effort
+    }
+  }
+  if (removed > 0) {
+    console.log(`[AppUpdate] Cleaned up ${removed} stale download artifact(s)`);
+  }
+  return removed;
+}
+
+async function hashFile(filePath: string, algorithm: 'sha256' | 'sha512'): Promise<string> {
+  const hash = createHash(algorithm);
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
+}
+
+/**
+ * Verify size (and optional hash), then atomically rename the partial file
+ * into the final path and persist the completed metadata so the same target
+ * can be reused (not re-downloaded) after a restart.
+ */
+async function finalizeDownload(
+  downloadPath: string,
+  finalPath: string,
+  metaPath: string,
+  meta: DownloadMeta,
+  total: number | undefined,
+  options: DownloadUpdateOptions,
+): Promise<string> {
+  const stat = await fs.promises.stat(downloadPath);
+  console.log(`[AppUpdate] Download complete: ${stat.size} bytes`);
+
+  if (stat.size === 0) {
+    throw new Error('Downloaded file is empty');
+  }
+  if (total !== undefined && Number.isFinite(total) && stat.size !== total) {
+    throw new Error(`Download incomplete: expected ${total} bytes but got ${stat.size}`);
+  }
+
+  if (options.expectedSha256 || options.expectedSha512) {
+    const algorithm = options.expectedSha512 ? 'sha512' : 'sha256';
+    const expected = (options.expectedSha512 ?? options.expectedSha256) as string;
+    const actual = await hashFile(downloadPath, algorithm);
+    if (actual !== expected) {
+      // Corrupt bytes can never be fixed by resuming; discard them so the next
+      // attempt starts fresh instead of failing on the same bytes forever.
+      await fs.promises.unlink(downloadPath).catch(() => {});
+      await fs.promises.unlink(metaPath).catch(() => {});
+      throw new Error(`Download checksum mismatch: expected ${expected}, got ${actual}`);
+    }
+    console.log(`[AppUpdate] Checksum verified (${algorithm})`);
+  }
+
+  // Atomic rename into the final path (same filesystem, temp dir).
+  try {
+    await fs.promises.rename(downloadPath, finalPath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Windows cannot overwrite an existing destination with a plain rename.
+    if (code === 'EEXIST' || code === 'EPERM') {
+      await fs.promises.unlink(finalPath).catch(() => {});
+      await fs.promises.rename(downloadPath, finalPath);
+    } else {
+      throw error;
+    }
+  }
+
+  meta.downloadedSize = stat.size;
+  meta.totalSize = total ?? stat.size;
+  meta.updatedAt = Date.now();
+  await writeDownloadMeta(metaPath, meta);
+  console.log(`[AppUpdate] File saved to: ${finalPath}`);
+  return finalPath;
+}
+
 export async function downloadUpdate(
   url: string,
   onProgress: (progress: AppUpdateDownloadProgress) => void,
+  options: DownloadUpdateOptions = {},
 ): Promise<string> {
   if (activeDownloadController) {
     throw new Error('A download is already in progress');
@@ -67,16 +233,20 @@ export async function downloadUpdate(
 
   const ext = path.extname(parsedUrl.pathname) || (process.platform === 'darwin' ? '.dmg' : '.exe');
   const tempDir = app.getPath('temp');
-  const ts = Date.now();
-  const downloadPath = path.join(tempDir, `idbots-update-${ts}${ext}.download`);
-  const finalPath = path.join(tempDir, `idbots-update-${ts}${ext}`);
+  const stableId = computeStableDownloadId(url, options.version);
+  const downloadPath = path.join(tempDir, `idbots-update-${stableId}${ext}.download`);
+  const finalPath = path.join(tempDir, `idbots-update-${stableId}${ext}`);
+  const metaPath = path.join(tempDir, `idbots-update-${stableId}.meta.json`);
 
+  console.log(`[AppUpdate] Stable id: ${stableId}`);
   console.log(`[AppUpdate] Temp path: ${downloadPath}`);
   console.log(`[AppUpdate] Final path: ${finalPath}`);
 
   const controller = new AbortController();
   activeDownloadController = controller;
+  activeDownloadStableId = stableId;
 
+  let meta: DownloadMeta | null = null;
   let writeStream: fs.WriteStream | null = null;
   let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -95,28 +265,32 @@ export async function downloadUpdate(
     }, DOWNLOAD_INACTIVITY_TIMEOUT_MS);
   };
 
-  try {
-    const response = await session.defaultSession.fetch(url, {
-      signal: controller.signal,
-    });
-
-    console.log(`[AppUpdate] HTTP response: ${response.status} ${response.statusText}`);
-
-    if (!response.ok) {
-      throw new Error(`Download failed (HTTP ${response.status})`);
-    }
-
+  /**
+   * Stream the response body into the partial file and finalize it.
+   * `initialReceived` is the byte offset already on disk for resumed runs.
+   */
+  const streamDownload = async (
+    response: Response,
+    initialReceived: number,
+    total: number | undefined,
+    resumed: boolean,
+  ): Promise<string> => {
     if (!response.body) {
       throw new Error('Response has no body');
     }
 
-    const totalHeader = response.headers.get('content-length');
-    const total = totalHeader ? Number(totalHeader) : undefined;
-    console.log(`[AppUpdate] Content-Length: ${totalHeader ?? 'unknown'}`);
+    console.log(`[AppUpdate] Content-Length: ${total ?? 'unknown'}`);
 
-    let received = 0;
+    // Persist the total size once known, so a failure later still leaves a
+    // complete metadata record (completeness check + reuse depend on it).
+    if (total !== undefined && Number.isFinite(total)) {
+      meta.totalSize = total;
+      await writeDownloadMeta(metaPath, meta);
+    }
+
+    let received = initialReceived;
     let lastSpeedTime = Date.now();
-    let lastSpeedBytes = 0;
+    let lastSpeedBytes = received;
     let currentSpeed: number | undefined = undefined;
     let lastProgressTime = 0;
 
@@ -126,6 +300,7 @@ export async function downloadUpdate(
         total: total && Number.isFinite(total) ? total : undefined,
         percent: total && Number.isFinite(total) ? received / total : undefined,
         speed: currentSpeed,
+        resumed,
       });
     };
 
@@ -133,7 +308,7 @@ export async function downloadUpdate(
     emitProgress();
 
     await fs.promises.mkdir(path.dirname(downloadPath), { recursive: true });
-    writeStream = fs.createWriteStream(downloadPath);
+    writeStream = fs.createWriteStream(downloadPath, { flags: resumed ? 'a' : 'w' });
 
     const nodeStream = Readable.fromWeb(response.body as any);
 
@@ -166,20 +341,7 @@ export async function downloadUpdate(
     writeStream = null;
     clearInactivityTimer();
 
-    // Validate downloaded file
-    const stat = await fs.promises.stat(downloadPath);
-    console.log(`[AppUpdate] Download complete: ${stat.size} bytes`);
-
-    if (stat.size === 0) {
-      throw new Error('Downloaded file is empty');
-    }
-    if (total && Number.isFinite(total) && stat.size !== total) {
-      throw new Error(`Download incomplete: expected ${total} bytes but got ${stat.size}`);
-    }
-
-    // Rename to final path (atomic on same filesystem)
-    await fs.promises.rename(downloadPath, finalPath);
-    console.log(`[AppUpdate] File saved to: ${finalPath}`);
+    const savedPath = await finalizeDownload(downloadPath, finalPath, metaPath, meta!, total, options);
 
     // Emit final 100% progress
     onProgress({
@@ -187,19 +349,189 @@ export async function downloadUpdate(
       total: total && Number.isFinite(total) ? total : received,
       percent: 1,
       speed: currentSpeed,
+      resumed,
     });
 
-    return finalPath;
+    return savedPath;
+  };
+
+  const discardPartial = async () => {
+    await fs.promises.unlink(downloadPath).catch(() => {});
+    await fs.promises.unlink(metaPath).catch(() => {});
+  };
+
+  try {
+    // Sweep stale artifacts from previous sessions; never the active download.
+    void cleanupStaleDownloads().catch(() => {});
+
+    meta = await readDownloadMeta(metaPath);
+    const partialStat = await fs.promises.stat(downloadPath).catch(() => null);
+
+    const metaMatches = (m: DownloadMeta): boolean =>
+      m.url === url &&
+      m.version === (options.version ?? '') &&
+      m.platform === process.platform &&
+      m.arch === process.arch;
+
+    // A previously completed download of the same target can be reused as-is.
+    if (meta && metaMatches(meta) && meta.totalSize !== undefined && meta.downloadedSize === meta.totalSize) {
+      const finalStat = await fs.promises.stat(finalPath).catch(() => null);
+      if (finalStat && finalStat.size === meta.totalSize && finalStat.size > 0) {
+        console.log(`[AppUpdate] Reusing previously completed download: ${finalPath}`);
+        onProgress({ received: meta.totalSize, total: meta.totalSize, percent: 1, speed: undefined });
+        return finalPath;
+      }
+    }
+
+    // Decide whether this run can resume from an existing partial file.
+    let canResume = false;
+    let resumeOffset = 0;
+    let resumeEtag: string | undefined;
+    if (meta && metaMatches(meta) && partialStat && partialStat.size > 0 && partialStat.size === meta.downloadedSize) {
+      if (meta.totalSize !== undefined && partialStat.size > meta.totalSize) {
+        console.warn(`[AppUpdate] Partial file (${partialStat.size}B) exceeds expected size, restarting`);
+      } else if (meta.totalSize === undefined || partialStat.size < meta.totalSize) {
+        canResume = true;
+        resumeOffset = partialStat.size;
+        resumeEtag = meta.etag;
+        console.log(`[AppUpdate] Found partial download (${resumeOffset} bytes), will resume`);
+      } else {
+        // The partial already covers the full payload — no network needed.
+        console.log('[AppUpdate] Partial file is already complete, verifying...');
+        return await finalizeDownload(downloadPath, finalPath, metaPath, meta, meta.totalSize, options);
+      }
+    }
+
+    let offset = canResume ? resumeOffset : 0;
+    let resumed = canResume;
+    let etag = resumeEtag;
+    let attempts = 0;
+
+    for (;;) {
+      attempts += 1;
+
+      // Persist (or refresh) metadata before each attempt so a crash mid-run
+      // still leaves a consistent sidecar for the next launch.
+      if (!meta || !metaMatches(meta)) {
+        meta = {
+          url,
+          version: options.version ?? '',
+          platform: process.platform,
+          arch: process.arch,
+          downloadedSize: 0,
+          updatedAt: Date.now(),
+        };
+      }
+      meta.downloadedSize = offset;
+      meta.updatedAt = Date.now();
+      if (etag) {
+        meta.etag = etag;
+      }
+      await writeDownloadMeta(metaPath, meta);
+
+      const headers: Record<string, string> = {};
+      if (resumed && offset > 0) {
+        headers['Range'] = `bytes=${offset}-`;
+        if (etag) {
+          headers['If-Range'] = etag;
+        }
+        console.log(`[AppUpdate] Resuming download from byte ${offset}`);
+      }
+
+      const response = await session.defaultSession.fetch(url, {
+        signal: controller.signal,
+        headers,
+      });
+
+      console.log(`[AppUpdate] HTTP response: ${response.status} ${response.statusText}`);
+
+      if (response.status === 416) {
+        // Range not satisfiable. A partial that already covers the payload is
+        // finalized; anything else is discarded and re-downloaded.
+        if (resumed && meta.totalSize !== undefined && offset >= meta.totalSize) {
+          return await finalizeDownload(downloadPath, finalPath, metaPath, meta, meta.totalSize, options);
+        }
+        if (resumed && attempts < 2) {
+          console.warn('[AppUpdate] Range not satisfiable, restarting download from scratch');
+          await discardPartial();
+          meta = null;
+          offset = 0;
+          resumed = false;
+          etag = undefined;
+          continue;
+        }
+        throw new Error(`Download failed (HTTP 416)`);
+      }
+
+      if (response.status === 206) {
+        const contentRange = response.headers.get('content-range');
+        const rangeMatch = contentRange?.match(/^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/);
+        const responseEtag = response.headers.get('etag') ?? undefined;
+        const start = rangeMatch ? Number(rangeMatch[1]) : NaN;
+        const rangeTotal = rangeMatch && rangeMatch[3] !== '*' ? Number(rangeMatch[3]) : undefined;
+        const validResume =
+          resumed &&
+          !!rangeMatch &&
+          start === offset &&
+          (meta.totalSize === undefined || rangeTotal === undefined || rangeTotal === meta.totalSize) &&
+          (!etag || !responseEtag || responseEtag === etag);
+        if (validResume) {
+          const total = rangeTotal ?? meta.totalSize;
+          if (responseEtag) {
+            meta.etag = responseEtag;
+          }
+          return await streamDownload(response, offset, total, true);
+        }
+        if (resumed && attempts < 2) {
+          console.warn(
+            `[AppUpdate] Invalid 206 resume response (${contentRange ?? 'no content-range'}), restarting download`,
+          );
+          await discardPartial();
+          meta = null;
+          offset = 0;
+          resumed = false;
+          etag = undefined;
+          continue;
+        }
+        throw new Error(`Download failed (HTTP 206)`);
+      }
+
+      if (response.status === 200) {
+        if (resumed && attempts < 2) {
+          console.log('[AppUpdate] Server ignored Range request (HTTP 200), restarting download from scratch');
+          await discardPartial();
+          meta = null;
+          offset = 0;
+          resumed = false;
+          etag = undefined;
+          continue;
+        }
+        const totalHeader = response.headers.get('content-length');
+        const total = totalHeader ? Number(totalHeader) : undefined;
+        return await streamDownload(response, 0, total, false);
+      }
+
+      if (!response.ok) {
+        throw new Error(`Download failed (HTTP ${response.status})`);
+      }
+      throw new Error(`Unexpected HTTP status ${response.status}`);
+    }
   } catch (error) {
     clearInactivityTimer();
     console.error('[AppUpdate] Download error:', error);
 
-    // Clean up partial download
+    // Keep the partial file and sync the metadata so the next attempt can
+    // resume from the exact byte count actually on disk.
     try {
       if (writeStream) {
         writeStream.destroy();
       }
-      await fs.promises.unlink(downloadPath).catch(() => {});
+      const size = (await fs.promises.stat(downloadPath).catch(() => null))?.size;
+      if (meta && size !== undefined) {
+        meta.downloadedSize = size;
+        meta.updatedAt = Date.now();
+        await writeDownloadMeta(metaPath, meta);
+      }
     } catch {
       // Ignore cleanup errors
     }
@@ -213,6 +545,7 @@ export async function downloadUpdate(
     throw error;
   } finally {
     activeDownloadController = null;
+    activeDownloadStableId = null;
   }
 }
 

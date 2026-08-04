@@ -492,7 +492,7 @@ contextBridge.exposeInMainWorld('electron', {
     }>,
   },
   appUpdate: {
-    download: (url: string) => ipcRenderer.invoke('appUpdate:download', url),
+    download: (url: string, version: string, sha256?: string) => ipcRenderer.invoke('appUpdate:download', { url, version, sha256 }),
     cancelDownload: () => ipcRenderer.invoke('appUpdate:cancelDownload'),
     install: (filePath: string) => ipcRenderer.invoke('appUpdate:install', filePath),
     applySilent: (filePath: string) => ipcRenderer.invoke('appUpdate:applySilent', filePath),

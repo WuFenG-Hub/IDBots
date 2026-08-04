@@ -515,10 +515,16 @@ const App: React.FC = () => {
 
   const startSilentDownload = useCallback(async (info: AppUpdateInfo) => {
     changeUpdatePhase('downloading');
+    setDownloadProgress(null);
+    // 静默下载也订阅进度，徽章以非打扰方式展示后台下载状态
+    const unsubscribe = window.electron.appUpdate.onDownloadProgress((progress) => {
+      setDownloadProgress(progress);
+    });
     try {
-      const downloadResult = await window.electron.appUpdate.download(info.url);
+      const downloadResult = await window.electron.appUpdate.download(info.url, info.latestVersion, info.sha256);
+      unsubscribe();
       if (!downloadResult.success || !downloadResult.filePath) {
-        // 静默下载失败：保留 updateInfo，徽章显示「有新版本」，用户可点击走手动下载保底流程
+        // 静默下载失败：部分文件保留在本地，徽章显示「有新版本」，下次检查会自动续传
         console.warn('[AppUpdate] Silent download failed:', downloadResult.error);
         changeUpdatePhase('idle');
         return;
@@ -541,6 +547,7 @@ const App: React.FC = () => {
       }
       changeUpdatePhase('ready');
     } catch (error) {
+      unsubscribe();
       console.warn('[AppUpdate] Silent download error:', error);
       changeUpdatePhase('idle');
     }
@@ -578,7 +585,10 @@ const App: React.FC = () => {
 
   const handleOpenUpdateModal = useCallback(() => {
     if (!updateInfo) return;
-    setUpdateModalState(updatePhase === 'restartReady' ? 'restart' : 'info');
+    // 下载中打开模态框时展示实时进度（可取消）；其余情况按阶段展示
+    setUpdateModalState(
+      updatePhase === 'restartReady' ? 'restart' : updatePhase === 'downloading' ? 'downloading' : 'info',
+    );
     setUpdateError(null);
     setDownloadProgress(null);
     setShowUpdateModal(true);
@@ -629,7 +639,7 @@ const App: React.FC = () => {
     });
 
     try {
-      const downloadResult = await window.electron.appUpdate.download(updateInfo.url);
+      const downloadResult = await window.electron.appUpdate.download(updateInfo.url, updateInfo.latestVersion, updateInfo.sha256);
       unsubscribe();
 
       if (!downloadResult.success) {
@@ -883,11 +893,12 @@ const App: React.FC = () => {
   }, [pendingPermission, handlePermissionResponse]);
 
   const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
-  // 静默下载/静默替换进行中不显示任何更新 UI；就绪或待重启时才显示徽章
-  const updateBadge = updateInfo && updatePhase !== 'downloading' && updatePhase !== 'applying' ? (
+  // 静默下载中显示带进度的徽章（非打扰式后台状态）；静默替换中隐藏；就绪/待重启时显示徽章
+  const updateBadge = updateInfo && updatePhase !== 'applying' ? (
     <AppUpdateBadge
       latestVersion={updateInfo.latestVersion}
       label={updatePhase === 'restartReady' ? i18nService.t('updateReadyPill') : undefined}
+      progress={updatePhase === 'downloading' ? downloadProgress : null}
       onClick={handleOpenUpdateModal}
     />
   ) : null;
