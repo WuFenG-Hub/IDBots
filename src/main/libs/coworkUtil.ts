@@ -1156,28 +1156,31 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
   const claudeCodePath = getClaudeCodePath();
   const currentEnv = await getEnhancedEnv();
 
-  // Ensure child_process.fork() runs cli.js as Node, not as another Electron app
-  if (app.isPackaged) {
-    currentEnv.ELECTRON_RUN_AS_NODE = '1';
-  }
-
   try {
-    const { unstable_v2_prompt } = await loadClaudeSdk();
+    const { query } = await loadClaudeSdk();
     const promptOptions: Record<string, unknown> = {
       model: getCurrentApiConfig()?.model || 'claude-sonnet',
       env: currentEnv,
       pathToClaudeCodeExecutable: claudeCodePath,
+      permissionMode: 'bypassPermissions',
     };
 
-    const result: SDKResultMessage = await unstable_v2_prompt(
-      `Generate a short, clear title (max 50 chars) for this conversation based on the user input below.
+    // unstable_v2_prompt was removed in SDK 0.3.x; run a single-turn query and
+    // take the final result message instead.
+    let result: SDKResultMessage | null = null;
+    for await (const message of query({
+      prompt: `Generate a short, clear title (max 50 chars) for this conversation based on the user input below.
 IMPORTANT: The title MUST be in the SAME language as the user input. If user writes in Chinese, output Chinese title. If user writes in English, output English title.
 User input: ${userIntent}
 Output only the title, nothing else.`,
-      promptOptions as any
-    );
+      options: promptOptions as any,
+    })) {
+      if ((message as { type?: string })?.type === 'result') {
+        result = message as SDKResultMessage;
+      }
+    }
 
-    if (result.subtype === 'success') {
+    if (result && result.subtype === 'success') {
       return result.result;
     }
 
