@@ -20,6 +20,9 @@ const DEFAULT_COMMUNITY_METAAPPS_PAGE_SIZE = 30;
 const COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE = 100;
 const COMMUNITY_METAAPPS_SCAN_MAX_PAGES = 100;
 const COMMUNITY_METAAPPS_ROOT_CURSOR = '0';
+// Bounded extra raw pages a single list request may consume while filling a
+// full page of distinct apps (duplicate edit versions are skipped).
+const COMMUNITY_METAAPPS_MAX_FILL_PAGES = 10;
 
 type LocalMetaAppLike = {
   id: string;
@@ -65,7 +68,9 @@ type ListCommunityMetaAppsInput = {
   fetchAuthorInfo?: FetchAuthorInfoFn;
   cursor?: string;
   size?: number;
-  allowShortPageNextCursor?: boolean;
+  /** App identity keys already shown to the user on earlier pages; stale
+   *  versions of these apps are skipped so one app never appears twice. */
+  seen?: string[];
 };
 
 type InstallCommunityMetaAppInput = {
@@ -96,6 +101,8 @@ type ChainMetaAppCandidate = {
   sourcePinId: string;
   creatorMetaId: string;
   publishedAt: number;
+  /** MAN row status; negative values mark revoked/superseded versions. */
+  status: number;
   payload: ChainMetaAppPayload;
 };
 
@@ -127,6 +134,9 @@ export type CommunityMetaAppListResult = {
   success: boolean;
   apps: CommunityMetaAppRecord[];
   nextCursor?: string | null;
+  /** Full app identity seen-set after processing this page (input seen plus
+   *  the apps returned on this page). Persist it per cursor for navigation. */
+  seen?: string[];
   error?: string;
 };
 
@@ -408,6 +418,9 @@ const decodeChainPayload = (item: unknown): ChainMetaAppCandidate | null => {
 
   const creatorMetaId = asText(obj.globalMetaId || obj.createMetaId || obj.metaid);
   const publishedAt = Number(obj.timestamp) || 0;
+  // MAN marks superseded/revoked versions with a negative status; only rows with
+  // status 0/1 are current (mirrors gigSquareServiceStateService.isServiceRowVisible).
+  const status = Number.isFinite(Number(obj.status)) ? Math.trunc(Number(obj.status)) : 0;
   const content = parseJsonObject(obj.contentSummary || obj.content || obj.contentBody);
   if (!content) return null;
 
@@ -419,6 +432,7 @@ const decodeChainPayload = (item: unknown): ChainMetaAppCandidate | null => {
     sourcePinId,
     creatorMetaId,
     publishedAt,
+    status,
     payload: {
       title,
       appName,
@@ -542,15 +556,36 @@ const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
   return buffer;
 };
 
+const isHiddenChainOperation = (value: unknown): boolean => {
+  const operation = asText(value).toLowerCase();
+  return operation === 'revoke' || operation === 'delete' || operation === 'deleted';
+};
+
+/**
+ * Identity of a logical MetaApp. MAN's /pin/path/list does not link create /
+ * modify pins of the same app through a stable id (firstPinId/originalId are
+ * absent or path-like), so the app is identified by its creator + appName,
+ * which is also how MAN itself marks superseded versions. When the creator is
+ * unknown the pin id is used so unrelated pins never collapse together.
+ */
+const buildCommunityAppGroupKey = (candidate: ChainMetaAppCandidate): string => {
+  const creator = asText(candidate.creatorMetaId);
+  const appIdentity = asText(candidate.payload.appName || candidate.payload.title);
+  if (!creator || !appIdentity) {
+    return `pin:${candidate.sourcePinId}`;
+  }
+  return `${creator.toLowerCase()}::${appIdentity.toLowerCase()}`;
+};
+
 export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): Promise<CommunityMetaAppListResult> {
   try {
     const fetchList = input.fetchList || defaultFetchList;
     const pageSize = normalizeListPageSize(input.size);
-    const rawPage = normalizeFetchListResult(await fetchList({
-      cursor: normalizeListCursor(input.cursor),
-      size: pageSize,
-    }));
-    const rawList = rawPage.list;
+    const seen = new Set<string>(
+      (Array.isArray(input.seen) ? input.seen : [])
+        .map((key) => asText(key).toLowerCase())
+        .filter(Boolean),
+    );
     const localApps = input.manager.listMetaApps() || [];
     const localMap = new Map<string, LocalMetaAppLike>();
     localApps.forEach((app) => {
@@ -563,25 +598,100 @@ export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): 
       });
     });
 
-    const decoded = rawList
-      .map((item) => decodeChainPayload(item))
-      .filter((item): item is ChainMetaAppCandidate => Boolean(item));
+    // Collect distinct apps (newest version per app) across raw MAN pages until
+    // the page is full. Older edit versions of the same app are deduplicated
+    // away, so a "page of 30" really shows 30 different apps. When a raw page
+    // pushes the collected set past the page size, the newest ones are returned
+    // and the next request re-fetches that same page; the seen-set keeps the
+    // re-fetch from re-serving apps that were already returned.
+    const bestByGroup = new Map<string, ChainMetaAppCandidate>();
+    const consumedPages = new Set<string>();
+    let rawCursor = normalizeListCursor(input.cursor);
+    let continueCursor: string | null = null;
+    let exhausted = false;
 
+    while (bestByGroup.size < pageSize) {
+      const rawPage = normalizeFetchListResult(await fetchList({
+        cursor: rawCursor,
+        size: pageSize,
+      }));
+      const rawList = rawPage.list;
+      if (!rawList.length) {
+        exhausted = true;
+        break;
+      }
+      for (const item of rawList) {
+        if (isHiddenChainOperation((item as Record<string, unknown>)?.operation)) {
+          continue;
+        }
+        const candidate = decodeChainPayload(item);
+        if (!candidate) {
+          continue;
+        }
+        // Revoked/superseded rows (status < 0) must never surface: MAN flips the
+        // whole chain of a revoked MetaApp to a negative status, so a revoked app
+        // simply has no visible row left (same rule as the Bot Hub service list).
+        if (candidate.status < 0) {
+          continue;
+        }
+        const key = buildCommunityAppGroupKey(candidate);
+        if (seen.has(key)) {
+          continue;
+        }
+        const current = bestByGroup.get(key);
+        if (!current || candidate.publishedAt > current.publishedAt) {
+          bestByGroup.set(key, candidate);
+        }
+      }
+
+      const nextCursor = asText(rawPage.nextCursor);
+      if (bestByGroup.size > pageSize) {
+        // Overshoot: keep the cursor on this page so the apps that did not fit
+        // into this page are re-served by the next request (seen filters the
+        // ones already returned).
+        continueCursor = rawCursor;
+        break;
+      }
+      if (bestByGroup.size === pageSize) {
+        continueCursor = nextCursor || null;
+        break;
+      }
+      consumedPages.add(rawCursor);
+      if (!nextCursor || nextCursor === rawCursor || consumedPages.has(nextCursor)) {
+        exhausted = true;
+        break;
+      }
+      rawCursor = nextCursor;
+      continueCursor = nextCursor;
+      if (consumedPages.size >= COMMUNITY_METAAPPS_MAX_FILL_PAGES) {
+        break;
+      }
+    }
+
+    const sortedCandidates = [...bestByGroup.values()]
+      .sort((a, b) => b.publishedAt - a.publishedAt || a.payload.title.localeCompare(b.payload.title));
+    const pageCandidates = sortedCandidates.slice(0, pageSize);
     const fetchAuthorInfo = input.fetchAuthorInfo || defaultFetchAuthorInfo;
     const authorEntries = await Promise.all(
-      [...new Set(decoded.map((item) => asText(item.creatorMetaId)).filter(Boolean))]
+      [...new Set(pageCandidates.map((item) => asText(item.creatorMetaId)).filter(Boolean))]
         .map(async (creatorMetaId) => [creatorMetaId, await fetchAuthorInfo(creatorMetaId)] as const),
     );
     const authorMap = new Map(authorEntries);
 
-    const records = decoded
+    const records = pageCandidates
       .map((item) => toCommunityRecord(item, localMap, authorMap.get(asText(item.creatorMetaId))))
       .sort((a, b) => b.publishedAt - a.publishedAt || a.name.localeCompare(b.name));
+
+    const resultSeen = [
+      ...seen,
+      ...pageCandidates.map((item) => buildCommunityAppGroupKey(item)),
+    ].map((key) => key.toLowerCase());
 
     return {
       success: true,
       apps: records,
-      nextCursor: (input.allowShortPageNextCursor || rawList.length >= pageSize) ? rawPage.nextCursor : null,
+      nextCursor: exhausted ? null : continueCursor,
+      seen: resultSeen,
     };
   } catch (error) {
     return {
@@ -598,30 +708,47 @@ const findCommunityMetaAppBySourcePinId = async (
 ): Promise<{ record?: CommunityMetaAppRecord; error?: string }> => {
   let cursor = COMMUNITY_METAAPPS_ROOT_CURSOR;
 
-  for (let pageIndex = 0; pageIndex < COMMUNITY_METAAPPS_SCAN_MAX_PAGES; pageIndex += 1) {
-    const result = await listCommunityMetaApps({
-      manager: input.manager,
-      fetchList: input.fetchList,
-      fetchAuthorInfo: input.fetchAuthorInfo,
-      cursor,
-      size: COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE,
-      allowShortPageNextCursor: true,
-    });
+  try {
+    for (let pageIndex = 0; pageIndex < COMMUNITY_METAAPPS_SCAN_MAX_PAGES; pageIndex += 1) {
+      const fetchList = input.fetchList || defaultFetchList;
+      const rawPage = normalizeFetchListResult(await fetchList({
+        cursor,
+        size: COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE,
+      }));
 
-    if (!result.success) {
-      return { error: result.error || 'Failed to load community MetaApps' };
-    }
+      const match = rawPage.list
+        .map((item) => decodeChainPayload(item))
+        .find((candidate): candidate is ChainMetaAppCandidate => (
+          Boolean(candidate)
+          && candidate.status >= 0
+          && candidate.sourcePinId === input.sourcePinId
+        ));
 
-    const record = result.apps.find((item) => item.sourcePinId === input.sourcePinId);
-    if (record) {
-      return { record };
-    }
+      if (match) {
+        const localApps = input.manager.listMetaApps() || [];
+        const localMap = new Map<string, LocalMetaAppLike>();
+        localApps.forEach((app) => {
+          localMap.set(asText(app.id), {
+            id: asText(app.id),
+            version: normalizeVersion(asText(app.version)),
+            creatorMetaId: asText(app.creatorMetaId),
+            sourceType: asText(app.sourceType),
+            sourcePinId: asText(app.sourcePinId),
+          });
+        });
+        const fetchAuthorInfo = input.fetchAuthorInfo || defaultFetchAuthorInfo;
+        const authorInfo = await fetchAuthorInfo(asText(match.creatorMetaId));
+        return { record: toCommunityRecord(match, localMap, authorInfo) };
+      }
 
-    const nextCursor = asText(result.nextCursor);
-    if (!nextCursor || nextCursor === cursor) {
-      break;
+      const nextCursor = asText(rawPage.nextCursor);
+      if (!nextCursor || nextCursor === cursor) {
+        break;
+      }
+      cursor = nextCursor;
     }
-    cursor = nextCursor;
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
   }
 
   return {};

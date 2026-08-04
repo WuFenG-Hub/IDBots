@@ -321,3 +321,271 @@ test('listCommunityMetaApps accepts content metafile when code is empty', async 
   assert.equal(result.apps[0]?.codeUri, 'metafile://zip-iddisk');
   assert.equal(result.apps[0]?.codePinId, 'zip-iddisk');
 });
+
+test('listCommunityMetaApps collapses edit versions into one record and keeps the newest', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const contentFor = (version, codeSuffix) => JSON.stringify({
+    title: `Edit App ${version}`,
+    appName: 'edit-app',
+    intro: `Edit app v${version}`,
+    runtime: 'browser',
+    version,
+    code: `metafile://zip-edit-app-${codeSuffix}`,
+    codeType: 'application/zip',
+    indexFile: 'index.html',
+    disabled: false,
+  });
+
+  const result = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    fetchList: async () => [
+      {
+        id: 'pin-edit-original',
+        operation: 'create',
+        globalMetaId: 'idq1creator',
+        timestamp: 1_777_777_700,
+        contentSummary: contentFor('1.0.0', 'original'),
+      },
+      {
+        id: 'pin-edit-modify',
+        operation: 'modify',
+        globalMetaId: 'idq1creator',
+        timestamp: 1_777_777_800,
+        contentSummary: contentFor('1.1.0', 'modified'),
+      },
+      {
+        id: 'pin-edit-revoked',
+        operation: 'revoke',
+        globalMetaId: 'idq1creator',
+        timestamp: 1_777_777_900,
+        contentSummary: contentFor('9.9.9', 'revoked'),
+      },
+    ],
+    fetchAuthorInfo: async () => null,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.apps.length, 1);
+  const app = result.apps[0];
+  assert.equal(app.appId, 'edit-app');
+  assert.equal(app.version, '1.1.0');
+  assert.equal(app.sourcePinId, 'pin-edit-modify');
+  assert.equal(app.codePinId, 'zip-edit-app-modified');
+  assert.deepEqual(result.seen, ['idq1creator::edit-app']);
+});
+
+test('listCommunityMetaApps fills a full page of distinct apps across raw pages', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const fetchCalls = [];
+  const result = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    size: 30,
+    fetchList: async ({ cursor = '0' } = {}) => {
+      fetchCalls.push(cursor);
+      if (cursor === '0') {
+        // 20 distinct apps, one duplicate edit version, one revoke pin.
+        const list = Array.from({ length: 20 }, (_, index) => chainMetaAppItem(index + 1));
+        list.push(chainMetaAppItem(3, { version: '2.0.0', title: 'Paged App 03 edited', intro: 'edited' }));
+        list.push({ id: 'pin-revoke', operation: 'revoke', globalMetaId: 'idq1x', timestamp: 9, contentSummary: '{}' });
+        return { list, nextCursor: 'cursor-b' };
+      }
+      // Second raw page supplies the remaining 10 distinct apps.
+      return {
+        list: Array.from({ length: 10 }, (_, index) => chainMetaAppItem(30 - index)),
+        nextCursor: 'cursor-c',
+      };
+    },
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.apps.length, 30);
+  assert.equal(result.nextCursor, 'cursor-c');
+  assert.deepEqual(fetchCalls, ['0', 'cursor-b']);
+  const ids = new Set(result.apps.map((app) => app.sourcePinId));
+  assert.equal(ids.size, 30, 'no duplicated app in a full page');
+  assert.equal(ids.has('pin-03'), true, 'duplicate edit version collapsed into the original pin');
+});
+
+test('listCommunityMetaApps honors the seen-set so stale versions never reappear across pages', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const contentFor = (appName, version, suffix) => JSON.stringify({
+    title: `${appName} ${version}`,
+    appName,
+    intro: `${appName} v${version}`,
+    runtime: 'browser',
+    version,
+    code: `metafile://zip-${suffix}`,
+    codeType: 'application/zip',
+    indexFile: 'index.html',
+    disabled: false,
+  });
+
+  const first = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    size: 5,
+    fetchList: async () => [
+      {
+        id: 'pin-a-head',
+        operation: 'create',
+        globalMetaId: 'idq1a',
+        timestamp: 2_000_000_000,
+        contentSummary: contentFor('app-a', '2.0.0', 'a-head'),
+      },
+      {
+        id: 'pin-b-head',
+        operation: 'create',
+        globalMetaId: 'idq1b',
+        timestamp: 1_999_999_999,
+        contentSummary: contentFor('app-b', '1.0.0', 'b-head'),
+      },
+    ],
+    fetchAuthorInfo: async () => null,
+  });
+
+  assert.equal(first.success, true);
+  assert.equal(first.apps.length, 2);
+  assert.equal(first.nextCursor, null);
+  assert.deepEqual(first.seen, ['idq1a::app-a', 'idq1b::app-b']);
+
+  const second = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    size: 5,
+    seen: first.seen,
+    fetchList: async () => [
+      // Stale version of app-a plus one brand-new app.
+      {
+        id: 'pin-a-stale',
+        operation: 'modify',
+        globalMetaId: 'idq1a',
+        timestamp: 1_000_000_000,
+        contentSummary: contentFor('app-a', '1.0.0', 'a-stale'),
+      },
+      {
+        id: 'pin-c-new',
+        operation: 'create',
+        globalMetaId: 'idq1c',
+        timestamp: 1_000_000_001,
+        contentSummary: contentFor('app-c', '1.0.0', 'c-new'),
+      },
+    ],
+    fetchAuthorInfo: async () => null,
+  });
+
+  assert.equal(second.success, true);
+  assert.deepEqual(second.apps.map((app) => app.sourcePinId), ['pin-c-new']);
+  assert.deepEqual(second.seen, ['idq1a::app-a', 'idq1b::app-b', 'idq1c::app-c']);
+});
+
+test('listCommunityMetaApps hides MetaApps whose rows MAN marked as revoked (status < 0)', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const contentFor = (appName, version, suffix) => JSON.stringify({
+    title: `${appName} ${version}`,
+    appName,
+    intro: `${appName} v${version}`,
+    runtime: 'browser',
+    version,
+    code: `metafile://zip-${suffix}`,
+    codeType: 'application/zip',
+    indexFile: 'index.html',
+    disabled: false,
+  });
+
+  // Mirrors the real revoked-service shape: every row of a revoked app is marked
+  // status -1 by MAN (e.g. bottianya, zhuwei-fortune-service), while a re-published
+  // or untouched app keeps status 0.
+  const result = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    size: 30,
+    fetchList: async () => [
+      {
+        id: 'pin-revoked-create',
+        operation: 'create',
+        globalMetaId: 'idq1a',
+        status: -1,
+        timestamp: 2_000_000_100,
+        contentSummary: contentFor('revoked-app', '1.0.0', 'revoked'),
+      },
+      {
+        id: 'pin-revoked-modify',
+        operation: 'modify',
+        globalMetaId: 'idq1a',
+        status: -1,
+        timestamp: 2_000_000_200,
+        contentSummary: contentFor('revoked-app', '1.1.0', 'revoked-modify'),
+      },
+      {
+        id: 'pin-revoked-declaration',
+        operation: 'revoke',
+        globalMetaId: 'idq1a',
+        status: 0,
+        timestamp: 2_000_000_300,
+        contentSummary: '{}',
+      },
+      {
+        id: 'pin-live',
+        operation: 'create',
+        globalMetaId: 'idq1b',
+        status: 0,
+        timestamp: 2_000_000_000,
+        contentSummary: contentFor('live-app', '1.0.0', 'live'),
+      },
+    ],
+    fetchAuthorInfo: async () => null,
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(result.apps.map((app) => app.sourcePinId), ['pin-live']);
+  assert.deepEqual(result.seen, ['idq1b::live-app']);
+});
+
+test('listCommunityMetaApps keeps the newest visible row when an older version is revoked', async () => {
+  assert.equal(typeof listCommunityMetaApps, 'function', 'listCommunityMetaApps() should be exported');
+
+  const contentFor = (appName, version, suffix) => JSON.stringify({
+    title: `${appName} ${version}`,
+    appName,
+    intro: `${appName} v${version}`,
+    runtime: 'browser',
+    version,
+    code: `metafile://zip-${suffix}`,
+    codeType: 'application/zip',
+    indexFile: 'index.html',
+    disabled: false,
+  });
+
+  // Mirrors bot-directory / cosset-li-space: the newest row is visible (status 0),
+  // older rows carry a negative status (revoked or superseded) and must not win.
+  const result = await listCommunityMetaApps({
+    manager: { listMetaApps: () => [] },
+    size: 30,
+    fetchList: async () => [
+      {
+        id: 'pin-old-revoked',
+        operation: 'create',
+        globalMetaId: 'idq1x',
+        status: -1,
+        timestamp: 1_000_000_100,
+        contentSummary: contentFor('mixed-app', '1.0.0', 'old'),
+      },
+      {
+        id: 'pin-current',
+        operation: 'create',
+        globalMetaId: 'idq1x',
+        status: 0,
+        timestamp: 1_000_000_200,
+        contentSummary: contentFor('mixed-app', '2.0.0', 'current'),
+      },
+    ],
+    fetchAuthorInfo: async () => null,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.apps.length, 1);
+  assert.equal(result.apps[0].sourcePinId, 'pin-current');
+  assert.equal(result.apps[0].version, '2.0.0');
+  assert.deepEqual(result.seen, ['idq1x::mixed-app']);
+});

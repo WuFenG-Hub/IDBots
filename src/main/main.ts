@@ -5812,12 +5812,13 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('metaapps:listCommunity', async (_event, input?: { cursor?: string; size?: number }) => {
+  ipcMain.handle('metaapps:listCommunity', async (_event, input?: { cursor?: string; size?: number; seen?: string[] }) => {
     try {
       const result = await listCommunityMetaApps({
         manager: getMetaAppManager(),
         cursor: input?.cursor,
         size: input?.size,
+        seen: input?.seen,
       });
       if (!result.success || !result.apps) {
         return result;
