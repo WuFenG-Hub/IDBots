@@ -66,6 +66,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     [dispatch],
   );
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
+  // Gate the empty-list selection reset below: the metabot list loads async,
+  // so without this flag every mount would clear the persisted New Task
+  // selection before the IPC resolves.
+  const [metabotsLoaded, setMetabotsLoaded] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const submitErrorSessionIdRef = useRef<string | null>(null);
   const activeSessionIdRef = useRef<string | null>(null);
@@ -135,6 +139,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       const { selectable, localCount } = await loadSelectableMetaBots();
       setMetabots(selectable);
       setLocalMetabotCount(localCount);
+      setMetabotsLoaded(true);
       if (selectable.length > 0) {
         const preferred = store.getState().cowork.preferredMetabotId;
         if (preferred != null && selectable.some((m) => m.id === preferred)) {
@@ -155,6 +160,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       if (cancelled) return;
       setMetabots(selectable);
       setLocalMetabotCount(localCount);
+      setMetabotsLoaded(true);
       if (selectable.some((m) => m.id === preferredMetabotId)) {
         setSelectedMetabotId(preferredMetabotId);
       }
@@ -165,6 +171,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   }, [preferredMetabotId, dispatch, loadSelectableMetaBots]);
 
   useEffect(() => {
+    if (!metabotsLoaded) return;
     if (metabots.length === 0) {
       setSelectedMetabotId(null);
       return;
@@ -174,7 +181,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     }
     const twin = metabots.find((metabot) => metabot.metabot_type === 'twin');
     setSelectedMetabotId(twin ? twin.id : metabots[0].id);
-  }, [metabots, selectedMetabotId, setSelectedMetabotId]);
+  }, [metabots, metabotsLoaded, selectedMetabotId, setSelectedMetabotId]);
 
   useEffect(() => {
     const id = selectedMetabotId;
