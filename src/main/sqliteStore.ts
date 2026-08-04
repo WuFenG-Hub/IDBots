@@ -1028,6 +1028,7 @@ export class SqliteStore {
         allow_chat_skills TEXT DEFAULT '[]',
         a2a_max_incoming_turns INTEGER,
         a2a_bye_cooldown_ms INTEGER,
+        a2a_auto_reply_enabled INTEGER,
         homepage TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -1565,6 +1566,7 @@ export class SqliteStore {
       const hasFallbackLlmId = columns.includes('fallback_llm_id');
       const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
       const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
+      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1597,7 +1599,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1636,6 +1638,7 @@ export class SqliteStore {
       const hasFallbackLlmId = columns.includes('fallback_llm_id');
       const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
       const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
+      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1668,7 +1671,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -1752,6 +1755,11 @@ export class SqliteStore {
       }
       if (!columns.includes('a2a_bye_cooldown_ms')) {
         this.db.run('ALTER TABLE metabots ADD COLUMN a2a_bye_cooldown_ms INTEGER');
+        columns = [...columns, 'a2a_bye_cooldown_ms'];
+        changed = true;
+      }
+      if (!columns.includes('a2a_auto_reply_enabled')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN a2a_auto_reply_enabled INTEGER');
         changed = true;
       }
       if (changed) {

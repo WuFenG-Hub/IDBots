@@ -97,6 +97,8 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
   const markup = renderTabsMarkup();
 
   const chatPanel = panelMarkup(markup, 'chatSettings');
+  assert.match(chatPanel, /data-slot="metabot-a2a-auto-reply-switch"/);
+  assert.match(chatPanel, /aria-checked="true"/);
   assert.match(chatPanel, /id="metabot-allow-chat-skills"/);
   assert.match(chatPanel, /id="metabot-a2a-max-turns"/);
   assert.match(chatPanel, /id="metabot-a2a-bye-cooldown"/);
@@ -110,7 +112,7 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
 test('tab field and sync group mappings pin each editable field to its tab', () => {
   assert.deepEqual(EDIT_TAB_FIELDS.basic, ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id']);
   assert.deepEqual(EDIT_TAB_FIELDS.persona, ['role', 'soul', 'goal']);
-  assert.deepEqual(EDIT_TAB_FIELDS.chatSettings, ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms']);
+  assert.deepEqual(EDIT_TAB_FIELDS.chatSettings, ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms', 'a2a_auto_reply_enabled']);
   assert.deepEqual(EDIT_TAB_FIELDS.advanced, ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin']);
 
   assert.deepEqual(EDIT_TAB_SYNC_GROUPS.basic, ['name', 'avatar', 'bio', 'owner', 'llm']);

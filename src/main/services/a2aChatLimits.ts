@@ -20,6 +20,19 @@ export const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [
 ];
 export const DEFAULT_A2A_BYE_COOLDOWN_MS = 300_000;
 
+/** Whether the MetaBot auto-replies in A2A private chats; stored column is NULL/1/0. */
+export const DEFAULT_A2A_AUTO_REPLY_ENABLED = true;
+
+/**
+ * Effective auto-reply flag. NULL/undefined means "use default" (on);
+ * accepts booleans and the 1/0 integer form stored in SQLite.
+ */
+export function normalizeA2AAutoReplyEnabled(value: unknown): boolean {
+  if (value === null || value === undefined) return DEFAULT_A2A_AUTO_REPLY_ENABLED;
+  if (typeof value === 'number') return value !== 0;
+  return Boolean(value);
+}
+
 export function normalizeA2AMaxIncomingTurns(value: unknown): number {
   const numeric = typeof value === 'number' ? value : Number(value);
   return A2A_MAX_INCOMING_TURNS_OPTIONS.includes(numeric) ? numeric : DEFAULT_A2A_MAX_INCOMING_TURNS;

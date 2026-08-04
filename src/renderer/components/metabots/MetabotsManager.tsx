@@ -10,6 +10,7 @@ import type { Skill } from '../../types/skill';
 import MetaBotEditTabs, {
   EDIT_TAB_FIELDS,
   EDIT_TAB_SYNC_GROUPS,
+  normalizeA2AAutoReplyEnabledOption,
   normalizeA2AByeCooldownMsOption,
   normalizeA2AMaxIncomingTurnsOption,
   type LlmOption,
@@ -97,6 +98,7 @@ const buildEditFormValues = (editMetabot: Metabot): MetaBotEditValues => ({
   allow_chat_skills: editMetabot.allow_chat_skills || [],
   a2a_max_incoming_turns: normalizeA2AMaxIncomingTurnsOption(editMetabot.a2a_max_incoming_turns),
   a2a_bye_cooldown_ms: normalizeA2AByeCooldownMsOption(editMetabot.a2a_bye_cooldown_ms),
+  a2a_auto_reply_enabled: normalizeA2AAutoReplyEnabledOption(editMetabot.a2a_auto_reply_enabled),
   homepage: editMetabot.homepage ?? null,
   homepage_initial: editMetabot.homepage ?? null,
   homepage_source: ((): MetaBotEditValues['homepage_source'] => {
@@ -347,6 +349,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextAllowChatSkills = normalizeAllowChatSkills(scopedValues.allow_chat_skills);
     const nextA2aMaxIncomingTurns = normalizeA2AMaxIncomingTurnsOption(scopedValues.a2a_max_incoming_turns);
     const nextA2aByeCooldownMs = normalizeA2AByeCooldownMsOption(scopedValues.a2a_bye_cooldown_ms);
+    const nextA2aAutoReplyEnabled = normalizeA2AAutoReplyEnabledOption(scopedValues.a2a_auto_reply_enabled);
     const nextHomepage = scopedValues.homepage ?? null;
 
     const oldName = (current.name || '').trim();
@@ -378,7 +381,8 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     // A2A chat limits are also local-only runtime knobs (never published on-chain).
     const a2aChatLimitsChanged =
       nextA2aMaxIncomingTurns !== normalizeA2AMaxIncomingTurnsOption(current.a2a_max_incoming_turns) ||
-      nextA2aByeCooldownMs !== normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms);
+      nextA2aByeCooldownMs !== normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms) ||
+      nextA2aAutoReplyEnabled !== normalizeA2AAutoReplyEnabledOption(current.a2a_auto_reply_enabled);
 
     const syncStepKeys: SyncStepKey[] = [];
     if (syncName) syncStepKeys.push('name');
@@ -413,6 +417,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       allow_chat_skills: nextAllowChatSkills,
       a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
       a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
+      a2a_auto_reply_enabled: nextA2aAutoReplyEnabled,
       homepage: nextHomepage,
     });
     if (!result.success) {
@@ -435,6 +440,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       allow_chat_skills: nextAllowChatSkills,
       a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
       a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
+      a2a_auto_reply_enabled: nextA2aAutoReplyEnabled,
       homepage: nextHomepage,
     };
     setList((prev) => prev.map((m) => (m.id === editId ? updatedMetabot : m)));

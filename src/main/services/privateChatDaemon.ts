@@ -90,6 +90,7 @@ import {
 import { ensureCoworkA2ASession } from './coworkEnsureA2ASession';
 import {
   deriveA2AClosingPhaseTurns,
+  normalizeA2AAutoReplyEnabled,
   normalizeA2AByeCooldownMs,
   normalizeA2AMaxIncomingTurns,
 } from './a2aChatLimits';
@@ -1386,6 +1387,7 @@ function matchesSenderIdentity(
 
 export type PrivateChatAutoReplyPolicyReason =
   | 'disabled_metabot'
+  | 'auto_reply_disabled'
   | 'owner'
   | 'respond_to_strangers_enabled'
   | 'prior_local_outbound'
@@ -1420,6 +1422,8 @@ export function isPrivateChatFromMetabotOwner(params: {
 export function evaluatePrivateChatAutoReplyPolicy(params: {
   metabot: {
     enabled?: boolean;
+    /** Per-MetaBot A2A auto-reply toggle; null/undefined = default (on). */
+    a2a_auto_reply_enabled?: boolean | null;
     boss_id?: number | null;
     boss_global_metaid?: string | null;
   };
@@ -1431,6 +1435,10 @@ export function evaluatePrivateChatAutoReplyPolicy(params: {
 }): { shouldReply: boolean; reason: PrivateChatAutoReplyPolicyReason } {
   if (params.metabot.enabled === false) {
     return { shouldReply: false, reason: 'disabled_metabot' };
+  }
+
+  if (!normalizeA2AAutoReplyEnabled(params.metabot.a2a_auto_reply_enabled)) {
+    return { shouldReply: false, reason: 'auto_reply_disabled' };
   }
 
   if (isPrivateChatFromMetabotOwner({
@@ -3731,7 +3739,7 @@ async function processOne(
     });
     if (!autoReplyPolicy.shouldReply) {
       emitLog(
-        `[PrivateChat] Stranger auto-reply disabled for ${fromGlobalMetaId.slice(0, 12)}…; skipping regular private chat.`
+        `[PrivateChat] Auto-reply skipped for ${fromGlobalMetaId.slice(0, 12)}… (reason: ${autoReplyPolicy.reason}).`
       );
       markProcessed(db, row.id, saveDb);
       return;

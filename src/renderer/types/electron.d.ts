@@ -395,6 +395,8 @@ interface Metabot {
   a2a_max_incoming_turns?: number | null;
   /** Cooldown after an auto-bye before the A2A conversation may reopen; null = app default. */
   a2a_bye_cooldown_ms?: number | null;
+  /** Whether this bot auto-replies in A2A private chats; null = default (on). */
+  a2a_auto_reply_enabled?: boolean | null;
   created_at: number;
   updated_at: number;
 }
@@ -433,6 +435,7 @@ interface MetabotUpdateInput {
   allow_chat_skills?: string[];
   a2a_max_incoming_turns?: number | null;
   a2a_bye_cooldown_ms?: number | null;
+  a2a_auto_reply_enabled?: boolean | null;
   homepage?: string | null;
 }
 
@@ -1012,6 +1015,7 @@ interface IElectronAPI {
       allow_chat_skills?: string[];
       a2a_max_incoming_turns?: number | null;
       a2a_bye_cooldown_ms?: number | null;
+      a2a_auto_reply_enabled?: boolean | null;
       metabot_type?: 'twin' | 'worker';
       homepage?: string | null;
     }) => Promise<{

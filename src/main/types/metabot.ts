@@ -50,6 +50,8 @@ export interface Metabot {
   a2a_max_incoming_turns?: number | null;
   /** Cooldown after an auto-bye before the A2A conversation may reopen; null = default. */
   a2a_bye_cooldown_ms?: number | null;
+  /** Whether this bot auto-replies in A2A private chats; null = default (on). */
+  a2a_auto_reply_enabled?: boolean | null;
   /** Homepage pointer JSON string (serialized {uri,renderer,contentType}); null = Default template. */
   homepage: string | null;
   created_at: number;
@@ -128,6 +130,8 @@ export interface MetabotUpdate {
   a2a_max_incoming_turns?: number | null;
   /** Cooldown after an auto-bye before the A2A conversation may reopen; null/undefined = default. */
   a2a_bye_cooldown_ms?: number | null;
+  /** Whether this bot auto-replies in A2A private chats; null/undefined = default (on). */
+  a2a_auto_reply_enabled?: boolean | null;
   /** Homepage pointer JSON string; null = Default. */
   homepage?: string | null;
 }

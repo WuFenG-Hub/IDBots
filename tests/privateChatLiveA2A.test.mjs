@@ -66,6 +66,7 @@ try {
 const {
   normalizeA2AMaxIncomingTurns,
   normalizeA2AByeCooldownMs,
+  normalizeA2AAutoReplyEnabled,
   deriveA2AClosingPhaseTurns,
 } = a2aChatLimits;
 
@@ -988,4 +989,71 @@ test('auto-bye cooldown honors per-bot reopen gap override', () => {
     shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, now: endedAt + 5 * 60_000 + 1_000, reopenGapMs: 123 }),
     false,
   );
+});
+
+
+test('per-bot A2A auto-reply toggle blocks auto-reply when turned off', () => {
+  const base = {
+    metabot: {
+      enabled: true,
+      boss_id: 42,
+      boss_global_metaid: null,
+      globalmetaid: 'local-global',
+      metaid: 'local-meta',
+    },
+    senderGlobalMetaId: 'boss-global',
+    senderMetaId: 'boss-meta',
+    listenerConfig: {
+      enabled: true,
+      groupChats: false,
+      privateChats: true,
+      serviceRequests: false,
+      respondToStrangerPrivateChats: true,
+    },
+    metabotStore: {
+      getMetabotById(id) {
+        assert.equal(id, 42);
+        return { globalmetaid: 'boss-global', metaid: 'boss-meta' };
+      },
+    },
+    hasPriorLocalOutbound: true,
+  };
+
+  // Off blocks auto-reply even for the owner.
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: false },
+    }),
+    { shouldReply: false, reason: 'auto_reply_disabled' },
+  );
+  // On (explicit or default) keeps the existing owner behavior.
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: true },
+    }),
+    { shouldReply: true, reason: 'owner' },
+  );
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy(base),
+    { shouldReply: true, reason: 'owner' },
+  );
+  // NULL stored value means default (on).
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: null },
+    }),
+    { shouldReply: true, reason: 'owner' },
+  );
+});
+
+test('a2a auto-reply normalizer treats null/undefined as default on and 0 as off', () => {
+  assert.equal(normalizeA2AAutoReplyEnabled(undefined), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(null), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(1), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(0), false);
+  assert.equal(normalizeA2AAutoReplyEnabled(true), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(false), false);
 });
