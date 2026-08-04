@@ -303,11 +303,12 @@ test('listGroupChatMessages: ordering, paging with beforeId, column set', async 
     const keys = Object.keys(all[0]).sort();
     assert.deepEqual(keys, [
       'chainTimestamp', 'content', 'contentType', 'id', 'msgIndex',
-      'pinId', 'replyPin', 'senderAvatar', 'senderGlobalMetaId', 'senderName',
+      'pinId', 'replyPin', 'senderAvatar', 'senderGlobalMetaId', 'senderName', 'txId',
     ]);
     assert.equal(all[0].msgIndex, 1);
     assert.equal(all[0].replyPin, 'pin-parent');
     assert.equal(all[0].senderAvatar, 'ava');
+    assert.equal(all[0].txId, 'm1');
 
     // limit: the LATEST page (chat semantics), still ascending
     const lastTwo = groupTaskStore.listGroupChatMessages('g1', { limit: 2 });

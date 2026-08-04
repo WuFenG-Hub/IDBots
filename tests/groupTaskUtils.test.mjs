@@ -49,7 +49,7 @@ test('groupTaskStatusBadgeClass: every known status has a class, unknown falls b
   assert.equal(groupTaskStatusBadgeClass('nope'), groupTaskStatusBadgeClass('cancelled'));
 });
 
-test('formatGroupTaskTime: sqlite UTC text, ms epoch, null/garbage', () => {
+test('formatGroupTaskTime: sqlite UTC text, ms epoch, seconds epoch, null/garbage', () => {
   // sqlite datetime('now') text is UTC without a marker
   const fromText = formatGroupTaskTime('2026-08-04 10:00:00');
   assert.ok(fromText.length > 0);
@@ -57,6 +57,11 @@ test('formatGroupTaskTime: sqlite UTC text, ms epoch, null/garbage', () => {
 
   const fromEpoch = formatGroupTaskTime(1785000000000);
   assert.ok(fromEpoch.length > 0);
+
+  // on-chain chain_timestamp is in SECONDS — must not render as 1970
+  const fromSeconds = formatGroupTaskTime(1785000000);
+  assert.equal(fromSeconds, formatGroupTaskTime(1785000000 * 1000));
+  assert.ok(!fromSeconds.includes('1970'));
 
   assert.equal(formatGroupTaskTime(null), '');
   assert.equal(formatGroupTaskTime(''), '');
