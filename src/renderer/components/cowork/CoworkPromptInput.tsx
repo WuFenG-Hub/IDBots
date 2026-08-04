@@ -3,6 +3,7 @@ import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { PaperClipIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import ModelSelector from '../ModelSelector';
+import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
 import { SkillsButton, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
@@ -11,6 +12,7 @@ import { RootState } from '../../store';
 import { setDraftPrompt } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
+import type { CoworkContextUsage } from '../../types/cowork';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -101,6 +103,8 @@ interface CoworkPromptInputProps {
   showAttachmentButton?: boolean;
   /** When set, restrict model choices to this LLM provider (e.g. from MetaBot llm_id). */
   restrictToLlmId?: string | null;
+  /** Estimated context-window usage of the current conversation; shows a ring indicator when provided. */
+  contextUsage?: CoworkContextUsage | null;
   onManageSkills?: () => void;
 }
 
@@ -121,6 +125,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       showModelSelector = false,
       showAttachmentButton = true,
       restrictToLlmId,
+      contextUsage,
       onManageSkills,
     } = props;
     const dispatch = useDispatch();
@@ -634,6 +639,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                 <ActiveSkillBadge />
               </fieldset>
               <div className="flex items-center gap-2">
+                {contextUsage && (
+                  <ContextUsageRing
+                    usedTokens={contextUsage.usedTokens}
+                    contextWindow={contextUsage.contextWindow}
+                  />
+                )}
                 {showStopButton ? (
                   <button
                     type="button"

@@ -10,6 +10,7 @@ import type {
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
+import ContextUsageRing from '../ContextUsageRing';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -3179,6 +3180,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 onEndConversation={handleEndA2APrivateChat}
               />
             )}
+            {currentSession.contextUsage && (
+              <div className="flex items-center justify-end">
+                <ContextUsageRing
+                  usedTokens={currentSession.contextUsage.usedTokens}
+                  contextWindow={currentSession.contextUsage.contextWindow}
+                />
+              </div>
+            )}
           </div>
         </div>
       ) : (
@@ -3210,6 +3219,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               size="large"
               showModelSelector={true}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
+              contextUsage={currentSession.contextUsage}
             />
             {isStreaming && (
               <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">

@@ -27,8 +27,9 @@ import {
 import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { getCurrentApiConfig, resolveCurrentApiConfig, setStoreGetter } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter } from './libs/claudeSettings';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
+import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
 import { generateSessionTitle } from './libs/coworkUtil';
 import { ensureSandboxReady, getSandboxStatus, onSandboxProgress } from './libs/coworkSandboxRuntime';
@@ -6807,7 +6808,22 @@ if (!gotTheLock) {
         if (session?.sessionType === 'a2a') {
           scheduleA2APeerProfileRefresh(session.id);
         }
-        return { success: true, session };
+        if (!session) {
+          return { success: true, session };
+        }
+        // Attach a freshly estimated context-window usage for the conversation
+        // header widgets. Informational only — never break session loading.
+        let contextUsage = null;
+        try {
+          contextUsage = computeCoworkContextUsage({
+            messages: session.messages ?? [],
+            systemPrompt: session.systemPrompt,
+            modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+          });
+        } catch {
+          contextUsage = null;
+        }
+        return { success: true, session: { ...session, contextUsage } };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {
