@@ -5,7 +5,7 @@ import { coworkService } from '../services/cowork';
 import { i18nService } from '../services/i18n';
 import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
-import { MagnifyingGlassIcon, PlusIcon, PuzzlePieceIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, PlusIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
@@ -128,10 +128,6 @@ const Sidebar: React.FC<SidebarProps> = ({
       onShowMetaApps();
       return;
     }
-    if (itemId === 'skills') {
-      onShowSkills();
-      return;
-    }
     if (itemId === 'metabots') {
       onShowMetabots();
     }
@@ -141,7 +137,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (icon === 'clock') return <ClockIcon className="h-4 w-4" />;
     if (icon === 'shoppingBag') return <ShoppingBagIcon className="h-4 w-4 shrink-0" />;
     if (icon === 'squares2x2') return <MagnifyingGlassIcon className="h-4 w-4 opacity-0 absolute pointer-events-none" />;
-    if (icon === 'puzzlePiece') return <PuzzlePieceIcon className="h-4 w-4" />;
     return <CpuChipIcon className="h-4 w-4" />;
   };
 
@@ -313,23 +308,23 @@ const Sidebar: React.FC<SidebarProps> = ({
         onRenameSession={handleRenameSession}
       />
       <div className="px-3 pb-3 pt-1">
-        <div className="mb-1">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => onShowSettings()}
+            className="inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+            aria-label={i18nService.t('settings')}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
+              <path d="M14 17H5" />
+              <path d="M19 7h-9" />
+              <circle cx="17" cy="17" r="3" />
+              <circle cx="7" cy="7" r="3" />
+            </svg>
+            {i18nService.t('settings')}
+          </button>
           <P2PStatusBadge />
         </div>
-        <button
-          type="button"
-          onClick={() => onShowSettings()}
-          className="w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-          aria-label={i18nService.t('settings')}
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-            <path d="M14 17H5" />
-            <path d="M19 7h-9" />
-            <circle cx="17" cy="17" r="3" />
-            <circle cx="7" cy="7" r="3" />
-          </svg>
-          {i18nService.t('settings')}
-        </button>
       </div>
     </aside>
   );

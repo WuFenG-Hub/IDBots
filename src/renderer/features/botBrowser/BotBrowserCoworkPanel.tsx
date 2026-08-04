@@ -104,9 +104,11 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     void (async () => {
       const result = await window.electron?.metabot?.list?.();
       if (cancelled || !result?.success || !result.list) return;
-      const selectable = result.list.filter(
-        (metabot) => metabot.enabled && typeof metabot.llm_id === 'string' && metabot.llm_id.trim()
-      );
+      const selectable = result.list
+        .filter(
+          (metabot) => metabot.enabled && typeof metabot.llm_id === 'string' && metabot.llm_id.trim()
+        )
+        .sort((a, b) => a.id - b.id);
       setMetabots(selectable);
     })();
     return () => {
@@ -239,7 +241,7 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
             />
           </div>
         ) : null}
-        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} />
+        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} compact />
         <button
           type="button"
           onClick={() => void handleAddFile()}

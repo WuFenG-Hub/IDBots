@@ -13,11 +13,6 @@ export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
       badge: t('gigSquareAlphaBadge'),
     },
     {
-      id: 'skills',
-      label: t('skills'),
-      icon: 'puzzlePiece',
-    },
-    {
       id: 'metaapps',
       label: t('metaApps'),
       icon: 'squares2x2',
