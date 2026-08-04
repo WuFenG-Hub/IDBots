@@ -46,6 +46,8 @@ export interface CommunityMetaAppRecord {
 export interface CommunityMetaAppListParams {
   cursor?: string;
   size?: number;
+  /** App identity keys already shown on earlier pages; stale versions are skipped. */
+  seen?: string[];
 }
 
 export interface MetaAppUrlResult {
@@ -60,6 +62,8 @@ export interface CommunityMetaAppListResult {
   success: boolean;
   apps?: CommunityMetaAppRecord[];
   nextCursor?: string | null;
+  /** Full seen-set for the requested cursor after this page; persist for navigation. */
+  seen?: string[];
   error?: string;
 }
 

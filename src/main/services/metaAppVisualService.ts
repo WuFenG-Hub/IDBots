@@ -123,7 +123,14 @@ const resolveRemoteAssetUrl = (value?: string): string | undefined => {
     return `${METAFILE_ACCELERATE_CONTENT_API_BASE_URL}${encodeURIComponent(pinId)}`;
   }
 
-  return normalizeMetaAppVisualFallback(normalized);
+  // Only absolute references can render directly in the renderer. Relative
+  // indexer paths such as "/content/" (an avatar field with no pin) and other
+  // unresolved values must not leak through as broken <img> sources.
+  if (normalized.startsWith('data:') || /^https?:\/\//i.test(normalized)) {
+    return normalizeMetaAppVisualFallback(normalized);
+  }
+
+  return undefined;
 };
 
 const resolveLocalOrPinnedVisualSource = async (
