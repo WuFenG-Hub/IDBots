@@ -141,6 +141,31 @@ test('Update badge shows non-intrusive download progress with resume label', () 
   assert.match(modal, /from '\.\/format'/);
 });
 
+test('Update badge shows a hover panel with the changelog in the current UI language', () => {
+  const badge = read('src/renderer/components/update/AppUpdateBadge.tsx');
+  const panel = read('src/renderer/components/update/UpdateChangeLogPanel.tsx');
+  const app = read('src/renderer/App.tsx');
+
+  // Badge accepts a hover panel and toggles it via mouse enter/leave; panel is
+  // fixed-positioned (Sidebar clips overflow) and hidden on click.
+  assert.match(badge, /hoverPanel\?: React\.ReactNode;/);
+  assert.match(badge, /onMouseEnter=\{showPanel\}/);
+  assert.match(badge, /onMouseLeave=\{hidePanel\}/);
+  assert.match(badge, /panelPos && hoverPanel/);
+  assert.match(badge, /fixed z-50 rounded-xl border/);
+  assert.match(badge, /dark:bg-claude-darkSurface bg-claude-surface shadow-lg/);
+  // Panel content: reuse of the modal info-state styles (surface tokens + accent dots)
+  assert.match(panel, /dark:text-claude-darkText text-claude-text/);
+  assert.match(panel, /bg-claude-accent\/60/);
+  assert.match(panel, /max-h-64 overflow-y-auto/);
+  assert.match(panel, /changeLog\.content\.map/);
+  // App resolves the changelog by current UI language with cross-language fallback
+  assert.match(app, /const lang = i18nService\.getLanguage\(\);/);
+  assert.match(app, /const preferred = lang === 'zh' \? zh : en;/);
+  assert.match(app, /<UpdateChangeLogPanel/);
+  assert.match(app, /hoverPanel=\{updateChangeLog \?/);
+});
+
 test('Update modal supports restart state and ready-to-install copy', () => {
   const source = read('src/renderer/components/update/AppUpdateModal.tsx');
 

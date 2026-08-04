@@ -18,7 +18,7 @@ import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
 import { scheduledTaskService } from './services/scheduledTask';
-import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
+import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
@@ -31,6 +31,7 @@ import { i18nService } from './services/i18n';
 import { matchesShortcut } from './services/shortcuts';
 import { metaAppService } from './services/metaApp';
 import AppUpdateBadge from './components/update/AppUpdateBadge';
+import UpdateChangeLogPanel from './components/update/UpdateChangeLogPanel';
 import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
 import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
@@ -903,6 +904,19 @@ const App: React.FC = () => {
   }, [pendingPermission, handlePermissionResponse]);
 
   const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
+  // 按当前 UI 语言解析更新说明（该语言无内容时回退到另一种语言），用于悬停徽章时展示
+  const isEmptyChangeLog = (log?: ChangeLogEntry): boolean => !log?.title && !(log?.content?.length > 0);
+  const updateChangeLog: ChangeLogEntry | null = (() => {
+    if (!updateInfo) return null;
+    const lang = i18nService.getLanguage();
+    const zh = updateInfo.changeLog.zh;
+    const en = updateInfo.changeLog.en;
+    const preferred = lang === 'zh' ? zh : en;
+    if (!isEmptyChangeLog(preferred)) return preferred;
+    if (!isEmptyChangeLog(zh)) return zh;
+    if (!isEmptyChangeLog(en)) return en;
+    return null;
+  })();
   // 静默下载中显示带进度的徽章（非打扰式后台状态）；静默替换中隐藏；就绪/待重启时显示徽章；
   // 静默下载失败时以警示色显示，提示将自动重试
   const updateBadge = updateInfo && updatePhase !== 'applying' ? (
@@ -918,6 +932,13 @@ const App: React.FC = () => {
       tone={silentDownloadFailed ? 'error' : undefined}
       progress={updatePhase === 'downloading' ? downloadProgress : null}
       onClick={handleOpenUpdateModal}
+      hoverPanel={updateChangeLog ? (
+        <UpdateChangeLogPanel
+          version={updateInfo.latestVersion}
+          date={updateInfo.date}
+          changeLog={updateChangeLog}
+        />
+      ) : undefined}
     />
   ) : null;
   const windowsStandaloneTitleBar = isWindows ? (
