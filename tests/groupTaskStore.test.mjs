@@ -119,8 +119,8 @@ test('state machine: legal transitions, illegal transitions throw, terminal lock
       groupId: 'group-sm', title: 'SM', goal: 'Goal', chairMetabotId: 1, createdBy: 'user',
     });
 
-    // planning -> done is illegal (must go through executing/review)
-    assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'done'), /Illegal/);
+    // planning -> review is illegal (chair flow must go through executing)
+    assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'review'), /Illegal/);
     // planning -> executing -> review -> done is legal
     assert.equal(groupTaskStore.updateTaskStatus(task.id, 'executing').status, 'executing');
     // executing -> planning is illegal
@@ -135,6 +135,17 @@ test('state machine: legal transitions, illegal transitions throw, terminal lock
     // terminal lock: done -> cancelled is illegal
     assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'cancelled'), /Illegal/);
     assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'executing'), /Illegal/);
+
+    // owner acceptance may shortcut: planning -> done and executing -> done are legal
+    const taskShortcut1 = groupTaskStore.createTask({
+      groupId: 'group-sm4', title: 'SM4', goal: 'Goal', chairMetabotId: 1, createdBy: 'user',
+    });
+    assert.equal(groupTaskStore.updateTaskStatus(taskShortcut1.id, 'done').status, 'done');
+    const taskShortcut2 = groupTaskStore.createTask({
+      groupId: 'group-sm5', title: 'SM5', goal: 'Goal', chairMetabotId: 1, createdBy: 'user',
+    });
+    groupTaskStore.updateTaskStatus(taskShortcut2.id, 'executing');
+    assert.equal(groupTaskStore.updateTaskStatus(taskShortcut2.id, 'done').status, 'done');
 
     // -> cancelled from any non-terminal state
     const task2 = groupTaskStore.createTask({
