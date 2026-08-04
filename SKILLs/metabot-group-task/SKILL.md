@@ -24,6 +24,7 @@ Every payload carries an `action`:
 
 | `action` | Purpose | RPC endpoint (script forwards) |
 | -------- | ------- | ------------------------------ |
+| `bots` | List local MetaBots with profiles (planning input) | `POST /api/idbots/list-metabots` |
 | `create` | Create group + task, join members, chair posts kickoff | `POST /api/idbots/group-task/create` |
 | `list` | List tasks (optionally by status) | `POST /api/idbots/group-task/list` |
 | `show` | Task detail incl. members + deliverables | `POST /api/idbots/group-task/show` |
@@ -31,11 +32,20 @@ Every payload carries an `action`:
 | `invite` | Add a local bot to an existing task | `POST /api/idbots/group-task/invite` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
-On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1.
+On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1. (`bots` prints a readable roster instead.)
 
 ## When to create a group task
 
 Create one when the user expresses a **wish-style complex goal** that clearly needs multiple bots with different skills to coordinate (research + build + publish, multi-step content production, etc.). Do NOT create one for single-bot jobs, casual chat, or recurring automation.
+
+## Wish-to-task workflow (follow in order)
+
+1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
+2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
+3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes).
+4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
+5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
+6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
 
 ## Chair identity (important)
 

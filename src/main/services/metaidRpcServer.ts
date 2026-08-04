@@ -35,6 +35,7 @@ import {
   joinGroupTaskMember,
   closeGroupTask,
 } from './groupTaskService';
+import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from './feeRateStore';
@@ -80,6 +81,7 @@ const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
+const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
 export type BotBrowserRpcOpenRequest = {
@@ -1417,6 +1419,19 @@ export function startMetaidRpcServer(
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === LIST_METABOTS_PATH) {
+      try {
+        const metabots = buildMetabotDirectory(getMetabotStore());
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, metabots }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

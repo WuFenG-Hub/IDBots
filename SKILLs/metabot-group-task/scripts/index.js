@@ -24,6 +24,7 @@ const ACTION_PATHS = {
   send: '/api/idbots/group-task/send',
   invite: '/api/idbots/group-task/invite',
   close: '/api/idbots/group-task/close',
+  bots: '/api/idbots/list-metabots',
 };
 
 function fail(message) {
@@ -76,6 +77,10 @@ async function main() {
 
   let body;
   switch (action) {
+    case 'bots': {
+      body = {};
+      break;
+    }
     case 'create': {
       const title = String(params.title ?? '').trim();
       const goal = String(params.goal ?? '').trim();
@@ -147,6 +152,23 @@ async function main() {
   }
 
   const result = await postJson(path, body);
+
+  if (action === 'bots') {
+    const metabots = Array.isArray(result.metabots) ? result.metabots : [];
+    if (metabots.length === 0) {
+      console.log('(no local MetaBots)');
+      return;
+    }
+    for (const bot of metabots) {
+      const headline = [bot.role, bot.bio].filter(Boolean).join(' — ');
+      const status = bot.enabled ? 'enabled' : 'disabled';
+      console.log(`- ${bot.name} [${bot.metabot_type}] ${status} (id=${bot.id})`);
+      if (headline) console.log(`  ${headline}`);
+      if (bot.goal) console.log(`  Goal: ${bot.goal}`);
+    }
+    return;
+  }
+
   console.log(JSON.stringify(result, null, 2));
 }
 
