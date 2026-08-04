@@ -15,6 +15,13 @@ export interface CoworkContextUsageInput {
   messages: Array<Pick<CoworkMessage, 'type' | 'content' | 'metadata'>>;
   systemPrompt?: string;
   modelLimits: Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>;
+  /**
+   * When set, only the most recent N messages are counted. A2A private chats
+   * rebuild the model context every turn from only the latest segment messages
+   * (see PRIVATE_CHAT_CONTEXT_MAX_MESSAGES), so their usage estimate must be
+   * capped the same way instead of counting the full session history.
+   */
+  maxRecentMessages?: number;
 }
 
 /**
@@ -24,8 +31,12 @@ export interface CoworkContextUsageInput {
  */
 export function computeCoworkContextUsage(input: CoworkContextUsageInput): CoworkContextUsage {
   const contextWindow = Math.max(0, Math.floor(input.modelLimits.contextWindow));
+  const maxRecentMessages = input.maxRecentMessages;
+  const messages = Number.isFinite(maxRecentMessages) && (maxRecentMessages as number) > 0
+    ? input.messages.slice(-Math.floor(maxRecentMessages as number))
+    : input.messages;
   const budget = getCoworkContextBudget({
-    messages: input.messages,
+    messages,
     systemPrompt: input.systemPrompt,
     modelLimits: input.modelLimits,
   });

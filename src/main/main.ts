@@ -98,6 +98,7 @@ import { startOrchestrator as startCognitiveOrchestrator, stopOrchestrator as st
 import {
   endPrivateChatA2AConversation,
   interruptPrivateChatA2AGuidanceTurnBeforeOutput,
+  PRIVATE_CHAT_CONTEXT_MAX_MESSAGES,
   recordOutgoingPrivateChatA2ADisplay,
   startPrivateChatDaemon,
   stopPrivateChatDaemon,
@@ -6819,6 +6820,12 @@ if (!gotTheLock) {
             messages: session.messages ?? [],
             systemPrompt: session.systemPrompt,
             modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+            // A2A private chats rebuild the model context every turn from only
+            // the latest segment messages; cap the estimate the same way so the
+            // ring reflects real per-turn usage instead of full history.
+            maxRecentMessages: session.sessionType === 'a2a'
+              ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
+              : undefined,
           });
         } catch {
           contextUsage = null;

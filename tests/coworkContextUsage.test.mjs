@@ -67,3 +67,30 @@ test('computeCoworkContextUsage skips thinking/system messages and counts system
   // A zero context window must never produce a NaN/Infinity ratio.
   assert.equal(usage.usageRatio, 0);
 });
+
+test('computeCoworkContextUsage counts only the most recent N messages when capped', async () => {
+  const {
+    computeCoworkContextUsage,
+  } = await import('../dist-electron/main/libs/coworkContextUsage.js');
+
+  // 100 messages of 400 ascii chars each -> 100 tokens + 4 frame tokens each.
+  const messages = Array.from({ length: 100 }, (_, index) => ({
+    id: `user-${index}`,
+    type: 'user',
+    content: 'a'.repeat(400),
+    timestamp: index + 1,
+  }));
+
+  const capped = computeCoworkContextUsage({
+    messages,
+    modelLimits: { contextWindow: 128_000, maxOutputTokens: 8_192 },
+    maxRecentMessages: 80,
+  });
+  assert.equal(capped.usedTokens, 80 * 104);
+
+  const uncapped = computeCoworkContextUsage({
+    messages,
+    modelLimits: { contextWindow: 128_000, maxOutputTokens: 8_192 },
+  });
+  assert.equal(uncapped.usedTokens, 100 * 104);
+});
