@@ -31,6 +31,7 @@ const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
+const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 
 Module._load = originalLoad;
 
@@ -77,17 +78,17 @@ const insertWallet = (db, id) => {
   );
 };
 
-const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid = null, bossGmid = null, llmId = null, allowChatSkills = [] }) => {
+const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid = null, bossGmid = null, llmId = null, allowChatSkills = [], bio = null, goal = null }) => {
   db.run(
     `INSERT INTO metabots (
       id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
       name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
-      boss_global_metaid, llm_id, allow_chat_skills, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      boss_global_metaid, llm_id, allow_chat_skills, bio, goal, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
       name, 1, `metaid-${id}`, globalmetaid, type, '0000', `${name} role`, `${name} soul`,
-      bossGmid, llmId, JSON.stringify(allowChatSkills), 1700000000000 + id, 1700000000000 + id,
+      bossGmid, llmId, JSON.stringify(allowChatSkills), bio, goal, 1700000000000 + id, 1700000000000 + id,
     ]
   );
 };
@@ -113,9 +114,9 @@ const createHarness = async (overrides = {}) => {
   const coworkStore = new CoworkStore(db, () => {});
 
   insertWallet(db, 1);
-  insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin', bossGmid: BOSS_GMID, llmId: 'llm-1' });
-  insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', globalmetaid: 'gmid-w2', llmId: 'llm-2', allowChatSkills: overrides.coderChatSkills ?? [] });
-  insertMetabot(db, { id: 3, walletId: 1, name: 'Designer Bot', globalmetaid: 'gmid-w3', llmId: 'llm-3' });
+  insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin', bossGmid: BOSS_GMID, llmId: 'llm-1', bio: 'Coordinates the team', goal: 'Ship group tasks' });
+  insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', globalmetaid: 'gmid-w2', llmId: 'llm-2', allowChatSkills: overrides.coderChatSkills ?? [], bio: 'Search and code specialist' });
+  insertMetabot(db, { id: 3, walletId: 1, name: 'Designer Bot', globalmetaid: 'gmid-w3', llmId: 'llm-3', bio: 'Visual design' });
   insertMetabot(db, { id: 4, walletId: 1, name: 'Reviewer Bot', globalmetaid: 'gmid-w4', llmId: 'llm-4' });
 
   const chatCalls = [];
@@ -126,6 +127,7 @@ const createHarness = async (overrides = {}) => {
   const state = {
     nowMs: 1_000_000_000_000,
     chatError: overrides.chatError ?? null,
+    chatErrorAlways: overrides.chatErrorAlways ?? null,
     routing: overrides.routing ?? null,
     chatReply: overrides.chatReply ?? null,
     skillReply: overrides.skillReply ?? null,
@@ -139,6 +141,9 @@ const createHarness = async (overrides = {}) => {
     getCoworkStore: () => coworkStore,
     performChat: async (systemPrompt, userMessage, llmId) => {
       chatCalls.push({ systemPrompt, userMessage, llmId });
+      if (state.chatErrorAlways) {
+        throw new Error(state.chatErrorAlways);
+      }
       if (state.chatError && !seenChatErrors.has(state.chatError)) {
         seenChatErrors.add(state.chatError);
         throw new Error(state.chatError);
@@ -832,4 +837,151 @@ test('[NO_REPLY] also applies on the skill-turn path', async () => {
   } finally {
     h.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// Chair planning turn, chair trust, and roster profiles
+// ---------------------------------------------------------------------------
+
+test('chair planning turn: fires once for a new planning task (kv, directive, roster profiles)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+
+    assert.deepEqual(h.sends.map((s) => s.metabotId), [1], 'chair posted exactly one plan');
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'planning fires exactly once');
+
+    const planningCall = h.chatCalls[0];
+    assert.equal(planningCall.llmId, 'llm-1');
+    assert.match(planningCall.userMessage, /SYSTEM planning directive/);
+    assert.match(planningCall.userMessage, /recent group log/);
+    assert.match(planningCall.userMessage, /\[STATUS:EXECUTING\]/);
+    assert.match(planningCall.systemPrompt, /Roster profiles/);
+    assert.match(planningCall.systemPrompt, /Search and code specialist/);
+
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
+    assert.ok(mapping, 'chair session on the metaweb_group_task channel');
+    assert.deepEqual(
+      h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.type),
+      ['user', 'assistant'],
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: not attempted for executing tasks', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.chatCalls.length, 0);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: failures retry up to 3 attempts then give up', async () => {
+  const h = await createHarness({ chatErrorAlways: 'llm offline' });
+  try {
+    const task = h.createTask([2], { activate: false });
+    for (let i = 0; i < 5; i++) {
+      await h.loop.runTick();
+    }
+    assert.equal(h.chatCalls.length, 3, 'three attempts, then silent');
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 3);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined);
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: [NO_REPLY] plan counts as a failed attempt', async () => {
+  const h = await createHarness({ chatReply: '[NO_REPLY]' });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 1);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined);
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair planning turn: posted plan flips status via [STATUS:EXECUTING] on round-trip', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research first, then hand off. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0].content, /\[STATUS:EXECUTING\]/);
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status, 'planning',
+      'status flips only when the plan round-trips through the listener',
+    );
+
+    insertGroupMessage(h.db, {
+      pinId: 'plan-roundtrip-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: h.sends[0].content,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    assert.ok(h.events.some((e) => e.status === 'executing'), 'transition event fired');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair trust: worker responding to a chair-sender message gets allowAllEnabled', async () => {
+  const h = await createHarness({
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+  });
+  try {
+    h.createTask([2]); // executing; chair is gmid-twin
+    insertGroupMessage(h.db, {
+      pinId: 'chair-assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot research the topic now',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.routingCalls.length, 1);
+    assert.equal(h.routingCalls[0].allowAllEnabled, true, 'chair assignments unlock the full skill set');
+    assert.equal(h.skillTurnCalls.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('prompts: roster profiles include bio/role/goal with the length cap', () => {
+  const longBio = `bio-start ${'x'.repeat(500)} bio-end`;
+  const prompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members: [
+      { name: 'Twin Bot', role: 'chair', bio: 'Chief of staff', roleProfile: 'Coordinator', goal: 'Ship tasks' },
+      { name: 'Coder Bot', role: 'worker', bio: longBio, roleProfile: null, goal: null },
+      { name: 'Ghost Bot', role: 'worker' },
+    ],
+    botRole: 'chair',
+  });
+
+  assert.match(prompt, /## Roster profiles/);
+  assert.match(prompt, /- Twin Bot \(chair\) — Role: Coordinator; Bio: Chief of staff; Goal: Ship tasks/);
+  assert.match(prompt, /- Coder Bot \(worker\) — Bio: bio-start/);
+  assert.ok(!prompt.includes('bio-end'), 'bio is capped before its tail');
+  assert.ok(!/Ghost Bot \(worker\) —/.test(prompt), 'profile-less member gets no profile line');
+
+  const bioLine = prompt.split('\n').find((line) => line.startsWith('- Coder Bot (worker) — Bio:'));
+  const renderedBio = bioLine.replace('- Coder Bot (worker) — Bio: ', '');
+  assert.ok(renderedBio.length <= 200, `bio capped at 200 chars (got ${renderedBio.length})`);
 });

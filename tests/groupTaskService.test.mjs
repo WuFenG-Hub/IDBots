@@ -342,15 +342,17 @@ test('closeGroupTask: state machine transitions and terminal lock', async () => 
   try {
     const detail = await createGroupTask({ title: 'T', goal: 'G', createdBy: 'user' });
 
-    // planning -> done is illegal through close too
-    await assert.rejects(closeGroupTask(detail.id, { status: 'done' }), /Illegal/);
+    // owner accept-close shortcut: planning -> done is legal by design
+    const done = await closeGroupTask(detail.id, { status: 'done', reason: 'goal met' });
+    assert.equal(done.status, 'done');
+    assert.ok(done.closedAt);
 
-    const cancelled = await closeGroupTask(detail.id, { status: 'cancelled', reason: 'user stopped' });
-    assert.equal(cancelled.status, 'cancelled');
-    assert.ok(cancelled.closedAt);
+    // same-status close is a no-op by design (updateTaskStatus early-returns)
+    const noop = await closeGroupTask(detail.id, { status: 'done' });
+    assert.equal(noop.status, 'done');
 
-    // already terminal: any further close throws
-    await assert.rejects(closeGroupTask(detail.id, { status: 'done' }), /Illegal/);
+    // already terminal: transitioning anywhere else throws
+    await assert.rejects(closeGroupTask(detail.id, { status: 'cancelled' }), /Illegal/);
     await assert.rejects(closeGroupTask(9999, { status: 'done' }), /not found/);
     await assert.rejects(closeGroupTask(detail.id, { status: 'executing' }), /done.*cancelled/);
   } finally {

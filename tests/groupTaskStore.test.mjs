@@ -326,3 +326,55 @@ test('listGroupChatMessages: ordering, paging with beforeId, column set', async 
     store.close();
   }
 });
+
+test('buildMetabotDirectory: sanitized roster with profiles, disabled bots included', async () => {
+  const tempDir = makeTempDir();
+  const { store, db } = await openStores(tempDir);
+  try {
+    const { buildMetabotDirectory } = require('../dist-electron/main/services/metabotDirectoryService.js');
+    insertWallet(db, 1);
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+        name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul, bio, goal,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [1, 1, 'mvc-1', 'btc-1', 'doge-1', 'pub-1', 'chat-1', 'Twin Bot', 1, 'metaid-1', 'gmid-twin',
+        'twin', '0000', '  Coordinator  ', 'soul-1', '  Chief of staff  ', ' Ship things ', 1, 1],
+    );
+    db.run(
+      `INSERT INTO metabots (
+        id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+        name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul, bio, goal,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [2, 1, 'mvc-2', 'btc-2', 'doge-2', 'pub-2', 'chat-2', 'Old Bot', 0, 'metaid-2', null,
+        'worker', '0000', '   ', 'soul-2', null, null, 2, 2],
+    );
+
+    const metabotStore = new MetabotStore(db, store.getSaveFunction());
+    const directory = buildMetabotDirectory(metabotStore);
+    assert.equal(directory.length, 2);
+
+    const twin = directory.find((entry) => entry.id === 1);
+    assert.deepEqual(twin, {
+      id: 1,
+      name: 'Twin Bot',
+      bio: 'Chief of staff',
+      role: 'Coordinator',
+      goal: 'Ship things',
+      metabot_type: 'twin',
+      enabled: true,
+      globalmetaid: 'gmid-twin',
+    });
+
+    const old = directory.find((entry) => entry.id === 2);
+    assert.equal(old.enabled, false, 'disabled bots included with enabled:false');
+    assert.equal(old.role, null, 'whitespace-only role becomes null');
+    assert.equal(old.bio, null);
+    assert.equal(old.goal, null);
+    assert.equal(old.globalmetaid, null);
+  } finally {
+    store.close();
+  }
+});
