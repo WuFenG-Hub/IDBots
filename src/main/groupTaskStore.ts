@@ -53,6 +53,7 @@ export interface GroupTaskDeliverable {
 export interface GroupChatTranscriptMessage {
   id: number;
   pinId: string | null;
+  txId: string | null;
   senderName: string | null;
   senderGlobalMetaId: string | null;
   senderAvatar: string | null;
@@ -131,6 +132,7 @@ interface GroupTaskDeliverableRow {
 interface GroupChatTranscriptRow {
   id: number;
   pin_id: string | null;
+  tx_id: string | null;
   sender_name: string | null;
   sender_global_metaid: string | null;
   sender_avatar: string | null;
@@ -145,6 +147,7 @@ function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChat
   return {
     id: row.id,
     pinId: row.pin_id ?? null,
+    txId: row.tx_id ?? null,
     senderName: row.sender_name ?? null,
     senderGlobalMetaId: row.sender_global_metaid ?? null,
     senderAvatar: row.sender_avatar ?? null,
@@ -384,7 +387,7 @@ export class GroupTaskStore {
     const beforeId = opts?.beforeId != null && Number.isFinite(opts.beforeId)
       ? Math.trunc(opts.beforeId)
       : null;
-    const columns = `id, pin_id, sender_name, sender_global_metaid, sender_avatar,
+    const columns = `id, pin_id, tx_id, sender_name, sender_global_metaid, sender_avatar,
       content, content_type, chain_timestamp, msg_index, reply_pin`;
     const rows = (beforeId != null
       ? this.getAll<GroupChatTranscriptRow>(

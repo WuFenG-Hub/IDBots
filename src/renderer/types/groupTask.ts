@@ -59,6 +59,7 @@ export interface GroupTaskSummary extends GroupTask {
 export interface GroupChatTranscriptMessage {
   id: number;
   pinId: string | null;
+  txId: string | null;
   senderName: string | null;
   senderGlobalMetaId: string | null;
   senderAvatar: string | null;
