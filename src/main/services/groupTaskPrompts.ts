@@ -24,6 +24,19 @@ export interface GroupTaskPromptTask {
 export interface GroupTaskPromptMember {
   name: string;
   role: 'chair' | 'worker';
+  /** Profile fields from the metabots table (optional; capped for prompt size). */
+  bio?: string | null;
+  roleProfile?: string | null;
+  goal?: string | null;
+}
+
+/** Cap one profile field so the roster section cannot blow up the prompt. */
+const PROFILE_FIELD_CAP = 200;
+
+function capProfileField(value: string | null | undefined): string {
+  const text = (value ?? '').trim();
+  if (!text) return '';
+  return text.length > PROFILE_FIELD_CAP ? `${text.slice(0, PROFILE_FIELD_CAP - 3)}...` : text;
 }
 
 /** Persona block: who the bot is. Mirrors buildPrivateReplySystemPrompt's shape. */
@@ -57,7 +70,7 @@ const SHARED_PLAYBOOK_RULES = [
 ];
 
 const CHAIR_PLAYBOOK_RULES = [
-  '- You are the facilitator: decompose the goal, assign work by name, chase stalls, and verify deliverables against the acceptance criteria.',
+  '- You are the owner\'s digital twin and chief of staff. NEVER relay the goal verbatim — decompose it into concrete subtasks. Assign different subtasks to different members by their profiles. Sequence dependent work: assign a step only when its inputs are ready (e.g. after a `[DELIVERABLE]` arrives). When a deliverable arrives, verify it against the acceptance criteria, then assign the next step.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
@@ -77,11 +90,28 @@ export function buildGroupTaskBlock(params: {
     : ['(no members)'];
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
 
+  // Roster profiles (metabots bio/role/goal, capped) so everyone knows each
+  // other's strengths; omitted entirely when no profile data exists.
+  const profileLines = params.members
+    .map((member) => {
+      const fields = [
+        capProfileField(member.roleProfile) && `Role: ${capProfileField(member.roleProfile)}`,
+        capProfileField(member.bio) && `Bio: ${capProfileField(member.bio)}`,
+        capProfileField(member.goal) && `Goal: ${capProfileField(member.goal)}`,
+      ].filter(Boolean);
+      return fields.length > 0 ? `- ${member.name} (${member.role}) — ${fields.join('; ')}` : null;
+    })
+    .filter((line): line is string => Boolean(line));
+  const profileSection = profileLines.length > 0
+    ? ['', '## Roster profiles', ...profileLines]
+    : [];
+
   const rules = params.botRole === 'chair'
     ? [...SHARED_PLAYBOOK_RULES, ...CHAIR_PLAYBOOK_RULES]
     : [
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
+        '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
         '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
       ];
@@ -94,6 +124,7 @@ export function buildGroupTaskBlock(params: {
     '',
     '## Roster',
     ...rosterLines,
+    ...profileSection,
     '',
     `## Your Role`,
     `You are ${params.botName}, the ${params.botRole} of this task group.`,
