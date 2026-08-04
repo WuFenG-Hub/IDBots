@@ -14,6 +14,13 @@ export const DREAM_LOOKBACK_DAYS = 7;
 export const DREAM_MAX_ATTEMPTS = 3;
 /** Nightly dream window: [00:00, 06:00) local time. */
 export const DREAM_WINDOW_END_MINUTES = 6 * 60;
+/**
+ * Dream algorithm version, recorded on every run. Bump it on any change to the
+ * prompt, budgeting, stats or write semantics — completed in-window dates with
+ * an older version are then re-dreamed automatically (limited per night).
+ * Rows written before versioning existed read as 0.
+ */
+export const DREAM_VERSION = 1;
 export const SELF_IDENTITY_MIN_CHARS = 200;
 export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
@@ -68,6 +75,19 @@ export type DreamParseResult =
 export interface DreamRunStateLike {
   status: 'running' | 'completed' | 'failed';
   attemptCount: number;
+  /** Run start (epoch ms). A completed run is final only when it started after
+   * the dream date ended — i.e. it reviewed the whole day. */
+  startedAt: number;
+  /** Algorithm version the run was made with (0 = legacy, pre-versioning). */
+  dreamVersion: number;
+}
+
+export interface DreamDueResult {
+  /** Dates needing a dream run, chronological-ascending (oldest first). */
+  dueDates: string[];
+  /** Completed full-day dates whose algorithm version is stale, newest first
+   * (recent days are recalled most, so they are repaired first). */
+  repairDates: string[];
 }
 
 /** Deterministic per-bot offset inside the dream window, 00:00 + [0, 240) minutes. */
@@ -86,35 +106,51 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
 }
 
 /**
- * Which past dates still need a dream run for this bot.
+ * Which past dates still need dream attention for this bot.
  * - Candidates: the last `lookbackDays` calendar days, today excluded.
  * - Yesterday's dream only runs inside the nightly window, after the bot's
  *   staggered minute; older missed dates (catch-up) are due any time.
- * - Completed/running dates are skipped; failed dates retry up to DREAM_MAX_ATTEMPTS.
- * Returns dates chronological-ascending (oldest first).
+ * - Running dates are skipped; failed dates retry up to DREAM_MAX_ATTEMPTS.
+ * - A completed run is *final* only when it started after the dream date
+ *   ended (it covered the whole day). A non-final run — e.g. triggered
+ *   manually mid-day — is due again in the next eligible window.
+ * - Final completed runs on a stale algorithm version become repair dates
+ *   (window-gated; the caller limits how many run per night).
  */
 export function computeDueDreamDates(input: {
   now: Date;
   metabotId: number;
   runStates: Map<string, DreamRunStateLike>;
   lookbackDays?: number;
-}): string[] {
+  dreamVersion?: number;
+}): DreamDueResult {
   const lookback = Math.max(1, Math.floor(input.lookbackDays ?? DREAM_LOOKBACK_DAYS));
+  const currentVersion = Math.max(0, Math.floor(input.dreamVersion ?? DREAM_VERSION));
   const minutesSinceMidnight = input.now.getHours() * 60 + input.now.getMinutes();
   const inWindow = minutesSinceMidnight < DREAM_WINDOW_END_MINUTES;
   const staggerMinute = computeDreamStaggerMinute(input.metabotId);
 
   const due: string[] = [];
+  const repair: string[] = [];
   for (let daysAgo = lookback; daysAgo >= 1; daysAgo--) {
     const candidate = new Date(input.now.getFullYear(), input.now.getMonth(), input.now.getDate() - daysAgo);
     const dateStr = formatBotWorkspaceDate(candidate);
     const state = input.runStates.get(dateStr);
-    if (state?.status === 'completed' || state?.status === 'running') continue;
+    if (state?.status === 'running') continue;
     if (state?.status === 'failed' && state.attemptCount >= DREAM_MAX_ATTEMPTS) continue;
+    if (state?.status === 'completed') {
+      const coveredWholeDay = state.startedAt >= getDayBoundsMs(dateStr).endMs;
+      if (coveredWholeDay) {
+        if (state.dreamVersion < currentVersion && inWindow) repair.push(dateStr);
+        continue;
+      }
+      // Partial-day run: fall through and dream the date properly.
+    }
     if (daysAgo === 1 && (!inWindow || minutesSinceMidnight < staggerMinute)) continue;
     due.push(dateStr);
   }
-  return due;
+  repair.sort((a, b) => b.localeCompare(a));
+  return { dueDates: due, repairDates: repair };
 }
 
 const truncateText = (text: string, maxChars: number): string => {
@@ -164,29 +200,38 @@ export function buildDreamPrompt(input: {
   const humanSessions: string[] = [];
   const a2aSessions: string[] = [];
   const orderSessions: string[] = [];
-  let remainingBudget = TOTAL_ACTIVITY_MAX_CHARS;
 
-  const pushSessionBlock = (bucket: string[], header: string, body: string): void => {
-    const block = `${header}\n${body}`;
-    if (remainingBudget <= 0) return;
-    const trimmed = block.length > remainingBudget ? `${block.slice(0, remainingBudget)}\n……(内容过多已截断)` : block;
-    bucket.push(trimmed);
-    remainingBudget -= trimmed.length;
-  };
-
+  interface SessionEntry {
+    bucket: string[];
+    header: string;
+    body: string;
+  }
+  const entries: SessionEntry[] = [];
   for (const session of input.activity.sessions) {
     const peerSuffix = session.peerName ? `(${session.peerName})` : '';
     const header = `【会话:${truncateText(session.title, 80)}${peerSuffix}】`;
     const body = formatSessionActivity(session, SESSION_MAX_CHARS);
     if (!body) continue;
-    if (session.isOrder) {
-      pushSessionBlock(orderSessions, header, body);
-    } else if (session.sessionType === 'a2a') {
-      pushSessionBlock(a2aSessions, header, body);
-    } else {
-      pushSessionBlock(humanSessions, header, body);
-    }
+    const bucket = session.isOrder ? orderSessions : session.sessionType === 'a2a' ? a2aSessions : humanSessions;
+    entries.push({ bucket, header, body });
   }
+
+  // Fair-share budgeting: every session gets an equal slice of the total
+  // budget (capped per session) instead of first-come-first-served — a busy
+  // day must not silently hide its later sessions from the review.
+  let remainingBudget = TOTAL_ACTIVITY_MAX_CHARS;
+  entries.forEach((entry, index) => {
+    const share = Math.min(SESSION_MAX_CHARS, Math.floor(remainingBudget / (entries.length - index)));
+    let block: string;
+    if (share <= 0) {
+      block = `${entry.header}\n……(篇幅有限,内容从略)`;
+    } else {
+      const body = entry.body.length > share ? `${entry.body.slice(0, share)}\n……(本会话更多内容略)` : entry.body;
+      block = `${entry.header}\n${body}`;
+    }
+    entry.bucket.push(block);
+    remainingBudget -= block.length;
+  });
 
   const sections: string[] = [];
   if (humanSessions.length > 0) sections.push(`## 与人类用户的对话\n${humanSessions.join('\n\n')}`);
@@ -199,8 +244,15 @@ export function buildDreamPrompt(input: {
     sections.push(`## 定时任务\n${taskLines}`);
   }
 
+  const sessionTitles = input.activity.sessions.map((session) => `「${truncateText(session.title, 40)}」`).join('、');
+  const inventory =
+    `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
+    `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次。` +
+    '以下内容按篇幅做了均衡摘录,被截断或从略的会话以其标题为准,不要臆造未展示的细节。';
+
   const user = [
     `以下是你在 ${input.date} 这一天的真实经历记录:`,
+    inventory,
     '',
     sections.join('\n\n'),
     '',

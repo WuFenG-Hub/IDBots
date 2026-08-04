@@ -33,6 +33,8 @@ export interface MemoryUserMemorySourceInput {
   sourceType?: string;
   externalConversationId?: string;
   sourceId?: string;
+  /** Dream pipeline: the YYYY-MM-DD this memory was distilled from. */
+  dreamDate?: string;
 }
 
 export interface MemoryUserMemoryStats {
@@ -75,6 +77,13 @@ export interface MemoryCreateUserMemoryInput extends MemoryScopeSelectorInput, M
   origin?: MemoryOrigin;
   source?: MemoryUserMemorySourceInput;
   metabotId: number;
+  /**
+   * Internal escape hatch for the dream pipeline: skip fingerprint/semantic
+   * revive and always insert a new row. Dream writes are authoritative
+   * per-date batches — cross-date dedup would let a re-dreamed day resurrect
+   * (and later cascade-delete) another day's entries.
+   */
+  forceNew?: boolean;
 }
 
 export interface MemoryUpdateUserMemoryInput extends MemoryScopeSelectorInput, MemoryScopeClassifyInput {
@@ -86,6 +95,8 @@ export interface MemoryUpdateUserMemoryInput extends MemoryScopeSelectorInput, M
   isExplicit?: boolean;
   /** Internal escape hatch: only the dream service may touch protected entries (self_identity). */
   allowProtected?: boolean;
+  /** When set, an additional source row is recorded for this memory. */
+  source?: MemoryUserMemorySourceInput;
 }
 
 export interface MemoryDeleteUserMemoryInput extends MemoryScopeSelectorInput {

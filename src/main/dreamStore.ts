@@ -24,6 +24,8 @@ export interface DreamRun {
   status: DreamRunStatus;
   attemptCount: number;
   llmId: string | null;
+  /** Algorithm version the run was made with; 0 = legacy, pre-versioning. */
+  dreamVersion: number;
   error: string | null;
   startedAt: number;
   completedAt: number | null;
@@ -76,6 +78,8 @@ export interface DreamTaskRunActivity {
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
+  /** service_orders rows created that day (raw order count, not sessions). */
+  orderCount: number;
 }
 
 interface DreamRunRow {
@@ -85,6 +89,7 @@ interface DreamRunRow {
   status: string;
   attempt_count: number | string;
   llm_id: string | null;
+  dream_version?: number | string | null;
   error: string | null;
   started_at: number | string;
   completed_at: number | string | null;
@@ -185,6 +190,65 @@ export class DreamStore {
     } catch (error) {
       console.warn('[DreamStore] Failed to verify metabot_daily_summaries columns:', error);
     }
+    try {
+      const cols = this.db.exec('PRAGMA table_info(metabot_dream_runs);');
+      const columns = (cols[0]?.values || []).map((row) => String(row[1]));
+      if (!columns.includes('dream_version')) {
+        this.db.run('ALTER TABLE metabot_dream_runs ADD COLUMN dream_version INTEGER NOT NULL DEFAULT 0;');
+      }
+    } catch (error) {
+      console.warn('[DreamStore] Failed to verify metabot_dream_runs columns:', error);
+    }
+    // dream_date tags on dream-origin memory sources: the idempotency anchor
+    // that lets a re-dream replace exactly one day's memory batch.
+    try {
+      const cols = this.db.exec('PRAGMA table_info(user_memory_sources);');
+      const columns = (cols[0]?.values || []).map((row) => String(row[1]));
+      if (!columns.includes('dream_date')) {
+        this.db.run('ALTER TABLE user_memory_sources ADD COLUMN dream_date TEXT NULL;');
+      }
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_user_memory_sources_dream_date
+        ON user_memory_sources(metabot_id, dream_date)
+      `);
+    } catch (error) {
+      console.warn('[DreamStore] Failed to verify user_memory_sources dream columns:', error);
+    }
+    this.backfillLegacyDreamMemoryDates();
+  }
+
+  /**
+   * One-time attribution of pre-versioning dream memories to their dream date.
+   * Legacy source rows (source_type='dream', dream_date NULL) are matched to
+   * the same-bot run whose completion is closest to — and not more than 5
+   * minutes after — the memory write. Runs only keep their latest attempt's
+   * window, so batches from superseded attempts may land on an adjacent date;
+   * acceptable, since every attributed date is re-dreamed once by version
+   * repair and each batch is then replaced wholesale. Rows with no matching
+   * run stay untagged and are never auto-removed. Only NULL rows are touched,
+   * so this is idempotent.
+   */
+  private backfillLegacyDreamMemoryDates(): void {
+    try {
+      this.db.run(`
+        UPDATE user_memory_sources
+        SET dream_date = (
+          SELECT r.dream_date
+          FROM metabot_dream_runs r
+          WHERE r.metabot_id = user_memory_sources.metabot_id
+            AND r.completed_at IS NOT NULL
+            AND r.completed_at <= user_memory_sources.created_at + 300000
+          ORDER BY r.completed_at DESC
+          LIMIT 1
+        )
+        WHERE dream_date IS NULL AND source_type = 'dream'
+      `);
+      if ((this.db.getRowsModified?.() || 0) > 0) {
+        this.saveDb();
+      }
+    } catch (error) {
+      console.warn('[DreamStore] Failed to backfill legacy dream memory dates:', error);
+    }
   }
 
   private getAll<T>(sql: string, params: (string | number | null)[] = []): T[] {
@@ -212,6 +276,7 @@ export class DreamStore {
       status: (row.status === 'completed' || row.status === 'failed' ? row.status : 'running') as DreamRunStatus,
       attemptCount: parseIdNumber(row.attempt_count) ?? 1,
       llmId: row.llm_id ?? null,
+      dreamVersion: parseIdNumber(row.dream_version) ?? 0,
       error: row.error ?? null,
       startedAt: Number(row.started_at),
       completedAt: row.completed_at === null ? null : Number(row.completed_at),
@@ -237,22 +302,23 @@ export class DreamStore {
    * Start (or restart) a run for (metabot, date). Re-running a completed/failed
    * date resets the row to running and bumps attempt_count.
    */
-  beginRun(metabotId: number, dreamDate: string, llmId: string | null): DreamRun {
+  beginRun(metabotId: number, dreamDate: string, llmId: string | null, dreamVersion: number): DreamRun {
     const now = Date.now();
     this.db.run(`
       INSERT INTO metabot_dream_runs (
-        id, metabot_id, dream_date, status, attempt_count, llm_id, error,
+        id, metabot_id, dream_date, status, attempt_count, llm_id, dream_version, error,
         started_at, completed_at, created_at, updated_at
-      ) VALUES (?, ?, ?, 'running', 1, ?, NULL, ?, NULL, ?, ?)
+      ) VALUES (?, ?, ?, 'running', 1, ?, ?, NULL, ?, NULL, ?, ?)
       ON CONFLICT(metabot_id, dream_date) DO UPDATE SET
         status = 'running',
         attempt_count = attempt_count + 1,
         llm_id = excluded.llm_id,
+        dream_version = excluded.dream_version,
         error = NULL,
         started_at = excluded.started_at,
         completed_at = NULL,
         updated_at = excluded.updated_at
-    `, [uuidv4(), metabotId, dreamDate, llmId, now, now, now]);
+    `, [uuidv4(), metabotId, dreamDate, llmId, dreamVersion, now, now, now]);
     this.saveDb();
     const run = this.getRun(metabotId, dreamDate);
     if (!run) {
@@ -279,13 +345,13 @@ export class DreamStore {
     return row ? this.mapRunRow(row) : null;
   }
 
-  /** status + attempt_count for the given dates, keyed by dream_date. */
-  getRunStates(metabotId: number, dreamDates: string[]): Map<string, { status: DreamRunStatus; attemptCount: number }> {
-    const states = new Map<string, { status: DreamRunStatus; attemptCount: number }>();
+  /** status + attempt_count + started_at + dream_version for the given dates, keyed by dream_date. */
+  getRunStates(metabotId: number, dreamDates: string[]): Map<string, { status: DreamRunStatus; attemptCount: number; startedAt: number; dreamVersion: number }> {
+    const states = new Map<string, { status: DreamRunStatus; attemptCount: number; startedAt: number; dreamVersion: number }>();
     if (dreamDates.length === 0) return states;
     const placeholders = dreamDates.map(() => '?').join(', ');
-    const rows = this.getAll<{ dream_date: string; status: string; attempt_count: number | string }>(
-      `SELECT dream_date, status, attempt_count FROM metabot_dream_runs
+    const rows = this.getAll<{ dream_date: string; status: string; attempt_count: number | string; started_at: number | string; dream_version: number | string | null }>(
+      `SELECT dream_date, status, attempt_count, started_at, dream_version FROM metabot_dream_runs
        WHERE metabot_id = ? AND dream_date IN (${placeholders})`,
       [metabotId, ...dreamDates]
     );
@@ -293,6 +359,8 @@ export class DreamStore {
       states.set(row.dream_date, {
         status: (row.status === 'completed' || row.status === 'failed' ? row.status : 'running') as DreamRunStatus,
         attemptCount: parseIdNumber(row.attempt_count) ?? 1,
+        startedAt: Number(row.started_at),
+        dreamVersion: parseIdNumber(row.dream_version) ?? 0,
       });
     }
     return states;
@@ -498,6 +566,13 @@ export class DreamStore {
       sessionId: row.session_id ?? null,
     }));
 
-    return { sessions, taskRuns };
+    // Raw order count for the day — one order session can carry several
+    // orders, so counting sessions alone under-reports (stats vs narrative).
+    const orderCountRow = this.getOne<{ n: number | string }>(
+      'SELECT COUNT(*) AS n FROM service_orders WHERE local_metabot_id = ? AND created_at >= ? AND created_at < ?',
+      [metabotId, dayStartMs, dayEndMs]
+    );
+
+    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0 };
   }
 }
