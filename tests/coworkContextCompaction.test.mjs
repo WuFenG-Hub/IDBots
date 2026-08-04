@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 test('buildCoworkCompactedPrompt creates summary, recent tail, and current request without thinking blocks', async () => {
   const {
     buildCoworkCompactedPrompt,
-  } = await import('../dist-electron/libs/coworkContextCompaction.js');
+  } = await import('../dist-electron/main/libs/coworkContextCompaction.js');
 
   const currentPrompt = '请继续修复 compact retry';
   const result = buildCoworkCompactedPrompt({
@@ -55,7 +55,7 @@ test('buildCoworkCompactedPrompt creates summary, recent tail, and current reque
 test('buildCoworkCompactedPrompt respects tight summary and tail budgets', async () => {
   const {
     buildCoworkCompactedPrompt,
-  } = await import('../dist-electron/libs/coworkContextCompaction.js');
+  } = await import('../dist-electron/main/libs/coworkContextCompaction.js');
 
   const result = buildCoworkCompactedPrompt({
     messages: [

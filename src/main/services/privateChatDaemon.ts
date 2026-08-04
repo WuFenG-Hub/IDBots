@@ -97,7 +97,8 @@ import {
 
 const POLL_INTERVAL_MS = 5_000;
 const PRIVATE_CHAT_SESSION_GAP_MS = 5 * 60 * 1000;
-const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
+/** Max recent messages of the active segment sent to the model per A2A private-chat turn. */
+export const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
 const PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES = 20;
 const RATING_PROMPT_ORIGINAL_REQUEST_MAX_CHARS = 1200;
 const RATING_PROMPT_SERVICE_RESULT_MAX_CHARS = 6000;

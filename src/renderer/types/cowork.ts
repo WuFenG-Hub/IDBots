@@ -106,6 +106,15 @@ export interface CoworkA2AGuidanceResult {
 }
 
 // Cowork session
+export interface CoworkContextUsage {
+  /** Estimated tokens currently consumed by the conversation. */
+  usedTokens: number;
+  /** The model's total context window in tokens. */
+  contextWindow: number;
+  /** usedTokens / contextWindow, clamped to [0, 1]. */
+  usageRatio: number;
+}
+
 export interface CoworkSession {
   id: string;
   title: string;
@@ -138,6 +147,8 @@ export interface CoworkSession {
   /** Local MetaBot's avatar data URL */
   metabotAvatar?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
+  /** Estimated context-window usage, computed by the main process on session load (not persisted). */
+  contextUsage?: CoworkContextUsage | null;
 }
 
 // Cowork configuration

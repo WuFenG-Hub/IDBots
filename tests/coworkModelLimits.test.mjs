@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 test('resolveCoworkModelLimits reads explicit provider model limits', async () => {
   const {
     resolveCoworkModelLimits,
-  } = await import('../dist-electron/libs/coworkModelLimits.js');
+  } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
     model: {
@@ -38,7 +38,7 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     DEFAULT_COWORK_CONTEXT_WINDOW,
     DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
     resolveCoworkModelLimits,
-  } = await import('../dist-electron/libs/coworkModelLimits.js');
+  } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
     model: {
@@ -61,7 +61,7 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
 test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by model id', async () => {
   const {
     resolveCoworkModelLimits,
-  } = await import('../dist-electron/libs/coworkModelLimits.js');
+  } = await import('../dist-electron/main/libs/coworkModelLimits.js');
 
   const limits = resolveCoworkModelLimits({
     model: {
