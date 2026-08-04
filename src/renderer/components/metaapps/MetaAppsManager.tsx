@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ClipboardDocumentIcon,
   FolderOpenIcon,
@@ -39,6 +39,8 @@ interface MetaAppsManagerProps {
 
 const COMMUNITY_PAGE_SIZE = 30;
 const COMMUNITY_ROOT_CURSOR = '0';
+const MAN_CONTENT_BASE_URL = 'https://man.metaid.io/content/';
+const ACCELERATE_CONTENT_PATH_PATTERN = '/files/accelerate/content/';
 
 const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   onOpenMetaAppInBrowser,
@@ -46,12 +48,18 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   onOpenBotInBrowser,
   onPreviewMetaAppByPin,
 }) => {
-  const [activeTab, setActiveTab] = useState<'local' | 'myApps' | 'chainCommunity'>('local');
+  const [activeTab, setActiveTab] = useState<'local' | 'myApps' | 'chainCommunity'>('myApps');
   const [apps, setApps] = useState<MetaAppRecord[]>([]);
   const [communityApps, setCommunityApps] = useState<CommunityMetaAppRecord[]>([]);
   const [communityCursor, setCommunityCursor] = useState(COMMUNITY_ROOT_CURSOR);
   const [communityCursorStack, setCommunityCursorStack] = useState<string[]>([]);
   const [communityNextCursor, setCommunityNextCursor] = useState<string | null>(null);
+  // App identity seen-set for the current cursor. Keys already shown on earlier
+  // pages are sent along so stale edit versions never appear twice.
+  const [communitySeen, setCommunitySeen] = useState<string[]>([]);
+  // The seen filter used when each cursor was first requested, so going back to
+  // a previous page reproduces exactly the same apps.
+  const seenByCursorRef = useRef<Map<string, string[]>>(new Map());
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isCommunityLoading, setIsCommunityLoading] = useState(false);
@@ -118,11 +126,13 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         const result = await metaAppService.listCommunityMetaApps({
           cursor,
           size: COMMUNITY_PAGE_SIZE,
+          seen: seenByCursorRef.current.get(cursor) ?? [],
         });
         if (!isActive) return;
         if (result.success && result.apps) {
           setCommunityApps(result.apps);
           setCommunityNextCursor(result.nextCursor || null);
+          setCommunitySeen(result.seen ?? []);
         } else {
           setCommunityApps([]);
           setCommunityNextCursor(null);
@@ -160,11 +170,13 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
         const result = await metaAppService.listCommunityMetaApps({
           cursor: communityCursor,
           size: COMMUNITY_PAGE_SIZE,
+          seen: seenByCursorRef.current.get(communityCursor) ?? [],
         });
         if (!isActive) return;
         if (result.success && result.apps) {
           setCommunityApps(result.apps);
           setCommunityNextCursor(result.nextCursor || null);
+          setCommunitySeen(result.seen ?? []);
         } else {
           setCommunityApps([]);
           setCommunityNextCursor(null);
@@ -230,13 +242,30 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
     const author = getMetaAppAuthorModel(app, language);
     const authorAvatarSrc = author.avatar || DEFAULT_GIG_SQUARE_PROVIDER_AVATAR;
     const authorBrowserTarget = getMetaAppAuthorBrowserTarget(app, language);
+    const handleAvatarError = (event: React.SyntheticEvent<HTMLImageElement>) => {
+      const img = event.currentTarget;
+      if (img.dataset.avatarFallback) return;
+      const currentSrc = String(img.src || '');
+      // Some avatar pins are not (yet) on the accelerate CDN; retry through the
+      // MAN content origin before giving up on the default placeholder.
+      const accelerateIndex = currentSrc.indexOf(ACCELERATE_CONTENT_PATH_PATTERN);
+      if (accelerateIndex >= 0) {
+        const pin = currentSrc.slice(accelerateIndex + ACCELERATE_CONTENT_PATH_PATTERN.length).split(/[?#]/)[0];
+        if (pin) {
+          img.src = `${MAN_CONTENT_BASE_URL}${encodeURIComponent(pin)}`;
+          return;
+        }
+      }
+      img.dataset.avatarFallback = '1';
+      img.src = DEFAULT_GIG_SQUARE_PROVIDER_AVATAR;
+    };
     const authorContent = (
       <>
         <img
           src={authorAvatarSrc}
           alt={author.name}
           className="h-7 w-7 flex-shrink-0 rounded-full border border-claude-border object-cover dark:border-claude-darkBorder"
-          onError={(event) => { event.currentTarget.src = DEFAULT_GIG_SQUARE_PROVIDER_AVATAR; }}
+          onError={handleAvatarError}
         />
         <div className="min-w-0">
           <div className="truncate text-xs font-medium text-claude-text dark:text-claude-darkText">
@@ -438,6 +467,9 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   const handleNextCommunityPage = () => {
     if (isCommunityLoading || !hasNextCommunityPage || !communityNextCursor) return;
     setActionError('');
+    // Snapshot the current seen-set against the next cursor so going back to
+    // this page later filters the exact same stale versions.
+    seenByCursorRef.current.set(communityNextCursor, communitySeen);
     setCommunityCursorStack((prev) => [...prev, communityCursor]);
     setCommunityCursor(communityNextCursor);
   };
@@ -659,17 +691,6 @@ const MetaAppsManager: React.FC<MetaAppsManagerProps> = ({
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2 border-b dark:border-claude-darkBorder border-claude-border -mx-1 px-1">
-        <button
-          type="button"
-          onClick={() => setActiveTab('local')}
-          className={`px-3 py-2 text-sm font-medium rounded-t-lg transition-colors ${
-            activeTab === 'local'
-              ? 'dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text border-b-2 border-transparent -mb-[1px]'
-              : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-          }`}
-        >
-          {i18nService.t('localMetaApps')}
-        </button>
         <button
           type="button"
           onClick={() => setActiveTab('myApps')}
