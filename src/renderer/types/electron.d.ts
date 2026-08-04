@@ -87,6 +87,8 @@ interface AppUpdateDownloadProgress {
   total: number | undefined;
   percent: number | undefined;
   speed: number | undefined;
+  /** True when this download run resumed from a previously saved partial file. */
+  resumed?: boolean;
 }
 
 interface ElectronP2PStatus {
@@ -824,7 +826,7 @@ interface IElectronAPI {
     }>;
   };
   appUpdate: {
-    download: (url: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    download: (url: string, version: string, sha256?: string) => Promise<{ success: boolean; filePath?: string; error?: string }>;
     cancelDownload: () => Promise<{ success: boolean }>;
     install: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     applySilent: (filePath: string) => Promise<{ success: boolean; permissionDenied?: boolean; error?: string }>;

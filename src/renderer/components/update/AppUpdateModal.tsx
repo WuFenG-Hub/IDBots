@@ -1,6 +1,7 @@
 import React from 'react';
 import { i18nService } from '../../services/i18n';
 import type { AppUpdateInfo, AppUpdateDownloadProgress } from '../../services/appUpdate';
+import { formatBytes, formatSpeed } from './format';
 
 export type UpdateModalState = 'info' | 'downloading' | 'installing' | 'error' | 'restart';
 
@@ -15,17 +16,6 @@ interface AppUpdateModalProps {
   errorMessage: string | null;
   onCancelDownload: () => void;
   onRetry: () => void;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function formatSpeed(bytesPerSecond: number | undefined): string {
-  if (!bytesPerSecond) return '';
-  return `${formatBytes(bytesPerSecond)}/s`;
 }
 
 const AppUpdateModal: React.FC<AppUpdateModalProps> = ({

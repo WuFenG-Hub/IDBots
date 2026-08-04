@@ -159,3 +159,5 @@ man_base_data_pebble/
 !tests/experienceRecallTool.test.mjs
 !tests/sessionArchive.test.mjs
 !tests/archivedSessionList.test.mjs
+!tests/appUpdateSilentFlowStatic.test.mjs
+!tests/appUpdateResumableDownload.test.mjs

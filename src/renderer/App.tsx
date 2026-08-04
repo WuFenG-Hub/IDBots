@@ -18,7 +18,7 @@ import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
 import { scheduledTaskService } from './services/scheduledTask';
-import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
+import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
@@ -31,6 +31,7 @@ import { i18nService } from './services/i18n';
 import { matchesShortcut } from './services/shortcuts';
 import { metaAppService } from './services/metaApp';
 import AppUpdateBadge from './components/update/AppUpdateBadge';
+import UpdateChangeLogPanel from './components/update/UpdateChangeLogPanel';
 import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
 import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
@@ -83,6 +84,8 @@ const App: React.FC = () => {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatePhase, setUpdatePhaseState] = useState<UpdatePhase>('idle');
   const updatePhaseRef = useRef<UpdatePhase>('idle');
+  // 静默下载失败（非用户取消）时置位，徽章给出可见提示；新一轮下载开始或手动下载成功后清除
+  const [silentDownloadFailed, setSilentDownloadFailed] = useState(false);
   const downloadedUpdateFileRef = useRef<{ version: string; filePath: string } | null>(null);
   const changeUpdatePhase = useCallback((phase: UpdatePhase) => {
     updatePhaseRef.current = phase;
@@ -515,11 +518,22 @@ const App: React.FC = () => {
 
   const startSilentDownload = useCallback(async (info: AppUpdateInfo) => {
     changeUpdatePhase('downloading');
+    setDownloadProgress(null);
+    // 新一轮下载开始，清除之前的失败标记
+    setSilentDownloadFailed(false);
+    // 静默下载也订阅进度，徽章以非打扰方式展示后台下载状态
+    const unsubscribe = window.electron.appUpdate.onDownloadProgress((progress) => {
+      setDownloadProgress(progress);
+    });
     try {
-      const downloadResult = await window.electron.appUpdate.download(info.url);
+      const downloadResult = await window.electron.appUpdate.download(info.url, info.latestVersion, info.sha256);
+      unsubscribe();
       if (!downloadResult.success || !downloadResult.filePath) {
-        // 静默下载失败：保留 updateInfo，徽章显示「有新版本」，用户可点击走手动下载保底流程
+        // 静默下载失败：部分文件保留在本地，徽章给出可见提示，下次检查会自动续传
         console.warn('[AppUpdate] Silent download failed:', downloadResult.error);
+        if (downloadResult.error !== 'Download cancelled') {
+          setSilentDownloadFailed(true);
+        }
         changeUpdatePhase('idle');
         return;
       }
@@ -541,7 +555,9 @@ const App: React.FC = () => {
       }
       changeUpdatePhase('ready');
     } catch (error) {
+      unsubscribe();
       console.warn('[AppUpdate] Silent download error:', error);
+      setSilentDownloadFailed(true);
       changeUpdatePhase('idle');
     }
   }, [changeUpdatePhase]);
@@ -578,7 +594,10 @@ const App: React.FC = () => {
 
   const handleOpenUpdateModal = useCallback(() => {
     if (!updateInfo) return;
-    setUpdateModalState(updatePhase === 'restartReady' ? 'restart' : 'info');
+    // 下载中打开模态框时展示实时进度（可取消）；其余情况按阶段展示
+    setUpdateModalState(
+      updatePhase === 'restartReady' ? 'restart' : updatePhase === 'downloading' ? 'downloading' : 'info',
+    );
     setUpdateError(null);
     setDownloadProgress(null);
     setShowUpdateModal(true);
@@ -629,7 +648,7 @@ const App: React.FC = () => {
     });
 
     try {
-      const downloadResult = await window.electron.appUpdate.download(updateInfo.url);
+      const downloadResult = await window.electron.appUpdate.download(updateInfo.url, updateInfo.latestVersion, updateInfo.sha256);
       unsubscribe();
 
       if (!downloadResult.success) {
@@ -643,6 +662,8 @@ const App: React.FC = () => {
 
       if (downloadResult.filePath) {
         downloadedUpdateFileRef.current = { version: updateInfo.latestVersion, filePath: downloadResult.filePath };
+        // 手动下载成功，清除静默下载失败的提示
+        setSilentDownloadFailed(false);
       }
 
       setUpdateModalState('installing');
@@ -883,12 +904,41 @@ const App: React.FC = () => {
   }, [pendingPermission, handlePermissionResponse]);
 
   const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
-  // 静默下载/静默替换进行中不显示任何更新 UI；就绪或待重启时才显示徽章
-  const updateBadge = updateInfo && updatePhase !== 'downloading' && updatePhase !== 'applying' ? (
+  // 按当前 UI 语言解析更新说明（该语言无内容时回退到另一种语言），用于悬停徽章时展示
+  const isEmptyChangeLog = (log?: ChangeLogEntry): boolean => !log?.title && !(log?.content?.length > 0);
+  const updateChangeLog: ChangeLogEntry | null = (() => {
+    if (!updateInfo) return null;
+    const lang = i18nService.getLanguage();
+    const zh = updateInfo.changeLog.zh;
+    const en = updateInfo.changeLog.en;
+    const preferred = lang === 'zh' ? zh : en;
+    if (!isEmptyChangeLog(preferred)) return preferred;
+    if (!isEmptyChangeLog(zh)) return zh;
+    if (!isEmptyChangeLog(en)) return en;
+    return null;
+  })();
+  // 静默下载中显示带进度的徽章（非打扰式后台状态）；静默替换中隐藏；就绪/待重启时显示徽章；
+  // 静默下载失败时以警示色显示，提示将自动重试
+  const updateBadge = updateInfo && updatePhase !== 'applying' ? (
     <AppUpdateBadge
       latestVersion={updateInfo.latestVersion}
-      label={updatePhase === 'restartReady' ? i18nService.t('updateReadyPill') : undefined}
+      label={
+        updatePhase === 'restartReady'
+          ? i18nService.t('updateReadyPill')
+          : silentDownloadFailed
+            ? i18nService.t('updateDownloadFailedPill')
+            : undefined
+      }
+      tone={silentDownloadFailed ? 'error' : undefined}
+      progress={updatePhase === 'downloading' ? downloadProgress : null}
       onClick={handleOpenUpdateModal}
+      hoverPanel={updateChangeLog ? (
+        <UpdateChangeLogPanel
+          version={updateInfo.latestVersion}
+          date={updateInfo.date}
+          changeLog={updateChangeLog}
+        />
+      ) : undefined}
     />
   ) : null;
   const windowsStandaloneTitleBar = isWindows ? (

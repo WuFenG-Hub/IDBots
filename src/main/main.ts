@@ -145,7 +145,7 @@ import {
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { encryptGroupMessageECB, computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
-import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate } from './libs/appUpdateInstaller';
+import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate, cleanupStaleDownloads } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
 import { resolveMetaidAvatarSource, resolvePinAssetSource } from './services/pinAssetService';
 import { buildMetafileUri } from './services/metaFileUploadShared';
@@ -9789,12 +9789,15 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   });
 
   // App update download & install
-  ipcMain.handle('appUpdate:download', async (event, url: string) => {
+  ipcMain.handle('appUpdate:download', async (event, payload: { url: string; version?: string; sha256?: string }) => {
     try {
-      const filePath = await downloadUpdate(url, (progress) => {
+      const filePath = await downloadUpdate(payload.url, (progress) => {
         if (!event.sender.isDestroyed()) {
           event.sender.send('appUpdate:downloadProgress', progress);
         }
+      }, {
+        version: payload.version,
+        expectedSha256: payload.sha256,
       });
       return { success: true, filePath };
     } catch (error) {
@@ -10472,6 +10475,10 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('app.whenReady resolved');
 
     migrateLegacyUserData();
+
+    // Sweep stale app-update download artifacts from previous sessions
+    // (best effort; partial files younger than the TTL are kept for resume).
+    void cleanupStaleDownloads().catch(() => {});
 
     // Note: Calendar permission is checked on-demand when calendar operations are requested
     // We don't trigger permission dialogs at startup to avoid annoying users
