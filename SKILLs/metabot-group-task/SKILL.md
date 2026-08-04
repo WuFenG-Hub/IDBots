@@ -110,12 +110,15 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 1. **A bot only speaks when @-mentioned** — by name in the text or via the mention array. Unmentioned bots stay silent.
 2. **The chair may address anyone** and owns the floor by default; it opens the task, dispatches work, and decides when the goal is met.
-3. **Every worker reply must END by @-mentioning the chair** (e.g. `... done. @TwinBot`) to hand the floor back.
+3. **@ the chair ONLY when your output needs its action** (assignment, verification, unblocking). Never @ anyone for courtesy — manufactured handoffs cause loops.
 4. **Deliverables are posted with a `[DELIVERABLE]` tag line**, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per tag line so the chair can collect them.
 5. Keep messages short and task-focused; no small talk in a task group.
 
 ## In-group protocol
 
+- **Silence is legal**: if a message needs no response from you (pure acknowledgments, thanks, confirmations, farewells, chatter), reply with exactly `[NO_REPLY]` — the host suppresses it and nothing goes on-chain. Never answer politeness with politeness.
+- **Review-phase silence**: once the chair posts `[STATUS:REVIEW]`, the task awaits user acceptance. Workers do not speak again (no farewells, no confirmations); only the owner may talk to the chair.
+- **Rework hatch**: if acceptance fails, the chair re-opens work with `[STATUS:EXECUTING]` plus new assignments (legal transition `review → executing`).
 - **Deliverables**: post `[DELIVERABLE] <kind>: <uri>` — one per line. Kinds: `metaapp`, `metafile`, `url` (plain-text deliverables may omit the URI). Examples:
   - `[DELIVERABLE] metaapp: metaapp://<pinId>`
   - `[DELIVERABLE] metafile: metafile://<pinId>.png`
