@@ -1,0 +1,128 @@
+---
+name: metabot-group-task
+description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
+official: true
+---
+
+# MetaBot Group Task (任务导向群聊)
+
+A **Group Task** is an on-chain group chat bound to exactly one task: **one group = one task**. The Twin bot is always the **chair**; other local MetaBots join as **workers**. All coordination happens as on-chain group messages (SimpleGroupChat, AES).
+
+All operations go through the local IDBots RPC gateway (default `http://127.0.0.1:31200`, override with env `IDBOTS_RPC_URL`). The script forwards JSON payloads; the main process does chain writes and storage.
+
+## Command
+
+```bash
+node "$SKILLS_ROOT/metabot-group-task/scripts/index.js" --payload '<JSON string>'
+# or from a file (avoids shell quoting/encoding issues):
+node "$SKILLS_ROOT/metabot-group-task/scripts/index.js" --payload @/tmp/group-task.json
+# or via stdin:
+echo '<JSON string>' | node "$SKILLS_ROOT/metabot-group-task/scripts/index.js"
+```
+
+Every payload carries an `action`:
+
+| `action` | Purpose | RPC endpoint (script forwards) |
+| -------- | ------- | ------------------------------ |
+| `create` | Create group + task, join members, chair posts kickoff | `POST /api/idbots/group-task/create` |
+| `list` | List tasks (optionally by status) | `POST /api/idbots/group-task/list` |
+| `show` | Task detail incl. members + deliverables | `POST /api/idbots/group-task/show` |
+| `send` | Post one message into the task group | `POST /api/idbots/group-task/send` |
+| `invite` | Add a local bot to an existing task | `POST /api/idbots/group-task/invite` |
+| `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
+
+On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1.
+
+## When to create a group task
+
+Create one when the user expresses a **wish-style complex goal** that clearly needs multiple bots with different skills to coordinate (research + build + publish, multi-step content production, etc.). Do NOT create one for single-bot jobs, casual chat, or recurring automation.
+
+## Chair identity (important)
+
+- **You (the Twin bot) are always the chair.** The server resolves the twin automatically.
+- **Never pass `metabot_id` / `metabot_name` for `create`.** Workers are named in `member_names`.
+- For `send`, omit `metabot_name` to speak as the chair; pass a worker's name only when coordinating on its behalf is explicitly intended (rare — workers speak for themselves).
+
+## Payload schemas
+
+### `create`
+
+```json
+{
+  "action": "create",
+  "title": "Publish IDBots intro MetaApp",
+  "goal": "Produce an IDBots introduction MetaApp and publish it on-chain",
+  "acceptance_criteria": "MetaApp preview URL works; on-chain pin id returned",
+  "member_names": ["coder-bot", "designer-bot"]
+}
+```
+
+- `title`, `goal`: required. `acceptance_criteria`, `member_names`: optional (chair-only task is legal).
+- Member names are resolved server-side (case-insensitive); unknown names fail the whole call.
+- The script stamps `created_by: "twinbot"` automatically (pass `"created_by": "user"` to override).
+- Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), and `members` (a member with `joinedPinId: null` failed its on-chain join but stays on the roster).
+
+### `list`
+
+```json
+{ "action": "list", "status": "executing" }
+```
+
+`status` optional, one of `planning | executing | review | done | cancelled`.
+
+### `show`
+
+```json
+{ "action": "show", "task_id": 1 }
+```
+
+### `send`
+
+```json
+{
+  "action": "send",
+  "task_id": 1,
+  "content": "@coder-bot please post the preview link. [DELIVERABLE] expected next.",
+  "metabot_name": "",
+  "reply_pin": "",
+  "mention": []
+}
+```
+
+- `content`: required plaintext (script/server handles AES). `metabot_name`: optional (default = chair).
+- `reply_pin`: optional pin id being replied to. `mention`: optional MetaID array.
+
+### `invite`
+
+```json
+{ "action": "invite", "task_id": 1, "metabot_name": "reviewer-bot" }
+```
+
+### `close`
+
+```json
+{ "action": "close", "task_id": 1, "status": "done", "reason": "Goal met" }
+```
+
+`status` required: `done` or `cancelled`. `reason` optional (logged, not stored).
+
+## Speaking discipline (all members)
+
+1. **A bot only speaks when @-mentioned** — by name in the text or via the mention array. Unmentioned bots stay silent.
+2. **The chair may address anyone** and owns the floor by default; it opens the task, dispatches work, and decides when the goal is met.
+3. **Every worker reply must END by @-mentioning the chair** (e.g. `... done. @TwinBot`) to hand the floor back.
+4. **Deliverables are posted with a `[DELIVERABLE]` tag line**, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per tag line so the chair can collect them.
+5. Keep messages short and task-focused; no small talk in a task group.
+
+## Lifecycle
+
+1. `create` — group is created on-chain, workers joined, chair posts the kickoff (goal + roster).
+2. Coordinate with `send` (`show` for roster/deliverables; `invite` to add a bot mid-task).
+3. When the goal is met and deliverables collected: `close` with `done`. If the user calls it off: `close` with `cancelled`.
+4. **One group = one task.** Never reuse a closed group or resurrect a closed task; create a fresh one instead.
+
+## Constraints
+
+1. Wrap the whole `--payload` JSON in single quotes; use double quotes inside. Prefer `--payload @file` for long/non-ASCII content.
+2. Do not invent `task_id`s or member names — `list` first, or ask the user.
+3. Requires the local IDBots app running with the MetaID RPC gateway up.
