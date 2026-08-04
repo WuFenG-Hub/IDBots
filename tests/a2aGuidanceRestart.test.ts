@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS,
+  A2A_GUIDANCE_RESTART_MAX_TOKENS,
   buildA2AGuidanceRestartPrompt,
   generateA2AGuidanceRestartMessage,
   getLatestA2APrivateChatControlState,
@@ -185,4 +187,51 @@ test('generateA2AGuidanceRestartMessage does not retry after a successful first 
 
   assert.equal(reply, 'ok');
   assert.equal(calls, 1);
+});
+
+test('buildA2AGuidanceRestartPrompt truncates overlong recent messages', () => {
+  const longContent = '长'.repeat(A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS * 3);
+  const prompts = buildA2AGuidanceRestartPrompt({
+    localName: 'AliceBot',
+    peerName: 'BobBot',
+    guidance: '重新打开话题。',
+    messages: [message('1', longContent, { direction: 'incoming' })],
+  });
+
+  const embeddedLine = prompts.systemPrompt
+    .split('\n')
+    .find((line) => line.startsWith('BobBot: '));
+  assert.ok(embeddedLine, 'expected the recent message line to be embedded');
+  assert.equal(embeddedLine!.length, A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS + 1);
+  assert.ok(embeddedLine!.endsWith('…'));
+});
+
+test('generateA2AGuidanceRestartMessage passes a generous maxTokens budget to performChat', async () => {
+  const seenMaxTokens: Array<number | undefined> = [];
+  await generateA2AGuidanceRestartMessage({
+    systemPrompt: 'sys',
+    userPrompt: 'user',
+    performChat: async (_system, _user, _llmId, options) => {
+      seenMaxTokens.push(options?.maxTokens);
+      return 'ok';
+    },
+  });
+
+  assert.deepEqual(seenMaxTokens, [A2A_GUIDANCE_RESTART_MAX_TOKENS]);
+  assert.ok(A2A_GUIDANCE_RESTART_MAX_TOKENS > 2048);
+});
+
+test('generateA2AGuidanceRestartMessage honors an explicit maxTokens override', async () => {
+  const seenMaxTokens: Array<number | undefined> = [];
+  await generateA2AGuidanceRestartMessage({
+    systemPrompt: 'sys',
+    userPrompt: 'user',
+    maxTokens: 8192,
+    performChat: async (_system, _user, _llmId, options) => {
+      seenMaxTokens.push(options?.maxTokens);
+      return 'ok';
+    },
+  });
+
+  assert.deepEqual(seenMaxTokens, [8192]);
 });

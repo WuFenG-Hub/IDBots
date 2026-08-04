@@ -49,6 +49,19 @@ export const shouldRestartA2APrivateChatForGuidance = (input: {
     || Number.isFinite(Number(input.mappingMetadata?.endedAt));
 };
 
+/**
+ * Cap each embedded recent-message line so a long conversation cannot blow up
+ * the restart prompt. Oversized prompts push reasoning-style models to spend
+ * the whole completion budget before emitting any visible content, which used
+ * to surface as "Local MetaBot did not generate a restart message".
+ */
+export const A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS = 400;
+
+const truncateContextLine = (line: string): string => {
+  if (line.length <= A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS) return line;
+  return `${line.slice(0, A2A_GUIDANCE_RESTART_MAX_CONTEXT_LINE_CHARS)}…`;
+};
+
 export const buildA2AGuidanceRestartPrompt = (input: {
   localName: string;
   peerName: string;
@@ -60,7 +73,7 @@ export const buildA2AGuidanceRestartPrompt = (input: {
     .slice(-20)
     .map((message) => {
       const direction = message.metadata?.direction === 'outgoing' ? input.localName : input.peerName;
-      return `${direction}: ${toSafeString(message.content).trim()}`;
+      return truncateContextLine(`${direction}: ${toSafeString(message.content).trim()}`);
     })
     .filter((line) => line.trim());
 
@@ -82,12 +95,19 @@ export const buildA2AGuidanceRestartPrompt = (input: {
 
 export const A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS = 60_000;
 export const A2A_GUIDANCE_RESTART_MAX_ATTEMPTS = 2;
+/**
+ * Completion budget for the restart message. Deliberately higher than the
+ * orchestrator default (2048): reasoning-style models count reasoning tokens
+ * against max_tokens, and a small budget makes them return empty content,
+ * which is the root cause of "did not generate a restart message".
+ */
+export const A2A_GUIDANCE_RESTART_MAX_TOKENS = 4096;
 
 export type PerformA2AGuidanceRestartChatFn = (
   systemPrompt: string,
   userPrompt: string,
   llmId?: string,
-  options?: { signal?: AbortSignal }
+  options?: { signal?: AbortSignal; maxTokens?: number }
 ) => Promise<string>;
 
 /**
@@ -104,9 +124,11 @@ export const generateA2AGuidanceRestartMessage = async (input: {
   performChat: PerformA2AGuidanceRestartChatFn;
   maxAttempts?: number;
   timeoutMs?: number;
+  maxTokens?: number;
 }): Promise<string> => {
   const maxAttempts = Math.max(1, Math.floor(input.maxAttempts ?? A2A_GUIDANCE_RESTART_MAX_ATTEMPTS));
   const timeoutMs = Math.max(1, Math.floor(input.timeoutMs ?? A2A_GUIDANCE_RESTART_LLM_TIMEOUT_MS));
+  const maxTokens = Math.max(1, Math.floor(input.maxTokens ?? A2A_GUIDANCE_RESTART_MAX_TOKENS));
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -114,6 +136,7 @@ export const generateA2AGuidanceRestartMessage = async (input: {
       const reply = toSafeString(
         await input.performChat(input.systemPrompt, input.userPrompt, input.llmId, {
           signal: AbortSignal.timeout(timeoutMs),
+          maxTokens,
         })
       ).trim();
       if (reply) return reply;
