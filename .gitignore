@@ -38,7 +38,9 @@ tests/*
 !tests/groupTaskService.test.mjs
 !tests/groupChatBackfill.test.mjs
 !tests/groupChatMsgIndexMigration.test.mjs
+!tests/groupChatTransport.test.mjs
 !tests/groupTaskDaemon.test.mjs
+!tests/groupTaskUtils.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs

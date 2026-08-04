@@ -33,12 +33,16 @@ Module._load = originalLoad;
 const {
   createGroupTask,
   listGroupTasks,
+  listGroupTaskSummaries,
   getGroupTask,
   postGroupTaskMessage,
+  postGroupTaskMessageAsOwner,
   joinGroupTaskMember,
   closeGroupTask,
+  ensureOwnerJoinedGroup,
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
 } = groupTaskService;
@@ -90,14 +94,16 @@ const createHarness = async (overrides = {}) => {
   insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', type: 'worker', globalmetaid: 'gmid-coder' });
   insertMetabot(db, { id: 3, walletId: 1, name: 'Designer Bot', type: 'worker', globalmetaid: 'gmid-designer' });
 
-  const calls = { create: [], join: [], send: [], wait: [] };
+  const calls = { create: [], join: [], send: [], wait: [], joinIdentity: [], sendIdentity: [] };
   const state = {
     joinFailures: new Set(overrides.joinFailures ?? []),
     indexed: overrides.indexed ?? true,
+    ownerJoinFails: overrides.ownerJoinFails ?? false,
   };
 
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(() => groupTaskStore);
+  setGroupTaskServiceKvStoreGetter(() => store);
   setGroupTaskServiceTransport({
     createGroupChat: async (metabotId, opts) => {
       calls.create.push({ metabotId, opts });
@@ -110,9 +116,20 @@ const createHarness = async (overrides = {}) => {
       }
       return { pinId: `join-pin-${metabotId}` };
     },
+    joinGroupChatAsIdentity: async (groupId) => {
+      if (state.ownerJoinFails) {
+        throw new Error('owner identity join failed');
+      }
+      calls.joinIdentity.push(groupId);
+      return { pinId: 'owner-join-pin' };
+    },
     sendGroupChatMessage: async (metabotId, groupId, opts) => {
       calls.send.push({ metabotId, groupId, opts });
       return { pinId: `msg-pin-${calls.send.length}` };
+    },
+    sendGroupChatMessageAsIdentity: async (groupId, opts) => {
+      calls.sendIdentity.push({ groupId, opts });
+      return { pinId: `identity-send-pin-${calls.sendIdentity.length}` };
     },
     waitForGroupIndexed: async (groupId) => {
       calls.wait.push({ groupId });
@@ -336,6 +353,90 @@ test('closeGroupTask: state machine transitions and terminal lock', async () => 
     await assert.rejects(closeGroupTask(detail.id, { status: 'done' }), /Illegal/);
     await assert.rejects(closeGroupTask(9999, { status: 'done' }), /not found/);
     await assert.rejects(closeGroupTask(detail.id, { status: 'executing' }), /done.*cancelled/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('createGroupTask: owner identity join attempted and recorded in kv', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    assert.ok(detail.id > 0);
+    assert.deepEqual(h.calls.joinIdentity, [GROUP_ID], 'owner joined the new group');
+
+    // kv flag set by the create flow: a later guard call joins no more
+    const again = await ensureOwnerJoinedGroup(GROUP_ID);
+    assert.equal(again, false);
+    assert.equal(h.calls.joinIdentity.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('createGroupTask tolerates owner identity join failure', async () => {
+  const h = await createHarness({ ownerJoinFails: true });
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    assert.ok(detail.id > 0, 'task still created');
+    assert.equal(h.calls.send.length, 1, 'kickoff still sent');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('ensureOwnerJoinedGroup: joins once, skips when kv flag present', async () => {
+  const h = await createHarness();
+  try {
+    const gid = 'ccccccccddddddddeeeeeeeeffffffff00000000111111112222222233333333i0';
+    assert.equal(await ensureOwnerJoinedGroup(gid), true, 'first call joins');
+    assert.equal(await ensureOwnerJoinedGroup(gid), false, 'kv flag skips the re-join');
+    assert.deepEqual(h.calls.joinIdentity, [gid], 'exactly one join pin');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('postGroupTaskMessageAsOwner: re-join guard then identity send; validation', async () => {
+  const h = await createHarness();
+  try {
+    // Pre-existing task created directly via the store: kv flag NOT set.
+    const task = h.groupTaskStore.createTask({
+      groupId: GROUP_ID, title: 'T', goal: 'G', chairMetabotId: 1, createdBy: 'user',
+    });
+
+    const result = await postGroupTaskMessageAsOwner(task.id, 'owner says hi');
+    assert.equal(result.pinId, 'identity-send-pin-1');
+    assert.deepEqual(h.calls.joinIdentity, [GROUP_ID], 'owner joined first (kv was missing)');
+    assert.equal(h.calls.sendIdentity.length, 1);
+    assert.equal(h.calls.sendIdentity[0].groupId, GROUP_ID);
+    assert.equal(h.calls.sendIdentity[0].opts.content, 'owner says hi');
+
+    // second send: guard skips the re-join
+    await postGroupTaskMessageAsOwner(task.id, 'again');
+    assert.equal(h.calls.joinIdentity.length, 1);
+    assert.equal(h.calls.sendIdentity.length, 2);
+
+    await assert.rejects(postGroupTaskMessageAsOwner(task.id, '  '), /content/);
+    await assert.rejects(postGroupTaskMessageAsOwner(9999, 'hi'), /not found/);
+
+    h.groupTaskStore.updateTaskStatus(task.id, 'cancelled');
+    await assert.rejects(postGroupTaskMessageAsOwner(task.id, 'still?'), /cancelled/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('listGroupTaskSummaries enriches with member count and chair/member names', async () => {
+  const h = await createHarness();
+  try {
+    await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2, 3], createdBy: 'user' });
+    const summaries = await listGroupTaskSummaries();
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].memberCount, 3);
+    assert.equal(summaries[0].chairName, 'Twin Bot');
+    assert.deepEqual(summaries[0].memberNames.slice().sort(), ['Coder Bot', 'Designer Bot', 'Twin Bot']);
+    assert.equal((await listGroupTaskSummaries({ status: 'executing' })).length, 0);
   } finally {
     h.cleanup();
   }

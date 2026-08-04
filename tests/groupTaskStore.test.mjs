@@ -257,3 +257,55 @@ test('deliverables CRUD', async () => {
     store.close();
   }
 });
+
+test('listGroupChatMessages: ordering, paging with beforeId, column set', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    const insertMsg = (pinId, groupId, senderName, content, msgIndex) => {
+      db.run(
+        `INSERT INTO group_chat_messages (
+          pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+          sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+          reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+        ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, 'ava', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, 'pin-parent', '[]', 1785000000000, 'mvc', '{}', 0, ?)`,
+        [pinId, pinId.replace(/-i0$/, ''), groupId, `metaid-${senderName}`, `gmid-${senderName}`, senderName, content, msgIndex],
+      );
+    };
+    for (let i = 1; i <= 5; i++) {
+      insertMsg(`m${i}-i0`, 'g1', `Bot${i}`, `content-${i}`, i);
+    }
+    insertMsg('other-i0', 'g2', 'Other', 'other group', 1);
+
+    // default page: all g1 rows ascending, other groups excluded
+    const all = groupTaskStore.listGroupChatMessages('g1');
+    assert.equal(all.length, 5);
+    assert.deepEqual(all.map((m) => m.content), ['content-1', 'content-2', 'content-3', 'content-4', 'content-5']);
+    assert.ok(all.every((m) => m.id > 0 && m.pinId && m.senderName && m.chainTimestamp === 1785000000000));
+
+    // column set (camelCase transcript shape)
+    const keys = Object.keys(all[0]).sort();
+    assert.deepEqual(keys, [
+      'chainTimestamp', 'content', 'contentType', 'id', 'msgIndex',
+      'pinId', 'replyPin', 'senderAvatar', 'senderGlobalMetaId', 'senderName',
+    ]);
+    assert.equal(all[0].msgIndex, 1);
+    assert.equal(all[0].replyPin, 'pin-parent');
+    assert.equal(all[0].senderAvatar, 'ava');
+
+    // limit: the LATEST page (chat semantics), still ascending
+    const lastTwo = groupTaskStore.listGroupChatMessages('g1', { limit: 2 });
+    assert.deepEqual(lastTwo.map((m) => m.content), ['content-4', 'content-5']);
+
+    // beforeId: the page immediately older than m4, still ascending
+    const m4Id = all[3].id;
+    const before = groupTaskStore.listGroupChatMessages('g1', { beforeId: m4Id, limit: 2 });
+    assert.deepEqual(before.map((m) => m.content), ['content-2', 'content-3']);
+
+    // beforeId beyond the oldest row: empty
+    const m1Id = all[0].id;
+    assert.deepEqual(groupTaskStore.listGroupChatMessages('g1', { beforeId: m1Id }), []);
+  } finally {
+    store.close();
+  }
+});
