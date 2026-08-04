@@ -267,6 +267,12 @@ export interface CoworkSessionSummary {
   sessionType?: CoworkSessionType;
   /** Remote peer MetaBot's display name (A2A sessions only) */
   peerName?: string | null;
+  /** Remote peer MetaBot's avatar (A2A sessions only) */
+  peerAvatar?: string | null;
+  /** Owning MetaBot's display name, when attributed */
+  metabotName?: string | null;
+  /** Owning MetaBot's avatar (data URL or remote URL), when attributed */
+  metabotAvatar?: string | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */

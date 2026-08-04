@@ -349,6 +349,14 @@ function parseIdNumber(value: unknown): number | null {
   return null;
 }
 
+/** MetaBot avatars may be stored as a BLOB; convert to a renderable data URL. */
+function normalizeMetabotAvatarForDisplay(avatar: unknown): string | null {
+  if (!avatar) return null;
+  if (typeof avatar === 'string') return avatar.trim() || null;
+  const buf = Buffer.from(avatar as Uint8Array);
+  return `data:image/png;base64,${buf.toString('base64')}`;
+}
+
 function normalizeDbBoolean(value: unknown, fallback: boolean): boolean {
   if (typeof value === 'number') {
     return value !== 0;
@@ -536,6 +544,12 @@ export interface CoworkSessionSummary {
   archivedAt?: number | null;
   sessionType?: CoworkSessionType;
   peerName?: string | null;
+  /** Remote peer MetaBot's avatar (A2A sessions only) */
+  peerAvatar?: string | null;
+  /** Owning MetaBot's display name, when attributed */
+  metabotName?: string | null;
+  /** Owning MetaBot's avatar (data URL or remote URL), when attributed */
+  metabotAvatar?: string | null;
   /** Bot Browser context: URI of the tab this session is about (browser sessions only) */
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */
@@ -2159,17 +2173,11 @@ export class CoworkStore implements MemoryBackend {
     let metabotName: string | null = null;
     let metabotAvatar: string | null = null;
     if (metabotId != null) {
-      interface MetabotNameRow { name: string; avatar: string | null; }
+      interface MetabotNameRow { name: string; avatar: string | Uint8Array | null; }
       const mbRow = this.getOne<MetabotNameRow>('SELECT name, avatar FROM metabots WHERE id = ? LIMIT 1', [metabotId]);
       if (mbRow) {
         metabotName = mbRow.name;
-        // avatar may be stored as BLOB; convert to base64 data URL if needed
-        if (mbRow.avatar && typeof mbRow.avatar !== 'string') {
-          const buf = Buffer.from(mbRow.avatar as unknown as Uint8Array);
-          metabotAvatar = `data:image/png;base64,${buf.toString('base64')}`;
-        } else {
-          metabotAvatar = (mbRow.avatar as string | null) ?? null;
-        }
+        metabotAvatar = normalizeMetabotAvatarForDisplay(mbRow.avatar);
       }
     }
 
@@ -2380,6 +2388,9 @@ export class CoworkStore implements MemoryBackend {
       metabot_id?: number | null;
       session_type?: string | null;
       peer_name?: string | null;
+      peer_avatar?: string | null;
+      metabot_name?: string | null;
+      metabot_avatar?: string | Uint8Array | null;
       browser_uri?: string | null;
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
@@ -2399,6 +2410,9 @@ export class CoworkStore implements MemoryBackend {
         s.metabot_id,
         s.session_type,
         s.peer_name,
+        s.peer_avatar,
+        mb.name AS metabot_name,
+        mb.avatar AS metabot_avatar,
         s.browser_uri,
         s.browser_title,
         s.hidden_from_session_list,
@@ -2412,6 +2426,7 @@ export class CoworkStore implements MemoryBackend {
           LIMIT 1
         ), s.updated_at) AS activity_at
       FROM cowork_sessions s
+      LEFT JOIN metabots mb ON mb.id = s.metabot_id
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
       AND s.archived_at IS NULL
       ${filterByMetabot ? 'AND s.metabot_id = ?' : ''}
@@ -2428,6 +2443,9 @@ export class CoworkStore implements MemoryBackend {
       metabotId: parseIdNumber(row.metabot_id),
       sessionType: (row.session_type === 'agent_agent' ? 'a2a' : row.session_type as CoworkSessionType) || 'standard',
       peerName: row.peer_name ?? null,
+      peerAvatar: row.peer_avatar ?? null,
+      metabotName: row.metabot_name ?? null,
+      metabotAvatar: normalizeMetabotAvatarForDisplay(row.metabot_avatar),
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),

@@ -100,6 +100,10 @@ class CoworkService {
                 updatedAt: s.updatedAt,
                 sessionType: s.sessionType,
                 peerName: s.peerName ?? null,
+                peerAvatar: s.peerAvatar ?? null,
+                metabotId: s.metabotId ?? null,
+                metabotName: s.metabotName ?? null,
+                metabotAvatar: s.metabotAvatar ?? null,
                 serviceOrderSummary: s.serviceOrderSummary ?? null,
               }));
             }

@@ -139,6 +139,10 @@ const coworkSlice = createSlice({
         updatedAt: action.payload.updatedAt,
         sessionType: action.payload.sessionType,
         peerName: action.payload.peerName,
+        peerAvatar: action.payload.peerAvatar,
+        metabotId: action.payload.metabotId,
+        metabotName: action.payload.metabotName,
+        metabotAvatar: action.payload.metabotAvatar,
         serviceOrderSummary: action.payload.serviceOrderSummary ?? null,
       };
       state.sessions.unshift(summary);

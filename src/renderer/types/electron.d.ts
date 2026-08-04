@@ -204,6 +204,9 @@ interface CoworkSessionSummary {
   archivedAt?: number | null;
   sessionType?: 'standard' | 'a2a';
   peerName?: string | null;
+  peerAvatar?: string | null;
+  metabotName?: string | null;
+  metabotAvatar?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
