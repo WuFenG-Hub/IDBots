@@ -140,7 +140,14 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     if (!draftFieldRef.current) {
       draftFieldRef.current = createVersionedComposerField(initialDraftRef.current, () => '', (nextValue) => {
         setValue(nextValue);
-        dispatch(setDraftPrompt(nextValue));
+        // Only the unscoped composer (the New Task home page) owns the global
+        // draft. Scoped composers (session steer input, Bot Browser panel)
+        // are local-only: they must never overwrite or clear the New Task
+        // draft, otherwise opening a conversation wipes the text the user
+        // typed on the home page.
+        if (!activeScopeKeyRef.current) {
+          dispatch(setDraftPrompt(nextValue));
+        }
       });
     }
     if (!attachmentFieldRef.current) {
@@ -232,7 +239,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const handleFocusInput = (event: Event) => {
       const detail = (event as CustomEvent<{ clear?: boolean }>).detail;
       const shouldClear = detail?.clear ?? true;
-      if (shouldClear) {
+      // Never clear the unscoped New Task composer from navigation events;
+      // its content is the persistent home-page draft. Clearing stays
+      // available for scoped composers and after a successful submit.
+      if (shouldClear && activeScopeKeyRef.current) {
         draftFieldRef.current?.set('');
         attachmentFieldRef.current?.set([]);
       }

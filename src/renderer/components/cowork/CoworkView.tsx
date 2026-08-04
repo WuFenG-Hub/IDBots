@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState, useRef } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState, store } from '../../store';
-import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId } from '../../store/slices/coworkSlice';
+import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMetabotId, setNewTaskMetabotId } from '../../store/slices/coworkSlice';
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
@@ -57,7 +57,14 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const [isInitialized, setIsInitialized] = useState(false);
   const [metabots, setMetabots] = useState<Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>>([]);
   const [localMetabotCount, setLocalMetabotCount] = useState(0);
-  const [selectedMetabotId, setSelectedMetabotId] = useState<number | null>(null);
+  // The New Task page is a single instance: its MetaBot selection lives in
+  // the global store so it survives navigating to conversations or other
+  // columns and back.
+  const selectedMetabotId = useSelector((state: RootState) => state.cowork.newTaskMetabotId);
+  const setSelectedMetabotId = useCallback(
+    (id: number | null) => dispatch(setNewTaskMetabotId(id)),
+    [dispatch],
+  );
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const submitErrorSessionIdRef = useRef<string | null>(null);
@@ -167,14 +174,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     }
     const twin = metabots.find((metabot) => metabot.metabot_type === 'twin');
     setSelectedMetabotId(twin ? twin.id : metabots[0].id);
-  }, [metabots, selectedMetabotId]);
-
-  // Keep selector in sync when opening a session (so "new chat" uses the same MetaBot as the current session)
-  useEffect(() => {
-    if (currentSession?.metabotId != null && typeof currentSession.metabotId === 'number') {
-      setSelectedMetabotId(currentSession.metabotId);
-    }
-  }, [currentSession?.id, currentSession?.metabotId]);
+  }, [metabots, selectedMetabotId, setSelectedMetabotId]);
 
   useEffect(() => {
     const id = selectedMetabotId;

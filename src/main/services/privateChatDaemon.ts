@@ -2621,7 +2621,8 @@ async function processOne(
   runPrivateChatSkillTurn?: RunPrivateChatSkillTurnFn,
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
-  getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>
+  getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
+  refreshA2APeerProfile?: (sessionId: string) => void
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -3751,6 +3752,12 @@ async function processOne(
       row,
       plaintext
     );
+    // Keep the session's stored peer name/avatar in sync with the latest
+    // chain profile (socket userInfo may be stale or absent); the refresh is
+    // TTL-cached so it stays cheap on busy conversations.
+    try {
+      refreshA2APeerProfile?.(sessionId);
+    } catch { /* peer profile refresh is best-effort */ }
 
     const userMessage = findPrivateChatA2AInboundMessage({
       coworkStore,
@@ -4188,6 +4195,7 @@ export function startPrivateChatDaemon(
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
+  refreshA2APeerProfile?: (sessionId: string) => void,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -4253,6 +4261,7 @@ export function startPrivateChatDaemon(
               generatePrivateChatSkillWaitNotice,
               consumeA2AGuidance,
               getRecentDailySummaries,
+              refreshA2APeerProfile,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);

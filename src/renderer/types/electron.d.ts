@@ -204,6 +204,9 @@ interface CoworkSessionSummary {
   archivedAt?: number | null;
   sessionType?: 'standard' | 'a2a';
   peerName?: string | null;
+  peerAvatar?: string | null;
+  metabotName?: string | null;
+  metabotAvatar?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -787,6 +790,7 @@ interface IElectronAPI {
     isDelegationBlocking: (sessionId: string) => Promise<boolean>;
     getDelegationInfo: (sessionId: string) => Promise<{ orderId: string } | null>;
     onDelegationStateChange: (callback: (data: { sessionId: string; blocking: boolean; orderId?: string; message?: string }) => void) => () => void;
+    onSessionProfileRefreshed: (callback: (data: { sessionId: string }) => void) => () => void;
   };
   dialog: {
     selectDirectory: () => Promise<{ success: boolean; path: string | null }>;

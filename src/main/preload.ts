@@ -452,6 +452,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('cowork:delegation:stateChange', handler);
       return () => ipcRenderer.removeListener('cowork:delegation:stateChange', handler);
     },
+    onSessionProfileRefreshed: (callback: (data: { sessionId: string }) => void) => {
+      const handler = (_event: any, data: { sessionId: string }) => callback(data);
+      ipcRenderer.on('cowork:session:profileRefreshed', handler);
+      return () => ipcRenderer.removeListener('cowork:session:profileRefreshed', handler);
+    },
   },
   dialog: {
     selectDirectory: () => ipcRenderer.invoke('dialog:selectDirectory'),

@@ -79,6 +79,66 @@ const formatRelativeTime = (timestamp: number): { compact: string; full: string 
   }
 };
 
+const isRenderableAvatarSource = (src?: string | null): src is string =>
+  Boolean(src && /^(https?:|data:|blob:)/i.test(src.trim()));
+
+const avatarInitial = (name?: string | null): string => {
+  const trimmed = name?.trim() ?? '';
+  return trimmed ? trimmed.slice(0, 1).toUpperCase() : '?';
+};
+
+/** Small circular avatar with an initial-letter fallback. */
+const SessionAvatarCircle: React.FC<{
+  src?: string | null;
+  name?: string | null;
+  className?: string;
+}> = ({ src, name, className = '' }) => (
+  <span
+    className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
+    title={name?.trim() || undefined}
+  >
+    {isRenderableAvatarSource(src) ? (
+      <img src={src} alt={name?.trim() || ''} className="h-full w-full object-cover" />
+    ) : (
+      avatarInitial(name)
+    )}
+  </span>
+);
+
+/**
+ * Sidebar avatar(s) identifying which MetaBot(s) a session belongs to:
+ * the executing MetaBot for standard cowork sessions, and both the local
+ * MetaBot and the remote peer (overlapping) for A2A sessions.
+ */
+export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> = ({ session }) => {
+  if (session.sessionType === 'a2a') {
+    return (
+      <span className="mr-2 flex flex-shrink-0 items-center">
+        <SessionAvatarCircle
+          src={session.metabotAvatar}
+          name={session.metabotName}
+          className="relative z-10 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
+        />
+        <SessionAvatarCircle
+          src={session.peerAvatar}
+          name={session.peerName}
+          className="-ml-2 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
+        />
+      </span>
+    );
+  }
+  if (session.metabotId == null && !session.metabotName && !session.metabotAvatar) {
+    return null;
+  }
+  return (
+    <SessionAvatarCircle
+      src={session.metabotAvatar}
+      name={session.metabotName || session.title}
+      className="mr-2"
+    />
+  );
+};
+
 const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   session,
   hasUnread,
@@ -295,6 +355,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
     >
       {/* Content area */}
       <div className="flex items-start leading-tight">
+        <CoworkSessionAvatars session={session} />
         <div className="flex-1 min-w-0">
           <div className={`flex items-center mb-0.5 ${showStatusIndicator || isA2A ? 'gap-2' : 'gap-0'}`}>
             {/* Status indicator */}

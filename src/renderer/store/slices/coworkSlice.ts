@@ -15,6 +15,8 @@ interface CoworkState {
   currentSession: CoworkSession | null;
   /** When set (e.g. after restore from mnemonic), CoworkView should select this MetaBot and clear it. */
   preferredMetabotId: number | null;
+  /** MetaBot selected on the New Task home page; persisted globally so the single-instance page keeps its state across navigation. */
+  newTaskMetabotId: number | null;
   draftPrompt: string;
   unreadSessionIds: string[];
   isCoworkActive: boolean;
@@ -28,6 +30,7 @@ const initialState: CoworkState = {
   currentSessionId: null,
   currentSession: null,
   preferredMetabotId: null,
+  newTaskMetabotId: null,
   draftPrompt: '',
   unreadSessionIds: [],
   isCoworkActive: false,
@@ -122,6 +125,10 @@ const coworkSlice = createSlice({
       state.draftPrompt = action.payload;
     },
 
+    setNewTaskMetabotId(state, action: PayloadAction<number | null>) {
+      state.newTaskMetabotId = action.payload;
+    },
+
     addSession(state, action: PayloadAction<CoworkSession>) {
       const summary: CoworkSessionSummary = {
         id: action.payload.id,
@@ -132,6 +139,10 @@ const coworkSlice = createSlice({
         updatedAt: action.payload.updatedAt,
         sessionType: action.payload.sessionType,
         peerName: action.payload.peerName,
+        peerAvatar: action.payload.peerAvatar,
+        metabotId: action.payload.metabotId,
+        metabotName: action.payload.metabotName,
+        metabotAvatar: action.payload.metabotAvatar,
         serviceOrderSummary: action.payload.serviceOrderSummary ?? null,
       };
       state.sessions.unshift(summary);
@@ -297,6 +308,7 @@ export const {
   setCurrentSessionId,
   setCurrentSession,
   setDraftPrompt,
+  setNewTaskMetabotId,
   addSession,
   registerBackgroundSession,
   updateSessionStatus,
