@@ -1,0 +1,664 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import Module from 'node:module';
+
+const require = createRequire(import.meta.url);
+
+// groupTaskDaemon -> coworkStore imports electron; mock it.
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, ...rest) {
+  if (request === 'electron') {
+    return {
+      app: {
+        isPackaged: false,
+        getAppPath: () => process.cwd(),
+        getPath: () => process.cwd(),
+      },
+    };
+  }
+  return originalLoad.call(this, request, ...rest);
+};
+
+const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
+const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
+const {
+  decideGroupTaskResponders,
+  createGroupTaskDaemonLoop,
+} = require('../dist-electron/main/services/groupTaskDaemon.js');
+
+Module._load = originalLoad;
+
+const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
+const BOSS_GMID = 'gmid-boss';
+
+const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-daemon-'));
+
+// ---------------------------------------------------------------------------
+// Pure gating fixtures
+// ---------------------------------------------------------------------------
+
+const GATE_BOTS = new Map([
+  [1, { id: 1, name: 'Twin Bot', metaid: 'metaid-1', globalmetaid: 'gmid-twin', boss_global_metaid: BOSS_GMID }],
+  [2, { id: 2, name: 'Coder Bot', metaid: 'metaid-2', globalmetaid: 'gmid-w2', boss_global_metaid: BOSS_GMID }],
+  [3, { id: 3, name: 'Designer Bot', metaid: 'metaid-3', globalmetaid: 'gmid-w3', boss_global_metaid: BOSS_GMID }],
+]);
+
+const GATE_MEMBERS = [
+  { metabotId: 1, globalmetaid: 'gmid-twin', role: 'chair', name: 'Twin Bot' },
+  { metabotId: 2, globalmetaid: 'gmid-w2', role: 'worker', name: 'Coder Bot' },
+  { metabotId: 3, globalmetaid: 'gmid-w3', role: 'worker', name: 'Designer Bot' },
+];
+const gateMessage = (overrides = {}) => ({
+  id: 1,
+  senderMetaId: 'metaid-human',
+  senderGlobalMetaId: 'gmid-human',
+  senderName: 'Human',
+  content: 'hello group',
+  mention: null,
+  ...overrides,
+});
+
+const gateTask = (status = 'executing') => ({ id: 1, status });
+
+// ---------------------------------------------------------------------------
+// Daemon loop harness
+// ---------------------------------------------------------------------------
+
+const insertWallet = (db, id) => {
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at) VALUES (?, ?, ?, ?)`,
+    [id, `abandon ability able about above absent absorb abstract absurd abuse access accident ${id}`, "m/44'/10001'/0'/0/0", 1700000000000 + id]
+  );
+};
+
+const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid = null, bossGmid = null, llmId = null, allowChatSkills = [] }) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
+      boss_global_metaid, llm_id, allow_chat_skills, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
+      name, 1, `metaid-${id}`, globalmetaid, type, '0000', `${name} role`, `${name} soul`,
+      bossGmid, llmId, JSON.stringify(allowChatSkills), 1700000000000 + id, 1700000000000 + id,
+    ]
+  );
+};
+
+const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null }) => {
+  db.run(
+    `INSERT INTO group_chat_messages (
+      pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+      sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, '', ?, NULL, 'mvc', '{}', 0, NULL)`,
+    [pinId, pinId.replace(/-i0$/, ''), groupId, senderMetaId, senderGlobalMetaId, senderName, content,
+      mention ? JSON.stringify(mention) : '[]'],
+  );
+};
+
+const createHarness = async (overrides = {}) => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  const metabotStore = new MetabotStore(db, store.getSaveFunction());
+  const groupTaskStore = new GroupTaskStore(db, store.getSaveFunction());
+  const coworkStore = new CoworkStore(db, () => {});
+
+  insertWallet(db, 1);
+  insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin', bossGmid: BOSS_GMID, llmId: 'llm-1' });
+  insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', globalmetaid: 'gmid-w2', llmId: 'llm-2', allowChatSkills: overrides.coderChatSkills ?? [] });
+  insertMetabot(db, { id: 3, walletId: 1, name: 'Designer Bot', globalmetaid: 'gmid-w3', llmId: 'llm-3' });
+  insertMetabot(db, { id: 4, walletId: 1, name: 'Reviewer Bot', globalmetaid: 'gmid-w4', llmId: 'llm-4' });
+
+  const chatCalls = [];
+  const sends = [];
+  const routingCalls = [];
+  const skillTurnCalls = [];
+  const events = [];
+  const state = {
+    nowMs: 1_000_000_000_000,
+    chatError: overrides.chatError ?? null,
+    routing: overrides.routing ?? null,
+  };
+  const seenChatErrors = new Set();
+
+  const loop = createGroupTaskDaemonLoop({
+    getStore: () => store,
+    getGroupTaskStore: () => groupTaskStore,
+    getMetabotStore: () => metabotStore,
+    getCoworkStore: () => coworkStore,
+    performChat: async (systemPrompt, userMessage, llmId) => {
+      chatCalls.push({ systemPrompt, userMessage, llmId });
+      if (state.chatError && !seenChatErrors.has(state.chatError)) {
+        seenChatErrors.add(state.chatError);
+        throw new Error(state.chatError);
+      }
+      return `reply-for-${llmId}`;
+    },
+    postGroupTaskMessage: async (taskId, metabotId, content) => {
+      sends.push({ taskId, metabotId, content });
+      return { pinId: `send-pin-${sends.length}` };
+    },
+    getChatSkillsRoutingPrompt: async (input) => {
+      routingCalls.push(input);
+      return typeof state.routing === 'function'
+        ? state.routing(input)
+        : (state.routing ?? { prompt: null, activeSkillIds: [] });
+    },
+    runSkillTurn: async (params) => {
+      skillTurnCalls.push(params);
+      return { replyText: 'skill-turn-reply', assistantMessageId: 'asst-fake-1' };
+    },
+    emitTaskEvent: (payload) => {
+      events.push(payload);
+    },
+    emitLog: () => {},
+    now: () => state.nowMs,
+    workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
+    chairCooldownMs: overrides.chairCooldownMs ?? 10_000,
+    replyBudget: overrides.replyBudget ?? 40,
+    maxRepliesPerTaskPerTick: overrides.maxRepliesPerTaskPerTick ?? 3,
+  });
+
+  const createTask = (workerIds = [2, 3], opts = {}) => {
+    const task = groupTaskStore.createTask({
+      groupId: GROUP_ID, title: 'Build MetaApp', goal: 'Build and publish the intro MetaApp',
+      acceptanceCriteria: 'Preview URL works', chairMetabotId: 1, createdBy: 'user', createPinId: 'pin-create',
+    });
+    groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: 'gmid-twin', role: 'chair', joinedPinId: 'pin-create' });
+    for (const workerId of workerIds) {
+      groupTaskStore.addMember({ taskId: task.id, metabotId: workerId, role: 'worker' });
+    }
+    if (opts.activate !== false) {
+      groupTaskStore.updateTaskStatus(task.id, 'executing');
+    }
+    return groupTaskStore.getTaskById(task.id);
+  };
+
+  return {
+    store, db, metabotStore, groupTaskStore, coworkStore, loop,
+    chatCalls, sends, routingCalls, skillTurnCalls, events, state, createTask,
+    cleanup: () => store.close(),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// Gating matrix (pure)
+// ---------------------------------------------------------------------------
+
+test('gating: worker responds only when mentioned (by name or mention array)', () => {
+  const byName = decideGroupTaskResponders(
+    gateMessage({ content: '@Coder Bot please handle this' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(byName, [{ metabotId: 2, reason: 'worker_mentioned' }]);
+
+  const byMentionArray = decideGroupTaskResponders(
+    gateMessage({ content: 'please handle this', mention: JSON.stringify(['gmid-w2']) }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(byMentionArray, [{ metabotId: 2, reason: 'worker_mentioned' }]);
+
+  const byMetaIdInArray = decideGroupTaskResponders(
+    gateMessage({ content: 'go', mention: JSON.stringify(['metaid-3']) }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(byMetaIdInArray, [{ metabotId: 3, reason: 'worker_mentioned' }]);
+
+  // name match is case-insensitive
+  const byNameCase = decideGroupTaskResponders(
+    gateMessage({ content: 'coder bot, take it' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(byNameCase, [{ metabotId: 2, reason: 'worker_mentioned' }]);
+});
+
+test('gating: chair rules (a) mentioned, (b) owner message, (c) deliverable, (d) floor control', () => {
+  // (a) chair mentioned
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: 'Twin Bot, your call?' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
+    [{ metabotId: 1, reason: 'chair_mentioned' }],
+  );
+
+  // (b) owner message: no mention needed for the chair; workers get NO privilege
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: BOSS_GMID, content: 'status update please' }),
+      gateTask(), GATE_MEMBERS, GATE_BOTS,
+    ),
+    [{ metabotId: 1, reason: 'chair_owner_message' }],
+  );
+
+  // (c) deliverable tag
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: 'gmid-w2', content: '[DELIVERABLE] metaapp: metaapp://pin1' }),
+      gateTask(), GATE_MEMBERS, GATE_BOTS,
+    ),
+    [{ metabotId: 1, reason: 'chair_deliverable' }],
+  );
+
+  // (d) not addressed to any specific member -> chair floor control
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: 'I have a general question about the goal' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
+    [{ metabotId: 1, reason: 'chair_floor_control' }],
+  );
+});
+
+test('gating: message addressed only to one worker keeps the chair silent', () => {
+  const decisions = decideGroupTaskResponders(
+    gateMessage({ content: '@Designer Bot draft the layout' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(decisions, [{ metabotId: 3, reason: 'worker_mentioned' }]);
+
+  // two workers addressed: both reply, chair still silent
+  const twoWorkers = decideGroupTaskResponders(
+    gateMessage({ content: '@Coder Bot @Designer Bot sync up' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(twoWorkers, [
+    { metabotId: 2, reason: 'worker_mentioned' },
+    { metabotId: 3, reason: 'worker_mentioned' },
+  ]);
+});
+
+test('gating: self-skip, unmentioned local author, empty content, terminal task', () => {
+  // chair's own message never triggers the chair (even with a deliverable tag)
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: 'gmid-twin', content: '[DELIVERABLE] my own note' }),
+      gateTask(), GATE_MEMBERS, GATE_BOTS,
+    ),
+    [],
+  );
+
+  // local worker authored, mentions nobody: self-skip for that worker, others silent,
+  // chair takes floor control (message not addressed to a specific member)
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: 'gmid-w2', content: 'I finished my part' }),
+      gateTask(), GATE_MEMBERS, GATE_BOTS,
+    ),
+    [{ metabotId: 1, reason: 'chair_floor_control' }],
+  );
+
+  // empty content -> nobody
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: '   ' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
+    [],
+  );
+
+  // terminal task -> nobody
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: '@Coder Bot go' }), gateTask('done'), GATE_MEMBERS, GATE_BOTS),
+    [],
+  );
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: '@Coder Bot go' }), gateTask('cancelled'), GATE_MEMBERS, GATE_BOTS),
+    [],
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Daemon loop
+// ---------------------------------------------------------------------------
+
+test('happy path: kickoff mentioning two workers triggers both, chair stays silent, sessions recorded', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    insertGroupMessage(h.db, {
+      pinId: 'kickoff-i0',
+      senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin', senderName: 'Twin Bot',
+      content: 'Team kickoff. @Coder Bot research options. @Designer Bot draft the layout.',
+    });
+
+    await h.loop.runTick();
+
+    // both workers replied; chair (author) did not
+    assert.deepEqual(h.sends.map((s) => s.metabotId).sort(), [2, 3]);
+    assert.equal(h.chatCalls.length, 2);
+
+    // prompts carry the task facts and the triggering-message marker
+    const coderCall = h.chatCalls.find((c) => c.llmId === 'llm-2');
+    assert.match(coderCall.systemPrompt, /Build MetaApp/);
+    assert.match(coderCall.systemPrompt, /Preview URL works/);
+    assert.match(coderCall.systemPrompt, /the worker of this task group/);
+    assert.match(coderCall.userMessage, />>> Twin Bot: Team kickoff\..*<<< \(the message you are responding to\)/);
+    assert.match(h.sends.find((s) => s.metabotId === 2).content, /reply-for-llm-2/);
+
+    // sessions: one per (task, worker) on the metaweb_group_task channel
+    for (const workerId of [2, 3]) {
+      const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, workerId);
+      assert.ok(mapping, `mapping for worker ${workerId}`);
+      const session = h.coworkStore.getSession(mapping.coworkSessionId);
+      assert.equal(session.sessionType, 'group_task');
+      assert.equal(session.metabotId, workerId);
+      const messages = h.coworkStore.getSessionMessages(session.id);
+      assert.deepEqual(messages.map((m) => m.type), ['user', 'assistant']);
+      assert.match(messages[0].content, /recent group log/);
+      assert.equal(messages[1].content, `reply-for-llm-${workerId}`);
+    }
+
+    // cursor advanced past the kickoff message
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['kickoff-i0'])[0].values[0][0];
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('cursor advances on no-reply messages and on per-message failure', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+
+    // chair talking (self-skip) -> no replies at all
+    insertGroupMessage(h.db, {
+      pinId: 'self-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'note to self, nobody addressed',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+    const selfId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['self-i0'])[0].values[0][0];
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId);
+
+    // first message blows up the LLM, second succeeds: cursor still advances past both
+    h.state.chatError = 'llm exploded';
+    insertGroupMessage(h.db, {
+      pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot first attempt',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'ok-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot second attempt',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 2, 'both messages attempted the LLM');
+    assert.equal(h.sends.length, 1, 'only the second message produced a send');
+    assert.match(h.sends[0].content, /reply-for-llm-2/);
+    const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('loop prevention: cooldown and per-tick cap', async () => {
+  const h = await createHarness({ maxRepliesPerTaskPerTick: 2 });
+  try {
+    const task = h.createTask([2, 3, 4]);
+
+    // one message mentions all three workers; per-tick cap = 2
+    insertGroupMessage(h.db, {
+      pinId: 'all-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot @Designer Bot @Reviewer Bot all hands',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'per-tick cap stops the third worker');
+
+    // cooldown: a fresh mention for worker 2 within 20s is skipped
+    insertGroupMessage(h.db, {
+      pinId: 'again-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot again',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'cooldown blocks the immediate follow-up');
+
+    // past cooldown: a new mention flows again (the skipped one is behind the cursor)
+    h.state.nowMs += 21_000;
+    insertGroupMessage(h.db, {
+      pinId: 'third-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot third',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 3);
+    assert.equal(h.sends.at(-1).metabotId, 2);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('loop prevention: reply budget per (task, bot)', async () => {
+  const h = await createHarness({ replyBudget: 1 });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'm1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot one',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    // budget exhausted (1): even after the cooldown, no more replies from this bot
+    h.state.nowMs += 60_000;
+    insertGroupMessage(h.db, {
+      pinId: 'm2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot two',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'budget exhausted: no second reply');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('chair reply does not count against the per-tick worker cap', async () => {
+  const h = await createHarness({ maxRepliesPerTaskPerTick: 1 });
+  try {
+    h.createTask([2, 3]);
+    // owner message mentions both workers: chair replies (owner privilege) + 1 worker (cap)
+    insertGroupMessage(h.db, {
+      pinId: 'boss-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: '@Coder Bot @Designer Bot get started',
+    });
+    await h.loop.runTick();
+    const workerSends = h.sends.filter((s) => s.metabotId !== 1);
+    const chairSends = h.sends.filter((s) => s.metabotId === 1);
+    assert.equal(chairSends.length, 1, 'chair replied to the owner message');
+    assert.equal(workerSends.length, 1, 'worker cap = 1, chair reply not counted');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('send failure is logged and swallowed; cursor still advances', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const originalSend = h.sends;
+    let attempt = 0;
+    // rebuild a loop whose send throws
+    const failingLoop = createGroupTaskDaemonLoop({
+      getStore: () => h.store,
+      getGroupTaskStore: () => h.groupTaskStore,
+      getMetabotStore: () => h.metabotStore,
+      getCoworkStore: () => h.coworkStore,
+      performChat: async () => 'reply-text',
+      postGroupTaskMessage: async () => {
+        attempt += 1;
+        throw new Error('chain offline');
+      },
+      emitLog: () => {},
+      now: () => h.state.nowMs,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'fail-send-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot say hi',
+    });
+    await failingLoop.runTick();
+    assert.equal(attempt, 1, 'send was attempted');
+    assert.equal(originalSend.length, 0, 'no successful sends recorded');
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['fail-send-i0'])[0].values[0][0];
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId, 'cursor advanced despite send failure');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Protocol tags ([DELIVERABLE] / [STATUS]) and skill turns
+// ---------------------------------------------------------------------------
+
+test('deliverable tags: kind inference, uri extraction, author recorded, dedupe by msg_pin_id', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const cases = [
+      { pinId: 'd1-i0', content: '[DELIVERABLE] metafile: metafile://pin123.png see this', kind: 'metafile', uri: 'metafile://pin123.png' },
+      { pinId: 'd2-i0', content: '[DELIVERABLE] metaapp: metaapp://app456 is live', kind: 'metaapp', uri: 'metaapp://app456' },
+      { pinId: 'd3-i0', content: '[DELIVERABLE] url: https://example.com/preview', kind: 'url', uri: 'https://example.com/preview' },
+      { pinId: 'd4-i0', content: '[deliverable] text summary: the work is done', kind: 'text', uri: null },
+    ];
+    for (const c of cases) {
+      insertGroupMessage(h.db, {
+        pinId: c.pinId, senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+        senderName: 'Coder Bot', content: c.content,
+      });
+    }
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 4);
+    for (const c of cases) {
+      const row = rows.find((r) => r.msgPinId === c.pinId);
+      assert.ok(row, `deliverable for ${c.pinId}`);
+      assert.equal(row.kind, c.kind, `${c.pinId} kind`);
+      assert.equal(row.uri, c.uri, `${c.pinId} uri`);
+      assert.equal(row.authorGlobalmetaid, 'gmid-w2');
+      assert.equal(row.status, 'pending');
+    }
+
+    // reprocessing the same messages (cursor forced back) must not duplicate rows
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = 0 WHERE id = ?', [task.id]);
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 4, 'dedupe by task_id + msg_pin_id');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('status tags: chair-only, transitions, illegal swallowed, review event once', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false }); // stays 'planning'
+    insertGroupMessage(h.db, {
+      pinId: 's1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[STATUS:REVIEW] worker trying to move it',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 's2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] work is underway',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 's3-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] still underway',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 's4-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 's5-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] illegal step back',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.deepEqual(
+      h.events.map((e) => ({ type: e.type, taskId: e.taskId, status: e.status })),
+      [
+        { type: 'groupTask:statusChanged', taskId: task.id, status: 'executing' },
+        { type: 'groupTask:statusChanged', taskId: task.id, status: 'review' },
+      ],
+      'only real transitions fire the event; same-status and illegal moves do not',
+    );
+    assert.ok(h.events.every((e) => typeof e.at === 'number'));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('skill path: routing hit runs the skill turn in the existing session, plain path untouched', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'skill-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot search for MetaID docs',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.skillTurnCalls.length, 1, 'skill turn used');
+    assert.equal(h.chatCalls.length, 0, 'plain completion not called');
+    assert.deepEqual(h.routingCalls[0].allowChatSkills, ['web-search']);
+    assert.equal(h.routingCalls[0].allowAllEnabled, false, 'human sender: no owner privilege');
+
+    // ran inside the existing metaweb_group_task session for (task, worker)
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping);
+    assert.equal(h.skillTurnCalls[0].sessionId, mapping.coworkSessionId);
+    assert.deepEqual(h.skillTurnCalls[0].activeSkillIds, ['web-search']);
+    assert.match(h.skillTurnCalls[0].systemPrompt, /available_skills/);
+    assert.match(h.skillTurnCalls[0].userMessage, />>> Human: @Coder Bot/);
+
+    // reply went on-chain; daemon did not double-append an assistant message
+    assert.deepEqual(h.sends.map((s) => [s.metabotId, s.content]), [[2, 'skill-turn-reply']]);
+    const messages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
+    assert.deepEqual(messages.map((m) => m.type), ['user']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('skill path: no routing hit falls back to the plain completion', async () => {
+  const h = await createHarness({ coderChatSkills: ['web-search'] }); // routing returns null prompt
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'plain-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot quick question',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.skillTurnCalls.length, 0, 'skill turn not used');
+    assert.equal(h.chatCalls.length, 1, 'plain completion used');
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0].content, /reply-for-llm-2/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('skill routing: owner message grants allowAllEnabled to the responding bot', async () => {
+  const h = await createHarness({
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'boss-skill-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'chair, give me a status summary',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.routingCalls.length, 1, 'only the chair responds to the owner message');
+    assert.equal(h.routingCalls[0].allowAllEnabled, true, 'owner privilege for skill scope');
+    assert.equal(h.skillTurnCalls.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
