@@ -280,7 +280,11 @@ export class DreamService {
       });
 
       let output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId);
-      output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId, fallbackLlmId);
+      // Repair runs discard selfIdentity in writeDreamResults, so skip the
+      // expansion retry instead of burning an extra LLM call on it.
+      if (!isRepair) {
+        output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId, fallbackLlmId);
+      }
       this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);

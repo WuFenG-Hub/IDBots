@@ -1116,6 +1116,7 @@ interface IElectronAPI {
         status: 'running' | 'completed' | 'failed';
         attemptCount: number;
         llmId: string | null;
+        dreamVersion: number;
         error: string | null;
         startedAt: number;
         completedAt: number | null;
