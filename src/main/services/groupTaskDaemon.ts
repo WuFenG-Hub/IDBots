@@ -17,6 +17,10 @@ import type { GroupTaskStore, GroupTask, GroupTaskMember } from '../groupTaskSto
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
+import {
+  buildExperiencePromptBlocksXml,
+  RECENT_SUMMARIES_PROMPT_DAYS,
+} from '../libs/experiencePromptBlocks';
 
 const CONVERSATION_CHANNEL = 'metaweb_group_task';
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
@@ -28,6 +32,18 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 const CHAIR_PLANNED_KV_PREFIX = 'group_task_chair_planned:';
 const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
+
+const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+
+/** Deliverable verification: strict formats (lowercase hex only). */
+const PINID_FORMAT = /^[0-9a-f]{64}i0$/;
+const TXID_FORMAT = /^[0-9a-f]{64}$/;
+/** Plausible pinid/txid candidates in a [DELIVERABLE] line (incl. 0x-prefixed fakes). */
+const DELIVERABLE_ID_CANDIDATE = /\b(?:0[xX][0-9a-fA-F]{2,66}|[0-9a-fA-F]{16,66}(?:i0)?)\b/g;
+const MAX_VERIFICATION_CANDIDATES = 3;
+
+/** Hard cap for the appended A2A experience/memory block. */
+const EXPERIENCE_BLOCK_MAX_CHARS = 1500;
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
@@ -245,6 +261,7 @@ export interface GroupTaskDaemonSqliteStoreLike {
   getSaveFunction(): () => void;
   get<T = unknown>(key: string): T | undefined;
   set<T = unknown>(key: string, value: T): void;
+  delete(key: string): void;
 }
 
 export type GroupTaskDaemonPerformChatFn = (
@@ -283,6 +300,30 @@ export interface GroupTaskDaemonTaskEvent {
   at: number;
 }
 
+/** On-chain existence check for deliverable verification (main.ts wires getPinData). */
+export type GroupTaskDaemonReadPinFn = (
+  pinId: string,
+) => Promise<'found' | 'not_found' | 'unavailable'>;
+
+/** Private A2A report from the chair bot to the owner (encrypted simplemsg in main.ts). */
+export type GroupTaskDaemonSendOwnerReportFn = (params: {
+  metabotId: number;
+  ownerGlobalMetaId: string;
+  text: string;
+}) => Promise<unknown>;
+
+/** Narrow memory read (owner scope, created status) for the A2A experience block. */
+export type GroupTaskDaemonListUserMemoriesFn = (
+  metabotId: number,
+  input: { usageClass: 'self_identity' | 'value_boundary'; limit: number },
+) => Array<{ text: string }>;
+
+/** Recent dream summaries for the A2A experience block. */
+export type GroupTaskDaemonListDailySummariesFn = (
+  metabotId: number,
+  limit: number,
+) => Array<{ summaryDate: string; summaryText: string }>;
+
 export interface GroupTaskDaemonDeps {
   getStore: () => GroupTaskDaemonSqliteStoreLike;
   getGroupTaskStore: () => GroupTaskStore;
@@ -293,6 +334,10 @@ export interface GroupTaskDaemonDeps {
   getChatSkillsRoutingPrompt?: GroupTaskDaemonSkillRoutingFn;
   runSkillTurn?: GroupTaskDaemonRunSkillTurnFn;
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
+  readPinForVerification?: GroupTaskDaemonReadPinFn;
+  sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
+  listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
+  listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   emitLog?: (message: string) => void;
   now?: () => number;
   intervalMs?: number;
@@ -457,18 +502,216 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * Protocol tags on EVERY ingested message (before/independent of reply gating):
-   * - [DELIVERABLE]: record one pending deliverable row (deduped by msg_pin_id).
-   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot; illegal
-   *   transitions are silently ignored; a real transition fires emitTaskEvent.
+   * Unambiguous per-turn local time line (mirrors coworkRunner's Local Time
+   * Context intent): local datetime, UTC offset, host timezone, and the long date.
    */
-  const processMessageTags = (
+  const formatTurnTimeText = (): string => {
+    const date = new Date(now());
+    const pad = (value: number): string => String(value).padStart(2, '0');
+    const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    const offsetMinutes = -date.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const utcOffset = `${sign}${Math.floor(Math.abs(offsetMinutes) / 60)}`;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
+    const weekday = date.toLocaleDateString('en-US', { weekday: 'long' });
+    const longDate = date.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    return `Current time: ${local} (UTC${utcOffset}, ${timezone}); today is ${weekday}, ${longDate}.`;
+  };
+
+  /**
+   * A2A experience/memory block for the responding bot, built with the SAME
+   * exported builder the private-chat path uses (buildExperiencePromptBlocksXml)
+   * fed through narrow injected memory/dream getters. '' when unwired or empty.
+   */
+  const buildExperienceBlockFor = (bot: GroupTaskDaemonBotFull): string => {
+    if (!deps.listUserMemories && !deps.listDailySummaries) return '';
+    try {
+      const identityEntry = deps.listUserMemories?.(bot.id, { usageClass: 'self_identity', limit: 1 })?.[0];
+      const valueBoundaries = deps.listUserMemories?.(bot.id, { usageClass: 'value_boundary', limit: 5 }) ?? [];
+      const summaries = deps.listDailySummaries?.(bot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
+      const block = buildExperiencePromptBlocksXml({
+        identityText: identityEntry?.text ?? null,
+        valueBoundaries,
+        summaries,
+      }).trim();
+      if (!block) return '';
+      return block.length > EXPERIENCE_BLOCK_MAX_CHARS
+        ? `${block.slice(0, EXPERIENCE_BLOCK_MAX_CHARS)}…`
+        : block;
+    } catch {
+      return '';
+    }
+  };
+
+  /** Full per-turn system prompt: base + fresh time line + experience block. */
+  const buildTurnSystemPrompt = (
+    bot: GroupTaskDaemonBotFull,
+    task: GroupTask,
+    promptMembers: DaemonPromptMember[],
+    botRole: 'chair' | 'worker',
+    ownerGlobalMetaId: string,
+  ): string => {
+    return buildGroupTaskSystemPrompt({
+      metabot: bot,
+      task: {
+        title: task.title,
+        goal: task.goal,
+        acceptanceCriteria: task.acceptanceCriteria,
+      },
+      members: promptMembers,
+      botRole,
+      ownerGlobalMetaId: ownerGlobalMetaId || null,
+      currentTimeText: formatTurnTimeText(),
+      experienceBlock: buildExperienceBlockFor(bot),
+    });
+  };
+
+  /** Plausible pinid/txid candidates in a [DELIVERABLE] line (deduped, capped). */
+  const extractIdCandidates = (content: string): string[] => {
+    const matches = content.match(DELIVERABLE_ID_CANDIDATE) ?? [];
+    return [...new Set(matches)].slice(0, MAX_VERIFICATION_CANDIDATES);
+  };
+
+  /**
+   * Deliverable verification hints: format-check any pinid/txid-looking token,
+   * then (when wired) an on-chain existence check via getPinData. The notes are
+   * appended to the chair's context so it verifies before accepting.
+   */
+  const verifyDeliverableCandidates = async (content: string): Promise<string[]> => {
+    const candidates = extractIdCandidates(content);
+    if (candidates.length === 0) return [];
+    const notes: string[] = [];
+    for (const token of candidates) {
+      const display = token.length > 16 ? `${token.slice(0, 12)}…` : token;
+      const isPinid = PINID_FORMAT.test(token);
+      const isTxid = TXID_FORMAT.test(token);
+      if (!isPinid && !isTxid) {
+        notes.push(
+          `⚠ Host verification: reported pinid "${display}" FAILS format validation ` +
+          '(expected 64 lowercase hex + i0).',
+        );
+        continue;
+      }
+      const label = isPinid ? 'pinid' : 'txid';
+      if (!deps.readPinForVerification) {
+        notes.push(`… Host verification: ${label} format valid; on-chain check unavailable.`);
+        continue;
+      }
+      try {
+        const outcome = await deps.readPinForVerification(isPinid ? token : `${token}i0`);
+        if (outcome === 'found') {
+          notes.push(`✓ Host verification: ${label} format valid; pin found on-chain (via getPinData/manapi).`);
+        } else if (outcome === 'not_found') {
+          notes.push(`⚠ Host verification: ${label} format valid but pin NOT found on-chain (via getPinData/manapi).`);
+        } else {
+          notes.push(`… Host verification: ${label} format valid; on-chain check unavailable.`);
+        }
+      } catch {
+        notes.push(`… Host verification: ${label} format valid; on-chain check unavailable.`);
+      }
+    }
+    return notes;
+  };
+
+  /** System-generated owner-report directive for the review transition. */
+  const buildOwnerReportDirective = (store: GroupTaskStore, task: GroupTask): string => {
+    const deliverables = store.listDeliverables(task.id);
+    const deliverableLines = deliverables.map(
+      (deliverable) =>
+        `- [${deliverable.kind ?? 'text'}] ${deliverable.uri ?? '(no uri)'} (status: ${deliverable.status})`,
+    );
+    return [
+      '[SYSTEM owner-report directive — generated by the host, not by a group participant]',
+      `The group task "${task.title}" just moved to REVIEW. Compose a concise PRIVATE report to the owner covering:`,
+      '- The task goal (restated briefly).',
+      '- What each member did (by name).',
+      '- Deliverables with pinids/URLs and any verification outcomes you are aware of.',
+      '- What the owner should decide now: accept & close, or request rework (and of what).',
+      '',
+      `Goal: ${task.goal}`,
+      `Acceptance criteria: ${task.acceptanceCriteria?.trim() || '(none specified)'}`,
+      'Deliverables recorded:',
+      ...(deliverableLines.length > 0 ? deliverableLines : ['(none recorded)']),
+    ].join('\n');
+  };
+
+  /**
+   * Owner report on review: one private A2A report from the chair to the owner
+   * per task per review-entry (kv guard group_task_owner_reported:<taskId>;
+   * cleared when the task re-enters executing via the rework hatch). The report
+   * is never posted to the group; failures only log, never block the tick.
+   */
+  const maybeSendOwnerReport = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<void> => {
+    if (!deps.sendOwnerPrivateReport) return;
+    const sqlite = deps.getStore();
+    const guardKey = `${OWNER_REPORTED_KV_PREFIX}${task.id}`;
+    if (sqlite.get<string>(guardKey) === '1') return;
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    const ownerGlobalMetaId = (bot?.boss_global_metaid ?? '').trim();
+    if (!chairMember || !bot || !ownerGlobalMetaId) {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report skipped (no chair bot or owner id)`);
+      return;
+    }
+
+    try {
+      const store = deps.getGroupTaskStore();
+      const coworkStore = deps.getCoworkStore();
+      const systemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const directive = buildOwnerReportDirective(store, task);
+      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
+      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
+      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId })).trim();
+      if (!report || NO_REPLY_PATTERN.test(report)) {
+        throw new Error('owner report turn produced no report');
+      }
+      await deps.sendOwnerPrivateReport({
+        metabotId: bot.id,
+        ownerGlobalMetaId,
+        text: report,
+      });
+      sqlite.set(guardKey, '1');
+      // Record the private report in the chair's own group-task session (context
+      // continuity), clearly marked as private — never posted to the group.
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      coworkStore.addMessage(session.id, {
+        type: 'assistant',
+        content: `[Private report sent to the owner — not posted to the group]\n${report}`,
+      });
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report sent privately to the owner`);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: owner report failed (tick continues): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  };
+
+  /**
+   * Protocol tags on EVERY ingested message (before/independent of reply gating):
+   * - [DELIVERABLE]: record one pending deliverable row (deduped by msg_pin_id)
+   *   and compute host verification notes for the chair.
+   * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot; illegal
+   *   transitions are silently ignored; a real transition fires emitTaskEvent,
+   *   entering review triggers the owner report, re-entering executing clears it.
+   * Returns the verification notes for this message (empty when none).
+   */
+  const processMessageTags = async (
     task: GroupTask,
     message: GroupTaskDaemonMessage,
     members: GroupTaskMember[],
-  ): void => {
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<string[]> => {
     const store = deps.getGroupTaskStore();
     const content = message.content;
+    let verificationNotes: string[] = [];
 
     if (DELIVERABLE_TAG.test(content)) {
       const msgPinId = message.pinId;
@@ -480,6 +723,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           kind: inferDeliverableKind(content),
           uri: extractDeliverableUri(content),
         });
+      }
+      try {
+        verificationNotes = await verifyDeliverableCandidates(content);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: deliverable verification failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
 
@@ -500,12 +751,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               status: updated.status,
               at: now(),
             });
+            if (updated.status === 'executing' && beforeStatus === 'review') {
+              // Rework hatch: the next review must report to the owner again.
+              deps.getStore().delete(`${OWNER_REPORTED_KV_PREFIX}${task.id}`);
+            }
+            if (updated.status === 'review') {
+              await maybeSendOwnerReport(task, members, botsById, promptMembers);
+            }
           }
         } catch {
           // Illegal transition (e.g. backwards or from terminal): silently ignored.
         }
       }
     }
+
+    return verificationNotes;
   };
 
   /** System-generated planning directive for the chair planning turn. */
@@ -560,16 +820,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const db = sqlite.getDatabase();
       const coworkStore = deps.getCoworkStore();
-      const systemPrompt = buildGroupTaskSystemPrompt({
-        metabot: bot,
-        task: {
-          title: task.title,
-          goal: task.goal,
-          acceptanceCriteria: task.acceptanceCriteria,
-        },
-        members: promptMembers,
-        botRole: 'chair',
-      });
+      const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
+      const systemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const directive = buildPlanningDirective(db, task);
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
@@ -608,21 +860,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     message: GroupTaskDaemonMessage,
     promptMembers: DaemonPromptMember[],
     chairGlobalMetaId: string,
+    ownerGlobalMetaId: string,
+    verificationNotes: string[],
   ): Promise<void> => {
     const db = deps.getStore().getDatabase();
     const coworkStore = deps.getCoworkStore();
 
-    const baseSystemPrompt = buildGroupTaskSystemPrompt({
-      metabot: bot,
-      task: {
-        title: task.title,
-        goal: task.goal,
-        acceptanceCriteria: task.acceptanceCriteria,
-      },
-      members: promptMembers,
-      botRole: member.role,
-    });
-    const userMessage = buildGroupLogUserMessage(db, task, message);
+    const baseSystemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
+    let userMessage = buildGroupLogUserMessage(db, task, message);
+    if (verificationNotes.length > 0) {
+      // Host deliverable-verification facts accompany the chair's context.
+      userMessage = `${userMessage}\n${verificationNotes.join('\n')}`;
+    }
 
     // Skill routing (mirrors privateChatDaemon): when the bot has chat skills enabled
     // and routing hits, run one skill turn in the existing metaweb_group_task session;
@@ -735,6 +984,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const chairGlobalMetaId = (
       members.find((member) => member.role === 'chair')?.globalmetaid ?? ''
     ).trim();
+    const chairMemberId = members.find((member) => member.role === 'chair')?.metabotId;
+    const ownerGlobalMetaId = (
+      chairMemberId != null ? botsById.get(chairMemberId)?.boss_global_metaid ?? '' : ''
+    ).trim();
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {
@@ -749,7 +1002,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     for (const row of rows) {
       const message = toDaemonMessage(row);
       try {
-        processMessageTags(task, message, members);
+        const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
         // the tick-start snapshot.
@@ -778,7 +1031,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             continue;
           }
 
-          await generateAndSendReply(task, member, bot, message, promptMembers, chairGlobalMetaId);
+          // Verification facts travel with the deliverable that triggered the chair.
+          const notesForDecision = decision.reason === 'chair_deliverable' ? verificationNotes : [];
+          await generateAndSendReply(
+            task,
+            member,
+            bot,
+            message,
+            promptMembers,
+            chairGlobalMetaId,
+            ownerGlobalMetaId,
+            notesForDecision,
+          );
           lastReplyAtByKey.set(key, now());
           replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
           if (!isChair) workerRepliesThisTick += 1;

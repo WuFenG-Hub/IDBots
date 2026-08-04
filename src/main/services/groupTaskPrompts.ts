@@ -66,29 +66,44 @@ const SHARED_PLAYBOOK_RULES = [
   '- Keep replies concise and actionable.',
   '- When handing work off, @ the target by name — only when the handoff needs their action. Never @ anyone for courtesy.',
   '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line.',
+  '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute with your skills. If you could not do it, say so plainly — an honest failure is acceptable, a fabricated success is a critical fault.',
   '- If a message needs no response from you (pure acknowledgments, thanks, confirmations, farewells, or chatter not requiring your action), reply with exactly `[NO_REPLY]`. Silence is correct and expected in those cases.',
 ];
 
 const CHAIR_PLAYBOOK_RULES = [
   '- You are the owner\'s digital twin and chief of staff. NEVER relay the goal verbatim — decompose it into concrete subtasks. Assign different subtasks to different members by their profiles. Sequence dependent work: assign a step only when its inputs are ready (e.g. after a `[DELIVERABLE]` arrives). When a deliverable arrives, verify it against the acceptance criteria, then assign the next step.',
+  '- You coordinate, assign, verify and report — you NEVER execute task work yourself (no searching, no writing deliverable content, no publishing). If a worker is stuck or incapable, re-assign to another member or escalate the blocker to the owner.',
+  '- When a worker reports a deliverable, VERIFY it (format, plausibility, any daemon verification notes in the context) BEFORE accepting; if it looks fabricated, reject it and demand the real tool output.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
   '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
 ];
 
-/** Group-task block: task facts, roster, the bot's role, and the playbook rules. */
+/** Group-task block: environment, task facts, roster, the bot's role, and the playbook rules. */
 export function buildGroupTaskBlock(params: {
   task: GroupTaskPromptTask;
   members: GroupTaskPromptMember[];
   botName: string;
   botRole: 'chair' | 'worker';
+  /** Owner human's globalMetaId (the chair bot's boss), for the worldview block. */
+  ownerGlobalMetaId?: string | null;
+  /** Fresh per-turn local time line (host timezone). */
+  currentTimeText?: string;
 }): string {
   const acceptance = (params.task.acceptanceCriteria ?? '').trim() || '(none specified)';
   const rosterLines = params.members.length > 0
     ? params.members.map((member) => `- ${member.name} (${member.role})`)
     : ['(no members)'];
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
+  const ownerId = (params.ownerGlobalMetaId ?? '').trim();
+  const environmentLines = [
+    '## Group task environment',
+    `- You are in a GROUP TASK: multiple bots collaborating on one owner's goal. Initiator and final acceptor is the OWNER (a human${ownerId ? `, globalMetaId \`${ownerId}\`` : ''}). ${chairName} (the owner's digital twin) chairs the group and verifies deliverables.`,
+    '- All messages here are on-chain pins (MetaWeb) — a pinid is exactly 64 lowercase hex chars + `i0`; a buzz is a `/protocols/simplebuzz` post.',
+    ...(params.currentTimeText?.trim() ? [`- ${params.currentTimeText.trim()}`] : []),
+    '',
+  ];
 
   // Roster profiles (metabots bio/role/goal, capped) so everyone knows each
   // other's strengths; omitted entirely when no profile data exists.
@@ -122,6 +137,7 @@ export function buildGroupTaskBlock(params: {
     `- Goal: ${params.task.goal}`,
     `- Acceptance criteria: ${acceptance}`,
     '',
+    ...environmentLines,
     '## Roster',
     ...rosterLines,
     ...profileSection,
@@ -140,6 +156,10 @@ export function buildGroupTaskSystemPrompt(params: {
   task: GroupTaskPromptTask;
   members: GroupTaskPromptMember[];
   botRole: 'chair' | 'worker';
+  ownerGlobalMetaId?: string | null;
+  currentTimeText?: string;
+  /** Pre-built A2A experience/memory block (already size-capped); appended at the end. */
+  experienceBlock?: string;
 }): string {
   return [
     buildGroupTaskPersonaBlock(params.metabot),
@@ -149,6 +169,9 @@ export function buildGroupTaskSystemPrompt(params: {
       members: params.members,
       botName: params.metabot.name,
       botRole: params.botRole,
+      ownerGlobalMetaId: params.ownerGlobalMetaId,
+      currentTimeText: params.currentTimeText,
     }),
+    ...(params.experienceBlock?.trim() ? ['', params.experienceBlock.trim()] : []),
   ].join('\n');
 }

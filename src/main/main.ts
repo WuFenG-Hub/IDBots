@@ -19,6 +19,7 @@ import {
 } from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
 import type { MemoryBackend } from './memory/memoryBackend';
+import { createOwnerMemoryScope } from './memory/memoryScope';
 import {
   CoworkRunner,
   isDelegationPriceNumeric,
@@ -3079,6 +3080,47 @@ const startSqliteDaemons = (): void => {
     emitTaskEvent: (payload) => {
       broadcastGroupTaskEvent(payload);
     },
+    readPinForVerification: async (pinId) => {
+      try {
+        await getPinData(pinId, false);
+        return 'found';
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes('404') ? 'not_found' : 'unavailable';
+      }
+    },
+    sendOwnerPrivateReport: async ({ metabotId, ownerGlobalMetaId, text }) => {
+      const metabotStore = getMetabotStore();
+      const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+      if (!wallet?.mnemonic?.trim()) {
+        throw new Error('chair wallet unavailable');
+      }
+      const identity = getUserIdentityStore().get();
+      const peerChatPubkey = (identity?.chat_public_key ?? '').trim();
+      if (!peerChatPubkey) {
+        throw new Error('owner chat public key unavailable');
+      }
+      const peerGlobalMetaId = (identity?.globalmetaid ?? '').trim() || ownerGlobalMetaId;
+      return sendEncryptedSimplemsg({
+        metabotId,
+        wallet,
+        peerGlobalMetaId,
+        peerChatPubkey,
+        plaintext: text,
+        createPin: async (id, payload) => createPin(metabotStore, id, payload),
+      });
+    },
+    listUserMemories: (metabotId, input) =>
+      getCoworkStore().getMemoryBackend().listUserMemories({
+        metabotId,
+        scope: createOwnerMemoryScope(),
+        usageClass: input.usageClass,
+        status: 'created',
+        includeDeleted: false,
+        limit: input.limit,
+        offset: 0,
+      }).map((entry) => ({ text: entry.text })),
+    listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
     emitLog: (msg) => console.log(msg),
   });
 
