@@ -56,6 +56,11 @@ test('Renderer runs silent download flow gated by update phase', () => {
   // Silent download subscribes to progress and passes version + optional sha256
   assert.match(source, /window\.electron\.appUpdate\.onDownloadProgress/);
   assert.match(source, /appUpdate\.download\(info\.url, info\.latestVersion, info\.sha256\)/);
+  // Silent download failure (except user cancel) surfaces a visible badge notice
+  assert.match(source, /setSilentDownloadFailed\(true\)/);
+  assert.match(source, /downloadResult\.error !== 'Download cancelled'/);
+  assert.match(source, /silentDownloadFailed[\s\S]*?i18nService\.t\('updateDownloadFailedPill'\)/);
+  assert.match(source, /tone=\{silentDownloadFailed \? 'error' : undefined\}/);
   // Restart confirmation relaunches into the silently applied update
   assert.match(source, /await window\.electron\.appUpdate\.relaunchNow\(\)/);
   // Downloaded installer is reused for the local install path
@@ -127,6 +132,11 @@ test('Update badge shows non-intrusive download progress with resume label', () 
   assert.match(badge, /updateDownloadingPill/);
   assert.match(badge, /formatBytes/);
   assert.match(badge, /Math\.round\(progress\.percent \* 100\)/);
+  // Error tone for a failed silent download (visible, non-intrusive notice)
+  assert.match(badge, /tone\?: 'default' \| 'error';/);
+  assert.match(badge, /updateDownloadFailedPill/);
+  assert.match(badge, /updateDownloadFailedTitle/);
+  assert.match(badge, /border-red-500\/30/);
   // Shared format helpers extracted for badge + modal
   assert.match(modal, /from '\.\/format'/);
 });
@@ -152,7 +162,7 @@ test('Update badge supports a phase-aware label', () => {
 test('i18n contains silent-update copy in zh and en', () => {
   const source = read('src/renderer/services/i18n.ts');
 
-  for (const key of ['updateReadyPill', 'updateDownloadedTitle', 'updateInstallNow', 'updateRestartTitle', 'updateRestartMessage', 'updateRestartNow', 'updateLater', 'updateDownloadingPill', 'updateResumingPill']) {
+  for (const key of ['updateReadyPill', 'updateDownloadedTitle', 'updateInstallNow', 'updateRestartTitle', 'updateRestartMessage', 'updateRestartNow', 'updateLater', 'updateDownloadingPill', 'updateResumingPill', 'updateDownloadFailedPill', 'updateDownloadFailedTitle']) {
     const occurrences = source.split(`${key}:`).length - 1;
     assert.ok(occurrences >= 2, `i18n key ${key} should exist in both zh and en dictionaries`);
   }

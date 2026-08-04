@@ -83,6 +83,8 @@ const App: React.FC = () => {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updatePhase, setUpdatePhaseState] = useState<UpdatePhase>('idle');
   const updatePhaseRef = useRef<UpdatePhase>('idle');
+  // 静默下载失败（非用户取消）时置位，徽章给出可见提示；新一轮下载开始或手动下载成功后清除
+  const [silentDownloadFailed, setSilentDownloadFailed] = useState(false);
   const downloadedUpdateFileRef = useRef<{ version: string; filePath: string } | null>(null);
   const changeUpdatePhase = useCallback((phase: UpdatePhase) => {
     updatePhaseRef.current = phase;
@@ -516,6 +518,8 @@ const App: React.FC = () => {
   const startSilentDownload = useCallback(async (info: AppUpdateInfo) => {
     changeUpdatePhase('downloading');
     setDownloadProgress(null);
+    // 新一轮下载开始，清除之前的失败标记
+    setSilentDownloadFailed(false);
     // 静默下载也订阅进度，徽章以非打扰方式展示后台下载状态
     const unsubscribe = window.electron.appUpdate.onDownloadProgress((progress) => {
       setDownloadProgress(progress);
@@ -524,8 +528,11 @@ const App: React.FC = () => {
       const downloadResult = await window.electron.appUpdate.download(info.url, info.latestVersion, info.sha256);
       unsubscribe();
       if (!downloadResult.success || !downloadResult.filePath) {
-        // 静默下载失败：部分文件保留在本地，徽章显示「有新版本」，下次检查会自动续传
+        // 静默下载失败：部分文件保留在本地，徽章给出可见提示，下次检查会自动续传
         console.warn('[AppUpdate] Silent download failed:', downloadResult.error);
+        if (downloadResult.error !== 'Download cancelled') {
+          setSilentDownloadFailed(true);
+        }
         changeUpdatePhase('idle');
         return;
       }
@@ -549,6 +556,7 @@ const App: React.FC = () => {
     } catch (error) {
       unsubscribe();
       console.warn('[AppUpdate] Silent download error:', error);
+      setSilentDownloadFailed(true);
       changeUpdatePhase('idle');
     }
   }, [changeUpdatePhase]);
@@ -653,6 +661,8 @@ const App: React.FC = () => {
 
       if (downloadResult.filePath) {
         downloadedUpdateFileRef.current = { version: updateInfo.latestVersion, filePath: downloadResult.filePath };
+        // 手动下载成功，清除静默下载失败的提示
+        setSilentDownloadFailed(false);
       }
 
       setUpdateModalState('installing');
@@ -893,11 +903,19 @@ const App: React.FC = () => {
   }, [pendingPermission, handlePermissionResponse]);
 
   const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
-  // 静默下载中显示带进度的徽章（非打扰式后台状态）；静默替换中隐藏；就绪/待重启时显示徽章
+  // 静默下载中显示带进度的徽章（非打扰式后台状态）；静默替换中隐藏；就绪/待重启时显示徽章；
+  // 静默下载失败时以警示色显示，提示将自动重试
   const updateBadge = updateInfo && updatePhase !== 'applying' ? (
     <AppUpdateBadge
       latestVersion={updateInfo.latestVersion}
-      label={updatePhase === 'restartReady' ? i18nService.t('updateReadyPill') : undefined}
+      label={
+        updatePhase === 'restartReady'
+          ? i18nService.t('updateReadyPill')
+          : silentDownloadFailed
+            ? i18nService.t('updateDownloadFailedPill')
+            : undefined
+      }
+      tone={silentDownloadFailed ? 'error' : undefined}
       progress={updatePhase === 'downloading' ? downloadProgress : null}
       onClick={handleOpenUpdateModal}
     />
