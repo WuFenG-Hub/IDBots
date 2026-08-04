@@ -1954,6 +1954,68 @@ export class CoworkStore implements MemoryBackend {
     return true;
   }
 
+  /**
+   * Update the stored peer display profile (name/avatar) of an A2A session
+   * after a refresh from the latest chain data. Also renames the session
+   * title when it still equals the previous peer name (sessions created from
+   * the Bot Browser use the peer name as their title), and syncs the
+   * metaweb_private conversation mapping metadata so future reads stay
+   * consistent. Returns true when the session row was updated.
+   */
+  updateA2APeerProfile(
+    sessionId: string,
+    input: { peerName?: string | null; peerAvatar?: string | null }
+  ): boolean {
+    const normalizedSessionId = String(sessionId || '').trim();
+    if (!normalizedSessionId) return false;
+    const session = this.getSession(normalizedSessionId);
+    if (!session || session.sessionType !== 'a2a') return false;
+
+    const peerName = String(input.peerName || '').trim() || session.peerName || null;
+    const peerAvatar = String(input.peerAvatar || '').trim() || session.peerAvatar || null;
+    const previousPeerName = String(session.peerName || '').trim();
+    const shouldRetitle = Boolean(
+      peerName
+      && previousPeerName
+      && String(session.title || '').trim() === previousPeerName
+      && peerName !== previousPeerName
+    );
+
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET peer_name = ?, peer_avatar = ?, title = CASE WHEN ? THEN ? ELSE title END, updated_at = ?
+      WHERE id = ?
+    `, [peerName, peerAvatar, shouldRetitle ? 1 : 0, shouldRetitle ? peerName : session.title, Date.now(), normalizedSessionId]);
+    const updated = (this.db.getRowsModified?.() || 0) > 0;
+    if (!updated) return false;
+    this.saveDb();
+
+    const mappings = this.getAll<{
+      channel: string;
+      external_conversation_id: string;
+      metabot_id: number | null;
+      metadata_json: string | null;
+    }>(`
+      SELECT channel, external_conversation_id, metabot_id, metadata_json
+      FROM cowork_conversation_mappings
+      WHERE cowork_session_id = ?
+    `, [normalizedSessionId]);
+    for (const mapping of mappings) {
+      if (this.normalizeConversationChannel(mapping.channel) !== 'metaweb_private') continue;
+      let metadata: Record<string, unknown> = {};
+      try {
+        metadata = mapping.metadata_json ? JSON.parse(mapping.metadata_json) as Record<string, unknown> : {};
+      } catch { /* keep empty metadata on parse failure */ }
+      this.updateConversationMappingMetadata(
+        mapping.channel,
+        mapping.external_conversation_id,
+        mapping.metabot_id,
+        { ...metadata, peerName, peerAvatar },
+      );
+    }
+    return true;
+  }
+
   deleteConversationMapping(channel: string, externalConversationId: string, metabotId?: number | null): void {
     const normalizedChannel = this.normalizeConversationChannel(channel);
     const normalizedConversationId = this.normalizeExternalConversationId(externalConversationId);

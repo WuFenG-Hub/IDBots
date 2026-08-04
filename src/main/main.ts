@@ -164,8 +164,10 @@ import {
 } from './services/botBrowserBridgeService';
 import {
   createBotBrowserHostService,
+  fetchLatestBotProfileInfo,
   type BotBrowserHostService,
 } from './services/botBrowserHostService';
+import { refreshA2APeerProfile } from './services/a2aPeerProfileRefresh';
 import {
   createBotBrowserTabBridge,
   type BotBrowserTabBridge,
@@ -538,6 +540,39 @@ const emitCoworkStreamMessageUpdate = (
       }
     }
   });
+};
+
+/**
+ * Fire-and-forget refresh of an A2A session's stored peer name/avatar from
+ * the latest chain data. When the stored profile actually changes, all
+ * windows are notified so the renderer reloads the session list/detail.
+ */
+const scheduleA2APeerProfileRefresh = (sessionId: string): void => {
+  const normalizedSessionId = toSafeString(sessionId).trim();
+  if (!normalizedSessionId) return;
+  void (async () => {
+    try {
+      const result = await refreshA2APeerProfile({
+        coworkStore: getCoworkStore(),
+        sessionId: normalizedSessionId,
+        fetchProfile: (peerGlobalMetaId) => fetchLatestBotProfileInfo(peerGlobalMetaId),
+      });
+      if (!result.changed) return;
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          try {
+            win.webContents.send('cowork:session:profileRefreshed', { sessionId: normalizedSessionId });
+          } catch { /* ignore */ }
+        }
+      });
+    } catch (error) {
+      console.warn(
+        `[A2A PeerProfile] Refresh failed for session ${normalizedSessionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  })();
 };
 
 const attachSimplemsgMetadataToCoworkMessage = (
@@ -2997,7 +3032,8 @@ const startSqliteDaemons = (): void => {
     },
     undefined,
     (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null,
-    (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit)
+    (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    (sessionId) => scheduleA2APeerProfileRefresh(sessionId)
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
@@ -6113,6 +6149,7 @@ if (!gotTheLock) {
           getMetabotById: (metabotId) => getMetabotStore().getMetabotById(metabotId),
           input,
         });
+        scheduleA2APeerProfileRefresh(result.session.id);
         return {
           success: true,
           created: result.created,
@@ -6769,6 +6806,9 @@ if (!gotTheLock) {
         const session = enrichCoworkSessionWithServiceOrderSummary(
           getCoworkStore().getSession(sessionId)
         );
+        if (session?.sessionType === 'a2a') {
+          scheduleA2APeerProfileRefresh(session.id);
+        }
         return { success: true, session };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;

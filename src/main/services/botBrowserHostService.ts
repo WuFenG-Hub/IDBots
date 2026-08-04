@@ -356,6 +356,38 @@ function resolveFetch(fetchImpl: typeof fetch | undefined): typeof fetch | undef
     : undefined;
 }
 
+/**
+ * Fetch a Bot's latest profile (name/avatar) from the same MetaSO P2P API the
+ * Bot Browser profile page uses, with the same config resolution (env vars and
+ * local browser settings). Used to refresh stale A2A peer name/avatar caches.
+ */
+export async function fetchLatestBotProfileInfo(
+  globalMetaId: string,
+  input: { env?: Record<string, string | undefined>; fetch?: typeof fetch } = {},
+): Promise<{ name: string | null; avatar: string | null } | null> {
+  const targetId = typeof globalMetaId === 'string' ? globalMetaId.trim() : '';
+  if (!targetId) return null;
+  const fetchImpl = resolveFetch(input.fetch);
+  if (!fetchImpl) return null;
+  const resolvedConfig = resolveHostBrowserConfig(createInitialBrowserConfig(), input.env ?? process.env);
+  const profile = await fetchBotProfileInfo({
+    baseUrl: resolvedConfig.metasoP2PBaseUrl,
+    globalMetaId: targetId,
+    fetch: fetchImpl,
+    metafileContentBaseUrl: resolvedConfig.metafileContentBaseUrl,
+  });
+  if (!profile) return null;
+  const rawName = typeof profile.name === 'string' ? profile.name.trim() : '';
+  const rawAvatar = typeof profile.avatar === 'string' ? profile.avatar.trim() : '';
+  return {
+    // fetchBotProfileInfo falls back to the raw globalMetaId when no name is
+    // published; treat that as "no name" so callers keep their own fallbacks.
+    name: rawName && rawName !== targetId ? rawName : null,
+    avatar: rawAvatar || null,
+  };
+}
+
+
 function createNameAliasProviders(input: {
   configured: BrowserNameAliasProvider[] | undefined;
   ensNameAliasProviderFactory: CreateBotBrowserHostServiceInput['ensNameAliasProviderFactory'];

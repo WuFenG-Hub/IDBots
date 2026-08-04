@@ -165,6 +165,23 @@ class CoworkService {
       store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'error' }));
     });
     this.streamListenerCleanups.push(errorCleanup);
+
+    // A2A peer profile (name/avatar) was refreshed from latest chain data in
+    // the main process; reload so the session list and open detail show it.
+    const profileRefreshedCleanup = cowork.onSessionProfileRefreshed?.(async ({ sessionId }) => {
+      await this.loadSessions();
+      if (store.getState().cowork.currentSessionId === sessionId) {
+        try {
+          const refreshed = await window.electron?.cowork?.getSession(sessionId);
+          if (refreshed?.success && refreshed.session) {
+            store.dispatch(setCurrentSession(refreshed.session));
+          }
+        } catch { /* ignore */ }
+      }
+    });
+    if (typeof profileRefreshedCleanup === 'function') {
+      this.streamListenerCleanups.push(profileRefreshedCleanup);
+    }
   }
 
   private cleanupListeners(): void {
