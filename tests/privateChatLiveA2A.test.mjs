@@ -57,6 +57,19 @@ try {
   } = await import('../dist-electron/services/privateChatDaemon.js'));
 }
 
+let a2aChatLimits;
+try {
+  a2aChatLimits = await import('../dist-electron/main/services/a2aChatLimits.js');
+} catch {
+  a2aChatLimits = await import('../dist-electron/services/a2aChatLimits.js');
+}
+const {
+  normalizeA2AMaxIncomingTurns,
+  normalizeA2AByeCooldownMs,
+  normalizeA2AAutoReplyEnabled,
+  deriveA2AClosingPhaseTurns,
+} = a2aChatLimits;
+
 function createCoworkStoreHarness() {
   const stored = [];
   return {
@@ -874,4 +887,173 @@ test('prior A2A outbound detection ignores internal order execution traces', () 
     }),
     false,
   );
+});
+
+
+function buildIncomingA2AMessages(count, startTimestamp = 1_770_000_000_000) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `incoming-${index + 1}`,
+    type: 'user',
+    content: `peer message ${index + 1}`,
+    timestamp: startTimestamp + index * 1_000,
+    metadata: { direction: 'incoming', sourceChannel: 'metaweb_private', senderName: 'Peer Bot' },
+  }));
+}
+
+test('a2a chat limit helpers normalize to selectable options and derive closing phase', () => {
+  assert.equal(normalizeA2AMaxIncomingTurns(30), 30);
+  assert.equal(normalizeA2AMaxIncomingTurns(200), 200);
+  assert.equal(normalizeA2AMaxIncomingTurns(31), 30);
+  assert.equal(normalizeA2AMaxIncomingTurns(undefined), 30);
+  assert.equal(normalizeA2AMaxIncomingTurns(null), 30);
+  assert.equal(normalizeA2AMaxIncomingTurns('abc'), 30);
+
+  assert.equal(normalizeA2AByeCooldownMs(60_000), 60_000);
+  assert.equal(normalizeA2AByeCooldownMs(3_600_000), 3_600_000);
+  assert.equal(normalizeA2AByeCooldownMs(90_000), 300_000);
+  assert.equal(normalizeA2AByeCooldownMs(undefined), 300_000);
+
+  assert.equal(deriveA2AClosingPhaseTurns(30), 20);
+  assert.equal(deriveA2AClosingPhaseTurns(20), 13);
+  assert.equal(deriveA2AClosingPhaseTurns(100), 66);
+  assert.equal(deriveA2AClosingPhaseTurns(200), 133);
+});
+
+test('private chat A2A analysis honors per-bot max incoming turns', () => {
+  const messages20 = buildIncomingA2AMessages(20);
+
+  // Default limit stays 30: 20 incoming turns do not force a bye.
+  assert.equal(analyzePrivateChatA2AConversation({ messages: messages20 }).shouldForceBye, false);
+  // Per-bot limit of 20: exactly 20 incoming turns forces a bye.
+  assert.equal(
+    analyzePrivateChatA2AConversation({ messages: messages20, maxIncomingTurns: 20 }).shouldForceBye,
+    true,
+  );
+  // Per-bot limit of 200: a 50-turn session is still active.
+  assert.equal(
+    analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(50), maxIncomingTurns: 200 }).shouldForceBye,
+    false,
+  );
+  // Invalid stored values fall back to the default 30-turn limit.
+  assert.equal(
+    analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(35), maxIncomingTurns: 999 }).shouldForceBye,
+    true,
+  );
+});
+
+test('private chat prompt reflects the per-bot max turns limit and closing phase', () => {
+  const buildAnalysis = (incomingCount, maxIncomingTurns) =>
+    analyzePrivateChatA2AConversation({ messages: buildIncomingA2AMessages(incomingCount), maxIncomingTurns });
+  const buildPrompt = (incomingCount, maxIncomingTurns) =>
+    buildPrivateChatA2ASystemPrompt({
+      metabot: { name: 'Local Bot' },
+      analysis: buildAnalysis(incomingCount, maxIncomingTurns),
+      maxIncomingTurns,
+    });
+
+  const defaultPrompt = buildPrompt(1, undefined);
+  assert.match(defaultPrompt, /1\/30 turns/);
+
+  const customPrompt = buildPrompt(5, 100);
+  assert.match(customPrompt, /5\/100 turns/);
+  assert.doesNotMatch(customPrompt, /closing phase/i);
+
+  // 67 > floor(100 * 2 / 3) = 66, so the closing-phase rule kicks in.
+  const closingPrompt = buildPrompt(67, 100);
+  assert.match(closingPrompt, /closing phase/i);
+
+  const forceByePrompt = buildPrompt(100, 100);
+  assert.match(forceByePrompt, /reached the 100 turns limit/i);
+});
+
+test('auto-bye cooldown honors per-bot reopen gap override', () => {
+  const endedAt = 1_770_000_000_000;
+  const mappingMeta = { byeSent: true, endedByAutoPolicy: true, endedAt };
+
+  // 1-minute cooldown: closed at 59s, reopened at 61s.
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, now: endedAt + 59_000, reopenGapMs: 60_000 }),
+    true,
+  );
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, now: endedAt + 61_000, reopenGapMs: 60_000 }),
+    false,
+  );
+  // 60-minute cooldown: still closed at the old 5-minute boundary.
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, now: endedAt + 5 * 60_000 + 1_000, reopenGapMs: 3_600_000 }),
+    true,
+  );
+  // Invalid stored values fall back to the default 5-minute cooldown.
+  assert.equal(
+    shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, now: endedAt + 5 * 60_000 + 1_000, reopenGapMs: 123 }),
+    false,
+  );
+});
+
+
+test('per-bot A2A auto-reply toggle blocks auto-reply when turned off', () => {
+  const base = {
+    metabot: {
+      enabled: true,
+      boss_id: 42,
+      boss_global_metaid: null,
+      globalmetaid: 'local-global',
+      metaid: 'local-meta',
+    },
+    senderGlobalMetaId: 'boss-global',
+    senderMetaId: 'boss-meta',
+    listenerConfig: {
+      enabled: true,
+      groupChats: false,
+      privateChats: true,
+      serviceRequests: false,
+      respondToStrangerPrivateChats: true,
+    },
+    metabotStore: {
+      getMetabotById(id) {
+        assert.equal(id, 42);
+        return { globalmetaid: 'boss-global', metaid: 'boss-meta' };
+      },
+    },
+    hasPriorLocalOutbound: true,
+  };
+
+  // Off blocks auto-reply even for the owner.
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: false },
+    }),
+    { shouldReply: false, reason: 'auto_reply_disabled' },
+  );
+  // On (explicit or default) keeps the existing owner behavior.
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: true },
+    }),
+    { shouldReply: true, reason: 'owner' },
+  );
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy(base),
+    { shouldReply: true, reason: 'owner' },
+  );
+  // NULL stored value means default (on).
+  assert.deepEqual(
+    evaluatePrivateChatAutoReplyPolicy({
+      ...base,
+      metabot: { ...base.metabot, a2a_auto_reply_enabled: null },
+    }),
+    { shouldReply: true, reason: 'owner' },
+  );
+});
+
+test('a2a auto-reply normalizer treats null/undefined as default on and 0 as off', () => {
+  assert.equal(normalizeA2AAutoReplyEnabled(undefined), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(null), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(1), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(0), false);
+  assert.equal(normalizeA2AAutoReplyEnabled(true), true);
+  assert.equal(normalizeA2AAutoReplyEnabled(false), false);
 });

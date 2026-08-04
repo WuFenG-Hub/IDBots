@@ -7634,6 +7634,9 @@ if (!gotTheLock) {
     llm_id?: string | null;
     fallback_llm_id?: string | null;
     allow_chat_skills?: string[];
+    a2a_max_incoming_turns?: number | null;
+    a2a_bye_cooldown_ms?: number | null;
+    a2a_auto_reply_enabled?: boolean | null;
     homepage?: string | null;
   }) => {
     try {

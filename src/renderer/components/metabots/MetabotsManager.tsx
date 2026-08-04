@@ -10,6 +10,9 @@ import type { Skill } from '../../types/skill';
 import MetaBotEditTabs, {
   EDIT_TAB_FIELDS,
   EDIT_TAB_SYNC_GROUPS,
+  normalizeA2AAutoReplyEnabledOption,
+  normalizeA2AByeCooldownMsOption,
+  normalizeA2AMaxIncomingTurnsOption,
   type LlmOption,
   type MetaBotEditTabKey,
   type MetaBotEditValues,
@@ -93,6 +96,9 @@ const buildEditFormValues = (editMetabot: Metabot): MetaBotEditValues => ({
   llm_id: editMetabot.llm_id || '',
   fallback_llm_id: editMetabot.fallback_llm_id || '',
   allow_chat_skills: editMetabot.allow_chat_skills || [],
+  a2a_max_incoming_turns: normalizeA2AMaxIncomingTurnsOption(editMetabot.a2a_max_incoming_turns),
+  a2a_bye_cooldown_ms: normalizeA2AByeCooldownMsOption(editMetabot.a2a_bye_cooldown_ms),
+  a2a_auto_reply_enabled: normalizeA2AAutoReplyEnabledOption(editMetabot.a2a_auto_reply_enabled),
   homepage: editMetabot.homepage ?? null,
   homepage_initial: editMetabot.homepage ?? null,
   homepage_source: ((): MetaBotEditValues['homepage_source'] => {
@@ -341,6 +347,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const hasFallbackLlmValue = valuesFallbackLlm !== undefined;
     const nextFallbackLlmRaw = hasFallbackLlmValue ? (valuesFallbackLlm ?? '').trim() : '';
     const nextAllowChatSkills = normalizeAllowChatSkills(scopedValues.allow_chat_skills);
+    const nextA2aMaxIncomingTurns = normalizeA2AMaxIncomingTurnsOption(scopedValues.a2a_max_incoming_turns);
+    const nextA2aByeCooldownMs = normalizeA2AByeCooldownMsOption(scopedValues.a2a_bye_cooldown_ms);
+    const nextA2aAutoReplyEnabled = normalizeA2AAutoReplyEnabledOption(scopedValues.a2a_auto_reply_enabled);
     const nextHomepage = scopedValues.homepage ?? null;
 
     const oldName = (current.name || '').trim();
@@ -369,6 +378,11 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     // metabot_type never goes on-chain; it is a local-only change tracked
     // separately so a Twin transfer alone still counts as a save-worthy edit.
     const metabotTypeChanged = scopedValues.metabot_type !== current.metabot_type;
+    // A2A chat limits are also local-only runtime knobs (never published on-chain).
+    const a2aChatLimitsChanged =
+      nextA2aMaxIncomingTurns !== normalizeA2AMaxIncomingTurnsOption(current.a2a_max_incoming_turns) ||
+      nextA2aByeCooldownMs !== normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms) ||
+      nextA2aAutoReplyEnabled !== normalizeA2AAutoReplyEnabledOption(current.a2a_auto_reply_enabled);
 
     const syncStepKeys: SyncStepKey[] = [];
     if (syncName) syncStepKeys.push('name');
@@ -383,7 +397,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     // Gate the sync to the step groups this tab owns. With the value scoping
     // above the other flags are already false; this makes the contract explicit.
     const tabSyncStepKeys = syncStepKeys.filter((key) => EDIT_TAB_SYNC_GROUPS[tab].includes(key));
-    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged) {
+    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged && !a2aChatLimitsChanged) {
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotNoChanges') }));
       return;
     }
@@ -401,6 +415,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       llm_id: nextLlmRaw || null,
       ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
+      a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
+      a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
+      a2a_auto_reply_enabled: nextA2aAutoReplyEnabled,
       homepage: nextHomepage,
     });
     if (!result.success) {
@@ -421,6 +438,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       llm_id: nextLlmRaw || null,
       ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
       allow_chat_skills: nextAllowChatSkills,
+      a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
+      a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
+      a2a_auto_reply_enabled: nextA2aAutoReplyEnabled,
       homepage: nextHomepage,
     };
     setList((prev) => prev.map((m) => (m.id === editId ? updatedMetabot : m)));

@@ -1,4 +1,5 @@
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { normalizeA2AAutoReplyEnabled, normalizeA2AByeCooldownMs, normalizeA2AMaxIncomingTurns } from './services/a2aChatLimits';
 import type {
   Metabot,
   MetabotInsert,
@@ -57,6 +58,9 @@ interface MetabotRow {
   tools: string;
   skills: string;
   allow_chat_skills: string;
+  a2a_max_incoming_turns?: number | null;
+  a2a_bye_cooldown_ms?: number | null;
+  a2a_auto_reply_enabled?: number | null;
   homepage?: string | null;
   created_at: number;
   updated_at: number;
@@ -128,6 +132,10 @@ function rowToMetabot(row: MetabotRow): Metabot {
     tools: parseJsonArray(row.tools),
     skills: parseJsonArray(row.skills),
     allow_chat_skills: parseJsonArray(row.allow_chat_skills),
+    a2a_max_incoming_turns: row.a2a_max_incoming_turns ?? null,
+    a2a_bye_cooldown_ms: row.a2a_bye_cooldown_ms ?? null,
+    a2a_auto_reply_enabled:
+      row.a2a_auto_reply_enabled == null ? null : row.a2a_auto_reply_enabled !== 0,
     homepage: row.homepage ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -464,6 +472,19 @@ export class MetabotStore {
     const homepage = input.homepage !== undefined ? input.homepage : existing.homepage;
     const fallbackLlmId =
       input.fallback_llm_id !== undefined ? input.fallback_llm_id : (existing.fallback_llm_id ?? null);
+    // Canonicalize selectable A2A chat limits on write; undefined keeps the stored value.
+    const a2aMaxIncomingTurns =
+      input.a2a_max_incoming_turns !== undefined
+        ? normalizeA2AMaxIncomingTurns(input.a2a_max_incoming_turns)
+        : (existing.a2a_max_incoming_turns ?? null);
+    const a2aByeCooldownMs =
+      input.a2a_bye_cooldown_ms !== undefined
+        ? normalizeA2AByeCooldownMs(input.a2a_bye_cooldown_ms)
+        : (existing.a2a_bye_cooldown_ms ?? null);
+    const a2aAutoReplyEnabled =
+      input.a2a_auto_reply_enabled !== undefined
+        ? (normalizeA2AAutoReplyEnabled(input.a2a_auto_reply_enabled) ? 1 : 0)
+        : (existing.a2a_auto_reply_enabled == null ? null : (existing.a2a_auto_reply_enabled ? 1 : 0));
 
     if (input.metabot_type === 'twin' && existing.metabot_type !== 'twin') {
       // Machine-wide unique Twin: promoting this bot first demotes the old twin.
@@ -475,7 +496,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar_blob = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -506,6 +527,9 @@ export class MetabotStore {
           toolsJson,
           skillsJson,
           allowChatSkillsJson,
+          a2aMaxIncomingTurns,
+          a2aByeCooldownMs,
+          a2aAutoReplyEnabled,
           homepage,
           now,
           id,
@@ -516,7 +540,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -547,6 +571,9 @@ export class MetabotStore {
           toolsJson,
           skillsJson,
           allowChatSkillsJson,
+          a2aMaxIncomingTurns,
+          a2aByeCooldownMs,
+          a2aAutoReplyEnabled,
           homepage,
           now,
           id,
