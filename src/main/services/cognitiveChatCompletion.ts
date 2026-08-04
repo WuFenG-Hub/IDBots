@@ -59,6 +59,12 @@ export interface ChatCompletionOptions {
   tools?: OpenAITool[];
   signal?: AbortSignal;
   maxTokens?: number;
+  /**
+   * When true, a response with neither text content nor tool_calls throws
+   * inside the fallback-wrapped attempt, so a configured fallback LLM gets
+   * a chance instead of the empty result passing through as success.
+   */
+  throwOnEmptyContent?: boolean;
 }
 
 /**
@@ -99,26 +105,29 @@ async function chatCompletionSingleAttempt(
   }
 
   try {
-    if (apiType === 'anthropic') {
-      return await callAnthropicStyleWithTools(
-        baseURL,
-        model,
-        config.apiKey ?? '',
-        messages,
-        options.tools,
-        options.signal,
-        options.maxTokens
-      );
+    const result = apiType === 'anthropic'
+      ? await callAnthropicStyleWithTools(
+          baseURL,
+          model,
+          config.apiKey ?? '',
+          messages,
+          options.tools,
+          options.signal,
+          options.maxTokens
+        )
+      : await callOpenAIStyleWithTools(
+          baseURL,
+          model,
+          config.apiKey ?? '',
+          messages,
+          options.tools,
+          options.signal,
+          options.maxTokens
+        );
+    if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
+      throw new Error('LLM returned empty content');
     }
-    return await callOpenAIStyleWithTools(
-      baseURL,
-      model,
-      config.apiKey ?? '',
-      messages,
-      options.tools,
-      options.signal,
-      options.maxTokens
-    );
+    return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[Orchestrator] chatCompletionWithTools failed:', msg);
@@ -134,7 +143,7 @@ export async function performChatCompletionForOrchestrator(
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null } = {}
+  options: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null; throwOnEmptyContent?: boolean } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -145,6 +154,7 @@ export async function performChatCompletionForOrchestrator(
     fallbackLlmId: options.fallbackLlmId,
     signal: options.signal,
     maxTokens: options.maxTokens,
+    throwOnEmptyContent: options.throwOnEmptyContent,
   });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {

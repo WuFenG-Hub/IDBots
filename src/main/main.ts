@@ -6305,17 +6305,15 @@ if (!gotTheLock) {
             userPrompt: prompts.userPrompt,
             llmId: metabot.llm_id ?? undefined,
             performChat: async (systemPrompt, userMessage, llmId, options) => {
-              const text = await performChatCompletionForOrchestrator(systemPrompt, userMessage, llmId, {
+              // throwOnEmptyContent makes an empty completion throw inside the
+              // fallback-wrapped attempt, so the configured fallback LLM gets
+              // a chance (runWithLlmFallback only retries on throw); when the
+              // fallback is also empty the error reaches the outer retry loop.
+              return performChatCompletionForOrchestrator(systemPrompt, userMessage, llmId, {
                 ...options,
                 fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+                throwOnEmptyContent: true,
               });
-              // Treat empty content as a failure so the configured fallback LLM
-              // gets a chance (runWithLlmFallback only retries on throw) and the
-              // outer retry loop re-attempts instead of giving up silently.
-              if (!text.trim()) {
-                throw new Error('LLM returned empty content for the A2A guidance restart message');
-              }
-              return text;
             },
           });
           if (!replyText) throw new Error('Local MetaBot did not generate a restart message');
