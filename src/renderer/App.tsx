@@ -9,6 +9,7 @@ import { CoworkView } from './components/cowork';
 import { MetaAppsView } from './components/metaapps';
 import { SkillsView } from './components/skills';
 import { ScheduledTasksView } from './components/scheduledTasks';
+import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
 import MetabotsView from './components/metabots/MetabotsView';
 import GigSquareView from './components/gigSquare/GigSquareView';
 import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
@@ -18,14 +19,17 @@ import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
 import { scheduledTaskService } from './services/scheduledTask';
+import { groupTaskService } from './services/groupTaskService';
 import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
+import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
 import type { ApiConfig } from './services/api';
 import type { CoworkPermissionResult } from './types/cowork';
 import type { MetaAppRecord } from './types/metaApp';
+import type { GroupTaskDetail } from './types/groupTask';
 import { ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 import { i18nService } from './services/i18n';
 import { matchesShortcut } from './services/shortcuts';
@@ -66,11 +70,12 @@ type UpdatePhase = 'idle' | 'downloading' | 'ready' | 'applying' | 'restartReady
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsOptions, setSettingsOptions] = useState<SettingsOpenOptions>({});
-  const [mainView, setMainView] = useState<'cowork' | 'metaapps' | 'skills' | 'scheduledTasks' | 'metabots' | 'gigSquare'>('cowork');
+  const [mainView, setMainView] = useState<'cowork' | 'metaapps' | 'skills' | 'scheduledTasks' | 'groupTasks' | 'metabots' | 'gigSquare'>('cowork');
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isNewGroupTaskOpen, setIsNewGroupTaskOpen] = useState(false);
   const [, forceLanguageRefresh] = useState(0);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() => loadSidebarWidth((key) => window.localStorage.getItem(key), 'home'));
@@ -233,6 +238,7 @@ const App: React.FC = () => {
         
         // 初始化定时任务服务
         await scheduledTaskService.init();
+        await groupTaskService.init();
 
         // Onboarding visibility: only first-run users without local MetaBots
         // should land in onboarding. Existing users must enter the app directly,
@@ -361,6 +367,20 @@ const App: React.FC = () => {
   const handleShowScheduledTasks = useCallback(() => {
     setMainView('scheduledTasks');
   }, []);
+
+  const handleShowGroupTasks = useCallback(() => {
+    setMainView('groupTasks');
+  }, []);
+
+  const handleNewGroupTask = useCallback(() => {
+    setIsNewGroupTaskOpen(true);
+  }, []);
+
+  const handleGroupTaskCreated = useCallback((task: GroupTaskDetail) => {
+    setIsNewGroupTaskOpen(false);
+    setMainView('groupTasks');
+    dispatch(selectGroupTask(task.id));
+  }, [dispatch]);
 
   const handleShowGigSquare = useCallback(() => {
     setMainView('gigSquare');
@@ -977,6 +997,13 @@ const App: React.FC = () => {
       onNewChat={handleBlankNewChat}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
     />
+  ) : mainView === 'groupTasks' ? (
+    <GroupTasksView
+      isSidebarCollapsed={isSidebarCollapsed}
+      onToggleSidebar={handleToggleSidebar}
+      onNewChat={handleBlankNewChat}
+      updateBadge={isSidebarCollapsed ? updateBadge : null}
+    />
   ) : mainView === 'metabots' ? (
     <MetabotsView
       isSidebarCollapsed={isSidebarCollapsed}
@@ -1009,6 +1036,12 @@ const App: React.FC = () => {
       {toastMessage && (
         <Toast message={toastMessage} onClose={() => setToastMessage(null)} />
       )}
+      {isNewGroupTaskOpen && (
+        <NewGroupTaskModal
+          onClose={() => setIsNewGroupTaskOpen(false)}
+          onCreated={handleGroupTaskCreated}
+        />
+      )}
       <Sidebar
         onShowLogin={handleShowLogin}
         onShowSettings={handleShowSettings}
@@ -1017,9 +1050,11 @@ const App: React.FC = () => {
         onShowSkills={handleShowSkills}
         onShowCowork={handleShowCowork}
         onShowScheduledTasks={handleShowScheduledTasks}
+        onShowGroupTasks={handleShowGroupTasks}
         onShowGigSquare={handleShowGigSquare}
         onShowMetabots={handleShowMetabots}
         onNewChat={handleBlankNewChat}
+        onNewGroupTask={handleNewGroupTask}
         mode={botBrowserShell.surfaceMode}
         onSelectHome={botBrowserShell.switchToHome}
         onSelectBrowser={() => {

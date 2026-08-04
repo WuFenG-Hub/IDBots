@@ -7,6 +7,11 @@ export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
       hasIndicator: Boolean(hasRunningScheduledTask),
     },
     {
+      id: 'groupTasks',
+      label: t('groupTasks'),
+      icon: 'userGroup',
+    },
+    {
       id: 'gigSquare',
       label: t('gigSquare'),
       icon: 'shoppingBag',
