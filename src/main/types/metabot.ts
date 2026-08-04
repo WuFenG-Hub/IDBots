@@ -46,6 +46,10 @@ export interface Metabot {
   skills: string[];
   /** Skills allowed in private chat; stored as JSON array in DB */
   allow_chat_skills: string[];
+  /** Max incoming turns per active A2A private-chat session before forcing "bye"; null = default. */
+  a2a_max_incoming_turns?: number | null;
+  /** Cooldown after an auto-bye before the A2A conversation may reopen; null = default. */
+  a2a_bye_cooldown_ms?: number | null;
   /** Homepage pointer JSON string (serialized {uri,renderer,contentType}); null = Default template. */
   homepage: string | null;
   created_at: number;
@@ -120,6 +124,10 @@ export interface MetabotUpdate {
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];
+  /** Max incoming turns per active A2A private-chat session; null/undefined = default. */
+  a2a_max_incoming_turns?: number | null;
+  /** Cooldown after an auto-bye before the A2A conversation may reopen; null/undefined = default. */
+  a2a_bye_cooldown_ms?: number | null;
   /** Homepage pointer JSON string; null = Default. */
   homepage?: string | null;
 }

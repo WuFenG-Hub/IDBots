@@ -88,12 +88,14 @@ import {
   type SimplemsgProtocolTag,
 } from './simplemsgPeerConversation';
 import { ensureCoworkA2ASession } from './coworkEnsureA2ASession';
+import {
+  deriveA2AClosingPhaseTurns,
+  normalizeA2AByeCooldownMs,
+  normalizeA2AMaxIncomingTurns,
+} from './a2aChatLimits';
 
 const POLL_INTERVAL_MS = 5_000;
 const PRIVATE_CHAT_SESSION_GAP_MS = 5 * 60 * 1000;
-const PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS = 5 * 60 * 1000;
-const PRIVATE_CHAT_MAX_INCOMING_TURNS = 30;
-const PRIVATE_CHAT_CLOSING_PHASE_TURNS = 20;
 const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
 const PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES = 20;
 const RATING_PROMPT_ORIGINAL_REQUEST_MAX_CHARS = 1200;
@@ -620,6 +622,8 @@ function parseConversationMappingMetadata(json: string | null | undefined): Reco
 export function shouldKeepPrivateChatConversationClosedAfterBye(params: {
   mappingMeta: Record<string, unknown>;
   now?: number;
+  /** Per-MetaBot cooldown after an auto-bye; defaults to the app-wide default. */
+  reopenGapMs?: number;
 }): boolean {
   if (params.mappingMeta.byeSent !== true) return false;
   const endedAt = typeof params.mappingMeta.endedAt === 'number' && Number.isFinite(params.mappingMeta.endedAt)
@@ -627,12 +631,14 @@ export function shouldKeepPrivateChatConversationClosedAfterBye(params: {
     : 0;
   return params.mappingMeta.endedByHuman === true
     || !endedAt
-    || (params.now ?? Date.now()) - endedAt < PRIVATE_CHAT_AUTO_BYE_REOPEN_GAP_MS;
+    || (params.now ?? Date.now()) - endedAt < normalizeA2AByeCooldownMs(params.reopenGapMs);
 }
 
 export function shouldDisplayInboundPrivateChatWhileClosed(params: {
   mappingMeta: Record<string, unknown>;
   now?: number;
+  /** Per-MetaBot cooldown after an auto-bye; defaults to the app-wide default. */
+  reopenGapMs?: number;
 }): boolean {
   return params.mappingMeta.byeSent === true
     && shouldKeepPrivateChatConversationClosedAfterBye(params);
@@ -862,7 +868,10 @@ export function shouldSkipPrivateChatAutoReplyText(value: string): boolean {
 export function analyzePrivateChatA2AConversation(params: {
   messages: CoworkMessage[];
   now?: number;
+  /** Per-MetaBot max incoming turns per active session; defaults to the app-wide default. */
+  maxIncomingTurns?: number;
 }): PrivateChatA2AAnalysis {
+  const maxIncomingTurns = normalizeA2AMaxIncomingTurns(params.maxIncomingTurns);
   const sortedMessages = params.messages
     .filter(isPrivateA2AMessage)
     .slice()
@@ -917,7 +926,7 @@ export function analyzePrivateChatA2AConversation(params: {
   return {
     contextMessages,
     incomingTurnCount,
-    shouldForceBye: incomingTurnCount >= PRIVATE_CHAT_MAX_INCOMING_TURNS,
+    shouldForceBye: incomingTurnCount >= maxIncomingTurns,
   };
 }
 
@@ -936,7 +945,11 @@ export function buildPrivateChatA2ASystemPrompt(params: {
   skillsPrompt?: string | null;
   skillWaitNoticeAlreadySent?: boolean;
   operatorGuidance?: string | null;
+  /** Per-MetaBot max incoming turns per active session; defaults to the app-wide default. */
+  maxIncomingTurns?: number;
 }): string {
+  const maxIncomingTurns = normalizeA2AMaxIncomingTurns(params.maxIncomingTurns);
+  const closingPhaseTurns = deriveA2AClosingPhaseTurns(maxIncomingTurns);
   const localName = params.metabot.name || 'Local Bot';
   const allowedSkillsPrompt =
     !params.analysis.shouldForceBye && typeof params.skillsPrompt === 'string'
@@ -948,12 +961,12 @@ export function buildPrivateChatA2ASystemPrompt(params: {
         return `${speaker}: ${message.content}`;
       })
     : ['(no prior messages in this active private-chat session)'];
-  const closingPhaseRule = params.analysis.incomingTurnCount > PRIVATE_CHAT_CLOSING_PHASE_TURNS && !params.analysis.shouldForceBye
+  const closingPhaseRule = params.analysis.incomingTurnCount > closingPhaseTurns && !params.analysis.shouldForceBye
     ? '- The conversation is entering the closing phase. Guide the discussion toward a natural conclusion. If there is no valuable discussion or pending questions, politely begin wrapping up the conversation.'
     : '';
 
   const forceByeRule = params.analysis.shouldForceBye
-    ? '- This active conversation has reached the 30 turns limit. Reply exactly "bye" now, with no other text.'
+    ? `- This active conversation has reached the ${maxIncomingTurns} turns limit. Reply exactly "bye" now, with no other text.`
     : '- If the conversation no longer seems likely to produce useful new information, end the topic by replying exactly "bye".';
   const skillPolicyRule = allowedSkillsPrompt
     ? '- You may use only the local skills listed in <available_skills> when they clearly help answer the latest private-chat message.'
@@ -980,7 +993,7 @@ export function buildPrivateChatA2ASystemPrompt(params: {
     forceByeRule,
     closingPhaseRule,
     '- When you say "bye", say exactly "bye" and nothing else.',
-    `- Active incoming turn count: ${params.analysis.incomingTurnCount}/${PRIVATE_CHAT_MAX_INCOMING_TURNS} turns.`,
+    `- Active incoming turn count: ${params.analysis.incomingTurnCount}/${maxIncomingTurns} turns.`,
     ...(allowedSkillsPrompt
       ? [
           '',
@@ -3652,11 +3665,11 @@ async function processOne(
       return;
     }
 
-    // Human-ended conversations stay closed. Auto-bye conversations can restart after 5 minutes.
+    // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
     const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
-      if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta })) {
+      if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, reopenGapMs: metabot.a2a_bye_cooldown_ms ?? undefined })) {
         const { sessionId } = await resolvePrivateConversationSession(
           coworkStore,
           metabot.id,
@@ -3777,6 +3790,7 @@ async function processOne(
     const sessionAfterUserMessage = coworkStore.getSession(sessionId);
     const conversationAnalysis = analyzePrivateChatA2AConversation({
       messages: sessionAfterUserMessage?.messages ?? [userMessage],
+      maxIncomingTurns: metabot.a2a_max_incoming_turns ?? undefined,
     });
     let chatSkillsRouting: ChatSkillsRoutingPromptResult = { prompt: null, activeSkillIds: [] };
     const shouldUseChatSkills = !conversationAnalysis.shouldForceBye && getChatSkillsRoutingPrompt && runPrivateChatSkillTurn;
@@ -3880,6 +3894,7 @@ async function processOne(
       skillsPrompt: canRunChatSkills ? chatSkillsRouting.prompt : null,
       skillWaitNoticeAlreadySent,
       operatorGuidance,
+      maxIncomingTurns: metabot.a2a_max_incoming_turns ?? undefined,
     });
     // Hot-layer experience injection (self-identity + value boundaries + recent
     // dream summaries). These describe the bot itself, not the user, so they

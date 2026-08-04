@@ -29,6 +29,17 @@ import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 
 const AVATAR_MAX_SIZE_BYTES = 200 * 1024; // 200KB
 
+// A2A private-chat limits; keep in sync with src/main/services/a2aChatLimits.ts.
+const A2A_MAX_INCOMING_TURNS_OPTIONS: readonly number[] = [20, 30, 50, 80, 100, 150, 200];
+const A2A_BYE_COOLDOWN_MS_OPTIONS: readonly number[] = [60_000, 300_000, 600_000, 1_800_000, 3_600_000];
+const DEFAULT_A2A_MAX_INCOMING_TURNS = 30;
+const DEFAULT_A2A_BYE_COOLDOWN_MS = 300_000;
+
+export const normalizeA2AMaxIncomingTurnsOption = (value: unknown): number =>
+  A2A_MAX_INCOMING_TURNS_OPTIONS.includes(Number(value)) ? Number(value) : DEFAULT_A2A_MAX_INCOMING_TURNS;
+export const normalizeA2AByeCooldownMsOption = (value: unknown): number =>
+  A2A_BYE_COOLDOWN_MS_OPTIONS.includes(Number(value)) ? Number(value) : DEFAULT_A2A_BYE_COOLDOWN_MS;
+
 export interface MetaBotEditValues {
   name: string;
   avatar: string;
@@ -43,6 +54,10 @@ export interface MetaBotEditValues {
   /** First-class edit field (Basic tab); empty string means "no fallback". */
   fallback_llm_id: string;
   allow_chat_skills: string[];
+  /** Max incoming turns per active A2A private-chat session before forcing "bye". */
+  a2a_max_incoming_turns: number;
+  /** Cooldown after an auto-bye before the A2A conversation may reopen. */
+  a2a_bye_cooldown_ms: number;
   homepage_source: 'default' | 'metafile' | 'metaapp';
   homepage_metafile_uri: string;
   homepage_metafile_content_type: string;
@@ -64,7 +79,7 @@ export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'advanced
 export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]> = {
   basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id'],
   persona: ['role', 'soul', 'goal'],
-  chatSettings: ['allow_chat_skills'],
+  chatSettings: ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms'],
   advanced: ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin'],
 };
 
@@ -100,6 +115,8 @@ const defaultValues: MetaBotEditValues = {
   llm_id: '',
   fallback_llm_id: '',
   allow_chat_skills: [],
+  a2a_max_incoming_turns: DEFAULT_A2A_MAX_INCOMING_TURNS,
+  a2a_bye_cooldown_ms: DEFAULT_A2A_BYE_COOLDOWN_MS,
   homepage_source: 'default',
   homepage_metafile_uri: '',
   homepage_metafile_content_type: '',
@@ -111,6 +128,12 @@ const buildInitialValues = (initialValues?: Partial<MetaBotEditValues> | null): 
   ...defaultValues,
   ...(initialValues || {}),
   allow_chat_skills: normalizeAllowChatSkills(initialValues?.allow_chat_skills ?? defaultValues.allow_chat_skills),
+  a2a_max_incoming_turns: normalizeA2AMaxIncomingTurnsOption(
+    initialValues?.a2a_max_incoming_turns ?? defaultValues.a2a_max_incoming_turns
+  ),
+  a2a_bye_cooldown_ms: normalizeA2AByeCooldownMsOption(
+    initialValues?.a2a_bye_cooldown_ms ?? defaultValues.a2a_bye_cooldown_ms
+  ),
 });
 
 const editFieldEquals = (a: MetaBotEditValues[keyof MetaBotEditValues], b: MetaBotEditValues[keyof MetaBotEditValues]): boolean => {
@@ -789,6 +812,52 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                 {i18nService.t('metabotNoAvailableSkills')}
               </p>
             )}
+          </div>
+        </div>
+
+        <div className={rowClass}>
+          <label htmlFor="metabot-a2a-max-turns" className={labelClass}>
+            {i18nService.t('metabotA2aMaxTurns')}
+          </label>
+          <div className="min-w-0">
+            <select
+              id="metabot-a2a-max-turns"
+              value={values.a2a_max_incoming_turns}
+              onChange={(e) => handleChange('a2a_max_incoming_turns', normalizeA2AMaxIncomingTurnsOption(e.target.value))}
+              className={inputClass}
+            >
+              {A2A_MAX_INCOMING_TURNS_OPTIONS.map((turns) => (
+                <option key={turns} value={turns}>
+                  {turns}
+                </option>
+              ))}
+            </select>
+            <p className={hintClass}>
+              {i18nService.t('metabotA2aMaxTurnsHint')}
+            </p>
+          </div>
+        </div>
+
+        <div className={rowClass}>
+          <label htmlFor="metabot-a2a-bye-cooldown" className={labelClass}>
+            {i18nService.t('metabotA2aByeCooldown')}
+          </label>
+          <div className="min-w-0">
+            <select
+              id="metabot-a2a-bye-cooldown"
+              value={values.a2a_bye_cooldown_ms}
+              onChange={(e) => handleChange('a2a_bye_cooldown_ms', normalizeA2AByeCooldownMsOption(e.target.value))}
+              className={inputClass}
+            >
+              {A2A_BYE_COOLDOWN_MS_OPTIONS.map((cooldownMs) => (
+                <option key={cooldownMs} value={cooldownMs}>
+                  {`${cooldownMs / 60_000} ${i18nService.t('metabotA2aByeCooldownMinutes')}`}
+                </option>
+              ))}
+            </select>
+            <p className={hintClass}>
+              {i18nService.t('metabotA2aByeCooldownHint')}
+            </p>
           </div>
         </div>
 
