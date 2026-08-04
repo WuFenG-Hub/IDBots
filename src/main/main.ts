@@ -41,6 +41,7 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
+import { GroupTaskStore } from './groupTaskStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { Scheduler } from './libs/scheduler';
@@ -105,6 +106,15 @@ import {
   startPrivateChatBackfill,
   stopPrivateChatBackfill,
 } from './services/privateChatBackfillService';
+import {
+  startGroupChatBackfill,
+  stopGroupChatBackfill,
+  setGroupChatBackfillActiveGroupIdsGetter,
+} from './services/groupChatBackfillService';
+import {
+  setGroupTaskServiceMetabotStoreGetter,
+  setGroupTaskServiceGroupTaskStoreGetter,
+} from './services/groupTaskService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -143,7 +153,8 @@ import {
   storePrivateChatHistoryMessages,
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
-import { encryptGroupMessageECB, computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
+import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
+import { sendGroupChatMessage, setGroupChatTransportMetabotStoreGetter } from './services/groupChatTransport';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
@@ -2767,6 +2778,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   coworkRunner = null;
   imGatewayManager = null;
   scheduledTaskStore = null;
+  groupTaskStore = null;
   metabotStore = null;
   serviceOrderStore = null;
   serviceOrderLifecycleService = null;
@@ -2902,6 +2914,10 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
 
 const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
+  setGroupChatTransportMetabotStoreGetter(getMetabotStore);
+  setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
+  setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
   startCognitiveOrchestrator(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -2923,21 +2939,7 @@ const startSqliteDaemons = (): void => {
     },
     performChatCompletionForOrchestrator,
     async (metabotId: number, groupId: string, nickName: string, content: string) => {
-      const encryptedContent = encryptGroupMessageECB(content, groupId);
-      const payload = {
-        groupId,
-        nickName,
-        content: encryptedContent,
-        contentType: 'text/plain',
-        encryption: 'aes',
-        timestamp: Date.now(),
-      };
-      await createPin(getMetabotStore(), metabotId, {
-        operation: 'create',
-        path: '/protocols/simplegroupchat',
-        contentType: 'application/json',
-        payload: JSON.stringify(payload),
-      });
+      await sendGroupChatMessage(metabotId, groupId, { content, nickName });
     },
     {
       getSkillsPromptForIds: (ids: string[]) => skillMgr.buildAutoRoutingPromptForSkillIds(ids),
@@ -3019,6 +3021,15 @@ const startSqliteDaemons = (): void => {
     emitLog: (msg) => console.log(msg),
   });
 
+  // Periodically reconcile Group Task group history with the indexer API so
+  // group messages missed by the socket push are recovered (INSERT OR IGNORE
+  // on pin_id keeps this idempotent against the realtime path).
+  startGroupChatBackfill({
+    db: getStore().getDatabase(),
+    saveDb: getStore().getSaveFunction(),
+    emitLog: (msg) => console.log(msg),
+  });
+
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
   startDreamService({
@@ -3052,6 +3063,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
   stopPrivateChatBackfill();
+  stopGroupChatBackfill();
   await resetSqliteBackedSingletons();
   return restartState;
 };
@@ -4522,6 +4534,15 @@ const getScheduledTaskStore = () => {
     scheduledTaskStore = new ScheduledTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return scheduledTaskStore;
+};
+
+let groupTaskStore: GroupTaskStore | null = null;
+const getGroupTaskStore = () => {
+  if (!groupTaskStore) {
+    const sqliteStore = getStore();
+    groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return groupTaskStore;
 };
 
 const getMetabotStore = () => {
