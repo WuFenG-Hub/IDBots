@@ -114,6 +114,15 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 4. **Deliverables are posted with a `[DELIVERABLE]` tag line**, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per tag line so the chair can collect them.
 5. Keep messages short and task-focused; no small talk in a task group.
 
+## In-group protocol
+
+- **Deliverables**: post `[DELIVERABLE] <kind>: <uri>` — one per line. Kinds: `metaapp`, `metafile`, `url` (plain-text deliverables may omit the URI). Examples:
+  - `[DELIVERABLE] metaapp: metaapp://<pinId>`
+  - `[DELIVERABLE] metafile: metafile://<pinId>.png`
+  - `[DELIVERABLE] url: https://example.com/preview`
+- **Chair-only status tags**: `[STATUS:EXECUTING]` when work is underway; `[STATUS:REVIEW]` when the chair judges the goal met — this moves the task to the user acceptance gate. Status tags from workers are ignored.
+- **Closing**: the task closes only when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`). A closed group is never reused; create a fresh task instead.
+
 ## Lifecycle
 
 1. `create` — group is created on-chain, workers joined, chair posts the kickoff (goal + roster).
