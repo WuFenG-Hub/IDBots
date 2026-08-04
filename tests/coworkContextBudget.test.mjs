@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 test('estimateCoworkTextTokens counts CJK more conservatively than ASCII', async () => {
   const {
     estimateCoworkTextTokens,
-  } = await import('../dist-electron/libs/coworkContextBudget.js');
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
 
   assert.equal(estimateCoworkTextTokens('abcd'), 1);
   assert.equal(estimateCoworkTextTokens('你好世界'), 4);
@@ -14,7 +14,7 @@ test('estimateCoworkTextTokens counts CJK more conservatively than ASCII', async
 test('getCoworkContextBudget skips thinking and does not double count current prompt', async () => {
   const {
     getCoworkContextBudget,
-  } = await import('../dist-electron/libs/coworkContextBudget.js');
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
 
   const currentPrompt = '继续处理这个问题';
   const messages = [
@@ -52,7 +52,7 @@ test('getCoworkContextBudget skips thinking and does not double count current pr
 test('getCoworkContextBudget requests compaction after soft threshold', async () => {
   const {
     getCoworkContextBudget,
-  } = await import('../dist-electron/libs/coworkContextBudget.js');
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
 
   const budget = getCoworkContextBudget({
     messages: [
@@ -75,7 +75,7 @@ test('getCoworkContextBudget requests compaction after soft threshold', async ()
 test('isContextWindowExceededError recognizes context overflow without catching DeepSeek thinking history errors', async () => {
   const {
     isContextWindowExceededError,
-  } = await import('../dist-electron/libs/coworkContextBudget.js');
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
 
   assert.equal(
     isContextWindowExceededError('Error: context length exceeded: maximum context length is 200000 tokens'),
