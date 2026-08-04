@@ -165,8 +165,10 @@ const TERMINAL_STATUSES: ReadonlySet<GroupTaskStatus> = new Set(['done', 'cancel
  * (done/cancelled) allow no further moves.
  */
 const LEGAL_TRANSITIONS: Record<GroupTaskStatus, GroupTaskStatus[]> = {
-  planning: ['executing', 'cancelled'],
-  executing: ['review', 'cancelled'],
+  // The chair-driven flow is planning→executing→review→done, but the owner's
+  // accept/close action may shortcut to 'done' from any non-terminal state.
+  planning: ['executing', 'done', 'cancelled'],
+  executing: ['review', 'done', 'cancelled'],
   review: ['done', 'executing', 'cancelled'],
   done: [],
   cancelled: [],

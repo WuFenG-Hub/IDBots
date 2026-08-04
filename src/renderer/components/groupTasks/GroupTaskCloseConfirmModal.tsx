@@ -6,6 +6,7 @@ interface GroupTaskCloseConfirmModalProps {
   action: 'done' | 'cancelled';
   taskTitle: string;
   closing: boolean;
+  error?: string | null;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -14,6 +15,7 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
   action,
   taskTitle,
   closing,
+  error,
   onConfirm,
   onCancel,
 }) => {
@@ -50,6 +52,9 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
           <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary mb-5">
             {i18nService.t(confirmKey).replace('{title}', taskTitle)}
           </p>
+          {error && (
+            <p className="text-xs text-red-500 mb-4 w-full text-left">{error}</p>
+          )}
           <div className="flex items-center gap-3 w-full">
             <button
               type="button"

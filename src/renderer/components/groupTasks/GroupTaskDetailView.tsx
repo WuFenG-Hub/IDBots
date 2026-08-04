@@ -458,6 +458,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           action={confirmAction}
           taskTitle={detail.title}
           closing={closing}
+          error={closeError}
           onConfirm={() => void handleConfirmClose()}
           onCancel={() => {
             setConfirmAction(null);
