@@ -49,6 +49,20 @@ export interface GroupTaskDeliverable {
   createdAt: string | null;
 }
 
+/** One transcript row for the Group Task chat view (content already decrypted). */
+export interface GroupChatTranscriptMessage {
+  id: number;
+  pinId: string | null;
+  senderName: string | null;
+  senderGlobalMetaId: string | null;
+  senderAvatar: string | null;
+  content: string | null;
+  contentType: string | null;
+  chainTimestamp: number | null;
+  msgIndex: number | null;
+  replyPin: string | null;
+}
+
 export interface CreateGroupTaskInput {
   groupId: string;
   title: string;
@@ -112,6 +126,34 @@ interface GroupTaskDeliverableRow {
   uri: string | null;
   status: string;
   created_at: string | null;
+}
+
+interface GroupChatTranscriptRow {
+  id: number;
+  pin_id: string | null;
+  sender_name: string | null;
+  sender_global_metaid: string | null;
+  sender_avatar: string | null;
+  content: string | null;
+  content_type: string | null;
+  chain_timestamp: number | null;
+  msg_index: number | null;
+  reply_pin: string | null;
+}
+
+function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChatTranscriptMessage {
+  return {
+    id: row.id,
+    pinId: row.pin_id ?? null,
+    senderName: row.sender_name ?? null,
+    senderGlobalMetaId: row.sender_global_metaid ?? null,
+    senderAvatar: row.sender_avatar ?? null,
+    content: row.content ?? null,
+    contentType: row.content_type ?? null,
+    chainTimestamp: row.chain_timestamp ?? null,
+    msgIndex: row.msg_index ?? null,
+    replyPin: row.reply_pin ?? null,
+  };
 }
 
 const TERMINAL_STATUSES: ReadonlySet<GroupTaskStatus> = new Set(['done', 'cancelled']);
@@ -323,6 +365,36 @@ export class GroupTaskStore {
          AND group_id IS NOT NULL AND TRIM(group_id) != ''`,
     );
     return rows.map((row) => row.group_id);
+  }
+
+  /**
+   * Paged chat transcript for one group, ascending by id. Content is already
+   * decrypted at insert time — returned as-is. Without beforeId, returns the
+   * LATEST page (chat semantics); beforeId pages backwards to older rows.
+   */
+  listGroupChatMessages(
+    groupId: string,
+    opts?: { beforeId?: number; limit?: number },
+  ): GroupChatTranscriptMessage[] {
+    const limit = Math.max(1, Math.min(200, Math.trunc(opts?.limit ?? 50)));
+    const beforeId = opts?.beforeId != null && Number.isFinite(opts.beforeId)
+      ? Math.trunc(opts.beforeId)
+      : null;
+    const columns = `id, pin_id, sender_name, sender_global_metaid, sender_avatar,
+      content, content_type, chain_timestamp, msg_index, reply_pin`;
+    const rows = (beforeId != null
+      ? this.getAll<GroupChatTranscriptRow>(
+          `SELECT ${columns} FROM group_chat_messages
+           WHERE group_id = ? AND id < ? ORDER BY id DESC LIMIT ?`,
+          [groupId, beforeId, limit],
+        )
+      : this.getAll<GroupChatTranscriptRow>(
+          `SELECT ${columns} FROM group_chat_messages
+           WHERE group_id = ? ORDER BY id DESC LIMIT ?`,
+          [groupId, limit],
+        )
+    ).reverse();
+    return rows.map(rowToGroupChatTranscriptMessage);
   }
 
   // --- group_task_members ---

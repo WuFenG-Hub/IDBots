@@ -41,7 +41,7 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
-import { GroupTaskStore } from './groupTaskStore';
+import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { Scheduler } from './libs/scheduler';
@@ -114,7 +114,13 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceKvStoreGetter,
   postGroupTaskMessage,
+  createGroupTask,
+  listGroupTaskSummaries,
+  getGroupTask,
+  closeGroupTask,
+  postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
   startGroupTaskDaemon,
@@ -159,7 +165,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, setGroupChatTransportMetabotStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
@@ -604,6 +610,17 @@ const emitProviderDiscoveryChanged = (snapshot: DiscoverySnapshot): void => {
       } catch (error) {
         console.error('Failed to forward provider discovery snapshot:', error);
       }
+    }
+  });
+};
+
+/** Broadcast a Group Task event (e.g. groupTask:statusChanged) to all renderer windows. */
+const broadcastGroupTaskEvent = <T extends { type: string }>(payload: T): void => {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send(payload.type, payload);
+      } catch { /* ignore */ }
     }
   });
 };
@@ -2920,8 +2937,10 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
 const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
   setGroupChatTransportMetabotStoreGetter(getMetabotStore);
+  setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
   startCognitiveOrchestrator(
     getStore().getDatabase(),
@@ -3058,11 +3077,7 @@ const startSqliteDaemons = (): void => {
       });
     },
     emitTaskEvent: (payload) => {
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          try { win.webContents.send(payload.type, payload); } catch { /* ignore */ }
-        }
-      });
+      broadcastGroupTaskEvent(payload);
     },
     emitLog: (msg) => console.log(msg),
   });
@@ -7365,6 +7380,114 @@ if (!gotTheLock) {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set config',
       };
+    }
+  });
+
+  // ==================== Group Task IPC Handlers ====================
+
+  ipcMain.handle('groupTask:create', async (_event, input: {
+    title?: string;
+    goal?: string;
+    acceptanceCriteria?: string;
+    memberMetabotIds?: number[];
+  }) => {
+    try {
+      const task = await withSqliteRecovery('groupTask:create', () =>
+        createGroupTask({
+          title: String(input?.title ?? '').trim(),
+          goal: String(input?.goal ?? '').trim(),
+          acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
+          memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          createdBy: 'user',
+        }));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:list', async (_event, filter?: { status?: GroupTaskStatus }) => {
+    try {
+      const status = typeof filter?.status === 'string' && filter.status.trim()
+        ? filter.status.trim() as GroupTaskStatus
+        : undefined;
+      const tasks = await withSqliteRecovery('groupTask:list', () => listGroupTaskSummaries(
+        status ? { status } : undefined,
+      ));
+      return { success: true, tasks };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list group tasks' };
+    }
+  });
+
+  ipcMain.handle('groupTask:get', async (_event, input: { taskId?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:get', () => getGroupTask(taskId));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const status = String(input?.status ?? '').trim();
+      if (status !== 'done' && status !== 'cancelled') {
+        throw new Error("status must be 'done' or 'cancelled'");
+      }
+      const task = await withSqliteRecovery('groupTask:close', () =>
+        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to close group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:listMessages', async (_event, input: { taskId?: number; beforeId?: number; limit?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const messages = await withSqliteRecovery('groupTask:listMessages', () => {
+        const task = getGroupTaskStore().getTaskById(taskId);
+        if (!task) throw new Error(`Group task ${taskId} not found`);
+        if (!task.groupId) return [];
+        return getGroupTaskStore().listGroupChatMessages(task.groupId, {
+          beforeId: typeof input?.beforeId === 'number' ? input.beforeId : undefined,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+      });
+      return { success: true, messages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list group task messages' };
+    }
+  });
+
+  ipcMain.handle('groupTask:sendUserMessage', async (_event, input: { taskId?: number; content?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const content = String(input?.content ?? '').trim();
+      if (!content) {
+        throw new Error('content is required');
+      }
+      const result = await withSqliteRecovery('groupTask:sendUserMessage', () =>
+        postGroupTaskMessageAsOwner(taskId, content));
+      return { success: true, pinId: result.pinId };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to send group task message' };
     }
   });
 

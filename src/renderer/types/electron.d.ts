@@ -846,6 +846,15 @@ interface IElectronAPI {
     onStatusUpdate: (callback: (data: any) => void) => () => void;
     onRunUpdate: (callback: (data: any) => void) => () => void;
   };
+  groupTask: {
+    create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;
+    list: (filter?: { status?: string }) => Promise<any>;
+    get: (taskId: number) => Promise<any>;
+    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) => Promise<any>;
+    listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
+    sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
+    onStatusChanged: (callback: (data: any) => void) => () => void;
+  };
   idbots: {
     getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;
     getOfficialSkillsStatus: () => Promise<{ success: boolean; skills?: OfficialSkillItem[]; error?: string }>;
