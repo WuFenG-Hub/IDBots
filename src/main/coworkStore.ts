@@ -440,7 +440,7 @@ function parsePeerGlobalMetaIdFromMetadata(metadataJson?: string | null): string
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
-export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 export interface CoworkMessageMetadata {

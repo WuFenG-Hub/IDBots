@@ -114,7 +114,12 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  postGroupTaskMessage,
 } from './services/groupTaskService';
+import {
+  startGroupTaskDaemon,
+  stopGroupTaskDaemon,
+} from './services/groupTaskDaemon';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -3030,6 +3035,38 @@ const startSqliteDaemons = (): void => {
     emitLog: (msg) => console.log(msg),
   });
 
+  // Group Task daemon: group messages trigger member/chair replies under the
+  // strict chair-controlled protocol (own cursor on group_tasks, own session
+  // channel; fully separate from the cognitive orchestrator).
+  startGroupTaskDaemon({
+    getStore,
+    getGroupTaskStore,
+    getMetabotStore,
+    getCoworkStore,
+    performChat: performChatCompletionForOrchestrator,
+    postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
+    getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
+    runSkillTurn: async (params) => {
+      const roots = skillMgr.getAllSkillRoots();
+      const cwd = roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot();
+      return runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
+        sessionId: params.sessionId,
+        systemPrompt: params.systemPrompt,
+        userMessage: params.userMessage,
+        cwd,
+        activeSkillIds: params.activeSkillIds,
+      });
+    },
+    emitTaskEvent: (payload) => {
+      BrowserWindow.getAllWindows().forEach((win) => {
+        if (!win.isDestroyed()) {
+          try { win.webContents.send(payload.type, payload); } catch { /* ignore */ }
+        }
+      });
+    },
+    emitLog: (msg) => console.log(msg),
+  });
+
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
   startDreamService({
@@ -3064,6 +3101,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopDreamService();
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
+  stopGroupTaskDaemon();
   await resetSqliteBackedSingletons();
   return restartState;
 };

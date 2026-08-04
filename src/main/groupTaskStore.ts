@@ -306,6 +306,15 @@ export class GroupTaskStore {
     return TERMINAL_STATUSES.has(status);
   }
 
+  /** Advance the daemon cursor (monotonic: never moves backwards). */
+  updateLastProcessedMsgId(id: number, msgId: number): void {
+    this.db.run(
+      'UPDATE group_tasks SET last_processed_msg_id = MAX(last_processed_msg_id, ?) WHERE id = ?',
+      [Math.trunc(msgId), id],
+    );
+    this.saveDb();
+  }
+
   /** group_id of every non-terminal task (backfill targets). */
   getActiveGroupIds(): string[] {
     const rows = this.getAll<{ group_id: string }>(
@@ -395,6 +404,15 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskDeliverable);
+  }
+
+  /** Code-level dedupe check for [DELIVERABLE] ingestion (no schema constraint). */
+  hasDeliverableWithMsgPin(taskId: number, msgPinId: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      'SELECT 1 AS found FROM group_task_deliverables WHERE task_id = ? AND msg_pin_id = ? LIMIT 1',
+      [taskId, msgPinId],
+    );
+    return Boolean(row);
   }
 
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
