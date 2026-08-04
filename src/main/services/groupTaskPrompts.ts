@@ -51,14 +51,16 @@ const SHARED_PLAYBOOK_RULES = [
   '- One group = one task. Stay on the task goal; no small talk.',
   '- Speak only when addressed (by name or @-mention); never reply to your own messages.',
   '- Keep replies concise and actionable.',
-  '- When handing work off, @ the target by name.',
-  '- When your part is complete, end your reply by @-mentioning the chair to hand the floor back.',
+  '- When handing work off, @ the target by name — only when the handoff needs their action. Never @ anyone for courtesy.',
   '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line.',
+  '- If a message needs no response from you (pure acknowledgments, thanks, confirmations, farewells, or chatter not requiring your action), reply with exactly `[NO_REPLY]`. Silence is correct and expected in those cases.',
 ];
 
 const CHAIR_PLAYBOOK_RULES = [
   '- You are the facilitator: decompose the goal, assign work by name, chase stalls, and verify deliverables against the acceptance criteria.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
+  '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
+  '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
   '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
 ];
 
@@ -80,6 +82,8 @@ export function buildGroupTaskBlock(params: {
     : [
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
+        '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
+        '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
       ];
 
   return [

@@ -22,6 +22,8 @@ const CONVERSATION_CHANNEL = 'metaweb_group_task';
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
 const DELIVERABLE_URI_PATTERN = /(metafile:\/\/[^\s]+|metaapp:\/\/[^\s]+|https?:\/\/[^\s]+)/i;
+/** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
+const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
@@ -126,6 +128,9 @@ function isMentioned(
 /**
  * Decide which local member bots respond to one group message.
  * - Never: the author itself (by sender_global_metaid), empty content, terminal tasks.
+ * - Review phase (status === 'review'): workers NEVER respond (even when mentioned);
+ *   the chair responds ONLY to owner messages. No floor-control, deliverable, or
+ *   mention triggers in review (hard silence against gratitude loops).
  * - Worker: only when @-mentioned (mention array hit or display name in content).
  * - Chair: when (a) @-mentioned, (b) the message is from the owner (sender matches the
  *   chair bot's boss_global_metaid), (c) a [DELIVERABLE] tag appears, or (d) the
@@ -143,6 +148,7 @@ export function decideGroupTaskResponders(
   const content = (message.content ?? '').trim();
   if (!content) return decisions;
   if (task.status === 'done' || task.status === 'cancelled') return decisions;
+  const isReviewPhase = task.status === 'review';
 
   const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
   const isSelf = (bot: GroupTaskDaemonBot): boolean =>
@@ -178,19 +184,30 @@ export function decideGroupTaskResponders(
     const mentioned = hits.get(member.metabotId) === true;
 
     if (member.role === 'worker') {
-      if (mentioned) {
+      // Review phase: workers never respond, even when @-mentioned.
+      if (!isReviewPhase && mentioned) {
         decisions.push({ metabotId: member.metabotId, reason: 'worker_mentioned' });
       }
       continue;
     }
 
     // chair
+    const bossGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
+    const isOwnerMessage = Boolean(
+      senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
+    );
+    if (isReviewPhase) {
+      // Review phase: the chair responds only to the owner (acceptance dialogue).
+      if (isOwnerMessage) {
+        decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
+      }
+      continue;
+    }
     if (mentioned) {
       decisions.push({ metabotId: member.metabotId, reason: 'chair_mentioned' });
       continue;
     }
-    const bossGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
-    if (senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId) {
+    if (isOwnerMessage) {
       decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
       continue;
     }
@@ -553,6 +570,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
     if (!reply) return;
 
+    // [NO_REPLY] escape hatch: the model opted to stay silent. The assistant
+    // message is already in the session (context continuity) and cooldown/budget
+    // is still recorded by the caller; only the on-chain send is suppressed.
+    if (NO_REPLY_PATTERN.test(reply)) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
+        'on-chain send suppressed (debug)',
+      );
+      return;
+    }
+
     try {
       await deps.postGroupTaskMessage(task.id, bot.id, reply);
     } catch (error) {
@@ -592,7 +620,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const message = toDaemonMessage(row);
       try {
         processMessageTags(task, message, members);
-        const decisions = decideGroupTaskResponders(message, task, members, botsById);
+        // A [STATUS:...] tag on THIS message may have flipped the task status
+        // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
+        // the tick-start snapshot.
+        const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
+        const gatingTask = freshStatus === task.status ? task : { ...task, status: freshStatus };
+        const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
         for (const decision of decisions) {
           const member = members.find((candidate) => candidate.metabotId === decision.metabotId);
           const bot = botsById.get(decision.metabotId);

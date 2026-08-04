@@ -159,13 +159,15 @@ function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChat
 const TERMINAL_STATUSES: ReadonlySet<GroupTaskStatus> = new Set(['done', 'cancelled']);
 
 /**
- * Legal transitions: planning→executing→review→done, and →cancelled from any
- * non-terminal state. Terminal states (done/cancelled) allow no further moves.
+ * Legal transitions: planning→executing→review→done, →cancelled from any
+ * non-terminal state, and review→executing as the rework hatch (the chair
+ * re-opens work via [STATUS:EXECUTING] when acceptance fails). Terminal states
+ * (done/cancelled) allow no further moves.
  */
 const LEGAL_TRANSITIONS: Record<GroupTaskStatus, GroupTaskStatus[]> = {
   planning: ['executing', 'cancelled'],
   executing: ['review', 'cancelled'],
-  review: ['done', 'cancelled'],
+  review: ['done', 'executing', 'cancelled'],
   done: [],
   cancelled: [],
 };
