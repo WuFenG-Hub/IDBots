@@ -40,7 +40,6 @@ export function encryptGroupMessageECB(message: string, groupId: string): string
   const encryptedBuf = Buffer.from(encrypted.toString(), 'base64');
   const hexOut = encryptedBuf.toString('hex');
 
-  console.log('[GroupChat Encrypt] plaintext:', JSON.stringify(message));
   console.log('[GroupChat Encrypt] key (first 16 chars of groupId):', JSON.stringify(secretKeyStr));
   console.log('[GroupChat Encrypt] ciphertext (hex):', hexOut.slice(0, 80) + (hexOut.length > 80 ? '...' : ''));
 
