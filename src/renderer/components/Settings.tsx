@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels } from '../store/slices/modelSlice';
@@ -25,11 +25,12 @@ import type {
 } from '../types/cowork';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
+import SkillMcpManager from './skills/SkillMcpManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 
-type TabType = 'user' | 'general' | 'model' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'skills' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -1798,6 +1799,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'user',           label: i18nService.t('userSettingsTab'), icon: <UserCircleIcon className="h-5 w-5" /> },
     { key: 'general',        label: i18nService.t('general'),        icon: <Cog6ToothIcon className="h-5 w-5" /> },
     { key: 'model',          label: i18nService.t('model'),          icon: <CubeIcon className="h-5 w-5" /> },
+    { key: 'skills',         label: i18nService.t('skills'),         icon: <PuzzlePieceIcon className="h-5 w-5" /> },
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'email',          label: i18nService.t('emailTab'),       icon: <EnvelopeIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
@@ -2018,6 +2020,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
 
       case 'email':
         return <EmailSkillConfig />;
+
+      case 'skills':
+        return <SkillMcpManager />;
 
       case 'coworkSandbox':
         return (

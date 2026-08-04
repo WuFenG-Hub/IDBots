@@ -7,7 +7,6 @@ import Toast from './components/Toast';
 import WindowTitleBar from './components/window/WindowTitleBar';
 import { CoworkView } from './components/cowork';
 import { MetaAppsView } from './components/metaapps';
-import { SkillsView } from './components/skills';
 import { ScheduledTasksView } from './components/scheduledTasks';
 import MetabotsView from './components/metabots/MetabotsView';
 import GigSquareView from './components/gigSquare/GigSquareView';
@@ -66,7 +65,7 @@ type UpdatePhase = 'idle' | 'downloading' | 'ready' | 'applying' | 'restartReady
 const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(false);
   const [settingsOptions, setSettingsOptions] = useState<SettingsOpenOptions>({});
-  const [mainView, setMainView] = useState<'cowork' | 'metaapps' | 'skills' | 'scheduledTasks' | 'metabots' | 'gigSquare'>('cowork');
+  const [mainView, setMainView] = useState<'cowork' | 'metaapps' | 'scheduledTasks' | 'metabots' | 'gigSquare'>('cowork');
   const [isInitialized, setIsInitialized] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -347,8 +346,8 @@ const App: React.FC = () => {
   }, []);
 
   const handleShowSkills = useCallback(() => {
-    setMainView('skills');
-  }, []);
+    handleShowSettings({ initialTab: 'skills' });
+  }, [handleShowSettings]);
 
   const handleShowMetaApps = useCallback(() => {
     setMainView('metaapps');
@@ -960,14 +959,6 @@ const App: React.FC = () => {
       onPreviewMetaAppByPin={botBrowserShell.openMetaAppByPin}
       onStartTaskWithMetaApp={handleStartTaskWithMetaApp}
       onOpenBotInBrowser={botBrowserShell.openRemoteBot}
-      updateBadge={isSidebarCollapsed ? updateBadge : null}
-    />
-  ) : mainView === 'skills' ? (
-    <SkillsView
-      isSidebarCollapsed={isSidebarCollapsed}
-      onToggleSidebar={handleToggleSidebar}
-      onNewChat={handleBlankNewChat}
-      onStartTaskWithSkill={(skillId) => handleNewChat(skillId)}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
     />
   ) : mainView === 'scheduledTasks' ? (

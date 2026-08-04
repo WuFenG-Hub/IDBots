@@ -5,7 +5,7 @@ import { coworkService } from '../services/cowork';
 import { i18nService } from '../services/i18n';
 import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
-import { MagnifyingGlassIcon, PlusIcon, PuzzlePieceIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, PlusIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon } from '@heroicons/react/24/outline';
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
@@ -128,10 +128,6 @@ const Sidebar: React.FC<SidebarProps> = ({
       onShowMetaApps();
       return;
     }
-    if (itemId === 'skills') {
-      onShowSkills();
-      return;
-    }
     if (itemId === 'metabots') {
       onShowMetabots();
     }
@@ -141,7 +137,6 @@ const Sidebar: React.FC<SidebarProps> = ({
     if (icon === 'clock') return <ClockIcon className="h-4 w-4" />;
     if (icon === 'shoppingBag') return <ShoppingBagIcon className="h-4 w-4 shrink-0" />;
     if (icon === 'squares2x2') return <MagnifyingGlassIcon className="h-4 w-4 opacity-0 absolute pointer-events-none" />;
-    if (icon === 'puzzlePiece') return <PuzzlePieceIcon className="h-4 w-4" />;
     return <CpuChipIcon className="h-4 w-4" />;
   };
 
