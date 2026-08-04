@@ -10,7 +10,9 @@
  */
 
 import type { MetabotStore } from '../metabotStore';
-import { createPin } from './metaidCore';
+import type { UserIdentityStore } from '../userIdentityStore';
+import type { UserIdentity } from '../types/userIdentity';
+import { createPin, createPinForIdentity } from './metaidCore';
 import { encryptGroupMessageECB } from './metaWebCrypto';
 
 export interface CreateGroupChatOptions {
@@ -26,6 +28,13 @@ export interface SendGroupChatMessageOptions {
   content: string;
   nickName?: string;
   contentType?: string;
+  replyPin?: string;
+  mention?: string[];
+}
+
+export interface SendGroupChatMessageAsIdentityOptions {
+  content: string;
+  nickName?: string;
   replyPin?: string;
   mention?: string[];
 }
@@ -51,6 +60,42 @@ function getMetabotStore(): MetabotStore {
     );
   }
   return metabotStoreGetter();
+}
+
+// DI for the user identity store (owner identity signs its own pins via createPinForIdentity).
+let userIdentityStoreGetter: (() => UserIdentityStore) | null = null;
+
+export function setGroupChatTransportUserIdentityStoreGetter(getter: () => UserIdentityStore): void {
+  userIdentityStoreGetter = getter;
+}
+
+function getUserIdentity(): UserIdentity {
+  if (!userIdentityStoreGetter) {
+    throw new Error(
+      'groupChatTransport not initialized: call setGroupChatTransportUserIdentityStoreGetter first'
+    );
+  }
+  const identity = userIdentityStoreGetter().get();
+  if (!identity) {
+    throw new Error('No user identity found: create or import a user identity first');
+  }
+  return identity;
+}
+
+// Pin-function seams (same setter-injection style as groupTaskService): tests override
+// these to inspect payloads without chain writes.
+let createPinForIdentityFn = createPinForIdentity;
+
+export interface GroupChatTransportOverrides {
+  createPinForIdentity?: typeof createPinForIdentity;
+}
+
+export function setGroupChatTransportOverrides(overrides: GroupChatTransportOverrides): void {
+  createPinForIdentityFn = overrides.createPinForIdentity ?? createPinForIdentity;
+}
+
+export function resetGroupChatTransportOverrides(): void {
+  createPinForIdentityFn = createPinForIdentity;
 }
 
 /**
@@ -111,6 +156,66 @@ export async function joinGroupChat(
     path: '/protocols/simplegroupjoin',
     contentType: 'application/json',
     payload: JSON.stringify(body),
+  });
+  return { pinId: result.pinId };
+}
+
+/**
+ * Join a public group chat as the local human user identity (owner). The indexer
+ * diverts messages from non-members, so the owner must join every task group to
+ * observe and post. Same payload as joinGroupChat, signed via createPinForIdentity.
+ */
+export async function joinGroupChatAsIdentity(groupId: string): Promise<{ pinId: string }> {
+  const identity = getUserIdentity();
+  const body = {
+    groupId,
+    state: 1,
+    referrer: '',
+    k: '',
+  };
+  const result = await createPinForIdentityFn({
+    mnemonic: identity.mnemonic,
+    path: identity.path || undefined,
+    metaidData: {
+      operation: 'create',
+      path: '/protocols/simplegroupjoin',
+      contentType: 'application/json',
+      payload: JSON.stringify(body),
+    },
+  });
+  return { pinId: result.pinId };
+}
+
+/**
+ * Send an AES-encrypted group message as the local human user identity.
+ * Same /protocols/simplegroupchat scheme as sendGroupChatMessage, signed via
+ * createPinForIdentity; nickName defaults to the identity display name.
+ */
+export async function sendGroupChatMessageAsIdentity(
+  groupId: string,
+  opts: SendGroupChatMessageAsIdentityOptions
+): Promise<{ pinId: string }> {
+  const identity = getUserIdentity();
+  const encryptedContent = encryptGroupMessageECB(opts.content, groupId);
+  const body = {
+    groupId,
+    nickName: opts.nickName ?? identity.name ?? '',
+    content: encryptedContent,
+    contentType: 'text/plain',
+    encryption: 'aes',
+    timestamp: Date.now(),
+    replyPin: opts.replyPin ?? '',
+    mention: opts.mention ?? [],
+  };
+  const result = await createPinForIdentityFn({
+    mnemonic: identity.mnemonic,
+    path: identity.path || undefined,
+    metaidData: {
+      operation: 'create',
+      path: '/protocols/simplegroupchat',
+      contentType: 'application/json',
+      payload: JSON.stringify(body),
+    },
   });
   return { pinId: result.pinId };
 }

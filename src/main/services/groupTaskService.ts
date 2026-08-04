@@ -18,7 +18,9 @@ import {
 import {
   createGroupChat,
   joinGroupChat,
+  joinGroupChatAsIdentity,
   sendGroupChatMessage,
+  sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
 } from './groupChatTransport';
 
@@ -55,32 +57,75 @@ export function setGroupTaskServiceGroupTaskStoreGetter(getter: () => GroupTaskS
   groupTaskStoreGetter = getter;
 }
 
+/** Minimal kv surface used for the owner-join guard (satisfied by SqliteStore). */
+export interface GroupTaskServiceKvStore {
+  get<T = unknown>(key: string): T | undefined;
+  set<T = unknown>(key: string, value: T): void;
+}
+
+let kvStoreGetter: (() => GroupTaskServiceKvStore) | null = null;
+
+export function setGroupTaskServiceKvStoreGetter(getter: () => GroupTaskServiceKvStore): void {
+  kvStoreGetter = getter;
+}
+
+function getKvStore(): GroupTaskServiceKvStore {
+  if (!kvStoreGetter) {
+    throw new Error('groupTaskService not initialized: call setGroupTaskServiceKvStoreGetter first');
+  }
+  return kvStoreGetter();
+}
+
 // Transport function seams (same setter-injection style; defaults are the real
 // implementations). Tests override these to avoid chain writes.
 let createGroupChatFn = createGroupChat;
 let joinGroupChatFn = joinGroupChat;
+let joinGroupChatAsIdentityFn = joinGroupChatAsIdentity;
 let sendGroupChatMessageFn = sendGroupChatMessage;
+let sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
 let waitForGroupIndexedFn = waitForGroupIndexed;
 
 export interface GroupTaskServiceTransportOverrides {
   createGroupChat?: typeof createGroupChat;
   joinGroupChat?: typeof joinGroupChat;
+  joinGroupChatAsIdentity?: typeof joinGroupChatAsIdentity;
   sendGroupChatMessage?: typeof sendGroupChatMessage;
+  sendGroupChatMessageAsIdentity?: typeof sendGroupChatMessageAsIdentity;
   waitForGroupIndexed?: typeof waitForGroupIndexed;
 }
 
 export function setGroupTaskServiceTransport(overrides: GroupTaskServiceTransportOverrides): void {
   createGroupChatFn = overrides.createGroupChat ?? createGroupChat;
   joinGroupChatFn = overrides.joinGroupChat ?? joinGroupChat;
+  joinGroupChatAsIdentityFn = overrides.joinGroupChatAsIdentity ?? joinGroupChatAsIdentity;
   sendGroupChatMessageFn = overrides.sendGroupChatMessage ?? sendGroupChatMessage;
+  sendGroupChatMessageAsIdentityFn = overrides.sendGroupChatMessageAsIdentity ?? sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = overrides.waitForGroupIndexed ?? waitForGroupIndexed;
 }
 
 export function resetGroupTaskServiceTransport(): void {
   createGroupChatFn = createGroupChat;
   joinGroupChatFn = joinGroupChat;
+  joinGroupChatAsIdentityFn = joinGroupChatAsIdentity;
   sendGroupChatMessageFn = sendGroupChatMessage;
+  sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = waitForGroupIndexed;
+}
+
+const OWNER_JOINED_KV_PREFIX = 'group_task_owner_joined:';
+
+/**
+ * Re-join guard: joining costs gas, so the owner's on-chain join is recorded in kv
+ * (`group_task_owner_joined:<groupId>` = '1'). Joins only when the flag is missing;
+ * returns true when a join pin was actually sent. Throws when the join fails.
+ */
+export async function ensureOwnerJoinedGroup(groupId: string): Promise<boolean> {
+  const kv = getKvStore();
+  const key = `${OWNER_JOINED_KV_PREFIX}${groupId}`;
+  if (kv.get<string>(key) === '1') return false;
+  await joinGroupChatAsIdentityFn(groupId);
+  kv.set(key, '1');
+  return true;
 }
 
 function getMetabotStore(): MetabotStore {
@@ -227,6 +272,17 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
     }
   }
 
+  // The indexer diverts messages from non-members, so the human owner joins every
+  // task group to observe/post. Degradation-tolerant like member joins.
+  try {
+    await ensureOwnerJoinedGroup(groupId);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Owner identity join failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   try {
     await sendGroupChatMessageFn(chairMetabotId, groupId, {
       content: buildKickoffMessage({
@@ -250,6 +306,28 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
 
 export async function listGroupTasks(filter?: { status?: GroupTaskStatus }): Promise<GroupTask[]> {
   return getGroupTaskStore().listTasks(filter);
+}
+
+export interface GroupTaskSummary extends GroupTask {
+  memberCount: number;
+  chairName: string | null;
+  memberNames: string[];
+}
+
+/** listGroupTasks enriched with member count + chair/member names (IPC list surface). */
+export async function listGroupTaskSummaries(
+  filter?: { status?: GroupTaskStatus },
+): Promise<GroupTaskSummary[]> {
+  const store = getGroupTaskStore();
+  return store.listTasks(filter).map((task) => {
+    const members = store.listMembers(task.id);
+    return {
+      ...task,
+      memberCount: members.length,
+      chairName: members.find((member) => member.role === 'chair')?.name ?? null,
+      memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
+    };
+  });
 }
 
 export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
@@ -285,6 +363,27 @@ export async function postGroupTaskMessage(
     content: text,
     nickName,
     contentType: opts?.contentType,
+    replyPin: opts?.replyPin,
+    mention: opts?.mention,
+  });
+}
+
+/**
+ * Post a message to the task group as the human owner (user identity).
+ * Applies the kv re-join guard first so the owner is an on-chain member
+ * (covers tasks created before owner-join existed).
+ */
+export async function postGroupTaskMessageAsOwner(
+  taskId: number,
+  content: string,
+  opts?: { replyPin?: string; mention?: string[] },
+): Promise<{ pinId: string }> {
+  const task = requireRunnableTask(taskId);
+  const text = content?.trim();
+  if (!text) throw new Error('content is required');
+  await ensureOwnerJoinedGroup(task.groupId!);
+  return sendGroupChatMessageAsIdentityFn(task.groupId!, {
+    content: text,
     replyPin: opts?.replyPin,
     mention: opts?.mention,
   });
