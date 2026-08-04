@@ -313,3 +313,35 @@ test('legacy untagged dream memories are attributed to a dream date on store ini
     cleanup();
   }
 });
+
+
+test('self_identity survives the generic 360-char memory cap intact', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const longText = `我是 AI_Sunny。${'我在每一天的经历里持续修正自己,四段式蒸馏自我。'.repeat(24)}`; // ~600 chars
+    assert.ok(longText.length > 360);
+
+    const identity = store.createUserMemory({
+      metabotId: 5, text: longText, scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', origin: 'dream', forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+    assert.equal(identity.text, longText, 'identity entry is stored in full');
+
+    const fact = store.createUserMemory({
+      metabotId: 5, text: longText, scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+    assert.equal(fact.text.length, 360, 'other memory classes keep the 360-char cap');
+
+    const longerText = `${longText}还有新的领悟。`;
+    const updated = store.updateUserMemory({
+      id: identity.id, metabotId: 5, text: longerText, allowProtected: true,
+    });
+    assert.equal(updated?.text, longerText, 'identity update path also preserves full text');
+  } finally {
+    cleanup();
+  }
+});

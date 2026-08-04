@@ -257,6 +257,8 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
   assert.ok(user.includes('关系温度'), 'temperature judging guidance');
   assert.ok(user.includes('活感'), 'aliveness scaffold in the identity section');
   assert.ok(user.includes('最稳定的面貌'), 'steady-persona scaffold');
+  assert.ok(user.includes('600 字以内'), 'identity length guidance matches the raised storage cap');
+  assert.ok(user.includes('占位'), 'sections placeholder keys are banned explicitly');
   assert.ok(!user.includes('不要轻易改动'), 'old rigid identity wording removed');
 });
 

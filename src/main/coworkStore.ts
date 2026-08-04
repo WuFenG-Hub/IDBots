@@ -331,6 +331,18 @@ function truncate(value: string, maxChars: number): string {
   return `${value.slice(0, maxChars - 1)}…`;
 }
 
+const MEMORY_TEXT_MAX_CHARS = 360;
+/** self_identity holds the dream pipeline's four-part self-distillation
+ * (200+ chars by contract, typically 350–600) — the generic 360-char memory
+ * cap used to cut every identity entry mid-sentence. */
+const SELF_IDENTITY_TEXT_MAX_CHARS = 1200;
+
+function maxMemoryTextChars(usageClass?: string | null): number {
+  return normalizeMemoryUsageClass(usageClass) === 'self_identity'
+    ? SELF_IDENTITY_TEXT_MAX_CHARS
+    : MEMORY_TEXT_MAX_CHARS;
+}
+
 function parseTimeToMs(input?: string | null): number | null {
   if (!input) return null;
   const timestamp = Date.parse(input);
@@ -4248,7 +4260,7 @@ export class CoworkStore implements MemoryBackend {
   }
 
   private createOrReviveUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; created: boolean; updated: boolean } {
-    const normalizedText = truncate(normalizeMemoryText(input.text), 360);
+    const normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
     if (!normalizedText) {
       throw new Error('Memory text is required');
     }
@@ -4461,7 +4473,9 @@ export class CoworkStore implements MemoryBackend {
     }
 
     const now = Date.now();
-    const nextText = input.text !== undefined ? truncate(normalizeMemoryText(input.text), 360) : current.text;
+    const nextText = input.text !== undefined
+      ? truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass ?? current.usage_class))
+      : current.text;
     if (!nextText) {
       throw new Error('Memory text is required');
     }
