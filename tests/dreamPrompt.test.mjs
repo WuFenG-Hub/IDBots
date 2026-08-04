@@ -42,38 +42,78 @@ const dateStr = (d) => {
 test('computeDueDreamDates: yesterday is due inside the window after the staggered minute', () => {
   // metabotId 1 staggers at minute 13 → due at 03:00, not due at 00:05.
   const atThree = new Date(2026, 7, 2, 3, 0);
-  const due = computeDueDreamDates({ now: atThree, metabotId: 1, runStates: new Map() });
-  assert.ok(due.includes('2026-08-01'), 'yesterday should be due at 03:00');
+  const { dueDates } = computeDueDreamDates({ now: atThree, metabotId: 1, runStates: new Map() });
+  assert.ok(dueDates.includes('2026-08-01'), 'yesterday should be due at 03:00');
 
   const early = new Date(2026, 7, 2, 0, 5);
-  const notYet = computeDueDreamDates({ now: early, metabotId: 1, runStates: new Map() });
+  const { dueDates: notYet } = computeDueDreamDates({ now: early, metabotId: 1, runStates: new Map() });
   assert.equal(notYet.includes('2026-08-01'), false, 'yesterday should wait for the staggered minute');
 });
 
 test('computeDueDreamDates: yesterday waits outside the window, older dates catch up any time', () => {
   const midday = new Date(2026, 7, 8, 12, 0);
-  const due = computeDueDreamDates({ now: midday, metabotId: 1, runStates: new Map() });
-  assert.equal(due.includes('2026-08-07'), false, 'yesterday must wait for the next nightly window');
-  assert.ok(due.includes('2026-08-06'), 'two days ago should catch up immediately');
-  assert.ok(due.includes('2026-08-02'), 'six days ago should catch up');
-  assert.equal(due.includes('2026-07-31'), false, 'beyond the 7-day lookback');
+  const { dueDates } = computeDueDreamDates({ now: midday, metabotId: 1, runStates: new Map() });
+  assert.equal(dueDates.includes('2026-08-07'), false, 'yesterday must wait for the next nightly window');
+  assert.ok(dueDates.includes('2026-08-06'), 'two days ago should catch up immediately');
+  assert.ok(dueDates.includes('2026-08-02'), 'six days ago should catch up');
+  assert.equal(dueDates.includes('2026-07-31'), false, 'beyond the 7-day lookback');
   // chronological ascending: oldest first
-  assert.deepEqual([...due].sort(), due);
+  assert.deepEqual([...dueDates].sort(), dueDates);
 });
 
 test('computeDueDreamDates: completed/running/exhausted dates are skipped, failed dates retry', () => {
   const now = new Date(2026, 7, 2, 3, 0);
   const runStates = new Map([
-    ['2026-08-01', { status: 'completed', attemptCount: 1 }],
-    ['2026-07-31', { status: 'running', attemptCount: 1 }],
-    ['2026-07-30', { status: 'failed', attemptCount: DREAM_MAX_ATTEMPTS }],
-    ['2026-07-29', { status: 'failed', attemptCount: 1 }],
+    ['2026-08-01', { status: 'completed', attemptCount: 1, startedAt: new Date(2026, 7, 2, 0, 30).getTime(), dreamVersion: 99 }],
+    ['2026-07-31', { status: 'running', attemptCount: 1, startedAt: 0, dreamVersion: 0 }],
+    ['2026-07-30', { status: 'failed', attemptCount: DREAM_MAX_ATTEMPTS, startedAt: 0, dreamVersion: 0 }],
+    ['2026-07-29', { status: 'failed', attemptCount: 1, startedAt: 0, dreamVersion: 0 }],
   ]);
-  const due = computeDueDreamDates({ now, metabotId: 1, runStates });
-  assert.equal(due.includes('2026-08-01'), false);
-  assert.equal(due.includes('2026-07-31'), false);
-  assert.equal(due.includes('2026-07-30'), false);
-  assert.ok(due.includes('2026-07-29'));
+  const { dueDates, repairDates } = computeDueDreamDates({ now, metabotId: 1, runStates });
+  assert.equal(dueDates.includes('2026-08-01'), false);
+  assert.equal(dueDates.includes('2026-07-31'), false);
+  assert.equal(dueDates.includes('2026-07-30'), false);
+  assert.ok(dueDates.includes('2026-07-29'));
+  assert.deepEqual(repairDates, [], 'current-version completed runs are fully settled');
+});
+
+test('computeDueDreamDates: a completed run that started mid-day is not final and is due again', () => {
+  // The 2026-08-03 incident: a manually triggered run at 04:24 covered only
+  // the day's first hours, then 'completed' locked the date forever.
+  const now = new Date(2026, 7, 4, 1, 0); // inside the nightly window
+  const partialDay = new Date(2026, 7, 3, 4, 24).getTime(); // started 08-03 04:24
+  const runStates = new Map([
+    ['2026-08-03', { status: 'completed', attemptCount: 1, startedAt: partialDay, dreamVersion: 1 }],
+  ]);
+  const { dueDates, repairDates } = computeDueDreamDates({ now, metabotId: 1, runStates });
+  assert.ok(dueDates.includes('2026-08-03'), 'partial-day completed run must be re-dreamed');
+  assert.deepEqual(repairDates, [], 're-dream of a partial day is a normal run, not a version repair');
+
+  // Once re-dreamed after the day ended, the date is final.
+  const settled = new Map([
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 1 }],
+  ]);
+  const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
+  assert.equal(next.dueDates.includes('2026-08-03'), false);
+  assert.equal(next.repairDates.includes('2026-08-03'), false);
+});
+
+test('computeDueDreamDates: stale-version completed dates become window-gated repairs, newest first', () => {
+  const inWindow = new Date(2026, 7, 8, 2, 0);
+  const finalStart = (day) => new Date(2026, 7, day + 1, 0, 30).getTime(); // after that day ended
+  const runStates = new Map([
+    ['2026-08-05', { status: 'completed', attemptCount: 1, startedAt: finalStart(5), dreamVersion: 0 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 1, startedAt: finalStart(3), dreamVersion: 0 }],
+    ['2026-08-02', { status: 'completed', attemptCount: 1, startedAt: finalStart(2), dreamVersion: 1 }],
+  ]);
+  const { dueDates, repairDates } = computeDueDreamDates({ now: inWindow, metabotId: 1, runStates, dreamVersion: 1 });
+  assert.equal(dueDates.includes('2026-08-05'), false, 'stale completed dates are not normal dues');
+  assert.equal(dueDates.includes('2026-08-03'), false);
+  assert.deepEqual(repairDates, ['2026-08-05', '2026-08-03'], 'stale dates repair newest-first; current version skipped');
+
+  const midday = new Date(2026, 7, 8, 12, 0);
+  const { repairDates: noonRepairs } = computeDueDreamDates({ now: midday, metabotId: 1, runStates, dreamVersion: 1 });
+  assert.deepEqual(noonRepairs, [], 'repairs only run inside the nightly window');
 });
 
 test('computeDreamStaggerMinute stays inside [0, 240)', () => {
@@ -192,6 +232,7 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
         },
       ],
       taskRuns: [{ taskName: '每日巡检', status: 'success', startedAt: 4, sessionId: 's1' }],
+      orderCount: 2,
     },
   });
 
@@ -199,6 +240,10 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
   assert.ok(system.includes('视频创作者'));
   assert.ok(system.includes('上帝视角'), 'observer framing in the system prompt');
   assert.ok(user.includes('2026-08-01'));
+  assert.ok(user.includes('当天共有 2 段会话'), 'session inventory line');
+  assert.ok(user.includes('「和用户聊发布」'), 'inventory lists session titles');
+  assert.ok(user.includes('服务订单共 2 笔'), 'raw order count in the inventory');
+  assert.ok(user.includes('定时任务执行 1 次'), 'task run count in the inventory');
   assert.ok(user.includes('与人类用户的对话'));
   assert.ok(user.includes('和用户聊发布'));
   assert.ok(user.includes('服务订单'));
@@ -212,6 +257,8 @@ test('buildDreamPrompt embeds persona, activity sections and the output contract
   assert.ok(user.includes('关系温度'), 'temperature judging guidance');
   assert.ok(user.includes('活感'), 'aliveness scaffold in the identity section');
   assert.ok(user.includes('最稳定的面貌'), 'steady-persona scaffold');
+  assert.ok(user.includes('600 字以内'), 'identity length guidance matches the raised storage cap');
+  assert.ok(user.includes('占位'), 'sections placeholder keys are banned explicitly');
   assert.ok(!user.includes('不要轻易改动'), 'old rigid identity wording removed');
 });
 
@@ -234,8 +281,14 @@ test('buildDreamPrompt truncates oversized activity within budget', () => {
         })),
       })),
       taskRuns: [],
+      orderCount: 0,
     },
   });
   assert.ok(user.length < 16000, `prompt should be bounded, got ${user.length}`);
   assert.ok(user.includes('……'));
+  // Fair-share budgeting: even with 30 oversized sessions, every session keeps
+  // its place (header and inventory title) instead of silently dropping out.
+  assert.ok(user.includes('会话0'), 'first session present');
+  assert.ok(user.includes('会话29'), 'last session present');
+  assert.ok(user.includes('当天共有 30 段会话'), 'inventory counts all sessions');
 });

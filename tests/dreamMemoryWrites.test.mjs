@@ -176,3 +176,172 @@ test('dream_enabled policy defaults on and is settable per bot', async () => {
     cleanup();
   }
 });
+
+
+test('dream memories are tagged with dream_date and replaced per date', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    new DreamStore(db, () => {}); // ensures the dream_date column exists
+
+    const dreamSource = (dreamDate) => ({ sourceType: 'dream', sourceChannel: 'dream', dreamDate });
+    const july30 = store.createUserMemory({
+      metabotId: 5, text: '7月30日沉淀的记忆', scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', source: dreamSource('2026-07-30'),
+    });
+    const july29 = store.createUserMemory({
+      metabotId: 5, text: '7月29日沉淀的记忆', scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', source: dreamSource('2026-07-29'),
+    });
+    const identity = store.createUserMemory({
+      metabotId: 5, text: '做梦沉淀的我是谁', scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', origin: 'dream', source: dreamSource('2026-07-30'),
+    });
+
+    const tagRows = db.exec(
+      `SELECT dream_date FROM user_memory_sources WHERE memory_id = ? AND dream_date IS NOT NULL`,
+      [july30.id]
+    );
+    assert.equal(tagRows[0].values[0][0], '2026-07-30', 'source row carries the dream date');
+
+    assert.equal(store.softDeleteDreamMemoriesForDate(5, '2026-07-30'), 1);
+    assert.equal(store.softDeleteDreamMemoriesForDate(5, '2026-07-30'), 0, 'second delete is a no-op');
+
+    const byId = new Map(
+      store.listUserMemories({ metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', status: 'all', includeDeleted: true })
+        .map((m) => [m.id, m])
+    );
+    assert.equal(byId.get(july30.id).status, 'deleted', 'that day batch is removed');
+    assert.equal(byId.get(july29.id).status, 'created', 'other days are untouched');
+    assert.equal(byId.get(identity.id).status, 'created', 'self_identity is never batch-deleted');
+
+    // conversation-origin memories tagged with a dream date are not swept up
+    // (only origin='dream' rows are replaced by the dream pipeline).
+    const manual = store.createUserMemory({
+      metabotId: 5, text: '用户手动记录的事', scopeKind: 'owner', scopeKey: 'owner:self',
+      source: dreamSource('2026-07-30'),
+    });
+    assert.equal(store.softDeleteDreamMemoriesForDate(5, '2026-07-30'), 0);
+    assert.equal(
+      store.listUserMemories({ metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', status: 'all', includeDeleted: true })
+        .find((m) => m.id === manual.id).status,
+      'created'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('forceNew skips revive dedup so dream batches never resurrect other dates', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const input = (forceNew) => ({
+      metabotId: 5, text: '同样的记忆文本', scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', forceNew, source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+
+    const first = store.createUserMemory(input(true));
+    const second = store.createUserMemory(input(true));
+    assert.notEqual(first.id, second.id, 'forceNew always inserts');
+
+    const revived = store.createUserMemory(input(false));
+    assert.equal(
+      store.listUserMemories({ metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', status: 'all' }).length,
+      2,
+      'default path still dedups by fingerprint'
+    );
+    assert.ok([first.id, second.id].includes(revived.id));
+  } finally {
+    cleanup();
+  }
+});
+
+test('identity dream-date tag tracks the newest producing dream', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    new DreamStore(db, () => {});
+
+    assert.equal(store.getDreamIdentityLatestDate(5), null, 'untagged legacy identity reads as null');
+
+    const identity = store.createUserMemory({
+      metabotId: 5, text: '我是谁 v1', scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', origin: 'dream',
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-29' },
+    });
+    assert.equal(store.getDreamIdentityLatestDate(5), '2026-07-29');
+
+    store.updateUserMemory({
+      id: identity.id, metabotId: 5, text: '我是谁 v2', allowProtected: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+    assert.equal(store.getDreamIdentityLatestDate(5), '2026-07-30', 'update path records the newer dream date');
+  } finally {
+    cleanup();
+  }
+});
+
+test('legacy untagged dream memories are attributed to a dream date on store init', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const dreamStore = new DreamStore(db, () => {});
+
+    dreamStore.beginRun(5, '2026-07-30', null, 0);
+    dreamStore.finishRun(5, '2026-07-30', 'completed');
+
+    // A legacy dream memory: source_type='dream', no dream_date tag.
+    const legacy = store.createUserMemory({
+      metabotId: 5, text: '旧版本梦境留下的记忆', scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', source: { sourceType: 'dream', sourceChannel: 'dream' },
+    });
+    const before = db.exec('SELECT dream_date FROM user_memory_sources WHERE memory_id = ?', [legacy.id]);
+    assert.equal(before[0].values[0][0], null);
+
+    // Re-initializing the dream store (app restart) backfills the attribution.
+    new DreamStore(db, () => {});
+    const after = db.exec('SELECT dream_date FROM user_memory_sources WHERE memory_id = ?', [legacy.id]);
+    assert.equal(after[0].values[0][0], '2026-07-30', 'backfill attributes the memory to the run that wrote it');
+
+    // The attributed batch is then replaceable by a re-dream of that date.
+    assert.equal(store.softDeleteDreamMemoriesForDate(5, '2026-07-30'), 1);
+  } finally {
+    cleanup();
+  }
+});
+
+
+test('self_identity survives the generic 360-char memory cap intact', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const longText = `我是 AI_Sunny。${'我在每一天的经历里持续修正自己,四段式蒸馏自我。'.repeat(24)}`; // ~600 chars
+    assert.ok(longText.length > 360);
+
+    const identity = store.createUserMemory({
+      metabotId: 5, text: longText, scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', origin: 'dream', forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+    assert.equal(identity.text, longText, 'identity entry is stored in full');
+
+    const fact = store.createUserMemory({
+      metabotId: 5, text: longText, scopeKind: 'owner', scopeKey: 'owner:self',
+      origin: 'dream', forceNew: true,
+      source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: '2026-07-30' },
+    });
+    assert.equal(fact.text.length, 360, 'other memory classes keep the 360-char cap');
+
+    const longerText = `${longText}还有新的领悟。`;
+    const updated = store.updateUserMemory({
+      id: identity.id, metabotId: 5, text: longerText, allowProtected: true,
+    });
+    assert.equal(updated?.text, longerText, 'identity update path also preserves full text');
+  } finally {
+    cleanup();
+  }
+});

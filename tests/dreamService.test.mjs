@@ -200,7 +200,7 @@ test('short self_identity triggers one expansion retry and keeps the long versio
   }
 });
 
-test('re-dreaming the same date updates the single self_identity entry in place', async () => {
+test('re-dreaming the same date replaces the day batch and updates identity in place', async () => {
   const { cleanup, coworkStore, dreamStore, service } = await setup(async () => makePayload());
   try {
     await service.runNow(5, DAY);
@@ -211,9 +211,18 @@ test('re-dreaming the same date updates the single self_identity entry in place'
     });
     assert.equal(identities.length, 1, 'still exactly one identity entry');
 
+    const dreamMemories = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', origin: 'dream', status: 'all',
+    });
+    const byClass = (cls) => dreamMemories.filter((m) => m.usageClass === cls);
+    assert.equal(byClass('profile_fact').length, 1, 're-dream replaces the day batch instead of duplicating it');
+    assert.equal(byClass('work_review').length, 1);
+    assert.equal(byClass('value_boundary').length, 1);
+
     const run = dreamStore.getRun(5, DAY);
     assert.equal(run.status, 'completed');
     assert.equal(run.attemptCount, 2);
+    assert.ok(run.dreamVersion >= 1, 'run records the current algorithm version');
   } finally {
     cleanup();
   }
@@ -234,5 +243,154 @@ test('global dreamLlmId override wins over the bot own llm_id', async () => {
     assert.deepEqual(seen, ['cheap-global-llm']);
   } finally {
     ctx.cleanup();
+  }
+});
+
+
+const seedMessagesForDate = (db, sessionId, dateStr, seqBase) => {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dayStart = new Date(y, m - 1, d).getTime();
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [`m-${dateStr}-u${seqBase}`, sessionId, 'user', `${dateStr} 的事`, '{}', dayStart + 1000, seqBase]
+  );
+  db.run(
+    'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    [`m-${dateStr}-a${seqBase}`, sessionId, 'assistant', '记下了', '{}', dayStart + 2000, seqBase + 1]
+  );
+};
+
+const firstSessionId = (db) => db.exec('SELECT id FROM cowork_sessions LIMIT 1')[0].values[0][0];
+
+test('an older re-dreamed date must not regress the self-identity entry', async () => {
+  const OLD_DAY = '2026-07-29';
+  const identityNew = `我是经历过 ${DAY} 的 MetaBot。${'我越来越清楚自己是谁。'.repeat(12)}`;
+  const identityOld = `我是只经历过 ${OLD_DAY} 的 MetaBot。${'我还在摸索自己是谁。'.repeat(12)}`;
+  const { db, cleanup, coworkStore, service } = await setup(async (system, user) =>
+    makePayload({ self_identity: user.includes(OLD_DAY) ? identityOld : identityNew })
+  );
+  try {
+    seedMessagesForDate(db, firstSessionId(db), OLD_DAY, 90);
+
+    await service.runNow(5, DAY);
+    await service.runNow(5, OLD_DAY);
+
+    const identities = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
+    });
+    assert.equal(identities.length, 1);
+    assert.equal(identities[0].text, identityNew, 'older date must not overwrite the newer identity');
+    assert.equal(coworkStore.getDreamIdentityLatestDate(5), DAY);
+
+    // The older date still gets its own memory batch, tagged by dream date.
+    const facts = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'profile_fact', origin: 'dream', status: 'all',
+    });
+    assert.equal(facts.length, 2, 'one batch per date, same text allowed across dates');
+  } finally {
+    cleanup();
+  }
+});
+
+test('a completed run that started mid-day is re-dreamed in the next nightly window', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const dreamStore = new DreamStore(db, () => {});
+    seedActivity(coworkStore, db);
+
+    // Simulate the 2026-08-03 incident: a completed run that started 04:24,
+    // having seen only the day's first hours. Current version, so no repair —
+    // the date itself must simply become due again.
+    dreamStore.beginRun(5, DAY, null, 1);
+    dreamStore.finishRun(5, DAY, 'completed');
+    db.run(
+      'UPDATE metabot_dream_runs SET started_at = ? WHERE metabot_id = 5 AND dream_date = ?',
+      [new Date(2026, 6, 30, 4, 24).getTime(), DAY]
+    );
+
+    const calls = [];
+    const service = new DreamService({
+      coworkStore,
+      metabotStore: metabotStoreStub(),
+      dreamStore,
+      performChat: async () => { calls.push(1); return makePayload(); },
+      llmTimeoutMs: 5000,
+      now: () => new Date(2026, 6, 31, 3, 0), // next night, inside the window
+    });
+    await service.tick();
+
+    assert.equal(calls.length, 1, 'partial-day date is re-dreamed');
+    const run = dreamStore.getRun(5, DAY);
+    assert.equal(run.status, 'completed');
+    assert.equal(run.attemptCount, 2);
+    // A normal re-dream, not a version repair: identity is written.
+    const identities = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
+    });
+    assert.equal(identities.length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('nightly tick repairs stale-version dates one per night, never touching identity', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const { DreamStore } = await import('../dist-electron/main/dreamStore.js').catch(() => import('../dist-electron/dreamStore.js'));
+    const dreamStore = new DreamStore(db, () => {});
+    seedActivity(coworkStore, db);
+    seedMessagesForDate(db, firstSessionId(db), '2026-07-29', 90);
+
+    // Two stale (version 0) completed runs that both covered their whole day.
+    for (const [date, started] of [
+      ['2026-07-29', new Date(2026, 6, 30, 0, 30).getTime()],
+      [DAY, new Date(2026, 6, 31, 0, 30).getTime()],
+    ]) {
+      dreamStore.beginRun(5, date, null, 0);
+      dreamStore.finishRun(5, date, 'completed');
+      db.run(
+        'UPDATE metabot_dream_runs SET started_at = ? WHERE metabot_id = 5 AND dream_date = ?',
+        [started, date]
+      );
+    }
+
+    const calls = [];
+    let now = new Date(2026, 7, 1, 3, 0); // window, after metabot 5's stagger (01:05)
+    const service = new DreamService({
+      coworkStore,
+      metabotStore: metabotStoreStub(),
+      dreamStore,
+      performChat: async (system, user) => { calls.push(user); return makePayload(); },
+      llmTimeoutMs: 5000,
+      now: () => now,
+    });
+
+    await service.tick();
+    assert.equal(calls.length, 1, 'at most one repair per bot per night');
+    assert.ok(calls[0].includes(DAY), 'newest stale date repairs first');
+    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 1, 'repaired date now records the current version');
+    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 0, 'older stale date waits');
+    const identities = coworkStore.listUserMemories({
+      metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
+    });
+    assert.equal(identities.length, 0, 'version repairs never touch self-identity');
+
+    await service.tick();
+    assert.equal(calls.length, 1, 'same night does not repair a second date');
+
+    now = new Date(2026, 7, 2, 3, 0);
+    await service.tick();
+    assert.equal(calls.length, 2, 'next night repairs the remaining stale date');
+    assert.ok(calls[1].includes('2026-07-29'));
+    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 1);
+
+    now = new Date(2026, 7, 3, 3, 0);
+    await service.tick();
+    assert.equal(calls.length, 2, 'window converged, nothing left to repair');
+  } finally {
+    cleanup();
   }
 });

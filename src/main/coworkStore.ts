@@ -331,6 +331,18 @@ function truncate(value: string, maxChars: number): string {
   return `${value.slice(0, maxChars - 1)}…`;
 }
 
+const MEMORY_TEXT_MAX_CHARS = 360;
+/** self_identity holds the dream pipeline's four-part self-distillation
+ * (200+ chars by contract, typically 350–600) — the generic 360-char memory
+ * cap used to cut every identity entry mid-sentence. */
+const SELF_IDENTITY_TEXT_MAX_CHARS = 1200;
+
+function maxMemoryTextChars(usageClass?: string | null): number {
+  return normalizeMemoryUsageClass(usageClass) === 'self_identity'
+    ? SELF_IDENTITY_TEXT_MAX_CHARS
+    : MEMORY_TEXT_MAX_CHARS;
+}
+
 function parseTimeToMs(input?: string | null): number | null {
   if (!input) return null;
   const timestamp = Date.parse(input);
@@ -579,6 +591,8 @@ export interface CoworkUserMemorySourceInput {
   sourceType?: string;
   externalConversationId?: string;
   sourceId?: string;
+  /** Dream pipeline: the YYYY-MM-DD this memory was distilled from. */
+  dreamDate?: string;
 }
 
 export interface CoworkUserMemoryStats {
@@ -1032,6 +1046,10 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!sourceColumns.includes('source_id')) {
         this.db.run('ALTER TABLE user_memory_sources ADD COLUMN source_id TEXT NULL;');
+        changed = true;
+      }
+      if (!sourceColumns.includes('dream_date')) {
+        this.db.run('ALTER TABLE user_memory_sources ADD COLUMN dream_date TEXT NULL;');
         changed = true;
       }
       this.db.run(`
@@ -4222,9 +4240,9 @@ export class CoworkStore implements MemoryBackend {
     this.db.run(`
       INSERT INTO user_memory_sources (
         id, memory_id, metabot_id, session_id, source_channel, source_type, external_conversation_id, source_id,
-        message_id, role, is_active, created_at
+        message_id, role, is_active, created_at, dream_date
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
     `, [
       uuidv4(),
       memoryId,
@@ -4237,11 +4255,12 @@ export class CoworkStore implements MemoryBackend {
       source?.messageId || null,
       source?.role || 'system',
       now,
+      source?.dreamDate?.trim() || null,
     ]);
   }
 
   private createOrReviveUserMemory(input: MemoryCreateUserMemoryInput): { memory: CoworkUserMemory; created: boolean; updated: boolean } {
-    const normalizedText = truncate(normalizeMemoryText(input.text), 360);
+    const normalizedText = truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass));
     if (!normalizedText) {
       throw new Error('Memory text is required');
     }
@@ -4257,36 +4276,39 @@ export class CoworkStore implements MemoryBackend {
       visibility: input.visibility ?? null,
     });
 
-    let existing = this.getOne<CoworkUserMemoryRow>(`
-      SELECT ${MEMORY_ROW_SELECT_COLUMNS}
-      FROM user_memories
-      WHERE fingerprint = ? AND status != 'deleted' AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
-      ORDER BY updated_at DESC
-      LIMIT 1
-    `, [fingerprint, metabotId, scope.kind, scope.key]);
+    let existing: CoworkUserMemoryRow | null = null;
+    if (!input.forceNew) {
+      existing = this.getOne<CoworkUserMemoryRow>(`
+        SELECT ${MEMORY_ROW_SELECT_COLUMNS}
+        FROM user_memories
+        WHERE fingerprint = ? AND status != 'deleted' AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `, [fingerprint, metabotId, scope.kind, scope.key]);
 
-    if (!existing) {
-      const incomingSemanticKey = normalizeMemorySemanticKey(normalizedText);
-      if (incomingSemanticKey) {
-        const candidates = this.getAll<CoworkUserMemoryRow>(`
-          SELECT ${MEMORY_ROW_SELECT_COLUMNS}
-          FROM user_memories
-          WHERE status != 'deleted' AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
-          ORDER BY updated_at DESC
-          LIMIT 200
-        `, [metabotId, scope.kind, scope.key]);
-        let bestCandidate: CoworkUserMemoryRow | null = null;
-        let bestScore = 0;
-        for (const candidate of candidates) {
-          const candidateSemanticKey = normalizeMemorySemanticKey(candidate.text);
-          if (!candidateSemanticKey) continue;
-          const score = scoreMemorySimilarity(candidateSemanticKey, incomingSemanticKey);
-          if (score <= bestScore) continue;
-          bestScore = score;
-          bestCandidate = candidate;
-        }
-        if (bestCandidate && bestScore >= MEMORY_NEAR_DUPLICATE_MIN_SCORE) {
-          existing = bestCandidate;
+      if (!existing) {
+        const incomingSemanticKey = normalizeMemorySemanticKey(normalizedText);
+        if (incomingSemanticKey) {
+          const candidates = this.getAll<CoworkUserMemoryRow>(`
+            SELECT ${MEMORY_ROW_SELECT_COLUMNS}
+            FROM user_memories
+            WHERE status != 'deleted' AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
+            ORDER BY updated_at DESC
+            LIMIT 200
+          `, [metabotId, scope.kind, scope.key]);
+          let bestCandidate: CoworkUserMemoryRow | null = null;
+          let bestScore = 0;
+          for (const candidate of candidates) {
+            const candidateSemanticKey = normalizeMemorySemanticKey(candidate.text);
+            if (!candidateSemanticKey) continue;
+            const score = scoreMemorySimilarity(candidateSemanticKey, incomingSemanticKey);
+            if (score <= bestScore) continue;
+            bestScore = score;
+            bestCandidate = candidate;
+          }
+          if (bestCandidate && bestScore >= MEMORY_NEAR_DUPLICATE_MIN_SCORE) {
+            existing = bestCandidate;
+          }
         }
       }
     }
@@ -4451,7 +4473,9 @@ export class CoworkStore implements MemoryBackend {
     }
 
     const now = Date.now();
-    const nextText = input.text !== undefined ? truncate(normalizeMemoryText(input.text), 360) : current.text;
+    const nextText = input.text !== undefined
+      ? truncate(normalizeMemoryText(input.text), maxMemoryTextChars(input.usageClass ?? current.usage_class))
+      : current.text;
     if (!nextText) {
       throw new Error('Memory text is required');
     }
@@ -4492,6 +4516,10 @@ export class CoworkStore implements MemoryBackend {
       FROM user_memories
       WHERE id = ? AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
     `, [input.id, input.metabotId, scope.kind, scope.key]);
+
+    if (input.source) {
+      this.addMemorySource(input.id, input.metabotId, input.source);
+    }
 
     this.saveDb();
     return updated ? this.mapMemoryRow(updated) : null;
@@ -4539,6 +4567,64 @@ export class CoworkStore implements MemoryBackend {
     }
     this.saveDb();
     return memoryRowsModified > 0;
+  }
+
+  /**
+   * Dream pipeline: soft-delete one day's dream-written batch (profile_fact /
+   * value_boundary / work_review entries tagged with the dream date) so a
+   * re-dream replaces the day's batch instead of piling onto it. self_identity
+   * is excluded — it is updated in place, never batch-deleted. Returns the
+   * number of memories deleted.
+   */
+  softDeleteDreamMemoriesForDate(metabotId: number, dreamDate: string): number {
+    const date = dreamDate.trim();
+    if (!date) return 0;
+    const now = Date.now();
+    const targets = this.getAll<{ id: string }>(`
+      SELECT DISTINCT m.id
+      FROM user_memories m
+      JOIN user_memory_sources s ON s.memory_id = m.id
+      WHERE m.metabot_id = ?
+        AND m.origin = 'dream'
+        AND m.usage_class IN ('profile_fact', 'value_boundary', 'work_review')
+        AND m.status != 'deleted'
+        AND s.dream_date = ?
+    `, [metabotId, date]);
+    if (targets.length === 0) return 0;
+    const ids = targets.map((row) => row.id);
+    const placeholders = ids.map(() => '?').join(', ');
+    this.db.run(`
+      UPDATE user_memories
+      SET status = 'deleted', updated_at = ?
+      WHERE id IN (${placeholders})
+    `, [now, ...ids]);
+    this.db.run(`
+      UPDATE user_memory_sources
+      SET is_active = 0
+      WHERE memory_id IN (${placeholders})
+    `, [...ids]);
+    this.saveDb();
+    return ids.length;
+  }
+
+  /**
+   * Dream pipeline: the newest dream date that produced the bot's current
+   * self-identity entry, or null when it predates dream-date tagging. The
+   * dream service only lets identity move forward in time.
+   */
+  getDreamIdentityLatestDate(metabotId: number): string | null {
+    const row = this.getOne<{ dream_date: string | null }>(`
+      SELECT s.dream_date
+      FROM user_memory_sources s
+      JOIN user_memories m ON m.id = s.memory_id
+      WHERE m.metabot_id = ?
+        AND m.usage_class = 'self_identity'
+        AND m.status != 'deleted'
+        AND s.dream_date IS NOT NULL
+      ORDER BY s.dream_date DESC
+      LIMIT 1
+    `, [metabotId]);
+    return row?.dream_date ?? null;
   }
 
   getUserMemoryStats(input: { metabotId: number } & MemoryScopeSelectorInput): MemoryUserMemoryStats;

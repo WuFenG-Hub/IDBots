@@ -27,14 +27,16 @@ test('dream run lifecycle is idempotent per bot and date', async () => {
     const store = new DreamStore(db, () => {});
     new DreamStore(db, () => {}); // schema creation is idempotent
 
-    const first = store.beginRun(5, '2026-07-30', 'deepseek-v4-flash');
+    const first = store.beginRun(5, '2026-07-30', 'deepseek-v4-flash', 1);
     assert.equal(first.status, 'running');
     assert.equal(first.attemptCount, 1);
     assert.equal(first.llmId, 'deepseek-v4-flash');
+    assert.equal(first.dreamVersion, 1);
 
-    const restarted = store.beginRun(5, '2026-07-30', null);
+    const restarted = store.beginRun(5, '2026-07-30', null, 2);
     assert.equal(restarted.status, 'running');
     assert.equal(restarted.attemptCount, 2);
+    assert.equal(restarted.dreamVersion, 2, 'restart records the newer algorithm version');
 
     store.finishRun(5, '2026-07-30', 'failed', 'llm timeout');
     const failed = store.getRun(5, '2026-07-30');
@@ -44,7 +46,11 @@ test('dream run lifecycle is idempotent per bot and date', async () => {
 
     store.finishRun(5, '2026-07-30', 'completed');
     const states = store.getRunStates(5, ['2026-07-30', '2026-07-29']);
-    assert.deepEqual(states.get('2026-07-30'), { status: 'completed', attemptCount: 2 });
+    const state = states.get('2026-07-30');
+    assert.equal(state.status, 'completed');
+    assert.equal(state.attemptCount, 2);
+    assert.equal(state.dreamVersion, 2);
+    assert.ok(state.startedAt > 0);
     assert.equal(states.has('2026-07-29'), false);
   } finally {
     cleanup();
@@ -55,8 +61,8 @@ test('resetStaleRunningRuns marks interrupted runs as failed', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
     const store = new DreamStore(db, () => {});
-    store.beginRun(5, '2026-07-30', null);
-    store.beginRun(6, '2026-07-30', null);
+    store.beginRun(5, '2026-07-30', null, 1);
+    store.beginRun(6, '2026-07-30', null, 1);
     store.finishRun(6, '2026-07-30', 'completed');
 
     assert.equal(store.resetStaleRunningRuns(), 1);
@@ -145,6 +151,17 @@ test('getActivityForDate returns only the bot\'s sessions and messages from that
         'completed', 0, 0, ?, ?, ?)`,
       [peerSession.id, DAY_START, DAY_START]
     );
+    // A second order on the same session: one session can carry many orders.
+    db.run(
+      `INSERT INTO service_orders (
+        id, role, local_metabot_id, counterparty_global_metaid, service_name,
+        payment_txid, payment_chain, payment_amount, payment_currency,
+        status, first_response_deadline_at, delivery_deadline_at,
+        cowork_session_id, created_at, updated_at
+      ) VALUES ('order-2', 'seller', 5, 'buyer-gmid', '翻译服务', 'tx-2', 'mvc', '1000', 'SPACE',
+        'completed', 0, 0, ?, ?, ?)`,
+      [peerSession.id, DAY_START + 500, DAY_START + 500]
+    );
 
     db.run(
       `INSERT INTO scheduled_tasks (id, name, schedule_json, prompt, metabot_id, created_at, updated_at)
@@ -175,10 +192,12 @@ test('getActivityForDate returns only the bot\'s sessions and messages from that
     assert.equal(activity.taskRuns.length, 1);
     assert.equal(activity.taskRuns[0].taskName, '每日巡检');
     assert.equal(activity.taskRuns[0].status, 'success');
+    assert.equal(activity.orderCount, 2, 'raw order count, not order sessions');
 
     const otherBot = dreamStore.getActivityForDate(6, DAY_START, DAY_END);
     assert.equal(otherBot.sessions.length, 1);
     assert.equal(otherBot.taskRuns.length, 0);
+    assert.equal(otherBot.orderCount, 0);
   } finally {
     cleanup();
   }

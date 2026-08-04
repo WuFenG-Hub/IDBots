@@ -2558,7 +2558,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                                 </div>
                               ))}
                               <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                {`${i18nService.t('dreamDiaryStatsSessions')}: ${summary.stats?.sessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsOrders')}: ${summary.stats?.orderSessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsTasks')}: ${summary.stats?.taskRunCount ?? 0} · ${i18nService.t('dreamDiaryStatsMessages')}: ${summary.stats?.messageCount ?? 0}`}
+                                {`${i18nService.t('dreamDiaryStatsSessions')}: ${summary.stats?.sessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsOrders')}: ${summary.stats?.orderCount ?? summary.stats?.orderSessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsTasks')}: ${summary.stats?.taskRunCount ?? 0} · ${i18nService.t('dreamDiaryStatsMessages')}: ${summary.stats?.messageCount ?? 0}`}
                               </div>
                               {(summary.sessionRefs ?? []).length > 0 && (
                                 <div className="space-y-1">

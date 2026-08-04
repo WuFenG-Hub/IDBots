@@ -2,6 +2,7 @@ import type { CoworkStore } from '../coworkStore';
 import type { DreamDayActivity, DreamStore } from '../dreamStore';
 import {
   DREAM_LOOKBACK_DAYS,
+  DREAM_VERSION,
   buildDreamPrompt,
   computeDueDreamDates,
   getDayBoundsMs,
@@ -73,6 +74,8 @@ export interface DreamServiceDeps {
 interface DreamQueueItem {
   metabotId: number;
   date: string;
+  /** Version-repair run: refreshes the day's records but never touches identity. */
+  isRepair: boolean;
 }
 
 export class DreamService {
@@ -84,6 +87,8 @@ export class DreamService {
   // stop() halts queue draining and future ticks.
   private stopped = false;
   private dreamingBots = new Set<number>();
+  /** botId → local date key of the night a version repair was last scheduled. */
+  private lastRepairNight = new Map<number, string>();
 
   constructor(private deps: DreamServiceDeps) {
     this.performChat = deps.performChat ?? performChatCompletionForOrchestrator;
@@ -147,14 +152,23 @@ export class DreamService {
       return;
     }
     const dates = this.candidateDates();
+    const nightKey = formatBotWorkspaceDate(now);
     for (const bot of bots) {
       try {
         const policy = this.deps.coworkStore.getEffectiveMemoryPolicyForMetabot(bot.id);
         if (!policy.dreamEnabled) continue;
         const runStates = this.deps.dreamStore.getRunStates(bot.id, dates);
-        const dueDates = computeDueDreamDates({ now, metabotId: bot.id, runStates });
+        const { dueDates, repairDates } = computeDueDreamDates({ now, metabotId: bot.id, runStates });
         for (const date of dueDates) {
           this.enqueue(bot.id, date);
+        }
+        // Algorithm-version repair: at most one stale date per bot per night,
+        // newest first — the window converges over a few nights without a
+        // nightly rewrite of the whole lookback range.
+        if (repairDates.length > 0 && this.lastRepairNight.get(bot.id) !== nightKey) {
+          if (this.enqueue(bot.id, repairDates[0], { isRepair: true })) {
+            this.lastRepairNight.set(bot.id, nightKey);
+          }
         }
       } catch (error) {
         console.warn(`[DreamService] Due-scan failed for metabot ${bot.id}:`, error);
@@ -168,19 +182,21 @@ export class DreamService {
     const targetDate = date?.trim() || formatBotWorkspaceDate(
       new Date(this.now().getFullYear(), this.now().getMonth(), this.now().getDate() - 1)
     );
-    this.enqueue(metabotId, targetDate, true);
+    this.enqueue(metabotId, targetDate, { toFront: true });
     await this.processQueue();
     return { metabotId, date: targetDate };
   }
 
-  private enqueue(metabotId: number, date: string, toFront = false): void {
-    if (this.dreamingBots.has(metabotId)) return;
-    if (this.queue.some((item) => item.metabotId === metabotId && item.date === date)) return;
-    if (toFront) {
-      this.queue.unshift({ metabotId, date });
+  private enqueue(metabotId: number, date: string, options: { toFront?: boolean; isRepair?: boolean } = {}): boolean {
+    if (this.dreamingBots.has(metabotId)) return false;
+    if (this.queue.some((item) => item.metabotId === metabotId && item.date === date)) return false;
+    const item: DreamQueueItem = { metabotId, date, isRepair: options.isRepair ?? false };
+    if (options.toFront) {
+      this.queue.unshift(item);
     } else {
-      this.queue.push({ metabotId, date });
+      this.queue.push(item);
     }
+    return true;
   }
 
   private async processQueue(): Promise<void> {
@@ -189,7 +205,7 @@ export class DreamService {
     try {
       while (!this.stopped && this.queue.length > 0) {
         const item = this.queue.shift()!;
-        await this.runDream(item.metabotId, item.date);
+        await this.runDream(item.metabotId, item.date, item.isRepair);
       }
     } finally {
       this.processing = false;
@@ -233,7 +249,7 @@ export class DreamService {
     }
   }
 
-  private async runDream(metabotId: number, date: string): Promise<void> {
+  private async runDream(metabotId: number, date: string, isRepair = false): Promise<void> {
     if (this.dreamingBots.has(metabotId)) return;
     const metabot = this.deps.metabotStore.listMetabots().find((bot) => bot.id === metabotId) ?? null;
     if (!metabot) {
@@ -245,7 +261,7 @@ export class DreamService {
     this.emitDreaming(metabotId, true);
     const llmId = this.resolveDreamLlmId(metabot);
     const fallbackLlmId = this.resolveDreamFallbackLlmId(metabot);
-    this.deps.dreamStore.beginRun(metabotId, date, llmId);
+    this.deps.dreamStore.beginRun(metabotId, date, llmId, DREAM_VERSION);
     try {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
@@ -265,9 +281,9 @@ export class DreamService {
 
       let output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId);
       output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId, fallbackLlmId);
-      this.writeDreamResults(metabotId, date, output, activity, llmId);
+      this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
-      console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}`);
+      console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn(`[DreamService] Dream failed for metabot ${metabotId} date ${date}:`, message);
@@ -327,7 +343,8 @@ export class DreamService {
     date: string,
     output: DreamOutput,
     activity: DreamDayActivity,
-    llmId: string | null
+    llmId: string | null,
+    isRepair: boolean
   ): void {
     this.deps.dreamStore.upsertDailySummary({
       metabotId,
@@ -337,6 +354,7 @@ export class DreamService {
       stats: {
         sessionCount: activity.sessions.length,
         orderSessionCount: activity.sessions.filter((session) => session.isOrder).length,
+        orderCount: activity.orderCount,
         taskRunCount: activity.taskRuns.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
       },
@@ -349,7 +367,14 @@ export class DreamService {
       llmId,
     });
 
-    for (const text of output.importantMemories) {
+    // Idempotent per-date batch: replace the day's dream memories wholesale so
+    // retries and version repairs never pile duplicates into the store.
+    const removed = this.deps.coworkStore.softDeleteDreamMemoriesForDate(metabotId, date);
+    if (removed > 0) {
+      console.log(`[DreamService] Replaced ${removed} existing dream memories for metabot ${metabotId} date ${date}`);
+    }
+
+    for (const text of new Set(output.importantMemories)) {
       this.deps.coworkStore.createUserMemory({
         metabotId,
         text,
@@ -358,12 +383,16 @@ export class DreamService {
         usageClass: 'profile_fact',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream' },
+        forceNew: true,
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
       });
     }
 
+    const seenLessons = new Set<string>();
     for (const lesson of output.valueLessons) {
       const text = lesson.source ? `${lesson.rule}(源自:${lesson.source})` : lesson.rule;
+      if (seenLessons.has(text)) continue;
+      seenLessons.add(text);
       this.deps.coworkStore.createUserMemory({
         metabotId,
         text,
@@ -372,10 +401,12 @@ export class DreamService {
         usageClass: 'value_boundary',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream' },
+        forceNew: true,
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
       });
     }
 
+    const seenReviews = new Set<string>();
     for (const review of output.workReviews) {
       const text = [
         `工作:${review.subject}`,
@@ -383,6 +414,8 @@ export class DreamService {
         `评价:${EVALUATION_LABELS[review.evaluation] ?? EVALUATION_LABELS.stable}`,
         review.note ? `依据:${review.note}` : '',
       ].filter(Boolean).join(';');
+      if (seenReviews.has(text)) continue;
+      seenReviews.add(text);
       this.deps.coworkStore.createUserMemory({
         metabotId,
         text,
@@ -391,39 +424,50 @@ export class DreamService {
         usageClass: 'work_review',
         origin: 'dream',
         isExplicit: true,
-        source: { sourceType: 'dream', sourceChannel: 'dream' },
+        forceNew: true,
+        source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
       });
     }
 
-    if (output.selfIdentity) {
-      const existing = this.deps.coworkStore.listUserMemories({
-        metabotId,
-        scopeKind: 'owner',
-        scopeKey: 'owner:self',
-        usageClass: 'self_identity',
-        status: 'all',
-        limit: 1,
-      })[0];
-      if (existing) {
-        this.deps.coworkStore.updateUserMemory({
-          id: existing.id,
-          metabotId,
-          text: output.selfIdentity,
-          usageClass: 'self_identity',
-          allowProtected: true,
-        });
+    // Self-identity only moves forward in time: version repairs never touch
+    // it, and a normal run for a date older than the identity's current
+    // source date must not regress it either.
+    if (output.selfIdentity && !isRepair) {
+      const latestIdentityDate = this.deps.coworkStore.getDreamIdentityLatestDate(metabotId);
+      if (latestIdentityDate && date < latestIdentityDate) {
+        console.log(`[DreamService] Skip self-identity update for metabot ${metabotId}: date ${date} older than current source ${latestIdentityDate}`);
       } else {
-        this.deps.coworkStore.createUserMemory({
+        const existing = this.deps.coworkStore.listUserMemories({
           metabotId,
-          text: output.selfIdentity,
           scopeKind: 'owner',
           scopeKey: 'owner:self',
           usageClass: 'self_identity',
-          origin: 'dream',
-          isExplicit: true,
-          confidence: 0.9,
-          source: { sourceType: 'dream', sourceChannel: 'dream' },
-        });
+          status: 'all',
+          limit: 1,
+        })[0];
+        if (existing) {
+          this.deps.coworkStore.updateUserMemory({
+            id: existing.id,
+            metabotId,
+            text: output.selfIdentity,
+            usageClass: 'self_identity',
+            allowProtected: true,
+            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+          });
+        } else {
+          this.deps.coworkStore.createUserMemory({
+            metabotId,
+            text: output.selfIdentity,
+            scopeKind: 'owner',
+            scopeKey: 'owner:self',
+            usageClass: 'self_identity',
+            origin: 'dream',
+            isExplicit: true,
+            confidence: 0.9,
+            forceNew: true,
+            source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
+          });
+        }
       }
     }
   }
