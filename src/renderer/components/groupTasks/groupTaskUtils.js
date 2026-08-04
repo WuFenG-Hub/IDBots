@@ -39,13 +39,16 @@ export function groupTaskStatusBadgeClass(status) {
 
 /**
  * Format a group-task timestamp for display. Accepts sqlite datetime('now')
- * text ('YYYY-MM-DD HH:MM:SS', UTC), ms epoch numbers, or null.
+ * text ('YYYY-MM-DD HH:MM:SS', UTC), epoch numbers, or null. On-chain
+ * chain_timestamp is in SECONDS; smaller numbers (< 1e12) are treated as
+ * seconds, larger ones as milliseconds.
  */
 export function formatGroupTaskTime(value) {
   if (value == null || value === '') return '';
   let date;
   if (typeof value === 'number' && Number.isFinite(value)) {
-    date = new Date(value);
+    const ms = value < 1e12 ? value * 1000 : value;
+    date = new Date(ms);
   } else {
     const text = String(value).trim();
     if (!text) return '';
