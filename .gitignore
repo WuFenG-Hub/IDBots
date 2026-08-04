@@ -34,6 +34,10 @@ tests/*
 !tests/chatSkillAuthorization.test.mjs
 !tests/orchestratorCoworkBridgeSkillIds.test.mjs
 !tests/groupChatAllowChatSkillsRuntime.test.mjs
+!tests/groupTaskStore.test.mjs
+!tests/groupTaskService.test.mjs
+!tests/groupChatBackfill.test.mjs
+!tests/groupChatMsgIndexMigration.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs
