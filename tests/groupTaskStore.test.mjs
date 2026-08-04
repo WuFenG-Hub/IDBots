@@ -123,6 +123,11 @@ test('state machine: legal transitions, illegal transitions throw, terminal lock
     assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'done'), /Illegal/);
     // planning -> executing -> review -> done is legal
     assert.equal(groupTaskStore.updateTaskStatus(task.id, 'executing').status, 'executing');
+    // executing -> planning is illegal
+    assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'planning'), /Illegal/);
+    assert.equal(groupTaskStore.updateTaskStatus(task.id, 'review').status, 'review');
+    // review -> executing is the legal rework hatch
+    assert.equal(groupTaskStore.updateTaskStatus(task.id, 'executing').status, 'executing');
     assert.equal(groupTaskStore.updateTaskStatus(task.id, 'review').status, 'review');
     const done = groupTaskStore.updateTaskStatus(task.id, 'done');
     assert.equal(done.status, 'done');

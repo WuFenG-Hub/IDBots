@@ -127,6 +127,8 @@ const createHarness = async (overrides = {}) => {
     nowMs: 1_000_000_000_000,
     chatError: overrides.chatError ?? null,
     routing: overrides.routing ?? null,
+    chatReply: overrides.chatReply ?? null,
+    skillReply: overrides.skillReply ?? null,
   };
   const seenChatErrors = new Set();
 
@@ -141,7 +143,7 @@ const createHarness = async (overrides = {}) => {
         seenChatErrors.add(state.chatError);
         throw new Error(state.chatError);
       }
-      return `reply-for-${llmId}`;
+      return state.chatReply ?? `reply-for-${llmId}`;
     },
     postGroupTaskMessage: async (taskId, metabotId, content) => {
       sends.push({ taskId, metabotId, content });
@@ -155,7 +157,7 @@ const createHarness = async (overrides = {}) => {
     },
     runSkillTurn: async (params) => {
       skillTurnCalls.push(params);
-      return { replyText: 'skill-turn-reply', assistantMessageId: 'asst-fake-1' };
+      return { replyText: state.skillReply ?? 'skill-turn-reply', assistantMessageId: 'asst-fake-1' };
     },
     emitTaskEvent: (payload) => {
       events.push(payload);
@@ -548,7 +550,7 @@ test('deliverable tags: kind inference, uri extraction, author recorded, dedupe 
   }
 });
 
-test('status tags: chair-only, transitions, illegal swallowed, review event once', async () => {
+test('status tags: chair-only, transitions, same-status silent, review->executing rework hatch', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask([2], { activate: false }); // stays 'planning'
@@ -570,18 +572,20 @@ test('status tags: chair-only, transitions, illegal swallowed, review event once
     });
     insertGroupMessage(h.db, {
       pinId: 's5-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
-      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] illegal step back',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] rework needed after all',
     });
     await h.loop.runTick();
 
-    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    // worker tag ignored; chair tags drive planning->executing->review->executing
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
     assert.deepEqual(
       h.events.map((e) => ({ type: e.type, taskId: e.taskId, status: e.status })),
       [
         { type: 'groupTask:statusChanged', taskId: task.id, status: 'executing' },
         { type: 'groupTask:statusChanged', taskId: task.id, status: 'review' },
+        { type: 'groupTask:statusChanged', taskId: task.id, status: 'executing' },
       ],
-      'only real transitions fire the event; same-status and illegal moves do not',
+      'every real transition fires the event (incl. the review->executing rework hatch); same-status does not',
     );
     assert.ok(h.events.every((e) => typeof e.at === 'number'));
   } finally {
@@ -658,6 +662,173 @@ test('skill routing: owner message grants allowAllEnabled to the responding bot'
     assert.equal(h.routingCalls.length, 1, 'only the chair responds to the owner message');
     assert.equal(h.routingCalls[0].allowAllEnabled, true, 'owner privilege for skill scope');
     assert.equal(h.skillTurnCalls.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Review-phase silence, mid-batch flip, and the [NO_REPLY] escape hatch
+// ---------------------------------------------------------------------------
+
+test('gating: review phase — workers never respond, chair only answers the owner', () => {
+  const reviewTask = gateTask('review');
+
+  // worker @-mentioned in review -> silent
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ content: '@Coder Bot are you sure?' }),
+      reviewTask, GATE_MEMBERS, GATE_BOTS,
+    ),
+    [],
+  );
+  // chair mentioned -> silent
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ content: 'Twin Bot thanks!' }),
+      reviewTask, GATE_MEMBERS, GATE_BOTS,
+    ),
+    [],
+  );
+  // floor control (unaddressed) -> silent
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ content: 'a general afterthought' }),
+      reviewTask, GATE_MEMBERS, GATE_BOTS,
+    ),
+    [],
+  );
+  // deliverable -> silent
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: 'gmid-w2', content: '[DELIVERABLE] metaapp: metaapp://pin9' }),
+      reviewTask, GATE_MEMBERS, GATE_BOTS,
+    ),
+    [],
+  );
+  // owner message -> chair responds (acceptance dialogue)
+  assert.deepEqual(
+    decideGroupTaskResponders(
+      gateMessage({ senderGlobalMetaId: BOSS_GMID, content: 'not quite — rework this part' }),
+      reviewTask, GATE_MEMBERS, GATE_BOTS,
+    ),
+    [{ metabotId: 1, reason: 'chair_owner_message' }],
+  );
+});
+
+test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new status', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'pre-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot wrap up your part',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'flip-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] everything is in',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'post-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot one more thing',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.deepEqual(
+      h.sends.map((s) => [s.metabotId, s.content]),
+      [[2, 'reply-for-llm-2']],
+      'worker answered the pre-flip mention only; the post-flip mention is gated silent',
+    );
+    assert.equal(h.chatCalls.length, 1, 'no LLM call for the post-flip message');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('[NO_REPLY] plain path: suppressed on-chain, session kept, cooldown recorded', async () => {
+  const h = await createHarness({ chatReply: '[NO_REPLY]' });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'nr1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot thanks!',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.chatCalls.length, 1, 'LLM was consulted');
+    assert.equal(h.sends.length, 0, 'nothing went on-chain');
+    // session continuity: user + assistant ([NO_REPLY]) both appended
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping);
+    const sessionMessages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
+    assert.deepEqual(sessionMessages.map((m) => m.type), ['user', 'assistant']);
+    assert.equal(sessionMessages[1].content, '[NO_REPLY]');
+
+    // cooldown recorded: an immediate second mention never reaches the LLM
+    insertGroupMessage(h.db, {
+      pinId: 'nr2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot and this one too',
+    });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'cooldown blocks the immediate follow-up');
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('[NO_REPLY] matching: trailing text and case variants suppressed; normal replies unaffected', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+    const mentionAndTick = async (pinId) => {
+      insertGroupMessage(h.db, {
+        pinId, senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+        senderName: 'Human', content: '@Coder Bot ping',
+      });
+      await h.loop.runTick();
+      h.state.nowMs += 21_000; // step past the worker cooldown for the next case
+    };
+
+    h.state.chatReply = '[NO_REPLY] Thanks!';
+    await mentionAndTick('v1-i0');
+    assert.equal(h.sends.length, 0, 'tag with trailing text is suppressed');
+
+    h.state.chatReply = '[no_reply]';
+    await mentionAndTick('v2-i0');
+    assert.equal(h.sends.length, 0, 'case-insensitive match');
+
+    h.state.chatReply = 'Here is the actual result.';
+    await mentionAndTick('v3-i0');
+    assert.equal(h.sends.length, 1, 'normal reply goes on-chain');
+    assert.equal(h.sends[0].content, 'Here is the actual result.');
+
+    h.state.chatReply = 'I noted [NO_REPLY] in the log output';
+    await mentionAndTick('v4-i0');
+    assert.equal(h.sends.length, 2, 'mid-sentence [NO_REPLY] is not treated as a tag');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('[NO_REPLY] also applies on the skill-turn path', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+    skillReply: '[NO_REPLY]',
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'nr-skill-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot run a search',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.skillTurnCalls.length, 1, 'skill turn ran');
+    assert.equal(h.chatCalls.length, 0, 'plain path untouched');
+    assert.equal(h.sends.length, 0, 'skill-turn [NO_REPLY] suppressed on-chain');
   } finally {
     h.cleanup();
   }
