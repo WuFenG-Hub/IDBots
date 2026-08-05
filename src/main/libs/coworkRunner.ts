@@ -7,8 +7,8 @@ import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits } from './claudeSettings';
+import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
+import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools } from './claudeSettings';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkSteerChannel,
@@ -26,6 +26,7 @@ import {
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
+import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import { getCoworkOpenAICompatProxyStatus } from './coworkOpenAICompatProxy';
@@ -157,6 +158,17 @@ const SKILLS_MARKER = '/skills/';
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';
 const PERMISSION_RESPONSE_TIMEOUT_MS = 60_000;
 const DELETE_TOOL_NAMES = new Set(['delete', 'remove', 'unlink', 'rmdir']);
+// Coalescing window for high-frequency task_progress / tool_progress events
+// per task_id, so the subagent panel updates don't flood the message stream.
+const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
+// Tools that never mutate the filesystem or execute side effects. Used by 'plan'
+// permission mode to enforce read-only behavior. Bash is intentionally excluded
+// (it can do anything). AskUserQuestion is excluded (handled separately).
+const READ_ONLY_TOOL_NAMES = new Set([
+  'read', 'view', 'ls', 'glob', 'grep', 'list',
+  'todowrite', 'taskget', 'tasklist',
+  'websearch', 'webfetch',  // informational only; network policy handled separately
+]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
 const ENABLE_SDK_WEB_TOOLS_ENV = 'IDBOTS_ENABLE_SDK_WEB_TOOLS';
 const SAFETY_APPROVAL_ALLOW_OPTION = '允许本次操作';
@@ -726,6 +738,34 @@ interface ActiveSession {
   autoApprove?: boolean;
   /** When true, this session will not read/write persistent user memories. */
   disableMemoryUpdates?: boolean;
+  /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
+  permissionMode: CoworkPermissionMode;
+  /** Runtime effort override from the UI toggle; null = use per-model default. */
+  effortOverride: string | null;
+  /** Runtime thinking override from the UI toggle; null = use per-model default. */
+  thinkingOverride: { type: string } | null;
+  /** Tool names auto-approved by PreToolUse hook rules (case-insensitive). */
+  autoApproveTools: Set<string>;
+  /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
+  lastSdkRuntimeStatusKey?: string;
+  /** Last subagent progress emit time (throttle window per task). */
+  lastSubagentThrottleAt?: number;
+  /** Task id of the last throttled subagent progress emit. */
+  lastSubagentThrottleTaskId?: string;
+  /** Accumulated token usage from SDK result events (drives cost display). */
+  usageStats?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    totalCostUsd?: number;
+    source: 'deepseek' | 'anthropic' | 'none';
+  };
+  /**
+   * Cached real context usage from the SDK's getContextUsage() (local mode only).
+   * Refreshed after each completed local turn; undefined for sandbox mode.
+   */
+  realContextUsage?: CoworkContextUsage | null;
 }
 
 interface PendingPermission {
@@ -1063,6 +1103,69 @@ export class CoworkRunner extends EventEmitter {
 
   waitForActiveTurnSettlement(sessionId: string): Promise<void> {
     return this.activeSessions.get(sessionId)?.turnSettled ?? Promise.resolve();
+  }
+
+  /**
+   * Returns the real context usage cached from the SDK's getContextUsage()
+   * for an active local-mode session, or null when unavailable (sandbox mode,
+   * first turn before any real measurement, or session not active).
+   */
+  getRealContextUsage(sessionId: string): CoworkContextUsage | null {
+    const activeSession = this.activeSessions.get(sessionId);
+    return activeSession?.realContextUsage ?? null;
+  }
+
+  /**
+   * Accumulates per-turn token usage from an SDK result event into the active
+   * session's usageStats. The proxy translates DeepSeek's OpenAI usage into
+   * Anthropic cache fields (cache_read = prompt_cache_hit, cache_creation =
+   * prompt_cache_miss), so the numbers here are the provider's real counts.
+   * total_cost_usd is the SDK's Anthropic-priced figure — only meaningful for
+   * direct Anthropic sessions (proxy providers reprice locally in the UI).
+   */
+  private accumulateResultUsage(sessionId: string, payload: Record<string, unknown>): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return;
+
+    const usage = payload.usage && typeof payload.usage === 'object'
+      ? payload.usage as Record<string, unknown>
+      : null;
+    const inputTokens = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+    const outputTokens = usage && typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
+    const cacheReadTokens = usage && typeof usage.cache_read_input_tokens === 'number'
+      ? usage.cache_read_input_tokens
+      : 0;
+    const cacheCreationTokens = usage && typeof usage.cache_creation_input_tokens === 'number'
+      ? usage.cache_creation_input_tokens
+      : 0;
+
+    if (inputTokens <= 0 && outputTokens <= 0 && cacheReadTokens <= 0 && cacheCreationTokens <= 0) {
+      return;
+    }
+
+    const prev = activeSession.usageStats ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      source: 'none' as const,
+    };
+    activeSession.usageStats = {
+      inputTokens: prev.inputTokens + inputTokens,
+      outputTokens: prev.outputTokens + outputTokens,
+      cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
+      cacheCreationTokens: prev.cacheCreationTokens + cacheCreationTokens,
+      totalCostUsd: typeof payload.total_cost_usd === 'number'
+        ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
+        : prev.totalCostUsd,
+      source: prev.source === 'none' ? 'deepseek' : prev.source,
+    };
+  }
+
+  /** Returns the accumulated usage stats for an active session, or null. */
+  getSessionUsageStats(sessionId: string): CoworkUsageStats | null {
+    const activeSession = this.activeSessions.get(sessionId);
+    return activeSession?.usageStats ?? null;
   }
 
   wasSessionStopped(sessionId: string): boolean {
@@ -3009,6 +3112,15 @@ export class CoworkRunner extends EventEmitter {
       || GIT_CLEAN_COMMAND_RE.test(command);
   }
 
+  /**
+   * Whether a tool call is read-only under 'plan' permission mode. Read-only
+   * tools never mutate the filesystem or execute side effects. Bash is treated
+   * as non-read-only by default since it can do anything.
+   */
+  private isReadOnlyTool(toolName: string): boolean {
+    return READ_ONLY_TOOL_NAMES.has(toolName.toLowerCase());
+  }
+
   private isBlockedBuiltinWebTool(toolName: string): boolean {
     return shouldBlockBuiltinWebTool(toolName);
   }
@@ -3281,6 +3393,9 @@ export class CoworkRunner extends EventEmitter {
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
+      permissionMode?: CoworkPermissionMode;
+      /** Tool names to auto-approve via the PreToolUse hook (case-insensitive). */
+      autoApproveTools?: string[];
     } = {}
   ): Promise<void> {
     this.stoppedSessions.delete(sessionId);
@@ -3370,6 +3485,12 @@ export class CoworkRunner extends EventEmitter {
       disableRemoteServicesPrompt: Boolean(options.disableRemoteServicesPrompt),
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
+      permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
+      effortOverride: null,
+      thinkingOverride: null,
+      autoApproveTools: new Set(
+        (options.autoApproveTools ?? []).map((name) => name.trim().toLowerCase()).filter(Boolean)
+      ),
     };
     this.activeSessions.set(sessionId, activeSession);
     if (session.cwd !== sessionCwd) {
@@ -3418,15 +3539,28 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; skipUserMessage?: boolean } = {}): Promise<void> {
+  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; skipUserMessage?: boolean; permissionMode?: CoworkPermissionMode } = {}): Promise<void> {
     this.stoppedSessions.delete(sessionId);
+
+    // Apply mid-session permission mode change if requested.
+    if (options.permissionMode) {
+      const activeSessionNow = this.activeSessions.get(sessionId);
+      if (activeSessionNow) {
+        activeSessionNow.permissionMode = options.permissionMode;
+      }
+      this.store.updateSession(sessionId, { permissionMode: options.permissionMode });
+    }
+
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) {
-      // If not active, start a new run
+      // If not active, start a new run. Auto-approve rules default to the
+      // persisted app-level list so continuing a session still honors them.
       await this.startSession(sessionId, prompt, {
         skillIds: options.skillIds,
         systemPrompt: options.systemPrompt,
         skipInitialUserMessage: options.skipUserMessage,
+        permissionMode: options.permissionMode,
+        autoApproveTools: getPersistedAutoApproveTools(),
       });
       return;
     }
@@ -3519,6 +3653,70 @@ export class CoworkRunner extends EventEmitter {
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
     }
+  }
+
+  /**
+   * Updates the permission mode for an active session (mid-session switching).
+   * Takes effect immediately for subsequent tool calls in local mode. For sandbox
+   * mode, applies on the next turn (the guest picks up the stored mode on resume).
+   */
+  setPermissionMode(sessionId: string, mode: CoworkPermissionMode): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      activeSession.permissionMode = mode;
+    }
+    this.store.updateSession(sessionId, { permissionMode: mode });
+    coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Updates the effort level override for an active session. Takes effect on the
+   * next turn (effort is set per query invocation). Pass null to revert to the
+   * per-model default.
+   */
+  setEffortOverride(sessionId: string, effort: string | null): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      activeSession.effortOverride = effort;
+    }
+    coworkLog('INFO', 'setEffortOverride', 'Effort override updated', { sessionId, effort });
+  }
+
+  /**
+   * Returns the auto-approve tool rules for an active session (sorted list).
+   */
+  getAutoApproveTools(sessionId: string): string[] {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return [];
+    return Array.from(activeSession.autoApproveTools).sort();
+  }
+
+  /**
+   * Adds a tool name to the auto-approve rules. Takes effect immediately for
+   * subsequent tool calls (the PreToolUse hook reads the live set).
+   */
+  addAutoApproveTool(sessionId: string, toolName: string): boolean {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return false;
+    const normalized = toolName.trim().toLowerCase();
+    if (!normalized) return false;
+    activeSession.autoApproveTools.add(normalized);
+    coworkLog('INFO', 'addAutoApproveTool', 'Added auto-approve rule', { sessionId, toolName: normalized });
+    return true;
+  }
+
+  /**
+   * Removes a tool name from the auto-approve rules. Takes effect immediately.
+   */
+  removeAutoApproveTool(sessionId: string, toolName: string): boolean {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return false;
+    const normalized = toolName.trim().toLowerCase();
+    const removed = activeSession.autoApproveTools.delete(normalized);
+    if (removed) {
+      coworkLog('INFO', 'removeAutoApproveTool', 'Removed auto-approve rule', { sessionId, toolName: normalized });
+    }
+    return removed;
   }
 
   stopSession(
@@ -3889,13 +4087,38 @@ export class CoworkRunner extends EventEmitter {
       );
     }
 
+    // Resolve per-model effort/thinking options from app_config. These reach
+    // the SDK directly (previously they only went through the OpenAI-compat
+    // proxy for the renderer's direct API calls, never the cowork session).
+    // Session-level effort override (from the runtime UI toggle) takes
+    // precedence over the per-model default.
+    const modelOptions = resolveModelOptions(apiConfig.model);
+    const effectiveEffort = activeSession.effortOverride ?? modelOptions?.reasoningEffort;
+    const effectiveThinking = activeSession.thinkingOverride ?? modelOptions?.thinking;
+
     const options: Record<string, unknown> = {
       cwd,
       abortController,
       env: envVars,
       pathToClaudeCodeExecutable: claudeCodePath,
-      permissionMode: 'default',
+      permissionMode: activeSession.permissionMode,
       includePartialMessages: true,
+      ...(apiConfig.fallbackModel
+        ? { fallbackModel: apiConfig.fallbackModel }
+        : {}),
+      ...(effectiveEffort ? { effort: effectiveEffort } : {}),
+      ...(effectiveThinking
+        ? { thinking: effectiveThinking }
+        : {}),
+      // Request context-aware follow-up prompt suggestions (one per turn,
+      // emitted as a prompt_suggestion event after the result message).
+      promptSuggestions: true,
+      // Periodic AI-generated progress summaries for running subagents, emitted
+      // on task_progress events via the `summary` field. Drives the live
+      // subagent panel. forwardSubagentText stays off to avoid flooding the
+      // main message stream; full transcripts are read post-hoc via
+      // getSubagentMessages.
+      agentProgressSummaries: true,
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -3976,6 +4199,35 @@ export class CoworkRunner extends EventEmitter {
           return { behavior: 'allow', updatedInput: resolvedInput };
         }
 
+        const permissionMode = activeSession.permissionMode;
+
+        // Plan mode: read-only enforcement. Deny all mutating tools; allow only
+        // known read-only tools. AskUserQuestion is allowed (it's interactive, not
+        // a filesystem mutation).
+        if (permissionMode === 'plan' && resolvedName !== 'AskUserQuestion') {
+          if (!this.isReadOnlyTool(resolvedName)) {
+            coworkLog('INFO', 'canUseTool', 'Blocked mutating tool in plan mode', {
+              sessionId,
+              toolName: resolvedName,
+              permissionMode,
+            });
+            return {
+              behavior: 'deny',
+              message: `Tool "${resolvedName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
+            };
+          }
+          return { behavior: 'allow', updatedInput: resolvedInput };
+        }
+
+        // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
+        // acceptEdits keeps AskUserQuestion prompts; bypassPermissions skips everything.
+        if (permissionMode === 'acceptEdits' || permissionMode === 'bypassPermissions') {
+          if (permissionMode === 'bypassPermissions' || resolvedName !== 'AskUserQuestion') {
+            return { behavior: 'allow', updatedInput: resolvedInput };
+          }
+          // acceptEdits + AskUserQuestion: fall through to the prompt below.
+        }
+
         if (resolvedName !== 'AskUserQuestion') {
           const policyResult = await this.enforceToolSafetyPolicy(
             sessionId,
@@ -4021,6 +4273,40 @@ export class CoworkRunner extends EventEmitter {
 
         return { behavior: 'allow', updatedInput };
       },
+    };
+    // PreToolUse hook: auto-approve whitelisted tools (user-configured rules)
+    // before the SDK asks. Returns empty output for everything else so
+    // canUseTool's full policy chain still applies. This is the SDK-level
+    // enforcement layer; canUseTool remains the source of truth for hard
+    // denials (blocked web tools, plan mode, delete safety).
+    options.hooks = {
+      PreToolUse: [
+        {
+          hooks: [
+            async (input: unknown): Promise<Record<string, unknown>> => {
+              const hookInput = input as {
+                tool_name?: string;
+                tool_use_id?: string;
+              };
+              const toolName = String(hookInput.tool_name ?? '');
+              const normalized = toolName.trim().toLowerCase();
+              if (!normalized || !activeSession.autoApproveTools.has(normalized)) {
+                return {};
+              }
+              coworkLog('INFO', 'PreToolUse', 'Auto-approved tool via rule', {
+                sessionId,
+                toolName,
+                toolUseId: hookInput.tool_use_id,
+              });
+              return {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                permissionDecisionReason: 'Auto-approved by user rule',
+              };
+            },
+          ],
+        },
+      ],
     };
     options.agents = {
       ...(options.agents as Record<string, AgentDefinition> | undefined),
@@ -4547,6 +4833,46 @@ export class CoworkRunner extends EventEmitter {
         }
       }
       clearLocalTurnStallWatchdog();
+
+      // Capture real per-category context usage from the SDK (local mode only).
+      // getContextUsage() is a Query method that asks the running CLI binary for
+      // its actual context accounting. We cache it on the active session so
+      // cowork:session:get can surface real numbers instead of the heuristic
+      // estimator. Failures are non-fatal — the estimator remains the fallback.
+      if (!isRetry) {
+        try {
+          const usageResult = await (result as { getContextUsage?: () => Promise<unknown> })
+            .getContextUsage?.();
+          if (usageResult && typeof usageResult === 'object') {
+            const usage = usageResult as {
+              totalTokens?: number;
+              maxTokens?: number;
+              percentage?: number;
+              categories?: Array<{ name?: string; tokens?: number; color?: string }>;
+            };
+            const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
+            const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
+            if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
+              activeSession.realContextUsage = {
+                usedTokens: totalTokens,
+                contextWindow: maxTokens,
+                usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
+                isRealUsage: true,
+                categories: Array.isArray(usage.categories)
+                  ? usage.categories
+                      .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
+                      .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
+                  : undefined,
+              };
+            }
+          }
+        } catch (usageError) {
+          coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
+            sessionId,
+            error: usageError instanceof Error ? usageError.message : String(usageError),
+          });
+        }
+      }
 
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
@@ -5873,6 +6199,199 @@ export class CoworkRunner extends EventEmitter {
       if (subtype === 'init' && typeof payload.session_id === 'string') {
         activeSession.claudeSessionId = payload.session_id;
         this.store.updateSession(sessionId, { claudeSessionId: payload.session_id });
+        return;
+      }
+
+      // Surface transient provider/API states. The SDK emits these as `system`
+      // messages; without handling they were silently dropped, leaving users
+      // staring at a stalled session during provider retries or request setup.
+      if (subtype === 'status') {
+        const statusValue = String(payload.status ?? '');
+        if (statusValue === 'requesting') {
+          this.emitSdkRuntimeStatus(sessionId, {
+            sdkRuntimeStatus: 'requesting',
+          });
+        }
+        return;
+      }
+
+      if (subtype === 'api_retry') {
+        const attempt = Number.isFinite(payload.attempt) ? Number(payload.attempt) : undefined;
+        const maxRetries = Number.isFinite(payload.max_retries) ? Number(payload.max_retries) : undefined;
+        const errorStatus =
+          typeof payload.error_status === 'number' ? payload.error_status : null;
+        this.emitSdkRuntimeStatus(sessionId, {
+          sdkRuntimeStatus: 'api_retry',
+          retryAttempt: attempt,
+          retryMax: maxRetries,
+          retryErrorStatus: errorStatus,
+        });
+        coworkLog(
+          'WARN',
+          'handleClaudeEvent',
+          'SDK api_retry — provider request is being retried',
+          {
+            sessionId,
+            attempt: attempt ?? null,
+            maxRetries: maxRetries ?? null,
+            errorStatus,
+          }
+        );
+        return;
+      }
+
+      // Model refusal fallback: the primary model returned stop_reason 'refusal'
+      // and the SDK transparently retried with fallbackModel (or could not).
+      if (subtype === 'model_refusal_fallback') {
+        const originalModel = typeof payload.original_model === 'string' ? payload.original_model : null;
+        const fallbackModel = typeof payload.fallback_model === 'string' ? payload.fallback_model : null;
+        if (originalModel && fallbackModel) {
+          this.addSystemMessage(
+            sessionId,
+            `Model "${originalModel}" refused the request; automatically switched to fallback model "${fallbackModel}".`
+          );
+        }
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK model_refusal_fallback', {
+          sessionId,
+          originalModel,
+          fallbackModel,
+        });
+        return;
+      }
+
+      if (subtype === 'model_refusal_no_fallback') {
+        const originalModel = typeof payload.original_model === 'string' ? payload.original_model : null;
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK model_refusal_no_fallback (no fallback configured or exhausted)', {
+          sessionId,
+          originalModel,
+        });
+        return;
+      }
+
+      // Subagent / background task events drive the live subagent panel.
+      // Without handling they were silently dropped, so subagent activity was
+      // invisible to the user. task_progress is high-frequency; it is
+      // throttled in emitSubagentEvent (coalesced per task_id).
+      if (subtype === 'task_started') {
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_started',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          taskType: typeof payload.task_type === 'string' ? payload.task_type : undefined,
+          workflowName: typeof payload.workflow_name === 'string' ? payload.workflow_name : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          prompt: typeof payload.prompt === 'string' ? payload.prompt : undefined,
+          status: 'running',
+          startedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_progress') {
+        const usage = payload.usage && typeof payload.usage === 'object'
+          ? payload.usage as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_progress',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+          lastToolName: typeof payload.last_tool_name === 'string' ? payload.last_tool_name : undefined,
+          status: 'running',
+          usage: usage ? {
+            totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined,
+            toolUses: typeof usage.tool_uses === 'number' ? usage.tool_uses : undefined,
+            durationMs: typeof usage.duration_ms === 'number' ? usage.duration_ms : undefined,
+          } : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_notification') {
+        const usage = payload.usage && typeof payload.usage === 'object'
+          ? payload.usage as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_notification',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          status: String(payload.status ?? 'completed') as 'completed' | 'failed' | 'stopped',
+          summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+          outputFile: typeof payload.output_file === 'string' ? payload.output_file : undefined,
+          usage: usage ? {
+            totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined,
+            toolUses: typeof usage.tool_uses === 'number' ? usage.tool_uses : undefined,
+            durationMs: typeof usage.duration_ms === 'number' ? usage.duration_ms : undefined,
+          } : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_updated') {
+        const patch = payload.patch && typeof payload.patch === 'object'
+          ? payload.patch as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_updated',
+          taskId: String(payload.task_id ?? ''),
+          status: patch && typeof patch.status === 'string'
+            ? (patch.status as 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'paused')
+            : undefined,
+          error: patch && typeof patch.error === 'string' ? patch.error : undefined,
+          isBackgrounded: patch && typeof patch.is_backgrounded === 'boolean'
+            ? patch.is_backgrounded
+            : undefined,
+          description: patch && typeof patch.description === 'string' ? patch.description : undefined,
+          endTime: patch && typeof patch.end_time === 'number' ? patch.end_time : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'background_tasks_changed') {
+        // Level signal: the full live set, REPLACE semantics. Emit once so the
+        // panel can reconcile; ids-only payloads are not correlated with edges.
+        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        this.emitSubagentEvent(sessionId, {
+          event: 'background_tasks_changed',
+          // No taskId on purpose: this is a level signal for the whole set,
+          // not an edge for one task. The renderer keys off the event name.
+          backgroundTasks: tasks
+            .filter((t) => t && typeof t === 'object')
+            .map((t) => {
+              const record = t as Record<string, unknown>;
+              return {
+                taskId: String(record.task_id ?? ''),
+                taskType: String(record.task_type ?? ''),
+                description: String(record.description ?? ''),
+              };
+            }),
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      return;
+    }
+
+    // tool_progress: per-tool heartbeats inside a subagent (top-level type,
+    // not a system subtype). Drives the panel's live activity lines.
+    if (eventType === 'tool_progress') {
+      const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
+      if (taskId) {
+        this.emitSubagentEvent(sessionId, {
+          event: 'tool_progress',
+          taskId,
+          lastToolName: typeof payload.tool_name === 'string' ? payload.tool_name : undefined,
+          elapsedTimeSeconds: typeof payload.elapsed_time_seconds === 'number' ? payload.elapsed_time_seconds : undefined,
+          updatedAt: Date.now(),
+        });
       }
       return;
     }
@@ -5881,6 +6400,25 @@ export class CoworkRunner extends EventEmitter {
       const authError = this.normalizeSdkError(payload.error);
       if (authError) {
         this.handleError(sessionId, authError);
+      }
+      return;
+    }
+
+    // Prompt suggestions: the SDK emits at most one prompt_suggestion per turn
+    // (after the result message) when options.promptSuggestions is enabled.
+    // Forward the suggestion text to the renderer as a system message carrying
+    // metadata.promptSuggestion so the prompt-input chips can pick it up.
+    if (eventType === 'prompt_suggestion') {
+      const suggestion = typeof payload.suggestion === 'string'
+        ? payload.suggestion.trim()
+        : '';
+      if (suggestion) {
+        const message = this.store.addMessage(sessionId, {
+          type: 'system',
+          content: '',
+          metadata: { promptSuggestion: suggestion } as Record<string, unknown>,
+        });
+        this.emit('message', sessionId, message);
       }
       return;
     }
@@ -5942,6 +6480,11 @@ export class CoworkRunner extends EventEmitter {
         this.persistFinalResult(sessionId, activeSession, payload.result);
         markAssistantTextOutput();
       }
+
+      // Accumulate per-turn token usage into the session stats. The proxy
+      // translates DeepSeek's OpenAI usage into Anthropic cache fields, so
+      // cache_read = prompt_cache_hit and cache_creation = prompt_cache_miss.
+      this.accumulateResultUsage(sessionId, payload);
 
       // For sandbox mode, mark session as completed when we receive a successful result.
       // Keep the VM alive for multi-turn conversations instead of killing it.
@@ -6676,6 +7219,80 @@ export class CoworkRunner extends EventEmitter {
         onLine(buffer);
       }
     }
+  }
+
+  /**
+   * Emits a transient SDK runtime-status signal (api_retry / requesting) as a
+   * `type: 'system'` message carrying `metadata.sdkRuntimeStatus`. The renderer
+   * hides these from the message list and surfaces them in StreamingActivityBar
+   * instead, so retries and request setup no longer look like silent stalls.
+   * Consecutive identical statuses are de-duplicated via an in-memory map.
+   */
+  private emitSdkRuntimeStatus(
+    sessionId: string,
+    payload: {
+      sdkRuntimeStatus: 'requesting' | 'api_retry';
+      retryAttempt?: number;
+      retryMax?: number;
+      retryErrorStatus?: number | null;
+    }
+  ): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      const key = `${payload.sdkRuntimeStatus}:${payload.retryAttempt ?? ''}`;
+      if (activeSession.lastSdkRuntimeStatusKey === key) {
+        return;
+      }
+      activeSession.lastSdkRuntimeStatusKey = key;
+    }
+
+    const message = this.store.addMessage(sessionId, {
+      type: 'system',
+      content: '',
+      metadata: payload as Record<string, unknown>,
+    });
+    this.emit('message', sessionId, message);
+  }
+
+  /**
+   * Emits a subagent/task activity signal as a `type: 'system'` message carrying
+   * `metadata.subagentEvent`. The renderer hides these from the message list and
+   * drives the live subagent panel instead. task_progress and tool_progress are
+   * high-frequency; they are coalesced per task_id behind a throttle window so
+   * the messages array does not flood.
+   */
+  private emitSubagentEvent(
+    sessionId: string,
+    payload: Record<string, unknown>
+  ): void {
+    const eventName = String(payload.event ?? '');
+    const taskId = String(payload.taskId ?? '');
+    const now = Date.now();
+
+    if (eventName === 'task_progress' || eventName === 'tool_progress') {
+      const activeSession = this.activeSessions.get(sessionId);
+      const last = activeSession?.lastSubagentThrottleAt;
+      const lastTaskKey = activeSession?.lastSubagentThrottleTaskId;
+      const throttleMs = SUBAGENT_PROGRESS_THROTTLE_MS;
+      if (
+        last !== undefined
+        && lastTaskKey === taskId
+        && now - last < throttleMs
+      ) {
+        return;
+      }
+      if (activeSession) {
+        activeSession.lastSubagentThrottleAt = now;
+        activeSession.lastSubagentThrottleTaskId = taskId;
+      }
+    }
+
+    const message = this.store.addMessage(sessionId, {
+      type: 'system',
+      content: '',
+      metadata: { subagentEvent: payload },
+    });
+    this.emit('message', sessionId, message);
   }
 
   private addSystemMessage(sessionId: string, content: string): void {

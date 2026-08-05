@@ -491,6 +491,7 @@ export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
+export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 const SERVICE_ORDER_RATING_SESSION_HOLD_MS = 24 * 60 * 60 * 1000;
 
@@ -625,6 +626,12 @@ export interface CoworkSession {
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL (populated from metabots table) */
   metabotAvatar?: string | null;
+  /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
+  permissionMode?: CoworkPermissionMode;
+  /** Source session id when this session was created by forking another session. */
+  parentSessionId?: string | null;
+  /** The source session's message id this fork was created from. */
+  forkPointMessageId?: string | null;
 }
 
 export type CoworkSessionMetadata = Pick<
@@ -1115,6 +1122,18 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!sessionColumns.includes('browser_title')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN browser_title TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('permission_mode')) {
+        this.db.run("ALTER TABLE cowork_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default';");
+        changed = true;
+      }
+      if (!sessionColumns.includes('parent_session_id')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN parent_session_id TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('fork_point_message_id')) {
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN fork_point_message_id TEXT;');
         changed = true;
       }
     } catch (error) {
@@ -2520,15 +2539,16 @@ export class CoworkStore implements MemoryBackend {
     sessionType: CoworkSessionType = 'standard',
     peerGlobalMetaId: string | null = null,
     peerName: string | null = null,
-    peerAvatar: string | null = null
+    peerAvatar: string | null = null,
+    permissionMode: CoworkPermissionMode = 'default'
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2558,6 +2578,7 @@ export class CoworkStore implements MemoryBackend {
       peerGlobalMetaId,
       peerName,
       peerAvatar,
+      permissionMode,
     };
   }
 
@@ -2610,13 +2631,16 @@ export class CoworkStore implements MemoryBackend {
       browser_uri?: string | null;
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
+      permission_mode?: string | null;
+      parent_session_id?: string | null;
+      fork_point_message_id?: string | null;
       created_at: number;
       updated_at: number;
     }
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2665,6 +2689,9 @@ export class CoworkStore implements MemoryBackend {
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
+      permissionMode: (row.permission_mode as CoworkPermissionMode) || 'default',
+      parentSessionId: row.parent_session_id ?? null,
+      forkPointMessageId: row.fork_point_message_id ?? null,
       metabotName,
       metabotAvatar,
     };
@@ -2711,7 +2738,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -2748,6 +2775,18 @@ export class CoworkStore implements MemoryBackend {
     if (updates.browserTitle !== undefined) {
       setClauses.push('browser_title = ?');
       values.push(updates.browserTitle);
+    }
+    if (updates.permissionMode !== undefined) {
+      setClauses.push('permission_mode = ?');
+      values.push(updates.permissionMode);
+    }
+    if (updates.parentSessionId !== undefined) {
+      setClauses.push('parent_session_id = ?');
+      values.push(updates.parentSessionId);
+    }
+    if (updates.forkPointMessageId !== undefined) {
+      setClauses.push('fork_point_message_id = ?');
+      values.push(updates.forkPointMessageId);
     }
 
     values.push(id);
@@ -3854,6 +3893,129 @@ export class CoworkStore implements MemoryBackend {
       copied += 1;
     }
     return copied;
+  }
+
+  /**
+   * Forks a session from a message: creates a new session whose message history
+   * is a copy of the source session up to and including the fork-point message.
+   * The fork's claude_session_id stays NULL (the SDK conversation restarts from
+   * the branch point), so the user continues from a fresh SDK session. The
+   * fork inherits the source's cwd/systemPrompt/executionMode/metabot/type/
+   * permissionMode. Fork provenance is recorded on the new session row.
+   *
+   * Message ids and timestamps are preserved (metadata references like
+   * toolUseId and memory source message_id stay valid). No memory updates are
+   * triggered — copying history is not new user input.
+   */
+  forkSession(
+    sourceSessionId: string,
+    forkPointMessageId: string,
+    options: { title?: string; systemPromptOverride?: string } = {}
+  ): CoworkSession | null {
+    const source = this.getSession(sourceSessionId);
+    if (!source) return null;
+
+    const messages = this.getSessionMessages(sourceSessionId);
+    const forkIndex = messages.findIndex((m) => m.id === forkPointMessageId);
+    if (forkIndex === -1) return null;
+    const forkMessages = messages.slice(0, forkIndex + 1);
+
+    const forked = this.createSession(
+      options.title?.trim() || `${source.title} (fork)`,
+      source.cwd,
+      options.systemPromptOverride ?? source.systemPrompt,
+      source.executionMode,
+      source.activeSkillIds,
+      source.metabotId ?? null,
+      source.sessionType ?? 'standard',
+      source.peerGlobalMetaId ?? null,
+      source.peerName ?? null,
+      source.peerAvatar ?? null,
+      source.permissionMode ?? 'default'
+    );
+
+    // Batch-copy messages preserving ids/timestamps/sequences with one flush.
+    for (const message of forkMessages) {
+      const sequenceRow = this.db.exec(`
+        SELECT COALESCE(MAX(sequence), 0) + 1 as next_seq
+        FROM cowork_messages
+        WHERE session_id = ?
+      `, [forked.id]);
+      const sequence = sequenceRow[0]?.values[0]?.[0] as number || 1;
+      this.db.run(`
+        INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `, [
+        message.id,
+        forked.id,
+        message.type,
+        message.content,
+        message.metadata ? JSON.stringify(message.metadata) : null,
+        message.timestamp,
+        sequence,
+      ]);
+    }
+    this.db.run(`
+      UPDATE cowork_sessions
+      SET parent_session_id = ?, fork_point_message_id = ?, updated_at = ?
+      WHERE id = ?
+    `, [sourceSessionId, forkPointMessageId, Date.now(), forked.id]);
+    this.saveDb();
+
+    return this.getSession(forked.id);
+  }
+
+  /**
+   * Rewinds a session to a message: deletes all messages after the given one
+   * and clears claude_session_id so the next continue starts a fresh SDK
+   * conversation from the rewind point. Returns the truncated session, or null
+   * when the session/message does not exist.
+   */
+  rewindSession(sessionId: string, rewindPointMessageId: string): CoworkSession | null {
+    const messages = this.getSessionMessages(sessionId);
+    const rewindIndex = messages.findIndex((m) => m.id === rewindPointMessageId);
+    if (rewindIndex === -1) return null;
+
+    const rewindMessage = messages[rewindIndex];
+    const rewindSequence = this.getRewindSequence(sessionId, rewindPointMessageId);
+    const rewindRowId = this.getRewindRowId(sessionId, rewindPointMessageId);
+    // Delete rows ordered strictly after the rewind point using the same
+    // (created_at, sequence, ROWID) composite ordering as getSessionMessages.
+    this.db.run(`
+      DELETE FROM cowork_messages
+      WHERE session_id = ?
+        AND (
+          created_at > ?
+          OR (created_at = ? AND COALESCE(sequence, 0) > ?)
+          OR (created_at = ? AND COALESCE(sequence, 0) = ? AND rowid > ?)
+        )
+    `, [
+      sessionId,
+      rewindMessage.timestamp,
+      rewindMessage.timestamp,
+      rewindSequence,
+      rewindMessage.timestamp,
+      rewindSequence,
+      rewindRowId,
+    ]);
+    this.db.run('UPDATE cowork_sessions SET claude_session_id = NULL, updated_at = ? WHERE id = ?', [Date.now(), sessionId]);
+    this.saveDb();
+
+    return this.getSession(sessionId);
+  }
+
+  private getRewindSequence(sessionId: string, messageId: string): number {
+    const row = this.getOne<{ sequence: number | null }>(`
+      SELECT sequence FROM cowork_messages WHERE session_id = ? AND id = ?
+    `, [sessionId, messageId]);
+    return row?.sequence ?? 0;
+  }
+
+  private getRewindRowId(sessionId: string, messageId: string): number {
+    const row = this.getOne<{ rowid: number }>(`
+      SELECT rowid FROM cowork_messages WHERE session_id = ? AND id = ?
+    `, [sessionId, messageId]);
+    return row?.rowid ?? 0;
   }
 
   private insertMigratedMessage(

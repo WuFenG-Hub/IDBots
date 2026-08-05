@@ -140,6 +140,11 @@ export interface AppConfig {
     mvc?: number;
     doge?: number;
   };
+  /**
+   * Persisted auto-approve tool rules. New cowork sessions start with this list
+   * as the default; the user's latest changes are saved here.
+   */
+  autoApproveTools?: string[];
 }
 
 type ModelDefinition = AppConfig['model']['availableModels'][number];

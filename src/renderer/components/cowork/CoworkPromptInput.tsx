@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline';
 import ModelSelector from '../ModelSelector';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
+import PermissionModeSelector from './PermissionModeSelector';
 import { SkillsButton, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
@@ -12,7 +13,7 @@ import { RootState } from '../../store';
 import { setDraftPrompt } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
-import type { CoworkContextUsage } from '../../types/cowork';
+import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -106,6 +107,14 @@ interface CoworkPromptInputProps {
   /** Estimated context-window usage of the current conversation; shows a ring indicator when provided. */
   contextUsage?: CoworkContextUsage | null;
   onManageSkills?: () => void;
+  /** Context-aware follow-up suggestions from the SDK; rendered as clickable chips. */
+  suggestedPrompts?: string[];
+  /** Show the permission-mode selector in the footer (new-session creation). */
+  showPermissionModeSelector?: boolean;
+  /** Controlled permission-mode value for the footer selector. */
+  permissionMode?: CoworkPermissionMode;
+  /** Callback when the footer permission-mode selector changes. */
+  onPermissionModeChange?: (mode: CoworkPermissionMode) => void;
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -127,6 +136,10 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       restrictToLlmId,
       contextUsage,
       onManageSkills,
+      suggestedPrompts,
+      showPermissionModeSelector = false,
+      permissionMode,
+      onPermissionModeChange,
     } = props;
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
@@ -637,12 +650,20 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onManageSkills={handleManageSkills}
                 />
                 <ActiveSkillBadge />
+                {showPermissionModeSelector && onPermissionModeChange && (
+                  <PermissionModeSelector
+                    currentMode={permissionMode ?? 'default'}
+                    onModeChange={onPermissionModeChange}
+                  />
+                )}
               </fieldset>
               <div className="flex items-center gap-2">
                 {contextUsage && (
                   <ContextUsageRing
                     usedTokens={contextUsage.usedTokens}
                     contextWindow={contextUsage.contextWindow}
+                    isRealUsage={contextUsage.isRealUsage}
+                    categories={contextUsage.categories}
                   />
                 )}
                 {showStopButton ? (
@@ -723,6 +744,24 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       {showFolderRequiredWarning && (
         <div className="mt-2 text-xs text-red-500 dark:text-red-400">
           {i18nService.t('coworkSelectFolderFirst')}
+        </div>
+      )}
+      {suggestedPrompts && suggestedPrompts.length > 0 && !disabled && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {suggestedPrompts.map((suggestion, index) => (
+            <button
+              key={`prompt-suggestion-${index}`}
+              type="button"
+              onClick={() => {
+                draftFieldRef.current?.set(suggestion);
+                textareaRef.current?.focus();
+              }}
+              className="inline-flex items-center gap-1 rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset hover:dark:text-claude-darkText hover:text-claude-text transition-colors max-w-full text-left"
+            >
+              <SparklesIcon className="h-3 w-3 flex-shrink-0 text-claude-accent" />
+              <span className="truncate">{suggestion}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

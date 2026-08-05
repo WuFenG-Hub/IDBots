@@ -16,6 +16,15 @@ type ProviderModel = {
   id: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  /**
+   * Per-model options mirroring the renderer's ModelOptions. Present in the
+   * app_config blob but previously stripped by this typed reader, so the cowork
+   * SDK path never saw effort/thinking settings.
+   */
+  options?: {
+    reasoningEffort?: string;
+    thinking?: { type: string };
+  };
 };
 
 type ProviderConfig = {
@@ -29,6 +38,8 @@ type ProviderConfig = {
 type AppConfig = {
   model?: {
     defaultModel?: string;
+    /** Optional SDK fallback model id for automatic model refusal fallback. */
+    fallbackModel?: string;
     availableModels?: ProviderModel[];
   };
   providers?: Record<string, ProviderConfig>;
@@ -249,6 +260,34 @@ function resolveMatchedProvider(
 }
 
 /**
+ * Resolves the fallback model id from app config. The SDK's `fallbackModel`
+ * option is only meaningful when the fallback model is served by the same
+ * provider as the primary (same base URL / API key), because the SDK retries
+ * in-process without re-resolving provider env. So we validate that the
+ * configured fallbackModel exists in an enabled provider's model list.
+ * Returns undefined when no usable fallback is configured.
+ */
+function resolveFallbackModelId(
+  appConfig: AppConfig,
+  primaryProviderName: string | null
+): string | undefined {
+  const fallbackId = appConfig.model?.fallbackModel?.trim();
+  if (!fallbackId) return undefined;
+
+  const providers = appConfig.providers ?? {};
+  for (const [providerName, provider] of Object.entries(providers)) {
+    if (!provider?.enabled || !provider.models) continue;
+    if (provider.models.some((m) => m.id === fallbackId)) {
+      // Only use fallback from the same provider — the SDK retries with the
+      // same base URL/key, so a cross-provider fallback would hit the wrong API.
+      if (primaryProviderName && providerName !== primaryProviderName) continue;
+      return fallbackId;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Resolve API config for a given model id (e.g. MetaBot's llm_id). When modelId is provided and
  * non-empty, finds the enabled provider that offers that model; otherwise uses app default.
  * Use this for per-MetaBot LLM (orchestrator chat completion).
@@ -269,7 +308,14 @@ export function resolveApiConfigForModel(
   if (!matched) {
     return { config: null, error };
   }
-  return buildApiConfigFromMatched(matched, target);
+  const resolution = buildApiConfigFromMatched(matched, target);
+  if (resolution.config) {
+    const fallbackModel = resolveFallbackModelId(appConfig, matched.providerName);
+    if (fallbackModel) {
+      resolution.config.fallbackModel = fallbackModel;
+    }
+  }
+  return resolution;
 }
 
 function buildApiConfigFromMatched(
@@ -346,17 +392,65 @@ export function resolveCurrentApiConfig(target: OpenAICompatProxyTarget = 'local
     };
   }
 
-  return buildApiConfigFromMatched(matched, target);
+  const resolution = buildApiConfigFromMatched(matched, target);
+  if (resolution.config) {
+    const fallbackModel = resolveFallbackModelId(appConfig, matched.providerName);
+    if (fallbackModel) {
+      resolution.config.fallbackModel = fallbackModel;
+    }
+  }
+  return resolution;
 }
 
 export function getCurrentApiConfig(target: OpenAICompatProxyTarget = 'local'): CoworkApiConfig | null {
   return resolveCurrentApiConfig(target).config;
 }
 
+/**
+ * Returns the persisted auto-approve tool rules from app_config. These are the
+ * defaults new cowork sessions start with; the user's latest changes are saved
+ * through the renderer configService (same app_config row).
+ */
+export function getPersistedAutoApproveTools(): string[] {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<{ autoApproveTools?: string[] }>('app_config');
+  const tools = appConfig?.autoApproveTools;
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .map((name) => (typeof name === 'string' ? name.trim().toLowerCase() : ''))
+    .filter(Boolean);
+}
+
 export function resolveCurrentModelLimits(modelId?: string | null): CoworkModelLimits {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config') ?? {};
   return resolveCoworkModelLimits(appConfig, modelId);
+}
+
+/**
+ * Resolves per-model options (effort/thinking) from app_config for the given
+ * model id. Returns null when no options are configured. Used by the cowork
+ * SDK path to pass effort/thinking into the SDK options — previously these
+ * settings only reached the OpenAI-compat proxy for the renderer's direct
+ * API calls, never the cowork session.
+ */
+export function resolveModelOptions(modelId?: string | null): {
+  reasoningEffort?: string;
+  thinking?: { type: string };
+} | null {
+  if (!modelId) return null;
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<AppConfig>('app_config');
+  if (!appConfig?.providers) return null;
+
+  for (const provider of Object.values(appConfig.providers)) {
+    if (!provider?.models) continue;
+    const model = provider.models.find((m) => m.id === modelId);
+    if (model?.options) {
+      return model.options;
+    }
+  }
+  return null;
 }
 
 export function buildEnvForConfig(config: CoworkApiConfig): Record<string, string> {

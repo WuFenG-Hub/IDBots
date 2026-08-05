@@ -9,6 +9,7 @@ import { MagnifyingGlassIcon, PlusIcon, ClockIcon, CpuChipIcon, ShoppingBagIcon 
 import ComposeIcon from './icons/ComposeIcon';
 import SidebarToggleIcon from './icons/SidebarToggleIcon';
 import { P2PStatusBadge } from './p2p/P2PStatusBadge';
+import BackgroundTasksBadge from './cowork/BackgroundTasksBadge';
 import { getSidebarPrimaryNavModel } from './sidebar/sidebarNavigation.js';
 import BotBrowserModeSwitch from '../features/botBrowser/BotBrowserModeSwitch';
 import BotBrowserCoworkPanel from '../features/botBrowser/BotBrowserCoworkPanel';
@@ -323,6 +324,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             </svg>
             {i18nService.t('settings')}
           </button>
+          <BackgroundTasksBadge />
           <P2PStatusBadge />
         </div>
       </div>

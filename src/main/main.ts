@@ -27,7 +27,9 @@ import {
 import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools } from './libs/claudeSettings';
+import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
+import { flattenSubagentTranscriptMessages } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -6111,6 +6113,7 @@ if (!gotTheLock) {
     activeSkillIds?: string[];
     metabotId?: number | null;
     sessionType?: 'standard' | 'browser';
+    permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -6158,7 +6161,11 @@ if (!gotTheLock) {
         config.executionMode || 'local',
         options.activeSkillIds || [],
         options.metabotId ?? null,
-        sessionType
+        sessionType,
+        null,
+        null,
+        null,
+        options.permissionMode ?? 'default'
       );
       const runner = getCoworkRunner();
 
@@ -6171,12 +6178,15 @@ if (!gotTheLock) {
         metadata: options.activeSkillIds?.length ? { skillIds: options.activeSkillIds } : undefined,
       });
 
-      // Start the session asynchronously (skip initial user message since we already added it)
+      // Start the session asynchronously (skip initial user message since we already added it).
+      // Auto-approve rules default to the persisted app-level list (latest user changes).
       runner.startSession(session.id, options.prompt, {
         skipInitialUserMessage: true,
         skillIds: options.activeSkillIds,
         workspaceRoot: selectedWorkspaceRoot,
         confirmationMode: 'modal',
+        permissionMode: options.permissionMode ?? 'default',
+        autoApproveTools: getPersistedAutoApproveTools(),
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
@@ -6234,6 +6244,7 @@ if (!gotTheLock) {
     prompt: string;
     systemPrompt?: string;
     activeSkillIds?: string[];
+    permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   }) => {
     return withSqliteRecovery('cowork:session:continue', async () => {
     try {
@@ -6244,7 +6255,7 @@ if (!gotTheLock) {
         requestedSystemPrompt: options.systemPrompt,
         activeSkillIds: options.activeSkillIds,
       });
-      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds }).catch(error => {
+      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds, permissionMode: options.permissionMode }).catch(error => {
         console.error('Cowork continue error:', error);
       });
 
@@ -6274,6 +6285,214 @@ if (!gotTheLock) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to stop session',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
+    sessionId: string;
+    permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+  }) => {
+    return withSqliteRecovery('cowork:session:setPermissionMode', async () => {
+      try {
+        const { sessionId, permissionMode } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        getCoworkRunner().setPermissionMode(sessionId, permissionMode);
+        return { success: true };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:setEffort', async (_event, payload: {
+    sessionId: string;
+    effort: string | null;
+  }) => {
+    try {
+      const { sessionId, effort } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      getCoworkRunner().setEffortOverride(sessionId, effort);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set effort level',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:fork', async (_event, payload: {
+    sessionId: string;
+    messageId: string;
+    title?: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:fork', async () => {
+      try {
+        const { sessionId, messageId, title } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!messageId) throw new Error('Message id is required');
+        const coworkStoreInst = getCoworkStore();
+        const source = coworkStoreInst.getSession(sessionId);
+        if (!source) {
+          return { success: false, error: 'Source session not found' };
+        }
+        const sourceMessages = source.messages ?? [];
+        const forkIndex = sourceMessages.findIndex((m) => m.id === messageId);
+        if (forkIndex === -1) {
+          return { success: false, error: 'Fork point message not found' };
+        }
+        // Append a compact history of the conversation before the fork point to
+        // the fork's system prompt so the restarted SDK session knows what
+        // happened earlier. Cap the tail to keep the prompt reasonable.
+        const history = sourceMessages.slice(0, forkIndex + 1);
+        const historyLines: string[] = [];
+        let historyChars = 0;
+        const MAX_FORK_HISTORY_CHARS = 12_000;
+        for (const message of history) {
+          const line = `${message.type === 'user' ? 'User' : message.type === 'assistant' ? 'Assistant' : 'Tool'}: ${message.content}`;
+          if (historyChars + line.length > MAX_FORK_HISTORY_CHARS) {
+            historyLines.push('... [earlier conversation truncated]');
+            break;
+          }
+          historyLines.push(line);
+          historyChars += line.length;
+        }
+        const historyContext = historyLines.join('\n');
+        const systemPromptOverride = source.systemPrompt
+          ? `${source.systemPrompt}\n\n<fork_history>\n${historyContext}\n</fork_history>`
+          : `<fork_history>\n${historyContext}\n</fork_history>`;
+        const forked = coworkStoreInst.forkSession(sessionId, messageId, { title, systemPromptOverride });
+        if (!forked) {
+          return { success: false, error: 'Failed to fork session: session or message not found' };
+        }
+        return { success: true, session: forked };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to fork session',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:rewind', async (_event, payload: {
+    sessionId: string;
+    messageId: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:rewind', async () => {
+      try {
+        const { sessionId, messageId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!messageId) throw new Error('Message id is required');
+        const rewound = getCoworkStore().rewindSession(sessionId, messageId);
+        if (!rewound) {
+          return { success: false, error: 'Failed to rewind session: session or message not found' };
+        }
+        return { success: true, session: rewound };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to rewind session',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:getSubagents', async (_event, sessionId: string) => {
+    try {
+      if (!sessionId) throw new Error('Session id is required');
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session?.claudeSessionId) {
+        return { success: true, agents: [] };
+      }
+      const sdk = await loadClaudeSdk();
+      const agents = await sdk.listSubagents(session.claudeSessionId, { dir: session.cwd });
+      return { success: true, agents: Array.isArray(agents) ? agents : [] };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list subagents',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:getSubagentMessages', async (_event, payload: {
+    sessionId: string;
+    agentId: string;
+    limit?: number;
+  }) => {
+    try {
+      const { sessionId, agentId, limit } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      if (!agentId) throw new Error('Agent id is required');
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session?.claudeSessionId) {
+        return { success: true, messages: [] };
+      }
+      const sdk = await loadClaudeSdk();
+      const transcript = await sdk.getSubagentMessages(session.claudeSessionId, agentId, {
+        dir: session.cwd,
+        limit,
+      });
+      const flattened = flattenSubagentTranscriptMessages(transcript ?? []);
+      return { success: true, messages: flattened };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get subagent messages',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {
+    try {
+      if (!sessionId) throw new Error('Session id is required');
+      return { success: true, tools: getCoworkRunner().getAutoApproveTools(sessionId) };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get auto-approve tools',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:addAutoApproveTool', async (_event, payload: {
+    sessionId: string;
+    toolName: string;
+  }) => {
+    try {
+      const { sessionId, toolName } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      const added = getCoworkRunner().addAutoApproveTool(sessionId, toolName);
+      return { success: added };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add auto-approve tool',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:removeAutoApproveTool', async (_event, payload: {
+    sessionId: string;
+    toolName: string;
+  }) => {
+    try {
+      const { sessionId, toolName } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      const removed = getCoworkRunner().removeAutoApproveTool(sessionId, toolName);
+      return { success: removed };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to remove auto-approve tool',
       };
     }
   });
@@ -6873,25 +7092,41 @@ if (!gotTheLock) {
         if (!session) {
           return { success: true, session };
         }
-        // Attach a freshly estimated context-window usage for the conversation
-        // header widgets. Informational only — never break session loading.
+        // Attach context-window usage for the conversation header widgets.
+        // Prefer the real per-category usage from the SDK's getContextUsage()
+        // (cached on the active local-mode session after each turn); fall back
+        // to the heuristic estimator for sandbox mode or first-turn sessions.
+        // Informational only — never break session loading.
         let contextUsage = null;
         try {
-          contextUsage = computeCoworkContextUsage({
-            messages: session.messages ?? [],
-            systemPrompt: session.systemPrompt,
-            modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
-            // A2A private chats rebuild the model context every turn from only
-            // the latest segment messages; cap the estimate the same way so the
-            // ring reflects real per-turn usage instead of full history.
-            maxRecentMessages: session.sessionType === 'a2a'
-              ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
-              : undefined,
-          });
+          const realUsage = getCoworkRunner().getRealContextUsage(sessionId);
+          if (realUsage) {
+            contextUsage = realUsage;
+          } else {
+            contextUsage = computeCoworkContextUsage({
+              messages: session.messages ?? [],
+              systemPrompt: session.systemPrompt,
+              modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+              // A2A private chats rebuild the model context every turn from only
+              // the latest segment messages; cap the estimate the same way so the
+              // ring reflects real per-turn usage instead of full history.
+              maxRecentMessages: session.sessionType === 'a2a'
+                ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
+                : undefined,
+            });
+          }
         } catch {
           contextUsage = null;
         }
-        return { success: true, session: { ...session, contextUsage } };
+        // Attach accumulated token/cost usage (DeepSeek-first via proxy-translated
+        // result usage). Informational only — never break session loading.
+        let usageStats = null;
+        try {
+          usageStats = getCoworkRunner().getSessionUsageStats(sessionId);
+        } catch {
+          usageStats = null;
+        }
+        return { success: true, session: { ...session, contextUsage, usageStats } };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {
@@ -10625,6 +10860,10 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // Sweep stale app-update download artifacts from previous sessions
     // (best effort; partial files younger than the TTL are kept for resume).
     void cleanupStaleDownloads().catch(() => {});
+
+    // Pre-warm the Claude Agent SDK (module import + binary path resolution)
+    // so the first cowork session doesn't pay the cold-import cost.
+    prewarmClaudeSdk();
 
     // Note: Calendar permission is checked on-demand when calendar operations are requested
     // We don't trigger permission dialogs at startup to avoid annoying users

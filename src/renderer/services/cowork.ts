@@ -12,6 +12,9 @@ import {
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,
+  updateSessionPermissionMode,
+  upsertSubagentTask,
+  setSubagentTasks,
   enqueuePendingPermission,
   dequeuePendingPermission,
   setConfig,
@@ -36,10 +39,14 @@ import type {
   CoworkA2AGuidanceResult,
   CoworkA2AHistoryCursor,
   CoworkA2AHistoryPage,
+  CoworkPermissionMode,
   CoworkStartOptions,
   CoworkContinueOptions,
   CoworkSubmitInput,
   CoworkSubmitInputResult,
+  CoworkMessage,
+  SubagentTaskState,
+  SubagentTaskStatus,
 } from '../types/cowork';
 import {
   shouldMarkSessionRunningFromStreamMessage,
@@ -126,6 +133,55 @@ class CoworkService {
       store.dispatch(addMessage({ sessionId, message }));
       store.dispatch(addBrowserMessage({ sessionId, message }));
 
+      // Subagent activity events ride on system messages via
+      // metadata.subagentEvent; drive the live subagent panel, not the message list.
+      const subagentEvent = message.metadata?.subagentEvent as
+        | (Record<string, unknown> & { event?: string; taskId?: string })
+        | undefined;
+      if (subagentEvent?.event) {
+        const eventName = subagentEvent.event;
+
+        // background_tasks_changed is a level signal for the whole set (no
+        // taskId); REPLACE the task map. Preserve existing task detail — the
+        // payload is ids-only — and keep real terminal status.
+        if (eventName === 'background_tasks_changed') {
+          const backgroundTasks = Array.isArray(subagentEvent.backgroundTasks)
+            ? subagentEvent.backgroundTasks as Array<{ taskId: string; taskType: string; description: string }>
+            : [];
+          store.dispatch(setSubagentTasks({
+            sessionId,
+            tasks: backgroundTasks,
+          }));
+          return;
+        }
+
+        if (!subagentEvent.taskId) return;
+        const taskId = String(subagentEvent.taskId);
+        const task: SubagentTaskState = {
+          taskId,
+          sessionId,
+          toolUseId: typeof subagentEvent.toolUseId === 'string' ? subagentEvent.toolUseId : undefined,
+          subagentType: typeof subagentEvent.subagentType === 'string' ? subagentEvent.subagentType : undefined,
+          taskType: typeof subagentEvent.taskType === 'string' ? subagentEvent.taskType : undefined,
+          workflowName: typeof subagentEvent.workflowName === 'string' ? subagentEvent.workflowName : undefined,
+          description: typeof subagentEvent.description === 'string' ? subagentEvent.description : undefined,
+          prompt: typeof subagentEvent.prompt === 'string' ? subagentEvent.prompt : undefined,
+          status: (subagentEvent.status as SubagentTaskStatus) ?? 'running',
+          isBackgrounded: typeof subagentEvent.isBackgrounded === 'boolean'
+            ? subagentEvent.isBackgrounded
+            : undefined,
+          endTime: typeof subagentEvent.endTime === 'number' ? subagentEvent.endTime : undefined,
+          summary: typeof subagentEvent.summary === 'string' ? subagentEvent.summary : undefined,
+          lastToolName: typeof subagentEvent.lastToolName === 'string' ? subagentEvent.lastToolName : undefined,
+          outputFile: typeof subagentEvent.outputFile === 'string' ? subagentEvent.outputFile : undefined,
+          error: typeof subagentEvent.error === 'string' ? subagentEvent.error : undefined,
+          usage: subagentEvent.usage as SubagentTaskState['usage'],
+          startedAt: typeof subagentEvent.startedAt === 'number' ? subagentEvent.startedAt : undefined,
+          updatedAt: typeof subagentEvent.updatedAt === 'number' ? subagentEvent.updatedAt : undefined,
+        };
+        store.dispatch(upsertSubagentTask(task));
+      }
+
       if (message.metadata?.refreshSessionSummary) {
         await this.loadSessions();
         const currentSessionId = store.getState().cowork.currentSessionId;
@@ -169,6 +225,15 @@ class CoworkService {
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));
       store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'completed' }));
+      // Refresh the current session so usageStats (token/cost chip) reflects
+      // the just-finished turn.
+      if (store.getState().cowork.currentSessionId === sessionId) {
+        void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
+          if (refreshed?.success && refreshed.session) {
+            store.dispatch(setCurrentSession(refreshed.session));
+          }
+        }).catch(() => {});
+      }
     });
     this.streamListenerCleanups.push(completeCleanup);
 
@@ -296,6 +361,112 @@ class CoworkService {
 
     console.error('Failed to stop session:', result.error);
     return false;
+  }
+
+  async setPermissionMode(sessionId: string, mode: CoworkPermissionMode): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setPermissionMode) {
+      console.error('setPermissionMode API not available');
+      return false;
+    }
+    const result = await cowork.setPermissionMode(sessionId, mode);
+    if (result.success) {
+      store.dispatch(updateSessionPermissionMode({ sessionId, permissionMode: mode }));
+      return true;
+    }
+    console.error('Failed to set permission mode:', result.error);
+    return false;
+  }
+
+  async setEffort(sessionId: string, effort: string | null): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setEffort) {
+      console.error('setEffort API not available');
+      return false;
+    }
+    const result = await cowork.setEffort(sessionId, effort);
+    if (!result.success) {
+      console.error('Failed to set effort level:', result.error);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Forks the session from a message into a new session. On success, loads the
+   * forked session as the current one.
+   */
+  async forkSession(sessionId: string, messageId: string, title?: string): Promise<CoworkSession | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.forkSession) {
+      console.error('forkSession API not available');
+      return null;
+    }
+    const result = await cowork.forkSession(sessionId, messageId, title);
+    if (result.success && result.session) {
+      store.dispatch(addSession(result.session));
+      store.dispatch(setCurrentSession(result.session));
+      return result.session;
+    }
+    console.error('Failed to fork session:', result.error);
+    return null;
+  }
+
+  /**
+   * Rewinds the session to a message (deletes everything after it). On success,
+   * reloads the truncated session as the current one.
+   */
+  async rewindSession(sessionId: string, messageId: string): Promise<CoworkSession | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.rewindSession) {
+      console.error('rewindSession API not available');
+      return null;
+    }
+    const result = await cowork.rewindSession(sessionId, messageId);
+    if (result.success && result.session) {
+      store.dispatch(addSession(result.session));
+      store.dispatch(setCurrentSession(result.session));
+      return result.session;
+    }
+    console.error('Failed to rewind session:', result.error);
+    return null;
+  }
+
+  /** Lists subagent transcript ids for a session (post-hoc, from disk). */
+  async getSubagents(sessionId: string): Promise<string[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSubagents) return [];
+    const result = await cowork.getSubagents(sessionId);
+    return result.success ? result.agents ?? [] : [];
+  }
+
+  /** Reads and flattens a subagent's transcript into CoworkMessages. */
+  async getSubagentMessages(sessionId: string, agentId: string, limit?: number): Promise<CoworkMessage[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSubagentMessages) return [];
+    const result = await cowork.getSubagentMessages(sessionId, agentId, limit);
+    return result.success ? result.messages ?? [] : [];
+  }
+
+  async getAutoApproveTools(sessionId: string): Promise<string[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getAutoApproveTools) return [];
+    const result = await cowork.getAutoApproveTools(sessionId);
+    return result.success ? result.tools ?? [] : [];
+  }
+
+  async addAutoApproveTool(sessionId: string, toolName: string): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.addAutoApproveTool) return false;
+    const result = await cowork.addAutoApproveTool(sessionId, toolName);
+    return result.success;
+  }
+
+  async removeAutoApproveTool(sessionId: string, toolName: string): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.removeAutoApproveTool) return false;
+    const result = await cowork.removeAutoApproveTool(sessionId, toolName);
+    return result.success;
   }
 
   async endA2APrivateChat(sessionId: string): Promise<{ success: boolean; noticeSent?: boolean; error?: string }> {

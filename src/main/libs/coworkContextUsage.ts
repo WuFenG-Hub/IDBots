@@ -2,6 +2,22 @@ import type { CoworkMessage } from '../coworkStore';
 import type { CoworkModelLimits } from './coworkModelLimits';
 import { getCoworkContextBudget } from './coworkContextBudget';
 
+/**
+ * Per-session token/cost usage accumulated from SDK result events. The proxy
+ * translates DeepSeek's OpenAI usage into Anthropic cache fields, so
+ * cacheRead = prompt_cache_hit and cacheCreation = prompt_cache_miss.
+ */
+export interface CoworkUsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
+  totalCostUsd?: number;
+  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
+  source: 'deepseek' | 'anthropic' | 'none';
+}
+
 export interface CoworkContextUsage {
   /** Estimated tokens currently consumed by the conversation (system prompt + messages). */
   usedTokens: number;
@@ -9,6 +25,14 @@ export interface CoworkContextUsage {
   contextWindow: number;
   /** usedTokens / contextWindow, clamped to [0, 1]. */
   usageRatio: number;
+  /**
+   * When true, usedTokens/contextWindow come from the SDK's getContextUsage()
+   * (real per-category accounting) rather than the local heuristic estimator.
+   * Only available in local mode after at least one completed turn.
+   */
+  isRealUsage?: boolean;
+  /** Per-category token breakdown from getContextUsage() (local mode only). */
+  categories?: Array<{ name: string; tokens: number; color?: string }>;
 }
 
 export interface CoworkContextUsageInput {

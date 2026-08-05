@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   CoworkA2AGuidanceRequest,
+  CoworkPermissionMode,
   CoworkSubmitInput,
   CoworkSubmitInputResult,
 } from '../renderer/types/cowork';
@@ -311,6 +312,24 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:submitInput', input),
     stopSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:stop', sessionId),
+    setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
+      ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    forkSession: (sessionId: string, messageId: string, title?: string) =>
+      ipcRenderer.invoke('cowork:session:fork', { sessionId, messageId, title }),
+    rewindSession: (sessionId: string, messageId: string) =>
+      ipcRenderer.invoke('cowork:session:rewind', { sessionId, messageId }),
+    getSubagents: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:getSubagents', sessionId),
+    getSubagentMessages: (sessionId: string, agentId: string, limit?: number) =>
+      ipcRenderer.invoke('cowork:session:getSubagentMessages', { sessionId, agentId, limit }),
+    setEffort: (sessionId: string, effort: string | null) =>
+      ipcRenderer.invoke('cowork:session:setEffort', { sessionId, effort }),
+    getAutoApproveTools: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:getAutoApproveTools', sessionId),
+    addAutoApproveTool: (sessionId: string, toolName: string) =>
+      ipcRenderer.invoke('cowork:session:addAutoApproveTool', { sessionId, toolName }),
+    removeAutoApproveTool: (sessionId: string, toolName: string) =>
+      ipcRenderer.invoke('cowork:session:removeAutoApproveTool', { sessionId, toolName }),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
     ensureA2ASession: (input: {

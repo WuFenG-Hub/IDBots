@@ -1,6 +1,15 @@
 // Cowork session status
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 
+/**
+ * Permission mode controls how tool calls are gated in the cowork session.
+ * - 'default': auto-allow edits; prompt for delete operations and AskUserQuestion.
+ * - 'plan': read-only — deny all mutating tools (Write/Edit/Bash/...), allow only read tools.
+ * - 'acceptEdits': auto-allow everything including deletes; keep AskUserQuestion prompts.
+ * - 'bypassPermissions': auto-allow everything (full trust, no prompts at all).
+ */
+export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+
 // Cowork message types
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 
@@ -63,6 +72,76 @@ export interface CoworkMessageMetadata {
    */
   senderAvatar?: string;
   [key: string]: unknown;
+}
+
+// Ephemeral SDK runtime status carried on `type: 'system'` messages.
+// Surfaced in StreamingActivityBar (transient, not a persisted bubble).
+export type CoworkSdkRuntimeStatus = 'requesting' | 'api_retry';
+
+export interface CoworkSdkRuntimeStatusPayload {
+  /** Discriminator for SDK runtime-status system messages. */
+  sdkRuntimeStatus?: CoworkSdkRuntimeStatus;
+  /** Current retry attempt (1-based), present when sdkRuntimeStatus === 'api_retry'. */
+  retryAttempt?: number;
+  /** Max retries configured by the SDK, present when sdkRuntimeStatus === 'api_retry'. */
+  retryMax?: number;
+  /** HTTP error status that triggered the retry, if known. */
+  retryErrorStatus?: number | null;
+}
+
+// Per-session token/cost usage, accumulated from SDK result events. The
+// proxy translates DeepSeek's OpenAI usage into Anthropic cache fields, so
+// cacheRead = prompt_cache_hit and cacheCreation = prompt_cache_miss.
+export interface CoworkUsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
+  totalCostUsd?: number;
+  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
+  source: 'deepseek' | 'anthropic' | 'none';
+}
+
+// Live subagent / background task state, driven by SDK task_* and tool_progress
+// events. Keyed by task_id in the cowork slice.
+export type SubagentTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+  | 'killed'
+  | 'paused';
+
+export interface SubagentTaskState {
+  taskId: string;
+  /** Session this task belongs to (set by the renderer on ingest). */
+  sessionId?: string;
+  toolUseId?: string;
+  subagentType?: string;
+  /** Friendly task-type label ('shell' | 'subagent' | 'monitor' | 'workflow' ...). */
+  taskType?: string;
+  /** meta.name of the workflow script, when taskType is 'local_workflow'. */
+  workflowName?: string;
+  description?: string;
+  prompt?: string;
+  status: SubagentTaskStatus;
+  /** True when the task runs in the background (Ctrl+B / backgroundTasks). */
+  isBackgrounded?: boolean;
+  /** End timestamp for terminal tasks. */
+  endTime?: number;
+  summary?: string;
+  lastToolName?: string;
+  outputFile?: string;
+  error?: string;
+  usage?: {
+    totalTokens?: number;
+    toolUses?: number;
+    durationMs?: number;
+  };
+  startedAt?: number;
+  updatedAt?: number;
 }
 
 // Cowork message
@@ -144,6 +223,14 @@ export interface CoworkContextUsage {
   contextWindow: number;
   /** usedTokens / contextWindow, clamped to [0, 1]. */
   usageRatio: number;
+  /**
+   * When true, usedTokens/contextWindow come from the SDK's getContextUsage()
+   * (real per-category accounting) rather than the local heuristic estimator.
+   * Only available in local mode after at least one completed turn.
+   */
+  isRealUsage?: boolean;
+  /** Per-category token breakdown from getContextUsage() (local mode only). */
+  categories?: Array<{ name: string; tokens: number; color?: string }>;
 }
 
 export interface CoworkSession {
@@ -182,6 +269,10 @@ export interface CoworkSession {
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
   /** Estimated context-window usage, computed by the main process on session load (not persisted). */
   contextUsage?: CoworkContextUsage | null;
+  /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
+  permissionMode?: CoworkPermissionMode;
+  /** Accumulated token/cost usage (computed by the main process, not persisted). */
+  usageStats?: CoworkUsageStats | null;
 }
 
 // Cowork configuration
@@ -212,6 +303,8 @@ export interface CoworkApiConfig {
   baseURL: string;
   model: string;
   apiType?: 'anthropic' | 'openai';
+  /** Optional SDK fallback model id (see main-side CoworkApiConfig). */
+  fallbackModel?: string;
 }
 
 export type CoworkSandboxStatus = {
@@ -334,6 +427,8 @@ export interface CoworkStartOptions {
   metabotId?: number | null;
   /** Only 'standard' (default) and 'browser' sessions can be created from the renderer. */
   sessionType?: 'standard' | 'browser';
+  /** Permission mode for this session. Defaults to 'default'. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 // Continue session options
@@ -342,6 +437,8 @@ export interface CoworkContinueOptions {
   prompt: string;
   systemPrompt?: string;
   activeSkillIds?: string[];
+  /** Update the session's permission mode for this and subsequent turns. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 export interface CoworkSubmitInput {
