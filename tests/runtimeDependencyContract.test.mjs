@@ -205,7 +205,6 @@ test('CoworkRunner uses MetaBot DeepSeek automation model for local service exec
     'CoworkRunner should pass the resolved API config into the child process environment',
   );
 });
-
 test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 
@@ -226,6 +225,34 @@ test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.j
     packageJson.scripts.postinstall,
     /patch-claude-sdk-cli/,
     'postinstall must not patch the removed cli.js bundle anymore',
+  );
+});
+
+test('SDK query call sites isolate from user Claude Code settings sources', () => {
+  const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+  const sandboxRunnerSource = fs.readFileSync(
+    path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
+    'utf8',
+  );
+
+  assert.match(
+    coworkRunnerSource,
+    /settingSources:\s*\[\]/,
+    'CoworkRunner must pass settingSources: [] so user settings env blocks cannot override the session provider env',
+  );
+  assert.match(
+    coworkUtilSource,
+    /settingSources:\s*\[\]/,
+    'Session title generation must pass settingSources: [] for the same isolation',
+  );
+  assert.match(
+    sandboxRunnerSource,
+    /settingSources:\s*\[\]/,
+    'Sandbox runner must pass settingSources: [] for the same isolation',
   );
 });
 

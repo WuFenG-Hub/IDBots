@@ -3896,6 +3896,10 @@ export class CoworkRunner extends EventEmitter {
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: 'default',
       includePartialMessages: true,
+      // Isolate from the user's Claude Code settings files: their env blocks
+      // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
+      // override the provider environment we pass per session.
+      settingSources: [],
       stderr: (message: string) => {
         stderrTail += message;
         if (stderrTail.length > STDERR_TAIL_MAX_CHARS) {

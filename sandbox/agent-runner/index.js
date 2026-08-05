@@ -1215,6 +1215,9 @@ async function handleRequest(requestId, request, requestPath) {
       pathToClaudeCodeExecutable: resolveClaudeCodeExecutable() || undefined,
       includePartialMessages: true,
       permissionMode: 'default',
+      // Isolate from any Claude Code settings files in the guest/home so their
+      // env blocks cannot override the provider environment passed per request.
+      settingSources: [],
       stderr: (data) => {
         const line = typeof data === 'string' ? data.trim() : '';
         if (line) {

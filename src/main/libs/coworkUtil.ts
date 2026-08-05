@@ -1163,6 +1163,8 @@ export async function generateSessionTitle(userIntent: string | null): Promise<s
       env: currentEnv,
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: 'bypassPermissions',
+      // Isolate from user Claude Code settings (their env blocks would override ours).
+      settingSources: [],
     };
 
     // unstable_v2_prompt was removed in SDK 0.3.x; run a single-turn query and
