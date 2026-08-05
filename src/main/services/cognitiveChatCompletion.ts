@@ -30,6 +30,16 @@ export interface ToolCallResult {
 export interface ChatCompletionResult {
   content?: string;
   tool_calls?: ToolCallResult[];
+  /** Provider response metadata used to explain empty completions without logging prompt/output data. */
+  responseMetadata?: ChatCompletionResponseMetadata;
+}
+
+export interface ChatCompletionResponseMetadata {
+  apiType: 'openai' | 'anthropic';
+  stopReason?: string | null;
+  contentBlockTypes?: string[];
+  inputTokens?: number | null;
+  outputTokens?: number | null;
 }
 
 /** Message for chat completion (OpenAI-style). */
@@ -125,7 +135,7 @@ async function chatCompletionSingleAttempt(
           options.maxTokens
         );
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
-      throw new Error('LLM returned empty content');
+      throw new Error(formatEmptyCompletionError(result.responseMetadata));
     }
     return result;
   } catch (err) {
@@ -259,7 +269,11 @@ async function callAnthropicStyleWithTools(
     throw new Error(`LLM request failed: ${response.status} ${text.slice(0, 300)}`);
   }
 
-  let data: { content?: Array<{ type?: string; text?: string; id?: string; name?: string; input?: string }> };
+  let data: {
+    content?: Array<{ type?: string; text?: string; id?: string; name?: string; input?: string }>;
+    stop_reason?: string | null;
+    usage?: { input_tokens?: number; output_tokens?: number };
+  };
   try {
     data = JSON.parse(text) as typeof data;
   } catch {
@@ -267,8 +281,16 @@ async function callAnthropicStyleWithTools(
     throw new Error('LLM response was not valid JSON');
   }
 
-  const out: ChatCompletionResult = {};
   const contentBlocks = data.content ?? [];
+  const out: ChatCompletionResult = {
+    responseMetadata: {
+      apiType: 'anthropic',
+      stopReason: data.stop_reason ?? null,
+      contentBlockTypes: contentBlocks.map((block) => block.type ?? 'unknown'),
+      inputTokens: data.usage?.input_tokens ?? null,
+      outputTokens: data.usage?.output_tokens ?? null,
+    },
+  };
   const toolCalls: ToolCallResult[] = [];
   for (const block of contentBlocks) {
     if (block.type === 'text' && block.text) {
@@ -329,7 +351,10 @@ async function callOpenAIStyleWithTools(
       function: { name: string; arguments: string };
     }>;
   };
-  let data: { choices?: Array<{ message?: ChoiceMessage }> };
+  let data: {
+    choices?: Array<{ finish_reason?: string | null; message?: ChoiceMessage }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
   try {
     data = JSON.parse(text) as typeof data;
   } catch {
@@ -338,7 +363,18 @@ async function callOpenAIStyleWithTools(
   }
 
   const msg = data.choices?.[0]?.message;
-  const out: ChatCompletionResult = {};
+  const out: ChatCompletionResult = {
+    responseMetadata: {
+      apiType: 'openai',
+      stopReason: data.choices?.[0]?.finish_reason ?? null,
+      contentBlockTypes: [
+        ...(msg?.content ? ['text'] : []),
+        ...(msg?.tool_calls?.length ? ['tool_calls'] : []),
+      ],
+      inputTokens: data.usage?.prompt_tokens ?? null,
+      outputTokens: data.usage?.completion_tokens ?? null,
+    },
+  };
   if (msg?.content) {
     out.content = String(msg.content).trim();
   }
@@ -350,4 +386,14 @@ async function callOpenAIStyleWithTools(
     }));
   }
   return out;
+}
+
+function formatEmptyCompletionError(metadata?: ChatCompletionResponseMetadata): string {
+  if (!metadata) return 'LLM returned empty content';
+  const details = [
+    metadata.stopReason ? `stop_reason=${metadata.stopReason}` : null,
+    metadata.contentBlockTypes?.length ? `blocks=${metadata.contentBlockTypes.join(',')}` : 'blocks=none',
+    metadata.outputTokens != null ? `output_tokens=${metadata.outputTokens}` : null,
+  ].filter(Boolean);
+  return `LLM returned no text (${details.join('; ')})`;
 }

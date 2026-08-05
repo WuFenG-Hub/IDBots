@@ -63,11 +63,73 @@ test('resetStaleRunningRuns marks interrupted runs as failed', async () => {
     const store = new DreamStore(db, () => {});
     store.beginRun(5, '2026-07-30', null, 1);
     store.beginRun(6, '2026-07-30', null, 1);
+    store.beginDreamFragment({
+      metabotId: 5,
+      dreamDate: '2026-07-30',
+      fragmentKey: 'session:s1:0',
+      sessionId: 's1',
+      chunkIndex: 0,
+      contentHash: 'hash',
+      sourceMessageCount: 1,
+      sourceCharCount: 1,
+      estimatedInputTokens: 1,
+      llmId: null,
+      dreamVersion: 3,
+    });
     store.finishRun(6, '2026-07-30', 'completed');
 
-    assert.equal(store.resetStaleRunningRuns(), 1);
+    assert.equal(store.resetStaleRunningRuns(), 2, 'interrupted runs and fragments are both recovered');
     assert.equal(store.getRun(5, '2026-07-30').status, 'failed');
+    assert.equal(store.getDreamFragment(5, '2026-07-30', 'session:s1:0').status, 'failed');
     assert.equal(store.getRun(6, '2026-07-30').status, 'completed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('dream fragments are idempotent, resumable, and migrate with the dream schema', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = new DreamStore(db, () => {});
+    const started = store.beginDreamFragment({
+      metabotId: 5,
+      dreamDate: '2026-07-30',
+      fragmentKey: 'session:s1:0',
+      sessionId: 's1',
+      chunkIndex: 0,
+      contentHash: 'hash-a',
+      sourceMessageCount: 4,
+      sourceCharCount: 1200,
+      estimatedInputTokens: 500,
+      llmId: 'deepseek-v4-flash',
+      dreamVersion: 3,
+    });
+    assert.equal(started.status, 'running');
+    assert.equal(started.attemptCount, 1);
+
+    store.finishDreamFragment(5, '2026-07-30', 'session:s1:0', 'completed', '{"daily_summary":"证据"}');
+    const completed = store.getDreamFragment(5, '2026-07-30', 'session:s1:0');
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.summaryJson, '{"daily_summary":"证据"}');
+
+    const restarted = store.beginDreamFragment({
+      metabotId: 5,
+      dreamDate: '2026-07-30',
+      fragmentKey: 'session:s1:0',
+      sessionId: 's1',
+      chunkIndex: 0,
+      contentHash: 'hash-b',
+      sourceMessageCount: 5,
+      sourceCharCount: 1500,
+      estimatedInputTokens: 600,
+      llmId: 'deepseek-v4-flash',
+      dreamVersion: 3,
+    });
+    assert.equal(restarted.status, 'running');
+    assert.equal(restarted.attemptCount, 2);
+    assert.equal(restarted.contentHash, 'hash-b');
+    assert.equal(store.listDreamFragments(5, '2026-07-30').length, 1);
+    assert.ok(db.exec('PRAGMA table_info(metabot_dream_fragments)')[0]);
   } finally {
     cleanup();
   }

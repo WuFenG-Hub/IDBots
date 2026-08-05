@@ -1,5 +1,7 @@
 import type { DreamDayActivity, DreamSessionActivity } from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
+import { estimateCoworkTextTokens } from './coworkContextBudget';
+import type { DreamActivityChunk } from './dreamFragments';
 
 /**
  * Dream prompt building and output parsing — pure functions, no I/O.
@@ -11,7 +13,10 @@ import { formatBotWorkspaceDate } from './botWorkspace';
  */
 
 export const DREAM_LOOKBACK_DAYS = 7;
-export const DREAM_MAX_ATTEMPTS = 3;
+/** Retry failed dream runs with bounded exponential backoff instead of
+ * abandoning a date after a short burst of transient failures. */
+export const DREAM_RETRY_BASE_DELAY_MS = 30 * 60 * 1000;
+export const DREAM_RETRY_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 /** Nightly dream window: [00:00, 06:00) local time. */
 export const DREAM_WINDOW_END_MINUTES = 6 * 60;
 /**
@@ -20,15 +25,13 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  */
-export const DREAM_VERSION = 1;
+export const DREAM_VERSION = 3;
+/** Default activity input budget for a day-level prompt, measured in tokens. */
+export const DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET = 48_000;
 export const SELF_IDENTITY_MIN_CHARS = 200;
 export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
 export const MAX_VALUE_LESSONS = 3;
-
-const MESSAGE_MAX_CHARS = 500;
-const SESSION_MAX_CHARS = 2000;
-const TOTAL_ACTIVITY_MAX_CHARS = 12000;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -105,12 +108,20 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
   return { valid: charCount >= SELF_IDENTITY_MIN_CHARS, charCount };
 }
 
+export function computeDreamRetryDelayMs(attemptCount: number): number {
+  const normalizedAttempts = Math.max(1, Math.floor(Number(attemptCount) || 1));
+  const exponent = Math.min(4, normalizedAttempts - 1);
+  return Math.min(DREAM_RETRY_MAX_DELAY_MS, DREAM_RETRY_BASE_DELAY_MS * (2 ** exponent));
+}
+
 /**
  * Which past dates still need dream attention for this bot.
  * - Candidates: the last `lookbackDays` calendar days, today excluded.
  * - Yesterday's dream only runs inside the nightly window, after the bot's
  *   staggered minute; older missed dates (catch-up) are due any time.
- * - Running dates are skipped; failed dates retry up to DREAM_MAX_ATTEMPTS.
+ * - Running dates are skipped; failed dates retry after bounded exponential
+ *   backoff, so a transient provider failure does not exhaust the date after
+ *   a few tightly grouped attempts.
  * - A completed run is *final* only when it started after the dream date
  *   ended (it covered the whole day). A non-final run — e.g. triggered
  *   manually mid-day — is due again in the next eligible window.
@@ -137,7 +148,10 @@ export function computeDueDreamDates(input: {
     const dateStr = formatBotWorkspaceDate(candidate);
     const state = input.runStates.get(dateStr);
     if (state?.status === 'running') continue;
-    if (state?.status === 'failed' && state.attemptCount >= DREAM_MAX_ATTEMPTS) continue;
+    if (state?.status === 'failed') {
+      const retryAt = state.startedAt + computeDreamRetryDelayMs(state.attemptCount);
+      if (input.now.getTime() < retryAt) continue;
+    }
     if (state?.status === 'completed') {
       const coveredWholeDay = state.startedAt >= getDayBoundsMs(dateStr).endMs;
       if (coveredWholeDay) {
@@ -159,18 +173,35 @@ const truncateText = (text: string, maxChars: number): string => {
   return `${normalized.slice(0, maxChars)}…`;
 };
 
-function formatSessionActivity(session: DreamSessionActivity, budgetChars: number): string {
+function truncateToTokenBudget(text: string, maxTokens: number): string {
+  const normalized = String(text ?? '').trim();
+  const budget = Math.max(1, Math.floor(maxTokens));
+  if (estimateCoworkTextTokens(normalized) <= budget) return normalized;
+  const marker = '\n……(本片段更多内容略)\n';
+  const chars = Array.from(normalized);
+  let low = 1;
+  let high = chars.length;
+  let best = marker;
+  while (low <= high) {
+    const length = Math.floor((low + high) / 2);
+    const headLength = Math.max(1, Math.floor(length * 0.65));
+    const tailLength = Math.max(1, length - headLength);
+    const candidate = `${chars.slice(0, headLength).join('')}${marker}${chars.slice(-tailLength).join('')}`;
+    if (estimateCoworkTextTokens(candidate) <= budget) {
+      best = candidate;
+      low = length + 1;
+    } else {
+      high = length - 1;
+    }
+  }
+  return best;
+}
+
+function formatSessionActivity(session: DreamSessionActivity): string {
   const lines: string[] = [];
-  let used = 0;
   for (const message of session.messages) {
     const speaker = message.type === 'user' ? '对方' : '你';
-    const line = `${speaker}: ${truncateText(message.content, MESSAGE_MAX_CHARS)}`;
-    if (used + line.length > budgetChars) {
-      lines.push('……(更多消息略)');
-      break;
-    }
-    lines.push(line);
-    used += line.length;
+    lines.push(`${speaker}: ${message.content.replace(/\s+/g, ' ').trim()}`);
   }
   return lines.join('\n');
 }
@@ -189,7 +220,14 @@ export function buildDreamPrompt(input: {
   soul?: string | null;
   date: string;
   activity: DreamDayActivity;
+  activityTokenBudget?: number;
+  sourceMode?: 'raw_activity' | 'fragment_summaries' | 'fragment';
 }): { system: string; user: string } {
+  const sourceMode = input.sourceMode ?? 'raw_activity';
+  const activityTokenBudget = Math.max(
+    256,
+    Math.floor(input.activityTokenBudget ?? DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET)
+  );
   const personaLines = [`你是 ${input.botName},一个生活在 MetaWeb 上的 MetaBot(类人智能体)。`];
   if (input.role?.trim()) personaLines.push(`你的角色:${input.role.trim()}`);
   if (input.soul?.trim()) personaLines.push(`你的灵魂:${input.soul.trim()}`);
@@ -200,6 +238,7 @@ export function buildDreamPrompt(input: {
   const humanSessions: string[] = [];
   const a2aSessions: string[] = [];
   const orderSessions: string[] = [];
+  const fragmentSessions: string[] = [];
 
   interface SessionEntry {
     bucket: string[];
@@ -210,30 +249,32 @@ export function buildDreamPrompt(input: {
   for (const session of input.activity.sessions) {
     const peerSuffix = session.peerName ? `(${session.peerName})` : '';
     const header = `【会话:${truncateText(session.title, 80)}${peerSuffix}】`;
-    const body = formatSessionActivity(session, SESSION_MAX_CHARS);
+    const body = formatSessionActivity(session);
     if (!body) continue;
-    const bucket = session.isOrder ? orderSessions : session.sessionType === 'a2a' ? a2aSessions : humanSessions;
+    const bucket = sourceMode === 'fragment_summaries'
+      ? fragmentSessions
+      : session.isOrder ? orderSessions : session.sessionType === 'a2a' ? a2aSessions : humanSessions;
     entries.push({ bucket, header, body });
   }
 
   // Fair-share budgeting: every session gets an equal slice of the total
   // budget (capped per session) instead of first-come-first-served — a busy
   // day must not silently hide its later sessions from the review.
-  let remainingBudget = TOTAL_ACTIVITY_MAX_CHARS;
+  let remainingBudget = activityTokenBudget;
   entries.forEach((entry, index) => {
-    const share = Math.min(SESSION_MAX_CHARS, Math.floor(remainingBudget / (entries.length - index)));
+    const share = Math.floor(remainingBudget / (entries.length - index));
     let block: string;
     if (share <= 0) {
       block = `${entry.header}\n……(篇幅有限,内容从略)`;
     } else {
-      const body = entry.body.length > share ? `${entry.body.slice(0, share)}\n……(本会话更多内容略)` : entry.body;
-      block = `${entry.header}\n${body}`;
+      block = truncateToTokenBudget(`${entry.header}\n${entry.body}`, share);
     }
     entry.bucket.push(block);
-    remainingBudget -= block.length;
+    remainingBudget = Math.max(0, remainingBudget - estimateCoworkTextTokens(block));
   });
 
   const sections: string[] = [];
+  if (fragmentSessions.length > 0) sections.push(`## 分块证据摘要\n${fragmentSessions.join('\n\n')}`);
   if (humanSessions.length > 0) sections.push(`## 与人类用户的对话\n${humanSessions.join('\n\n')}`);
   if (a2aSessions.length > 0) sections.push(`## 与其他 Bot 的对话\n${a2aSessions.join('\n\n')}`);
   if (orderSessions.length > 0) sections.push(`## 服务订单\n${orderSessions.join('\n\n')}`);
@@ -248,7 +289,31 @@ export function buildDreamPrompt(input: {
   const inventory =
     `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
     `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次。` +
-    '以下内容按篇幅做了均衡摘录,被截断或从略的会话以其标题为准,不要臆造未展示的细节。';
+    (sourceMode === 'fragment_summaries'
+      ? '以下内容是从当天真实记录中分块提炼出的证据摘要,请综合摘要而不是臆造未展示的原文细节。'
+      : '以下内容按 token 预算做了均衡摘录,被截断或从略的会话以其标题为准,不要臆造未展示的细节。');
+
+  if (sourceMode === 'fragment') {
+    const user = [
+      `以下是你在 ${input.date} 这一天的一段真实经历记录(这是分块提炼阶段,不是整日结论):`,
+      inventory,
+      '',
+      sections.join('\n\n'),
+      '',
+      '请只根据当前片段中明确出现的证据,输出一个紧凑 JSON 对象(不要输出其他文字、不要使用 markdown):',
+      '{',
+      '  "daily_summary": "本片段发生了什么,只写明确证据",',
+      '  "sections": {"human": "...", "a2a": "...", "orders": "...", "tasks": "..."},',
+      '  "work_reviews": [],',
+      '  "important_memories": [],',
+      '  "value_lessons": [],',
+      '  "self_identity": null',
+      '}',
+      '',
+      '只保留有证据的 sections 键,不要推断整天发生的事,不要生成自我身份或泛泛而谈的结论。',
+    ].join('\n');
+    return { system: personaLines.join('\n'), user };
+  }
 
   const user = [
     `以下是你在 ${input.date} 这一天的真实经历记录:`,
@@ -287,6 +352,37 @@ export function buildDreamPrompt(input: {
   ].join('\n');
 
   return { system: personaLines.join('\n'), user };
+}
+
+export function buildDreamFragmentPrompt(input: {
+  botName: string;
+  role?: string | null;
+  soul?: string | null;
+  date: string;
+  chunk: DreamActivityChunk;
+}): { system: string; user: string } {
+  return buildDreamPrompt({
+    botName: input.botName,
+    role: input.role,
+    soul: input.soul,
+    date: input.date,
+    activity: {
+      sessions: input.chunk.messages.length > 0
+        ? [{
+          sessionId: input.chunk.sessionId,
+          title: input.chunk.title,
+          sessionType: input.chunk.sessionType,
+          peerName: input.chunk.peerName,
+          isOrder: input.chunk.isOrder,
+          messages: input.chunk.messages,
+        }]
+        : [],
+      taskRuns: input.chunk.taskRuns,
+      orderCount: input.chunk.orderCount,
+    },
+    activityTokenBudget: Math.max(256, input.chunk.estimatedInputTokens + 256),
+    sourceMode: 'fragment',
+  });
 }
 
 const normalizeEvaluation = (value: unknown): DreamWorkReviewEvaluation => {

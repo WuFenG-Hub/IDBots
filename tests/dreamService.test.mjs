@@ -94,7 +94,7 @@ const setup = async (performChat) => {
 test('runNow completes the full dream pipeline and writes all artifacts', async () => {
   const calls = [];
   const { cleanup, coworkStore, dreamStore, service, events } = await setup(async (system, user, llmId, options) => {
-    calls.push({ llmId, maxTokens: options?.maxTokens });
+    calls.push({ llmId, maxTokens: options?.maxTokens, throwOnEmptyContent: options?.throwOnEmptyContent });
     return makePayload();
   });
   try {
@@ -104,13 +104,16 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(run.status, 'completed');
     assert.equal(run.llmId, 'bot-own-llm');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].maxTokens, 4096);
+    assert.equal(calls[0].maxTokens, 8192);
+    assert.equal(calls[0].throwOnEmptyContent, true);
 
     const summary = dreamStore.getDailySummary(5, DAY);
     assert.equal(summary.summaryText, '今天为用户交付了演示视频,获得高度赞扬。');
     assert.equal(summary.sections.human, '和用户确认视频效果');
     assert.equal(summary.stats.sessionCount, 1);
     assert.equal(summary.stats.messageCount, 3);
+    assert.equal(summary.stats.activityCharCount, '视频做好了吗'.length + '做好了,你看下'.length + '太棒了,就是这个效果'.length);
+    assert.ok(summary.stats.estimatedActivityTokens > 0);
     assert.equal(summary.sessionRefs.length, 1);
     assert.equal(summary.sessionRefs[0].title, '和用户聊发布');
     assert.equal(summary.sessionRefs[0].sessionType, 'standard');
@@ -141,6 +144,69 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
       { channel: 'metabot:dreamStatusChanged', payload: { metabotId: 5, dreaming: false } },
     ]);
     assert.equal(service.isDreaming(5), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('large activity uses resumable map-reduce fragments and reuses completed fragments', async () => {
+  const calls = [];
+  const ctx = await setup(async (system, user, llmId, options) => {
+    calls.push({ system, user, llmId, maxTokens: options?.maxTokens });
+    return makePayload();
+  });
+  try {
+    const sessionId = firstSessionId(ctx.db);
+    for (let index = 0; index < 70; index += 1) {
+      ctx.db.run(
+        'INSERT INTO cowork_messages (id, session_id, type, content, metadata, created_at, sequence) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [`large-${index}`, sessionId, index % 2 === 0 ? 'user' : 'assistant', `${index % 2 === 0 ? '用户' : '我'}:${'当天的长对话内容'.repeat(140)}`, '{}', DAY_START + 10_000 + index, 10 + index]
+      );
+    }
+
+    await ctx.service.runNow(5, DAY);
+    const fragments = ctx.dreamStore.listDreamFragments(5, DAY);
+    assert.ok(fragments.length > 1, 'large day should produce multiple fragments');
+    assert.ok(fragments.every((fragment) => fragment.status === 'completed'));
+    assert.ok(calls.some((call) => call.user.includes('分块提炼阶段')));
+    assert.ok(calls.some((call) => call.user.includes('分块证据摘要')));
+    assert.ok(calls.some((call) => call.maxTokens === 4096), 'fragment calls use a compact output budget');
+    assert.equal(calls.at(-1).maxTokens, 8192, 'final synthesis uses the default model output limit');
+    const attemptsBefore = fragments.map((fragment) => fragment.attemptCount);
+    const callsBefore = calls.length;
+
+    await ctx.service.runNow(5, DAY);
+    assert.equal(calls.length, callsBefore + 1, 'a retry reuses completed fragments and only reruns synthesis');
+    assert.deepEqual(
+      ctx.dreamStore.listDreamFragments(5, DAY).map((fragment) => fragment.attemptCount),
+      attemptsBefore,
+    );
+  } finally {
+    ctx.cleanup();
+  }
+});
+
+test('a concurrent manual trigger waits for the active queue run', async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const { cleanup, dreamStore, service } = await setup(async () => {
+    calls += 1;
+    await blocked;
+    return makePayload();
+  });
+  try {
+    const first = service.runNow(5, DAY);
+    while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+    const second = service.runNow(5, DAY);
+    let secondSettled = false;
+    void second.then(() => { secondSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondSettled, false);
+    release();
+    await Promise.all([first, second]);
+    assert.equal(calls, 1);
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
   } finally {
     cleanup();
   }
@@ -222,7 +288,7 @@ test('re-dreaming the same date replaces the day batch and updates identity in p
     const run = dreamStore.getRun(5, DAY);
     assert.equal(run.status, 'completed');
     assert.equal(run.attemptCount, 2);
-    assert.ok(run.dreamVersion >= 1, 'run records the current algorithm version');
+    assert.equal(run.dreamVersion, 3, 'run records the current algorithm version');
   } finally {
     cleanup();
   }
@@ -371,7 +437,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 1, 'at most one repair per bot per night');
     assert.ok(calls[0].includes(DAY), 'newest stale date repairs first');
-    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 1, 'repaired date now records the current version');
+    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 3, 'repaired date now records the current version');
     assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 0, 'older stale date waits');
     const identities = coworkStore.listUserMemories({
       metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
@@ -385,7 +451,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 2, 'next night repairs the remaining stale date');
     assert.ok(calls[1].includes('2026-07-29'));
-    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 1);
+    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 3);
 
     now = new Date(2026, 7, 3, 3, 0);
     await service.tick();

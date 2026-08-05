@@ -4,7 +4,7 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 /**
  * Dream consolidation storage layer.
  *
- * Two tables (created idempotently both here and in sqliteStore.initializeTables):
+ * Dream tables (created idempotently both here and in sqliteStore.initializeTables):
  * - metabot_daily_summaries: one row per bot per date with the dream-produced
  *   narrative of that day (overall + per-category sections).
  * - metabot_dream_runs: one row per bot per date tracking consolidation runs;
@@ -16,6 +16,7 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
  */
 
 export type DreamRunStatus = 'running' | 'completed' | 'failed';
+export type DreamFragmentStatus = 'running' | 'completed' | 'failed';
 
 export interface DreamRun {
   id: string;
@@ -29,6 +30,27 @@ export interface DreamRun {
   error: string | null;
   startedAt: number;
   completedAt: number | null;
+}
+
+export interface DreamFragment {
+  id: string;
+  metabotId: number;
+  dreamDate: string;
+  fragmentKey: string;
+  sessionId: string;
+  chunkIndex: number;
+  contentHash: string;
+  sourceMessageCount: number;
+  sourceCharCount: number;
+  estimatedInputTokens: number;
+  status: DreamFragmentStatus;
+  summaryJson: string | null;
+  llmId: string | null;
+  dreamVersion: number;
+  error: string | null;
+  attemptCount: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface DailySummarySessionRef {
@@ -93,6 +115,27 @@ interface DreamRunRow {
   error: string | null;
   started_at: number | string;
   completed_at: number | string | null;
+}
+
+interface DreamFragmentRow {
+  id: string;
+  metabot_id: number | string;
+  dream_date: string;
+  fragment_key: string;
+  session_id: string;
+  chunk_index: number | string;
+  content_hash: string;
+  source_message_count: number | string;
+  source_char_count: number | string;
+  estimated_input_tokens: number | string;
+  status: string;
+  summary_json: string | null;
+  llm_id: string | null;
+  dream_version: number | string | null;
+  error: string | null;
+  attempt_count: number | string;
+  created_at: number | string;
+  updated_at: number | string;
 }
 
 interface DailySummaryRow {
@@ -180,6 +223,33 @@ export class DreamStore {
         updated_at INTEGER NOT NULL,
         UNIQUE(metabot_id, dream_date)
       );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_dream_fragments (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        fragment_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL DEFAULT 0,
+        content_hash TEXT NOT NULL,
+        source_message_count INTEGER NOT NULL DEFAULT 0,
+        source_char_count INTEGER NOT NULL DEFAULT 0,
+        estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        summary_json TEXT,
+        llm_id TEXT,
+        dream_version INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, dream_date, fragment_key)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_dream_fragments_date
+      ON metabot_dream_fragments(metabot_id, dream_date)
     `);
     try {
       const cols = this.db.exec('PRAGMA table_info(metabot_daily_summaries);');
@@ -283,6 +353,30 @@ export class DreamStore {
     };
   }
 
+  private mapFragmentRow(row: DreamFragmentRow): DreamFragment {
+    const status = row.status === 'completed' || row.status === 'failed' ? row.status : 'running';
+    return {
+      id: row.id,
+      metabotId: parseIdNumber(row.metabot_id) ?? 0,
+      dreamDate: row.dream_date,
+      fragmentKey: row.fragment_key,
+      sessionId: row.session_id,
+      chunkIndex: parseIdNumber(row.chunk_index) ?? 0,
+      contentHash: row.content_hash,
+      sourceMessageCount: parseIdNumber(row.source_message_count) ?? 0,
+      sourceCharCount: parseIdNumber(row.source_char_count) ?? 0,
+      estimatedInputTokens: parseIdNumber(row.estimated_input_tokens) ?? 0,
+      status: status as DreamFragmentStatus,
+      summaryJson: row.summary_json ?? null,
+      llmId: row.llm_id ?? null,
+      dreamVersion: parseIdNumber(row.dream_version) ?? 0,
+      error: row.error ?? null,
+      attemptCount: parseIdNumber(row.attempt_count) ?? 1,
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+
   private mapSummaryRow(row: DailySummaryRow): DailySummary {
     return {
       id: row.id,
@@ -345,6 +439,96 @@ export class DreamStore {
     return row ? this.mapRunRow(row) : null;
   }
 
+  getDreamFragment(metabotId: number, dreamDate: string, fragmentKey: string): DreamFragment | null {
+    const row = this.getOne<DreamFragmentRow>(
+      `SELECT * FROM metabot_dream_fragments
+       WHERE metabot_id = ? AND dream_date = ? AND fragment_key = ? LIMIT 1`,
+      [metabotId, dreamDate, fragmentKey]
+    );
+    return row ? this.mapFragmentRow(row) : null;
+  }
+
+  listDreamFragments(metabotId: number, dreamDate: string): DreamFragment[] {
+    const rows = this.getAll<DreamFragmentRow>(
+      `SELECT * FROM metabot_dream_fragments
+       WHERE metabot_id = ? AND dream_date = ? ORDER BY chunk_index ASC, fragment_key ASC`,
+      [metabotId, dreamDate]
+    );
+    return rows.map((row) => this.mapFragmentRow(row));
+  }
+
+  beginDreamFragment(input: {
+    metabotId: number;
+    dreamDate: string;
+    fragmentKey: string;
+    sessionId: string;
+    chunkIndex: number;
+    contentHash: string;
+    sourceMessageCount: number;
+    sourceCharCount: number;
+    estimatedInputTokens: number;
+    llmId: string | null;
+    dreamVersion: number;
+  }): DreamFragment {
+    const now = Date.now();
+    this.db.run(`
+      INSERT INTO metabot_dream_fragments (
+        id, metabot_id, dream_date, fragment_key, session_id, chunk_index,
+        content_hash, source_message_count, source_char_count, estimated_input_tokens,
+        status, summary_json, llm_id, dream_version, error, attempt_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', NULL, ?, ?, NULL, 1, ?, ?)
+      ON CONFLICT(metabot_id, dream_date, fragment_key) DO UPDATE SET
+        session_id = excluded.session_id,
+        chunk_index = excluded.chunk_index,
+        content_hash = excluded.content_hash,
+        source_message_count = excluded.source_message_count,
+        source_char_count = excluded.source_char_count,
+        estimated_input_tokens = excluded.estimated_input_tokens,
+        status = 'running',
+        summary_json = NULL,
+        llm_id = excluded.llm_id,
+        dream_version = excluded.dream_version,
+        error = NULL,
+        attempt_count = metabot_dream_fragments.attempt_count + 1,
+        updated_at = excluded.updated_at
+    `, [
+      uuidv4(),
+      input.metabotId,
+      input.dreamDate,
+      input.fragmentKey,
+      input.sessionId,
+      input.chunkIndex,
+      input.contentHash,
+      input.sourceMessageCount,
+      input.sourceCharCount,
+      input.estimatedInputTokens,
+      input.llmId,
+      input.dreamVersion,
+      now,
+      now,
+    ]);
+    this.saveDb();
+    const fragment = this.getDreamFragment(input.metabotId, input.dreamDate, input.fragmentKey);
+    if (!fragment) throw new Error('Failed to load dream fragment after beginDreamFragment');
+    return fragment;
+  }
+
+  finishDreamFragment(
+    metabotId: number,
+    dreamDate: string,
+    fragmentKey: string,
+    status: 'completed' | 'failed',
+    summaryJson: string | null = null,
+    error: string | null = null,
+  ): void {
+    this.db.run(`
+      UPDATE metabot_dream_fragments
+      SET status = ?, summary_json = ?, error = ?, updated_at = ?
+      WHERE metabot_id = ? AND dream_date = ? AND fragment_key = ?
+    `, [status, summaryJson, error, Date.now(), metabotId, dreamDate, fragmentKey]);
+    this.saveDb();
+  }
+
   /** status + attempt_count + started_at + dream_version for the given dates, keyed by dream_date. */
   getRunStates(metabotId: number, dreamDates: string[]): Map<string, { status: DreamRunStatus; attemptCount: number; startedAt: number; dreamVersion: number }> {
     const states = new Map<string, { status: DreamRunStatus; attemptCount: number; startedAt: number; dreamVersion: number }>();
@@ -386,7 +570,14 @@ export class DreamStore {
       SET status = 'failed', error = 'Application restarted during dream run', updated_at = ?
       WHERE status = 'running'
     `, [Date.now()]);
-    const modified = this.db.getRowsModified?.() || 0;
+    const runModified = this.db.getRowsModified?.() || 0;
+    this.db.run(`
+      UPDATE metabot_dream_fragments
+      SET status = 'failed', error = 'Application restarted during dream run', updated_at = ?
+      WHERE status = 'running'
+    `, [Date.now()]);
+    const fragmentModified = this.db.getRowsModified?.() || 0;
+    const modified = runModified + fragmentModified;
     if (modified > 0) {
       this.saveDb();
     }
