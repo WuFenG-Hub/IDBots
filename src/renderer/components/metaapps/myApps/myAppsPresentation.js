@@ -5,7 +5,7 @@ const METAFILE_ACCELERATE_CONTENT_API_BASE_URL =
   'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/';
 const PIN_ID_PATTERN = /^[0-9a-f]{64}i0$/i;
 
-export const buildShareUrl = (pinId) => `https://metaweb.world/metaapp/${String(pinId || '').toLowerCase()}`;
+export const buildShareUrl = (pinId) => `https://openagentinternet.org/browser/metaapp/${String(pinId || '').toLowerCase()}`;
 
 export const formatRuntime = (runtime) => {
   const text = String(runtime || '').trim();

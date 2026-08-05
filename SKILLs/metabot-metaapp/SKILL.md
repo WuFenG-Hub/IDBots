@@ -25,11 +25,13 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 
 1. 开发新的 MetaApp，或改一个现有静态站点的 Agent Internet 接入方式：
    先读 `references/agent-browser-metaapp.md`；新应用同时读 `references/app-md.md` 并给应用写好包根的 `APP.md`
-2. 发布、修改、删除、分享 MetaApp：
-   先读 `references/publish-manage.md`，再用 `scripts/index.js`
-3. 做 Bot homepage / Bot Page：
+2. 预览一个还没发布的项目：
+   用 `bot_browser_preview_local`（构造 `preview-metaapp://localhost<absPath>`），见 `references/publish-manage.md` §9
+3. 发布、修改、删除、分享 MetaApp：
+   先读 `references/publish-manage.md`，默认走 §6 Publish Wizard，再用 `scripts/index.js`
+4. 做 Bot homepage / Bot Page：
    先读 `references/agent-browser-metaapp.md`，再补读 `references/bot-homepage-v3.md`
-4. 用户问的是旧的 IDFramework MetaApp：
+5. 用户问的是旧的 IDFramework MetaApp：
    只有在用户明确要维护 IDFramework 老项目时，才考虑旧技能；普通 MetaApp 工作一律走本技能
 
 ## 开发规则
@@ -42,6 +44,9 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 - 写链用 `metaid.pin.write`。
 - 选文件上传用 `metafile.upload`。
 - 不要在 MetaApp 里请求钱包 API、私钥、支付 API、宿主路由、本地文件路径、父 DOM 访问权。
+- 发布前先用 `bot_browser_preview_local` 预览，确认应用在内置浏览器里能跑。
+- 渲染远端图片字段（头像、icon、cover、gallery）时，先把 `metafile://` / 裸 pin id 解析成可访问 URL，详见 [agent-browser-metaapp.md](references/agent-browser-metaapp.md) §8。
+- homepage 上的 Message 按钮用宿主拥有的 compose 流程，详见 [agent-browser-metaapp.md](references/agent-browser-metaapp.md) §9。
 
 写前端或审查前端实现前，先读 [agent-browser-metaapp.md](references/agent-browser-metaapp.md)。
 
@@ -151,12 +156,19 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 ## 验证清单
 
 - 项目是浏览器可运行的静态站点
+- 发布前已用 `bot_browser_preview_local` 预览，应用在内置浏览器里可运行
+- 预览用的是 `preview-metaapp://localhost<absPath>`，不是 `file://`、不是手拼 localhost URL、也不是内部 `localPreviewUrl` 直接交给用户
 - 包内资源路径是相对路径，不是站点根路径
 - 包根有 `APP.md`（纯自然语言的应用自述），且与当前代码一致
 - Agent Internet 资源链接优先使用 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://`
 - 页面需要 bridge 时，`AgentBrowser` helper 已接入
+- 远端图片字段（`metafile://`、裸 pin id）已解析成可访问 URL，没有把未解析的 `metafile://` 直接放进 `<img src>`（除非运行时原生支持）
+- 系统提供 `metafileContentBaseUrl` / `manApiBaseUrl` 时，优先用配置值而不是公共 fallback
+- homepage 的 Message 按钮用无参 `browser.privateChat.compose`；`browser.simplemsg.compose` 只在显式收件人 + 非空 content 时用
+- `{ opened: true }` 只表示确认 UI 已打开，不是已发送
 - `content` 最终是 `metafile://...`
 - 本地图片在最终 JSON 里已经变成 `metafile://...` 或保留合法 `https://...`
 - `metadata` 是对象，不是随意字符串
 - 最终 payload 已展示给用户确认
 - 更新/删除/分享时，优先携带 `firstPinId`，避免公开分享 pin 漂到最新 write pin
+- 发布后 handoff 给用户的四件套：URI（`metaapp://<viewPinId>`）、打开（内置浏览器 `bot_browser_open_uri`）、管理（My Apps）、分享（`openagentinternet.org` web2 链接，仅用于发给别人）

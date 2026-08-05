@@ -16,7 +16,7 @@ export interface OwnerMutationResult {
   revokedPinId?: string;
   chainWrite?: unknown;
   metaappUri?: string;
-  metawebUrl?: string;
+  shareWebUrl?: string;
 }
 
 class MetaAppOwnerService {

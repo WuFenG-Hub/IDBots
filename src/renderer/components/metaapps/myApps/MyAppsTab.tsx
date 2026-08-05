@@ -298,7 +298,7 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
       {owner.shareRecord ? (() => {
         const rec = owner.shareRecord;
         const metaappUri = rec.metaappUri || `metaapp://${rec.pinId}`;
-        const webUrl = rec.metawebUrl || buildShareUrl(rec.pinId);
+        const webUrl = rec.shareWebUrl || buildShareUrl(rec.pinId);
         const shareRows: Array<[string, string]> = [
           [t('myAppsShareMetaappUri') || 'MetaApp URI', metaappUri],
           [t('myAppsShareWebUrl') || 'Web URL', webUrl],

@@ -48,7 +48,7 @@ export interface OwnerMetaAppRecord {
   txid?: string;
   txids: string[];
   metaappUri: string;
-  metawebUrl: string;
+  shareWebUrl: string;
   runUrl: string;
   raw?: unknown;
 }
