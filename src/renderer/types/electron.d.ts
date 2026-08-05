@@ -706,6 +706,7 @@ interface IElectronAPI {
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) => Promise<{ success: boolean; error?: string }>;
+    setEffort: (sessionId: string, effort: string | null) => Promise<{ success: boolean; error?: string }>;
     endA2APrivateChat: (sessionId: string) => Promise<{ success: boolean; noticeSent?: boolean; error?: string }>;
     ensureA2ASession: (input: CoworkEnsureA2ASessionInput) => Promise<CoworkEnsureA2ASessionResult>;
     queueA2AGuidance: (input: CoworkA2AGuidanceRequest) => Promise<CoworkA2AGuidanceResult>;

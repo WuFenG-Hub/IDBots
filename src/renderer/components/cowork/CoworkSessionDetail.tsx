@@ -12,6 +12,7 @@ import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
 import ContextUsageRing from '../ContextUsageRing';
 import PermissionModeSelector from './PermissionModeSelector';
+import EffortSelector from './EffortSelector';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -2086,6 +2087,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     return null;
   }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
+  const [effortOverride, setEffortOverride] = useState<string | null>(null);
   const detailRootRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -3278,6 +3280,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             )}
             <div className="flex items-center justify-end gap-2">
+              <EffortSelector
+                sessionId={currentSession.id}
+                currentEffort={effortOverride}
+                onEffortChange={(effort) => {
+                  setEffortOverride(effort);
+                  void coworkService.setEffort(currentSession.id, effort);
+                }}
+              />
               <PermissionModeSelector
                 sessionId={currentSession.id}
                 currentMode={currentSession.permissionMode ?? 'default'}

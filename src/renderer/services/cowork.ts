@@ -306,6 +306,20 @@ class CoworkService {
     return false;
   }
 
+  async setEffort(sessionId: string, effort: string | null): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setEffort) {
+      console.error('setEffort API not available');
+      return false;
+    }
+    const result = await cowork.setEffort(sessionId, effort);
+    if (!result.success) {
+      console.error('Failed to set effort level:', result.error);
+      return false;
+    }
+    return true;
+  }
+
   async endA2APrivateChat(sessionId: string): Promise<{ success: boolean; noticeSent?: boolean; error?: string }> {
     const cowork = window.electron?.cowork;
     if (!cowork?.endA2APrivateChat) {

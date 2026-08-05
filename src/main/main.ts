@@ -6246,6 +6246,23 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:setEffort', async (_event, payload: {
+    sessionId: string;
+    effort: string | null;
+  }) => {
+    try {
+      const { sessionId, effort } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      getCoworkRunner().setEffortOverride(sessionId, effort);
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to set effort level',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:queueA2AGuidance', async (_event, input: {
     sessionId?: unknown;
     guidance?: unknown;

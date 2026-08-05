@@ -310,6 +310,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    setEffort: (sessionId: string, effort: string | null) =>
+      ipcRenderer.invoke('cowork:session:setEffort', { sessionId, effort }),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
     ensureA2ASession: (input: {

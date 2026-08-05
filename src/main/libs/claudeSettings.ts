@@ -16,6 +16,15 @@ type ProviderModel = {
   id: string;
   contextWindow?: number;
   maxOutputTokens?: number;
+  /**
+   * Per-model options mirroring the renderer's ModelOptions. Present in the
+   * app_config blob but previously stripped by this typed reader, so the cowork
+   * SDK path never saw effort/thinking settings.
+   */
+  options?: {
+    reasoningEffort?: string;
+    thinking?: { type: string };
+  };
 };
 
 type ProviderConfig = {
@@ -401,6 +410,32 @@ export function resolveCurrentModelLimits(modelId?: string | null): CoworkModelL
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config') ?? {};
   return resolveCoworkModelLimits(appConfig, modelId);
+}
+
+/**
+ * Resolves per-model options (effort/thinking) from app_config for the given
+ * model id. Returns null when no options are configured. Used by the cowork
+ * SDK path to pass effort/thinking into the SDK options — previously these
+ * settings only reached the OpenAI-compat proxy for the renderer's direct
+ * API calls, never the cowork session.
+ */
+export function resolveModelOptions(modelId?: string | null): {
+  reasoningEffort?: string;
+  thinking?: { type: string };
+} | null {
+  if (!modelId) return null;
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<AppConfig>('app_config');
+  if (!appConfig?.providers) return null;
+
+  for (const provider of Object.values(appConfig.providers)) {
+    if (!provider?.models) continue;
+    const model = provider.models.find((m) => m.id === modelId);
+    if (model?.options) {
+      return model.options;
+    }
+  }
+  return null;
 }
 
 export function buildEnvForConfig(config: CoworkApiConfig): Record<string, string> {

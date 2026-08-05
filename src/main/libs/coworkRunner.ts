@@ -8,7 +8,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits } from './claudeSettings';
+import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions } from './claudeSettings';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkSteerChannel,
@@ -737,6 +737,10 @@ interface ActiveSession {
   disableMemoryUpdates?: boolean;
   /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
   permissionMode: CoworkPermissionMode;
+  /** Runtime effort override from the UI toggle; null = use per-model default. */
+  effortOverride: string | null;
+  /** Runtime thinking override from the UI toggle; null = use per-model default. */
+  thinkingOverride: { type: string } | null;
   /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
   lastSdkRuntimeStatusKey?: string;
   /**
@@ -3409,6 +3413,8 @@ export class CoworkRunner extends EventEmitter {
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
+      effortOverride: null,
+      thinkingOverride: null,
     };
     this.activeSessions.set(sessionId, activeSession);
     if (session.cwd !== sessionCwd) {
@@ -3583,6 +3589,19 @@ export class CoworkRunner extends EventEmitter {
     }
     this.store.updateSession(sessionId, { permissionMode: mode });
     coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Updates the effort level override for an active session. Takes effect on the
+   * next turn (effort is set per query invocation). Pass null to revert to the
+   * per-model default.
+   */
+  setEffortOverride(sessionId: string, effort: string | null): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      activeSession.effortOverride = effort;
+    }
+    coworkLog('INFO', 'setEffortOverride', 'Effort override updated', { sessionId, effort });
   }
 
   stopSession(
@@ -3953,6 +3972,15 @@ export class CoworkRunner extends EventEmitter {
       );
     }
 
+    // Resolve per-model effort/thinking options from app_config. These reach
+    // the SDK directly (previously they only went through the OpenAI-compat
+    // proxy for the renderer's direct API calls, never the cowork session).
+    // Session-level effort override (from the runtime UI toggle) takes
+    // precedence over the per-model default.
+    const modelOptions = resolveModelOptions(apiConfig.model);
+    const effectiveEffort = activeSession.effortOverride ?? modelOptions?.reasoningEffort;
+    const effectiveThinking = activeSession.thinkingOverride ?? modelOptions?.thinking;
+
     const options: Record<string, unknown> = {
       cwd,
       abortController,
@@ -3962,6 +3990,10 @@ export class CoworkRunner extends EventEmitter {
       includePartialMessages: true,
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
+        : {}),
+      ...(effectiveEffort ? { effort: effectiveEffort } : {}),
+      ...(effectiveThinking
+        ? { thinking: effectiveThinking }
         : {}),
       // Request context-aware follow-up prompt suggestions (one per turn,
       // emitted as a prompt_suggestion event after the result message).
