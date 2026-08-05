@@ -133,7 +133,6 @@ function resolvePinId(resp) {
     const txid = resp.txid ?? resp.txids?.[0] ?? '';
     return resp.pinId ?? (txid ? `${txid}i0` : '');
 }
-
 /**
  * Upload a local attachment through the unified file upload flow
  * (/api/idbots/files/upload-largefile). The flow picks direct vs chunked

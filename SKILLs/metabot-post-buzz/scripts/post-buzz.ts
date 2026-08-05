@@ -15,6 +15,7 @@ import pathMod from 'path';
 
 const RPC_BASE = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
 const CREATE_PIN_URL = `${RPC_BASE}/api/metaid/create-pin`;
+const UPLOAD_URL = `${RPC_BASE}/api/idbots/files/upload-largefile`;
 
 function writeStderr(message: string): void {
   process.stderr.write(message + '\n');
@@ -160,41 +161,75 @@ function resolvePinId(resp: CreatePinResponse): string {
   return resp.pinId ?? (txid ? `${txid}i0` : '');
 }
 
-async function uploadFile(filePath: string, metabotId: number, network: string): Promise<{ pinId: string; ext: string }> {
+interface UploadRpcResponse {
+  success?: boolean;
+  error?: string;
+  pinId?: string;
+  metafileUri?: string;
+  uploadMode?: string;
+}
+
+/**
+ * Upload a local attachment through the unified file upload flow
+ * (/api/idbots/files/upload-largefile). The flow picks direct vs chunked
+ * from file size and returns the canonical result (metafileUri, previewUrl,
+ * downloadUrl, metawebUrl, uploadMode). DOGE is not supported for file
+ * upload, so the caller maps DOGE attachments to the MVC path while keeping
+ * DOGE for the final buzz write.
+ */
+async function uploadFile(filePath: string, metabotId: number, network: string): Promise<{ pinId: string; ext: string; metafileUri: string }> {
   const resolved = pathMod.resolve(filePath);
   if (!fs.existsSync(resolved)) {
     throw new Error(`File not found: ${resolved}`);
   }
 
-  const buffer = fs.readFileSync(resolved);
-  const base64 = buffer.toString('base64');
+  const stat = fs.statSync(resolved);
   const contentType = inferContentType(resolved);
   const ext = getFileExtension(resolved);
 
-  writeStderr(`Uploading: ${pathMod.basename(resolved)} (${contentType}, ${buffer.length} bytes)...`);
+  writeStderr(`Uploading: ${pathMod.basename(resolved)} (${contentType}, ${stat.size} bytes)...`);
 
-  const resp = await createPin(metabotId, network, {
-    operation: 'create',
-    path: '/file',
-    encryption: '0',
-    version: '1.0',
-    contentType,
-    encoding: 'base64',
-    payload: base64,
+  const res = await fetch(UPLOAD_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      metabot_id: metabotId,
+      file_path: resolved,
+      content_type: contentType,
+      network,
+    }),
   });
 
-  const pinId = resolvePinId(resp);
+  const rawText = await res.text();
+  let parsed: UploadRpcResponse | null = null;
+  if (rawText.trim()) {
+    try {
+      const maybe = JSON.parse(rawText) as unknown;
+      parsed = maybe && typeof maybe === 'object' ? (maybe as UploadRpcResponse) : null;
+    } catch {
+      parsed = null;
+    }
+  }
+
+  if (!res.ok) {
+    const errMsg = parsed?.error || rawText;
+    throw new Error(`HTTP ${res.status}: ${errMsg}`);
+  }
+  if (!parsed || parsed.success === false) {
+    throw new Error(parsed?.error || 'Unknown upload RPC error');
+  }
+
+  const pinId = resolvePinId(parsed);
   if (!pinId) {
     throw new Error(`Failed to get pinId for uploaded file: ${resolved}`);
   }
+  const metafileUri = typeof parsed.metafileUri === 'string' && parsed.metafileUri.trim()
+    ? parsed.metafileUri.trim()
+    : `metafile://${pinId}${ext}`;
 
-  if (typeof resp.totalCost === 'number') {
-    writeStderr(`  -> pinId: ${pinId} (cost: ${resp.totalCost} satoshis)`);
-  } else {
-    writeStderr(`  -> pinId: ${pinId}`);
-  }
+  writeStderr(`  -> pinId: ${pinId} (mode: ${parsed.uploadMode ?? 'direct'})`);
 
-  return { pinId, ext };
+  return { pinId, ext, metafileUri };
 }
 
 const USAGE =
@@ -223,7 +258,7 @@ async function main(): Promise<void> {
         '  --content <string>              Text to post. Optional when request file provides content.\n' +
         '  --attachment <file|metafile://> (optional, repeatable) Local file path to upload, or existing metafile URI to attach directly.\n' +
         '  --content-type <string>         (optional) Content MIME type, default: text/plain;utf-8\n' +
-        '  --network <string>              (optional) Target network: mvc (default), doge, btc\n' +
+        '  --network <string>              (optional) Buzz write network: mvc (default), doge, btc. Attachments always upload via the file upload flow (DOGE unsupported for files; DOGE attachments upload on mvc).\n' +
         '  -h, --help                      Show this message.\n' +
         '\nEnv: IDBOTS_METABOT_ID (required), IDBOTS_RPC_URL (optional).\n'
     );
@@ -251,6 +286,8 @@ async function main(): Promise<void> {
     ...(values.attachment ?? []).map((item) => item.trim()).filter((item) => item.length > 0),
   ];
   const network = normalizeNetwork(values.network ?? requestNetwork);
+  // File upload does not support DOGE; keep DOGE only for the final buzz write.
+  const attachmentNetwork = network === 'doge' ? 'mvc' : network;
 
   if (typeof content !== 'string' || content.trim() === '') {
     writeStderr('Error: content is required and must not be empty. Use --request-file or --content.');
@@ -281,8 +318,8 @@ async function main(): Promise<void> {
       continue;
     }
 
-    const { pinId, ext } = await uploadFile(attachment, metabotId, network);
-    attachments.push(`metafile://${pinId}${ext}`);
+    const { metafileUri } = await uploadFile(attachment, metabotId, attachmentNetwork);
+    attachments.push(metafileUri);
     uploadedAttachmentCount += 1;
   }
 
