@@ -851,6 +851,7 @@ export function startMetaidRpcServer(
         file_path?: string;
         content_type?: string;
         network?: string;
+        verify?: boolean;
       };
       try {
         parsed = JSON.parse(body) as {
@@ -858,6 +859,7 @@ export function startMetaidRpcServer(
           file_path?: string;
           content_type?: string;
           network?: string;
+          verify?: boolean;
         };
       } catch {
         res.writeHead(400);
@@ -871,6 +873,7 @@ export function startMetaidRpcServer(
           filePath: String(parsed.file_path || '').trim(),
           contentType: typeof parsed.content_type === 'string' ? parsed.content_type : undefined,
           network: typeof parsed.network === 'string' ? parsed.network : undefined,
+          verify: parsed.verify === true,
         });
         res.writeHead(200);
         res.end(JSON.stringify(result));

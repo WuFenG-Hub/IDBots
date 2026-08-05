@@ -14,6 +14,7 @@ async function main() {
             file: { type: 'string' },
             'content-type': { type: 'string' },
             network: { type: 'string' },
+            verify: { type: 'boolean' },
             help: { type: 'boolean', short: 'h' },
         },
         allowPositionals: true,
@@ -25,6 +26,7 @@ async function main() {
             '  --file <path>            (required) Local file path.\n' +
             '  --content-type <mime>    (optional) Override MIME type.\n' +
             '  --network <network>      (optional) mvc (default), btc, opcat. DOGE is unsupported.\n' +
+            '  --verify                 (optional) Request post-upload availability verification.\n' +
             '  -h, --help               Show this message.\n' +
             '\nEnv: IDBOTS_METABOT_ID (required), IDBOTS_RPC_URL (optional).\n');
         process.exit(0);
@@ -59,6 +61,7 @@ async function main() {
             file_path: filePath,
             content_type: values['content-type'] || undefined,
             network: values.network || undefined,
+            verify: values.verify === true,
         }),
     });
     const rawText = await response.text();

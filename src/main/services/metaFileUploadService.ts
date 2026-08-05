@@ -7,6 +7,7 @@ import { resolveElectronExecutablePath } from '../libs/runtimePaths';
 import { createPin } from './metaidCore';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
+import { verifyMetafileAvailability } from './metafileVerifier';
 import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -54,6 +55,8 @@ export interface UploadMetaFileParams {
   dataFileName?: string;
   contentType?: string;
   network?: string;
+  /** Request post-upload availability verification when supported. */
+  verify?: boolean;
   chunkThresholdBytes?: number;
   maxSizeBytes?: number;
   uploaderBaseUrl?: string;
@@ -160,6 +163,30 @@ async function runUploadLargeFileWorker(
   });
 }
 
+async function attachVerificationIfRequested(
+  result: Record<string, unknown>,
+  params: UploadMetaFileParams,
+): Promise<Record<string, unknown>> {
+  if (params.verify !== true) {
+    return result;
+  }
+  const pinId = String(result?.pinId || '').trim();
+  if (!pinId) {
+    return result;
+  }
+  try {
+    result.verification = await verifyMetafileAvailability({ pinId });
+  } catch (error) {
+    result.verification = {
+      ok: false,
+      url: null,
+      attempts: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return result;
+}
+
 export async function uploadMetaFile(
   metabotStore: MetabotStore,
   params: UploadMetaFileParams,
@@ -237,17 +264,20 @@ export async function uploadMetaFile(
       },
     );
 
-    return normalizeRpcUploadResult({
-      pinId: result.pinId,
-      fileName,
-      size,
-      contentType,
-      uploadMode: 'direct',
-      network,
-      txids: result.txids,
-      totalCost: result.totalCost,
-      globalMetaId: metabot?.metaid?.trim() || undefined,
-    });
+    return attachVerificationIfRequested(
+      normalizeRpcUploadResult({
+        pinId: result.pinId,
+        fileName,
+        size,
+        contentType,
+        uploadMode: 'direct',
+        network,
+        txids: result.txids,
+        totalCost: result.totalCost,
+        globalMetaId: metabot?.metaid?.trim() || undefined,
+      }),
+      params,
+    );
   }
 
   if (network !== 'mvc') {
@@ -292,10 +322,13 @@ export async function uploadMetaFile(
     ),
   });
 
-  return normalizeRpcUploadResult({
-    ...workerResult,
-    network: 'mvc',
-    txids: workerResult.txId ? [workerResult.txId] : [],
-    globalMetaId: metabot.metaid.trim(),
-  });
+  return attachVerificationIfRequested(
+    normalizeRpcUploadResult({
+      ...workerResult,
+      network: 'mvc',
+      txids: workerResult.txId ? [workerResult.txId] : [],
+      globalMetaId: metabot.metaid.trim(),
+    }),
+    params,
+  );
 }
