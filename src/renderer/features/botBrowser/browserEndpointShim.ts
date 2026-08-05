@@ -219,6 +219,7 @@ export function createBrowserEndpointShim(adapter: BrowserEndpointAdapter): Brow
             resourceUri,
             kind,
             payload,
+            sessionId: text(body.sessionId) || undefined,
           }),
         );
       }

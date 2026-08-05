@@ -69,6 +69,7 @@ export interface ChatCompletionOptions {
   tools?: OpenAITool[];
   signal?: AbortSignal;
   maxTokens?: number;
+  temperature?: number;
   /**
    * When true, a response with neither text content nor tool_calls throws
    * inside the fallback-wrapped attempt, so a configured fallback LLM gets
@@ -123,7 +124,8 @@ async function chatCompletionSingleAttempt(
           messages,
           options.tools,
           options.signal,
-          options.maxTokens
+          options.maxTokens,
+          options.temperature
         )
       : await callOpenAIStyleWithTools(
           baseURL,
@@ -132,7 +134,8 @@ async function chatCompletionSingleAttempt(
           messages,
           options.tools,
           options.signal,
-          options.maxTokens
+          options.maxTokens,
+          options.temperature
         );
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
       throw new Error(formatEmptyCompletionError(result.responseMetadata));
@@ -202,7 +205,8 @@ async function callAnthropicStyleWithTools(
   messages: ChatMessage[],
   tools?: OpenAITool[],
   signal?: AbortSignal,
-  maxTokens?: number
+  maxTokens?: number,
+  temperature?: number
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/messages`;
   const systemParts: string[] = [];
@@ -253,6 +257,7 @@ async function callAnthropicStyleWithTools(
       input_schema: t.function.parameters ?? { type: 'object', properties: {} },
     }));
   }
+  if (temperature !== undefined) body.temperature = temperature;
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -319,7 +324,8 @@ async function callOpenAIStyleWithTools(
   messages: ChatMessage[],
   tools?: OpenAITool[],
   signal?: AbortSignal,
-  maxTokens?: number
+  maxTokens?: number,
+  temperature?: number
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/chat/completions`;
   const body: Record<string, unknown> = {
@@ -330,6 +336,7 @@ async function callOpenAIStyleWithTools(
   if (Array.isArray(tools) && tools.length > 0) {
     body.tools = tools;
   }
+  if (temperature !== undefined) body.temperature = temperature;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey.trim()) {

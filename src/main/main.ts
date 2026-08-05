@@ -114,7 +114,11 @@ import {
   shouldRestartA2APrivateChatForGuidance,
 } from './services/a2aGuidanceRestart';
 import { sendEncryptedSimplemsg } from './services/encryptedSimplemsg';
-import { performChatCompletionForOrchestrator } from './services/cognitiveChatCompletion';
+import {
+  chatCompletionWithTools,
+  performChatCompletionForOrchestrator,
+  type ChatMessage,
+} from './services/cognitiveChatCompletion';
 import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
@@ -161,8 +165,10 @@ import {
   createBotBrowserBridgeService,
   type BotBrowserBridgeService,
   type BotBrowserHostPickedFile,
+  type BotBrowserLlmCompleteInput,
   type BotBrowserMetaFileUploadInput,
   type BotBrowserPinWriteInput,
+  type BotBrowserPermissionsInput,
 } from './services/botBrowserBridgeService';
 import {
   createBotBrowserHostService,
@@ -2562,6 +2568,38 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);
     },
+    completeLlm: async ({ metabot, payload }) => {
+      const timeoutMs = payload.options?.timeoutMs ?? 30_000;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const result = await chatCompletionWithTools(
+          payload.messages.map((message): ChatMessage => ({
+            role: message.role,
+            content: message.content,
+          })),
+          {
+            llmId: metabot.llm_id,
+            fallbackLlmId: metabot.fallback_llm_id,
+            signal: controller.signal,
+            maxTokens: payload.options?.maxOutputTokens,
+            temperature: payload.options?.temperature,
+            throwOnEmptyContent: true,
+          },
+        );
+        const stopReason = result.responseMetadata?.stopReason;
+        return {
+          text: result.content?.trim() ?? '',
+          finishReason: stopReason === 'length' || stopReason === 'max_tokens'
+            ? 'length'
+            : stopReason === 'error'
+              ? 'error'
+              : 'stop',
+        };
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
     pickFiles: (input) => pickBotBrowserMetaFiles(ownerWindow, input),
   });
   if (ownerWindow) {
@@ -2572,7 +2610,13 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
   return service;
 }
 
-function botBrowserBridgeInput<T extends BotBrowserPinWriteInput | BotBrowserMetaFileUploadInput>(
+function botBrowserBridgeInput<
+  T extends
+    | BotBrowserPinWriteInput
+    | BotBrowserMetaFileUploadInput
+    | BotBrowserLlmCompleteInput
+    | BotBrowserPermissionsInput,
+>(
   input: unknown,
 ): T {
   return input && typeof input === 'object' && !Array.isArray(input)
@@ -5659,6 +5703,20 @@ if (!gotTheLock) {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     return getBotBrowserBridgeServiceForWindow(ownerWindow).uploadMetaFile(
       botBrowserBridgeInput<BotBrowserMetaFileUploadInput>(input),
+    );
+  });
+
+  ipcMain.handle('botBrowser:completeLlm', async (event, input: unknown) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    return getBotBrowserBridgeServiceForWindow(ownerWindow).completeLlm(
+      botBrowserBridgeInput<BotBrowserLlmCompleteInput>(input),
+    );
+  });
+
+  ipcMain.handle('botBrowser:requestPermissions', async (event, input: unknown) => {
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    return getBotBrowserBridgeServiceForWindow(ownerWindow).requestPermissions(
+      botBrowserBridgeInput<BotBrowserPermissionsInput>(input),
     );
   });
 

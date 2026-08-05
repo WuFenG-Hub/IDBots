@@ -97,10 +97,14 @@ contextBridge.exposeInMainWorld('electron', {
     getMetaAppCache: () => ipcRenderer.invoke('botBrowser:getMetaAppCache'),
     clearMetaAppCache: (input?: { all?: boolean; scope?: string; pinId?: string; cacheKey?: string }) =>
       ipcRenderer.invoke('botBrowser:clearMetaAppCache', input),
-    writeMetaIdPin: (input: { actorId?: string; resourceUri?: string; payload?: unknown; network?: string }) =>
+    writeMetaIdPin: (input: { actorId?: string; resourceUri?: string; sessionId?: string; payload?: unknown; network?: string }) =>
       ipcRenderer.invoke('botBrowser:writeMetaIdPin', input),
-    uploadMetaFile: (input: { actorId?: string; resourceUri?: string; payload?: unknown; network?: string }) =>
+    uploadMetaFile: (input: { actorId?: string; resourceUri?: string; sessionId?: string; payload?: unknown; network?: string }) =>
       ipcRenderer.invoke('botBrowser:uploadMetaFile', input),
+    completeLlm: (input: { actorId?: string; resourceUri?: string; sessionId?: string; payload?: unknown }) =>
+      ipcRenderer.invoke('botBrowser:completeLlm', input),
+    requestPermissions: (input: { actorId?: string; resourceUri?: string; sessionId?: string; payload?: unknown }) =>
+      ipcRenderer.invoke('botBrowser:requestPermissions', input),
     sendPrivateChat: (input: {
       actorId?: string;
       peerGlobalMetaId?: string;
