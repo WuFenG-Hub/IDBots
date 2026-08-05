@@ -85,11 +85,18 @@ interface DreamQueueItem {
   isRepair: boolean;
 }
 
+function dreamRunKey(metabotId: number, date: string): string {
+  return `${metabotId}:${date}`;
+}
+
 export class DreamService {
   private readonly performChat: DreamPerformChat;
   private timer: ReturnType<typeof setInterval> | null = null;
   private queue: DreamQueueItem[] = [];
   private processing = false;
+  /** Completion signals let manual callers wait even when another queue drain is already active. */
+  private runCompletions = new Map<string, Promise<void>>();
+  private runCompletionResolvers = new Map<string, () => void>();
   // Instances are live once constructed (runNow works without start());
   // stop() halts queue draining and future ticks.
   private stopped = false;
@@ -189,15 +196,35 @@ export class DreamService {
     const targetDate = date?.trim() || formatBotWorkspaceDate(
       new Date(this.now().getFullYear(), this.now().getMonth(), this.now().getDate() - 1)
     );
-    this.enqueue(metabotId, targetDate, { toFront: true });
-    await this.processQueue();
+    const key = dreamRunKey(metabotId, targetDate);
+    if (!this.dreamingBots.has(metabotId)) {
+      this.enqueue(metabotId, targetDate, { toFront: true });
+    }
+    const completion = this.runCompletions.get(key);
+    if (!completion) {
+      throw new Error(`Dream is already running for metabot ${metabotId}`);
+    }
+    void this.processQueue();
+    await completion;
     return { metabotId, date: targetDate };
   }
 
   private enqueue(metabotId: number, date: string, options: { toFront?: boolean; isRepair?: boolean } = {}): boolean {
     if (this.dreamingBots.has(metabotId)) return false;
-    if (this.queue.some((item) => item.metabotId === metabotId && item.date === date)) return false;
+    const existingIndex = this.queue.findIndex((item) => item.metabotId === metabotId && item.date === date);
+    if (existingIndex >= 0) {
+      if (options.toFront && existingIndex > 0) {
+        const [existing] = this.queue.splice(existingIndex, 1);
+        this.queue.unshift(existing);
+      }
+      return false;
+    }
     const item: DreamQueueItem = { metabotId, date, isRepair: options.isRepair ?? false };
+    const key = dreamRunKey(metabotId, date);
+    let resolveCompletion!: () => void;
+    const completion = new Promise<void>((resolve) => { resolveCompletion = resolve; });
+    this.runCompletions.set(key, completion);
+    this.runCompletionResolvers.set(key, resolveCompletion);
     if (options.toFront) {
       this.queue.unshift(item);
     } else {
@@ -212,7 +239,14 @@ export class DreamService {
     try {
       while (!this.stopped && this.queue.length > 0) {
         const item = this.queue.shift()!;
-        await this.runDream(item.metabotId, item.date, item.isRepair);
+        try {
+          await this.runDream(item.metabotId, item.date, item.isRepair);
+        } finally {
+          const key = dreamRunKey(item.metabotId, item.date);
+          this.runCompletionResolvers.get(key)?.();
+          this.runCompletionResolvers.delete(key);
+          this.runCompletions.delete(key);
+        }
       }
     } finally {
       this.processing = false;

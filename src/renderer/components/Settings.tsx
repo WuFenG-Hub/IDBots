@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels } from '../store/slices/modelSlice';
@@ -40,6 +40,13 @@ export type SettingsOpenOptions = {
 interface SettingsProps extends SettingsOpenOptions {
   onClose: () => void;
 }
+
+const formatLocalDateInput = (date: Date): string => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const providerKeys = [
   'openai',
@@ -479,6 +486,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [dreamDiaryLoading, setDreamDiaryLoading] = useState<boolean>(false);
   const [dreamDiaryMetabotId, setDreamDiaryMetabotId] = useState<number | null>(null);
   const [dreamDiaryExpandedId, setDreamDiaryExpandedId] = useState<string | null>(null);
+  const [dreamDiaryRunDate, setDreamDiaryRunDate] = useState<string>(() => {
+    const now = new Date();
+    return formatLocalDateInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  });
+  const [dreamDiaryRunning, setDreamDiaryRunning] = useState<boolean>(false);
+  const [dreamDiaryNotice, setDreamDiaryNotice] = useState<string | null>(null);
 
   useEffect(() => {
     window.electron.appInfo
@@ -1068,6 +1081,32 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       setDreamDiaryLoading(false);
     }
   }, [dreamDiaryMetabotId]);
+
+  const handleForceDream = async () => {
+    if (dreamDiaryMetabotId == null || !dreamDiaryRunDate || dreamDiaryRunning) return;
+    setDreamDiaryRunning(true);
+    setDreamDiaryNotice(null);
+    try {
+      const result = await window.electron?.dream?.runNow({
+        metabotId: dreamDiaryMetabotId,
+        date: dreamDiaryRunDate,
+      });
+      if (!result?.success) {
+        throw new Error(result?.error || i18nService.t('dreamDiaryForceFailed'));
+      }
+      if (result.run?.status === 'failed') {
+        setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${result.run.error || i18nService.t('dreamDiaryForceFailed')}`);
+      } else {
+        setDreamDiaryNotice(i18nService.t('dreamDiaryForceCompleted'));
+        await loadDreamDiary();
+      }
+    } catch (runError) {
+      console.error('Failed to force dream:', runError);
+      setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
+    } finally {
+      setDreamDiaryRunning(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab !== 'dreamDiary') return;
@@ -2522,6 +2561,34 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   )}
                 </select>
               </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <input
+                  type="date"
+                  value={dreamDiaryRunDate}
+                  max={formatLocalDateInput(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 1))}
+                  onChange={(event) => setDreamDiaryRunDate(event.target.value)}
+                  aria-label={i18nService.t('dreamDiaryForceDate')}
+                  className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                  disabled={dreamDiaryRunning || coworkMemoryMetabots.length === 0}
+                />
+                <button
+                  type="button"
+                  onClick={() => { void handleForceDream(); }}
+                  title={i18nService.t('dreamDiaryForceHint')}
+                  aria-label={i18nService.t('dreamDiaryForceDream')}
+                  disabled={dreamDiaryRunning || dreamDiaryMetabotId == null || !dreamDiaryRunDate}
+                  className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ArrowPathIcon className={`h-3.5 w-3.5 ${dreamDiaryRunning ? 'animate-spin' : ''}`} />
+                  <span>{dreamDiaryRunning ? i18nService.t('dreamDiaryForceRunning') : i18nService.t('dreamDiaryForceDream')}</span>
+                </button>
+              </div>
+              {dreamDiaryNotice && (
+                <div className="text-right text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                  {dreamDiaryNotice}
+                </div>
+              )}
 
               <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
                 {dreamDiaryLoading ? (

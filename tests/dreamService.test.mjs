@@ -147,6 +147,32 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
   }
 });
 
+test('a concurrent manual trigger waits for the active queue run', async () => {
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const { cleanup, dreamStore, service } = await setup(async () => {
+    calls += 1;
+    await blocked;
+    return makePayload();
+  });
+  try {
+    const first = service.runNow(5, DAY);
+    while (calls === 0) await new Promise((resolve) => setImmediate(resolve));
+    const second = service.runNow(5, DAY);
+    let secondSettled = false;
+    void second.then(() => { secondSettled = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondSettled, false);
+    release();
+    await Promise.all([first, second]);
+    assert.equal(calls, 1);
+    assert.equal(dreamStore.getRun(5, DAY).status, 'completed');
+  } finally {
+    cleanup();
+  }
+});
+
 test('empty day completes without calling the LLM or writing a summary', async () => {
   let calls = 0;
   const { cleanup, dreamStore, service } = await setup(async () => {
