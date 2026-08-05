@@ -3898,6 +3898,9 @@ export class CoworkRunner extends EventEmitter {
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: 'default',
       includePartialMessages: true,
+      ...(apiConfig.fallbackModel
+        ? { fallbackModel: apiConfig.fallbackModel }
+        : {}),
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -5913,6 +5916,34 @@ export class CoworkRunner extends EventEmitter {
             errorStatus,
           }
         );
+        return;
+      }
+
+      // Model refusal fallback: the primary model returned stop_reason 'refusal'
+      // and the SDK transparently retried with fallbackModel (or could not).
+      if (subtype === 'model_refusal_fallback') {
+        const originalModel = typeof payload.original_model === 'string' ? payload.original_model : null;
+        const fallbackModel = typeof payload.fallback_model === 'string' ? payload.fallback_model : null;
+        if (originalModel && fallbackModel) {
+          this.addSystemMessage(
+            sessionId,
+            `Model "${originalModel}" refused the request; automatically switched to fallback model "${fallbackModel}".`
+          );
+        }
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK model_refusal_fallback', {
+          sessionId,
+          originalModel,
+          fallbackModel,
+        });
+        return;
+      }
+
+      if (subtype === 'model_refusal_no_fallback') {
+        const originalModel = typeof payload.original_model === 'string' ? payload.original_model : null;
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK model_refusal_no_fallback (no fallback configured or exhausted)', {
+          sessionId,
+          originalModel,
+        });
         return;
       }
 

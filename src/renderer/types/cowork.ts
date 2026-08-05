@@ -194,6 +194,8 @@ export interface CoworkApiConfig {
   baseURL: string;
   model: string;
   apiType?: 'anthropic' | 'openai';
+  /** Optional SDK fallback model id (see main-side CoworkApiConfig). */
+  fallbackModel?: string;
 }
 
 export type CoworkSandboxStatus = {

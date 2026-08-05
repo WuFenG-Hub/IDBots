@@ -9,6 +9,12 @@ export type CoworkApiConfig = {
   baseURL: string;
   model: string;
   apiType?: CoworkApiType;
+  /**
+   * Optional fallback model id passed to the SDK's `fallbackModel` option.
+   * When the primary model refuses (stop_reason 'refusal'), the SDK transparently
+   * retries with this model. Unset = no fallback (default behavior).
+   */
+  fallbackModel?: string;
 };
 
 const CONFIG_FILE_NAME = 'api-config.json';

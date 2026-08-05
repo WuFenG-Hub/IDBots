@@ -29,6 +29,8 @@ type ProviderConfig = {
 type AppConfig = {
   model?: {
     defaultModel?: string;
+    /** Optional SDK fallback model id for automatic model refusal fallback. */
+    fallbackModel?: string;
     availableModels?: ProviderModel[];
   };
   providers?: Record<string, ProviderConfig>;
@@ -249,6 +251,34 @@ function resolveMatchedProvider(
 }
 
 /**
+ * Resolves the fallback model id from app config. The SDK's `fallbackModel`
+ * option is only meaningful when the fallback model is served by the same
+ * provider as the primary (same base URL / API key), because the SDK retries
+ * in-process without re-resolving provider env. So we validate that the
+ * configured fallbackModel exists in an enabled provider's model list.
+ * Returns undefined when no usable fallback is configured.
+ */
+function resolveFallbackModelId(
+  appConfig: AppConfig,
+  primaryProviderName: string | null
+): string | undefined {
+  const fallbackId = appConfig.model?.fallbackModel?.trim();
+  if (!fallbackId) return undefined;
+
+  const providers = appConfig.providers ?? {};
+  for (const [providerName, provider] of Object.entries(providers)) {
+    if (!provider?.enabled || !provider.models) continue;
+    if (provider.models.some((m) => m.id === fallbackId)) {
+      // Only use fallback from the same provider — the SDK retries with the
+      // same base URL/key, so a cross-provider fallback would hit the wrong API.
+      if (primaryProviderName && providerName !== primaryProviderName) continue;
+      return fallbackId;
+    }
+  }
+  return undefined;
+}
+
+/**
  * Resolve API config for a given model id (e.g. MetaBot's llm_id). When modelId is provided and
  * non-empty, finds the enabled provider that offers that model; otherwise uses app default.
  * Use this for per-MetaBot LLM (orchestrator chat completion).
@@ -269,7 +299,14 @@ export function resolveApiConfigForModel(
   if (!matched) {
     return { config: null, error };
   }
-  return buildApiConfigFromMatched(matched, target);
+  const resolution = buildApiConfigFromMatched(matched, target);
+  if (resolution.config) {
+    const fallbackModel = resolveFallbackModelId(appConfig, matched.providerName);
+    if (fallbackModel) {
+      resolution.config.fallbackModel = fallbackModel;
+    }
+  }
+  return resolution;
 }
 
 function buildApiConfigFromMatched(
@@ -346,7 +383,14 @@ export function resolveCurrentApiConfig(target: OpenAICompatProxyTarget = 'local
     };
   }
 
-  return buildApiConfigFromMatched(matched, target);
+  const resolution = buildApiConfigFromMatched(matched, target);
+  if (resolution.config) {
+    const fallbackModel = resolveFallbackModelId(appConfig, matched.providerName);
+    if (fallbackModel) {
+      resolution.config.fallbackModel = fallbackModel;
+    }
+  }
+  return resolution;
 }
 
 export function getCurrentApiConfig(target: OpenAICompatProxyTarget = 'local'): CoworkApiConfig | null {
