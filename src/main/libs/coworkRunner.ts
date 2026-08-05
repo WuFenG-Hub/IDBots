@@ -3917,6 +3917,9 @@ export class CoworkRunner extends EventEmitter {
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
         : {}),
+      // Request context-aware follow-up prompt suggestions (one per turn,
+      // emitted as a prompt_suggestion event after the result message).
+      promptSuggestions: true,
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -6010,6 +6013,25 @@ export class CoworkRunner extends EventEmitter {
       const authError = this.normalizeSdkError(payload.error);
       if (authError) {
         this.handleError(sessionId, authError);
+      }
+      return;
+    }
+
+    // Prompt suggestions: the SDK emits at most one prompt_suggestion per turn
+    // (after the result message) when options.promptSuggestions is enabled.
+    // Forward the suggestion text to the renderer as a system message carrying
+    // metadata.promptSuggestion so the prompt-input chips can pick it up.
+    if (eventType === 'prompt_suggestion') {
+      const suggestion = typeof payload.suggestion === 'string'
+        ? payload.suggestion.trim()
+        : '';
+      if (suggestion) {
+        const message = this.store.addMessage(sessionId, {
+          type: 'system',
+          content: '',
+          metadata: { promptSuggestion: suggestion } as Record<string, unknown>,
+        });
+        this.emit('message', sessionId, message);
       }
       return;
     }

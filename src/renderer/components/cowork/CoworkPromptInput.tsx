@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
-import { PaperClipIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { PaperClipIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline';
 import ModelSelector from '../ModelSelector';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
@@ -106,6 +106,8 @@ interface CoworkPromptInputProps {
   /** Estimated context-window usage of the current conversation; shows a ring indicator when provided. */
   contextUsage?: CoworkContextUsage | null;
   onManageSkills?: () => void;
+  /** Context-aware follow-up suggestions from the SDK; rendered as clickable chips. */
+  suggestedPrompts?: string[];
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -127,6 +129,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       restrictToLlmId,
       contextUsage,
       onManageSkills,
+      suggestedPrompts,
     } = props;
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
@@ -725,6 +728,24 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       {showFolderRequiredWarning && (
         <div className="mt-2 text-xs text-red-500 dark:text-red-400">
           {i18nService.t('coworkSelectFolderFirst')}
+        </div>
+      )}
+      {suggestedPrompts && suggestedPrompts.length > 0 && !disabled && (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {suggestedPrompts.map((suggestion, index) => (
+            <button
+              key={`prompt-suggestion-${index}`}
+              type="button"
+              onClick={() => {
+                draftFieldRef.current?.set(suggestion);
+                textareaRef.current?.focus();
+              }}
+              className="inline-flex items-center gap-1 rounded-full border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-3 py-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset hover:dark:text-claude-darkText hover:text-claude-text transition-colors max-w-full text-left"
+            >
+              <SparklesIcon className="h-3 w-3 flex-shrink-0 text-claude-accent" />
+              <span className="truncate">{suggestion}</span>
+            </button>
+          ))}
         </div>
       )}
     </div>

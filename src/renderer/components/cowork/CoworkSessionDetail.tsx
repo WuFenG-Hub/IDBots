@@ -832,6 +832,10 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
   if (typeof message.metadata?.sdkRuntimeStatus === 'string') {
     return true;
   }
+  // Prompt-suggestion signals are surfaced as chips below the prompt input.
+  if (typeof message.metadata?.promptSuggestion === 'string') {
+    return true;
+  }
   return typeof message.content === 'string' && message.content.includes(DELEGATION_CONTROL_PREFIX);
 };
 
@@ -2068,6 +2072,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
     return ended;
   }, [currentSession?.messages]);
+  // Latest SDK prompt suggestion for the follow-up chips. The SDK emits at most
+  // one per turn (after the result message); we surface the most recent one.
+  const latestPromptSuggestion = useMemo(() => {
+    const messages = currentSession?.messages ?? [];
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const suggestion = messages[i]?.metadata?.promptSuggestion;
+      if (typeof suggestion === 'string' && suggestion.trim()) {
+        return suggestion.trim();
+      }
+    }
+    return null;
+  }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const detailRootRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -3302,6 +3318,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               showModelSelector={true}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
               contextUsage={currentSession.contextUsage}
+              suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
             />
             {isStreaming && (
               <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
