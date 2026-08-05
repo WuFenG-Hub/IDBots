@@ -827,6 +827,11 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
   if (message.metadata?.isDelegationInternal) {
     return true;
   }
+  // Ephemeral SDK runtime-status signals (api_retry / requesting) are surfaced
+  // in StreamingActivityBar, not as persisted message bubbles.
+  if (typeof message.metadata?.sdkRuntimeStatus === 'string') {
+    return true;
+  }
   return typeof message.content === 'string' && message.content.includes(DELEGATION_CONTROL_PREFIX);
 };
 
@@ -1762,6 +1767,30 @@ const A2AGuidanceControls = React.memo(({
 const StreamingActivityBar: React.FC<{ messages: CoworkMessage[] }> = ({ messages }) => {
   // Walk messages backwards to find the latest tool_use without a paired tool_result
   const getStatusText = (): string => {
+    // SDK runtime-status signals (api_retry / requesting) take precedence over
+    // tool-running text — they describe the transport layer, not the agent loop.
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      const status = msg.metadata?.sdkRuntimeStatus;
+      if (status === 'api_retry') {
+        const attempt = typeof msg.metadata?.retryAttempt === 'number' ? msg.metadata.retryAttempt : null;
+        const max = typeof msg.metadata?.retryMax === 'number' ? msg.metadata.retryMax : null;
+        if (attempt !== null && max !== null) {
+          return i18nService.t('coworkRetrying').replace('{attempt}', String(attempt)).replace('{max}', String(max));
+        }
+        if (attempt !== null) {
+          return i18nService.t('coworkRetryingSimple').replace('{attempt}', String(attempt));
+        }
+        return i18nService.t('coworkRetryingGeneric');
+      }
+      if (status === 'requesting') {
+        return i18nService.t('coworkRequesting');
+      }
+      // Stop scanning once we hit a non-runtime-status message — only the most
+      // recent SDK status applies.
+      break;
+    }
+
     const toolUseIds = new Set<string>();
     const toolResultIds = new Set<string>();
     for (const msg of messages) {

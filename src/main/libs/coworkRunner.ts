@@ -726,6 +726,8 @@ interface ActiveSession {
   autoApprove?: boolean;
   /** When true, this session will not read/write persistent user memories. */
   disableMemoryUpdates?: boolean;
+  /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
+  lastSdkRuntimeStatusKey?: string;
 }
 
 interface PendingPermission {
@@ -5873,7 +5875,47 @@ export class CoworkRunner extends EventEmitter {
       if (subtype === 'init' && typeof payload.session_id === 'string') {
         activeSession.claudeSessionId = payload.session_id;
         this.store.updateSession(sessionId, { claudeSessionId: payload.session_id });
+        return;
       }
+
+      // Surface transient provider/API states. The SDK emits these as `system`
+      // messages; without handling they were silently dropped, leaving users
+      // staring at a stalled session during provider retries or request setup.
+      if (subtype === 'status') {
+        const statusValue = String(payload.status ?? '');
+        if (statusValue === 'requesting') {
+          this.emitSdkRuntimeStatus(sessionId, {
+            sdkRuntimeStatus: 'requesting',
+          });
+        }
+        return;
+      }
+
+      if (subtype === 'api_retry') {
+        const attempt = Number.isFinite(payload.attempt) ? Number(payload.attempt) : undefined;
+        const maxRetries = Number.isFinite(payload.max_retries) ? Number(payload.max_retries) : undefined;
+        const errorStatus =
+          typeof payload.error_status === 'number' ? payload.error_status : null;
+        this.emitSdkRuntimeStatus(sessionId, {
+          sdkRuntimeStatus: 'api_retry',
+          retryAttempt: attempt,
+          retryMax: maxRetries,
+          retryErrorStatus: errorStatus,
+        });
+        coworkLog(
+          'WARN',
+          'handleClaudeEvent',
+          'SDK api_retry — provider request is being retried',
+          {
+            sessionId,
+            attempt: attempt ?? null,
+            maxRetries: maxRetries ?? null,
+            errorStatus,
+          }
+        );
+        return;
+      }
+
       return;
     }
 
@@ -6676,6 +6718,39 @@ export class CoworkRunner extends EventEmitter {
         onLine(buffer);
       }
     }
+  }
+
+  /**
+   * Emits a transient SDK runtime-status signal (api_retry / requesting) as a
+   * `type: 'system'` message carrying `metadata.sdkRuntimeStatus`. The renderer
+   * hides these from the message list and surfaces them in StreamingActivityBar
+   * instead, so retries and request setup no longer look like silent stalls.
+   * Consecutive identical statuses are de-duplicated via an in-memory map.
+   */
+  private emitSdkRuntimeStatus(
+    sessionId: string,
+    payload: {
+      sdkRuntimeStatus: 'requesting' | 'api_retry';
+      retryAttempt?: number;
+      retryMax?: number;
+      retryErrorStatus?: number | null;
+    }
+  ): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      const key = `${payload.sdkRuntimeStatus}:${payload.retryAttempt ?? ''}`;
+      if (activeSession.lastSdkRuntimeStatusKey === key) {
+        return;
+      }
+      activeSession.lastSdkRuntimeStatusKey = key;
+    }
+
+    const message = this.store.addMessage(sessionId, {
+      type: 'system',
+      content: '',
+      metadata: payload as Record<string, unknown>,
+    });
+    this.emit('message', sessionId, message);
   }
 
   private addSystemMessage(sessionId: string, content: string): void {

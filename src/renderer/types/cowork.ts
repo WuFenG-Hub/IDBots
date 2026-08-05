@@ -65,6 +65,21 @@ export interface CoworkMessageMetadata {
   [key: string]: unknown;
 }
 
+// Ephemeral SDK runtime status carried on `type: 'system'` messages.
+// Surfaced in StreamingActivityBar (transient, not a persisted bubble).
+export type CoworkSdkRuntimeStatus = 'requesting' | 'api_retry';
+
+export interface CoworkSdkRuntimeStatusPayload {
+  /** Discriminator for SDK runtime-status system messages. */
+  sdkRuntimeStatus?: CoworkSdkRuntimeStatus;
+  /** Current retry attempt (1-based), present when sdkRuntimeStatus === 'api_retry'. */
+  retryAttempt?: number;
+  /** Max retries configured by the SDK, present when sdkRuntimeStatus === 'api_retry'. */
+  retryMax?: number;
+  /** HTTP error status that triggered the retry, if known. */
+  retryErrorStatus?: number | null;
+}
+
 // Cowork message
 export interface CoworkMessage {
   id: string;
