@@ -6156,8 +6156,10 @@ if (!gotTheLock) {
         return {
           success: true,
           created: result.created,
+          rotated: result.rotated,
+          rotationReason: result.rotationReason,
           externalConversationId: result.externalConversationId,
-          session: result.session,
+          session: getCoworkStore().getSessionView(result.session.id) ?? result.session,
         };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
@@ -6805,7 +6807,7 @@ if (!gotTheLock) {
       try {
         repairSelfDirectedServiceOrders();
         const session = enrichCoworkSessionWithServiceOrderSummary(
-          getCoworkStore().getSession(sessionId)
+          getCoworkStore().getSessionView(sessionId)
         );
         if (session?.sessionType === 'a2a') {
           scheduleA2APeerProfileRefresh(session.id);
@@ -6837,6 +6839,68 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to get session',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:getMessagesPage', async (_event, input: {
+    sessionId?: unknown;
+    beforeSequence?: unknown;
+    limit?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:getMessagesPage', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        if (!sessionId || !getCoworkStore().getSessionMetadata(sessionId)) {
+          return { success: false, error: 'Session not found' };
+        }
+        const page = getCoworkStore().getSessionMessagesPage(sessionId, {
+          beforeSequence: typeof input?.beforeSequence === 'number' ? input.beforeSequence : null,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+        return { success: true, page };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get session messages',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:getA2AHistoryPage', async (_event, input: {
+    sessionId?: unknown;
+    beforeCursor?: { episodeIndex?: unknown; beforeSequence?: unknown } | null;
+    limit?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:getA2AHistoryPage', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        const session = sessionId ? getCoworkStore().getSessionMetadata(sessionId) : null;
+        if (!session || session.sessionType !== 'a2a') {
+          return { success: false, error: 'A2A session not found' };
+        }
+        const beforeCursor = input?.beforeCursor
+          && typeof input.beforeCursor.episodeIndex === 'number'
+          && typeof input.beforeCursor.beforeSequence === 'number'
+          ? {
+              episodeIndex: input.beforeCursor.episodeIndex,
+              beforeSequence: input.beforeCursor.beforeSequence,
+            }
+          : null;
+        const page = getCoworkStore().getA2AConversationHistoryPage(sessionId, {
+          beforeCursor,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+        if (!page) return { success: false, error: 'A2A conversation thread not found' };
+        return { success: true, page };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get A2A conversation history',
         };
       }
     });

@@ -74,6 +74,37 @@ export interface CoworkMessage {
   metadata?: CoworkMessageMetadata;
 }
 
+export interface CoworkMessagePage {
+  messages: CoworkMessage[];
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+}
+
+export interface CoworkA2AHistoryCursor {
+  episodeIndex: number;
+  beforeSequence: number;
+}
+
+export interface CoworkA2AHistoryMessage {
+  sessionId: string;
+  episodeIndex: number;
+  message: CoworkMessage;
+}
+
+export interface CoworkA2AHistoryPage {
+  threadId: string;
+  participantPairKey: string;
+  messages: CoworkA2AHistoryMessage[];
+  hasMoreBefore: boolean;
+  beforeCursor: CoworkA2AHistoryCursor | null;
+}
+
+export interface CoworkMessageHistoryState {
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+  pageSize: number;
+}
+
 export interface CoworkServiceOrderSummary {
   role?: 'buyer' | 'seller';
   status:
@@ -126,6 +157,8 @@ export interface CoworkSession {
   executionMode: CoworkExecutionMode;
   activeSkillIds: string[];
   messages: CoworkMessage[];
+  /** Bounded A2A history state supplied by the renderer session endpoint. */
+  messageHistory?: CoworkMessageHistoryState;
   createdAt: number;
   updatedAt: number;
   /** FK to metabots.id; which MetaBot persona this session uses */

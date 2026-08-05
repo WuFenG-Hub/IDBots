@@ -130,6 +130,11 @@ interface CoworkSession {
   executionMode: 'auto' | 'local' | 'sandbox';
   activeSkillIds: string[];
   messages: CoworkMessage[];
+  messageHistory?: {
+    hasMoreBefore: boolean;
+    beforeSequence: number | null;
+    pageSize: number;
+  };
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;
@@ -153,6 +158,29 @@ interface CoworkMessage {
     senderAvatar?: string;
     suppressRunningStatus?: boolean;
   };
+}
+
+interface CoworkMessagePage {
+  messages: CoworkMessage[];
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+}
+
+interface CoworkA2AHistoryCursor {
+  episodeIndex: number;
+  beforeSequence: number;
+}
+
+interface CoworkA2AHistoryPage {
+  threadId: string;
+  participantPairKey: string;
+  messages: Array<{
+    sessionId: string;
+    episodeIndex: number;
+    message: CoworkMessage;
+  }>;
+  hasMoreBefore: boolean;
+  beforeCursor: CoworkA2AHistoryCursor | null;
 }
 
 interface CoworkSubmitInput {
@@ -223,6 +251,8 @@ interface CoworkEnsureA2ASessionInput {
 interface CoworkEnsureA2ASessionResult {
   success: boolean;
   created?: boolean;
+  rotated?: boolean;
+  rotationReason?: 'conversation_restarted' | 'archived_session' | 'message_limit' | 'idle_timeout';
   externalConversationId?: string;
   session?: CoworkSession;
   error?: string;
@@ -714,6 +744,8 @@ interface IElectronAPI {
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
+    getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;

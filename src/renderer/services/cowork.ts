@@ -7,6 +7,7 @@ import {
   updateSessionStatus,
   deleteSession as deleteSessionAction,
   addMessage,
+  prependMessages,
   updateMessageContent,
   setStreaming,
   updateSessionPinned,
@@ -33,6 +34,8 @@ import type {
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkA2AHistoryCursor,
+  CoworkA2AHistoryPage,
   CoworkStartOptions,
   CoworkContinueOptions,
   CoworkSubmitInput,
@@ -125,7 +128,13 @@ class CoworkService {
 
       if (message.metadata?.refreshSessionSummary) {
         await this.loadSessions();
-        if (store.getState().cowork.currentSessionId === sessionId) {
+        const currentSessionId = store.getState().cowork.currentSessionId;
+        const previousEpisodeSessionId = typeof message.metadata.previousEpisodeSessionId === 'string'
+          ? message.metadata.previousEpisodeSessionId
+          : null;
+        if (previousEpisodeSessionId && currentSessionId === previousEpisodeSessionId) {
+          await this.loadSession(sessionId);
+        } else if (currentSessionId === sessionId) {
           try {
             const refreshed = await window.electron?.cowork?.getSession(sessionId);
             if (refreshed?.success && refreshed.session) {
@@ -532,6 +541,50 @@ class CoworkService {
 
     console.error('Failed to load session:', result.error);
     return null;
+  }
+
+  async loadEarlierMessages(sessionId: string): Promise<number> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSessionMessagesPage) return 0;
+    const currentSession = store.getState().cowork.currentSession;
+    const history = currentSession?.id === sessionId ? currentSession.messageHistory : null;
+    if (!history?.hasMoreBefore || history.beforeSequence == null) return 0;
+
+    const result = await cowork.getSessionMessagesPage({
+      sessionId,
+      beforeSequence: history.beforeSequence,
+      limit: history.pageSize,
+    });
+    if (!result.success || !result.page) {
+      console.error('Failed to load earlier session messages:', result.error);
+      return 0;
+    }
+    if (store.getState().cowork.currentSessionId !== sessionId) return 0;
+    store.dispatch(prependMessages({
+      sessionId,
+      messages: result.page.messages,
+      messageHistory: {
+        hasMoreBefore: result.page.hasMoreBefore,
+        beforeSequence: result.page.beforeSequence,
+        pageSize: history.pageSize,
+      },
+    }));
+    return result.page.messages.length;
+  }
+
+  async getA2AConversationHistoryPage(input: {
+    sessionId: string;
+    beforeCursor?: CoworkA2AHistoryCursor | null;
+    limit?: number;
+  }): Promise<CoworkA2AHistoryPage | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getA2AConversationHistoryPage) return null;
+    const result = await cowork.getA2AConversationHistoryPage(input);
+    if (!result.success || !result.page) {
+      console.error('Failed to load A2A conversation history:', result.error);
+      return null;
+    }
+    return result.page;
   }
 
   async respondToPermission(requestId: string, result: CoworkPermissionResult): Promise<boolean> {

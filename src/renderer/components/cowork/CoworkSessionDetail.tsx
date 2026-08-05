@@ -1998,6 +1998,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const skipNextAutoScrollEffectRef = useRef(false);
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
+  const historyLoadInFlightRef = useRef(false);
+  const [isLoadingEarlierMessages, setIsLoadingEarlierMessages] = useState(false);
   const [focusedOrderMessageId, setFocusedOrderMessageId] = useState<string | null>(null);
   const [liveExecutionMode, setLiveExecutionMode] = useState<{
     sessionId: string;
@@ -2300,6 +2302,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     });
     skipNextAutoScrollEffectRef.current = true;
     lastAutoScrollSessionIdRef.current = sessionId;
+  }, [currentSession?.id]);
+
+  useEffect(() => {
+    historyLoadInFlightRef.current = false;
+    setIsLoadingEarlierMessages(false);
   }, [currentSession?.id]);
 
   // Focus rename input when entering rename mode
@@ -2620,13 +2627,53 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setShowConfirmDelete(false);
   };
 
+  const loadEarlierMessages = useCallback(async () => {
+    const sessionId = currentSession?.id;
+    const history = currentSession?.messageHistory;
+    const container = scrollContainerRef.current;
+    if (
+      !sessionId
+      || currentSession?.sessionType !== 'a2a'
+      || !history?.hasMoreBefore
+      || history.beforeSequence == null
+      || !container
+      || historyLoadInFlightRef.current
+    ) {
+      return;
+    }
+    historyLoadInFlightRef.current = true;
+    setIsLoadingEarlierMessages(true);
+    const previousScrollHeight = container.scrollHeight;
+    const previousScrollTop = container.scrollTop;
+    try {
+      const loadedCount = await coworkService.loadEarlierMessages(sessionId);
+      if (loadedCount <= 0) return;
+      await new Promise<void>((resolve) => {
+        window.requestAnimationFrame(() => {
+          const activeContainer = scrollContainerRef.current;
+          if (activeContainer) {
+            const addedHeight = activeContainer.scrollHeight - previousScrollHeight;
+            activeContainer.scrollTop = previousScrollTop + Math.max(0, addedHeight);
+          }
+          resolve();
+        });
+      });
+    } finally {
+      historyLoadInFlightRef.current = false;
+      setIsLoadingEarlierMessages(false);
+    }
+  }, [currentSession?.id, currentSession?.sessionType, currentSession?.messageHistory]);
+
   const handleMessagesScroll = useCallback(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
     const isNearBottom = distanceToBottom <= AUTO_SCROLL_THRESHOLD;
     setShouldAutoScroll((prev) => (prev === isNearBottom ? prev : isNearBottom));
-  }, []);
+    if (container.scrollTop <= AUTO_SCROLL_THRESHOLD) {
+      void loadEarlierMessages();
+    }
+  }, [loadEarlierMessages]);
 
   // Get the last message content for auto-scroll on streaming updates
   const lastMessage = currentSession?.messages?.[currentSession.messages.length - 1];
@@ -3085,6 +3132,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         onScroll={handleMessagesScroll}
         className="flex-1 overflow-y-auto min-h-0 pt-3"
       >
+        {isA2ASession && isLoadingEarlierMessages && (
+          <div className="flex items-center justify-center gap-2 px-4 py-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
+            <span>Loading earlier messages…</span>
+          </div>
+        )}
         {isA2ASession ? (
           visibleA2AMessages.flatMap((msg, index, arr) => {
             const content = typeof msg.content === 'string' ? msg.content : '';
