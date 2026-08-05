@@ -117,3 +117,32 @@ test('every bundled metabot-* skill is marked official so force-sync applies', (
   });
   assert.deepEqual(missing, []);
 });
+
+test('retireLegacySkillsFromUserData removes the legacy metabot-upload-largefile skill', () => {
+  const manager = createManager();
+  const userRoot = makeTempDir('idbots-skill-user-');
+  writeFile(userRoot, 'metabot-upload-largefile/SKILL.md', '---\nname: metabot-upload-largefile\n---\n');
+  writeFile(userRoot, 'metabot-upload-file/SKILL.md', '---\nname: metabot-upload-file\n---\n');
+  writeFile(
+    userRoot,
+    'skills.config.json',
+    JSON.stringify(
+      {
+        defaults: {
+          'metabot-upload-largefile': { order: 16, version: '1.0.1', enabled: true },
+          'metabot-upload-file': { order: 16, version: '1.1.0', enabled: true },
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  manager.retireLegacySkillsFromUserData(userRoot);
+
+  assert.equal(fs.existsSync(path.join(userRoot, 'metabot-upload-largefile')), false);
+  assert.equal(fs.existsSync(path.join(userRoot, 'metabot-upload-file')), true);
+  const config = JSON.parse(fs.readFileSync(path.join(userRoot, 'skills.config.json'), 'utf8'));
+  assert.equal('metabot-upload-largefile' in config.defaults, false);
+  assert.equal('metabot-upload-file' in config.defaults, true);
+});
