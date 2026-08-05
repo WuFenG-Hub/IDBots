@@ -9,8 +9,10 @@ import { buildCanonicalPrivateConversationExternalConversationId } from './simpl
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 
 const RAW_GLOBAL_META_ID_VERSION_CHARS = new Set(['q', 'p', 'z', 'r', 'y', 't']);
-/** Episode boundaries cap UI/storage growth without treating a five-minute topic gap as a new conversation. */
+/** Keep episode rotation aligned with the runtime's existing definition of a new A2A conversation round. */
+export const A2A_SESSION_CONVERSATION_GAP_MS = 5 * 60 * 1000;
 export const A2A_SESSION_EPISODE_IDLE_MS = 24 * 60 * 60 * 1000;
+/** Soft threshold: rotation waits for the current conversation round to end. */
 export const A2A_SESSION_EPISODE_MESSAGE_LIMIT = 500;
 
 export type A2ASessionEpisodeRotationReason =
@@ -83,14 +85,20 @@ export function resolveA2ASessionEpisodeRotationReason(input: {
   }
   if (input.isArchived) return 'archived_session';
   if (metadata.byeSent === true) return null;
-  if (Math.max(0, Math.floor(input.messageCount)) >= A2A_SESSION_EPISODE_MESSAGE_LIMIT) {
-    return 'message_limit';
-  }
 
   const now = Number.isFinite(input.now) ? Number(input.now) : Date.now();
   const lastActiveAt = Number(input.mapping.lastActiveAt);
-  if (Number.isFinite(lastActiveAt) && lastActiveAt > 0 && now - lastActiveAt >= A2A_SESSION_EPISODE_IDLE_MS) {
+  const inactiveFor = Number.isFinite(lastActiveAt) && lastActiveAt > 0
+    ? Math.max(0, now - lastActiveAt)
+    : 0;
+  if (inactiveFor >= A2A_SESSION_EPISODE_IDLE_MS) {
     return 'idle_timeout';
+  }
+  if (
+    Math.max(0, Math.floor(input.messageCount)) >= A2A_SESSION_EPISODE_MESSAGE_LIMIT
+    && inactiveFor > A2A_SESSION_CONVERSATION_GAP_MS
+  ) {
+    return 'message_limit';
   }
   return null;
 }

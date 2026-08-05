@@ -88,6 +88,7 @@ import {
   type SimplemsgProtocolTag,
 } from './simplemsgPeerConversation';
 import {
+  A2A_SESSION_CONVERSATION_GAP_MS,
   ensureCoworkA2ASession,
   resolveA2ASessionEpisodeRotationReason,
   rotateCoworkA2ASessionEpisode,
@@ -100,7 +101,6 @@ import {
 } from './a2aChatLimits';
 
 const POLL_INTERVAL_MS = 5_000;
-const PRIVATE_CHAT_SESSION_GAP_MS = 5 * 60 * 1000;
 /** Max recent messages of the active segment sent to the model per A2A private-chat turn. */
 export const PRIVATE_CHAT_CONTEXT_MAX_MESSAGES = 80;
 const PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES = 20;
@@ -903,7 +903,7 @@ export function analyzePrivateChatA2AConversation(params: {
     const timestamp = Number.isFinite(message.timestamp) ? message.timestamp : params.now ?? Date.now();
     if (
       previousTimestamp != null
-      && timestamp - previousTimestamp > PRIVATE_CHAT_SESSION_GAP_MS
+      && timestamp - previousTimestamp > A2A_SESSION_CONVERSATION_GAP_MS
     ) {
       previousSegmentTail = activeSegment.slice(-PRIVATE_CHAT_PREVIOUS_SEGMENT_CONTEXT_MESSAGES);
       activeSegment = [];

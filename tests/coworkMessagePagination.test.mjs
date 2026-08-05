@@ -8,6 +8,7 @@ import {
 } from './memoryTestUtils.mjs';
 
 const {
+  A2A_SESSION_CONVERSATION_GAP_MS,
   A2A_SESSION_EPISODE_IDLE_MS,
   A2A_SESSION_EPISODE_MESSAGE_LIMIT,
   resolveA2ASessionEpisodeRotationReason,
@@ -144,6 +145,13 @@ test('A2A episode policy rotates only at durable boundaries', () => {
   assert.equal(resolveA2ASessionEpisodeRotationReason({
     mapping,
     messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT,
+    hasBlockingServiceOrders: false,
+    isArchived: false,
+    now,
+  }), null);
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping: { ...mapping, lastActiveAt: now - A2A_SESSION_CONVERSATION_GAP_MS - 1 },
+    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT + 400,
     hasBlockingServiceOrders: false,
     isArchived: false,
     now,
