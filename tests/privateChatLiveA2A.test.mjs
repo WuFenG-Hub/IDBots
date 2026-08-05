@@ -182,7 +182,7 @@ test('ending a private chat A2A conversation marks the mapping closed and emits 
     metadataJson: JSON.stringify({ peerGlobalMetaId: 'peer-global-1', peerName: 'Peer Bot' }),
   };
   const coworkStore = {
-    getSession(id) {
+    getSessionWithoutMessages(id) {
       return id === session.id ? session : null;
     },
     getConversationSourceContextBySession(id) {
@@ -813,33 +813,9 @@ test('prior A2A outbound detection counts previous local private chat turns', ()
       assert.equal(metabotId, 7);
       return { coworkSessionId: 'session-1' };
     },
-    getSession(sessionId) {
+    hasPriorPrivateA2AOutboundMessage(sessionId) {
       assert.equal(sessionId, 'session-1');
-      return {
-        messages: [
-          {
-            id: 'm1',
-            type: 'user',
-            content: 'hello?',
-            timestamp: 1,
-            metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
-          },
-          {
-            id: 'm2',
-            type: 'assistant',
-            content: 'pong',
-            timestamp: 2,
-            metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
-          },
-          {
-            id: 'm3',
-            type: 'assistant',
-            content: 'local reply',
-            timestamp: 3,
-            metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
-          },
-        ],
-      };
+      return true;
     },
   };
 
@@ -860,23 +836,9 @@ test('prior A2A outbound detection ignores internal order execution traces', () 
       assert.equal(metabotId, 7);
       return { coworkSessionId: 'session-1' };
     },
-    getSession(sessionId) {
+    hasPriorPrivateA2AOutboundMessage(sessionId) {
       assert.equal(sessionId, 'session-1');
-      return {
-        messages: [
-          {
-            id: 'm1',
-            type: 'assistant',
-            content: '正在执行图片生成技能。',
-            timestamp: 1,
-            metadata: {
-              sourceChannel: 'metaweb_private',
-              orderExecutionTrace: true,
-              excludeFromSandboxHistory: true,
-            },
-          },
-        ],
-      };
+      return false;
     },
   };
 

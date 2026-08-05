@@ -286,13 +286,23 @@ function metadataHasPrivateChatChainIdentity(
   return false;
 }
 
+function getPrivateChatChainIdentitySearchValues(row: PrivateChatMessageRow): string[] {
+  return Array.from(new Set([
+    normalizePrivateChatPinId(row.pin_id),
+    getPrivateChatRowTxid(row),
+  ].filter(Boolean)));
+}
+
 function findPrivateChatA2AInboundMessage(params: {
-  coworkStore: Pick<CoworkStore, 'getSession'>;
+  coworkStore: Pick<CoworkStore, 'getSessionMessagesMatchingMetadataValues'>;
   sessionId: string;
   externalConversationId: string;
   row: PrivateChatMessageRow;
 }): CoworkMessage | null {
-  return params.coworkStore.getSession(params.sessionId)?.messages.find((message) => (
+  return params.coworkStore.getSessionMessagesMatchingMetadataValues(
+    params.sessionId,
+    getPrivateChatChainIdentitySearchValues(params.row),
+  ).find((message) => (
     message.type === 'user'
     && message.metadata?.sourceChannel === 'metaweb_private'
     && message.metadata?.externalConversationId === params.externalConversationId
@@ -301,7 +311,7 @@ function findPrivateChatA2AInboundMessage(params: {
 }
 
 function findRetryablePrivateChatA2AReplyMessage(params: {
-  coworkStore: Pick<CoworkStore, 'getSession'>;
+  coworkStore: Pick<CoworkStore, 'getSessionMessagesMatchingMetadataValues'>;
   sessionId: string;
   externalConversationId: string;
   row: PrivateChatMessageRow;
@@ -309,7 +319,10 @@ function findRetryablePrivateChatA2AReplyMessage(params: {
   const rowPinId = normalizePrivateChatPinId(params.row.pin_id);
   const rowTxid = getPrivateChatRowTxid(params.row);
   if (!rowPinId && !rowTxid) return null;
-  return params.coworkStore.getSession(params.sessionId)?.messages.find((message) => {
+  return params.coworkStore.getSessionMessagesMatchingMetadataValues(
+    params.sessionId,
+    getPrivateChatChainIdentitySearchValues(params.row),
+  ).find((message) => {
     const metadata = message.metadata;
     if (
       message.type !== 'assistant'
@@ -1527,7 +1540,7 @@ export function hasNewerPrivateChatMessage(
 }
 
 export function hasPriorPrivateChatA2AOutbound(
-  coworkStore: Pick<CoworkStore, 'getConversationMapping' | 'getSession'>,
+  coworkStore: Pick<CoworkStore, 'getConversationMapping' | 'hasPriorPrivateA2AOutboundMessage'>,
   params: {
     externalConversationId: string;
     metabotId: number;
@@ -1540,16 +1553,7 @@ export function hasPriorPrivateChatA2AOutbound(
   );
   if (!mapping) return false;
 
-  const session = coworkStore.getSession(mapping.coworkSessionId);
-  const messages = session?.messages ?? [];
-  return messages.some((message) => {
-    if (!isPrivateA2AMessage(message)) return false;
-    if (resolveA2AMessageDirection(message) !== 'outgoing') return false;
-    const content = String(message.content || '').trim();
-    if (!content) return false;
-    return normalizeHandshakeWord(content) !== 'ping'
-      && normalizeHandshakeWord(content) !== 'pong';
-  });
+  return coworkStore.hasPriorPrivateA2AOutboundMessage(mapping.coworkSessionId);
 }
 
 function completeBuyerOrderObserverSession(
@@ -1631,7 +1635,7 @@ async function resolvePrivateConversationSession(
   const externalConversationId = buildPrivateConversationExternalConversationId(row);
   const existing = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabotId);
   if (existing) {
-    const session = coworkStore.getSession(existing.coworkSessionId);
+    const session = coworkStore.getSessionWithoutMessages(existing.coworkSessionId);
     if (session) {
       const repaired = coworkStore.ensureCanonicalPeerSessionShape({
         sessionId: existing.coworkSessionId,
@@ -1772,7 +1776,10 @@ export function recordOutgoingPrivateChatA2ADisplay(params: {
   const chainTxid = normalizeA2AChainTxid(chainMetadata.txid);
   if (chainPinId || chainTxid) {
     const identityRow = { pin_id: chainPinId, tx_id: chainTxid } as PrivateChatMessageRow;
-    const alreadyTracked = params.coworkStore.getSession(ensured.session.id)?.messages.some((message) => (
+    const alreadyTracked = params.coworkStore.getSessionMessagesMatchingMetadataValues(
+      ensured.session.id,
+      getPrivateChatChainIdentitySearchValues(identityRow),
+    ).some((message) => (
       message.type === 'assistant'
       && message.metadata?.sourceChannel === 'metaweb_private'
       && metadataHasPrivateChatChainIdentity(message.metadata, identityRow)
@@ -1818,9 +1825,16 @@ function getPrivateChatSkillWaitNoticeKey(row: PrivateChatMessageRow): string {
   return String(row.pin_id || row.id || '').trim();
 }
 
-function hasSentPrivateChatSkillWaitNotice(messages: CoworkMessage[], waitNoticeKey: string): boolean {
+function hasSentPrivateChatSkillWaitNotice(
+  coworkStore: Pick<CoworkStore, 'getSessionMessagesMatchingMetadataValues'>,
+  sessionId: string,
+  waitNoticeKey: string,
+): boolean {
   if (!waitNoticeKey) return false;
-  return messages.some((message) => (
+  return coworkStore.getSessionMessagesMatchingMetadataValues(
+    sessionId,
+    [waitNoticeKey],
+  ).some((message) => (
     message.type === 'assistant'
     && message.metadata?.privateChatSkillWaitNotice === true
     && message.metadata?.privateChatSkillWaitNoticeForPinId === waitNoticeKey
@@ -1877,7 +1891,7 @@ async function sendPrivateChatSkillWaitNotice(params: {
 export function endPrivateChatA2AConversation(params: {
   coworkStore: Pick<
     CoworkStore,
-    | 'getSession'
+    | 'getSessionWithoutMessages'
     | 'getConversationSourceContextBySession'
     | 'getConversationMapping'
     | 'updateConversationMappingMetadata'
@@ -1895,7 +1909,7 @@ export function endPrivateChatA2AConversation(params: {
   alreadyEnded?: boolean;
   endMessage?: CoworkMessage;
 } {
-  const session = params.coworkStore.getSession(params.sessionId);
+  const session = params.coworkStore.getSessionWithoutMessages(params.sessionId);
   if (!session) return { success: false, error: 'Session not found' };
   if (session.sessionType !== 'a2a') return { success: false, error: 'Only A2A sessions can be ended this way' };
   if (typeof session.metabotId !== 'number') return { success: false, error: 'A2A session has no local MetaBot id' };
@@ -3803,9 +3817,13 @@ async function processOne(
       emitLog(`[PrivateChat] MetaBot(${metabot.name}) llm_id is empty, fallback to default app LLM.`);
     }
 
-    const sessionAfterUserMessage = coworkStore.getSession(sessionId);
+    const contextMessageLimit = Math.min(
+      1000,
+      Math.max(120, normalizeA2AMaxIncomingTurns(metabot.a2a_max_incoming_turns ?? undefined) * 4 + 40),
+    );
+    const recentPrivateMessages = coworkStore.getRecentPrivateA2AMessages(sessionId, contextMessageLimit);
     const conversationAnalysis = analyzePrivateChatA2AConversation({
-      messages: sessionAfterUserMessage?.messages ?? [userMessage],
+      messages: recentPrivateMessages.length > 0 ? recentPrivateMessages : [userMessage],
       maxIncomingTurns: metabot.a2a_max_incoming_turns ?? undefined,
     });
     let chatSkillsRouting: ChatSkillsRoutingPromptResult = { prompt: null, activeSkillIds: [] };
@@ -3828,17 +3846,11 @@ async function processOne(
     );
     const waitNoticeKey = canRunChatSkills ? getPrivateChatSkillWaitNoticeKey(row) : '';
     let skillWaitNoticeAlreadySent = canRunChatSkills
-      ? hasSentPrivateChatSkillWaitNotice(
-          coworkStore.getSession(sessionId)?.messages ?? [],
-          waitNoticeKey
-        )
+      ? hasSentPrivateChatSkillWaitNotice(coworkStore, sessionId, waitNoticeKey)
       : false;
     const sendSkillWaitNoticeBeforeExecution = async (): Promise<void> => {
       if (!canRunChatSkills || skillWaitNoticeAlreadySent) return;
-      skillWaitNoticeAlreadySent = hasSentPrivateChatSkillWaitNotice(
-        coworkStore.getSession(sessionId)?.messages ?? [],
-        waitNoticeKey
-      );
+      skillWaitNoticeAlreadySent = hasSentPrivateChatSkillWaitNotice(coworkStore, sessionId, waitNoticeKey);
       if (skillWaitNoticeAlreadySent) return;
 
       let waitNoticeText = '';
@@ -4003,9 +4015,8 @@ async function processOne(
 
     let assistantMessage: CoworkMessage | null = null;
     if (skillAssistantMessageId) {
-      const existingAssistant = coworkStore.getSession(sessionId)?.messages.find((message) => (
-        message.id === skillAssistantMessageId && message.type === 'assistant'
-      ));
+      const candidateAssistant = coworkStore.getMessageById(sessionId, skillAssistantMessageId);
+      const existingAssistant = candidateAssistant?.type === 'assistant' ? candidateAssistant : null;
       if (existingAssistant) {
         const metadata: CoworkMessageMetadata = {
           ...(existingAssistant.metadata ?? {}),

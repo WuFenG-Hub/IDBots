@@ -65,3 +65,50 @@ test('message pages use a stable sequence cursor and preserve chronological orde
     cleanup();
   }
 });
+
+test('A2A daemon queries stay bounded and preserve exact metadata for callers', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const session = store.createSession('bounded A2A chat', '/tmp/a2a', '', 'local', [], 1, 'a2a');
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'pong',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', pinId: 'pin-pong' },
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'internal trace',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', orderExecutionTrace: true },
+    });
+    store.addMessage(session.id, {
+      type: 'tool_result',
+      content: 'large internal result',
+      metadata: { sourceChannel: 'cowork_ui' },
+    });
+    assert.equal(store.hasPriorPrivateA2AOutboundMessage(session.id), false);
+    store.addMessage(session.id, {
+      type: 'user',
+      content: 'peer question',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming', pinId: 'pin-question' },
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'useful reply',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing', txid: 'tx-reply' },
+    });
+
+    assert.deepEqual(
+      store.getRecentPrivateA2AMessages(session.id, 2).map((message) => message.content),
+      ['peer question', 'useful reply'],
+    );
+    assert.deepEqual(
+      store.getSessionMessagesMatchingMetadataValues(session.id, ['pin-question']).map((message) => message.content),
+      ['peer question'],
+    );
+    assert.equal(store.hasPriorPrivateA2AOutboundMessage(session.id), true);
+    assert.deepEqual(store.getSessionWithoutMessages(session.id)?.messages, []);
+  } finally {
+    cleanup();
+  }
+});

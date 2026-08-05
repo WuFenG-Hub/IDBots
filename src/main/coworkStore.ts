@@ -1959,7 +1959,7 @@ export class CoworkStore implements MemoryBackend {
     const peerGlobalMetaId = String(input.peerGlobalMetaId || '').trim();
     if (!sessionId || !peerGlobalMetaId) return false;
 
-    const session = this.getSession(sessionId);
+    const session = this.getSessionWithoutMessages(sessionId);
     if (!session) return false;
 
     const existingPeer = String(session.peerGlobalMetaId || '').trim();
@@ -2018,7 +2018,7 @@ export class CoworkStore implements MemoryBackend {
   ): boolean {
     const normalizedSessionId = String(sessionId || '').trim();
     if (!normalizedSessionId) return false;
-    const session = this.getSession(normalizedSessionId);
+    const session = this.getSessionWithoutMessages(normalizedSessionId);
     if (!session || session.sessionType !== 'a2a') return false;
 
     const peerName = String(input.peerName || '').trim() || session.peerName || null;
@@ -2163,7 +2163,7 @@ export class CoworkStore implements MemoryBackend {
   }
 
   getSession(id: string): CoworkSession | null {
-    const session = this.getSessionShell(id);
+    const session = this.getSessionWithoutMessages(id);
     if (!session) return null;
     return {
       ...session,
@@ -2172,7 +2172,7 @@ export class CoworkStore implements MemoryBackend {
   }
 
   getSessionView(id: string, messageLimit: number = 100): CoworkSession | null {
-    const session = this.getSessionShell(id);
+    const session = this.getSessionWithoutMessages(id);
     if (!session) return null;
     if (session.sessionType !== 'a2a') {
       return {
@@ -2192,7 +2192,7 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
-  private getSessionShell(id: string): CoworkSession | null {
+  getSessionWithoutMessages(id: string): CoworkSession | null {
     interface SessionRow {
       id: string;
       title: string;
@@ -2362,7 +2362,7 @@ export class CoworkStore implements MemoryBackend {
   }
 
   deleteSession(id: string): void {
-    const session = this.getSession(id);
+    const session = this.getSessionWithoutMessages(id);
     const metabotId = session?.metabotId ?? this.getDefaultMetabotId();
     const sourceContext = this.getConversationSourceContextBySession(id);
     const resolvedWriteScope = metabotId == null
@@ -2726,6 +2726,84 @@ export class CoworkStore implements MemoryBackend {
       timestamp: row.created_at,
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     }));
+  }
+
+  getRecentPrivateA2AMessages(sessionId: string, requestedLimit: number = 100): CoworkMessage[] {
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(1000, Math.floor(requestedLimit)))
+      : 100;
+    const rows = this.getAll<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages INDEXED BY idx_cowork_messages_session_sequence
+      WHERE session_id = ?
+        AND type IN ('user', 'assistant')
+        AND metadata LIKE '%"sourceChannel":"metaweb_private"%'
+        AND metadata NOT LIKE '%"orderExecutionTrace":true%'
+      ORDER BY
+        COALESCE(sequence, 0) DESC,
+        created_at DESC,
+        ROWID DESC
+      LIMIT ?
+    `, [sessionId, limit]);
+
+    return rows.reverse().map(row => ({
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    }));
+  }
+
+  getSessionMessagesMatchingMetadataValues(
+    sessionId: string,
+    values: string[],
+    requestedLimit: number = 100,
+  ): CoworkMessage[] {
+    const normalizedValues = Array.from(new Set(
+      values.map(value => String(value || '').trim()).filter(Boolean),
+    )).slice(0, 20);
+    if (normalizedValues.length === 0) return [];
+
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(500, Math.floor(requestedLimit)))
+      : 100;
+    const metadataClauses = normalizedValues.map(() => 'metadata LIKE ?').join(' OR ');
+    const rows = this.getAll<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages INDEXED BY idx_cowork_messages_session_sequence
+      WHERE session_id = ?
+        AND metadata IS NOT NULL
+        AND (${metadataClauses})
+      ORDER BY
+        COALESCE(sequence, 0) DESC,
+        created_at DESC,
+        ROWID DESC
+      LIMIT ?
+    `, [sessionId, ...normalizedValues.map(value => `%${value}%`), limit]);
+
+    return rows.map(row => ({
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    }));
+  }
+
+  hasPriorPrivateA2AOutboundMessage(sessionId: string): boolean {
+    const row = this.getOne<{ found: number }>(`
+      SELECT 1 AS found
+      FROM cowork_messages
+      WHERE session_id = ?
+        AND type = 'assistant'
+        AND metadata LIKE '%"sourceChannel":"metaweb_private"%'
+        AND metadata NOT LIKE '%"orderExecutionTrace":true%'
+        AND TRIM(content) <> ''
+        AND LOWER(TRIM(content)) NOT IN ('ping', 'pong')
+      LIMIT 1
+    `, [sessionId]);
+    return Boolean(row?.found);
   }
 
   getSessionMessagesPage(
@@ -3103,7 +3181,7 @@ export class CoworkStore implements MemoryBackend {
       input.privateExternalConversationId,
       input.metabotId,
     );
-    if (existing && this.getSession(existing.coworkSessionId)) {
+    if (existing && this.getSessionWithoutMessages(existing.coworkSessionId)) {
       if (this.ensureCanonicalPeerSessionShape({
         sessionId: existing.coworkSessionId,
         metabotId: input.metabotId,
@@ -3119,7 +3197,7 @@ export class CoworkStore implements MemoryBackend {
       }
       this.deleteConversationMapping('metaweb_private', input.privateExternalConversationId, input.metabotId);
     }
-    if (existing && !this.getSession(existing.coworkSessionId)) {
+    if (existing && !this.getSessionWithoutMessages(existing.coworkSessionId)) {
       this.deleteConversationMapping('metaweb_private', input.privateExternalConversationId, input.metabotId);
     }
 
