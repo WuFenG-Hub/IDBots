@@ -1,8 +1,10 @@
+import { createHash } from 'node:crypto';
 import type { CoworkStore } from '../coworkStore';
 import type { DreamDayActivity, DreamStore } from '../dreamStore';
 import {
   DREAM_LOOKBACK_DAYS,
   DREAM_VERSION,
+  buildDreamFragmentPrompt,
   buildDreamPrompt,
   computeDueDreamDates,
   getDayBoundsMs,
@@ -10,7 +12,15 @@ import {
   validateSelfIdentity,
   type DreamOutput,
 } from '../libs/dreamPrompt';
+import {
+  chunkDreamActivity,
+  estimateDreamActivityTokens,
+  summariesToActivity,
+  type DreamActivityChunk,
+  type DreamFragmentSummary,
+} from '../libs/dreamFragments';
 import { formatBotWorkspaceDate } from '../libs/botWorkspace';
+import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { normalizeMetabotLlmId } from './llmFallback';
 
@@ -30,9 +40,14 @@ import { normalizeMetabotLlmId } from './llmFallback';
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
-// Dream prompts carry a full day's activity and require structured JSON.
-// Reasoning-style models count hidden reasoning against this same budget.
-const DREAM_LLM_MAX_TOKENS = 8192;
+// The requested ceiling is clamped to the selected model's declared limit.
+// DeepSeek V4 Flash and unknown models stay at 8192; models declaring a larger
+// output budget can use up to 16K without sending an unsupported parameter.
+const DREAM_LLM_TARGET_MAX_TOKENS = 16_000;
+const DREAM_FRAGMENT_MAX_TOKENS = 4_096;
+const DREAM_CONTEXT_RESERVE_TOKENS = 8_000;
+const DREAM_FAST_PATH_MAX_TOKENS = 96_000;
+const DREAM_CHUNK_MAX_TOKENS = 64_000;
 const DREAM_STATUS_CHANNEL = 'metabot:dreamStatusChanged';
 
 const EVALUATION_LABELS: Record<string, string> = {
@@ -276,13 +291,19 @@ export class DreamService {
     }
   }
 
-  private async callDreamLlm(systemPrompt: string, userMessage: string, llmId: string | null, fallbackLlmId: string | null = null): Promise<string> {
+  private async callDreamLlm(
+    systemPrompt: string,
+    userMessage: string,
+    llmId: string | null,
+    fallbackLlmId: string | null = null,
+    maxTokens?: number,
+  ): Promise<string> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.deps.llmTimeoutMs ?? DREAM_LLM_TIMEOUT_MS);
     try {
       return await this.performChat(systemPrompt, userMessage, llmId, {
         signal: controller.signal,
-        maxTokens: DREAM_LLM_MAX_TOKENS,
+        maxTokens: maxTokens ?? this.resolveDreamBudgets(llmId).maxOutputTokens,
         fallbackLlmId,
         // Empty content must fail inside runWithLlmFallback so a configured
         // secondary provider gets a chance before the dream attempt fails.
@@ -291,6 +312,198 @@ export class DreamService {
     } finally {
       clearTimeout(timeout);
     }
+  }
+
+  private resolveDreamBudgets(llmId: string | null): {
+    maxOutputTokens: number;
+    fastPathInputTokens: number;
+    fragmentInputTokens: number;
+    fragmentOutputTokens: number;
+  } {
+    const effectiveModelId = resolveAutomationModelOverride(llmId) ?? llmId;
+    const limits = resolveCurrentModelLimits(effectiveModelId);
+    const maxOutputTokens = Math.max(1, Math.min(DREAM_LLM_TARGET_MAX_TOKENS, limits.maxOutputTokens));
+    const usableInputTokens = Math.max(16_000, limits.contextWindow - maxOutputTokens - DREAM_CONTEXT_RESERVE_TOKENS);
+    return {
+      maxOutputTokens,
+      fastPathInputTokens: Math.min(DREAM_FAST_PATH_MAX_TOKENS, Math.floor(usableInputTokens * 0.5)),
+      fragmentInputTokens: Math.min(DREAM_CHUNK_MAX_TOKENS, Math.floor(usableInputTokens * 0.35)),
+      fragmentOutputTokens: Math.min(DREAM_FRAGMENT_MAX_TOKENS, maxOutputTokens),
+    };
+  }
+
+  private async getOrCreateDreamFragment(
+    metabot: DreamMetabotLike,
+    date: string,
+    chunk: DreamActivityChunk,
+    llmId: string | null,
+    fallbackLlmId: string | null,
+    fragmentOutputTokens: number,
+  ): Promise<DreamFragmentSummary> {
+    const contentHash = createHash('sha256')
+      .update(JSON.stringify(chunk))
+      .digest('hex');
+    const existing = this.deps.dreamStore.getDreamFragment(metabot.id, date, chunk.fragmentKey);
+    if (
+      existing?.status === 'completed' &&
+      existing.contentHash === contentHash &&
+      existing.dreamVersion === DREAM_VERSION &&
+      existing.llmId === llmId &&
+      existing.summaryJson
+    ) {
+      let cachedOutput: DreamOutput | null = null;
+      try {
+        const stored = JSON.parse(existing.summaryJson) as Partial<DreamOutput>;
+        if (stored && typeof stored === 'object' && typeof stored.dailySummary === 'string') {
+          cachedOutput = stored as DreamOutput;
+        }
+      } catch {
+        // Older/manual rows may contain the provider's snake_case JSON shape.
+      }
+      if (!cachedOutput) {
+        const cached = parseDreamOutput(existing.summaryJson);
+        if (cached.ok) cachedOutput = cached.output;
+      }
+      if (cachedOutput) {
+        return {
+          fragmentKey: chunk.fragmentKey,
+          sessionId: chunk.sessionId,
+          title: chunk.title,
+          chunkIndex: chunk.chunkIndex,
+          output: cachedOutput,
+        };
+      }
+    }
+
+    this.deps.dreamStore.beginDreamFragment({
+      metabotId: metabot.id,
+      dreamDate: date,
+      fragmentKey: chunk.fragmentKey,
+      sessionId: chunk.sessionId,
+      chunkIndex: chunk.chunkIndex,
+      contentHash,
+      sourceMessageCount: chunk.sourceMessageCount,
+      sourceCharCount: chunk.sourceCharCount,
+      estimatedInputTokens: chunk.estimatedInputTokens,
+      llmId,
+      dreamVersion: DREAM_VERSION,
+    });
+    try {
+      const prompt = buildDreamFragmentPrompt({
+        botName: metabot.name,
+        role: metabot.role,
+        soul: metabot.soul,
+        date,
+        chunk,
+      });
+      const output = await this.generateAndParse(
+        prompt.system,
+        prompt.user,
+        llmId,
+        fallbackLlmId,
+        fragmentOutputTokens,
+      );
+      this.deps.dreamStore.finishDreamFragment(
+        metabot.id,
+        date,
+        chunk.fragmentKey,
+        'completed',
+        JSON.stringify(output),
+        null,
+      );
+      return {
+        fragmentKey: chunk.fragmentKey,
+        sessionId: chunk.sessionId,
+        title: chunk.title,
+        chunkIndex: chunk.chunkIndex,
+        output,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.dreamStore.finishDreamFragment(
+        metabot.id,
+        date,
+        chunk.fragmentKey,
+        'failed',
+        null,
+        message,
+      );
+      throw error;
+    }
+  }
+
+  private async prepareDreamPromptAndOutput(
+    metabot: DreamMetabotLike,
+    date: string,
+    activity: DreamDayActivity,
+    llmId: string | null,
+    fallbackLlmId: string | null,
+  ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
+    const budgets = this.resolveDreamBudgets(llmId);
+    const estimatedTokens = estimateDreamActivityTokens(activity);
+    if (estimatedTokens <= budgets.fastPathInputTokens) {
+      const prompt = buildDreamPrompt({
+        botName: metabot.name,
+        role: metabot.role,
+        soul: metabot.soul,
+        date,
+        activity,
+        activityTokenBudget: budgets.fastPathInputTokens,
+      });
+      const output = await this.generateAndParse(
+        prompt.system,
+        prompt.user,
+        llmId,
+        fallbackLlmId,
+        budgets.maxOutputTokens,
+      );
+      return { prompt, output };
+    }
+
+    const chunks = chunkDreamActivity(activity, budgets.fragmentInputTokens);
+    if (chunks.length === 0) {
+      const prompt = buildDreamPrompt({
+        botName: metabot.name,
+        role: metabot.role,
+        soul: metabot.soul,
+        date,
+        activity,
+        activityTokenBudget: budgets.fastPathInputTokens,
+      });
+      const output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId, budgets.maxOutputTokens);
+      return { prompt, output };
+    }
+
+    const summaries: DreamFragmentSummary[] = [];
+    for (const chunk of chunks) {
+      summaries.push(await this.getOrCreateDreamFragment(
+        metabot,
+        date,
+        chunk,
+        llmId,
+        fallbackLlmId,
+        budgets.fragmentOutputTokens,
+      ));
+    }
+
+    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount);
+    const prompt = buildDreamPrompt({
+      botName: metabot.name,
+      role: metabot.role,
+      soul: metabot.soul,
+      date,
+      activity: synthesisActivity,
+      activityTokenBudget: budgets.fastPathInputTokens,
+      sourceMode: 'fragment_summaries',
+    });
+    const output = await this.generateAndParse(
+      prompt.system,
+      prompt.user,
+      llmId,
+      fallbackLlmId,
+      budgets.maxOutputTokens,
+    );
+    return { prompt, output };
   }
 
   private async runDream(metabotId: number, date: string, isRepair = false): Promise<void> {
@@ -315,19 +528,19 @@ export class DreamService {
         return;
       }
 
-      const prompt = buildDreamPrompt({
-        botName: metabot.name,
-        role: metabot.role,
-        soul: metabot.soul,
-        date,
-        activity,
-      });
-
-      let output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId);
+      const prepared = await this.prepareDreamPromptAndOutput(metabot, date, activity, llmId, fallbackLlmId);
+      let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
       // expansion retry instead of burning an extra LLM call on it.
       if (!isRepair) {
-        output = await this.ensureSelfIdentity(output, prompt.system, prompt.user, llmId, fallbackLlmId);
+        output = await this.ensureSelfIdentity(
+          output,
+          prepared.prompt.system,
+          prepared.prompt.user,
+          llmId,
+          fallbackLlmId,
+          this.resolveDreamBudgets(llmId).maxOutputTokens,
+        );
       }
       this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
@@ -343,8 +556,14 @@ export class DreamService {
   }
 
   /** First attempt + one retry when the output is not parseable JSON. */
-  private async generateAndParse(system: string, user: string, llmId: string | null, fallbackLlmId: string | null = null): Promise<DreamOutput> {
-    const firstRaw = await this.callDreamLlm(system, user, llmId, fallbackLlmId);
+  private async generateAndParse(
+    system: string,
+    user: string,
+    llmId: string | null,
+    fallbackLlmId: string | null = null,
+    maxTokens?: number,
+  ): Promise<DreamOutput> {
+    const firstRaw = await this.callDreamLlm(system, user, llmId, fallbackLlmId, maxTokens);
     const first = parseDreamOutput(firstRaw);
     if (first.ok) return first.output;
     const firstError = (first as { ok: false; error: string }).error;
@@ -353,7 +572,8 @@ export class DreamService {
       system,
       `${user}\n\n(上一次输出无法解析:${firstError}。请严格只输出一个 JSON 对象,不要输出任何其他文字。)`,
       llmId,
-      fallbackLlmId
+      fallbackLlmId,
+      maxTokens,
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok) return retry.output;
@@ -366,7 +586,8 @@ export class DreamService {
     system: string,
     user: string,
     llmId: string | null,
-    fallbackLlmId: string | null = null
+    fallbackLlmId: string | null = null,
+    maxTokens?: number,
   ): Promise<DreamOutput> {
     const validation = validateSelfIdentity(output.selfIdentity);
     if (validation.valid) return output;
@@ -375,7 +596,8 @@ export class DreamService {
       system,
       `${user}\n\n(上一次的 self_identity ${output.selfIdentity ? `只有 ${validation.charCount} 个非空白字符` : '缺失'}。请重新输出完整 JSON,其中 self_identity 不少于 200 个非空白字符,认真写一段「我是谁」。)`,
       llmId,
-      fallbackLlmId
+      fallbackLlmId,
+      maxTokens,
     );
     const retry = parseDreamOutput(retryRaw);
     if (retry.ok && validateSelfIdentity(retry.output.selfIdentity).valid) {
@@ -405,6 +627,11 @@ export class DreamService {
         orderCount: activity.orderCount,
         taskRunCount: activity.taskRuns.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
+        activityCharCount: activity.sessions.reduce(
+          (sum, session) => sum + session.messages.reduce((sessionSum, message) => sessionSum + message.content.length, 0),
+          0,
+        ),
+        estimatedActivityTokens: estimateDreamActivityTokens(activity),
       },
       sessionRefs: activity.sessions.map((session) => ({
         sessionId: session.sessionId,

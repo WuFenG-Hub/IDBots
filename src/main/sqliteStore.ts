@@ -464,6 +464,34 @@ export class SqliteStore {
     `);
 
     this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_dream_fragments (
+        id TEXT PRIMARY KEY,
+        metabot_id INTEGER NOT NULL,
+        dream_date TEXT NOT NULL,
+        fragment_key TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL DEFAULT 0,
+        content_hash TEXT NOT NULL,
+        source_message_count INTEGER NOT NULL DEFAULT 0,
+        source_char_count INTEGER NOT NULL DEFAULT 0,
+        estimated_input_tokens INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL,
+        summary_json TEXT,
+        llm_id TEXT,
+        dream_version INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(metabot_id, dream_date, fragment_key)
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_metabot_dream_fragments_date
+      ON metabot_dream_fragments(metabot_id, dream_date)
+    `);
+
+    this.db.run(`
       CREATE TABLE IF NOT EXISTS cowork_conversation_mappings (
         channel TEXT NOT NULL,
         external_conversation_id TEXT NOT NULL,

@@ -104,7 +104,7 @@ test('computeDueDreamDates: a completed run that started mid-day is not final an
 
   // Once re-dreamed after the day ended, the date is final.
   const settled = new Map([
-    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 2 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 3 }],
   ]);
   const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
   assert.equal(next.dueDates.includes('2026-08-03'), false);
@@ -297,7 +297,7 @@ test('buildDreamPrompt truncates oversized activity within budget', () => {
       orderCount: 0,
     },
   });
-  assert.ok(user.length < 16000, `prompt should be bounded, got ${user.length}`);
+  assert.ok(user.length < 60000, `prompt should be bounded, got ${user.length}`);
   assert.ok(user.includes('……'));
   // Fair-share budgeting: even with 30 oversized sessions, every session keeps
   // its place (header and inventory title) instead of silently dropping out.
