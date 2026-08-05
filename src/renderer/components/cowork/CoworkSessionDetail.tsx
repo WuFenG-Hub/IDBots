@@ -382,6 +382,16 @@ const isTodoWriteToolName = (toolName: string | undefined): boolean => {
   return normalizeToolName(toolName) === 'todowrite';
 };
 
+// SDK 0.3.142+ headless/SDK sessions emit TaskCreate/TaskUpdate/TaskGet/TaskList
+// in place of TodoWrite. TaskCreate and TaskUpdate carry task arrays that map
+// cleanly onto the existing checkbox-list rendering; TaskGet/TaskList return
+// text results and fall through to the generic renderer.
+const isTaskListToolName = (toolName: string | undefined): boolean => {
+  if (!toolName) return false;
+  const normalized = normalizeToolName(toolName);
+  return normalized === 'taskcreate' || normalized === 'taskupdate';
+};
+
 const toTrimmedString = (value: unknown): string | null => (
   typeof value === 'string' && value.trim() ? value.trim() : null
 );
@@ -445,6 +455,38 @@ const getTodoWriteSummary = (items: ParsedTodoItem[]): string => {
   return summary.join(' · ');
 };
 
+// Task-family tools (TaskCreate/TaskUpdate) store tasks under a `tasks` array.
+// Each task carries content/activeForm/status the same way TodoWrite items do,
+// so we reuse ParsedTodoItem and the shared summary formatter.
+const parseTaskListItems = (input: unknown): ParsedTodoItem[] | null => {
+  if (!input || typeof input !== 'object') return null;
+  const record = input as Record<string, unknown>;
+  const rawTasks = Array.isArray(record.tasks) ? record.tasks : null;
+  if (!rawTasks) return null;
+
+  const parsedItems = rawTasks
+    .map((rawTask) => {
+      if (!rawTask || typeof rawTask !== 'object') {
+        return null;
+      }
+
+      const task = rawTask as Record<string, unknown>;
+      const activeForm = toTrimmedString(task.activeForm);
+      const content = toTrimmedString(task.content);
+      const primaryText = activeForm ?? content ?? i18nService.t('coworkTodoUntitled');
+      const secondaryText = content && content !== primaryText ? content : null;
+
+      return {
+        primaryText,
+        secondaryText,
+        status: normalizeTodoStatus(task.status),
+      } satisfies ParsedTodoItem;
+    })
+    .filter((item): item is ParsedTodoItem => item !== null);
+
+  return parsedItems.length > 0 ? parsedItems : null;
+};
+
 const getToolInputSummary = (
   toolName: string | undefined,
   toolInput?: Record<string, unknown>
@@ -453,6 +495,11 @@ const getToolInputSummary = (
   const input = toolInput as Record<string, unknown>;
   if (isTodoWriteToolName(toolName)) {
     const items = parseTodoWriteItems(input);
+    return items ? getTodoWriteSummary(items) : null;
+  }
+
+  if (isTaskListToolName(toolName)) {
+    const items = parseTaskListItems(input);
     return items ? getTodoWriteSummary(items) : null;
   }
 
@@ -1136,6 +1183,8 @@ const ToolCallGroup: React.FC<{
   const toolInput = toolUse.metadata?.toolInput;
   const isTodoWriteTool = isTodoWriteToolName(toolName);
   const todoItems = isTodoWriteTool ? parseTodoWriteItems(toolInput) : null;
+  const isTaskListTool = isTaskListToolName(toolName);
+  const taskItems = isTaskListTool ? parseTaskListItems(toolInput) : null;
   const mapText = mapDisplayText ?? ((value: string) => value);
   const toolInputDisplayRaw = formatToolInput(toolName, toolInput);
   const toolInputDisplay = toolInputDisplayRaw ? mapText(toolInputDisplayRaw) : null;
@@ -1184,7 +1233,7 @@ const ToolCallGroup: React.FC<{
               </code>
             )}
           </div>
-          {toolResult && resultLineCount > 0 && !isTodoWriteTool && (
+          {toolResult && resultLineCount > 0 && !isTodoWriteTool && !isTaskListTool && (
             <div className="text-xs dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 mt-0.5">
               {resultLineCount} {resultLineCount === 1 ? 'line' : 'lines'} of output
             </div>
@@ -1232,6 +1281,8 @@ const ToolCallGroup: React.FC<{
             </div>
           ) : isTodoWriteTool && todoItems ? (
             <TodoWriteInputView items={todoItems} />
+          ) : isTaskListTool && taskItems ? (
+            <TodoWriteInputView items={taskItems} />
           ) : (
             // Standard display for other tools with input/output labels
             <div className="space-y-2">
