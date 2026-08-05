@@ -1,38 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const packageJsonPath = path.join(process.cwd(), 'package.json');
 const mainProcessPath = path.join(process.cwd(), 'src', 'main', 'main.ts');
 const skillManagerPath = path.join(process.cwd(), 'src', 'main', 'skillManager.ts');
 const coworkRunnerPath = path.join(process.cwd(), 'src', 'main', 'libs', 'coworkRunner.ts');
-const claudeSdkCliPatchScriptPath = path.join(process.cwd(), 'scripts', 'patch-claude-sdk-cli.js');
 const electronMainExternalsPath = path.join(process.cwd(), 'scripts', 'electron-main-externals.cjs');
 const viteConfigPath = path.join(process.cwd(), 'vite.config.ts');
 const require = createRequire(import.meta.url);
-
-const CYGPATH_SNIPPET =
-  'BS=(A)=>{let Q=g4([A]);return NL(`cygpath -u ${Q}`,{shell:dM1()}).toString().trim()},B0Q=(A)=>{let Q=g4([A]);return NL(`cygpath -w ${Q}`,{shell:dM1()}).toString().trim()};';
-
-const EXPLORE_AGENT_SNIPPET =
-  'FT={agentType:"Explore",whenToUse:"Fast agent specialized for exploring codebases.",disallowedTools:[P6,eZ1,S6,NG,EC],source:"built-in",baseDir:"built-in",model:"haiku",getSystemPrompt:()=>JH5,criticalSystemReminder_EXPERIMENTAL:"CRITICAL: This is a READ-ONLY task. You CANNOT edit, write, or create files."}';
-
-function createClaudeSdkCliFixture() {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-claude-sdk-patch-'));
-  const cliDir = path.join(tempDir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
-  fs.mkdirSync(cliDir, { recursive: true });
-  const cliPath = path.join(cliDir, 'cli.js');
-  fs.writeFileSync(
-    cliPath,
-    ['before', CYGPATH_SNIPPET, EXPLORE_AGENT_SNIPPET, 'after'].join('\n'),
-    'utf8',
-  );
-  return { tempDir, cliPath };
-}
 
 test('skillManager runtime YAML parser must be declared as production dependency', () => {
   const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
@@ -227,25 +205,75 @@ test('CoworkRunner uses MetaBot DeepSeek automation model for local service exec
     'CoworkRunner should pass the resolved API config into the child process environment',
   );
 });
+test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.js patching', () => {
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
 
-test('Claude SDK CLI patch makes the built-in Explore sub-agent inherit the main model', (t) => {
-  const { tempDir, cliPath } = createClaudeSdkCliFixture();
-  t.after(() => {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  execFileSync(process.execPath, [claudeSdkCliPatchScriptPath], { cwd: tempDir, stdio: 'pipe' });
-
-  const patched = fs.readFileSync(cliPath, 'utf8');
   assert.match(
-    patched,
-    /agentType:"Explore"[\s\S]*?model:"inherit"/,
-    'Explore should inherit the parent Cowork model instead of forcing Claude Haiku',
+    packageJson.dependencies['@anthropic-ai/claude-agent-sdk'],
+    /^0\.3\./,
+    'SDK 0.3.x ships the compiled native binary instead of cli.js',
+  );
+  assert.ok(
+    packageJson.dependencies['@anthropic-ai/sdk'],
+    'SDK 0.3.x declares @anthropic-ai/sdk as a required peer dependency',
+  );
+  assert.ok(
+    packageJson.dependencies['@modelcontextprotocol/sdk'],
+    'SDK 0.3.x declares @modelcontextprotocol/sdk as a required peer dependency',
   );
   assert.doesNotMatch(
-    patched,
-    /agentType:"Explore"[\s\S]*?model:"haiku"/,
-    'Explore must not keep the SDK default haiku override',
+    packageJson.scripts.postinstall,
+    /patch-claude-sdk-cli/,
+    'postinstall must not patch the removed cli.js bundle anymore',
+  );
+});
+
+test('cowork subprocess env disables Claude Code nonessential external traffic', () => {
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+
+  for (const flag of [
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    'DISABLE_TELEMETRY',
+    'DISABLE_ERROR_REPORTING',
+    'DISABLE_AUTOUPDATER',
+    'DISABLE_BUG_COMMAND',
+  ]) {
+    assert.match(
+      coworkUtilSource,
+      new RegExp(`env\\.${flag} = '1'`),
+      `${flag} must be forced on so embedded Claude Code sessions never depend on Anthropic-operated endpoints`,
+    );
+  }
+});
+
+test('SDK query call sites isolate from user Claude Code settings sources', () => {
+  const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+  const sandboxRunnerSource = fs.readFileSync(
+    path.join(process.cwd(), 'sandbox', 'agent-runner', 'index.js'),
+    'utf8',
+  );
+
+  assert.match(
+    coworkRunnerSource,
+    /settingSources:\s*\[\]/,
+    'CoworkRunner must pass settingSources: [] so user settings env blocks cannot override the session provider env',
+  );
+  assert.match(
+    coworkUtilSource,
+    /settingSources:\s*\[\]/,
+    'Session title generation must pass settingSources: [] for the same isolation',
+  );
+  assert.match(
+    sandboxRunnerSource,
+    /settingSources:\s*\[\]/,
+    'Sandbox runner must pass settingSources: [] for the same isolation',
   );
 });
 

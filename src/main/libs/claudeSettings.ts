@@ -1,4 +1,5 @@
 import { join } from 'path';
+import { existsSync } from 'fs';
 import { app } from 'electron';
 import type { SqliteStore } from '../sqliteStore';
 import type { CoworkApiConfig } from './coworkConfigStore';
@@ -53,23 +54,66 @@ const getStore = (): SqliteStore | null => {
 };
 
 export function getClaudeCodePath(): string {
-  if (app.isPackaged) {
-    return join(
-      process.resourcesPath,
-      'app.asar.unpacked/node_modules/@anthropic-ai/claude-agent-sdk/cli.js'
-    );
+  const candidates = resolveClaudeCodeBinaryCandidates();
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  // Fall back to the first candidate so callers still get a deterministic path
+  // even before the platform package is installed.
+  return candidates[0];
+}
+
+/**
+ * The 0.3.x Claude Agent SDK no longer ships a Node `cli.js`. It resolves a
+ * compiled native binary from a platform-specific optional dependency such as
+ * `@anthropic-ai/claude-agent-sdk-darwin-arm64`. We build the same candidate
+ * list the SDK uses internally and anchor it to our node_modules root so the
+ * packaged app (asar.unpacked) and dev checkouts both resolve.
+ */
+function resolveClaudeCodeBinaryCandidates(): string[] {
+  const nodeModulesRoot = app.isPackaged
+    ? join(process.resourcesPath, 'app.asar.unpacked', 'node_modules')
+    : // In development, try to find node_modules in the project root.
+      // app.getAppPath() might point to dist-electron or other build output directories.
+      join(resolveProjectRootDir(), 'node_modules');
+
+  const platform = process.platform;
+  const arch = process.arch;
+  const binaryName = platform === 'win32' ? 'claude.exe' : 'claude';
+  const scope = '@anthropic-ai';
+
+  const packageNames: string[] = [];
+  if (platform === 'linux') {
+    // Prefer the musl build when the current process reports no glibc, matching SDK behavior.
+    if (isMuslRuntime()) {
+      packageNames.push(`claude-agent-sdk-linux-${arch}-musl`);
+      packageNames.push(`claude-agent-sdk-linux-${arch}`);
+    } else {
+      packageNames.push(`claude-agent-sdk-linux-${arch}`);
+      packageNames.push(`claude-agent-sdk-linux-${arch}-musl`);
+    }
+  } else {
+    packageNames.push(`claude-agent-sdk-${platform}-${arch}`);
   }
 
-  // In development, try to find the SDK in the project root node_modules
-  // app.getAppPath() might point to dist-electron or other build output directories
-  // We need to look in the project root
-  const appPath = app.getAppPath();
-  // If appPath ends with dist-electron, go up one level
-  const rootDir = appPath.endsWith('dist-electron') 
-    ? join(appPath, '..') 
-    : appPath;
+  return packageNames.map((name) => join(nodeModulesRoot, scope, name, binaryName));
+}
 
-  return join(rootDir, 'node_modules/@anthropic-ai/claude-agent-sdk/cli.js');
+function resolveProjectRootDir(): string {
+  const appPath = app.getAppPath();
+  return appPath.endsWith('dist-electron') ? join(appPath, '..') : appPath;
+}
+
+function isMuslRuntime(): boolean {
+  try {
+    const report = (process as unknown as { report?: { getReport?: () => { header?: { glibcVersionRuntime?: string } } } }).report;
+    const header = report?.getReport?.()?.header;
+    return header !== undefined && header.glibcVersionRuntime === undefined;
+  } catch {
+    return false;
+  }
 }
 
 type MatchedProvider = {

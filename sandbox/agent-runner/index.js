@@ -120,6 +120,49 @@ function getClaudeSdkVersion() {
   }
 }
 
+function isMuslRuntime() {
+  try {
+    const report = process.report && typeof process.report.getReport === 'function'
+      ? process.report.getReport()
+      : null;
+    const header = report && report.header;
+    return header !== undefined && header.glibcVersionRuntime === undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SDK 0.3.x no longer bundles a Node cli.js; the CLI is a compiled native
+ * binary delivered through platform-specific packages such as
+ * @anthropic-ai/claude-agent-sdk-linux-x64-musl. Resolve it the same way the
+ * SDK does, preferring the musl build on this Alpine guest.
+ */
+function resolveClaudeCodeExecutable() {
+  const binaryName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  const scope = '@anthropic-ai';
+  const candidates = [];
+  if (process.platform === 'linux') {
+    if (isMuslRuntime()) {
+      candidates.push(`${scope}/claude-agent-sdk-linux-${process.arch}-musl/${binaryName}`);
+      candidates.push(`${scope}/claude-agent-sdk-linux-${process.arch}/${binaryName}`);
+    } else {
+      candidates.push(`${scope}/claude-agent-sdk-linux-${process.arch}/${binaryName}`);
+      candidates.push(`${scope}/claude-agent-sdk-linux-${process.arch}-musl/${binaryName}`);
+    }
+  } else {
+    candidates.push(`${scope}/claude-agent-sdk-${process.platform}-${process.arch}/${binaryName}`);
+  }
+  for (const candidate of candidates) {
+    try {
+      return require.resolve(candidate);
+    } catch {
+      // try next candidate
+    }
+  }
+  return null;
+}
+
 function buildFallbackMcpServerFactory() {
   try {
     const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
@@ -1169,9 +1212,12 @@ async function handleRequest(requestId, request, requestPath) {
     const options = {
       cwd: requestCwd,
       env: buildEnv(request.env),
-      pathToClaudeCodeExecutable: require.resolve('@anthropic-ai/claude-agent-sdk/cli.js'),
+      pathToClaudeCodeExecutable: resolveClaudeCodeExecutable() || undefined,
       includePartialMessages: true,
       permissionMode: 'default',
+      // Isolate from any Claude Code settings files in the guest/home so their
+      // env blocks cannot override the provider environment passed per request.
+      settingSources: [],
       stderr: (data) => {
         const line = typeof data === 'string' ? data.trim() : '';
         if (line) {

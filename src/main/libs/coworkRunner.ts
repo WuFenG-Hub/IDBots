@@ -3801,10 +3801,9 @@ export class CoworkRunner extends EventEmitter {
     }
     let stderrTail = '';
 
-    // When packaged, process.execPath is the Electron binary.
-    // child_process.fork() uses process.execPath by default, so without
-    // ELECTRON_RUN_AS_NODE the SDK would launch another Electron app instance
-    // instead of running cli.js as a Node script, causing exit code 1.
+    // Kept for child processes spawned down the tool chain (node/npx shims run
+    // Electron as Node). SDK 0.3.x spawns the native Claude binary directly, so
+    // the CLI itself no longer depends on this flag.
     if (app.isPackaged) {
       envVars.ELECTRON_RUN_AS_NODE = '1';
     }
@@ -3897,6 +3896,10 @@ export class CoworkRunner extends EventEmitter {
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: 'default',
       includePartialMessages: true,
+      // Isolate from the user's Claude Code settings files: their env blocks
+      // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
+      // override the provider environment we pass per session.
+      settingSources: [],
       stderr: (message: string) => {
         stderrTail += message;
         if (stderrTail.length > STDERR_TAIL_MAX_CHARS) {
