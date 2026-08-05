@@ -102,24 +102,45 @@
 
 ## Tasks
 
-- [ ] T1: Rename `SKILLs/metabot-upload-largefile` to `SKILLs/metabot-upload-file`, rename script to `upload-file.js`/`.ts`, update `skills.config.json`, wiki runtime reference, and wiki test; fix stale "2M" eval reference.
-- [ ] T2: Threshold and chain semantics in `metaFileUploadShared.js`/`metaFileUploadService.ts`: `> 5 MiB` chunked, `> 50 MiB` reject, DOGE rejected everywhere, `opcat` accepted for direct.
-- [ ] T3: Canonical result shape: content preview URL, accelerate download URL, `metawebUrl` share link, extension-bearing `metafileUri`, plus `txids`/`totalCost`/`network`/`bytes`/`extension`/`globalMetaId`.
-- [ ] T4: `--verify` flow: RPC `verify` param, skill `--verify` flag, `metafileVerifier.ts` probe loop, `verification` result field.
-- [ ] T5: MVC sponsor path: config gate `chain.mvcSponsorUploadEnabled`, `mvcSponsorUpload.ts`, direct `<= 5 MiB` sponsor attempt, fallback semantics, `feeAssist` result field.
-- [ ] T6: Network default resolution from metabot profile config (or document `mvc` default if no per-metabot setting exists).
-- [ ] T7: Rewrite `SKILLs/metabot-upload-file/SKILL.md` in English per OAC structure; include post-upload viewing (local Bot Browser vs share URL) and handoff sections.
-- [ ] T8: Align `metabot-post-buzz` / `metabot-post-skill` uploads to the unified flow; keep existing behavior covered by tests.
-- [ ] T9: Production sync cleanup of legacy `metabot-upload-largefile` in `userData/SKILLs`.
-- [ ] T10: Update/extend tests: `tests/metabotUploadLargefile.test.mjs` (boundaries, DOGE, new result fields, verify), `tests/uploadLargeFileWorker.test.mjs`, `tests/metaFileUploadMvcSpend.test.mjs` (sponsor + fallback), new `tests/metafileVerifier.test.mjs`, `tests/mvcSponsorUpload.test.mjs`, `tests/metabotWikiMetafileUri.test.mjs`.
-- [ ] T11: Update evals (`SKILLs/metabot-upload-file/evals/evals.json`) to cover: small PNG direct, PDF direct with `--verify`, > 5 MiB MP4 chunked, > 50 MiB rejection, DOGE rejection.
-- [ ] T12: Docs: record final semantics in this plan; mark OAC parity table complete.
+- [x] T1: Rename `SKILLs/metabot-upload-largefile` to `SKILLs/metabot-upload-file`, rename script to `upload-file.js`/`.ts`, update `skills.config.json`, wiki runtime reference, and wiki test; fix stale "2M" eval reference.
+- [x] T2: Threshold and chain semantics in `metaFileUploadShared.js`/`metaFileUploadService.ts`: `> 5 MiB` chunked, `> 50 MiB` reject, DOGE rejected everywhere, `opcat` accepted for direct.
+- [x] T3: Canonical result shape: content preview URL, accelerate download URL, `metawebUrl` share link, extension-bearing `metafileUri`, plus `txids`/`totalCost`/`network`/`bytes`/`extension`/`globalMetaId`.
+- [x] T4: `--verify` flow: RPC `verify` param, skill `--verify` flag, `metafileVerifier.ts` probe loop, `verification` result field.
+- [x] T5: MVC sponsor path: config gate `chain.mvcSponsorUploadEnabled`, `mvcSponsorUpload.ts`, direct `<= 5 MiB` sponsor attempt, fallback semantics, `feeAssist` result field.
+- [x] T6: Network default resolution from metabot profile config (`chain.defaultWriteNetwork`, default `mvc`).
+- [x] T7: Rewrite `SKILLs/metabot-upload-file/SKILL.md` in English per OAC structure; include post-upload viewing (local Bot Browser vs share URL) and handoff sections.
+- [x] T8: Align `metabot-post-buzz` / `metabot-post-skill` uploads to the unified flow; keep existing behavior covered by tests.
+- [x] T9: Production sync cleanup of legacy `metabot-upload-largefile` in `userData/SKILLs`.
+- [x] T10: Update/extend tests: `tests/metabotUploadLargefile.test.mjs` (boundaries, DOGE, new result fields), `tests/uploadLargeFileWorker.test.mjs` + `tests/metaFileUploadMvcSpend.test.mjs` (import-path fix), new `tests/metafileVerifier.test.mjs`, `tests/mvcSponsorUpload.test.mjs`, `tests/metabotSettings.test.mjs`, `tests/metabotPostBuzzSkill.test.mjs` (unified upload), `tests/skillManagerContentSync.test.mjs` (retirement), `tests/metabotWikiMetafileUri.test.mjs`.
+- [x] T11: Update evals (`SKILLs/metabot-upload-file/evals/evals.json`) to cover: small PNG direct, PDF direct with `--verify`, > 5 MiB MP4 chunked, > 50 MiB rejection, DOGE rejection.
+- [x] T12: Docs: record final semantics in this plan; mark OAC parity table complete.
+
+## Final Status (implementation complete)
+
+All 12 tasks are implemented on `feat/upload-file-align-oac`. Final behavior:
+
+- **Skill identity**: `metabot-upload-file`; one skill for small and large files; path-first script `SKILLs/metabot-upload-file/scripts/upload-file.js` -> RPC `POST /api/idbots/files/upload-largefile` (endpoint kept, not renamed).
+- **Thresholds**: direct `<= 5 MiB`; chunked `> 5 MiB` and `<= 50 MiB` (MVC only); reject `> 50 MiB`.
+- **Chains**: direct `mvc`/`btc`/`opcat` (opcat via new `src/main/libs/opcatInscribe.ts`, dependency `@opcat-labs/scrypt-ts-opcat@^4.0.0`); DOGE rejected everywhere for file upload.
+- **Sponsor**: MVC sponsor v2 for direct MVC file uploads, gated by per-metabot setting `chain.mvcSponsorUploadEnabled` (default true); self-paid fallback for `service_unavailable`/`no_user_utxo`; hard failure with `data.feeAssist` for `pre_rejected`/`commit_failed`; quota shortfall surfaces at `pre` as `insufficient_quota` hard failure (the address-info advisory estimate is 0 by draft construction, matching OAC).
+- **Verification**: `--verify` probes accelerate/content/legacy URLs (HEAD, GET fallback), 3 attempts x 250 ms; `verification` field only when requested.
+- **Result**: `success`, `pinId`, `metafileUri` (extension-bearing), `previewUrl` (content URL), `downloadUrl` (accelerate URL), `metawebUrl` (share link), `fileName`, `size` + `bytes` alias, `extension`, `contentType`, `uploadMode`, `network`, `txids`, optional `totalCost`, `globalMetaId`, optional `feeAssist`, optional `verification`. `fallbackUrl` removed from the payload.
+- **Settings**: new idempotent `metabot_settings` table (per-metabot kv): `chain.defaultWriteNetwork` (default `mvc`) and `chain.mvcSponsorUploadEnabled` (default true). A config-set RPC/IPC surface is deferred.
+- **Post-upload handling**: local viewing via `bot_browser_open_uri metafile://<pinId>.<ext>`; sharing via `metawebUrl` / `https://openagentinternet.org/browser/metafile/<pinId>`.
+- **Consumers**: `metabot-post-buzz` attachments and `metabot-post-skill` ZIP uploads route through the unified flow; post-buzz maps DOGE to MVC for attachments while keeping DOGE for the buzz write; post-skill keeps its documented 4 MB product cap.
+- **Upgrade path**: production skill sync removes the legacy `metabot-upload-largefile` folder and config entries from `userData/SKILLs`.
+
+### Deviations from OAC (intentional)
+
+- OAC's pending-UTXO tracking after sponsor commit is not ported; IDBots relies on its existing MVC spend coordinator and stale-input retry machinery.
+- `chain.defaultWriteNetwork`/`chain.mvcSponsorUploadEnabled` live in the IDBots per-metabot `metabot_settings` table instead of a profile `config.json`; no `config get/set` CLI surface in this iteration.
+- The RPC endpoint path `/api/idbots/files/upload-largefile` is unchanged to avoid breaking existing callers (`metabot-metaapp`, `metabot-post-metaapp`, wiki runtime).
 
 ## Verification
 
 - `npm run compile:electron` passes.
-- `node --test tests/metabotUploadLargefile.test.mjs tests/uploadLargeFileWorker.test.mjs tests/metaFileUploadMvcSpend.test.mjs tests/metabotWikiMetafileUri.test.mjs` (plus new test files) passes.
-- Manual: upload a small PNG (expect `uploadMode: direct`, content preview URL, download URL, share link, optional verification); upload a > 5 MiB MP4 to MVC (expect `uploadMode: chunked`); upload > 50 MiB (expect hard-cap error); request DOGE (expect explicit rejection); run with `--verify` (expect `verification.ok` true and a probed URL).
+- Test suite: `tests/metabotUploadLargefile.test.mjs tests/uploadLargeFileWorker.test.mjs tests/metaFileUploadMvcSpend.test.mjs tests/metabotWikiMetafileUri.test.mjs tests/metafileVerifier.test.mjs tests/mvcSponsorUpload.test.mjs tests/metabotSettings.test.mjs tests/metabotPostBuzzSkill.test.mjs tests/skillManagerContentSync.test.mjs` - all pass (28 tests).
+- Manual (recommended before merge): upload a small PNG (expect `uploadMode: direct`, content preview URL, download URL, share link, optional verification); upload a > 5 MiB MP4 to MVC (expect `uploadMode: chunked`); upload > 50 MiB (expect hard-cap error); request DOGE (expect explicit rejection); run with `--verify` (expect `verification.ok` true and a probed URL); upload with `--network opcat` on a bot with OPCAT funds (expect direct opcat write).
 - Skill name `metabot-upload-file` resolves in dev mode; production sync does not leave a stale `metabot-upload-largefile` folder.
 
 ## Out Of Scope (this iteration)
@@ -129,3 +150,4 @@
 - DOGE file upload support.
 - Changes to the MetaFS uploader protocol itself (1 MiB parts, multipart staging) - shared server, keep as-is.
 - The externally installed `~/.metabot/skills/metabot-upload-*` copies (these belong to the OAC `metabot` CLI installation, not IDBots).
+- A per-metabot `config get/set` RPC surface for the new chain settings.
