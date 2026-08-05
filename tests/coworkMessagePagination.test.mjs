@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   createCoworkStore,
   createSqliteStore,
+  getCompiledStores,
   getIndexNames,
 } from './memoryTestUtils.mjs';
 
@@ -14,6 +15,31 @@ const {
   resolveA2ASessionEpisodeRotationReason,
   rotateCoworkA2ASessionEpisode,
 } = await import('../dist-electron/main/services/coworkEnsureA2ASession.js');
+const {
+  buildA2AConversationThreadId,
+  buildA2AParticipantPairKey,
+} = getCompiledStores();
+
+const insertMetabot = (db, id, globalMetaId) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key,
+      chat_public_key, name, metaid, globalmetaid, metabot_type, created_by,
+      role, soul, created_at, updated_at
+    ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'worker', 'test', 'role', 'soul', 1, 1)`,
+    [
+      id,
+      `mvc-${id}`,
+      `btc-${id}`,
+      `doge-${id}`,
+      `pk-${id}`,
+      `chatpk-${id}`,
+      `bot-${id}`,
+      `metaid-${id}`,
+      globalMetaId,
+    ],
+  );
+};
 
 test('message pagination index is created idempotently', async () => {
   const { db, cleanup } = await createSqliteStore();
@@ -22,6 +48,55 @@ test('message pagination index is created idempotently', async () => {
     createCoworkStore(db);
     const names = getIndexNames(db, 'cowork_messages');
     assert.equal(names.filter((name) => name === 'idx_cowork_messages_session_sequence').length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('A2A identity keys separate local perspective while retaining a pair-wide key', () => {
+  assert.notEqual(
+    buildA2AConversationThreadId('IDQ1LOCAL', 'idq1peer'),
+    buildA2AConversationThreadId('idq1peer', 'idq1local'),
+  );
+  assert.equal(
+    buildA2AParticipantPairKey('IDQ1LOCAL', 'idq1peer'),
+    buildA2AParticipantPairKey('idq1peer', 'idq1local'),
+  );
+});
+
+test('legacy canonical A2A sessions are idempotently backfilled into logical threads', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    insertMetabot(db, 1, 'idq1local');
+    const session = store.createSession(
+      'Legacy peer',
+      '/tmp/a2a',
+      '',
+      'local',
+      [],
+      1,
+      'a2a',
+      'idq1peer',
+    );
+    store.upsertConversationMapping({
+      channel: 'metaweb_private',
+      externalConversationId: 'metaweb-private:idq1peer',
+      metabotId: 1,
+      coworkSessionId: session.id,
+      metadataJson: JSON.stringify({
+        a2aConversationId: 'metaweb-private:idq1peer',
+        episodeIndex: 1,
+        episodeStartedAt: session.createdAt,
+      }),
+    });
+
+    const migrated = createCoworkStore(db);
+    createCoworkStore(db);
+    const thread = migrated.getA2AConversationThreadBySession(session.id);
+    assert.equal(thread?.localGlobalMetaId, 'idq1local');
+    assert.equal(thread?.peerGlobalMetaId, 'idq1peer');
+    assert.equal(migrated.listA2AConversationEpisodes(session.id).length, 1);
   } finally {
     cleanup();
   }
@@ -227,6 +302,7 @@ test('rotating an A2A episode preserves stable conversation identity and archive
       session: store.getSessionWithoutMessages(oldSession.id),
       externalConversationId: conversationId,
       reason: 'message_limit',
+      localGlobalMetaId: 'idq1local',
       peerGlobalMetaId: 'idq1peer',
       peerName: 'Peer Bot',
       now: 1_800_000_000_000,
@@ -248,6 +324,63 @@ test('rotating an A2A episode preserves stable conversation identity and archive
     assert.equal(currentMetadata.episodeIndex, 2);
     assert.equal(currentMetadata.previousEpisodeSessionId, oldSession.id);
     assert.equal(currentMetadata.byeSent, false);
+
+    store.addMessage(nextSession.id, {
+      type: 'assistant',
+      content: 'new episode message 1',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
+    });
+    store.addMessage(nextSession.id, {
+      type: 'user',
+      content: 'new episode message 2',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    });
+
+    const episodes = store.listA2AConversationEpisodes(nextSession.id);
+    assert.deepEqual(episodes.map((episode) => ({
+      sessionId: episode.sessionId,
+      episodeIndex: episode.episodeIndex,
+      previousSessionId: episode.previousSessionId,
+      nextSessionId: episode.nextSessionId,
+      endedAt: episode.endedAt,
+      closeReason: episode.closeReason,
+    })), [
+      {
+        sessionId: oldSession.id,
+        episodeIndex: 1,
+        previousSessionId: null,
+        nextSessionId: nextSession.id,
+        endedAt: 1_800_000_000_000,
+        closeReason: 'message_limit',
+      },
+      {
+        sessionId: nextSession.id,
+        episodeIndex: 2,
+        previousSessionId: oldSession.id,
+        nextSessionId: null,
+        endedAt: null,
+        closeReason: null,
+      },
+    ]);
+    const thread = store.getA2AConversationThreadBySession(nextSession.id);
+    assert.ok(thread?.id.startsWith('a2a-thread:'));
+    assert.ok(thread?.participantPairKey.startsWith('a2a-pair:'));
+
+    const latestHistory = store.getA2AConversationHistoryPage(nextSession.id, { limit: 2 });
+    assert.deepEqual(
+      latestHistory?.messages.map((entry) => [entry.episodeIndex, entry.message.content]),
+      [[2, 'new episode message 1'], [2, 'new episode message 2']],
+    );
+    assert.equal(latestHistory?.hasMoreBefore, true);
+    const earlierHistory = store.getA2AConversationHistoryPage(nextSession.id, {
+      beforeCursor: latestHistory?.beforeCursor,
+      limit: 2,
+    });
+    assert.deepEqual(
+      earlierHistory?.messages.map((entry) => [entry.episodeIndex, entry.message.content]),
+      [[1, 'old history remains intact']],
+    );
+    assert.equal(earlierHistory?.hasMoreBefore, false);
   } finally {
     cleanup();
   }

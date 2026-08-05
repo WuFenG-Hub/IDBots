@@ -1632,6 +1632,7 @@ function handleAutoDeliveryResult(
 async function resolvePrivateConversationSession(
   coworkStore: CoworkStore,
   metabotId: number,
+  localGlobalMetaId: string,
   row: PrivateChatMessageRow,
   firstMessage: string
 ): Promise<{
@@ -1655,6 +1656,18 @@ async function resolvePrivateConversationSession(
       });
       if (repaired) {
         const repairedSession = coworkStore.getSessionWithoutMessages(existing.coworkSessionId) ?? session;
+        const existingMetadata = parseConversationMappingMetadata(existing.metadataJson);
+        coworkStore.registerA2AEpisode({
+          sessionId: repairedSession.id,
+          localMetabotId: metabotId,
+          localGlobalMetaId,
+          peerGlobalMetaId: peerId,
+          episodeIndex: Number(existingMetadata.episodeIndex) || 1,
+          previousSessionId: typeof existingMetadata.previousEpisodeSessionId === 'string'
+            ? existingMetadata.previousEpisodeSessionId
+            : null,
+          startedAt: Number(existingMetadata.episodeStartedAt) || repairedSession.createdAt,
+        });
         const rotationReason = resolveA2ASessionEpisodeRotationReason({
           mapping: existing,
           messageCount: coworkStore.getSessionMessageCount(repairedSession.id),
@@ -1668,6 +1681,7 @@ async function resolvePrivateConversationSession(
             session: repairedSession,
             externalConversationId,
             reason: rotationReason,
+            localGlobalMetaId,
             peerGlobalMetaId: peerId,
             peerName: (row.from_name as string | null) ?? null,
             peerAvatar: (row.from_avatar as string | null) ?? null,
@@ -1723,8 +1737,20 @@ async function resolvePrivateConversationSession(
       episodeStartedAt: session.createdAt,
     }),
   });
+  const registeredEpisode = coworkStore.registerA2AEpisode({
+    sessionId: session.id,
+    localMetabotId: metabotId,
+    localGlobalMetaId,
+    peerGlobalMetaId: peerId,
+    episodeIndex: 1,
+    startedAt: session.createdAt,
+  });
+  coworkStore.updateConversationMappingMetadata('metaweb_private', externalConversationId, metabotId, {
+    a2aThreadId: registeredEpisode.threadId,
+  });
   coworkStore.updateConversationMappingMetadata('cowork_ui', session.id, metabotId, {
     a2aConversationId: externalConversationId,
+    a2aThreadId: registeredEpisode.threadId,
     episodeIndex: 1,
     episodeStartedAt: session.createdAt,
     peerGlobalMetaId: peerId,
@@ -3740,6 +3766,7 @@ async function processOne(
         const { sessionId } = await resolvePrivateConversationSession(
           coworkStore,
           metabot.id,
+          metabot.globalmetaid,
           row,
           plaintext
         );
@@ -3808,6 +3835,7 @@ async function processOne(
     const { sessionId, episodeStarted, previousEpisodeSessionId } = await resolvePrivateConversationSession(
       coworkStore,
       metabot.id,
+      metabot.globalmetaid,
       row,
       plaintext
     );

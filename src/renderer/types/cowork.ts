@@ -80,6 +80,25 @@ export interface CoworkMessagePage {
   beforeSequence: number | null;
 }
 
+export interface CoworkA2AHistoryCursor {
+  episodeIndex: number;
+  beforeSequence: number;
+}
+
+export interface CoworkA2AHistoryMessage {
+  sessionId: string;
+  episodeIndex: number;
+  message: CoworkMessage;
+}
+
+export interface CoworkA2AHistoryPage {
+  threadId: string;
+  participantPairKey: string;
+  messages: CoworkA2AHistoryMessage[];
+  hasMoreBefore: boolean;
+  beforeCursor: CoworkA2AHistoryCursor | null;
+}
+
 export interface CoworkMessageHistoryState {
   hasMoreBefore: boolean;
   beforeSequence: number | null;

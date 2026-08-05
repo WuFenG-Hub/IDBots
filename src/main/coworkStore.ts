@@ -456,6 +456,36 @@ function parsePeerGlobalMetaIdFromMetadata(metadataJson?: string | null): string
   }
 }
 
+function normalizeA2AParticipantId(value: string): string {
+  return normalizeScopeIdentity(value).toLowerCase();
+}
+
+function hashA2AIdentity(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+/** Stable across physical session rotation and directional for one local Bot's view. */
+export function buildA2AConversationThreadId(localGlobalMetaId: string, peerGlobalMetaId: string): string {
+  const local = normalizeA2AParticipantId(localGlobalMetaId);
+  const peer = normalizeA2AParticipantId(peerGlobalMetaId);
+  if (!local || !peer || local === peer) {
+    throw new Error('Two distinct A2A participant GlobalMetaIDs are required');
+  }
+  return `a2a-thread:${hashA2AIdentity(`${local}>${peer}`)}`;
+}
+
+/** Direction-independent key reserved for future pair-wide history aggregation. */
+export function buildA2AParticipantPairKey(localGlobalMetaId: string, peerGlobalMetaId: string): string {
+  const participants = [
+    normalizeA2AParticipantId(localGlobalMetaId),
+    normalizeA2AParticipantId(peerGlobalMetaId),
+  ].sort();
+  if (!participants[0] || !participants[1] || participants[0] === participants[1]) {
+    throw new Error('Two distinct A2A participant GlobalMetaIDs are required');
+  }
+  return `a2a-pair:${hashA2AIdentity(participants.join('|'))}`;
+}
+
 // Types mirroring src/types/cowork.ts for main process use
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
@@ -500,6 +530,59 @@ export interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
   beforeSequence: number | null;
+}
+
+export interface CoworkA2AHistoryCursor {
+  episodeIndex: number;
+  beforeSequence: number;
+}
+
+export interface CoworkA2AHistoryMessage {
+  sessionId: string;
+  episodeIndex: number;
+  message: CoworkMessage;
+}
+
+export interface CoworkA2AHistoryPage {
+  threadId: string;
+  participantPairKey: string;
+  messages: CoworkA2AHistoryMessage[];
+  hasMoreBefore: boolean;
+  beforeCursor: CoworkA2AHistoryCursor | null;
+}
+
+export interface CoworkA2AConversationThread {
+  id: string;
+  participantPairKey: string;
+  localMetabotId: number;
+  localGlobalMetaId: string;
+  peerGlobalMetaId: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoworkA2AConversationEpisode {
+  sessionId: string;
+  threadId: string;
+  episodeIndex: number;
+  previousSessionId: string | null;
+  nextSessionId: string | null;
+  startedAt: number;
+  endedAt: number | null;
+  closeReason: string | null;
+}
+
+export interface RegisterCoworkA2AEpisodeInput {
+  sessionId: string;
+  localMetabotId: number;
+  localGlobalMetaId: string;
+  peerGlobalMetaId: string;
+  episodeIndex?: number;
+  previousSessionId?: string | null;
+  startedAt: number;
+  endedAt?: number | null;
+  closeReason?: string | null;
+  previousCloseReason?: string | null;
 }
 
 export interface CoworkMessageHistoryState {
@@ -849,6 +932,32 @@ interface CoworkConversationMappingRow {
   last_active_at: number | string;
 }
 
+interface CoworkA2AThreadRow {
+  id: string;
+  participant_pair_key: string;
+  local_metabot_id: number | string;
+  local_global_metaid: string;
+  peer_global_metaid: string;
+  created_at: number | string;
+  updated_at: number | string;
+}
+
+interface CoworkA2AEpisodeRow {
+  session_id: string;
+  thread_id: string;
+  episode_index: number | string;
+  previous_session_id: string | null;
+  next_session_id: string | null;
+  started_at: number | string;
+  ended_at: number | string | null;
+  close_reason: string | null;
+}
+
+interface CoworkA2AHistoryRow extends CoworkMessageRow {
+  session_id: string;
+  episode_index: number | string;
+}
+
 interface MemoryScopeResolutionContext {
   sourceChannel?: string | null;
   externalConversationId?: string | null;
@@ -911,6 +1020,7 @@ export class CoworkStore implements MemoryBackend {
     this.ensureMemorySchemaCompatibility();
     this.ensureMemoryPolicySchemaCompatibility();
     this.ensureConversationMappingSchemaCompatibility();
+    this.ensureA2AConversationSchemaCompatibility();
     this.ensureCoworkMessageIndexes();
     this.ensureCoworkSessionIndexes();
     this.backfillScopedMemoryMetadata();
@@ -1219,6 +1329,139 @@ export class CoworkStore implements MemoryBackend {
     }
   }
 
+  private ensureA2AConversationSchemaCompatibility(): void {
+    try {
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS a2a_conversation_threads (
+          id TEXT PRIMARY KEY,
+          participant_pair_key TEXT NOT NULL,
+          local_metabot_id INTEGER NOT NULL,
+          local_global_metaid TEXT NOT NULL,
+          peer_global_metaid TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_a2a_threads_participant_pair
+        ON a2a_conversation_threads(participant_pair_key, updated_at DESC)
+      `);
+      this.db.run(`
+        CREATE TABLE IF NOT EXISTS a2a_conversation_episodes (
+          session_id TEXT PRIMARY KEY,
+          thread_id TEXT NOT NULL,
+          episode_index INTEGER NOT NULL,
+          previous_session_id TEXT,
+          next_session_id TEXT,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          close_reason TEXT,
+          UNIQUE(thread_id, episode_index),
+          FOREIGN KEY (session_id) REFERENCES cowork_sessions(id) ON DELETE CASCADE,
+          FOREIGN KEY (thread_id) REFERENCES a2a_conversation_threads(id) ON DELETE CASCADE
+        )
+      `);
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_a2a_episodes_thread_index
+        ON a2a_conversation_episodes(thread_id, episode_index DESC)
+      `);
+      this.backfillA2AConversationEpisodes();
+      this.saveDb();
+    } catch (error) {
+      console.warn('[CoworkStore] Failed to verify A2A conversation schema:', error);
+    }
+  }
+
+  private backfillA2AConversationEpisodes(): void {
+    if (!this.tableExists('metabots')) return;
+    const metabotColumns = this.db.exec('PRAGMA table_info(metabots);');
+    const metabotColumnNames = (metabotColumns[0]?.values || []).map((row) => String(row[1]));
+    if (!metabotColumnNames.includes('globalmetaid')) return;
+
+    const rows = this.getAll<{
+      session_id: string;
+      metabot_id: number | string;
+      peer_global_metaid: string;
+      created_at: number | string;
+      updated_at: number | string;
+      local_global_metaid: string | null;
+      ui_metadata_json: string | null;
+      private_metadata_json: string | null;
+    }>(`
+      SELECT
+        s.id AS session_id,
+        s.metabot_id,
+        s.peer_global_metaid,
+        s.created_at,
+        s.updated_at,
+        b.globalmetaid AS local_global_metaid,
+        ui.metadata_json AS ui_metadata_json,
+        (
+          SELECT private_mapping.metadata_json
+          FROM cowork_conversation_mappings private_mapping
+          WHERE private_mapping.channel = 'metaweb_private'
+            AND private_mapping.cowork_session_id = s.id
+            AND private_mapping.metabot_id = COALESCE(s.metabot_id, 0)
+          LIMIT 1
+        ) AS private_metadata_json
+      FROM cowork_sessions s
+      LEFT JOIN metabots b ON b.id = s.metabot_id
+      LEFT JOIN cowork_conversation_mappings ui
+        ON ui.channel = 'cowork_ui'
+        AND ui.external_conversation_id = s.id
+        AND ui.metabot_id = COALESCE(s.metabot_id, 0)
+      WHERE s.session_type = 'a2a'
+        AND TRIM(COALESCE(s.peer_global_metaid, '')) <> ''
+        AND (
+          ui.metadata_json LIKE '%"a2aConversationId"%'
+          OR EXISTS (
+            SELECT 1
+            FROM cowork_conversation_mappings private_mapping
+            WHERE private_mapping.channel = 'metaweb_private'
+              AND private_mapping.cowork_session_id = s.id
+              AND private_mapping.metabot_id = COALESCE(s.metabot_id, 0)
+          )
+        )
+      ORDER BY s.created_at ASC, s.id ASC
+    `);
+
+    for (const row of rows) {
+      const localMetabotId = parseIdNumber(row.metabot_id);
+      const localGlobalMetaId = normalizeA2AParticipantId(row.local_global_metaid || '');
+      const peerGlobalMetaId = normalizeA2AParticipantId(row.peer_global_metaid || '');
+      if (localMetabotId == null || !localGlobalMetaId || !peerGlobalMetaId || localGlobalMetaId === peerGlobalMetaId) {
+        continue;
+      }
+      let metadata: CoworkMessageMetadata = {};
+      for (const rawMetadata of [row.ui_metadata_json, row.private_metadata_json]) {
+        if (!rawMetadata) continue;
+        try {
+          const parsed = JSON.parse(rawMetadata) as unknown;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            metadata = { ...metadata, ...parsed as CoworkMessageMetadata };
+          }
+        } catch {
+          // Ignore malformed legacy mapping metadata and preserve the session itself.
+        }
+      }
+      this.writeA2AEpisode({
+        sessionId: row.session_id,
+        localMetabotId,
+        localGlobalMetaId,
+        peerGlobalMetaId,
+        episodeIndex: parseIdNumber(metadata.episodeIndex) ?? undefined,
+        previousSessionId: typeof metadata.previousEpisodeSessionId === 'string'
+          ? metadata.previousEpisodeSessionId
+          : null,
+        startedAt: parseIdNumber(metadata.episodeStartedAt) ?? parseIdNumber(row.created_at) ?? Date.now(),
+        endedAt: parseIdNumber(metadata.episodeClosedAt),
+        closeReason: typeof metadata.episodeCloseReason === 'string'
+          ? metadata.episodeCloseReason
+          : null,
+      });
+    }
+  }
+
   private getKvValue(key: string): string | null {
     const row = this.getOne<{ value: string }>('SELECT value FROM kv WHERE key = ?', [key]);
     if (!row?.value) {
@@ -1519,6 +1762,152 @@ export class CoworkStore implements MemoryBackend {
       });
       return row as T;
     });
+  }
+
+  private mapA2AThreadRow(row: CoworkA2AThreadRow): CoworkA2AConversationThread {
+    return {
+      id: row.id,
+      participantPairKey: row.participant_pair_key,
+      localMetabotId: parseIdNumber(row.local_metabot_id) ?? 0,
+      localGlobalMetaId: row.local_global_metaid,
+      peerGlobalMetaId: row.peer_global_metaid,
+      createdAt: parseIdNumber(row.created_at) ?? 0,
+      updatedAt: parseIdNumber(row.updated_at) ?? 0,
+    };
+  }
+
+  private mapA2AEpisodeRow(row: CoworkA2AEpisodeRow): CoworkA2AConversationEpisode {
+    return {
+      sessionId: row.session_id,
+      threadId: row.thread_id,
+      episodeIndex: parseIdNumber(row.episode_index) ?? 1,
+      previousSessionId: row.previous_session_id,
+      nextSessionId: row.next_session_id,
+      startedAt: parseIdNumber(row.started_at) ?? 0,
+      endedAt: parseIdNumber(row.ended_at),
+      closeReason: row.close_reason,
+    };
+  }
+
+  private writeA2AEpisode(input: RegisterCoworkA2AEpisodeInput): CoworkA2AConversationEpisode {
+    const localMetabotId = parseIdNumber(input.localMetabotId);
+    if (localMetabotId == null) throw new Error('A valid local MetaBot id is required');
+    const localGlobalMetaId = normalizeA2AParticipantId(input.localGlobalMetaId);
+    const peerGlobalMetaId = normalizeA2AParticipantId(input.peerGlobalMetaId);
+    const threadId = buildA2AConversationThreadId(localGlobalMetaId, peerGlobalMetaId);
+    const participantPairKey = buildA2AParticipantPairKey(localGlobalMetaId, peerGlobalMetaId);
+    const startedAt = parseIdNumber(input.startedAt) ?? Date.now();
+
+    this.db.run(`
+      INSERT INTO a2a_conversation_threads (
+        id, participant_pair_key, local_metabot_id, local_global_metaid,
+        peer_global_metaid, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        participant_pair_key = excluded.participant_pair_key,
+        local_metabot_id = excluded.local_metabot_id,
+        local_global_metaid = excluded.local_global_metaid,
+        peer_global_metaid = excluded.peer_global_metaid,
+        updated_at = MAX(a2a_conversation_threads.updated_at, excluded.updated_at)
+    `, [
+      threadId,
+      participantPairKey,
+      localMetabotId,
+      localGlobalMetaId,
+      peerGlobalMetaId,
+      startedAt,
+      input.endedAt ?? startedAt,
+    ]);
+
+    const existing = this.getOne<CoworkA2AEpisodeRow>(`
+      SELECT * FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+    `, [input.sessionId]);
+    if (existing) return this.mapA2AEpisodeRow(existing);
+
+    const latest = this.getOne<CoworkA2AEpisodeRow>(`
+      SELECT *
+      FROM a2a_conversation_episodes
+      WHERE thread_id = ?
+      ORDER BY episode_index DESC
+      LIMIT 1
+    `, [threadId]);
+    const latestIndex = parseIdNumber(latest?.episode_index) ?? 0;
+    const requestedIndex = parseIdNumber(input.episodeIndex);
+    let episodeIndex = requestedIndex ?? latestIndex + 1;
+    const occupied = this.getOne<{ session_id: string }>(`
+      SELECT session_id
+      FROM a2a_conversation_episodes
+      WHERE thread_id = ? AND episode_index = ?
+      LIMIT 1
+    `, [threadId, episodeIndex]);
+    if (occupied && occupied.session_id !== input.sessionId) {
+      episodeIndex = latestIndex + 1;
+    }
+    const previousSessionId = input.previousSessionId
+      ?? (latest && (parseIdNumber(latest.episode_index) ?? 0) < episodeIndex ? latest.session_id : null);
+
+    this.db.run(`
+      INSERT INTO a2a_conversation_episodes (
+        session_id, thread_id, episode_index, previous_session_id, next_session_id,
+        started_at, ended_at, close_reason
+      ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?)
+    `, [
+      input.sessionId,
+      threadId,
+      episodeIndex,
+      previousSessionId,
+      startedAt,
+      input.endedAt ?? null,
+      input.closeReason ?? null,
+    ]);
+
+    if (previousSessionId) {
+      this.db.run(`
+        UPDATE a2a_conversation_episodes
+        SET next_session_id = ?, ended_at = COALESCE(ended_at, ?), close_reason = COALESCE(close_reason, ?)
+        WHERE session_id = ? AND thread_id = ?
+      `, [
+        input.sessionId,
+        startedAt,
+        input.previousCloseReason ?? null,
+        previousSessionId,
+        threadId,
+      ]);
+    }
+
+    return this.mapA2AEpisodeRow(this.getOne<CoworkA2AEpisodeRow>(`
+      SELECT * FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+    `, [input.sessionId])!);
+  }
+
+  registerA2AEpisode(input: RegisterCoworkA2AEpisodeInput): CoworkA2AConversationEpisode {
+    const episode = this.writeA2AEpisode(input);
+    this.saveDb();
+    return episode;
+  }
+
+  getA2AConversationThreadBySession(sessionId: string): CoworkA2AConversationThread | null {
+    const row = this.getOne<CoworkA2AThreadRow>(`
+      SELECT thread.*
+      FROM a2a_conversation_episodes episode
+      JOIN a2a_conversation_threads thread ON thread.id = episode.thread_id
+      WHERE episode.session_id = ?
+      LIMIT 1
+    `, [sessionId]);
+    return row ? this.mapA2AThreadRow(row) : null;
+  }
+
+  listA2AConversationEpisodes(sessionId: string): CoworkA2AConversationEpisode[] {
+    const anchor = this.getOne<{ thread_id: string }>(`
+      SELECT thread_id FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+    `, [sessionId]);
+    if (!anchor) return [];
+    return this.getAll<CoworkA2AEpisodeRow>(`
+      SELECT *
+      FROM a2a_conversation_episodes
+      WHERE thread_id = ?
+      ORDER BY episode_index ASC
+    `, [anchor.thread_id]).map((row) => this.mapA2AEpisodeRow(row));
   }
 
   /** Get metabot_id for a session; returns null if session not found or has no metabot_id. */
@@ -2373,6 +2762,9 @@ export class CoworkStore implements MemoryBackend {
 
   deleteSession(id: string): void {
     const session = this.getSessionWithoutMessages(id);
+    const a2aEpisode = this.getOne<CoworkA2AEpisodeRow>(`
+      SELECT * FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+    `, [id]);
     const metabotId = session?.metabotId ?? this.getDefaultMetabotId();
     const sourceContext = this.getConversationSourceContextBySession(id);
     const resolvedWriteScope = metabotId == null
@@ -2386,7 +2778,29 @@ export class CoworkStore implements MemoryBackend {
         }).writeScope;
     this.markMemorySourcesInactiveBySession(id);
     this.db.run('DELETE FROM cowork_conversation_mappings WHERE cowork_session_id = ?', [id]);
+    if (a2aEpisode) {
+      if (a2aEpisode.previous_session_id) {
+        this.db.run(`
+          UPDATE a2a_conversation_episodes SET next_session_id = ? WHERE session_id = ?
+        `, [a2aEpisode.next_session_id, a2aEpisode.previous_session_id]);
+      }
+      if (a2aEpisode.next_session_id) {
+        this.db.run(`
+          UPDATE a2a_conversation_episodes SET previous_session_id = ? WHERE session_id = ?
+        `, [a2aEpisode.previous_session_id, a2aEpisode.next_session_id]);
+      }
+      this.db.run('DELETE FROM a2a_conversation_episodes WHERE session_id = ?', [id]);
+    }
     this.db.run('DELETE FROM cowork_sessions WHERE id = ?', [id]);
+    if (a2aEpisode) {
+      this.db.run(`
+        DELETE FROM a2a_conversation_threads
+        WHERE id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM a2a_conversation_episodes WHERE thread_id = ?
+          )
+      `, [a2aEpisode.thread_id, a2aEpisode.thread_id]);
+    }
     if (metabotId != null) {
       this.markOrphanImplicitMemoriesStale(metabotId, { scope: resolvedWriteScope });
     }
@@ -2894,6 +3308,90 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
+  getA2AConversationHistoryPage(
+    sessionId: string,
+    options?: { beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number },
+  ): CoworkA2AHistoryPage | null {
+    const anchor = this.getOne<CoworkA2AEpisodeRow>(`
+      SELECT * FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+    `, [sessionId]);
+    if (!anchor) return null;
+    const thread = this.getOne<CoworkA2AThreadRow>(`
+      SELECT * FROM a2a_conversation_threads WHERE id = ? LIMIT 1
+    `, [anchor.thread_id]);
+    if (!thread) return null;
+
+    const requestedLimit = Number(options?.limit);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
+      : 100;
+    const cursorEpisodeIndex = parseIdNumber(options?.beforeCursor?.episodeIndex);
+    const cursorBeforeSequence = parseIdNumber(options?.beforeCursor?.beforeSequence);
+    const anchorEpisodeIndex = parseIdNumber(anchor.episode_index) ?? 1;
+    const params: Array<string | number> = [anchor.thread_id];
+    let cursorClause = 'AND episode.episode_index <= ?';
+    if (cursorEpisodeIndex != null && cursorBeforeSequence != null) {
+      cursorClause = `
+        AND (
+          episode.episode_index < ?
+          OR (episode.episode_index = ? AND COALESCE(message.sequence, 0) < ?)
+        )
+      `;
+      params.push(cursorEpisodeIndex, cursorEpisodeIndex, cursorBeforeSequence);
+    } else {
+      params.push(anchorEpisodeIndex);
+    }
+    params.push(limit + 1);
+
+    const rows = this.getAll<CoworkA2AHistoryRow>(`
+      SELECT
+        message.id,
+        message.session_id,
+        message.type,
+        message.content,
+        message.metadata,
+        message.created_at,
+        message.sequence,
+        episode.episode_index
+      FROM a2a_conversation_episodes episode
+      JOIN cowork_messages message ON message.session_id = episode.session_id
+      WHERE episode.thread_id = ?
+      ${cursorClause}
+      ORDER BY
+        episode.episode_index DESC,
+        COALESCE(message.sequence, 0) DESC,
+        message.created_at DESC,
+        message.ROWID DESC
+      LIMIT ?
+    `, params);
+    const hasMoreBefore = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const oldest = pageRows[pageRows.length - 1];
+
+    return {
+      threadId: thread.id,
+      participantPairKey: thread.participant_pair_key,
+      messages: pageRows.reverse().map((row) => ({
+        sessionId: row.session_id,
+        episodeIndex: parseIdNumber(row.episode_index) ?? 1,
+        message: {
+          id: row.id,
+          type: row.type as CoworkMessageType,
+          content: row.content,
+          timestamp: row.created_at,
+          metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+        },
+      })),
+      hasMoreBefore,
+      beforeCursor: hasMoreBefore && oldest
+        ? {
+            episodeIndex: parseIdNumber(oldest.episode_index) ?? 1,
+            beforeSequence: parseIdNumber(oldest.sequence) ?? 1,
+          }
+        : null,
+    };
+  }
+
   getSessionLatestMessage(sessionId: string): CoworkMessage | null {
     const row = this.getOne<CoworkMessageRow>(`
       SELECT id, type, content, metadata, created_at, sequence
@@ -2986,6 +3484,13 @@ export class CoworkStore implements MemoryBackend {
     ]);
 
     this.db.run('UPDATE cowork_sessions SET updated_at = ? WHERE id = ?', [now, sessionId]);
+    this.db.run(`
+      UPDATE a2a_conversation_threads
+      SET updated_at = ?
+      WHERE id = (
+        SELECT thread_id FROM a2a_conversation_episodes WHERE session_id = ? LIMIT 1
+      )
+    `, [now, sessionId]);
 
     this.saveDb();
 

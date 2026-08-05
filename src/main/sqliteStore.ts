@@ -508,6 +508,42 @@ export class SqliteStore {
       ON cowork_conversation_mappings(cowork_session_id);
     `);
 
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS a2a_conversation_threads (
+        id TEXT PRIMARY KEY,
+        participant_pair_key TEXT NOT NULL,
+        local_metabot_id INTEGER NOT NULL,
+        local_global_metaid TEXT NOT NULL,
+        peer_global_metaid TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_a2a_threads_participant_pair
+      ON a2a_conversation_threads(participant_pair_key, updated_at DESC);
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS a2a_conversation_episodes (
+        session_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        episode_index INTEGER NOT NULL,
+        previous_session_id TEXT,
+        next_session_id TEXT,
+        started_at INTEGER NOT NULL,
+        ended_at INTEGER,
+        close_reason TEXT,
+        UNIQUE(thread_id, episode_index),
+        FOREIGN KEY (session_id) REFERENCES cowork_sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (thread_id) REFERENCES a2a_conversation_threads(id) ON DELETE CASCADE
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_a2a_episodes_thread_index
+      ON a2a_conversation_episodes(thread_id, episode_index DESC);
+    `);
+
     // Create scheduled tasks tables
     this.db.run(`
       CREATE TABLE IF NOT EXISTS scheduled_tasks (

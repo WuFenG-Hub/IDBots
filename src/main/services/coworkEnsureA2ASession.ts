@@ -109,6 +109,7 @@ export function rotateCoworkA2ASessionEpisode(input: {
   session: CoworkSession;
   externalConversationId: string;
   reason: A2ASessionEpisodeRotationReason;
+  localGlobalMetaId: string;
   peerGlobalMetaId: string;
   peerName?: string | null;
   peerAvatar?: string | null;
@@ -117,7 +118,6 @@ export function rotateCoworkA2ASessionEpisode(input: {
   const now = Number.isFinite(input.now) ? Number(input.now) : Date.now();
   const mappingMetadata = parseMappingMetadata(input.mapping.metadataJson);
   const previousEpisodeIndex = positiveInteger(mappingMetadata.episodeIndex, 1);
-  const episodeIndex = previousEpisodeIndex + 1;
   const peerName = text(input.peerName) || input.session.peerName || null;
   const peerAvatar = text(input.peerAvatar) || input.session.peerAvatar || null;
   const mappedMetabotId = Number(input.mapping.metabotId);
@@ -142,9 +142,28 @@ export function rotateCoworkA2ASessionEpisode(input: {
     input.coworkStore.setSessionPinned(session.id, true);
   }
 
+  input.coworkStore.registerA2AEpisode({
+    sessionId: input.session.id,
+    localMetabotId: metabotId ?? mappedMetabotId,
+    localGlobalMetaId: input.localGlobalMetaId,
+    peerGlobalMetaId: input.peerGlobalMetaId,
+    episodeIndex: previousEpisodeIndex,
+    startedAt: positiveInteger(mappingMetadata.episodeStartedAt, input.session.createdAt),
+  });
+  const registeredEpisode = input.coworkStore.registerA2AEpisode({
+    sessionId: session.id,
+    localMetabotId: metabotId ?? mappedMetabotId,
+    localGlobalMetaId: input.localGlobalMetaId,
+    peerGlobalMetaId: input.peerGlobalMetaId,
+    previousSessionId: input.session.id,
+    startedAt: now,
+    previousCloseReason: input.reason,
+  });
+
   const sharedEpisodeMetadata: CoworkMessageMetadata = {
     a2aConversationId: input.externalConversationId,
-    episodeIndex,
+    a2aThreadId: registeredEpisode.threadId,
+    episodeIndex: registeredEpisode.episodeIndex,
     episodeStartedAt: now,
     previousEpisodeSessionId: input.session.id,
     episodeReason: input.reason,
@@ -170,6 +189,7 @@ export function rotateCoworkA2ASessionEpisode(input: {
   });
   input.coworkStore.updateConversationMappingMetadata('cowork_ui', input.session.id, metabotId, {
     a2aConversationId: input.externalConversationId,
+    a2aThreadId: registeredEpisode.threadId,
     episodeIndex: previousEpisodeIndex,
     episodeStartedAt: positiveInteger(mappingMetadata.episodeStartedAt, input.session.createdAt),
     nextEpisodeSessionId: session.id,
@@ -276,6 +296,18 @@ export function ensureCoworkA2ASession(
       });
       if (repaired) {
         const repairedSession = params.coworkStore.getSessionWithoutMessages(existing.coworkSessionId) ?? session;
+        const existingMetadata = parseMappingMetadata(existing.metadataJson);
+        params.coworkStore.registerA2AEpisode({
+          sessionId: repairedSession.id,
+          localMetabotId: normalized.localMetabotId,
+          localGlobalMetaId,
+          peerGlobalMetaId: normalized.peerGlobalMetaId,
+          episodeIndex: positiveInteger(existingMetadata.episodeIndex, 1),
+          previousSessionId: typeof existingMetadata.previousEpisodeSessionId === 'string'
+            ? existingMetadata.previousEpisodeSessionId
+            : null,
+          startedAt: positiveInteger(existingMetadata.episodeStartedAt, repairedSession.createdAt),
+        });
         const isArchived = params.coworkStore.isSessionArchived(repairedSession.id);
         const hasBlockingServiceOrders = params.coworkStore.hasBlockingServiceOrdersForSession(repairedSession.id);
         const rotationReason = resolveA2ASessionEpisodeRotationReason({
@@ -297,6 +329,7 @@ export function ensureCoworkA2ASession(
               session: repairedSession,
               externalConversationId,
               reason: rotationReason,
+              localGlobalMetaId,
               peerGlobalMetaId: normalized.peerGlobalMetaId,
               peerName: normalized.peerName,
               peerAvatar: normalized.peerAvatar,
@@ -359,8 +392,23 @@ export function ensureCoworkA2ASession(
       episodeStartedAt: session.createdAt,
     }),
   });
+  const registeredEpisode = params.coworkStore.registerA2AEpisode({
+    sessionId: session.id,
+    localMetabotId: normalized.localMetabotId,
+    localGlobalMetaId,
+    peerGlobalMetaId: normalized.peerGlobalMetaId,
+    episodeIndex: 1,
+    startedAt: session.createdAt,
+  });
+  params.coworkStore.updateConversationMappingMetadata(
+    'metaweb_private',
+    externalConversationId,
+    normalized.localMetabotId,
+    { a2aThreadId: registeredEpisode.threadId },
+  );
   params.coworkStore.updateConversationMappingMetadata('cowork_ui', session.id, normalized.localMetabotId, {
     a2aConversationId: externalConversationId,
+    a2aThreadId: registeredEpisode.threadId,
     episodeIndex: 1,
     episodeStartedAt: session.createdAt,
     peerGlobalMetaId: normalized.peerGlobalMetaId,

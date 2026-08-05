@@ -34,6 +34,8 @@ import type {
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkA2AHistoryCursor,
+  CoworkA2AHistoryPage,
   CoworkStartOptions,
   CoworkContinueOptions,
   CoworkSubmitInput,
@@ -568,6 +570,21 @@ class CoworkService {
       },
     }));
     return result.page.messages.length;
+  }
+
+  async getA2AConversationHistoryPage(input: {
+    sessionId: string;
+    beforeCursor?: CoworkA2AHistoryCursor | null;
+    limit?: number;
+  }): Promise<CoworkA2AHistoryPage | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getA2AConversationHistoryPage) return null;
+    const result = await cowork.getA2AConversationHistoryPage(input);
+    if (!result.success || !result.page) {
+      console.error('Failed to load A2A conversation history:', result.error);
+      return null;
+    }
+    return result.page;
   }
 
   async respondToPermission(requestId: string, result: CoworkPermissionResult): Promise<boolean> {

@@ -166,6 +166,23 @@ interface CoworkMessagePage {
   beforeSequence: number | null;
 }
 
+interface CoworkA2AHistoryCursor {
+  episodeIndex: number;
+  beforeSequence: number;
+}
+
+interface CoworkA2AHistoryPage {
+  threadId: string;
+  participantPairKey: string;
+  messages: Array<{
+    sessionId: string;
+    episodeIndex: number;
+    message: CoworkMessage;
+  }>;
+  hasMoreBefore: boolean;
+  beforeCursor: CoworkA2AHistoryCursor | null;
+}
+
 interface CoworkSubmitInput {
   sessionId: string;
   submissionId: string;
@@ -728,6 +745,7 @@ interface IElectronAPI {
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
+    getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;

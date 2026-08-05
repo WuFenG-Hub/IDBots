@@ -335,6 +335,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:get', sessionId),
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
       ipcRenderer.invoke('cowork:session:getMessagesPage', input),
+    getA2AConversationHistoryPage: (input: {
+      sessionId: string;
+      beforeCursor?: { episodeIndex: number; beforeSequence: number } | null;
+      limit?: number;
+    }) => ipcRenderer.invoke('cowork:session:getA2AHistoryPage', input),
     listSessions: (options?: { metabotId?: number | null }) =>
       ipcRenderer.invoke('cowork:session:list', options),
     processServiceRefund: (sessionId: string) =>

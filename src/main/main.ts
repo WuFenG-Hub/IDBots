@@ -6870,6 +6870,42 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:getA2AHistoryPage', async (_event, input: {
+    sessionId?: unknown;
+    beforeCursor?: { episodeIndex?: unknown; beforeSequence?: unknown } | null;
+    limit?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:getA2AHistoryPage', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        const session = sessionId ? getCoworkStore().getSessionMetadata(sessionId) : null;
+        if (!session || session.sessionType !== 'a2a') {
+          return { success: false, error: 'A2A session not found' };
+        }
+        const beforeCursor = input?.beforeCursor
+          && typeof input.beforeCursor.episodeIndex === 'number'
+          && typeof input.beforeCursor.beforeSequence === 'number'
+          ? {
+              episodeIndex: input.beforeCursor.episodeIndex,
+              beforeSequence: input.beforeCursor.beforeSequence,
+            }
+          : null;
+        const page = getCoworkStore().getA2AConversationHistoryPage(sessionId, {
+          beforeCursor,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+        if (!page) return { success: false, error: 'A2A conversation thread not found' };
+        return { success: true, page };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get A2A conversation history',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
     return withSqliteRecovery('cowork:session:list', async () => {
       try {
