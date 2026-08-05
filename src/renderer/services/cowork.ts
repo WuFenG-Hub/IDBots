@@ -126,7 +126,13 @@ class CoworkService {
 
       if (message.metadata?.refreshSessionSummary) {
         await this.loadSessions();
-        if (store.getState().cowork.currentSessionId === sessionId) {
+        const currentSessionId = store.getState().cowork.currentSessionId;
+        const previousEpisodeSessionId = typeof message.metadata.previousEpisodeSessionId === 'string'
+          ? message.metadata.previousEpisodeSessionId
+          : null;
+        if (previousEpisodeSessionId && currentSessionId === previousEpisodeSessionId) {
+          await this.loadSession(sessionId);
+        } else if (currentSessionId === sessionId) {
           try {
             const refreshed = await window.electron?.cowork?.getSession(sessionId);
             if (refreshed?.success && refreshed.session) {

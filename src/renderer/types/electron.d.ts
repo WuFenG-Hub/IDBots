@@ -234,6 +234,8 @@ interface CoworkEnsureA2ASessionInput {
 interface CoworkEnsureA2ASessionResult {
   success: boolean;
   created?: boolean;
+  rotated?: boolean;
+  rotationReason?: 'conversation_restarted' | 'archived_session' | 'message_limit' | 'idle_timeout';
   externalConversationId?: string;
   session?: CoworkSession;
   error?: string;

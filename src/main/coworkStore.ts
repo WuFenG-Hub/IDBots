@@ -462,6 +462,7 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
+const SERVICE_ORDER_RATING_SESSION_HOLD_MS = 24 * 60 * 60 * 1000;
 
 export interface CoworkMessageMetadata {
   interactionKind?: 'steer';
@@ -1309,9 +1310,18 @@ export class CoworkStore implements MemoryBackend {
       LIMIT 1
     `, [sessionId]);
 
+    const mappingMetadata = this.parseMessageMetadata(mappingRow?.metadata_json);
+    const episodeConversationId = typeof mappingMetadata.a2aConversationId === 'string'
+      ? mappingMetadata.a2aConversationId.trim()
+      : '';
+    const sourceChannel = mappingRow?.channel === 'cowork_ui' && episodeConversationId
+      ? 'metaweb_private'
+      : mappingRow?.channel || 'cowork_ui';
+    const externalConversationId = episodeConversationId || mappingRow?.external_conversation_id || sessionId;
+
     return {
-      sourceChannel: mappingRow?.channel || 'cowork_ui',
-      externalConversationId: mappingRow?.external_conversation_id ?? sessionId,
+      sourceChannel,
+      externalConversationId,
       sessionType: (sessionRow?.session_type === 'agent_agent'
         ? 'a2a'
         : sessionRow?.session_type) as CoworkSessionType | null | undefined ?? 'standard',
@@ -2803,6 +2813,31 @@ export class CoworkStore implements MemoryBackend {
         AND LOWER(TRIM(content)) NOT IN ('ping', 'pong')
       LIMIT 1
     `, [sessionId]);
+    return Boolean(row?.found);
+  }
+
+  getSessionMessageCount(sessionId: string): number {
+    const row = this.getOne<{ count: number | string }>(`
+      SELECT COUNT(*) AS count
+      FROM cowork_messages
+      WHERE session_id = ?
+    `, [sessionId]);
+    return parseIdNumber(row?.count) ?? 0;
+  }
+
+  /** Keep live delivery/refund work, plus fresh rating handoffs, on the current episode. */
+  hasBlockingServiceOrdersForSession(sessionId: string, now: number = Date.now()): boolean {
+    if (!this.tableExists('service_orders')) return false;
+    const row = this.getOne<{ found: number }>(`
+      SELECT 1 AS found
+      FROM service_orders
+      WHERE cowork_session_id = ?
+        AND (
+          status IN ('awaiting_first_response', 'in_progress', 'refund_pending')
+          OR (status = 'rating_pending' AND updated_at >= ?)
+        )
+      LIMIT 1
+    `, [sessionId, now - SERVICE_ORDER_RATING_SESSION_HOLD_MS]);
     return Boolean(row?.found);
   }
 

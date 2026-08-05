@@ -7,6 +7,13 @@ import {
   getIndexNames,
 } from './memoryTestUtils.mjs';
 
+const {
+  A2A_SESSION_EPISODE_IDLE_MS,
+  A2A_SESSION_EPISODE_MESSAGE_LIMIT,
+  resolveA2ASessionEpisodeRotationReason,
+  rotateCoworkA2ASessionEpisode,
+} = await import('../dist-electron/main/services/coworkEnsureA2ASession.js');
+
 test('message pagination index is created idempotently', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
@@ -108,6 +115,131 @@ test('A2A daemon queries stay bounded and preserve exact metadata for callers', 
     );
     assert.equal(store.hasPriorPrivateA2AOutboundMessage(session.id), true);
     assert.deepEqual(store.getSessionWithoutMessages(session.id)?.messages, []);
+
+    const now = 1_800_000_000_000;
+    db.run(`
+      INSERT INTO service_orders (
+        id, role, local_metabot_id, counterparty_global_metaid, service_name,
+        payment_txid, payment_chain, payment_amount, payment_currency,
+        cowork_session_id, status, first_response_deadline_at, delivery_deadline_at,
+        created_at, updated_at
+      ) VALUES (?, 'buyer', 1, 'idq1peer', 'Test service', 'tx-order', 'mvc', '1', 'SPACE', ?, 'rating_pending', ?, ?, ?, ?)
+    `, ['order-1', session.id, now, now, now, now - 2 * A2A_SESSION_EPISODE_IDLE_MS]);
+    assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), false);
+    db.run("UPDATE service_orders SET updated_at = ? WHERE id = 'order-1'", [now]);
+    assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), true);
+    db.run("UPDATE service_orders SET status = 'in_progress', updated_at = ? WHERE id = 'order-1'", [now - 2 * A2A_SESSION_EPISODE_IDLE_MS]);
+    assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('A2A episode policy rotates only at durable boundaries', () => {
+  const now = 1_800_000_000_000;
+  const mapping = {
+    lastActiveAt: now - 1_000,
+    metadataJson: JSON.stringify({ episodeIndex: 1 }),
+  };
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping,
+    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT,
+    hasBlockingServiceOrders: false,
+    isArchived: false,
+    now,
+  }), 'message_limit');
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping: { ...mapping, lastActiveAt: now - A2A_SESSION_EPISODE_IDLE_MS },
+    messageCount: 10,
+    hasBlockingServiceOrders: false,
+    isArchived: false,
+    now,
+  }), 'idle_timeout');
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping: { ...mapping, metadataJson: JSON.stringify({ byeSent: true }) },
+    messageCount: 10,
+    hasBlockingServiceOrders: false,
+    isArchived: false,
+    restartEndedConversation: true,
+    now,
+  }), 'conversation_restarted');
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping: { ...mapping, metadataJson: JSON.stringify({ episodeRestartRequestedAt: now }) },
+    messageCount: 10,
+    hasBlockingServiceOrders: false,
+    isArchived: false,
+    now,
+  }), 'conversation_restarted');
+  assert.equal(resolveA2ASessionEpisodeRotationReason({
+    mapping,
+    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT + 100,
+    hasBlockingServiceOrders: true,
+    isArchived: true,
+    restartEndedConversation: true,
+    now,
+  }), null);
+});
+
+test('rotating an A2A episode preserves stable conversation identity and archives raw history', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const conversationId = 'metaweb-private:idq1peer';
+    const oldSession = store.createSession(
+      'Peer Bot',
+      '/tmp/a2a',
+      '',
+      'local',
+      [],
+      1,
+      'a2a',
+      'idq1peer',
+      'Peer Bot',
+    );
+    store.addMessage(oldSession.id, {
+      type: 'user',
+      content: 'old history remains intact',
+      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
+    });
+    const mapping = store.upsertConversationMapping({
+      channel: 'metaweb_private',
+      externalConversationId: conversationId,
+      metabotId: 1,
+      coworkSessionId: oldSession.id,
+      metadataJson: JSON.stringify({
+        peerGlobalMetaId: 'idq1peer',
+        episodeIndex: 1,
+        episodeStartedAt: oldSession.createdAt,
+      }),
+    });
+
+    const nextSession = rotateCoworkA2ASessionEpisode({
+      coworkStore: store,
+      mapping,
+      session: store.getSessionWithoutMessages(oldSession.id),
+      externalConversationId: conversationId,
+      reason: 'message_limit',
+      peerGlobalMetaId: 'idq1peer',
+      peerName: 'Peer Bot',
+      now: 1_800_000_000_000,
+    });
+
+    assert.notEqual(nextSession.id, oldSession.id);
+    assert.equal(store.getConversationMapping('metaweb_private', conversationId, 1)?.coworkSessionId, nextSession.id);
+    assert.equal(store.isSessionArchived(oldSession.id), true);
+    assert.deepEqual(store.getSession(oldSession.id)?.messages.map((message) => message.content), ['old history remains intact']);
+    assert.deepEqual(store.getConversationSourceContextBySession(oldSession.id), {
+      sourceChannel: 'metaweb_private',
+      externalConversationId: conversationId,
+    });
+    assert.deepEqual(store.listSessions().map((session) => session.id), [nextSession.id]);
+    assert.deepEqual(store.listArchivedSessions().map((session) => session.id), [oldSession.id]);
+    const currentMetadata = JSON.parse(
+      store.getConversationMapping('metaweb_private', conversationId, 1)?.metadataJson ?? '{}',
+    );
+    assert.equal(currentMetadata.episodeIndex, 2);
+    assert.equal(currentMetadata.previousEpisodeSessionId, oldSession.id);
+    assert.equal(currentMetadata.byeSent, false);
   } finally {
     cleanup();
   }

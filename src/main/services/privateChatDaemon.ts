@@ -87,7 +87,11 @@ import {
   classifySimplemsgContent,
   type SimplemsgProtocolTag,
 } from './simplemsgPeerConversation';
-import { ensureCoworkA2ASession } from './coworkEnsureA2ASession';
+import {
+  ensureCoworkA2ASession,
+  resolveA2ASessionEpisodeRotationReason,
+  rotateCoworkA2ASessionEpisode,
+} from './coworkEnsureA2ASession';
 import {
   deriveA2AClosingPhaseTurns,
   normalizeA2AAutoReplyEnabled,
@@ -1630,7 +1634,12 @@ async function resolvePrivateConversationSession(
   metabotId: number,
   row: PrivateChatMessageRow,
   firstMessage: string
-): Promise<{ sessionId: string; externalConversationId: string }> {
+): Promise<{
+  sessionId: string;
+  externalConversationId: string;
+  episodeStarted: boolean;
+  previousEpisodeSessionId?: string;
+}> {
   const peerId = normalizePrivateConversationPeerId(row);
   const externalConversationId = buildPrivateConversationExternalConversationId(row);
   const existing = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabotId);
@@ -1645,8 +1654,33 @@ async function resolvePrivateConversationSession(
         peerAvatar: (row.from_avatar as string | null) ?? null,
       });
       if (repaired) {
+        const repairedSession = coworkStore.getSessionWithoutMessages(existing.coworkSessionId) ?? session;
+        const rotationReason = resolveA2ASessionEpisodeRotationReason({
+          mapping: existing,
+          messageCount: coworkStore.getSessionMessageCount(repairedSession.id),
+          hasBlockingServiceOrders: coworkStore.hasBlockingServiceOrdersForSession(repairedSession.id),
+          isArchived: coworkStore.isSessionArchived(repairedSession.id),
+        });
+        if (rotationReason) {
+          const rotatedSession = rotateCoworkA2ASessionEpisode({
+            coworkStore,
+            mapping: existing,
+            session: repairedSession,
+            externalConversationId,
+            reason: rotationReason,
+            peerGlobalMetaId: peerId,
+            peerName: (row.from_name as string | null) ?? null,
+            peerAvatar: (row.from_avatar as string | null) ?? null,
+          });
+          return {
+            sessionId: rotatedSession.id,
+            externalConversationId,
+            episodeStarted: true,
+            previousEpisodeSessionId: repairedSession.id,
+          };
+        }
         coworkStore.touchConversationMapping('metaweb_private', externalConversationId, metabotId);
-        return { sessionId: existing.coworkSessionId, externalConversationId };
+        return { sessionId: existing.coworkSessionId, externalConversationId, episodeStarted: false };
       }
       coworkStore.deleteConversationMapping('metaweb_private', externalConversationId, metabotId);
     } else {
@@ -1684,9 +1718,18 @@ async function resolvePrivateConversationSession(
       peerGlobalMetaId: peerId,
       peerName: (row.from_name as string | null) ?? null,
       peerAvatar: (row.from_avatar as string | null) ?? null,
+      a2aConversationId: externalConversationId,
+      episodeIndex: 1,
+      episodeStartedAt: session.createdAt,
     }),
   });
-  return { sessionId: session.id, externalConversationId };
+  coworkStore.updateConversationMappingMetadata('cowork_ui', session.id, metabotId, {
+    a2aConversationId: externalConversationId,
+    episodeIndex: 1,
+    episodeStartedAt: session.createdAt,
+    peerGlobalMetaId: peerId,
+  });
+  return { sessionId: session.id, externalConversationId, episodeStarted: true };
 }
 
 export function appendPrivateChatA2AMessage(params: {
@@ -3731,6 +3774,7 @@ async function processOne(
         ...mappingMeta,
         byeSent: false,
         endedByAutoPolicy: false,
+        episodeRestartRequestedAt: Date.now(),
         restartedAt: Date.now(),
       });
     }
@@ -3761,7 +3805,7 @@ async function processOne(
       return;
     }
 
-    const { sessionId } = await resolvePrivateConversationSession(
+    const { sessionId, episodeStarted, previousEpisodeSessionId } = await resolvePrivateConversationSession(
       coworkStore,
       metabot.id,
       row,
@@ -3788,10 +3832,17 @@ async function processOne(
       senderGlobalMetaId: fromGlobalMetaId,
       senderName: (row.from_name as string | null) ?? null,
       senderAvatar: (row.from_avatar as string | null) ?? null,
-      extraMetadata: buildPrivateChatA2AChainMetadata({
-        txId: row.tx_id,
-        pinId: row.pin_id,
-      }),
+      extraMetadata: {
+        ...buildPrivateChatA2AChainMetadata({
+          txId: row.tx_id,
+          pinId: row.pin_id,
+        }),
+        ...(episodeStarted ? {
+          refreshSessionSummary: true,
+          a2aEpisodeStarted: true,
+          previousEpisodeSessionId,
+        } : {}),
+      },
       emitToRenderer,
     });
 
