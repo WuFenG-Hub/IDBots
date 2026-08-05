@@ -2,34 +2,40 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 let computeDreamStaggerMinute;
+let computeDreamRetryDelayMs;
 let computeDueDreamDates;
 let countNonWhitespaceChars;
 let validateSelfIdentity;
 let parseDreamOutput;
 let buildDreamPrompt;
 let getDayBoundsMs;
-let DREAM_MAX_ATTEMPTS;
+let DREAM_RETRY_BASE_DELAY_MS;
+let DREAM_RETRY_MAX_DELAY_MS;
 try {
   ({
     computeDreamStaggerMinute,
+    computeDreamRetryDelayMs,
     computeDueDreamDates,
     countNonWhitespaceChars,
     validateSelfIdentity,
     parseDreamOutput,
     buildDreamPrompt,
     getDayBoundsMs,
-    DREAM_MAX_ATTEMPTS,
+    DREAM_RETRY_BASE_DELAY_MS,
+    DREAM_RETRY_MAX_DELAY_MS,
   } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 } catch {
   ({
     computeDreamStaggerMinute,
+    computeDreamRetryDelayMs,
     computeDueDreamDates,
     countNonWhitespaceChars,
     validateSelfIdentity,
     parseDreamOutput,
     buildDreamPrompt,
     getDayBoundsMs,
-    DREAM_MAX_ATTEMPTS,
+    DREAM_RETRY_BASE_DELAY_MS,
+    DREAM_RETRY_MAX_DELAY_MS,
   } = await import('../dist-electron/libs/dreamPrompt.js'));
 }
 
@@ -61,20 +67,27 @@ test('computeDueDreamDates: yesterday waits outside the window, older dates catc
   assert.deepEqual([...dueDates].sort(), dueDates);
 });
 
-test('computeDueDreamDates: completed/running/exhausted dates are skipped, failed dates retry', () => {
+test('computeDueDreamDates: completed/running dates are skipped and failed dates respect backoff', () => {
   const now = new Date(2026, 7, 2, 3, 0);
   const runStates = new Map([
     ['2026-08-01', { status: 'completed', attemptCount: 1, startedAt: new Date(2026, 7, 2, 0, 30).getTime(), dreamVersion: 99 }],
     ['2026-07-31', { status: 'running', attemptCount: 1, startedAt: 0, dreamVersion: 0 }],
-    ['2026-07-30', { status: 'failed', attemptCount: DREAM_MAX_ATTEMPTS, startedAt: 0, dreamVersion: 0 }],
-    ['2026-07-29', { status: 'failed', attemptCount: 1, startedAt: 0, dreamVersion: 0 }],
+    ['2026-07-30', { status: 'failed', attemptCount: 3, startedAt: new Date(2026, 7, 2, 2, 30).getTime(), dreamVersion: 0 }],
+    ['2026-07-29', { status: 'failed', attemptCount: 99, startedAt: new Date(2026, 7, 1, 20, 0).getTime(), dreamVersion: 0 }],
   ]);
   const { dueDates, repairDates } = computeDueDreamDates({ now, metabotId: 1, runStates });
   assert.equal(dueDates.includes('2026-08-01'), false);
   assert.equal(dueDates.includes('2026-07-31'), false);
-  assert.equal(dueDates.includes('2026-07-30'), false);
-  assert.ok(dueDates.includes('2026-07-29'));
+  assert.equal(dueDates.includes('2026-07-30'), false, 'recent failure waits for its retry delay');
+  assert.ok(dueDates.includes('2026-07-29'), 'even a high attempt count becomes eligible after bounded backoff');
   assert.deepEqual(repairDates, [], 'current-version completed runs are fully settled');
+});
+
+test('computeDreamRetryDelayMs grows exponentially and caps at six hours', () => {
+  assert.equal(computeDreamRetryDelayMs(1), DREAM_RETRY_BASE_DELAY_MS);
+  assert.equal(computeDreamRetryDelayMs(2), DREAM_RETRY_BASE_DELAY_MS * 2);
+  assert.equal(computeDreamRetryDelayMs(3), DREAM_RETRY_BASE_DELAY_MS * 4);
+  assert.equal(computeDreamRetryDelayMs(99), DREAM_RETRY_MAX_DELAY_MS);
 });
 
 test('computeDueDreamDates: a completed run that started mid-day is not final and is due again', () => {
@@ -91,7 +104,7 @@ test('computeDueDreamDates: a completed run that started mid-day is not final an
 
   // Once re-dreamed after the day ended, the date is final.
   const settled = new Map([
-    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 1 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 2 }],
   ]);
   const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
   assert.equal(next.dueDates.includes('2026-08-03'), false);

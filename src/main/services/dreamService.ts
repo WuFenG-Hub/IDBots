@@ -30,7 +30,9 @@ import { normalizeMetabotLlmId } from './llmFallback';
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
-const DREAM_LLM_MAX_TOKENS = 4096;
+// Dream prompts carry a full day's activity and require structured JSON.
+// Reasoning-style models count hidden reasoning against this same budget.
+const DREAM_LLM_MAX_TOKENS = 8192;
 const DREAM_STATUS_CHANNEL = 'metabot:dreamStatusChanged';
 
 const EVALUATION_LABELS: Record<string, string> = {
@@ -57,7 +59,12 @@ export type DreamPerformChat = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null }
+  options?: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    fallbackLlmId?: string | null;
+    throwOnEmptyContent?: boolean;
+  }
 ) => Promise<string>;
 
 export interface DreamServiceDeps {
@@ -243,6 +250,9 @@ export class DreamService {
         signal: controller.signal,
         maxTokens: DREAM_LLM_MAX_TOKENS,
         fallbackLlmId,
+        // Empty content must fail inside runWithLlmFallback so a configured
+        // secondary provider gets a chance before the dream attempt fails.
+        throwOnEmptyContent: true,
       });
     } finally {
       clearTimeout(timeout);

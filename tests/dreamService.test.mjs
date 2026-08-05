@@ -94,7 +94,7 @@ const setup = async (performChat) => {
 test('runNow completes the full dream pipeline and writes all artifacts', async () => {
   const calls = [];
   const { cleanup, coworkStore, dreamStore, service, events } = await setup(async (system, user, llmId, options) => {
-    calls.push({ llmId, maxTokens: options?.maxTokens });
+    calls.push({ llmId, maxTokens: options?.maxTokens, throwOnEmptyContent: options?.throwOnEmptyContent });
     return makePayload();
   });
   try {
@@ -104,7 +104,8 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(run.status, 'completed');
     assert.equal(run.llmId, 'bot-own-llm');
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].maxTokens, 4096);
+    assert.equal(calls[0].maxTokens, 8192);
+    assert.equal(calls[0].throwOnEmptyContent, true);
 
     const summary = dreamStore.getDailySummary(5, DAY);
     assert.equal(summary.summaryText, '今天为用户交付了演示视频,获得高度赞扬。');
@@ -222,7 +223,7 @@ test('re-dreaming the same date replaces the day batch and updates identity in p
     const run = dreamStore.getRun(5, DAY);
     assert.equal(run.status, 'completed');
     assert.equal(run.attemptCount, 2);
-    assert.ok(run.dreamVersion >= 1, 'run records the current algorithm version');
+    assert.equal(run.dreamVersion, 2, 'run records the current algorithm version');
   } finally {
     cleanup();
   }
@@ -371,7 +372,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 1, 'at most one repair per bot per night');
     assert.ok(calls[0].includes(DAY), 'newest stale date repairs first');
-    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 1, 'repaired date now records the current version');
+    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 2, 'repaired date now records the current version');
     assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 0, 'older stale date waits');
     const identities = coworkStore.listUserMemories({
       metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
@@ -385,7 +386,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 2, 'next night repairs the remaining stale date');
     assert.ok(calls[1].includes('2026-07-29'));
-    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 1);
+    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 2);
 
     now = new Date(2026, 7, 3, 3, 0);
     await service.tick();

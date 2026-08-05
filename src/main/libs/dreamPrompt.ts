@@ -11,7 +11,10 @@ import { formatBotWorkspaceDate } from './botWorkspace';
  */
 
 export const DREAM_LOOKBACK_DAYS = 7;
-export const DREAM_MAX_ATTEMPTS = 3;
+/** Retry failed dream runs with bounded exponential backoff instead of
+ * abandoning a date after a short burst of transient failures. */
+export const DREAM_RETRY_BASE_DELAY_MS = 30 * 60 * 1000;
+export const DREAM_RETRY_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 /** Nightly dream window: [00:00, 06:00) local time. */
 export const DREAM_WINDOW_END_MINUTES = 6 * 60;
 /**
@@ -20,7 +23,7 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  */
-export const DREAM_VERSION = 1;
+export const DREAM_VERSION = 2;
 export const SELF_IDENTITY_MIN_CHARS = 200;
 export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
@@ -105,12 +108,20 @@ export function validateSelfIdentity(text?: string | null): { valid: boolean; ch
   return { valid: charCount >= SELF_IDENTITY_MIN_CHARS, charCount };
 }
 
+export function computeDreamRetryDelayMs(attemptCount: number): number {
+  const normalizedAttempts = Math.max(1, Math.floor(Number(attemptCount) || 1));
+  const exponent = Math.min(4, normalizedAttempts - 1);
+  return Math.min(DREAM_RETRY_MAX_DELAY_MS, DREAM_RETRY_BASE_DELAY_MS * (2 ** exponent));
+}
+
 /**
  * Which past dates still need dream attention for this bot.
  * - Candidates: the last `lookbackDays` calendar days, today excluded.
  * - Yesterday's dream only runs inside the nightly window, after the bot's
  *   staggered minute; older missed dates (catch-up) are due any time.
- * - Running dates are skipped; failed dates retry up to DREAM_MAX_ATTEMPTS.
+ * - Running dates are skipped; failed dates retry after bounded exponential
+ *   backoff, so a transient provider failure does not exhaust the date after
+ *   a few tightly grouped attempts.
  * - A completed run is *final* only when it started after the dream date
  *   ended (it covered the whole day). A non-final run — e.g. triggered
  *   manually mid-day — is due again in the next eligible window.
@@ -137,7 +148,10 @@ export function computeDueDreamDates(input: {
     const dateStr = formatBotWorkspaceDate(candidate);
     const state = input.runStates.get(dateStr);
     if (state?.status === 'running') continue;
-    if (state?.status === 'failed' && state.attemptCount >= DREAM_MAX_ATTEMPTS) continue;
+    if (state?.status === 'failed') {
+      const retryAt = state.startedAt + computeDreamRetryDelayMs(state.attemptCount);
+      if (input.now.getTime() < retryAt) continue;
+    }
     if (state?.status === 'completed') {
       const coveredWholeDay = state.startedAt >= getDayBoundsMs(dateStr).endMs;
       if (coveredWholeDay) {
