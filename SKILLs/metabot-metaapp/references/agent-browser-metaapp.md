@@ -209,7 +209,147 @@ const upload = await window.AgentBrowser.request({
 
 不要让 MetaApp 直接拿到宿主本地路径。宿主如果不支持上传，应返回 bridge error，而不是泄露本地文件系统细节。
 
-## 8. 安全边界
+## 8. MetaFile 图片解析
+
+当 MetaApp 要渲染远端图片字段（Bot homepage 头像、MetaApp icon / cover / gallery / section 缩略图）时，**除非宿主运行时明确声明原生支持 `metafile://` 图片**，否则必须先把 MetaFile 引用解析成浏览器可访问的图片 URL，再赋给 `<img src>`。
+
+### 解析顺序
+
+1. 值已经是 `data:`、`blob:`、`http(s):` → 直接用
+2. 值是 `metafile://<pinId>[.<ext>]`、裸 pin id、或已知 content path → 先抽出 pin id
+3. 如果是头像且系统提供了 `manApiBaseUrl` → 用 `<manApiBaseUrl>/content/<pinId>`
+4. 否则，如果系统提供了专用 MetaFile 图片 base → 用那个配置值
+5. 否则回退到公共 fallback base：
+   - 头像：`https://file.metaid.io/metafile-indexer/content/<pinId>`
+   - 其它 MetaFile 图片：`https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/<pinId>`
+
+**如果系统已经提供 `metafileContentBaseUrl` 或 `manApiBaseUrl`，以那些配置值为准；上面的公共 URL 只是 fallback。** 不要把公共地址硬编码在系统配置之上。
+
+### helper 代码
+
+```html
+<script>
+  function normalizeText(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  function extractMetafilePinId(value) {
+    var raw = normalizeText(value);
+    if (!raw) return '';
+    if (/^https?:\/\//i.test(raw)) {
+      try {
+        raw = new URL(raw).pathname || '';
+      } catch {
+        return '';
+      }
+    } else if (/^metafile:\/\//i.test(raw)) {
+      raw = raw.slice('metafile://'.length);
+    }
+    raw = decodeURIComponent((raw.split(/[?#]/, 1)[0] || '').replace(/^\/+/, ''));
+    raw = raw
+      .replace(/^content\//i, '')
+      .replace(/^metafile-indexer\/content\//i, '')
+      .replace(/^metafile-indexer\/thumbnail\//i, '')
+      .replace(/^metafile-indexer\/api\/v1\/files\/content\//i, '')
+      .replace(/^metafile-indexer\/api\/v1\/files\/accelerate\/content\//i, '')
+      .replace(/^metafile-indexer\/api\/v1\/users\/avatar\/accelerate\//i, '');
+    var match = raw.match(/^([0-9a-f]{64}i0)(?:\.[a-z0-9][a-z0-9+.-]{0,31})?$/i);
+    return match && match[1] ? match[1] : '';
+  }
+
+  function trimTrailingSlash(value) {
+    return normalizeText(value).replace(/\/+$/, '');
+  }
+
+  function resolveMetaFileImageUrl(reference, options) {
+    var raw = normalizeText(reference);
+    if (!raw) return '';
+    if (/^(data:|blob:|https?:)/i.test(raw)) return raw;
+    var pinId = extractMetafilePinId(raw);
+    if (!pinId) return '';
+    var config = options || {};
+    var fallbackMetafileBase = 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content';
+    var fallbackAvatarBase = 'https://file.metaid.io/metafile-indexer/content';
+    if (config.kind === 'avatar') {
+      var avatarBase = trimTrailingSlash(config.manApiBaseUrl);
+      return (avatarBase ? avatarBase + '/content' : fallbackAvatarBase) + '/' + encodeURIComponent(pinId);
+    }
+    var metafileBase = trimTrailingSlash(config.metafileContentBaseUrl) || fallbackMetafileBase;
+    return metafileBase + '/' + encodeURIComponent(pinId);
+  }
+</script>
+```
+
+## 9. Browser 私信 composer
+
+MetaApp 可以让宿主打开**宿主拥有的私信确认流程**，但 MetaApp 本身**永远不直接发送消息**。两种 compose 方法都只是打开一个 Browser 拥有的确认对话框，用户必须亲自点击 Send 才会真正发出。
+
+### owner 推导收件人（无参）
+
+Bot homepage 上的普通 Message / Chat / Contact Bot / Send Message 按钮，调用**无参**的 `browser.privateChat.compose`，由 ABC 从当前 Bot Page owner 推导收件人：
+
+```html
+<button type="button" id="message-button">Message</button>
+<script>
+  document.getElementById('message-button').addEventListener('click', async function () {
+    try {
+      await window.AgentBrowser.request({ method: 'browser.privateChat.compose' });
+    } catch (error) {
+      console.error(error);
+    }
+  });
+</script>
+```
+
+**不要**给 `browser.privateChat.compose` 传 `to` / `content` 参数——ABC 会忽略 iframe 传入的 params，这个方法不允许 MetaApp 自选收件人或预填消息。错误示例：
+
+```js
+// 错误：这个方法不接受 recipient / content
+window.AgentBrowser.request({
+  method: 'browser.privateChat.compose',
+  params: { to: someGlobalMetaId, content: someMessage }
+});
+```
+
+### 显式收件人或 MetaApp 自有消息输入
+
+当 MetaApp 自己拥有消息输入框、或显式指定了收件人时，用 `browser.simplemsg.compose` 同时传 `to`（Global MetaID）和 `content`（非空）：
+
+```js
+async function openMessageConfirmation(to, content) {
+  to = String(to || '').trim();
+  content = String(content || '').trim();
+  if (!to || !content) {
+    throw new Error('A recipient and message are required.');
+  }
+  try {
+    const result = await window.AgentBrowser.request({
+      method: 'browser.simplemsg.compose',
+      params: { to, content }
+    });
+    if (result && result.opened) {
+      return { status: 'confirmation_opened' };
+    }
+    return { status: 'unavailable' };
+  } catch (error) {
+    if (error && error.code === 'unsupported_method') {
+      return { status: 'unavailable' };
+    }
+    throw error;
+  }
+}
+```
+
+### 语义约束
+
+- `{ opened: true }` 只表示确认对话框已打开，**不代表已发送**。反馈文案用“在 Browser 里确认并发送这条消息”，**不要**说“已发送”。
+- `unavailable` 映射成普通的“此 Browser 暂不支持消息”反馈。
+- `browser.simplemsg.compose` 的对话框已预填，`browser.privateChat.compose` 把消息输入留给用户。两种情况用户都必须亲自点 Browser 拥有的 Send 按钮。
+- 宿主不支持某个 compose 方法时返回 `unsupported_method`，给普通不可用 / 错误反馈，**不要**回退到 `metaid.pin.write`、裸 PIN 写、或任何直连发送路径。
+- `metaid.pin.write` 不是私信 API。MetaApp **不得**通过 `/protocols/simplemsg` 构造私信、解析 / 解析对端 chat 公钥、加密、签名、广播、绕过 Browser 确认或直接调用宿主发送路径——这些始终是宿主的职责。
+- `map://simplemsg/conversation?peer=<globalMetaId>` 是**已有会话的导航 URI**，只用于“打开 / 查看会话”这种意图，**不要**用作发送按钮，也不要标成“在 IDChat 打开”或当成外部 Web 链接。
+
+## 10. 安全边界
 
 MetaApp 可以拿到的，是：
 
