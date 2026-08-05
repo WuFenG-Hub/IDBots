@@ -6216,6 +6216,8 @@ export class CoworkRunner extends EventEmitter {
           taskId: String(payload.task_id ?? ''),
           toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
           subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          taskType: typeof payload.task_type === 'string' ? payload.task_type : undefined,
+          workflowName: typeof payload.workflow_name === 'string' ? payload.workflow_name : undefined,
           description: typeof payload.description === 'string' ? payload.description : undefined,
           prompt: typeof payload.prompt === 'string' ? payload.prompt : undefined,
           status: 'running',
@@ -6255,7 +6257,6 @@ export class CoworkRunner extends EventEmitter {
           event: 'task_notification',
           taskId: String(payload.task_id ?? ''),
           toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
-          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
           description: typeof payload.description === 'string' ? payload.description : undefined,
           status: String(payload.status ?? 'completed') as 'completed' | 'failed' | 'stopped',
           summary: typeof payload.summary === 'string' ? payload.summary : undefined,
@@ -6281,6 +6282,11 @@ export class CoworkRunner extends EventEmitter {
             ? (patch.status as 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'paused')
             : undefined,
           error: patch && typeof patch.error === 'string' ? patch.error : undefined,
+          isBackgrounded: patch && typeof patch.is_backgrounded === 'boolean'
+            ? patch.is_backgrounded
+            : undefined,
+          description: patch && typeof patch.description === 'string' ? patch.description : undefined,
+          endTime: patch && typeof patch.end_time === 'number' ? patch.end_time : undefined,
           updatedAt: Date.now(),
         });
         return;
@@ -6292,7 +6298,8 @@ export class CoworkRunner extends EventEmitter {
         const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
         this.emitSubagentEvent(sessionId, {
           event: 'background_tasks_changed',
-          taskId: '',
+          // No taskId on purpose: this is a level signal for the whole set,
+          // not an edge for one task. The renderer keys off the event name.
           backgroundTasks: tasks
             .filter((t) => t && typeof t === 'object')
             .map((t) => {

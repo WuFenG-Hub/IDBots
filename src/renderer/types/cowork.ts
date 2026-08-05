@@ -102,13 +102,21 @@ export type SubagentTaskStatus =
 
 export interface SubagentTaskState {
   taskId: string;
+  /** Session this task belongs to (set by the renderer on ingest). */
+  sessionId?: string;
   toolUseId?: string;
   subagentType?: string;
   /** Friendly task-type label ('shell' | 'subagent' | 'monitor' | 'workflow' ...). */
   taskType?: string;
+  /** meta.name of the workflow script, when taskType is 'local_workflow'. */
+  workflowName?: string;
   description?: string;
   prompt?: string;
   status: SubagentTaskStatus;
+  /** True when the task runs in the background (Ctrl+B / backgroundTasks). */
+  isBackgrounded?: boolean;
+  /** End timestamp for terminal tasks. */
+  endTime?: number;
   summary?: string;
   lastToolName?: string;
   outputFile?: string;

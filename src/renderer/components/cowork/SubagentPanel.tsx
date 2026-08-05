@@ -160,7 +160,9 @@ const SubagentTaskRow: React.FC<{
     ? formatDuration(task.usage?.durationMs ?? (task.startedAt && task.updatedAt ? task.updatedAt - task.startedAt : undefined))
     : null;
   const tokens = task ? formatTokens(task.usage?.totalTokens) : null;
-  const typeLabel = task?.subagentType ?? task?.taskType ?? 'subagent';
+  // Prefer the subagent type for Task-tool subagents; fall back to the task
+  // type (shell / monitor / workflow / local_workflow) for non-subagent tasks.
+  const typeLabel = task?.subagentType ?? task?.taskType ?? (task?.workflowName ? 'workflow' : 'subagent');
   const titleText = task
     ? (task.description || task.prompt || task.taskId.slice(0, 8))
     : (agentId ?? 'subagent');
@@ -194,6 +196,14 @@ const SubagentTaskRow: React.FC<{
     <div className="rounded-lg px-2.5 py-2 dark:bg-claude-darkSurfaceInset/60 bg-claude-surfaceInset/60 dark:border dark:border-claude-darkBorder/50 border border-claude-border/50">
       <div className="flex items-center gap-2">
         <span className="text-[11px]">{task ? (STATUS_ICON[task.status] ?? '•') : '📄'}</span>
+        {task?.isBackgrounded && (
+          <span
+            className="inline-flex items-center rounded-md bg-claude-accent/10 px-1 py-0.5 text-[10px] font-semibold text-claude-accent"
+            title={i18nService.t('coworkBackgroundedLabel')}
+          >
+            ⏸️ {i18nService.t('coworkBackgroundedLabel')}
+          </span>
+        )}
         <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent max-w-[40%] truncate">
           {typeLabel}
         </span>

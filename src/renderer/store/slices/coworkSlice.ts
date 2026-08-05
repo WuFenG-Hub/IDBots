@@ -9,6 +9,7 @@ import type {
   CoworkPermissionMode,
   CoworkSessionStatus,
   SubagentTaskState,
+  SubagentTaskStatus,
 } from '../../types/cowork';
 
 interface CoworkState {
@@ -284,11 +285,25 @@ const coworkSlice = createSlice({
         : task;
     },
 
-    /** Replace the whole subagent task set (background_tasks_changed REPLACE semantics). */
-    setSubagentTasks(state, action: PayloadAction<SubagentTaskState[]>) {
+    /**
+     * Replace the task set for one session (background_tasks_changed REPLACE
+     * semantics). Tasks for other sessions are kept; existing detail for the
+     * same task_id is preserved since the payload is ids-only (no status).
+     */
+    setSubagentTasks(state, action: PayloadAction<{ sessionId: string; tasks: Array<Partial<SubagentTaskState> & { taskId: string }> }>) {
+      const { sessionId, tasks } = action.payload;
       const next: Record<string, SubagentTaskState> = {};
-      for (const task of action.payload) {
-        next[task.taskId] = { ...(state.subagentTasks[task.taskId] ?? {}), ...task };
+      for (const [key, existing] of Object.entries(state.subagentTasks)) {
+        if (existing.sessionId !== sessionId) {
+          next[key] = existing;
+        }
+      }
+      for (const task of tasks) {
+        next[task.taskId] = {
+          ...(state.subagentTasks[task.taskId] ?? { status: 'running' as SubagentTaskStatus }),
+          ...task,
+          sessionId,
+        };
       }
       state.subagentTasks = next;
     },
@@ -332,6 +347,10 @@ const coworkSlice = createSlice({
       state.currentSessionId = null;
       state.currentSession = null;
       state.isStreaming = false;
+      // Tasks belong to a session; leaving the session clears its task view
+      // (background_tasks_changed REPLACE will repopulate on the next signal).
+      state.subagentTasks = {};
+      state.isSubagentPanelOpen = false;
     },
 
     setPreferredMetabotId(state, action: PayloadAction<number | null>) {

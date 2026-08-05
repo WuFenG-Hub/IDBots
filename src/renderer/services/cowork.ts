@@ -135,16 +135,39 @@ class CoworkService {
       const subagentEvent = message.metadata?.subagentEvent as
         | (Record<string, unknown> & { event?: string; taskId?: string })
         | undefined;
-      if (subagentEvent?.event && subagentEvent.taskId) {
+      if (subagentEvent?.event) {
         const eventName = subagentEvent.event;
+
+        // background_tasks_changed is a level signal for the whole set (no
+        // taskId); REPLACE the task map. Preserve existing task detail — the
+        // payload is ids-only — and keep real terminal status.
+        if (eventName === 'background_tasks_changed') {
+          const backgroundTasks = Array.isArray(subagentEvent.backgroundTasks)
+            ? subagentEvent.backgroundTasks as Array<{ taskId: string; taskType: string; description: string }>
+            : [];
+          store.dispatch(setSubagentTasks({
+            sessionId,
+            tasks: backgroundTasks,
+          }));
+          return;
+        }
+
+        if (!subagentEvent.taskId) return;
         const taskId = String(subagentEvent.taskId);
         const task: SubagentTaskState = {
           taskId,
+          sessionId,
           toolUseId: typeof subagentEvent.toolUseId === 'string' ? subagentEvent.toolUseId : undefined,
           subagentType: typeof subagentEvent.subagentType === 'string' ? subagentEvent.subagentType : undefined,
+          taskType: typeof subagentEvent.taskType === 'string' ? subagentEvent.taskType : undefined,
+          workflowName: typeof subagentEvent.workflowName === 'string' ? subagentEvent.workflowName : undefined,
           description: typeof subagentEvent.description === 'string' ? subagentEvent.description : undefined,
           prompt: typeof subagentEvent.prompt === 'string' ? subagentEvent.prompt : undefined,
           status: (subagentEvent.status as SubagentTaskStatus) ?? 'running',
+          isBackgrounded: typeof subagentEvent.isBackgrounded === 'boolean'
+            ? subagentEvent.isBackgrounded
+            : undefined,
+          endTime: typeof subagentEvent.endTime === 'number' ? subagentEvent.endTime : undefined,
           summary: typeof subagentEvent.summary === 'string' ? subagentEvent.summary : undefined,
           lastToolName: typeof subagentEvent.lastToolName === 'string' ? subagentEvent.lastToolName : undefined,
           outputFile: typeof subagentEvent.outputFile === 'string' ? subagentEvent.outputFile : undefined,
@@ -153,19 +176,7 @@ class CoworkService {
           startedAt: typeof subagentEvent.startedAt === 'number' ? subagentEvent.startedAt : undefined,
           updatedAt: typeof subagentEvent.updatedAt === 'number' ? subagentEvent.updatedAt : undefined,
         };
-        if (eventName === 'background_tasks_changed') {
-          const backgroundTasks = Array.isArray(subagentEvent.backgroundTasks)
-            ? subagentEvent.backgroundTasks as Array<{ taskId: string; taskType: string; description: string }>
-            : [];
-          store.dispatch(setSubagentTasks(backgroundTasks.map((t) => ({
-            taskId: t.taskId,
-            description: t.description,
-            status: 'running' as SubagentTaskStatus,
-            taskType: t.taskType,
-          }))));
-        } else {
-          store.dispatch(upsertSubagentTask(task));
-        }
+        store.dispatch(upsertSubagentTask(task));
       }
 
       if (message.metadata?.refreshSessionSummary) {
