@@ -155,14 +155,14 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 IDBots 当前真实可分享的是：
 
 - `metaapp://<pinId>`
-- `https://metaweb.world/metaapp/<pinId>`
+- `https://openagentinternet.org/browser/metaapp/<pinId>`
 
 脚本会输出：
 
 - `pinId`：最新写链 pin
 - `firstPinId`：稳定展示 pin（如果已知）
 - `metaappUri`
-- `metawebUrl`
+- `shareWebUrl`
 - `runPath`
 
 homepage 选中与普通 publish 分开。推荐顺序是：

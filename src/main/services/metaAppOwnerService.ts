@@ -30,7 +30,7 @@ export interface OwnerMetaAppRecord {
   runtime: string; version: string; contentType: string; content?: string; indexFile?: string;
   code?: string; contentHash?: string; metadata?: Record<string, unknown>; tags: string[];
   disabled: boolean; codeType?: string; ownerAddress: string; timestamp: number | null;
-  txid?: string; txids: string[]; metaappUri: string; metawebUrl: string; runUrl: string; raw?: unknown;
+  txid?: string; txids: string[]; metaappUri: string; shareWebUrl: string; runUrl: string; raw?: unknown;
 }
 
 // --- MAN indexer list + parse (port of manOwnerList.ts) ---
@@ -125,7 +125,7 @@ function buildRecord(raw: any, ownerAddress: string): OwnerMetaAppRecord | null 
     ownerAddress, timestamp,
     txid: raw?.txid, txids,
     metaappUri: `metaapp://${pinId}`,
-    metawebUrl: `https://metaweb.world/metaapp/${pinId}`,
+    shareWebUrl: `https://openagentinternet.org/browser/metaapp/${pinId}`,
     runUrl: `/browser/metaapp/${pinId}`,
     raw,
   };
@@ -214,7 +214,7 @@ function mergeWithLocalCache(
       disabled: payload.disabled === true, codeType: payload.codeType,
       ownerAddress: '', timestamp: null, txids: [],
       metaappUri: `metaapp://${row.pin_id}`,
-      metawebUrl: `https://metaweb.world/metaapp/${row.pin_id}`,
+      shareWebUrl: `https://openagentinternet.org/browser/metaapp/${row.pin_id}`,
       runUrl: `/browser/metaapp/${row.pin_id}`,
     });
   }
@@ -284,7 +284,7 @@ function ensureConfirm(confirm: unknown, action: string): void {
 export async function publishMetaApp(
   store: MetabotStore, metabotId: number, manifestInput: MetaAppManifestInput,
   options: { confirm?: boolean; network?: string } = {},
-): Promise<{ pinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number }; metaappUri: string; metawebUrl: string }> {
+): Promise<{ pinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number }; metaappUri: string; shareWebUrl: string }> {
   ensureConfirm(options.confirm, 'publish');
   const { mvcAddress } = await resolveMetabotAndAddress(store, metabotId);
   const manifest = buildMetaAppProtocolPayload(manifestInput);
@@ -312,14 +312,14 @@ export async function publishMetaApp(
     pinId,
     chainWrite,
     metaappUri: `metaapp://${pinId}`,
-    metawebUrl: `https://metaweb.world/metaapp/${pinId}`,
+    shareWebUrl: `https://openagentinternet.org/browser/metaapp/${pinId}`,
   };
 }
 
 export async function updateMetaApp(
   store: MetabotStore, metabotId: number, targetPinId: string, manifestInput: MetaAppManifestInput,
   options: { confirm?: boolean; network?: string; firstPinId?: string } = {},
-): Promise<{ pinId: string; targetPinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number }; metaappUri: string; metawebUrl: string }> {
+): Promise<{ pinId: string; targetPinId: string; chainWrite: { txids: string[]; pinId: string; totalCost: number }; metaappUri: string; shareWebUrl: string }> {
   ensureConfirm(options.confirm, 'update');
   const { mvcAddress } = await resolveMetabotAndAddress(store, metabotId);
   const manifest = buildMetaAppProtocolPayload(manifestInput);
@@ -351,7 +351,7 @@ export async function updateMetaApp(
     pinId, targetPinId: targetPinId.toLowerCase(),
     chainWrite,
     metaappUri: `metaapp://${pinId}`,
-    metawebUrl: `https://metaweb.world/metaapp/${pinId}`,
+    shareWebUrl: `https://openagentinternet.org/browser/metaapp/${pinId}`,
   };
 }
 

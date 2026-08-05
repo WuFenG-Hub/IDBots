@@ -24,7 +24,7 @@ test('parseLocalMetaAppServerAppId extracts the first path segment on loopback h
   assert.equal(parseLocalMetaAppServerAppId('http://localhost:8899/my-app/'), 'my-app');
   // The cache preview server shares the loopback host; its namespace must not be read as an app id.
   assert.equal(parseLocalMetaAppServerAppId('http://127.0.0.1:8899/browser-cache/metaapp-preview/x/index.html'), null);
-  assert.equal(parseLocalMetaAppServerAppId('https://metaweb.world/metaapp/abc'), null);
+  assert.equal(parseLocalMetaAppServerAppId('https://openagentinternet.org/browser/metaapp/abc'), null);
   assert.equal(parseLocalMetaAppServerAppId('http://127.0.0.1:8899/'), null);
 });
 

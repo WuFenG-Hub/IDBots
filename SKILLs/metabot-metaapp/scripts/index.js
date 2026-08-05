@@ -873,7 +873,7 @@ async function publishPrepared(prepared, metabotId, network, deps = {}) {
     txids,
     totalCost: typeof response.totalCost === 'number' ? response.totalCost : undefined,
     metaappUri: pinId ? `metaapp://${pinId}` : undefined,
-    metawebUrl: pinId ? `https://metaweb.world/metaapp/${pinId}` : undefined,
+    shareWebUrl: pinId ? `https://openagentinternet.org/browser/metaapp/${pinId}` : undefined,
   };
   if (canonical.targetPinId) result.targetPinId = canonical.targetPinId;
   if (canonical.firstPinId) result.firstPinId = canonical.firstPinId;
@@ -928,9 +928,9 @@ function buildShareLinks(pinId, firstPinId) {
     firstPinId: normalizedFirstPinId,
     sharePinId,
     metaappUri: `metaapp://${sharePinId}`,
-    metawebUrl: `https://metaweb.world/metaapp/${sharePinId}`,
+    shareWebUrl: `https://openagentinternet.org/browser/metaapp/${sharePinId}`,
     currentMetaappUri: `metaapp://${currentPinId}`,
-    currentMetawebUrl: `https://metaweb.world/metaapp/${currentPinId}`,
+    currentShareWebUrl: `https://openagentinternet.org/browser/metaapp/${currentPinId}`,
     runPath: `/browser/metaapp/${sharePinId}`,
   };
 }

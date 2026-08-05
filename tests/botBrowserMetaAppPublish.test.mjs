@@ -64,7 +64,7 @@ function makeDeps(calls) {
         pinId: 'd'.repeat(64) + 'i0',
         chainWrite: { txids: ['tx'], pinId: 'd'.repeat(64) + 'i0', totalCost: 1234 },
         metaappUri: `metaapp://${'d'.repeat(64)}i0`,
-        metawebUrl: 'https://metaweb.world/metaapp/x',
+        shareWebUrl: 'https://openagentinternet.org/browser/metaapp/x',
       };
     },
   };
