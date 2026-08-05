@@ -26,7 +26,7 @@ import {
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
-import type { CoworkContextUsage } from './coworkContextUsage';
+import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import { getCoworkOpenAICompatProxyStatus } from './coworkOpenAICompatProxy';
@@ -752,6 +752,15 @@ interface ActiveSession {
   lastSubagentThrottleAt?: number;
   /** Task id of the last throttled subagent progress emit. */
   lastSubagentThrottleTaskId?: string;
+  /** Accumulated token usage from SDK result events (drives cost display). */
+  usageStats?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    totalCostUsd?: number;
+    source: 'deepseek' | 'anthropic' | 'none';
+  };
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
@@ -1104,6 +1113,59 @@ export class CoworkRunner extends EventEmitter {
   getRealContextUsage(sessionId: string): CoworkContextUsage | null {
     const activeSession = this.activeSessions.get(sessionId);
     return activeSession?.realContextUsage ?? null;
+  }
+
+  /**
+   * Accumulates per-turn token usage from an SDK result event into the active
+   * session's usageStats. The proxy translates DeepSeek's OpenAI usage into
+   * Anthropic cache fields (cache_read = prompt_cache_hit, cache_creation =
+   * prompt_cache_miss), so the numbers here are the provider's real counts.
+   * total_cost_usd is the SDK's Anthropic-priced figure — only meaningful for
+   * direct Anthropic sessions (proxy providers reprice locally in the UI).
+   */
+  private accumulateResultUsage(sessionId: string, payload: Record<string, unknown>): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return;
+
+    const usage = payload.usage && typeof payload.usage === 'object'
+      ? payload.usage as Record<string, unknown>
+      : null;
+    const inputTokens = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+    const outputTokens = usage && typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
+    const cacheReadTokens = usage && typeof usage.cache_read_input_tokens === 'number'
+      ? usage.cache_read_input_tokens
+      : 0;
+    const cacheCreationTokens = usage && typeof usage.cache_creation_input_tokens === 'number'
+      ? usage.cache_creation_input_tokens
+      : 0;
+
+    if (inputTokens <= 0 && outputTokens <= 0 && cacheReadTokens <= 0 && cacheCreationTokens <= 0) {
+      return;
+    }
+
+    const prev = activeSession.usageStats ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      source: 'none' as const,
+    };
+    activeSession.usageStats = {
+      inputTokens: prev.inputTokens + inputTokens,
+      outputTokens: prev.outputTokens + outputTokens,
+      cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
+      cacheCreationTokens: prev.cacheCreationTokens + cacheCreationTokens,
+      totalCostUsd: typeof payload.total_cost_usd === 'number'
+        ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
+        : prev.totalCostUsd,
+      source: prev.source === 'none' ? 'deepseek' : prev.source,
+    };
+  }
+
+  /** Returns the accumulated usage stats for an active session, or null. */
+  getSessionUsageStats(sessionId: string): CoworkUsageStats | null {
+    const activeSession = this.activeSessions.get(sessionId);
+    return activeSession?.usageStats ?? null;
   }
 
   wasSessionStopped(sessionId: string): boolean {
@@ -6418,6 +6480,11 @@ export class CoworkRunner extends EventEmitter {
         this.persistFinalResult(sessionId, activeSession, payload.result);
         markAssistantTextOutput();
       }
+
+      // Accumulate per-turn token usage into the session stats. The proxy
+      // translates DeepSeek's OpenAI usage into Anthropic cache fields, so
+      // cache_read = prompt_cache_hit and cache_creation = prompt_cache_miss.
+      this.accumulateResultUsage(sessionId, payload);
 
       // For sandbox mode, mark session as completed when we receive a successful result.
       // Keep the VM alive for multi-turn conversations instead of killing it.

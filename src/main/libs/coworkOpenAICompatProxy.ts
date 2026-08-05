@@ -1496,6 +1496,11 @@ function emitMessageDelta(
     usage: {
       input_tokens: chunk.usage?.prompt_tokens ?? 0,
       output_tokens: chunk.usage?.completion_tokens ?? 0,
+      // DeepSeek reports cache hits/misses at the top level of usage; map
+      // them to Anthropic's cache fields so the SDK's result event carries
+      // real per-turn token accounting for the cost display.
+      cache_read_input_tokens: chunk.usage?.prompt_cache_hit_tokens ?? 0,
+      cache_creation_input_tokens: chunk.usage?.prompt_cache_miss_tokens ?? 0,
     },
   });
 }

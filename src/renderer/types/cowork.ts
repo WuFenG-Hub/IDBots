@@ -89,6 +89,20 @@ export interface CoworkSdkRuntimeStatusPayload {
   retryErrorStatus?: number | null;
 }
 
+// Per-session token/cost usage, accumulated from SDK result events. The
+// proxy translates DeepSeek's OpenAI usage into Anthropic cache fields, so
+// cacheRead = prompt_cache_hit and cacheCreation = prompt_cache_miss.
+export interface CoworkUsageStats {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
+  totalCostUsd?: number;
+  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
+  source: 'deepseek' | 'anthropic' | 'none';
+}
+
 // Live subagent / background task state, driven by SDK task_* and tool_progress
 // events. Keyed by task_id in the cowork slice.
 export type SubagentTaskStatus =
@@ -224,6 +238,8 @@ export interface CoworkSession {
   contextUsage?: CoworkContextUsage | null;
   /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
   permissionMode?: CoworkPermissionMode;
+  /** Accumulated token/cost usage (computed by the main process, not persisted). */
+  usageStats?: CoworkUsageStats | null;
 }
 
 // Cowork configuration

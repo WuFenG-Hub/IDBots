@@ -24,6 +24,10 @@ export type OpenAIStreamChunk = {
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
+    total_tokens?: number;
+    // DeepSeek reports cache hits/misses at the top level of usage.
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
   };
 };
 
@@ -377,6 +381,12 @@ export function anthropicToOpenAI(body: unknown): Record<string, unknown> {
   }
   if (source.stream !== undefined) {
     output.stream = source.stream;
+    // Ask OpenAI-compatible providers (DeepSeek etc.) to include usage in
+    // stream chunks. Without this, the proxy's message_delta gets 0/0 tokens
+    // and the SDK never sees real usage for cost display.
+    if (source.stream === true) {
+      output.stream_options = { include_usage: true };
+    }
   }
 
   const tools = toArray(source.tools)
@@ -487,6 +497,10 @@ export function openAIToAnthropic(body: unknown): Record<string, unknown> {
     usage: {
       input_tokens: Number(usage.prompt_tokens) || 0,
       output_tokens: Number(usage.completion_tokens) || 0,
+      // DeepSeek top-level cache fields → Anthropic cache fields (same
+      // semantics as the streaming path in the proxy).
+      cache_read_input_tokens: Number(usage.prompt_cache_hit_tokens) || 0,
+      cache_creation_input_tokens: Number(usage.prompt_cache_miss_tokens) || 0,
     },
   };
 }

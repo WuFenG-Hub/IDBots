@@ -7058,7 +7058,15 @@ if (!gotTheLock) {
         } catch {
           contextUsage = null;
         }
-        return { success: true, session: { ...session, contextUsage } };
+        // Attach accumulated token/cost usage (DeepSeek-first via proxy-translated
+        // result usage). Informational only — never break session loading.
+        let usageStats = null;
+        try {
+          usageStats = getCoworkRunner().getSessionUsageStats(sessionId);
+        } catch {
+          usageStats = null;
+        }
+        return { success: true, session: { ...session, contextUsage, usageStats } };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {

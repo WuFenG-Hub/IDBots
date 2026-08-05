@@ -15,6 +15,7 @@ import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import AutoApproveRulesPanel from './AutoApproveRulesPanel';
 import SubagentPanel from './SubagentPanel';
+import UsageStatsChip from './UsageStatsChip';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -2222,6 +2223,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     return null;
   }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
+  const currentModelId = useSelector((state: RootState) => state.model.selectedModel?.id);
   const [effortOverride, setEffortOverride] = useState<string | null>(null);
   const [branchActionError, setBranchActionError] = useState<string | null>(null);
   const detailRootRef = useRef<HTMLDivElement>(null);
@@ -3435,6 +3437,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             )}
             <div className="flex items-center justify-end gap-2">
+              {currentSession.usageStats && (
+                <UsageStatsChip
+                  usageStats={currentSession.usageStats}
+                  modelId={currentModelId}
+                />
+              )}
               <SubagentPanel sessionId={currentSession.id} />
               <AutoApproveRulesPanel
                 sessionId={currentSession.id}

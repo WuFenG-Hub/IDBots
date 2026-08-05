@@ -216,6 +216,15 @@ class CoworkService {
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));
       store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'completed' }));
+      // Refresh the current session so usageStats (token/cost chip) reflects
+      // the just-finished turn.
+      if (store.getState().cowork.currentSessionId === sessionId) {
+        void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
+          if (refreshed?.success && refreshed.session) {
+            store.dispatch(setCurrentSession(refreshed.session));
+          }
+        }).catch(() => {});
+      }
     });
     this.streamListenerCleanups.push(completeCleanup);
 
