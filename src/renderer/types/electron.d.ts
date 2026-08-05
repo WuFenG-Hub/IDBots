@@ -130,6 +130,11 @@ interface CoworkSession {
   executionMode: 'auto' | 'local' | 'sandbox';
   activeSkillIds: string[];
   messages: CoworkMessage[];
+  messageHistory?: {
+    hasMoreBefore: boolean;
+    beforeSequence: number | null;
+    pageSize: number;
+  };
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;

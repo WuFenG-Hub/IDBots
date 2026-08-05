@@ -7,6 +7,7 @@ import {
   updateSessionStatus,
   deleteSession as deleteSessionAction,
   addMessage,
+  prependMessages,
   updateMessageContent,
   setStreaming,
   updateSessionPinned,
@@ -532,6 +533,35 @@ class CoworkService {
 
     console.error('Failed to load session:', result.error);
     return null;
+  }
+
+  async loadEarlierMessages(sessionId: string): Promise<number> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSessionMessagesPage) return 0;
+    const currentSession = store.getState().cowork.currentSession;
+    const history = currentSession?.id === sessionId ? currentSession.messageHistory : null;
+    if (!history?.hasMoreBefore || history.beforeSequence == null) return 0;
+
+    const result = await cowork.getSessionMessagesPage({
+      sessionId,
+      beforeSequence: history.beforeSequence,
+      limit: history.pageSize,
+    });
+    if (!result.success || !result.page) {
+      console.error('Failed to load earlier session messages:', result.error);
+      return 0;
+    }
+    if (store.getState().cowork.currentSessionId !== sessionId) return 0;
+    store.dispatch(prependMessages({
+      sessionId,
+      messages: result.page.messages,
+      messageHistory: {
+        hasMoreBefore: result.page.hasMoreBefore,
+        beforeSequence: result.page.beforeSequence,
+        pageSize: history.pageSize,
+      },
+    }));
+    return result.page.messages.length;
   }
 
   async respondToPermission(requestId: string, result: CoworkPermissionResult): Promise<boolean> {

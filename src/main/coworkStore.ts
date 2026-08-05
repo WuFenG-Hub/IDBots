@@ -501,6 +501,12 @@ export interface CoworkMessagePage {
   beforeSequence: number | null;
 }
 
+export interface CoworkMessageHistoryState {
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+  pageSize: number;
+}
+
 export interface CoworkSession {
   id: string;
   title: string;
@@ -512,6 +518,8 @@ export interface CoworkSession {
   executionMode: CoworkExecutionMode;
   activeSkillIds: string[];
   messages: CoworkMessage[];
+  /** Renderer-only bounded history state. Absent for full internal session reads. */
+  messageHistory?: CoworkMessageHistoryState;
   createdAt: number;
   updatedAt: number;
   /** FK to metabots.id; which MetaBot persona this session uses */
@@ -2155,6 +2163,36 @@ export class CoworkStore implements MemoryBackend {
   }
 
   getSession(id: string): CoworkSession | null {
+    const session = this.getSessionShell(id);
+    if (!session) return null;
+    return {
+      ...session,
+      messages: this.getSessionMessages(id),
+    };
+  }
+
+  getSessionView(id: string, messageLimit: number = 100): CoworkSession | null {
+    const session = this.getSessionShell(id);
+    if (!session) return null;
+    if (session.sessionType !== 'a2a') {
+      return {
+        ...session,
+        messages: this.getSessionMessages(id),
+      };
+    }
+    const page = this.getSessionMessagesPage(id, { limit: messageLimit });
+    return {
+      ...session,
+      messages: page.messages,
+      messageHistory: {
+        hasMoreBefore: page.hasMoreBefore,
+        beforeSequence: page.beforeSequence,
+        pageSize: Math.max(1, Math.min(200, Math.floor(messageLimit))),
+      },
+    };
+  }
+
+  private getSessionShell(id: string): CoworkSession | null {
     interface SessionRow {
       id: string;
       title: string;
@@ -2185,8 +2223,6 @@ export class CoworkStore implements MemoryBackend {
     `, [id]);
 
     if (!row) return null;
-
-    const messages = this.getSessionMessages(id);
 
     let activeSkillIds: string[] = [];
     if (row.active_skill_ids) {
@@ -2219,7 +2255,7 @@ export class CoworkStore implements MemoryBackend {
       systemPrompt: row.system_prompt,
       executionMode: (row.execution_mode as CoworkExecutionMode) || 'local',
       activeSkillIds,
-      messages,
+      messages: [],
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       metabotId: metabotId ?? undefined,

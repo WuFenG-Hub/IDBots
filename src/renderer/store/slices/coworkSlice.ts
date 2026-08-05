@@ -3,6 +3,7 @@ import type {
   CoworkSession,
   CoworkSessionSummary,
   CoworkMessage,
+  CoworkMessageHistoryState,
   CoworkMessageMetadata,
   CoworkConfig,
   CoworkPermissionRequest,
@@ -81,10 +82,28 @@ const coworkSlice = createSlice({
     },
 
     setCurrentSession(state, action: PayloadAction<CoworkSession | null>) {
-      state.currentSession = action.payload;
-      if (action.payload) {
-        state.currentSessionId = action.payload.id;
-        if (!action.payload.id.startsWith('temp-')) {
+      let nextSession = action.payload;
+      if (
+        nextSession
+        && nextSession.messageHistory
+        && state.currentSession?.id === nextSession.id
+        && state.currentSession.messageHistory
+      ) {
+        const incomingById = new Map(nextSession.messages.map((message) => [message.id, message]));
+        const existingIds = new Set(state.currentSession.messages.map((message) => message.id));
+        nextSession = {
+          ...nextSession,
+          messages: [
+            ...state.currentSession.messages.map((message) => incomingById.get(message.id) ?? message),
+            ...nextSession.messages.filter((message) => !existingIds.has(message.id)),
+          ],
+          messageHistory: state.currentSession.messageHistory,
+        };
+      }
+      state.currentSession = nextSession;
+      if (nextSession) {
+        state.currentSessionId = nextSession.id;
+        if (!nextSession.id.startsWith('temp-')) {
           const {
             id,
             title,
@@ -95,7 +114,7 @@ const coworkSlice = createSlice({
             sessionType,
             peerName,
             serviceOrderSummary,
-          } = action.payload;
+          } = nextSession;
           const summary: CoworkSessionSummary = {
             id,
             title,
@@ -117,7 +136,7 @@ const coworkSlice = createSlice({
             state.sessions.unshift(summary);
           }
         }
-        markSessionRead(state, action.payload.id);
+        markSessionRead(state, nextSession.id);
       }
     },
 
@@ -207,6 +226,22 @@ const coworkSlice = createSlice({
       }
 
       markSessionUnread(state, sessionId);
+    },
+
+    prependMessages(state, action: PayloadAction<{
+      sessionId: string;
+      messages: CoworkMessage[];
+      messageHistory: CoworkMessageHistoryState;
+    }>) {
+      const { sessionId, messages, messageHistory } = action.payload;
+      if (state.currentSession?.id !== sessionId) return;
+      const existingIds = new Set(state.currentSession.messages.map((message) => message.id));
+      const uniqueEarlierMessages = messages.filter((message) => !existingIds.has(message.id));
+      state.currentSession.messages = [
+        ...uniqueEarlierMessages,
+        ...state.currentSession.messages,
+      ];
+      state.currentSession.messageHistory = messageHistory;
     },
 
     updateMessageContent(state, action: PayloadAction<{ sessionId: string; messageId: string; content?: string; metadata?: CoworkMessageMetadata }>) {
@@ -314,6 +349,7 @@ export const {
   updateSessionStatus,
   deleteSession,
   addMessage,
+  prependMessages,
   updateMessageContent,
   setStreaming,
   updateSessionPinned,

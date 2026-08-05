@@ -53,6 +53,13 @@ test('message pages use a stable sequence cursor and preserve chronological orde
     assert.equal(oldest.hasMoreBefore, false);
     assert.equal(oldest.beforeSequence, null);
 
+    const view = store.getSessionView(session.id, 3);
+    assert.deepEqual(view?.messages.map((message) => message.content), ['message-5', 'message-6', 'message-7']);
+    assert.deepEqual(view?.messageHistory, {
+      hasMoreBefore: true,
+      beforeSequence: 5,
+      pageSize: 3,
+    });
     assert.deepEqual(store.getSession(session.id)?.messages.map((message) => message.id), ids);
   } finally {
     cleanup();

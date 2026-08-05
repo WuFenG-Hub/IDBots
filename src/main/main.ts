@@ -6157,7 +6157,7 @@ if (!gotTheLock) {
           success: true,
           created: result.created,
           externalConversationId: result.externalConversationId,
-          session: result.session,
+          session: getCoworkStore().getSessionView(result.session.id) ?? result.session,
         };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
@@ -6805,7 +6805,7 @@ if (!gotTheLock) {
       try {
         repairSelfDirectedServiceOrders();
         const session = enrichCoworkSessionWithServiceOrderSummary(
-          getCoworkStore().getSession(sessionId)
+          getCoworkStore().getSessionView(sessionId)
         );
         if (session?.sessionType === 'a2a') {
           scheduleA2APeerProfileRefresh(session.id);
