@@ -6813,21 +6813,29 @@ if (!gotTheLock) {
         if (!session) {
           return { success: true, session };
         }
-        // Attach a freshly estimated context-window usage for the conversation
-        // header widgets. Informational only — never break session loading.
+        // Attach context-window usage for the conversation header widgets.
+        // Prefer the real per-category usage from the SDK's getContextUsage()
+        // (cached on the active local-mode session after each turn); fall back
+        // to the heuristic estimator for sandbox mode or first-turn sessions.
+        // Informational only — never break session loading.
         let contextUsage = null;
         try {
-          contextUsage = computeCoworkContextUsage({
-            messages: session.messages ?? [],
-            systemPrompt: session.systemPrompt,
-            modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
-            // A2A private chats rebuild the model context every turn from only
-            // the latest segment messages; cap the estimate the same way so the
-            // ring reflects real per-turn usage instead of full history.
-            maxRecentMessages: session.sessionType === 'a2a'
-              ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
-              : undefined,
-          });
+          const realUsage = getCoworkRunner().getRealContextUsage(sessionId);
+          if (realUsage) {
+            contextUsage = realUsage;
+          } else {
+            contextUsage = computeCoworkContextUsage({
+              messages: session.messages ?? [],
+              systemPrompt: session.systemPrompt,
+              modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+              // A2A private chats rebuild the model context every turn from only
+              // the latest segment messages; cap the estimate the same way so the
+              // ring reflects real per-turn usage instead of full history.
+              maxRecentMessages: session.sessionType === 'a2a'
+                ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
+                : undefined,
+            });
+          }
         } catch {
           contextUsage = null;
         }

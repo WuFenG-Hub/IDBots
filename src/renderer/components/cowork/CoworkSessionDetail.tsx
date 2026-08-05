@@ -3265,6 +3265,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 <ContextUsageRing
                   usedTokens={currentSession.contextUsage.usedTokens}
                   contextWindow={currentSession.contextUsage.contextWindow}
+                  isRealUsage={currentSession.contextUsage.isRealUsage}
+                  categories={currentSession.contextUsage.categories}
                 />
               </div>
             )}

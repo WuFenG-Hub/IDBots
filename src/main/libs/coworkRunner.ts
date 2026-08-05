@@ -26,6 +26,7 @@ import {
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
+import type { CoworkContextUsage } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import { getCoworkOpenAICompatProxyStatus } from './coworkOpenAICompatProxy';
@@ -728,6 +729,11 @@ interface ActiveSession {
   disableMemoryUpdates?: boolean;
   /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
   lastSdkRuntimeStatusKey?: string;
+  /**
+   * Cached real context usage from the SDK's getContextUsage() (local mode only).
+   * Refreshed after each completed local turn; undefined for sandbox mode.
+   */
+  realContextUsage?: CoworkContextUsage | null;
 }
 
 interface PendingPermission {
@@ -1065,6 +1071,16 @@ export class CoworkRunner extends EventEmitter {
 
   waitForActiveTurnSettlement(sessionId: string): Promise<void> {
     return this.activeSessions.get(sessionId)?.turnSettled ?? Promise.resolve();
+  }
+
+  /**
+   * Returns the real context usage cached from the SDK's getContextUsage()
+   * for an active local-mode session, or null when unavailable (sandbox mode,
+   * first turn before any real measurement, or session not active).
+   */
+  getRealContextUsage(sessionId: string): CoworkContextUsage | null {
+    const activeSession = this.activeSessions.get(sessionId);
+    return activeSession?.realContextUsage ?? null;
   }
 
   wasSessionStopped(sessionId: string): boolean {
@@ -4552,6 +4568,46 @@ export class CoworkRunner extends EventEmitter {
         }
       }
       clearLocalTurnStallWatchdog();
+
+      // Capture real per-category context usage from the SDK (local mode only).
+      // getContextUsage() is a Query method that asks the running CLI binary for
+      // its actual context accounting. We cache it on the active session so
+      // cowork:session:get can surface real numbers instead of the heuristic
+      // estimator. Failures are non-fatal — the estimator remains the fallback.
+      if (!isRetry) {
+        try {
+          const usageResult = await (result as { getContextUsage?: () => Promise<unknown> })
+            .getContextUsage?.();
+          if (usageResult && typeof usageResult === 'object') {
+            const usage = usageResult as {
+              totalTokens?: number;
+              maxTokens?: number;
+              percentage?: number;
+              categories?: Array<{ name?: string; tokens?: number; color?: string }>;
+            };
+            const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
+            const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
+            if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
+              activeSession.realContextUsage = {
+                usedTokens: totalTokens,
+                contextWindow: maxTokens,
+                usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
+                isRealUsage: true,
+                categories: Array.isArray(usage.categories)
+                  ? usage.categories
+                      .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
+                      .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
+                  : undefined,
+              };
+            }
+          }
+        } catch (usageError) {
+          coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
+            sessionId,
+            error: usageError instanceof Error ? usageError.message : String(usageError),
+          });
+        }
+      }
 
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });

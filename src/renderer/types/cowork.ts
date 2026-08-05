@@ -128,6 +128,14 @@ export interface CoworkContextUsage {
   contextWindow: number;
   /** usedTokens / contextWindow, clamped to [0, 1]. */
   usageRatio: number;
+  /**
+   * When true, usedTokens/contextWindow come from the SDK's getContextUsage()
+   * (real per-category accounting) rather than the local heuristic estimator.
+   * Only available in local mode after at least one completed turn.
+   */
+  isRealUsage?: boolean;
+  /** Per-category token breakdown from getContextUsage() (local mode only). */
+  categories?: Array<{ name: string; tokens: number; color?: string }>;
 }
 
 export interface CoworkSession {

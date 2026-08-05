@@ -643,6 +643,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   <ContextUsageRing
                     usedTokens={contextUsage.usedTokens}
                     contextWindow={contextUsage.contextWindow}
+                    isRealUsage={contextUsage.isRealUsage}
+                    categories={contextUsage.categories}
                   />
                 )}
                 {showStopButton ? (
