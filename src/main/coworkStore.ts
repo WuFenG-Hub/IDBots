@@ -461,6 +461,7 @@ export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
+export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
 export interface CoworkMessageMetadata {
@@ -527,6 +528,8 @@ export interface CoworkSession {
   metabotName?: string | null;
   /** Local MetaBot's avatar data URL (populated from metabots table) */
   metabotAvatar?: string | null;
+  /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 export type CoworkSessionMetadata = Pick<
@@ -986,6 +989,10 @@ export class CoworkStore implements MemoryBackend {
       }
       if (!sessionColumns.includes('browser_title')) {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN browser_title TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('permission_mode')) {
+        this.db.run("ALTER TABLE cowork_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default';");
         changed = true;
       }
     } catch (error) {
@@ -2103,15 +2110,16 @@ export class CoworkStore implements MemoryBackend {
     sessionType: CoworkSessionType = 'standard',
     peerGlobalMetaId: string | null = null,
     peerName: string | null = null,
-    peerAvatar: string | null = null
+    peerAvatar: string | null = null,
+    permissionMode: CoworkPermissionMode = 'default'
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2141,6 +2149,7 @@ export class CoworkStore implements MemoryBackend {
       peerGlobalMetaId,
       peerName,
       peerAvatar,
+      permissionMode,
     };
   }
 
@@ -2163,13 +2172,14 @@ export class CoworkStore implements MemoryBackend {
       browser_uri?: string | null;
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
+      permission_mode?: string | null;
       created_at: number;
       updated_at: number;
     }
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2220,6 +2230,7 @@ export class CoworkStore implements MemoryBackend {
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       browserUri: row.browser_uri ?? null,
       browserTitle: row.browser_title ?? null,
+      permissionMode: (row.permission_mode as CoworkPermissionMode) || 'default',
       metabotName,
       metabotAvatar,
     };
@@ -2266,7 +2277,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -2303,6 +2314,10 @@ export class CoworkStore implements MemoryBackend {
     if (updates.browserTitle !== undefined) {
       setClauses.push('browser_title = ?');
       values.push(updates.browserTitle);
+    }
+    if (updates.permissionMode !== undefined) {
+      setClauses.push('permission_mode = ?');
+      values.push(updates.permissionMode);
     }
 
     values.push(id);

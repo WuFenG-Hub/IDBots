@@ -7,7 +7,7 @@ import type { Readable } from 'stream';
 import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus } from '../coworkStore';
+import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits } from './claudeSettings';
 import { loadClaudeSdk } from './claudeSdk';
 import {
@@ -158,6 +158,14 @@ const SKILLS_MARKER = '/skills/';
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';
 const PERMISSION_RESPONSE_TIMEOUT_MS = 60_000;
 const DELETE_TOOL_NAMES = new Set(['delete', 'remove', 'unlink', 'rmdir']);
+// Tools that never mutate the filesystem or execute side effects. Used by 'plan'
+// permission mode to enforce read-only behavior. Bash is intentionally excluded
+// (it can do anything). AskUserQuestion is excluded (handled separately).
+const READ_ONLY_TOOL_NAMES = new Set([
+  'read', 'view', 'ls', 'glob', 'grep', 'list',
+  'todowrite', 'taskget', 'tasklist',
+  'websearch', 'webfetch',  // informational only; network policy handled separately
+]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
 const ENABLE_SDK_WEB_TOOLS_ENV = 'IDBOTS_ENABLE_SDK_WEB_TOOLS';
 const SAFETY_APPROVAL_ALLOW_OPTION = '允许本次操作';
@@ -727,6 +735,8 @@ interface ActiveSession {
   autoApprove?: boolean;
   /** When true, this session will not read/write persistent user memories. */
   disableMemoryUpdates?: boolean;
+  /** Permission mode controlling tool gating (default/plan/acceptEdits/bypassPermissions). */
+  permissionMode: CoworkPermissionMode;
   /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
   lastSdkRuntimeStatusKey?: string;
   /**
@@ -3027,6 +3037,15 @@ export class CoworkRunner extends EventEmitter {
       || GIT_CLEAN_COMMAND_RE.test(command);
   }
 
+  /**
+   * Whether a tool call is read-only under 'plan' permission mode. Read-only
+   * tools never mutate the filesystem or execute side effects. Bash is treated
+   * as non-read-only by default since it can do anything.
+   */
+  private isReadOnlyTool(toolName: string): boolean {
+    return READ_ONLY_TOOL_NAMES.has(toolName.toLowerCase());
+  }
+
   private isBlockedBuiltinWebTool(toolName: string): boolean {
     return shouldBlockBuiltinWebTool(toolName);
   }
@@ -3299,6 +3318,7 @@ export class CoworkRunner extends EventEmitter {
       disableRemoteServicesPrompt?: boolean;
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
+      permissionMode?: CoworkPermissionMode;
     } = {}
   ): Promise<void> {
     this.stoppedSessions.delete(sessionId);
@@ -3388,6 +3408,7 @@ export class CoworkRunner extends EventEmitter {
       disableRemoteServicesPrompt: Boolean(options.disableRemoteServicesPrompt),
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
+      permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
     };
     this.activeSessions.set(sessionId, activeSession);
     if (session.cwd !== sessionCwd) {
@@ -3436,8 +3457,18 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; skipUserMessage?: boolean } = {}): Promise<void> {
+  async continueSession(sessionId: string, prompt: string, options: { systemPrompt?: string; skillIds?: string[]; skipUserMessage?: boolean; permissionMode?: CoworkPermissionMode } = {}): Promise<void> {
     this.stoppedSessions.delete(sessionId);
+
+    // Apply mid-session permission mode change if requested.
+    if (options.permissionMode) {
+      const activeSessionNow = this.activeSessions.get(sessionId);
+      if (activeSessionNow) {
+        activeSessionNow.permissionMode = options.permissionMode;
+      }
+      this.store.updateSession(sessionId, { permissionMode: options.permissionMode });
+    }
+
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) {
       // If not active, start a new run
@@ -3445,6 +3476,7 @@ export class CoworkRunner extends EventEmitter {
         skillIds: options.skillIds,
         systemPrompt: options.systemPrompt,
         skipInitialUserMessage: options.skipUserMessage,
+        permissionMode: options.permissionMode,
       });
       return;
     }
@@ -3537,6 +3569,20 @@ export class CoworkRunner extends EventEmitter {
     } finally {
       this.markCrossSessionTurnSettled(sessionId);
     }
+  }
+
+  /**
+   * Updates the permission mode for an active session (mid-session switching).
+   * Takes effect immediately for subsequent tool calls in local mode. For sandbox
+   * mode, applies on the next turn (the guest picks up the stored mode on resume).
+   */
+  setPermissionMode(sessionId: string, mode: CoworkPermissionMode): void {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      activeSession.permissionMode = mode;
+    }
+    this.store.updateSession(sessionId, { permissionMode: mode });
+    coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
   }
 
   stopSession(
@@ -3912,7 +3958,7 @@ export class CoworkRunner extends EventEmitter {
       abortController,
       env: envVars,
       pathToClaudeCodeExecutable: claudeCodePath,
-      permissionMode: 'default',
+      permissionMode: activeSession.permissionMode,
       includePartialMessages: true,
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
@@ -3998,6 +4044,35 @@ export class CoworkRunner extends EventEmitter {
         // Auto-approve mode (kept for compatibility with legacy callers).
         if (activeSession.autoApprove) {
           return { behavior: 'allow', updatedInput: resolvedInput };
+        }
+
+        const permissionMode = activeSession.permissionMode;
+
+        // Plan mode: read-only enforcement. Deny all mutating tools; allow only
+        // known read-only tools. AskUserQuestion is allowed (it's interactive, not
+        // a filesystem mutation).
+        if (permissionMode === 'plan' && resolvedName !== 'AskUserQuestion') {
+          if (!this.isReadOnlyTool(resolvedName)) {
+            coworkLog('INFO', 'canUseTool', 'Blocked mutating tool in plan mode', {
+              sessionId,
+              toolName: resolvedName,
+              permissionMode,
+            });
+            return {
+              behavior: 'deny',
+              message: `Tool "${resolvedName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
+            };
+          }
+          return { behavior: 'allow', updatedInput: resolvedInput };
+        }
+
+        // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
+        // acceptEdits keeps AskUserQuestion prompts; bypassPermissions skips everything.
+        if (permissionMode === 'acceptEdits' || permissionMode === 'bypassPermissions') {
+          if (permissionMode === 'bypassPermissions' || resolvedName !== 'AskUserQuestion') {
+            return { behavior: 'allow', updatedInput: resolvedInput };
+          }
+          // acceptEdits + AskUserQuestion: fall through to the prompt below.
         }
 
         if (resolvedName !== 'AskUserQuestion') {

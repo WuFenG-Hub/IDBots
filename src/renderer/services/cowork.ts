@@ -11,6 +11,7 @@ import {
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,
+  updateSessionPermissionMode,
   enqueuePendingPermission,
   dequeuePendingPermission,
   setConfig,
@@ -33,6 +34,7 @@ import type {
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkPermissionMode,
   CoworkStartOptions,
   CoworkContinueOptions,
   CoworkSubmitInput,
@@ -286,6 +288,21 @@ class CoworkService {
     }
 
     console.error('Failed to stop session:', result.error);
+    return false;
+  }
+
+  async setPermissionMode(sessionId: string, mode: CoworkPermissionMode): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setPermissionMode) {
+      console.error('setPermissionMode API not available');
+      return false;
+    }
+    const result = await cowork.setPermissionMode(sessionId, mode);
+    if (result.success) {
+      store.dispatch(updateSessionPermissionMode({ sessionId, permissionMode: mode }));
+      return true;
+    }
+    console.error('Failed to set permission mode:', result.error);
     return false;
   }
 

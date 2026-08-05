@@ -1,6 +1,15 @@
 // Cowork session status
 export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
 
+/**
+ * Permission mode controls how tool calls are gated in the cowork session.
+ * - 'default': auto-allow edits; prompt for delete operations and AskUserQuestion.
+ * - 'plan': read-only — deny all mutating tools (Write/Edit/Bash/...), allow only read tools.
+ * - 'acceptEdits': auto-allow everything including deletes; keep AskUserQuestion prompts.
+ * - 'bypassPermissions': auto-allow everything (full trust, no prompts at all).
+ */
+export type CoworkPermissionMode = 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+
 // Cowork message types
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 
@@ -172,6 +181,8 @@ export interface CoworkSession {
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
   /** Estimated context-window usage, computed by the main process on session load (not persisted). */
   contextUsage?: CoworkContextUsage | null;
+  /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 // Cowork configuration
@@ -326,6 +337,8 @@ export interface CoworkStartOptions {
   metabotId?: number | null;
   /** Only 'standard' (default) and 'browser' sessions can be created from the renderer. */
   sessionType?: 'standard' | 'browser';
+  /** Permission mode for this session. Defaults to 'default'. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 // Continue session options
@@ -334,6 +347,8 @@ export interface CoworkContinueOptions {
   prompt: string;
   systemPrompt?: string;
   activeSkillIds?: string[];
+  /** Update the session's permission mode for this and subsequent turns. */
+  permissionMode?: CoworkPermissionMode;
 }
 
 export interface CoworkSubmitInput {

@@ -6054,6 +6054,7 @@ if (!gotTheLock) {
     activeSkillIds?: string[];
     metabotId?: number | null;
     sessionType?: 'standard' | 'browser';
+    permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -6101,7 +6102,11 @@ if (!gotTheLock) {
         config.executionMode || 'local',
         options.activeSkillIds || [],
         options.metabotId ?? null,
-        sessionType
+        sessionType,
+        null,
+        null,
+        null,
+        options.permissionMode ?? 'default'
       );
       const runner = getCoworkRunner();
 
@@ -6120,6 +6125,7 @@ if (!gotTheLock) {
         skillIds: options.activeSkillIds,
         workspaceRoot: selectedWorkspaceRoot,
         confirmationMode: 'modal',
+        permissionMode: options.permissionMode ?? 'default',
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
@@ -6175,6 +6181,7 @@ if (!gotTheLock) {
     prompt: string;
     systemPrompt?: string;
     activeSkillIds?: string[];
+    permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
   }) => {
     return withSqliteRecovery('cowork:session:continue', async () => {
     try {
@@ -6185,7 +6192,7 @@ if (!gotTheLock) {
         requestedSystemPrompt: options.systemPrompt,
         activeSkillIds: options.activeSkillIds,
       });
-      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds }).catch(error => {
+      runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds, permissionMode: options.permissionMode }).catch(error => {
         console.error('Cowork continue error:', error);
       });
 
@@ -6217,6 +6224,26 @@ if (!gotTheLock) {
         error: error instanceof Error ? error.message : 'Failed to stop session',
       };
     }
+  });
+
+  ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
+    sessionId: string;
+    permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+  }) => {
+    return withSqliteRecovery('cowork:session:setPermissionMode', async () => {
+      try {
+        const { sessionId, permissionMode } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        getCoworkRunner().setPermissionMode(sessionId, permissionMode);
+        return { success: true };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
   });
 
   ipcMain.handle('cowork:session:queueA2AGuidance', async (_event, input: {

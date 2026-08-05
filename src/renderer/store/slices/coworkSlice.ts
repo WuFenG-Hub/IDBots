@@ -6,6 +6,7 @@ import type {
   CoworkMessageMetadata,
   CoworkConfig,
   CoworkPermissionRequest,
+  CoworkPermissionMode,
   CoworkSessionStatus,
 } from '../../types/cowork';
 
@@ -255,6 +256,15 @@ const coworkSlice = createSlice({
       }
     },
 
+    updateSessionPermissionMode(state, action: PayloadAction<{ sessionId: string; permissionMode: CoworkPermissionMode }>) {
+      const { sessionId, permissionMode } = action.payload;
+      // currentSession is the full CoworkSession; the sessions list holds
+      // summaries without permissionMode, so only patch the active session.
+      if (state.currentSession?.id === sessionId) {
+        state.currentSession.permissionMode = permissionMode;
+      }
+    },
+
     enqueuePendingPermission(state, action: PayloadAction<CoworkPermissionRequest>) {
       const alreadyQueued = state.pendingPermissions.some(
         (permission) => permission.requestId === action.payload.requestId
@@ -318,6 +328,7 @@ export const {
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,
+  updateSessionPermissionMode,
   enqueuePendingPermission,
   dequeuePendingPermission,
   clearPendingPermissions,

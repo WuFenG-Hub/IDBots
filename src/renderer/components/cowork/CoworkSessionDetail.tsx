@@ -11,6 +11,7 @@ import type {
 import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
 import ContextUsageRing from '../ContextUsageRing';
+import PermissionModeSelector from './PermissionModeSelector';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -3276,16 +3277,23 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 onEndConversation={handleEndA2APrivateChat}
               />
             )}
-            {currentSession.contextUsage && (
-              <div className="flex items-center justify-end">
+            <div className="flex items-center justify-end gap-2">
+              <PermissionModeSelector
+                sessionId={currentSession.id}
+                currentMode={currentSession.permissionMode ?? 'default'}
+                onModeChange={(mode) => {
+                  void coworkService.setPermissionMode(currentSession.id, mode);
+                }}
+              />
+              {currentSession.contextUsage && (
                 <ContextUsageRing
                   usedTokens={currentSession.contextUsage.usedTokens}
                   contextWindow={currentSession.contextUsage.contextWindow}
                   isRealUsage={currentSession.contextUsage.isRealUsage}
                   categories={currentSession.contextUsage.categories}
                 />
-              </div>
-            )}
+              )}
+            </div>
           </div>
         </div>
       ) : (
