@@ -219,6 +219,7 @@ export async function uploadMetaFile(
   if (uploadMode === 'direct') {
     const buffer = dataBuffer ?? await fs.promises.readFile(resolvedFilePath);
     const feeRate = getGlobalFeeRate(network);
+    const metabot = metabotStore.getMetabotById(params.metabotId);
     const result = await createPin(
       metabotStore,
       params.metabotId,
@@ -242,6 +243,10 @@ export async function uploadMetaFile(
       size,
       contentType,
       uploadMode: 'direct',
+      network,
+      txids: result.txids,
+      totalCost: result.totalCost,
+      globalMetaId: metabot?.metaid?.trim() || undefined,
     });
   }
 
@@ -287,5 +292,10 @@ export async function uploadMetaFile(
     ),
   });
 
-  return normalizeRpcUploadResult(workerResult);
+  return normalizeRpcUploadResult({
+    ...workerResult,
+    network: 'mvc',
+    txids: workerResult.txId ? [workerResult.txId] : [],
+    globalMetaId: metabot.metaid.trim(),
+  });
 }

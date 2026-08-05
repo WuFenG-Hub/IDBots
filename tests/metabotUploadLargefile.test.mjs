@@ -74,7 +74,7 @@ test('buildMetafileUri appends an extension from file name or content type', () 
   assert.equal(buildMetafileUri('abc123i0'), 'metafile://abc123i0');
 });
 
-test('buildUploadSuccessPayload returns pinId, metafile URI, and preview URL', () => {
+test('buildUploadSuccessPayload returns the canonical OAC-aligned result shape', () => {
   assert.deepEqual(
     buildUploadSuccessPayload({
       pinId: 'abc123i0',
@@ -82,17 +82,28 @@ test('buildUploadSuccessPayload returns pinId, metafile URI, and preview URL', (
       size: 123,
       contentType: 'image/png',
       uploadMode: 'chunked',
+      network: 'mvc',
+      txids: ['tx1', 'tx2'],
+      totalCost: 55,
+      globalMetaId: 'gmid1',
     }),
     {
       success: true,
       pinId: 'abc123i0',
       metafileUri: 'metafile://abc123i0.png',
-      previewUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/abc123i0',
-      fallbackUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/content/abc123i0',
+      previewUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/content/abc123i0',
+      downloadUrl: 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/abc123i0',
+      metawebUrl: 'https://openagentinternet.org/browser/metafile/abc123i0',
       fileName: 'demo.png',
       size: 123,
+      bytes: 123,
+      extension: '.png',
       contentType: 'image/png',
       uploadMode: 'chunked',
+      network: 'mvc',
+      txids: ['tx1', 'tx2'],
+      totalCost: 55,
+      globalMetaId: 'gmid1',
     },
   );
 });
@@ -104,6 +115,8 @@ test('normalizeRpcUploadResult preserves the backend JSON contract for the skill
     size: 1048577,
     contentType: 'video/mp4',
     uploadMode: 'chunked',
+    network: 'mvc',
+    txids: ['txid123'],
   });
 
   assert.equal(payload.success, true);
@@ -111,14 +124,21 @@ test('normalizeRpcUploadResult preserves the backend JSON contract for the skill
   assert.equal(payload.metafileUri, 'metafile://pin123i0.mp4');
   assert.equal(
     payload.previewUrl,
-    'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/pin123i0',
-  );
-  assert.equal(
-    payload.fallbackUrl,
     'https://file.metaid.io/metafile-indexer/api/v1/files/content/pin123i0',
   );
+  assert.equal(
+    payload.downloadUrl,
+    'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/pin123i0',
+  );
+  assert.equal(payload.metawebUrl, 'https://openagentinternet.org/browser/metafile/pin123i0');
   assert.equal(payload.fileName, 'clip.mp4');
   assert.equal(payload.size, 1048577);
+  assert.equal(payload.bytes, 1048577);
+  assert.equal(payload.extension, '.mp4');
   assert.equal(payload.contentType, 'video/mp4');
   assert.equal(payload.uploadMode, 'chunked');
+  assert.equal(payload.network, 'mvc');
+  assert.deepEqual(payload.txids, ['txid123']);
+  assert.equal('totalCost' in payload, false);
+  assert.equal('fallbackUrl' in payload, false);
 });

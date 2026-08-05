@@ -3,8 +3,10 @@ import path from 'path';
 const DEFAULT_CHUNK_THRESHOLD_BYTES = 5 * 1024 * 1024;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
 const DEFAULT_METAFS_UPLOADER_BASE = 'https://file.metaid.io/metafile-uploader';
-const PREVIEW_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content';
-const FALLBACK_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/content';
+const PREVIEW_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/content';
+const DOWNLOAD_URL_BASE = 'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content';
+const LEGACY_CONTENT_URL_BASE = 'https://file.metaid.io/metafile-indexer/content';
+const METAWEB_SHARE_BASE = 'https://openagentinternet.org/browser/metafile';
 const METAFILE_URI_PREFIX = 'metafile://';
 const MIME_MAP = {
   '.png': 'image/png',
@@ -183,12 +185,28 @@ function buildPreviewUrl(pinId) {
   return `${PREVIEW_URL_BASE}/${normalizedPinId}`;
 }
 
-function buildFallbackUrl(pinId) {
+function buildDownloadUrl(pinId) {
   const normalizedPinId = String(pinId || '').trim();
   if (!normalizedPinId) {
     throw new Error('pinId is required');
   }
-  return `${FALLBACK_URL_BASE}/${normalizedPinId}`;
+  return `${DOWNLOAD_URL_BASE}/${normalizedPinId}`;
+}
+
+function buildLegacyContentUrl(pinId) {
+  const normalizedPinId = String(pinId || '').trim();
+  if (!normalizedPinId) {
+    throw new Error('pinId is required');
+  }
+  return `${LEGACY_CONTENT_URL_BASE}/${normalizedPinId}`;
+}
+
+function buildMetawebUrl(pinId) {
+  const normalizedPinId = String(pinId || '').trim();
+  if (!normalizedPinId) {
+    throw new Error('pinId is required');
+  }
+  return `${METAWEB_SHARE_BASE}/${normalizedPinId}`;
 }
 
 function buildUploadSuccessPayload({
@@ -197,6 +215,10 @@ function buildUploadSuccessPayload({
   size,
   contentType,
   uploadMode,
+  network,
+  txids,
+  totalCost,
+  globalMetaId,
 }) {
   const normalizedPinId = String(pinId || '').trim();
   if (!normalizedPinId) {
@@ -205,16 +227,30 @@ function buildUploadSuccessPayload({
 
   assertPositiveInteger(size, 'size');
 
+  const normalizedUploadMode = uploadMode === 'chunked' ? 'chunked' : 'direct';
+  const extension = getMetafileExtension({ fileName, contentType });
+  const normalizedTxids = Array.isArray(txids)
+    ? txids.map((txid) => String(txid || '').trim()).filter(Boolean)
+    : [];
+  const hasTotalCost = Number.isFinite(Number(totalCost)) && Number(totalCost) >= 0;
+
   return {
     success: true,
     pinId: normalizedPinId,
     metafileUri: buildMetafileUri(normalizedPinId, { fileName, contentType }),
     previewUrl: buildPreviewUrl(normalizedPinId),
-    fallbackUrl: buildFallbackUrl(normalizedPinId),
+    downloadUrl: buildDownloadUrl(normalizedPinId),
+    metawebUrl: buildMetawebUrl(normalizedPinId),
     fileName: String(fileName || ''),
     size,
+    bytes: size,
+    extension,
     contentType: String(contentType || 'application/octet-stream'),
-    uploadMode: uploadMode === 'chunked' ? 'chunked' : 'direct',
+    uploadMode: normalizedUploadMode,
+    network: String(network || 'mvc').toLowerCase(),
+    txids: normalizedTxids,
+    ...(hasTotalCost ? { totalCost: Number(totalCost) } : {}),
+    ...(globalMetaId ? { globalMetaId: String(globalMetaId).trim() } : {}),
   };
 }
 
@@ -233,6 +269,10 @@ function normalizeRpcUploadResult(payload) {
     size: Number(payload.size),
     contentType: payload.contentType,
     uploadMode: payload.uploadMode,
+    network: payload.network,
+    txids: payload.txids,
+    totalCost: payload.totalCost,
+    globalMetaId: payload.globalMetaId,
   });
 }
 
@@ -243,10 +283,14 @@ const metaFileUploadShared = {
   MIME_MAP,
   CONTENT_TYPE_EXTENSION_MAP,
   buildChunkedMetaFilePath,
-  FALLBACK_URL_BASE,
+  LEGACY_CONTENT_URL_BASE,
   METAFILE_URI_PREFIX,
+  METAWEB_SHARE_BASE,
   PREVIEW_URL_BASE,
-  buildFallbackUrl,
+  DOWNLOAD_URL_BASE,
+  buildDownloadUrl,
+  buildLegacyContentUrl,
+  buildMetawebUrl,
   buildMetafileUri,
   buildPreviewUrl,
   buildUploadSuccessPayload,
@@ -268,12 +312,16 @@ export {
   DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_METAFS_UPLOADER_BASE,
   CONTENT_TYPE_EXTENSION_MAP,
-  FALLBACK_URL_BASE,
+  LEGACY_CONTENT_URL_BASE,
   METAFILE_URI_PREFIX,
+  METAWEB_SHARE_BASE,
   MIME_MAP,
   PREVIEW_URL_BASE,
+  DOWNLOAD_URL_BASE,
   buildChunkedMetaFilePath,
-  buildFallbackUrl,
+  buildDownloadUrl,
+  buildLegacyContentUrl,
+  buildMetawebUrl,
   buildMetafileUri,
   buildPreviewUrl,
   buildUploadSuccessPayload,
