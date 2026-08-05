@@ -21,7 +21,7 @@ function writeStderr(message: string): void {
 }
 
 const USAGE =
-  'Usage: node upload-largefile.js --file <path> [--content-type <mime>] [--network mvc|doge|btc]';
+  'Usage: node upload-file.js --file <path> [--content-type <mime>] [--network mvc|btc|opcat]';
 
 async function main(): Promise<void> {
   const { values, positionals } = parseArgs({
@@ -29,6 +29,7 @@ async function main(): Promise<void> {
       file: { type: 'string' },
       'content-type': { type: 'string' },
       network: { type: 'string' },
+      verify: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
     allowPositionals: true,
@@ -36,12 +37,13 @@ async function main(): Promise<void> {
 
   if (values.help) {
     writeStderr(
-      'metabot-upload-largefile: upload one local file to MetaID via IDBots local RPC.\n\n' +
+      'metabot-upload-file: upload one local file to MetaWeb via IDBots local RPC.\n\n' +
         `${USAGE}\n\n` +
         'Options:\n' +
         '  --file <path>            (required) Local file path.\n' +
         '  --content-type <mime>    (optional) Override MIME type.\n' +
-        '  --network <network>      (optional) mvc (default), doge, btc.\n' +
+        '  --network <network>      (optional) mvc (default), btc, opcat. DOGE is unsupported.\n' +
+        '  --verify                 (optional) Request post-upload availability verification.\n' +
         '  -h, --help               Show this message.\n' +
         '\nEnv: IDBOTS_METABOT_ID (required), IDBOTS_RPC_URL (optional).\n',
     );
@@ -81,6 +83,7 @@ async function main(): Promise<void> {
       file_path: filePath,
       content_type: values['content-type'] || undefined,
       network: values.network || undefined,
+      verify: values.verify === true,
     }),
   });
 

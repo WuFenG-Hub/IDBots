@@ -39,7 +39,7 @@ async function runRuntime(payload, env) {
 test('publish_zip uses an extension-bearing metafile URI for uploaded wiki bundles', async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'idbots-wiki-metafile-'));
   const skillsRoot = path.join(tempRoot, 'skills');
-  const uploadScript = path.join(skillsRoot, 'metabot-upload-largefile/scripts/upload-largefile.js');
+  const uploadScript = path.join(skillsRoot, 'metabot-upload-file/scripts/upload-file.js');
   await mkdir(path.dirname(uploadScript), { recursive: true });
   await writeFile(
     uploadScript,

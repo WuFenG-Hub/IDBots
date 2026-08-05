@@ -898,8 +898,51 @@ export class SkillManager {
       if (syncedSkillIds.size > 0) {
         this.mergeBundledSkillDefaults(userRoot, bundledRoot, syncedSkillIds);
       }
+
+      // Retire legacy skill directories that were renamed in the bundled set,
+      // so upgraded users do not end up with two competing skills.
+      this.retireLegacySkillsFromUserData(userRoot);
     } catch (error) {
       console.warn('[skills] Failed to sync bundled skills:', error);
+    }
+  }
+
+  private retireLegacySkillsFromUserData(userRoot: string): void {
+    const retiredSkillIds = ['metabot-upload-largefile'];
+    for (const retiredId of retiredSkillIds) {
+      const legacyDir = path.join(userRoot, retiredId);
+      try {
+        if (fs.existsSync(legacyDir)) {
+          fs.rmSync(legacyDir, { recursive: true, force: true });
+          console.log(`[skills] Removed retired skill "${retiredId}" from user data`);
+        }
+      } catch (error) {
+        console.warn(`[skills] Failed to remove retired skill "${retiredId}":`, error);
+      }
+    }
+
+    const targetConfigPath = path.join(userRoot, SKILLS_CONFIG_FILE);
+    if (!fs.existsSync(targetConfigPath)) {
+      return;
+    }
+    try {
+      const targetRaw = fs.readFileSync(targetConfigPath, 'utf8');
+      const targetConfig = JSON.parse(targetRaw) as SkillsConfig;
+      let changed = false;
+      if (targetConfig.defaults && typeof targetConfig.defaults === 'object') {
+        for (const retiredId of retiredSkillIds) {
+          if (retiredId in targetConfig.defaults) {
+            delete targetConfig.defaults[retiredId];
+            changed = true;
+          }
+        }
+      }
+      if (changed) {
+        fs.writeFileSync(targetConfigPath, JSON.stringify(targetConfig, null, 2), 'utf8');
+        console.log('[skills] Pruned retired skill entries from user skills.config.json');
+      }
+    } catch (error) {
+      console.warn('[skills] Failed to prune retired skill config entries:', error);
     }
   }
 

@@ -17,6 +17,7 @@ const pathMod = require('path');
 
 const RPC_BASE = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
 const CREATE_PIN_URL = `${RPC_BASE}/api/metaid/create-pin`;
+const UPLOAD_URL = `${RPC_BASE}/api/idbots/files/upload-largefile`;
 const SKILL_PROTOCOL_PATH = '/protocols/metabot-skill';
 const MAX_ZIP_SIZE = 4 * 1024 * 1024; // 4 MB
 
@@ -60,6 +61,12 @@ async function createPin(metabotId, network, metaidData) {
   return parsed ?? {};
 }
 
+/**
+ * Upload the skill ZIP through the unified file upload flow
+ * (/api/idbots/files/upload-largefile). The flow picks direct vs chunked
+ * from file size and returns the canonical result with an extension-bearing
+ * metafileUri. The 4 MB product cap for skill packages is kept.
+ */
 async function uploadZip(filePath, metabotId, network) {
   const resolved = pathMod.resolve(filePath);
   if (!fs.existsSync(resolved)) {
@@ -73,29 +80,43 @@ async function uploadZip(filePath, metabotId, network) {
     const sizeMB = (stat.size / (1024 * 1024)).toFixed(2);
     throw new Error(`ZIP file too large: ${sizeMB} MB (max 4 MB). Please reduce the skill package size.`);
   }
-  const buffer = fs.readFileSync(resolved);
-  const base64 = buffer.toString('base64');
   writeStderr(`Uploading: ${pathMod.basename(resolved)} (application/zip, ${stat.size} bytes)...`);
-  const resp = await createPin(metabotId, network, {
-    operation: 'create',
-    path: '/file',
-    encryption: '0',
-    version: '1.0',
-    contentType: 'application/zip',
-    encoding: 'base64',
-    payload: base64,
+  const res = await fetch(UPLOAD_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      metabot_id: metabotId,
+      file_path: resolved,
+      content_type: 'application/zip',
+      network,
+    }),
   });
-  const pinId = resolvePinId(resp);
+  const rawText = await res.text();
+  let parsed = null;
+  if (rawText.trim()) {
+    try {
+      const maybe = JSON.parse(rawText);
+      parsed = maybe && typeof maybe === 'object' ? maybe : null;
+    } catch {
+      parsed = null;
+    }
+  }
+  if (!res.ok) {
+    const errMsg = parsed?.error || rawText;
+    throw new Error(`HTTP ${res.status}: ${errMsg}`);
+  }
+  if (!parsed || parsed.success === false) {
+    throw new Error(parsed?.error || 'Unknown upload RPC error');
+  }
+  const pinId = resolvePinId(parsed);
   if (!pinId) {
     throw new Error(`Failed to get pinId for uploaded file: ${resolved}`);
   }
   const ext = pathMod.extname(resolved).toLowerCase();
-  const metafileUri = `metafile://${pinId}${ext}`;
-  if (typeof resp.totalCost === 'number') {
-    writeStderr(`  -> Uploaded: ${metafileUri} (cost: ${resp.totalCost} satoshis)`);
-  } else {
-    writeStderr(`  -> Uploaded: ${metafileUri}`);
-  }
+  const metafileUri = typeof parsed.metafileUri === 'string' && parsed.metafileUri.trim()
+    ? parsed.metafileUri.trim()
+    : `metafile://${pinId}${ext}`;
+  writeStderr(`  -> Uploaded: ${metafileUri} (mode: ${parsed.uploadMode ?? 'direct'})`);
   return { pinId, ext, metafileUri };
 }
 

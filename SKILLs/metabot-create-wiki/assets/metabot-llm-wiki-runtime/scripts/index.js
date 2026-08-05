@@ -2582,9 +2582,9 @@ function findUploadSkillScript() {
   roots.push(path.resolve(process.cwd(), '..'));
 
   for (const root of roots) {
-    const candidate = path.join(root, 'metabot-upload-largefile', 'scripts', 'upload-largefile.js');
+    const candidate = path.join(root, 'metabot-upload-file', 'scripts', 'upload-file.js');
     if (fs.existsSync(candidate)) return candidate;
-    const candidate2 = path.join(root, 'SKILLs', 'metabot-upload-largefile', 'scripts', 'upload-largefile.js');
+    const candidate2 = path.join(root, 'SKILLs', 'metabot-upload-file', 'scripts', 'upload-file.js');
     if (fs.existsSync(candidate2)) return candidate2;
   }
   return null;
@@ -2638,7 +2638,7 @@ function actionPublishZip(input, paths, state) {
     if (!uploadScript) {
       throw new SkillError(
         'dependency_missing',
-        'metabot-upload-largefile skill not found. Provide payload.pinUri/payload.zipUri or install metabot-upload-largefile.'
+        'metabot-upload-file skill not found. Provide payload.pinUri/payload.zipUri or install metabot-upload-file.'
       );
     }
     const result = spawnSync(

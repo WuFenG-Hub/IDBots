@@ -5,7 +5,7 @@ const {
   isRetryableChunkedUploadError,
   normalizeChunkedUploadUtxos,
   pickChunkedUploadFundingUtxos,
-} = await import('../dist-electron/libs/uploadLargeFileFunding.js');
+} = await import('../dist-electron/main/libs/uploadLargeFileFunding.js');
 
 test('chunked upload funding preserves provider order and excluded outpoints', () => {
   const utxos = normalizeChunkedUploadUtxos(

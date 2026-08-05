@@ -15,8 +15,9 @@ official: true
 1. **识别意图**：关键信号词包括「发 buzz」「发条动态」「上链」「广播」「发到链上」「把这张图发出去」「发个带图的 buzz」等。
 2. **提取内容**：从用户指令中提取 Buzz 的文本内容。若内容包含特殊字符、换行、Markdown、代码块、JSON、链接参数等，优先写入请求 JSON 文件的 `content` 字段。
 3. **提取附件**：附件可以是本地文件路径，也可以是已有的 `metafile://...` URI。
-   - 本地文件路径：传给 `attachments` 或 `--attachment`，脚本会读取文件 → base64 编码 → 以 `/file` 协议上链 → 组装 `metafile://<pinId>.<ext>` URI。
+   - 本地文件路径：传给 `attachments` 或 `--attachment`，脚本会通过统一文件上链流程（`/api/idbots/files/upload-largefile`，≤5MiB 直传、>5MiB 分片、自动选择网络）以 `/file` 协议上链 → 返回带扩展名的 `metafile://<pinId>.<ext>` URI。
    - `metafile://...` URI：直接传给 `attachments` 或 `--attachment`，脚本会原样写入 SimpleBuzz 的 `attachments` 数组，不下载、不重新上传。
+   - 注意：文件上链不支持 DOGE。若 buzz 的目标网络是 DOGE，附件会改走 MVC 上链，buzz 正文仍按 DOGE 发布。
 4. **优先使用请求文件执行**：调用 `scripts/post-buzz.js --request-file <request.json>`。只有很短、无特殊字符的纯文本，才建议直接使用 `--content`。
 5. **展示 MetaApp 路径**，调用 `resolve_metaapp_url` 获取本地buzz相关应用的URL，并在回复中输出可点击地址，例如 `[在Buzz MetaApp 查看](http://127.0.0.1:PORT/...)`。除非用户明确要求“打开 / 启动 / 进入” MetaApp，否则不要调用 `open_metaapp` 自动打开。
 

@@ -73,7 +73,7 @@ export interface MetaidDataPayload {
 }
 
 /** Supported network for createPin. Default 'mvc' for backward compatibility. */
-export type CreatePinNetwork = 'mvc' | 'doge' | 'btc';
+export type CreatePinNetwork = 'mvc' | 'doge' | 'btc' | 'opcat';
 
 export interface CreatePinWorkerSuccess {
   txids: string[];
@@ -479,7 +479,7 @@ export async function spawnCreatePinWorker(params: SpawnCreatePinWorkerParams): 
     Buffer.isBuffer(metaidData.payload) ? 'base64' : (metaidData.encoding ?? 'utf-8');
 
   const network = resolveCreatePinNetwork(options?.network);
-  const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000 };
+  const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
   const payloadStr = JSON.stringify({
     feeRate: options?.feeRate ?? FALLBACK_FEE_RATES[network] ?? 1,
     network,
@@ -577,7 +577,7 @@ export async function createPinForIdentity(params: {
 
 /**
  * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
- * @param options.network - Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'.
+ * @param options.network - Target network: 'mvc' (default), 'doge', 'btc', 'opcat'. Omit or empty defaults to 'mvc'.
  */
 export async function createPin(
   metabotStore: MetabotStore,

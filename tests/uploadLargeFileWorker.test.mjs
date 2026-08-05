@@ -7,10 +7,10 @@ const { mvc } = require('meta-contract');
 
 const {
   buildChunkedUploadMergeTxLocally,
-} = await import('../dist-electron/libs/uploadLargeFileWorker.js');
+} = await import('../dist-electron/main/libs/uploadLargeFileWorker.js');
 const {
   normalizeChunkedUploadUtxos,
-} = await import('../dist-electron/libs/uploadLargeFileFunding.js');
+} = await import('../dist-electron/main/libs/uploadLargeFileFunding.js');
 
 test('buildChunkedUploadMergeTxLocally preserves provider order and excludeOutpoints', () => {
   assert.equal(

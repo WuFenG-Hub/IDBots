@@ -1,0 +1,41 @@
+{
+  "skill_name": "metabot-upload-file",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "把本地文件 /tmp/avatar.png 上传到链上，返回 pinId 和预览地址。",
+      "expected_output": "调用 metabot-upload-file 脚本上传文件，并返回 pinId、previewUrl、downloadUrl、metawebUrl 与 uploadMode（direct）。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把 /tmp/report.pdf 上链，目标网络是 mvc，直接告诉我预览地址。",
+      "expected_output": "使用该技能上传 PDF（--network mvc），输出 JSON 结果并在最终回复里包含 pinId 与预览地址。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "把一个 6MB 的 /tmp/demo.mp4 上传到 mvc 链，超过 5M 要自动分片。",
+      "expected_output": "触发大文件分片上传路径（>5MiB 且 <=50MiB 走 chunked，MVC only），最终返回 pinId、previewUrl，并标明 uploadMode=chunked。",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "把 /tmp/photo.png 上传并验证上链后文件可访问。",
+      "expected_output": "调用 metabot-upload-file 脚本并附加 --verify，最终结果包含 verification 字段（ok/url/attempts），不虚构验证结果。",
+      "files": []
+    },
+    {
+      "id": 5,
+      "prompt": "把 /tmp/big.zip（60MB）上传到链上。",
+      "expected_output": "明确报错：文件超过 50 MiB 硬限制，不尝试上传。",
+      "files": []
+    },
+    {
+      "id": 6,
+      "prompt": "把 /tmp/note.txt 上传到 doge 链。",
+      "expected_output": "明确说明文件上链不支持 DOGE，仅支持 mvc、btc、opcat。",
+      "files": []
+    }
+  ]
+}

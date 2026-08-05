@@ -7,6 +7,11 @@ import { resolveElectronExecutablePath } from '../libs/runtimePaths';
 import { createPin } from './metaidCore';
 import { getRate as getGlobalFeeRate } from './feeRateStore';
 import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
+import { verifyMetafileAvailability } from './metafileVerifier';
+import {
+  uploadMvcSponsorDirectFile,
+  type MvcSponsorFeeAssistMetadata,
+} from './mvcSponsorUpload';
 import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -16,7 +21,8 @@ function loadMetaFileUploadShared(): {
   inferContentTypeFromFilePath: (filePath: string) => string;
   normalizeRpcUploadResult: (payload: Record<string, unknown>) => Record<string, unknown>;
   normalizeUploadContentType: (contentType: string) => string;
-  normalizeUploadNetwork: (network?: string) => 'mvc' | 'btc' | 'doge';
+  normalizeUploadNetwork: (network?: string) => 'mvc' | 'btc' | 'opcat';
+  getMetafileExtension: (input: { fileName?: string; contentType?: string }) => string;
   validateUploadSize: (input: { sizeBytes: number; maxSizeBytes?: number }) => number;
   selectUploadMode: (input: { sizeBytes: number; chunkThresholdBytes?: number }) => 'direct' | 'chunked';
 } {
@@ -38,11 +44,38 @@ const {
   normalizeRpcUploadResult,
   normalizeUploadContentType,
   normalizeUploadNetwork,
+  getMetafileExtension,
   validateUploadSize,
   selectUploadMode,
 } = loadMetaFileUploadShared();
 
 const DEFAULT_PATH = "m/44'/10001'/0'/0/0";
+
+const CHAIN_DEFAULT_WRITE_NETWORK_KEY = 'chain.defaultWriteNetwork';
+const MVC_SPONSOR_UPLOAD_ENABLED_KEY = 'chain.mvcSponsorUploadEnabled';
+
+function parseBooleanSetting(value: string | null, fallback: boolean): boolean {
+  if (value === null) return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (normalized === 'true' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === '0') return false;
+  return fallback;
+}
+
+function resolveDefaultUploadNetwork(metabotStore: MetabotStore, metabotId: number): string {
+  const configured = metabotStore.getMetabotSetting(metabotId, CHAIN_DEFAULT_WRITE_NETWORK_KEY);
+  if (!configured) {
+    return 'mvc';
+  }
+  return normalizeUploadNetwork(configured);
+}
+
+function isMvcSponsorUploadEnabled(metabotStore: MetabotStore, metabotId: number): boolean {
+  return parseBooleanSetting(
+    metabotStore.getMetabotSetting(metabotId, MVC_SPONSOR_UPLOAD_ENABLED_KEY),
+    true,
+  );
+}
 
 export interface UploadMetaFileParams {
   metabotId: number;
@@ -54,6 +87,8 @@ export interface UploadMetaFileParams {
   dataFileName?: string;
   contentType?: string;
   network?: string;
+  /** Request post-upload availability verification when supported. */
+  verify?: boolean;
   chunkThresholdBytes?: number;
   maxSizeBytes?: number;
   uploaderBaseUrl?: string;
@@ -160,6 +195,30 @@ async function runUploadLargeFileWorker(
   });
 }
 
+async function attachVerificationIfRequested(
+  result: Record<string, unknown>,
+  params: UploadMetaFileParams,
+): Promise<Record<string, unknown>> {
+  if (params.verify !== true) {
+    return result;
+  }
+  const pinId = String(result?.pinId || '').trim();
+  if (!pinId) {
+    return result;
+  }
+  try {
+    result.verification = await verifyMetafileAvailability({ pinId });
+  } catch (error) {
+    result.verification = {
+      ok: false,
+      url: null,
+      attempts: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return result;
+}
+
 export async function uploadMetaFile(
   metabotStore: MetabotStore,
   params: UploadMetaFileParams,
@@ -207,7 +266,10 @@ export async function uploadMetaFile(
     fileName = path.basename(resolvedFilePath);
   }
 
-  const network = normalizeUploadNetwork(params.network);
+  const requestedNetwork = String(params.network || '').trim();
+  const network = requestedNetwork
+    ? normalizeUploadNetwork(requestedNetwork)
+    : resolveDefaultUploadNetwork(metabotStore, params.metabotId);
   const contentType = normalizeUploadContentType(
     params.contentType || inferContentTypeFromFilePath(fileName),
   );
@@ -218,35 +280,69 @@ export async function uploadMetaFile(
 
   if (uploadMode === 'direct') {
     const buffer = dataBuffer ?? await fs.promises.readFile(resolvedFilePath);
-    const feeRate = getGlobalFeeRate(network);
-    const result = await createPin(
-      metabotStore,
-      params.metabotId,
-      {
-        operation: 'create',
-        path: '/file',
-        encryption: '0',
-        version: '1.0',
-        contentType,
-        payload: buffer,
-      },
-      {
-        network,
-        feeRate,
-      },
-    );
+    const metabot = metabotStore.getMetabotById(params.metabotId);
 
-    return normalizeRpcUploadResult({
-      pinId: result.pinId,
-      fileName,
-      size,
-      contentType,
-      uploadMode: 'direct',
-    });
+    const selfPaidDirect = async (feeAssist?: MvcSponsorFeeAssistMetadata) => {
+      const feeRate = getGlobalFeeRate(network);
+      const result = await createPin(
+        metabotStore,
+        params.metabotId,
+        {
+          operation: 'create',
+          path: '/file',
+          encryption: '0',
+          version: '1.0',
+          contentType,
+          payload: buffer,
+        },
+        {
+          network,
+          feeRate,
+        },
+      );
+      const normalized = normalizeRpcUploadResult({
+        pinId: result.pinId,
+        fileName,
+        size,
+        contentType,
+        uploadMode: 'direct',
+        network,
+        txids: result.txids,
+        totalCost: result.totalCost,
+        globalMetaId: metabot?.metaid?.trim() || undefined,
+      });
+      if (feeAssist) {
+        normalized.feeAssist = feeAssist;
+      }
+      return normalized;
+    };
+
+    if (network === 'mvc' && !useData && metabot && isMvcSponsorUploadEnabled(metabotStore, params.metabotId)) {
+      const sponsorWallet = metabotStore.getMetabotWalletByMetabotId(params.metabotId);
+      if (sponsorWallet?.mnemonic?.trim() && metabot.mvc_address?.trim()) {
+        return attachVerificationIfRequested(
+          await uploadMvcSponsorDirectFile({
+            filePath: resolvedFilePath,
+            fileName,
+            contentType,
+            bytes: size,
+            extension: getMetafileExtension({ fileName, contentType }),
+            mnemonic: sponsorWallet.mnemonic.trim(),
+            walletPath: (sponsorWallet.path || DEFAULT_PATH).trim(),
+            mvcAddress: metabot.mvc_address.trim(),
+            globalMetaId: metabot.metaid?.trim() || undefined,
+            selfPaidUpload: async (feeAssist) => selfPaidDirect(feeAssist),
+          }),
+          params,
+        );
+      }
+    }
+
+    return attachVerificationIfRequested(await selfPaidDirect(), params);
   }
 
   if (network !== 'mvc') {
-    throw new Error('Chunked upload is currently supported only on mvc network in IDBots');
+    throw new Error('Large file upload currently supports MVC only.');
   }
 
   const metabot = metabotStore.getMetabotById(params.metabotId);
@@ -287,5 +383,13 @@ export async function uploadMetaFile(
     ),
   });
 
-  return normalizeRpcUploadResult(workerResult);
+  return attachVerificationIfRequested(
+    normalizeRpcUploadResult({
+      ...workerResult,
+      network: 'mvc',
+      txids: workerResult.txId ? [workerResult.txId] : [],
+      globalMetaId: metabot.metaid.trim(),
+    }),
+    params,
+  );
 }

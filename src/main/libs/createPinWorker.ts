@@ -277,7 +277,7 @@ function getEstimatedTxSizeWithoutInputs(opReturnScriptSize: number): number {
  * Pick UTXOs so that sum(satoshis) >= totalOutput + fee, where fee = txSize * feeRate.
  * Tx size depends on number of inputs, so we add UTXOs until sum >= required.
  */
-const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000 };
+const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
 
 function isInsufficientFeeError(message: string): boolean {
   const m = message.toLowerCase();
@@ -352,6 +352,24 @@ async function main(): Promise<void> {
     const { runBtcCreatePin } = await import('./btcInscribe');
     btcLog(`feeRate=${feeRate} (from ${payload.feeRate != null ? 'global store' : 'fallback'})`);
     const result = await runBtcCreatePin(mnemonic, pathStr, metaidData, feeRate);
+    console.log(
+      JSON.stringify({
+        success: true,
+        txids: result.txids,
+        pinId: result.pinId,
+        totalCost: result.totalCost,
+      })
+    );
+    return;
+  }
+
+  if (networkKind === 'opcat') {
+    const opcatLog = (msg: string) => {
+      try { process.stderr.write(`[createPinWorker:opcat] ${msg}\n`); } catch { /* noop */ }
+    };
+    const { runOpcatCreatePin } = await import('./opcatInscribe');
+    opcatLog(`feeRate=${feeRate} (from ${payload.feeRate != null ? 'global store' : 'fallback'})`);
+    const result = await runOpcatCreatePin(mnemonic, pathStr, metaidData, feeRate);
     console.log(
       JSON.stringify({
         success: true,
