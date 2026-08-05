@@ -3,7 +3,8 @@ import { i18nService } from '../../services/i18n';
 import type { CoworkPermissionMode } from '../../types/cowork';
 
 interface PermissionModeSelectorProps {
-  sessionId: string;
+  /** Session id for mid-session switching; omitted during new-session creation. */
+  sessionId?: string;
   currentMode: CoworkPermissionMode;
   onModeChange: (mode: CoworkPermissionMode) => void;
   disabled?: boolean;

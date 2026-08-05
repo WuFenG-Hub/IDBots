@@ -5,6 +5,7 @@ import { PaperClipIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outl
 import ModelSelector from '../ModelSelector';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
+import PermissionModeSelector from './PermissionModeSelector';
 import { SkillsButton, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
@@ -12,7 +13,7 @@ import { RootState } from '../../store';
 import { setDraftPrompt } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
-import type { CoworkContextUsage } from '../../types/cowork';
+import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -108,6 +109,12 @@ interface CoworkPromptInputProps {
   onManageSkills?: () => void;
   /** Context-aware follow-up suggestions from the SDK; rendered as clickable chips. */
   suggestedPrompts?: string[];
+  /** Show the permission-mode selector in the footer (new-session creation). */
+  showPermissionModeSelector?: boolean;
+  /** Controlled permission-mode value for the footer selector. */
+  permissionMode?: CoworkPermissionMode;
+  /** Callback when the footer permission-mode selector changes. */
+  onPermissionModeChange?: (mode: CoworkPermissionMode) => void;
 }
 
 const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInputProps>(
@@ -130,6 +137,9 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       contextUsage,
       onManageSkills,
       suggestedPrompts,
+      showPermissionModeSelector = false,
+      permissionMode,
+      onPermissionModeChange,
     } = props;
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
@@ -640,6 +650,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onManageSkills={handleManageSkills}
                 />
                 <ActiveSkillBadge />
+                {showPermissionModeSelector && onPermissionModeChange && (
+                  <PermissionModeSelector
+                    currentMode={permissionMode ?? 'default'}
+                    onModeChange={onPermissionModeChange}
+                  />
+                )}
               </fieldset>
               <div className="flex items-center gap-2">
                 {contextUsage && (

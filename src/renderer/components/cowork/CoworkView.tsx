@@ -17,7 +17,7 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { QuickActionBar, PromptPanel } from '../quick-actions';
 import type { SettingsOpenOptions } from '../Settings';
-import type { CoworkSession } from '../../types/cowork';
+import type { CoworkSession, CoworkPermissionMode } from '../../types/cowork';
 import type { LocalizedPrompt } from '../../types/quickAction';
 import { resolveQuickActionPromptSkillMapping } from '../quick-actions/quickActionPresentation.js';
 import { shouldRouteFirstMetabotCreationToOnboarding } from '../onboarding/onboardingGate.js';
@@ -66,6 +66,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     [dispatch],
   );
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
+  const [permissionMode, setPermissionMode] = useState<CoworkPermissionMode>('default');
   // Gate the empty-list selection reset below: the metabot list loads async,
   // so without this flag every mount would clear the persisted New Task
   // selection before the IPC resolves.
@@ -346,6 +347,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         systemPrompt: combinedSystemPrompt,
         activeSkillIds: sessionSkillIds,
         metabotId: selectedMetabotId,
+        permissionMode,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
@@ -607,6 +609,9 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             }}
             showFolderSelector={true}
             onManageSkills={() => onShowSkills?.()}
+            showPermissionModeSelector={true}
+            permissionMode={permissionMode}
+            onPermissionModeChange={setPermissionMode}
           />
         </div>
       </div>
