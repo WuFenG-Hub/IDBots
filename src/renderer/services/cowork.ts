@@ -12,6 +12,8 @@ import {
   updateSessionPinned,
   updateSessionTitle,
   updateSessionPermissionMode,
+  upsertSubagentTask,
+  setSubagentTasks,
   enqueuePendingPermission,
   dequeuePendingPermission,
   setConfig,
@@ -39,6 +41,8 @@ import type {
   CoworkContinueOptions,
   CoworkSubmitInput,
   CoworkSubmitInputResult,
+  SubagentTaskState,
+  SubagentTaskStatus,
 } from '../types/cowork';
 import {
   shouldMarkSessionRunningFromStreamMessage,
@@ -124,6 +128,44 @@ class CoworkService {
       // Late stream chunks can arrive after an error/complete event.
       store.dispatch(addMessage({ sessionId, message }));
       store.dispatch(addBrowserMessage({ sessionId, message }));
+
+      // Subagent activity events ride on system messages via
+      // metadata.subagentEvent; drive the live subagent panel, not the message list.
+      const subagentEvent = message.metadata?.subagentEvent as
+        | (Record<string, unknown> & { event?: string; taskId?: string })
+        | undefined;
+      if (subagentEvent?.event && subagentEvent.taskId) {
+        const eventName = subagentEvent.event;
+        const taskId = String(subagentEvent.taskId);
+        const task: SubagentTaskState = {
+          taskId,
+          toolUseId: typeof subagentEvent.toolUseId === 'string' ? subagentEvent.toolUseId : undefined,
+          subagentType: typeof subagentEvent.subagentType === 'string' ? subagentEvent.subagentType : undefined,
+          description: typeof subagentEvent.description === 'string' ? subagentEvent.description : undefined,
+          prompt: typeof subagentEvent.prompt === 'string' ? subagentEvent.prompt : undefined,
+          status: (subagentEvent.status as SubagentTaskStatus) ?? 'running',
+          summary: typeof subagentEvent.summary === 'string' ? subagentEvent.summary : undefined,
+          lastToolName: typeof subagentEvent.lastToolName === 'string' ? subagentEvent.lastToolName : undefined,
+          outputFile: typeof subagentEvent.outputFile === 'string' ? subagentEvent.outputFile : undefined,
+          error: typeof subagentEvent.error === 'string' ? subagentEvent.error : undefined,
+          usage: subagentEvent.usage as SubagentTaskState['usage'],
+          startedAt: typeof subagentEvent.startedAt === 'number' ? subagentEvent.startedAt : undefined,
+          updatedAt: typeof subagentEvent.updatedAt === 'number' ? subagentEvent.updatedAt : undefined,
+        };
+        if (eventName === 'background_tasks_changed') {
+          const backgroundTasks = Array.isArray(subagentEvent.backgroundTasks)
+            ? subagentEvent.backgroundTasks as Array<{ taskId: string; taskType: string; description: string }>
+            : [];
+          store.dispatch(setSubagentTasks(backgroundTasks.map((t) => ({
+            taskId: t.taskId,
+            description: t.description,
+            status: 'running' as SubagentTaskStatus,
+            taskType: t.taskType,
+          }))));
+        } else {
+          store.dispatch(upsertSubagentTask(task));
+        }
+      }
 
       if (message.metadata?.refreshSessionSummary) {
         await this.loadSessions();

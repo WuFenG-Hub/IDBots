@@ -158,6 +158,9 @@ const SKILLS_MARKER = '/skills/';
 const TASK_WORKSPACE_CONTAINER_DIR = '.idbots-tasks';
 const PERMISSION_RESPONSE_TIMEOUT_MS = 60_000;
 const DELETE_TOOL_NAMES = new Set(['delete', 'remove', 'unlink', 'rmdir']);
+// Coalescing window for high-frequency task_progress / tool_progress events
+// per task_id, so the subagent panel updates don't flood the message stream.
+const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
 // Tools that never mutate the filesystem or execute side effects. Used by 'plan'
 // permission mode to enforce read-only behavior. Bash is intentionally excluded
 // (it can do anything). AskUserQuestion is excluded (handled separately).
@@ -745,6 +748,10 @@ interface ActiveSession {
   autoApproveTools: Set<string>;
   /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
   lastSdkRuntimeStatusKey?: string;
+  /** Last subagent progress emit time (throttle window per task). */
+  lastSubagentThrottleAt?: number;
+  /** Task id of the last throttled subagent progress emit. */
+  lastSubagentThrottleTaskId?: string;
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
@@ -4044,6 +4051,12 @@ export class CoworkRunner extends EventEmitter {
       // Request context-aware follow-up prompt suggestions (one per turn,
       // emitted as a prompt_suggestion event after the result message).
       promptSuggestions: true,
+      // Periodic AI-generated progress summaries for running subagents, emitted
+      // on task_progress events via the `summary` field. Drives the live
+      // subagent panel. forwardSubagentText stays off to avoid flooding the
+      // main message stream; full transcripts are read post-hoc via
+      // getSubagentMessages.
+      agentProgressSummaries: true,
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -6193,6 +6206,124 @@ export class CoworkRunner extends EventEmitter {
         return;
       }
 
+      // Subagent / background task events drive the live subagent panel.
+      // Without handling they were silently dropped, so subagent activity was
+      // invisible to the user. task_progress is high-frequency; it is
+      // throttled in emitSubagentEvent (coalesced per task_id).
+      if (subtype === 'task_started') {
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_started',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          prompt: typeof payload.prompt === 'string' ? payload.prompt : undefined,
+          status: 'running',
+          startedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_progress') {
+        const usage = payload.usage && typeof payload.usage === 'object'
+          ? payload.usage as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_progress',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+          lastToolName: typeof payload.last_tool_name === 'string' ? payload.last_tool_name : undefined,
+          status: 'running',
+          usage: usage ? {
+            totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined,
+            toolUses: typeof usage.tool_uses === 'number' ? usage.tool_uses : undefined,
+            durationMs: typeof usage.duration_ms === 'number' ? usage.duration_ms : undefined,
+          } : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_notification') {
+        const usage = payload.usage && typeof payload.usage === 'object'
+          ? payload.usage as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_notification',
+          taskId: String(payload.task_id ?? ''),
+          toolUseId: typeof payload.tool_use_id === 'string' ? payload.tool_use_id : undefined,
+          subagentType: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
+          description: typeof payload.description === 'string' ? payload.description : undefined,
+          status: String(payload.status ?? 'completed') as 'completed' | 'failed' | 'stopped',
+          summary: typeof payload.summary === 'string' ? payload.summary : undefined,
+          outputFile: typeof payload.output_file === 'string' ? payload.output_file : undefined,
+          usage: usage ? {
+            totalTokens: typeof usage.total_tokens === 'number' ? usage.total_tokens : undefined,
+            toolUses: typeof usage.tool_uses === 'number' ? usage.tool_uses : undefined,
+            durationMs: typeof usage.duration_ms === 'number' ? usage.duration_ms : undefined,
+          } : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'task_updated') {
+        const patch = payload.patch && typeof payload.patch === 'object'
+          ? payload.patch as Record<string, unknown>
+          : null;
+        this.emitSubagentEvent(sessionId, {
+          event: 'task_updated',
+          taskId: String(payload.task_id ?? ''),
+          status: patch && typeof patch.status === 'string'
+            ? (patch.status as 'pending' | 'running' | 'completed' | 'failed' | 'killed' | 'paused')
+            : undefined,
+          error: patch && typeof patch.error === 'string' ? patch.error : undefined,
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      if (subtype === 'background_tasks_changed') {
+        // Level signal: the full live set, REPLACE semantics. Emit once so the
+        // panel can reconcile; ids-only payloads are not correlated with edges.
+        const tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+        this.emitSubagentEvent(sessionId, {
+          event: 'background_tasks_changed',
+          taskId: '',
+          backgroundTasks: tasks
+            .filter((t) => t && typeof t === 'object')
+            .map((t) => {
+              const record = t as Record<string, unknown>;
+              return {
+                taskId: String(record.task_id ?? ''),
+                taskType: String(record.task_type ?? ''),
+                description: String(record.description ?? ''),
+              };
+            }),
+          updatedAt: Date.now(),
+        });
+        return;
+      }
+
+      return;
+    }
+
+    // tool_progress: per-tool heartbeats inside a subagent (top-level type,
+    // not a system subtype). Drives the panel's live activity lines.
+    if (eventType === 'tool_progress') {
+      const taskId = typeof payload.task_id === 'string' ? payload.task_id : '';
+      if (taskId) {
+        this.emitSubagentEvent(sessionId, {
+          event: 'tool_progress',
+          taskId,
+          lastToolName: typeof payload.tool_name === 'string' ? payload.tool_name : undefined,
+          elapsedTimeSeconds: typeof payload.elapsed_time_seconds === 'number' ? payload.elapsed_time_seconds : undefined,
+          updatedAt: Date.now(),
+        });
+      }
       return;
     }
 
@@ -7045,6 +7176,47 @@ export class CoworkRunner extends EventEmitter {
       type: 'system',
       content: '',
       metadata: payload as Record<string, unknown>,
+    });
+    this.emit('message', sessionId, message);
+  }
+
+  /**
+   * Emits a subagent/task activity signal as a `type: 'system'` message carrying
+   * `metadata.subagentEvent`. The renderer hides these from the message list and
+   * drives the live subagent panel instead. task_progress and tool_progress are
+   * high-frequency; they are coalesced per task_id behind a throttle window so
+   * the messages array does not flood.
+   */
+  private emitSubagentEvent(
+    sessionId: string,
+    payload: Record<string, unknown>
+  ): void {
+    const eventName = String(payload.event ?? '');
+    const taskId = String(payload.taskId ?? '');
+    const now = Date.now();
+
+    if (eventName === 'task_progress' || eventName === 'tool_progress') {
+      const activeSession = this.activeSessions.get(sessionId);
+      const last = activeSession?.lastSubagentThrottleAt;
+      const lastTaskKey = activeSession?.lastSubagentThrottleTaskId;
+      const throttleMs = SUBAGENT_PROGRESS_THROTTLE_MS;
+      if (
+        last !== undefined
+        && lastTaskKey === taskId
+        && now - last < throttleMs
+      ) {
+        return;
+      }
+      if (activeSession) {
+        activeSession.lastSubagentThrottleAt = now;
+        activeSession.lastSubagentThrottleTaskId = taskId;
+      }
+    }
+
+    const message = this.store.addMessage(sessionId, {
+      type: 'system',
+      content: '',
+      metadata: { subagentEvent: payload },
     });
     this.emit('message', sessionId, message);
   }

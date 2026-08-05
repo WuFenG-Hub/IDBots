@@ -8,6 +8,7 @@ import type {
   CoworkPermissionRequest,
   CoworkPermissionMode,
   CoworkSessionStatus,
+  SubagentTaskState,
 } from '../../types/cowork';
 
 interface CoworkState {
@@ -24,6 +25,10 @@ interface CoworkState {
   isStreaming: boolean;
   pendingPermissions: CoworkPermissionRequest[];
   config: CoworkConfig;
+  /** Live subagent/background-task state keyed by task_id (drives SubagentPanel). */
+  subagentTasks: Record<string, SubagentTaskState>;
+  /** Whether the subagent panel is open. */
+  isSubagentPanelOpen: boolean;
 }
 
 const initialState: CoworkState = {
@@ -37,6 +42,8 @@ const initialState: CoworkState = {
   isCoworkActive: false,
   isStreaming: false,
   pendingPermissions: [],
+  subagentTasks: {},
+  isSubagentPanelOpen: false,
   config: {
     workingDirectory: '',
     systemPrompt: '',
@@ -265,6 +272,31 @@ const coworkSlice = createSlice({
       }
     },
 
+    /**
+     * Upsert a subagent task row from a SDK task or tool_progress event.
+     * Later events (progress, notification) merge into the existing row.
+     */
+    upsertSubagentTask(state, action: PayloadAction<SubagentTaskState>) {
+      const task = action.payload;
+      const existing = state.subagentTasks[task.taskId];
+      state.subagentTasks[task.taskId] = existing
+        ? { ...existing, ...task }
+        : task;
+    },
+
+    /** Replace the whole subagent task set (background_tasks_changed REPLACE semantics). */
+    setSubagentTasks(state, action: PayloadAction<SubagentTaskState[]>) {
+      const next: Record<string, SubagentTaskState> = {};
+      for (const task of action.payload) {
+        next[task.taskId] = { ...(state.subagentTasks[task.taskId] ?? {}), ...task };
+      }
+      state.subagentTasks = next;
+    },
+
+    setSubagentPanelOpen(state, action: PayloadAction<boolean>) {
+      state.isSubagentPanelOpen = action.payload;
+    },
+
     enqueuePendingPermission(state, action: PayloadAction<CoworkPermissionRequest>) {
       const alreadyQueued = state.pendingPermissions.some(
         (permission) => permission.requestId === action.payload.requestId
@@ -329,6 +361,9 @@ export const {
   updateSessionPinned,
   updateSessionTitle,
   updateSessionPermissionMode,
+  upsertSubagentTask,
+  setSubagentTasks,
+  setSubagentPanelOpen,
   enqueuePendingPermission,
   dequeuePendingPermission,
   clearPendingPermissions,

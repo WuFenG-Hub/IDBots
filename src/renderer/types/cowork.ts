@@ -89,6 +89,39 @@ export interface CoworkSdkRuntimeStatusPayload {
   retryErrorStatus?: number | null;
 }
 
+// Live subagent / background task state, driven by SDK task_* and tool_progress
+// events. Keyed by task_id in the cowork slice.
+export type SubagentTaskStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'stopped'
+  | 'killed'
+  | 'paused';
+
+export interface SubagentTaskState {
+  taskId: string;
+  toolUseId?: string;
+  subagentType?: string;
+  /** Friendly task-type label ('shell' | 'subagent' | 'monitor' | 'workflow' ...). */
+  taskType?: string;
+  description?: string;
+  prompt?: string;
+  status: SubagentTaskStatus;
+  summary?: string;
+  lastToolName?: string;
+  outputFile?: string;
+  error?: string;
+  usage?: {
+    totalTokens?: number;
+    toolUses?: number;
+    durationMs?: number;
+  };
+  startedAt?: number;
+  updatedAt?: number;
+}
+
 // Cowork message
 export interface CoworkMessage {
   id: string;

@@ -14,6 +14,7 @@ import ContextUsageRing from '../ContextUsageRing';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import AutoApproveRulesPanel from './AutoApproveRulesPanel';
+import SubagentPanel from './SubagentPanel';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -839,6 +840,10 @@ const shouldHideControlMessage = (message: CoworkMessage): boolean => {
   }
   // Prompt-suggestion signals are surfaced as chips below the prompt input.
   if (typeof message.metadata?.promptSuggestion === 'string') {
+    return true;
+  }
+  // Subagent activity signals drive the live subagent panel, not the message list.
+  if (message.metadata?.subagentEvent && typeof message.metadata.subagentEvent === 'object') {
     return true;
   }
   return typeof message.content === 'string' && message.content.includes(DELEGATION_CONTROL_PREFIX);
@@ -3430,6 +3435,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             )}
             <div className="flex items-center justify-end gap-2">
+              <SubagentPanel />
               <AutoApproveRulesPanel
                 sessionId={currentSession.id}
                 getRules={(sid) => coworkService.getAutoApproveTools(sid)}
