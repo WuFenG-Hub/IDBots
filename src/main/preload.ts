@@ -310,6 +310,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    forkSession: (sessionId: string, messageId: string, title?: string) =>
+      ipcRenderer.invoke('cowork:session:fork', { sessionId, messageId, title }),
+    rewindSession: (sessionId: string, messageId: string) =>
+      ipcRenderer.invoke('cowork:session:rewind', { sessionId, messageId }),
     setEffort: (sessionId: string, effort: string | null) =>
       ipcRenderer.invoke('cowork:session:setEffort', { sessionId, effort }),
     getAutoApproveTools: (sessionId: string) =>

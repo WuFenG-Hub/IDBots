@@ -320,6 +320,46 @@ class CoworkService {
     return true;
   }
 
+  /**
+   * Forks the session from a message into a new session. On success, loads the
+   * forked session as the current one.
+   */
+  async forkSession(sessionId: string, messageId: string, title?: string): Promise<CoworkSession | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.forkSession) {
+      console.error('forkSession API not available');
+      return null;
+    }
+    const result = await cowork.forkSession(sessionId, messageId, title);
+    if (result.success && result.session) {
+      store.dispatch(addSession(result.session));
+      store.dispatch(setCurrentSession(result.session));
+      return result.session;
+    }
+    console.error('Failed to fork session:', result.error);
+    return null;
+  }
+
+  /**
+   * Rewinds the session to a message (deletes everything after it). On success,
+   * reloads the truncated session as the current one.
+   */
+  async rewindSession(sessionId: string, messageId: string): Promise<CoworkSession | null> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.rewindSession) {
+      console.error('rewindSession API not available');
+      return null;
+    }
+    const result = await cowork.rewindSession(sessionId, messageId);
+    if (result.success && result.session) {
+      store.dispatch(addSession(result.session));
+      store.dispatch(setCurrentSession(result.session));
+      return result.session;
+    }
+    console.error('Failed to rewind session:', result.error);
+    return null;
+  }
+
   async getAutoApproveTools(sessionId: string): Promise<string[]> {
     const cowork = window.electron?.cowork;
     if (!cowork?.getAutoApproveTools) return [];

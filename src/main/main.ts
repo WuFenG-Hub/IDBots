@@ -6265,6 +6265,85 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('cowork:session:fork', async (_event, payload: {
+    sessionId: string;
+    messageId: string;
+    title?: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:fork', async () => {
+      try {
+        const { sessionId, messageId, title } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!messageId) throw new Error('Message id is required');
+        const coworkStoreInst = getCoworkStore();
+        const source = coworkStoreInst.getSession(sessionId);
+        if (!source) {
+          return { success: false, error: 'Source session not found' };
+        }
+        const sourceMessages = source.messages ?? [];
+        const forkIndex = sourceMessages.findIndex((m) => m.id === messageId);
+        if (forkIndex === -1) {
+          return { success: false, error: 'Fork point message not found' };
+        }
+        // Append a compact history of the conversation before the fork point to
+        // the fork's system prompt so the restarted SDK session knows what
+        // happened earlier. Cap the tail to keep the prompt reasonable.
+        const history = sourceMessages.slice(0, forkIndex + 1);
+        const historyLines: string[] = [];
+        let historyChars = 0;
+        const MAX_FORK_HISTORY_CHARS = 12_000;
+        for (const message of history) {
+          const line = `${message.type === 'user' ? 'User' : message.type === 'assistant' ? 'Assistant' : 'Tool'}: ${message.content}`;
+          if (historyChars + line.length > MAX_FORK_HISTORY_CHARS) {
+            historyLines.push('... [earlier conversation truncated]');
+            break;
+          }
+          historyLines.push(line);
+          historyChars += line.length;
+        }
+        const historyContext = historyLines.join('\n');
+        const systemPromptOverride = source.systemPrompt
+          ? `${source.systemPrompt}\n\n<fork_history>\n${historyContext}\n</fork_history>`
+          : `<fork_history>\n${historyContext}\n</fork_history>`;
+        const forked = coworkStoreInst.forkSession(sessionId, messageId, { title, systemPromptOverride });
+        if (!forked) {
+          return { success: false, error: 'Failed to fork session: session or message not found' };
+        }
+        return { success: true, session: forked };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to fork session',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:rewind', async (_event, payload: {
+    sessionId: string;
+    messageId: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:rewind', async () => {
+      try {
+        const { sessionId, messageId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!messageId) throw new Error('Message id is required');
+        const rewound = getCoworkStore().rewindSession(sessionId, messageId);
+        if (!rewound) {
+          return { success: false, error: 'Failed to rewind session: session or message not found' };
+        }
+        return { success: true, session: rewound };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to rewind session',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {
     try {
       if (!sessionId) throw new Error('Session id is required');
