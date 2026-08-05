@@ -4,6 +4,10 @@ import {
   browserFailure,
   browserManualActionRequired,
   browserSuccess,
+  type BrowserLlmCompletePayload,
+  type BrowserLlmCompleteResult,
+  type BrowserPermissionGrant,
+  type BrowserPermissionsResult,
   type BrowserCommandResult,
 } from '@openagentinternet/agent-browser-host-contract';
 import type { MetabotStore } from '../metabotStore';
@@ -14,6 +18,10 @@ const MAX_PIN_PAYLOAD_BYTES = 512 * 1024;
 const PIN_ID_PATTERN = /^[0-9a-f]{64}i\d+$/iu;
 const PIN_WRITE_CONFIRMATION_TTL_MS = 60_000;
 const MAX_PENDING_PIN_WRITE_CONFIRMATIONS = 256;
+const MAX_LLM_INPUT_BYTES = 64 * 1024;
+const MAX_LLM_MESSAGES = 128;
+const MAX_PERMISSION_GRANTS = 32;
+const PROTOCOL_GRANT_PATH_PATTERN = /^\/protocols\/[A-Za-z0-9_-]+$/u;
 
 export type BotBrowserBridgeErrorCode =
   | 'invalid_request'
@@ -23,7 +31,9 @@ export type BotBrowserBridgeErrorCode =
   | 'manual_action_required'
   | 'user_cancelled'
   | 'upload_failed'
-  | 'pin_write_failed';
+  | 'pin_write_failed'
+  | 'llm_unavailable'
+  | 'permissions_failed';
 
 export interface MetaAppBridgeActor {
   uri: string;
@@ -82,6 +92,7 @@ export interface BotBrowserPinWriteManualActionData {
 export interface BotBrowserPinWriteInput {
   actorId?: string;
   resourceUri?: string;
+  sessionId?: string;
   payload?: unknown;
   network?: string;
 }
@@ -89,8 +100,23 @@ export interface BotBrowserPinWriteInput {
 export interface BotBrowserMetaFileUploadInput {
   actorId?: string;
   resourceUri?: string;
+  sessionId?: string;
   payload?: unknown;
   network?: string;
+}
+
+export interface BotBrowserLlmCompleteInput {
+  actorId?: string;
+  resourceUri?: string;
+  sessionId?: string;
+  payload?: unknown;
+}
+
+export interface BotBrowserPermissionsInput {
+  actorId?: string;
+  resourceUri?: string;
+  sessionId?: string;
+  payload?: unknown;
 }
 
 export interface BotBrowserHostPickedFile {
@@ -116,10 +142,19 @@ type UploadMetaFileFn = (
   },
 ) => Promise<Record<string, unknown>>;
 
+type CompleteLlmFn = (input: {
+  metabot: Metabot;
+  actor: MetaAppBridgeActor;
+  resourceUri: string;
+  sessionId: string;
+  payload: BrowserLlmCompletePayload;
+}) => Promise<BrowserLlmCompleteResult>;
+
 export interface BotBrowserBridgeServiceDeps {
   metabotStore: MetabotStore;
   createPin?: CreatePinFn;
   uploadMetaFile?: UploadMetaFileFn;
+  completeLlm?: CompleteLlmFn;
   pickFiles?: (input: {
     multiple: boolean;
     accept: string[];
@@ -134,6 +169,8 @@ export interface BotBrowserBridgeServiceDeps {
 export interface BotBrowserBridgeService {
   writeMetaIdPin(input: BotBrowserPinWriteInput): Promise<BrowserCommandResult<BotBrowserPinWriteResult>>;
   uploadMetaFile(input: BotBrowserMetaFileUploadInput): Promise<BrowserCommandResult<BotBrowserMetaFileUploadResult>>;
+  completeLlm(input: BotBrowserLlmCompleteInput): Promise<BrowserCommandResult<BrowserLlmCompleteResult>>;
+  requestPermissions(input: BotBrowserPermissionsInput): Promise<BrowserCommandResult<BrowserPermissionsResult>>;
 }
 
 function text(value: unknown): string {
@@ -434,6 +471,24 @@ interface PendingPinWriteAuthorization {
   expiresAt: number;
 }
 
+interface PendingPermissionAuthorization {
+  actorId: number;
+  actorGlobalMetaId: string;
+  resourceUri: string;
+  sessionId: string;
+  requestHash: string;
+  tokenHash: Buffer;
+  expiresAt: number;
+}
+
+interface ActivePermissionContext {
+  actorId: number;
+  actorGlobalMetaId: string;
+  resourceUri: string;
+  sessionId: string;
+  grants: BrowserPermissionGrant[];
+}
+
 interface HostConfirmationAttempt {
   id: string;
   token: string;
@@ -467,6 +522,120 @@ function normalizedResourceUri(value: unknown): string {
     return '';
   }
   return resourceUri;
+}
+
+function normalizedSessionId(value: unknown): string {
+  const sessionId = text(value);
+  if (!sessionId || sessionId.length > 256 || /[\r\n]/u.test(sessionId)) {
+    return '';
+  }
+  return sessionId;
+}
+
+function validateLlmCompletePayload(payload: unknown):
+  | BrowserLlmCompletePayload
+  | BrowserCommandResult<never> {
+  const body = objectRecord(payload);
+  const rawMessages = Array.isArray(body?.messages) ? body.messages : [];
+  if (!body || rawMessages.length === 0 || rawMessages.length > MAX_LLM_MESSAGES) {
+    return failure('invalid_params', 'LLM completion requires between 1 and 128 messages.');
+  }
+
+  const messages: BrowserLlmCompletePayload['messages'] = [];
+  let totalBytes = 0;
+  for (const value of rawMessages) {
+    const message = objectRecord(value);
+    const role = text(message?.role);
+    const content = text(message?.content);
+    if ((role !== 'system' && role !== 'user' && role !== 'assistant') || !content) {
+      return failure('invalid_params', 'LLM completion messages are invalid.');
+    }
+    totalBytes += Buffer.byteLength(content, 'utf8');
+    if (totalBytes > MAX_LLM_INPUT_BYTES) {
+      return failure('invalid_params', 'LLM completion input exceeds the 64KB limit.');
+    }
+    messages.push({ role, content });
+  }
+
+  const normalized: BrowserLlmCompletePayload = { messages };
+  const rawOptions = objectRecord(body.options);
+  if (rawOptions) {
+    const options: NonNullable<BrowserLlmCompletePayload['options']> = {};
+    if (rawOptions.temperature !== undefined) {
+      const temperature = Number(rawOptions.temperature);
+      if (!Number.isFinite(temperature) || temperature < 0 || temperature > 2) {
+        return failure('invalid_params', 'LLM completion temperature must be between 0 and 2.');
+      }
+      options.temperature = temperature;
+    }
+    if (rawOptions.maxOutputTokens !== undefined) {
+      const maxOutputTokens = Number(rawOptions.maxOutputTokens);
+      if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 32_768) {
+        return failure('invalid_params', 'LLM completion maxOutputTokens is invalid.');
+      }
+      options.maxOutputTokens = maxOutputTokens;
+    }
+    if (rawOptions.timeoutMs !== undefined) {
+      const timeoutMs = Number(rawOptions.timeoutMs);
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 1_000 || timeoutMs > 120_000) {
+        return failure('invalid_params', 'LLM completion timeoutMs must be between 1000 and 120000.');
+      }
+      options.timeoutMs = timeoutMs;
+    }
+    if (Object.keys(options).length > 0) {
+      normalized.options = options;
+    }
+  }
+
+  const purpose = text(body.purpose);
+  if (purpose) {
+    normalized.purpose = purpose.slice(0, 120);
+  }
+  return normalized;
+}
+
+interface ValidatedPermissionsRequest {
+  grants: BrowserPermissionGrant[];
+  reason?: string;
+}
+
+function validatePermissionsRequest(payload: unknown):
+  | ValidatedPermissionsRequest
+  | BrowserCommandResult<never> {
+  const body = objectRecord(payload);
+  const rawGrants = Array.isArray(body?.grants) ? body.grants : [];
+  if (!body || rawGrants.length === 0 || rawGrants.length > MAX_PERMISSION_GRANTS) {
+    return failure('invalid_params', 'Permission request requires between 1 and 32 grants.');
+  }
+
+  const grants = new Map<string, BrowserPermissionGrant>();
+  for (const value of rawGrants) {
+    const grant = objectRecord(value);
+    const method = text(grant?.method);
+    const operation = text(grant?.operation);
+    const pathValue = text(grant?.path);
+    if (
+      method !== 'metaid.pin.write'
+      || operation !== 'create'
+      || !PROTOCOL_GRANT_PATH_PATTERN.test(pathValue)
+    ) {
+      return failure(
+        'invalid_params',
+        'Permissions only support MetaID PIN create writes on exact protocol paths.',
+      );
+    }
+    grants.set(`${method}:${operation}:${pathValue}`, {
+      method: 'metaid.pin.write',
+      operation: 'create',
+      path: pathValue,
+    });
+  }
+
+  const reason = text(body.reason);
+  return {
+    grants: [...grants.values()],
+    ...(reason ? { reason: reason.slice(0, 500) } : {}),
+  };
 }
 
 function requestHash(payload: Record<string, unknown>): string {
@@ -545,6 +714,8 @@ export function createBotBrowserBridgeService(
   deps: BotBrowserBridgeServiceDeps,
 ): BotBrowserBridgeService {
   const pendingPinWrites = new Map<string, PendingPinWriteAuthorization>();
+  const pendingPermissions = new Map<string, PendingPermissionAuthorization>();
+  const activePermissions = new Map<string, ActivePermissionContext>();
   const now = deps.now ?? Date.now;
   const confirmationTtlMs = typeof deps.confirmationTtlMs === 'number'
     && Number.isFinite(deps.confirmationTtlMs)
@@ -561,6 +732,38 @@ export function createBotBrowserBridgeService(
         pendingPinWrites.delete(confirmationId);
       }
     }
+    for (const [confirmationId, authorization] of pendingPermissions) {
+      if (authorization.expiresAt <= currentTime) {
+        pendingPermissions.delete(confirmationId);
+      }
+    }
+  };
+
+  const permissionContextKey = (
+    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    resourceUri: string,
+    sessionId: string,
+  ): string => JSON.stringify([
+    sessionId,
+    actorResult.metabot.id,
+    actorResult.actor.globalMetaId,
+    resourceUri,
+  ]);
+
+  const hasAutoWritePermission = (
+    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    resourceUri: string,
+    sessionId: string,
+    operation: 'create' | 'modify' | 'revoke',
+    pinPath: string,
+  ): boolean => {
+    if (!sessionId || operation !== 'create') return false;
+    const context = activePermissions.get(permissionContextKey(actorResult, resourceUri, sessionId));
+    return Boolean(context?.grants.some((grant) => (
+      grant.method === 'metaid.pin.write'
+      && grant.operation === 'create'
+      && grant.path === pinPath
+    )));
   };
 
   const issuePinWriteConfirmation = (
@@ -621,6 +824,65 @@ export function createBotBrowserBridgeService(
     );
   };
 
+  const issuePermissionsConfirmation = (
+    actorResult: { metabot: Metabot; actor: MetaAppBridgeActor },
+    resourceUri: string,
+    sessionId: string,
+    validation: ValidatedPermissionsRequest,
+  ): BrowserCommandResult<BrowserPermissionsResult> => {
+    const issuedAt = now();
+    removeExpiredPinWrites(issuedAt);
+    if (pendingPermissions.size >= MAX_PENDING_PIN_WRITE_CONFIRMATIONS) {
+      const oldestConfirmationId = pendingPermissions.keys().next().value;
+      if (typeof oldestConfirmationId === 'string') {
+        pendingPermissions.delete(oldestConfirmationId);
+      }
+    }
+
+    const normalizedPayload = {
+      grants: validation.grants,
+      ...(validation.reason ? { reason: validation.reason } : {}),
+    };
+    const confirmationId = createConfirmationId();
+    const opaqueToken = createConfirmationToken();
+    const expiresAt = issuedAt + confirmationTtlMs;
+    pendingPermissions.set(confirmationId, {
+      actorId: actorResult.metabot.id,
+      actorGlobalMetaId: actorResult.actor.globalMetaId,
+      resourceUri,
+      sessionId,
+      requestHash: requestHash(normalizedPayload),
+      tokenHash: tokenHash(opaqueToken),
+      expiresAt,
+    });
+
+    return browserManualActionRequired(
+      'manual_action_required',
+      'Confirm this session write permission request.',
+      {
+        data: {
+          confirmation: {
+            actor: actorResult.actor,
+            grants: validation.grants,
+            ...(validation.reason ? { reason: validation.reason } : {}),
+          },
+          confirmRequest: {
+            resourceUri,
+            kind: 'permissions-request',
+            payload: {
+              ...normalizedPayload,
+              confirmed: true,
+              hostConfirmation: {
+                id: confirmationId,
+                token: opaqueToken,
+              },
+            },
+          },
+        },
+      },
+    ) as BrowserCommandResult<BrowserPermissionsResult>;
+  };
+
   return {
     async writeMetaIdPin(input: BotBrowserPinWriteInput): Promise<BrowserCommandResult<BotBrowserPinWriteResult>> {
       const actorResult = resolveActor(deps.metabotStore, input.actorId);
@@ -639,6 +901,7 @@ export function createBotBrowserBridgeService(
       if (!resourceUri) {
         return failure('invalid_request', 'MetaID PIN write resourceUri is required.');
       }
+      const sessionId = normalizedSessionId(input.sessionId);
 
       const validation = validatePinWritePayload(input.payload);
       if (isCommandFailure(validation)) return validation;
@@ -649,34 +912,43 @@ export function createBotBrowserBridgeService(
 
       const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
       if (isCommandFailure(confirmationAttempt)) return confirmationAttempt;
-      if (!confirmationAttempt) {
+      const autoWriteAuthorized = !confirmationAttempt && hasAutoWritePermission(
+        actorResult,
+        resourceUri,
+        sessionId,
+        validation.operation,
+        validation.path,
+      );
+      if (!confirmationAttempt && !autoWriteAuthorized) {
         return issuePinWriteConfirmation(actorResult, resourceUri, validation);
       }
 
-      const authorization = pendingPinWrites.get(confirmationAttempt.id);
-      if (!authorization || !tokenMatches(confirmationAttempt.token, authorization.tokenHash)) {
-        return invalidConfirmation();
-      }
+      if (confirmationAttempt) {
+        const authorization = pendingPinWrites.get(confirmationAttempt.id);
+        if (!authorization || !tokenMatches(confirmationAttempt.token, authorization.tokenHash)) {
+          return invalidConfirmation();
+        }
 
-      const currentTime = now();
-      if (authorization.expiresAt <= currentTime) {
+        const currentTime = now();
+        if (authorization.expiresAt <= currentTime) {
+          pendingPinWrites.delete(confirmationAttempt.id);
+          return issuePinWriteConfirmation(actorResult, resourceUri, validation);
+        }
+
+        if (
+          authorization.actorId !== actorResult.metabot.id
+          || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
+          || authorization.resourceUri !== resourceUri
+          || authorization.requestHash !== requestHash(validation.normalizedPayload)
+        ) {
+          pendingPinWrites.delete(confirmationAttempt.id);
+          return invalidConfirmation();
+        }
+
+        // Consume before signing so a retry cannot replay an authorization even
+        // when transaction construction or broadcast later fails.
         pendingPinWrites.delete(confirmationAttempt.id);
-        return issuePinWriteConfirmation(actorResult, resourceUri, validation);
       }
-
-      if (
-        authorization.actorId !== actorResult.metabot.id
-        || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
-        || authorization.resourceUri !== resourceUri
-        || authorization.requestHash !== requestHash(validation.normalizedPayload)
-      ) {
-        pendingPinWrites.delete(confirmationAttempt.id);
-        return invalidConfirmation();
-      }
-
-      // Consume before signing so a retry cannot replay an authorization even
-      // when transaction construction or broadcast later fails.
-      pendingPinWrites.delete(confirmationAttempt.id);
 
       try {
         const result = await deps.createPin(
@@ -700,6 +972,119 @@ export function createBotBrowserBridgeService(
       } catch {
         return failure('pin_write_failed', 'MetaID PIN write failed.');
       }
+    },
+
+    async completeLlm(input: BotBrowserLlmCompleteInput): Promise<BrowserCommandResult<BrowserLlmCompleteResult>> {
+      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      if (isCommandFailure(actorResult)) return actorResult;
+
+      const resourceUri = normalizedResourceUri(input.resourceUri);
+      const sessionId = normalizedSessionId(input.sessionId);
+      if (!resourceUri || !sessionId) {
+        return failure('invalid_request', 'LLM completion requires a resourceUri and sessionId.');
+      }
+
+      const validation = validateLlmCompletePayload(input.payload);
+      if (isCommandFailure(validation)) return validation;
+      if (!deps.completeLlm) {
+        return failure('unsupported_method', 'Local LLM completion is not supported in this IDBots build.');
+      }
+
+      try {
+        const result = await deps.completeLlm({
+          metabot: actorResult.metabot,
+          actor: actorResult.actor,
+          resourceUri,
+          sessionId,
+          payload: validation,
+        });
+        if (!text(result.text)) {
+          return failure('llm_unavailable', 'Local LLM returned an empty completion.');
+        }
+        return browserSuccess(result);
+      } catch {
+        return failure('llm_unavailable', 'Local LLM completion failed.');
+      }
+    },
+
+    async requestPermissions(input: BotBrowserPermissionsInput): Promise<BrowserCommandResult<BrowserPermissionsResult>> {
+      const actorResult = resolveActor(deps.metabotStore, input.actorId);
+      if (isCommandFailure(actorResult)) return actorResult;
+
+      const resourceUri = normalizedResourceUri(input.resourceUri);
+      const sessionId = normalizedSessionId(input.sessionId);
+      if (!resourceUri || !sessionId) {
+        return failure('invalid_request', 'Permission requests require a resourceUri and sessionId.');
+      }
+
+      const rawPayload = objectRecord(input.payload);
+      if (rawPayload?.revoke === true) {
+        activePermissions.delete(permissionContextKey(actorResult, resourceUri, sessionId));
+        return browserSuccess({ granted: [] });
+      }
+
+      const validation = validatePermissionsRequest(input.payload);
+      if (isCommandFailure(validation)) return validation;
+
+      const contextKey = permissionContextKey(actorResult, resourceUri, sessionId);
+      const existing = activePermissions.get(contextKey);
+      if (existing && validation.grants.every((requested) => existing.grants.some((granted) => (
+        granted.method === requested.method
+        && granted.operation === requested.operation
+        && granted.path === requested.path
+      )))) {
+        return browserSuccess({ granted: existing.grants });
+      }
+
+      const confirmationAttempt = parseHostConfirmationAttempt(input.payload);
+      if (isCommandFailure(confirmationAttempt)) return confirmationAttempt;
+      if (!confirmationAttempt) {
+        return issuePermissionsConfirmation(actorResult, resourceUri, sessionId, validation);
+      }
+
+      const authorization = pendingPermissions.get(confirmationAttempt.id);
+      if (!authorization || !tokenMatches(confirmationAttempt.token, authorization.tokenHash)) {
+        return invalidConfirmation();
+      }
+
+      const currentTime = now();
+      if (authorization.expiresAt <= currentTime) {
+        pendingPermissions.delete(confirmationAttempt.id);
+        return issuePermissionsConfirmation(actorResult, resourceUri, sessionId, validation);
+      }
+
+      const normalizedPayload = {
+        grants: validation.grants,
+        ...(validation.reason ? { reason: validation.reason } : {}),
+      };
+      if (
+        authorization.actorId !== actorResult.metabot.id
+        || authorization.actorGlobalMetaId !== actorResult.actor.globalMetaId
+        || authorization.resourceUri !== resourceUri
+        || authorization.sessionId !== sessionId
+        || authorization.requestHash !== requestHash(normalizedPayload)
+      ) {
+        pendingPermissions.delete(confirmationAttempt.id);
+        return invalidConfirmation();
+      }
+
+      pendingPermissions.delete(confirmationAttempt.id);
+      const merged = new Map<string, BrowserPermissionGrant>();
+      for (const grant of existing?.grants ?? []) {
+        merged.set(`${grant.method}:${grant.operation}:${grant.path}`, grant);
+      }
+      for (const grant of validation.grants) {
+        merged.set(`${grant.method}:${grant.operation}:${grant.path}`, grant);
+      }
+      const grants = [...merged.values()];
+      activePermissions.set(contextKey, {
+        actorId: actorResult.metabot.id,
+        actorGlobalMetaId: actorResult.actor.globalMetaId,
+        resourceUri,
+        sessionId,
+        grants,
+      });
+      return browserSuccess({ granted: grants });
     },
 
     async uploadMetaFile(input: BotBrowserMetaFileUploadInput): Promise<BrowserCommandResult<BotBrowserMetaFileUploadResult>> {

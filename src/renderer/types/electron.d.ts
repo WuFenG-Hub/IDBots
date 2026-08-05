@@ -590,14 +590,28 @@ interface IElectronAPI {
     writeMetaIdPin: (input: {
       actorId?: string;
       resourceUri?: string;
+      sessionId?: string;
       payload?: unknown;
       network?: string;
     }) => Promise<HostBrowserCommandResult<unknown>>;
     uploadMetaFile: (input: {
       actorId?: string;
       resourceUri?: string;
+      sessionId?: string;
       payload?: unknown;
       network?: string;
+    }) => Promise<HostBrowserCommandResult<unknown>>;
+    completeLlm: (input: {
+      actorId?: string;
+      resourceUri?: string;
+      sessionId?: string;
+      payload?: unknown;
+    }) => Promise<HostBrowserCommandResult<unknown>>;
+    requestPermissions: (input: {
+      actorId?: string;
+      resourceUri?: string;
+      sessionId?: string;
+      payload?: unknown;
     }) => Promise<HostBrowserCommandResult<unknown>>;
     sendPrivateChat: (input: {
       actorId?: string;

@@ -73,6 +73,8 @@ export interface IdBotsBrowserHostAdapterInput {
   clearMetaAppCache?: (input: BrowserCacheClearInput) => Promise<BrowserCommandResult<BrowserCacheClearResult>>;
   writeMetaIdPin?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
   uploadMetaFile?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
+  completeLlm?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
+  requestPermissions?: (input: BotBrowserBridgeTrustedActionRequest) => Promise<BrowserCommandResult<unknown>>;
   openConversation: (request: BotBrowserConversationRequest) => Promise<void>;
   /**
    * Sends an on-chain /protocols/simplemsg PIN (ECDH-encrypted) to a peer.
@@ -91,6 +93,7 @@ export interface IdBotsBrowserHostAdapterInput {
 export interface BotBrowserBridgeTrustedActionRequest {
   actorId?: string;
   resourceUri: string;
+  sessionId?: string;
   payload?: unknown;
 }
 
@@ -245,6 +248,7 @@ async function runBridgeTrustedAction(
   ipcChannel: string,
   fallbackCode: string,
   fallbackMessage: string,
+  unsupportedMessage: string,
 ): Promise<BrowserCommandResult<BrowserTrustedActionResult>> {
   try {
     const result = await invoke(input);
@@ -259,9 +263,7 @@ async function runBridgeTrustedAction(
     if (isMissingIpcHandlerError(error, ipcChannel)) {
       return browserFailure(
         'unsupported_method',
-        kind === ('metaid-pin-write' as BrowserTrustedActionKind)
-          ? 'MetaID PIN write is not supported in this IDBots build.'
-          : 'MetaFile upload is not supported in this IDBots build.',
+        unsupportedMessage,
       );
     }
     return browserFailure(fallbackCode, fallbackMessage);
@@ -519,12 +521,14 @@ export function createIdbotsBrowserHostAdapter(
           {
             actorId: text(actionInput.actorId) || undefined,
             resourceUri: actionInput.resourceUri,
+            sessionId: text(actionInput.sessionId) || undefined,
             payload: actionInput.payload,
           },
           actionInput.kind,
           'botBrowser:writeMetaIdPin',
           'pin_write_failed',
           'MetaID PIN write failed.',
+          'MetaID PIN write is not supported in this IDBots build.',
         );
       }
 
@@ -540,12 +544,60 @@ export function createIdbotsBrowserHostAdapter(
           {
             actorId: text(actionInput.actorId) || undefined,
             resourceUri: actionInput.resourceUri,
+            sessionId: text(actionInput.sessionId) || undefined,
             payload: actionInput.payload,
           },
           actionInput.kind,
           'botBrowser:uploadMetaFile',
           'upload_failed',
           'MetaFile upload failed.',
+          'MetaFile upload is not supported in this IDBots build.',
+        );
+      }
+
+      if (actionKind === 'llm-complete') {
+        if (!input.completeLlm) {
+          return browserFailure(
+            'unsupported_method',
+            'Local LLM completion is not supported in this IDBots build.',
+          );
+        }
+        return runBridgeTrustedAction(
+          input.completeLlm,
+          {
+            actorId: text(actionInput.actorId) || undefined,
+            resourceUri: actionInput.resourceUri,
+            sessionId: text(actionInput.sessionId) || undefined,
+            payload: actionInput.payload,
+          },
+          actionInput.kind,
+          'botBrowser:completeLlm',
+          'llm_unavailable',
+          'Local LLM completion failed.',
+          'Local LLM completion is not supported in this IDBots build.',
+        );
+      }
+
+      if (actionKind === 'permissions-request') {
+        if (!input.requestPermissions) {
+          return browserFailure(
+            'unsupported_method',
+            'Session write permissions are not supported in this IDBots build.',
+          );
+        }
+        return runBridgeTrustedAction(
+          input.requestPermissions,
+          {
+            actorId: text(actionInput.actorId) || undefined,
+            resourceUri: actionInput.resourceUri,
+            sessionId: text(actionInput.sessionId) || undefined,
+            payload: actionInput.payload,
+          },
+          actionInput.kind,
+          'botBrowser:requestPermissions',
+          'permissions_failed',
+          'Session write permission request failed.',
+          'Session write permissions are not supported in this IDBots build.',
         );
       }
 

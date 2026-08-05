@@ -181,6 +181,8 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
         clearMetaAppCache: (input) => window.electron.botBrowser.clearMetaAppCache(input),
         writeMetaIdPin: (input) => window.electron.botBrowser.writeMetaIdPin(input),
         uploadMetaFile: (input) => window.electron.botBrowser.uploadMetaFile(input),
+        completeLlm: (input) => window.electron.botBrowser.completeLlm(input),
+        requestPermissions: (input) => window.electron.botBrowser.requestPermissions(input),
         sendPrivateChat: (input) => window.electron.botBrowser.sendPrivateChat(input),
         openConversation: (request) => callbacksRef.current.onOpenConversation(request),
       });

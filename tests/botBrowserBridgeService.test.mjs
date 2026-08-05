@@ -523,6 +523,181 @@ test('writeMetaIdPin rejects modify and revoke slash paths before authorization 
   assert.equal(createPinCalls, 0);
 });
 
+test('session permissions authorize only exact protocol creates and revoke restores confirmation', async () => {
+  const writes = [];
+  let confirmationSequence = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    createConfirmationId: () => `permission-${++confirmationSequence}`,
+    createConfirmationToken: () => `permission-token-${confirmationSequence}`,
+    createPin: async (_store, _metabotId, payload) => {
+      writes.push(payload);
+      return { pinId: `pin-${writes.length}`, txids: [`tx-${writes.length}`], totalCost: 1 };
+    },
+  });
+  const actorId = 'idbots-metabot-7';
+  const resourceUri = 'metaapp://app123i0';
+  const sessionId = 'browser-session-1';
+  const permissionPayload = {
+    grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplebuzz' }],
+    reason: 'Publish a community update',
+  };
+
+  const phaseOne = await service.requestPermissions({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: permissionPayload,
+  });
+  assert.equal(phaseOne.state, 'manual_action_required');
+  assert.deepEqual(phaseOne.data.confirmation.grants, permissionPayload.grants);
+  assert.equal(phaseOne.data.confirmRequest.kind, 'permissions-request');
+
+  const granted = await service.requestPermissions({
+    actorId,
+    resourceUri,
+    sessionId,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(granted.ok, true);
+  assert.deepEqual(granted.data.granted, permissionPayload.grants);
+
+  const authorizedWrite = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload({ payload: { encoding: 'utf8', value: 'authorized' } }),
+  });
+  assert.equal(authorizedWrite.ok, true);
+  assert.equal(writes.length, 1);
+
+  const differentPath = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload({ path: '/protocols/other' }),
+  });
+  assert.equal(differentPath.state, 'manual_action_required');
+
+  const modify = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload({ operation: 'modify', path: `@${MODIFY_TARGET_PIN_ID}` }),
+  });
+  assert.equal(modify.state, 'manual_action_required');
+
+  const otherSession = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId: 'browser-session-2',
+    payload: createPinWritePayload(),
+  });
+  assert.equal(otherSession.state, 'manual_action_required');
+
+  const revoked = await service.requestPermissions({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: { revoke: true },
+  });
+  assert.deepEqual(revoked, { ok: true, state: 'success', data: { granted: [] } });
+
+  const afterRevoke = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload(),
+  });
+  assert.equal(afterRevoke.state, 'manual_action_required');
+  assert.equal(writes.length, 1);
+});
+
+test('permission confirmations are bound to actor, resource, session, and exact grants', async () => {
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    createConfirmationId: () => 'permission-bound',
+    createConfirmationToken: () => 'permission-bound-token',
+    createPin: async () => ({ pinId: 'pin123i0', txids: ['tx123'], totalCost: 1 }),
+  });
+  const base = {
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
+    payload: {
+      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplebuzz' }],
+    },
+  };
+  const phaseOne = await service.requestPermissions(base);
+  const confirmRequest = phaseOne.data.confirmRequest;
+
+  const wrongSession = await service.requestPermissions({
+    ...base,
+    sessionId: 'browser-session-other',
+    ...confirmRequest,
+  });
+  assert.equal(wrongSession.code, 'invalid_request');
+
+  const consumedByWrongSession = await service.requestPermissions({ ...base, ...confirmRequest });
+  assert.equal(consumedByWrongSession.code, 'invalid_request');
+
+  const newPhaseOne = await service.requestPermissions(base);
+  const changedGrant = structuredClone(newPhaseOne.data.confirmRequest.payload);
+  changedGrant.grants[0].path = '/protocols/changed';
+  const changed = await service.requestPermissions({
+    ...base,
+    payload: changedGrant,
+  });
+  assert.equal(changed.code, 'invalid_request');
+});
+
+test('completeLlm validates session context and delegates only normalized messages', async () => {
+  const calls = [];
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(createMetabot({ llm_id: 'model-primary', fallback_llm_id: 'model-fallback' })),
+    completeLlm: async (input) => {
+      calls.push(input);
+      return { text: '  completed answer  ', model: 'model-primary', finishReason: 'stop' };
+    },
+  });
+
+  const result = await service.completeLlm({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
+    payload: {
+      messages: [
+        { role: 'system', content: 'System prompt' },
+        { role: 'user', content: 'User question' },
+      ],
+      options: { temperature: 0.2, maxOutputTokens: 128, timeoutMs: 10_000 },
+      purpose: 'answer question',
+    },
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    state: 'success',
+    data: { text: '  completed answer  ', model: 'model-primary', finishReason: 'stop' },
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].metabot.llm_id, 'model-primary');
+  assert.equal(calls[0].metabot.fallback_llm_id, 'model-fallback');
+  assert.equal(calls[0].resourceUri, 'metaapp://app123i0');
+  assert.equal(calls[0].sessionId, 'browser-session-1');
+  assert.deepEqual(calls[0].payload.messages, [
+    { role: 'system', content: 'System prompt' },
+    { role: 'user', content: 'User question' },
+  ]);
+
+  const missingSession = await service.completeLlm({
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    payload: { messages: [{ role: 'user', content: 'should not run' }] },
+  });
+  assert.equal(missingSession.code, 'invalid_request');
+  assert.equal(calls.length, 1);
+});
+
 test('installed ABC routes Browser Share and MetaApp iframe writes through one shared modal with no native PIN dialog', () => {
   const abcBrowserSource = readFileSync(
     new URL('../node_modules/@openagentinternet/agent-browser-ui/dist-cjs/browser/app.js', import.meta.url),
@@ -542,6 +717,8 @@ test('installed ABC routes Browser Share and MetaApp iframe writes through one s
     abcBrowserSource,
     /async function submitMetaIdPinWrite[\s\S]*?await promptMetaIdPinWrite\(/u,
   );
+  assert.match(abcBrowserSource, /kind: 'llm-complete'/u);
+  assert.match(abcBrowserSource, /kind: 'permissions-request'/u);
   assert.equal((abcBrowserSource.match(/function promptMetaIdPinWrite\(/gu) ?? []).length, 1);
   assert.match(mainSource, /new WeakMap<BrowserWindow, BotBrowserBridgeService>\(\)/u);
   assert.doesNotMatch(mainSource, /confirmBotBrowserPinWrite|confirmPinWrite|Confirm MetaID PIN Write/u);
