@@ -1070,6 +1070,15 @@ export async function getEnhancedEnv(
 
   applyPackagedEnvOverrides(env);
 
+  // Keep the embedded Claude Code binary from talking to Anthropic-operated
+  // endpoints (telemetry, error reporting, auto-update, nonessential traffic).
+  // All model traffic must flow through the per-session provider config only.
+  env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  env.DISABLE_TELEMETRY = '1';
+  env.DISABLE_ERROR_REPORTING = '1';
+  env.DISABLE_AUTOUPDATER = '1';
+  env.DISABLE_BUG_COMMAND = '1';
+
   // Inject SKILLs directory path for skill scripts
   const skillsRoot = getSkillsRoot();
   env.SKILLS_ROOT = skillsRoot;

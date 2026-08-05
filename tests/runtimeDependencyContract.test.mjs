@@ -228,6 +228,27 @@ test('Claude Agent SDK is pinned to the native-binary 0.3.x series without cli.j
   );
 });
 
+test('cowork subprocess env disables Claude Code nonessential external traffic', () => {
+  const coworkUtilSource = fs.readFileSync(
+    path.join(process.cwd(), 'src', 'main', 'libs', 'coworkUtil.ts'),
+    'utf8',
+  );
+
+  for (const flag of [
+    'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+    'DISABLE_TELEMETRY',
+    'DISABLE_ERROR_REPORTING',
+    'DISABLE_AUTOUPDATER',
+    'DISABLE_BUG_COMMAND',
+  ]) {
+    assert.match(
+      coworkUtilSource,
+      new RegExp(`env\\.${flag} = '1'`),
+      `${flag} must be forced on so embedded Claude Code sessions never depend on Anthropic-operated endpoints`,
+    );
+  }
+});
+
 test('SDK query call sites isolate from user Claude Code settings sources', () => {
   const coworkRunnerSource = fs.readFileSync(coworkRunnerPath, 'utf8');
   const coworkUtilSource = fs.readFileSync(
