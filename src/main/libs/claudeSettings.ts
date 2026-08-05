@@ -406,6 +406,21 @@ export function getCurrentApiConfig(target: OpenAICompatProxyTarget = 'local'): 
   return resolveCurrentApiConfig(target).config;
 }
 
+/**
+ * Returns the persisted auto-approve tool rules from app_config. These are the
+ * defaults new cowork sessions start with; the user's latest changes are saved
+ * through the renderer configService (same app_config row).
+ */
+export function getPersistedAutoApproveTools(): string[] {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<{ autoApproveTools?: string[] }>('app_config');
+  const tools = appConfig?.autoApproveTools;
+  if (!Array.isArray(tools)) return [];
+  return tools
+    .map((name) => (typeof name === 'string' ? name.trim().toLowerCase() : ''))
+    .filter(Boolean);
+}
+
 export function resolveCurrentModelLimits(modelId?: string | null): CoworkModelLimits {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config') ?? {};

@@ -8,7 +8,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions } from './claudeSettings';
+import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools } from './claudeSettings';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkSteerChannel,
@@ -3484,12 +3484,14 @@ export class CoworkRunner extends EventEmitter {
 
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) {
-      // If not active, start a new run
+      // If not active, start a new run. Auto-approve rules default to the
+      // persisted app-level list so continuing a session still honors them.
       await this.startSession(sessionId, prompt, {
         skillIds: options.skillIds,
         systemPrompt: options.systemPrompt,
         skipInitialUserMessage: options.skipUserMessage,
         permissionMode: options.permissionMode,
+        autoApproveTools: getPersistedAutoApproveTools(),
       });
       return;
     }

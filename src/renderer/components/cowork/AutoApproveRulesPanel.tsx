@@ -6,6 +6,13 @@ interface AutoApproveRulesPanelProps {
   getRules: (sessionId: string) => Promise<string[]>;
   addRule: (sessionId: string, toolName: string) => Promise<boolean>;
   removeRule: (sessionId: string, toolName: string) => Promise<boolean>;
+  /**
+   * Persisted rules (from app_config) to seed the panel when the session has
+   * no in-memory rules yet (e.g. a freshly created session).
+   */
+  initialRules?: string[];
+  /** Called after every successful add/remove so the caller can persist. */
+  onRulesChange?: (rules: string[]) => void;
   disabled?: boolean;
 }
 
@@ -19,10 +26,12 @@ const AutoApproveRulesPanel: React.FC<AutoApproveRulesPanelProps> = ({
   getRules,
   addRule,
   removeRule,
+  initialRules,
+  onRulesChange,
   disabled = false,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [rules, setRules] = useState<string[]>([]);
+  const [rules, setRules] = useState<string[]>(() => [...(initialRules ?? [])].sort());
   const [inputValue, setInputValue] = useState('');
   const [error, setError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -32,7 +41,9 @@ const AutoApproveRulesPanel: React.FC<AutoApproveRulesPanelProps> = ({
     if (!isOpen) return;
     let cancelled = false;
     void getRules(sessionId).then((loaded) => {
-      if (!cancelled) setRules(loaded);
+      // Prefer in-memory session rules when present; otherwise keep the
+      // persisted defaults shown.
+      if (!cancelled && loaded.length > 0) setRules(loaded);
     });
     return () => {
       cancelled = true;
@@ -55,9 +66,11 @@ const AutoApproveRulesPanel: React.FC<AutoApproveRulesPanelProps> = ({
     if (!toolName) return;
     const added = await addRule(sessionId, toolName);
     if (added) {
-      setRules((prev) => Array.from(new Set([...prev, toolName.toLowerCase()])).sort());
+      const next = Array.from(new Set([...rules, toolName.toLowerCase()])).sort();
+      setRules(next);
       setInputValue('');
       setError(null);
+      onRulesChange?.(next);
     } else {
       setError(i18nService.t('coworkAutoApproveAddFailed'));
     }
@@ -66,7 +79,9 @@ const AutoApproveRulesPanel: React.FC<AutoApproveRulesPanelProps> = ({
   const handleRemove = async (toolName: string) => {
     const removed = await removeRule(sessionId, toolName);
     if (removed) {
-      setRules((prev) => prev.filter((r) => r !== toolName));
+      const next = rules.filter((r) => r !== toolName);
+      setRules(next);
+      onRulesChange?.(next);
     }
   };
 

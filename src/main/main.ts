@@ -27,7 +27,7 @@ import {
 import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools } from './libs/claudeSettings';
 import { prewarmClaudeSdk } from './libs/claudeSdk';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
@@ -6119,13 +6119,15 @@ if (!gotTheLock) {
         metadata: options.activeSkillIds?.length ? { skillIds: options.activeSkillIds } : undefined,
       });
 
-      // Start the session asynchronously (skip initial user message since we already added it)
+      // Start the session asynchronously (skip initial user message since we already added it).
+      // Auto-approve rules default to the persisted app-level list (latest user changes).
       runner.startSession(session.id, options.prompt, {
         skipInitialUserMessage: true,
         skillIds: options.activeSkillIds,
         workspaceRoot: selectedWorkspaceRoot,
         confirmationMode: 'modal',
         permissionMode: options.permissionMode ?? 'default',
+        autoApproveTools: getPersistedAutoApproveTools(),
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
