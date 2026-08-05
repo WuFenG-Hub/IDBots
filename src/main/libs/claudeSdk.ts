@@ -3,10 +3,12 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 import { pathToFileURL } from 'url';
 import { coworkLog } from './coworkLogger';
+import { getClaudeCodePath } from './claudeSettings';
 
 export type ClaudeSdkModule = typeof import('@anthropic-ai/claude-agent-sdk');
 
 let claudeSdkPromise: Promise<ClaudeSdkModule> | null = null;
+let prewarmStarted = false;
 
 const CLAUDE_SDK_PATH_PARTS = ['@anthropic-ai', 'claude-agent-sdk'];
 
@@ -72,4 +74,50 @@ export function loadClaudeSdk(): Promise<ClaudeSdkModule> {
   }
 
   return claudeSdkPromise;
+}
+
+/**
+ * Eagerly pre-warms the Claude Agent SDK at app startup so the first cowork
+ * session doesn't pay the dynamic-import + native-binary-resolution cost.
+ *
+ * This triggers two currently-lazy operations in parallel:
+ *  1. loadClaudeSdk() — the runtime dynamic import of sdk.mjs (cached in
+ *     claudeSdkPromise, reused by every subsequent session).
+ *  2. getClaudeCodePath() — probing the platform-specific native binary
+ *     candidates (existsSync checks across platform package dirs).
+ *
+ * Note on SDK startup()/WarmQuery: the SDK's startup() returns a single-use
+ * WarmQuery whose options (env, model) are fixed at creation time. IDBots runs
+ * multi-provider sessions with per-session env, so a global warm subprocess
+ * cannot serve them. Instead we pre-load the module + resolve the binary path
+ * — both provider-agnostic — which removes the dominant first-session import
+ * cost while keeping per-session env flexibility.
+ *
+ * Fire-and-forget: failures are logged but never block app startup. The
+ * promise is cached so the first real session reuses the in-flight load.
+ */
+export function prewarmClaudeSdk(): void {
+  if (prewarmStarted) return;
+  prewarmStarted = true;
+
+  coworkLog('INFO', 'prewarmClaudeSdk', 'Pre-warming Claude Agent SDK (module + binary path)');
+
+  // Module import (cached in claudeSdkPromise).
+  void loadClaudeSdk().catch(() => {
+    // Errors are already logged inside loadClaudeSdk; nothing more to do.
+  });
+
+  // Binary path resolution — run on the next tick to avoid blocking the
+  // ready event; the result is not cached explicitly but the filesystem cache
+  // and V8 module compilation warm up for the real call in runClaudeCodeLocal.
+  setImmediate(() => {
+    try {
+      const resolved = getClaudeCodePath();
+      coworkLog('DEBUG', 'prewarmClaudeSdk', 'Pre-resolved Claude binary path', { resolved });
+    } catch (error) {
+      coworkLog('WARN', 'prewarmClaudeSdk', 'Binary path pre-resolution failed (non-fatal)', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
 }
