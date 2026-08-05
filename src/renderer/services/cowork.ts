@@ -41,6 +41,7 @@ import type {
   CoworkContinueOptions,
   CoworkSubmitInput,
   CoworkSubmitInputResult,
+  CoworkMessage,
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../types/cowork';
@@ -400,6 +401,22 @@ class CoworkService {
     }
     console.error('Failed to rewind session:', result.error);
     return null;
+  }
+
+  /** Lists subagent transcript ids for a session (post-hoc, from disk). */
+  async getSubagents(sessionId: string): Promise<string[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSubagents) return [];
+    const result = await cowork.getSubagents(sessionId);
+    return result.success ? result.agents ?? [] : [];
+  }
+
+  /** Reads and flattens a subagent's transcript into CoworkMessages. */
+  async getSubagentMessages(sessionId: string, agentId: string, limit?: number): Promise<CoworkMessage[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getSubagentMessages) return [];
+    const result = await cowork.getSubagentMessages(sessionId, agentId, limit);
+    return result.success ? result.messages ?? [] : [];
   }
 
   async getAutoApproveTools(sessionId: string): Promise<string[]> {

@@ -709,6 +709,8 @@ interface IElectronAPI {
     setEffort: (sessionId: string, effort: string | null) => Promise<{ success: boolean; error?: string }>;
     forkSession: (sessionId: string, messageId: string, title?: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     rewindSession: (sessionId: string, messageId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    getSubagents: (sessionId: string) => Promise<{ success: boolean; agents?: string[]; error?: string }>;
+    getSubagentMessages: (sessionId: string, agentId: string, limit?: number) => Promise<{ success: boolean; messages?: CoworkMessage[]; error?: string }>;
     getAutoApproveTools: (sessionId: string) => Promise<{ success: boolean; tools?: string[]; error?: string }>;
     addAutoApproveTool: (sessionId: string, toolName: string) => Promise<{ success: boolean; error?: string }>;
     removeAutoApproveTool: (sessionId: string, toolName: string) => Promise<{ success: boolean; error?: string }>;

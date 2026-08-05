@@ -28,7 +28,8 @@ import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools } from './libs/claudeSettings';
-import { prewarmClaudeSdk } from './libs/claudeSdk';
+import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
+import { flattenSubagentTranscriptMessages } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
 import { computeCoworkContextUsage } from './libs/coworkContextUsage';
 import { resolveContinueSystemPrompt } from './libs/coworkPromptStrategy';
@@ -6342,6 +6343,52 @@ if (!gotTheLock) {
         };
       }
     });
+  });
+
+  ipcMain.handle('cowork:session:getSubagents', async (_event, sessionId: string) => {
+    try {
+      if (!sessionId) throw new Error('Session id is required');
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session?.claudeSessionId) {
+        return { success: true, agents: [] };
+      }
+      const sdk = await loadClaudeSdk();
+      const agents = await sdk.listSubagents(session.claudeSessionId, { dir: session.cwd });
+      return { success: true, agents: Array.isArray(agents) ? agents : [] };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list subagents',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:getSubagentMessages', async (_event, payload: {
+    sessionId: string;
+    agentId: string;
+    limit?: number;
+  }) => {
+    try {
+      const { sessionId, agentId, limit } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      if (!agentId) throw new Error('Agent id is required');
+      const session = getCoworkStore().getSession(sessionId);
+      if (!session?.claudeSessionId) {
+        return { success: true, messages: [] };
+      }
+      const sdk = await loadClaudeSdk();
+      const transcript = await sdk.getSubagentMessages(session.claudeSessionId, agentId, {
+        dir: session.cwd,
+        limit,
+      });
+      const flattened = flattenSubagentTranscriptMessages(transcript ?? []);
+      return { success: true, messages: flattened };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get subagent messages',
+      };
+    }
   });
 
   ipcMain.handle('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {

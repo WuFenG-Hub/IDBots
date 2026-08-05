@@ -3435,7 +3435,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             )}
             <div className="flex items-center justify-end gap-2">
-              <SubagentPanel />
+              <SubagentPanel sessionId={currentSession.id} />
               <AutoApproveRulesPanel
                 sessionId={currentSession.id}
                 getRules={(sid) => coworkService.getAutoApproveTools(sid)}

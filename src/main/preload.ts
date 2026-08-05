@@ -314,6 +314,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:fork', { sessionId, messageId, title }),
     rewindSession: (sessionId: string, messageId: string) =>
       ipcRenderer.invoke('cowork:session:rewind', { sessionId, messageId }),
+    getSubagents: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:getSubagents', sessionId),
+    getSubagentMessages: (sessionId: string, agentId: string, limit?: number) =>
+      ipcRenderer.invoke('cowork:session:getSubagentMessages', { sessionId, agentId, limit }),
     setEffort: (sessionId: string, effort: string | null) =>
       ipcRenderer.invoke('cowork:session:setEffort', { sessionId, effort }),
     getAutoApproveTools: (sessionId: string) =>

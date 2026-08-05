@@ -1,11 +1,21 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector } from 'react-redux';
 import { i18nService } from '../../services/i18n';
+import { coworkService } from '../../services/cowork';
 import { RootState } from '../../store';
-import type { SubagentTaskState, SubagentTaskStatus } from '../../types/cowork';
+import type { CoworkMessage, SubagentTaskState, SubagentTaskStatus } from '../../types/cowork';
 
 interface SubagentPanelProps {
+  /** Current session id; enables the post-hoc transcript viewer. */
+  sessionId?: string;
   disabled?: boolean;
+}
+
+/** Post-hoc subagent entry from listSubagents, merged with live tasks. */
+interface SubagentEntry {
+  key: string;
+  agentId?: string;
+  task?: SubagentTaskState;
 }
 
 const STATUS_ICON: Record<SubagentTaskStatus, string> = {
@@ -39,11 +49,26 @@ const formatTokens = (value?: number): string | null => {
  * tool_progress events). Each row shows type badge, description, status icon,
  * duration, token usage, AI summary (agentProgressSummaries) and the last tool.
  */
-const SubagentPanel: React.FC<SubagentPanelProps> = ({ disabled = false }) => {
+const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = false }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [postHocAgents, setPostHocAgents] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const tasks = useSelector((state: RootState) => state.cowork.subagentTasks);
   const taskList = Object.values(tasks).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+
+  // On open, load post-hoc subagent ids from disk (listSubagents) and merge
+  // with live tasks. Post-hoc entries may not correlate 1:1 with live task
+  // ids (task_id != agentId), so they appear as additional rows.
+  useEffect(() => {
+    if (!isOpen || !sessionId) return;
+    let cancelled = false;
+    void coworkService.getSubagents(sessionId).then((agents) => {
+      if (!cancelled) setPostHocAgents(agents);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, sessionId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -57,6 +82,13 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ disabled = false }) => {
   }, [isOpen]);
 
   const runningCount = taskList.filter((t) => t.status === 'running' || t.status === 'pending').length;
+
+  // Merge live tasks and post-hoc agents into one list. Post-hoc agents that
+  // match a live task's transcript path are deduped by key.
+  const entries: SubagentEntry[] = [
+    ...taskList.map<SubagentEntry>((task) => ({ key: `task-${task.taskId}`, task })),
+    ...postHocAgents.map<SubagentEntry>((agentId) => ({ key: `agent-${agentId}`, agentId })),
+  ];
 
   return (
     <div ref={containerRef} className="relative">
@@ -87,19 +119,24 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ disabled = false }) => {
               {i18nService.t('coworkSubagentPanelTitle')}
             </span>
             <span className="text-[10px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
-              {taskList.length > 0
-                ? i18nService.t('coworkSubagentCount').replace('{count}', String(taskList.length))
+              {entries.length > 0
+                ? i18nService.t('coworkSubagentCount').replace('{count}', String(entries.length))
                 : i18nService.t('coworkSubagentNone')}
             </span>
           </div>
           <div className="overflow-y-auto flex-1 p-2 space-y-1.5">
-            {taskList.length === 0 ? (
+            {entries.length === 0 ? (
               <div className="px-2 py-4 text-center text-[11px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
                 {i18nService.t('coworkSubagentEmpty')}
               </div>
             ) : (
-              taskList.map((task) => (
-                <SubagentTaskRow key={task.taskId} task={task} />
+              entries.map((entry) => (
+                <SubagentTaskRow
+                  key={entry.key}
+                  task={entry.task}
+                  agentId={entry.agentId}
+                  sessionId={sessionId}
+                />
               ))
             )}
           </div>
@@ -109,36 +146,125 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ disabled = false }) => {
   );
 };
 
-const SubagentTaskRow: React.FC<{ task: SubagentTaskState }> = ({ task }) => {
-  const duration = formatDuration(task.usage?.durationMs ?? (task.startedAt && task.updatedAt ? task.updatedAt - task.startedAt : undefined));
-  const tokens = formatTokens(task.usage?.totalTokens);
-  const typeLabel = task.subagentType ?? task.taskType ?? 'task';
+const SubagentTaskRow: React.FC<{
+  task?: SubagentTaskState;
+  agentId?: string;
+  sessionId?: string;
+}> = ({ task, agentId, sessionId }) => {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [transcript, setTranscript] = useState<CoworkMessage[] | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const duration = task
+    ? formatDuration(task.usage?.durationMs ?? (task.startedAt && task.updatedAt ? task.updatedAt - task.startedAt : undefined))
+    : null;
+  const tokens = task ? formatTokens(task.usage?.totalTokens) : null;
+  const typeLabel = task?.subagentType ?? task?.taskType ?? 'subagent';
+  const titleText = task
+    ? (task.description || task.prompt || task.taskId.slice(0, 8))
+    : (agentId ?? 'subagent');
+  const canViewTranscript = Boolean(sessionId && agentId);
+
+  const toggleTranscript = useCallback(async () => {
+    if (!sessionId || !agentId) return;
+    if (isExpanded) {
+      setIsExpanded(false);
+      return;
+    }
+    setIsExpanded(true);
+    if (transcript === null) {
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const messages = await coworkService.getSubagentMessages(sessionId, agentId, 200);
+        setTranscript(messages);
+        if (messages.length === 0) {
+          setLoadError(i18nService.t('coworkSubagentTranscriptEmpty'));
+        }
+      } catch {
+        setLoadError(i18nService.t('coworkSubagentTranscriptFailed'));
+      } finally {
+        setIsLoading(false);
+      }
+    }
+  }, [sessionId, agentId, isExpanded, transcript]);
 
   return (
     <div className="rounded-lg px-2.5 py-2 dark:bg-claude-darkSurfaceInset/60 bg-claude-surfaceInset/60 dark:border dark:border-claude-darkBorder/50 border border-claude-border/50">
       <div className="flex items-center gap-2">
-        <span className="text-[11px]">{STATUS_ICON[task.status] ?? '•'}</span>
+        <span className="text-[11px]">{task ? (STATUS_ICON[task.status] ?? '•') : '📄'}</span>
         <span className="inline-flex items-center rounded-md bg-claude-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-claude-accent max-w-[40%] truncate">
           {typeLabel}
         </span>
         <span className="flex-1 min-w-0 text-xs dark:text-claude-darkText text-claude-text truncate">
-          {task.description || task.prompt || task.taskId.slice(0, 8)}
+          {titleText}
         </span>
+        {canViewTranscript && (
+          <button
+            type="button"
+            onClick={() => void toggleTranscript()}
+            className="flex-shrink-0 text-[10px] font-medium dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 hover:text-claude-accent dark:hover:text-claude-accent transition-colors"
+            title={i18nService.t('coworkSubagentTranscriptTitle')}
+          >
+            {isExpanded ? '−' : '+'}
+          </button>
+        )}
       </div>
-      {(task.summary || task.lastToolName || duration || tokens) && (
+      {(task?.summary || task?.lastToolName || duration || tokens) && (
         <div className="mt-1.5 space-y-0.5">
-          {task.summary && (
+          {task?.summary && (
             <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary leading-relaxed">
               {task.summary}
             </div>
           )}
           <div className="flex items-center gap-2 text-[10px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-            {task.lastToolName && (
+            {task?.lastToolName && (
               <span className="font-mono truncate">{task.lastToolName}</span>
             )}
             {duration && <span>⏱ {duration}</span>}
             {tokens && <span>∑ {tokens}</span>}
           </div>
+        </div>
+      )}
+      {isExpanded && (
+        <div className="mt-2 border-t dark:border-claude-darkBorder/40 border-claude-border/40 pt-2">
+          {isLoading ? (
+            <div className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+              {i18nService.t('coworkSubagentTranscriptLoading')}
+            </div>
+          ) : loadError ? (
+            <div className="text-[11px] text-red-500 dark:text-red-400">{loadError}</div>
+          ) : transcript && transcript.length > 0 ? (
+            <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+              {transcript.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={`text-[11px] leading-relaxed ${
+                    msg.type === 'assistant' && msg.metadata?.isThinking
+                      ? 'dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 italic'
+                      : msg.type === 'tool_use'
+                        ? 'dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 font-mono'
+                        : msg.type === 'tool_result'
+                          ? 'dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60'
+                          : 'dark:text-claude-darkText text-claude-text'
+                  }`}
+                >
+                  {msg.type === 'user' && <span className="font-medium text-claude-accent">User: </span>}
+                  {msg.type === 'assistant' && !msg.metadata?.isThinking && <span className="font-medium">Assistant: </span>}
+                  {msg.type === 'tool_use' && (
+                    <span className="font-medium">🔧 {msg.metadata?.toolName}: </span>
+                  )}
+                  {msg.type === 'tool_result' && <span className="font-medium">📥 Result: </span>}
+                  {msg.content.length > 300 ? `${msg.content.slice(0, 300)}…` : msg.content}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-[11px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
+              {i18nService.t('coworkSubagentTranscriptEmpty')}
+            </div>
+          )}
         </div>
       )}
     </div>
