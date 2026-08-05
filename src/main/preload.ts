@@ -578,6 +578,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('groupTask:statusChanged', handler);
       return () => ipcRenderer.removeListener('groupTask:statusChanged', handler);
     },
+    onOwnerReportDelivery: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('groupTask:ownerReportDelivery', handler);
+      return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
+    },
   },
   idbots: {
     getMetaBots: () => ipcRenderer.invoke('idbots:getMetaBots'),

@@ -1,4 +1,5 @@
 import { store } from '../store';
+import { i18nService } from './i18n';
 import {
   setLoading,
   setError,
@@ -9,6 +10,7 @@ import {
 import type {
   GroupTaskCreateInput,
   GroupTaskDetail,
+  GroupTaskOwnerReportDeliveryEvent,
   GroupTaskStatus,
   GroupTaskStatusEvent,
   GroupTaskSummary,
@@ -52,6 +54,23 @@ class GroupTaskService {
       );
     });
     this.cleanupFns.push(cleanup);
+
+    const cleanupOwnerReport = api.onOwnerReportDelivery((event: GroupTaskOwnerReportDeliveryEvent) => {
+      let message: string;
+      if (event.outcome === 'failed') {
+        message = i18nService
+          .t('groupTasksOwnerReportFailed')
+          .replace('{error}', event.error?.trim() || i18nService.t('groupTasksOwnerReportUnknownError'));
+      } else if (event.displayError) {
+        message = i18nService
+          .t('groupTasksOwnerReportDisplayFailed')
+          .replace('{error}', event.displayError);
+      } else {
+        message = i18nService.t('groupTasksOwnerReportSent');
+      }
+      window.dispatchEvent(new CustomEvent<string>('app:showToast', { detail: message }));
+    });
+    this.cleanupFns.push(cleanupOwnerReport);
   }
 
   async loadTasks(status?: GroupTaskStatus): Promise<void> {

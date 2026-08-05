@@ -1267,6 +1267,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksSending: '发送中…',
     groupTasksSentHint: '已上链 — 索引确认后显示',
     groupTasksLoadFailed: '加载群任务失败',
+    groupTasksOwnerReportSent: 'Twin Bot 已通过 A2A 私聊发送验收报告',
+    groupTasksOwnerReportFailed: 'Twin Bot 验收报告发送失败：{error}',
+    groupTasksOwnerReportDisplayFailed: '验收报告已上链，但无法显示在 A2A 对话中：{error}',
+    groupTasksOwnerReportUnknownError: '未知错误',
     scheduledTasks: '定时任务',
     scheduledTasksTitle: '定时任务',
     scheduledTasksNewTask: '新建任务',
@@ -2753,6 +2757,10 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksSending: 'Sending…',
     groupTasksSentHint: 'Posted on-chain — will appear after indexer confirmation',
     groupTasksLoadFailed: 'Failed to load group tasks',
+    groupTasksOwnerReportSent: 'Twin Bot sent the review report in your A2A chat',
+    groupTasksOwnerReportFailed: 'Twin Bot could not send the review report: {error}',
+    groupTasksOwnerReportDisplayFailed: 'The review report was sent on-chain but could not be shown in A2A: {error}',
+    groupTasksOwnerReportUnknownError: 'Unknown error',
 
     // Scheduled Tasks
     scheduledTasks: 'Scheduled Tasks',

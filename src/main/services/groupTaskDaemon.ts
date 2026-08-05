@@ -293,12 +293,23 @@ export type GroupTaskDaemonRunSkillTurnFn = (params: {
   activeSkillIds: string[];
 }) => Promise<{ replyText: string; assistantMessageId?: string | null }>;
 
-export interface GroupTaskDaemonTaskEvent {
-  type: 'groupTask:statusChanged';
-  taskId: number;
-  status: string;
-  at: number;
-}
+export type GroupTaskDaemonTaskEvent =
+  | {
+    type: 'groupTask:statusChanged';
+    taskId: number;
+    status: string;
+    at: number;
+  }
+  | {
+    type: 'groupTask:ownerReportDelivery';
+    taskId: number;
+    outcome: 'sent' | 'failed';
+    pinId?: string | null;
+    sessionId?: string | null;
+    displayError?: string | null;
+    error?: string | null;
+    at: number;
+  };
 
 /** On-chain existence check for deliverable verification (main.ts wires getPinData). */
 export type GroupTaskDaemonReadPinFn = (
@@ -306,11 +317,18 @@ export type GroupTaskDaemonReadPinFn = (
 ) => Promise<'found' | 'not_found' | 'unavailable'>;
 
 /** Private A2A report from the chair bot to the owner (encrypted simplemsg in main.ts). */
+export interface GroupTaskOwnerReportDeliveryResult {
+  pinId?: string | null;
+  sessionId?: string | null;
+  displayError?: string | null;
+}
+
 export type GroupTaskDaemonSendOwnerReportFn = (params: {
+  taskId: number;
   metabotId: number;
   ownerGlobalMetaId: string;
   text: string;
-}) => Promise<unknown>;
+}) => Promise<GroupTaskOwnerReportDeliveryResult>;
 
 /** Narrow memory read (owner scope, created status) for the A2A experience block. */
 export type GroupTaskDaemonListUserMemoriesFn = (
@@ -647,7 +665,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     botsById: Map<number, GroupTaskDaemonBotFull>,
     promptMembers: DaemonPromptMember[],
   ): Promise<void> => {
-    if (!deps.sendOwnerPrivateReport) return;
+    if (!deps.sendOwnerPrivateReport) {
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'failed',
+        error: 'owner report transport unavailable',
+        at: now(),
+      });
+      return;
+    }
     const sqlite = deps.getStore();
     const guardKey = `${OWNER_REPORTED_KV_PREFIX}${task.id}`;
     if (sqlite.get<string>(guardKey) === '1') return;
@@ -656,7 +683,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
     const ownerGlobalMetaId = (bot?.boss_global_metaid ?? '').trim();
     if (!chairMember || !bot || !ownerGlobalMetaId) {
-      emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report skipped (no chair bot or owner id)`);
+      const error = 'chair bot or owner GlobalMetaID unavailable';
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report skipped (${error})`);
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'failed',
+        error,
+        at: now(),
+      });
       return;
     }
 
@@ -671,12 +706,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
       }
-      await deps.sendOwnerPrivateReport({
+      const delivery = await deps.sendOwnerPrivateReport({
+        taskId: task.id,
         metabotId: bot.id,
         ownerGlobalMetaId,
         text: report,
       });
       sqlite.set(guardKey, '1');
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'sent',
+        pinId: delivery.pinId ?? null,
+        sessionId: delivery.sessionId ?? null,
+        displayError: delivery.displayError ?? null,
+        at: now(),
+      });
       // Record the private report in the chair's own group-task session (context
       // continuity), clearly marked as private — never posted to the group.
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
@@ -686,10 +731,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       });
       emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report sent privately to the owner`);
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: owner report failed (tick continues): ` +
-        `${error instanceof Error ? error.message : String(error)}`,
+        errorMessage,
       );
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'failed',
+        error: errorMessage,
+        at: now(),
+      });
     }
   };
 

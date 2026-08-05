@@ -854,6 +854,7 @@ interface IElectronAPI {
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
+    onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
   };
   idbots: {
     getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;

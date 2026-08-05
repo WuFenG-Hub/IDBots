@@ -3089,19 +3089,28 @@ const startSqliteDaemons = (): void => {
         return message.includes('404') ? 'not_found' : 'unavailable';
       }
     },
-    sendOwnerPrivateReport: async ({ metabotId, ownerGlobalMetaId, text }) => {
+    sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
       const metabotStore = getMetabotStore();
       const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
       if (!wallet?.mnemonic?.trim()) {
         throw new Error('chair wallet unavailable');
       }
       const identity = getUserIdentityStore().get();
-      const peerChatPubkey = (identity?.chat_public_key ?? '').trim();
+      if (!identity) {
+        throw new Error('owner identity unavailable');
+      }
+      const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
+      if (!peerGlobalMetaId) {
+        throw new Error('owner GlobalMetaID unavailable');
+      }
+      if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
+        throw new Error('task owner does not match the current user identity');
+      }
+      const peerChatPubkey = identity.chat_public_key.trim();
       if (!peerChatPubkey) {
         throw new Error('owner chat public key unavailable');
       }
-      const peerGlobalMetaId = (identity?.globalmetaid ?? '').trim() || ownerGlobalMetaId;
-      return sendEncryptedSimplemsg({
+      const sent = await sendEncryptedSimplemsg({
         metabotId,
         wallet,
         peerGlobalMetaId,
@@ -3109,6 +3118,45 @@ const startSqliteDaemons = (): void => {
         plaintext: text,
         createPin: async (id, payload) => createPin(metabotStore, id, payload),
       });
+
+      let sessionId: string | null = null;
+      let displayError: string | null = null;
+      try {
+        const recorded = recordOutgoingPrivateChatA2ADisplay({
+          coworkStore: getCoworkStore(),
+          getMetabotById: (id) => metabotStore.getMetabotById(id),
+          metabotId,
+          peerGlobalMetaId,
+          peerName: identity.name,
+          peerAvatar: identity.avatar,
+          content: text,
+          chain: { txids: sent.txids, pinId: sent.pinId },
+          extraMetadata: {
+            privateChatDeliveryStatus: 'sent',
+            suppressRunningStatus: true,
+            groupTaskOwnerReport: true,
+            groupTaskId: taskId,
+          },
+        });
+        if (recorded) {
+          sessionId = recorded.sessionId;
+          if (recorded.message) {
+            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+          }
+        }
+      } catch (error) {
+        displayError = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
+          error,
+        );
+      }
+
+      return {
+        pinId: sent.pinId,
+        sessionId,
+        displayError,
+      };
     },
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({

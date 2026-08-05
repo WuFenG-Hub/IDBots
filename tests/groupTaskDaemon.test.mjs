@@ -133,6 +133,7 @@ const createHarness = async (overrides = {}) => {
     chatReply: overrides.chatReply ?? null,
     skillReply: overrides.skillReply ?? null,
     ownerReportFails: overrides.ownerReportFails ?? false,
+    ownerReportResult: overrides.ownerReportResult ?? null,
     pinOutcomes: overrides.pinOutcomes ?? {},
   };
   const seenChatErrors = new Set();
@@ -175,7 +176,10 @@ const createHarness = async (overrides = {}) => {
       if (state.ownerReportFails) {
         throw new Error('owner chat public key unavailable');
       }
-      return { pinId: `owner-report-pin-${ownerReportCalls.length}` };
+      return state.ownerReportResult ?? {
+        pinId: `owner-report-pin-${ownerReportCalls.length}`,
+        sessionId: `owner-report-session-${ownerReportCalls.length}`,
+      };
     },
     readPinForVerification: async (pinId) => state.pinOutcomes[pinId] ?? 'unavailable',
     ...(overrides.listUserMemories ? { listUserMemories: overrides.listUserMemories } : {}),
@@ -597,7 +601,9 @@ test('status tags: chair-only, transitions, same-status silent, review->executin
     // worker tag ignored; chair tags drive planning->executing->review->executing
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
     assert.deepEqual(
-      h.events.map((e) => ({ type: e.type, taskId: e.taskId, status: e.status })),
+      h.events
+        .filter((e) => e.type === 'groupTask:statusChanged')
+        .map((e) => ({ type: e.type, taskId: e.taskId, status: e.status })),
       [
         { type: 'groupTask:statusChanged', taskId: task.id, status: 'executing' },
         { type: 'groupTask:statusChanged', taskId: task.id, status: 'review' },
@@ -1167,6 +1173,7 @@ test('owner report: review transition sends exactly one private report to the bo
 
     assert.equal(h.ownerReportCalls.length, 1, 'exactly one private report');
     assert.equal(h.ownerReportCalls[0].metabotId, 1, 'from the chair bot');
+    assert.equal(h.ownerReportCalls[0].taskId, task.id, 'delivery is tied to the task');
     assert.equal(h.ownerReportCalls[0].ownerGlobalMetaId, BOSS_GMID, 'to the owner');
     assert.match(h.ownerReportCalls[0].text, /Report: goal met, deliverables verified\./);
 
@@ -1176,6 +1183,19 @@ test('owner report: review transition sends exactly one private report to the bo
     assert.match(reportCall.userMessage, /metaapp:\/\//);
 
     assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1', 'guard set');
+    assert.deepEqual(
+      h.events.find((event) => event.type === 'groupTask:ownerReportDelivery'),
+      {
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'sent',
+        pinId: 'owner-report-pin-1',
+        sessionId: 'owner-report-session-1',
+        displayError: null,
+        at: h.state.nowMs,
+      },
+      'renderer receives the successful delivery and A2A session result',
+    );
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1, 'no duplicate on the next tick');
 
@@ -1212,6 +1232,44 @@ test('owner report: rework hatch clears the guard and the next review reports ag
   }
 });
 
+test('owner report: A2A display failure is reported without retrying the on-chain send', async () => {
+  const h = await createHarness({
+    ownerReportResult: {
+      pinId: 'owner-report-pin-display-failed',
+      sessionId: null,
+      displayError: 'cowork session unavailable',
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'rdf1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] done',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.ownerReportCalls.length, 1, 'the report was sent once');
+    assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1', 'send guard is set');
+    assert.deepEqual(
+      h.events.find((event) => event.type === 'groupTask:ownerReportDelivery'),
+      {
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'sent',
+        pinId: 'owner-report-pin-display-failed',
+        sessionId: null,
+        displayError: 'cowork session unavailable',
+        at: h.state.nowMs,
+      },
+    );
+
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'display failure does not resend the on-chain report');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('owner report: send failure is logged and does not block the tick', async () => {
   const h = await createHarness({ ownerReportFails: true });
   try {
@@ -1228,6 +1286,17 @@ test('owner report: send failure is logged and does not block the tick', async (
 
     assert.equal(h.ownerReportCalls.length, 1, 'send was attempted');
     assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), undefined, 'guard not set on failure');
+    assert.deepEqual(
+      h.events.find((event) => event.type === 'groupTask:ownerReportDelivery'),
+      {
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'failed',
+        error: 'owner chat public key unavailable',
+        at: h.state.nowMs,
+      },
+      'renderer receives the real delivery failure reason',
+    );
     const afterId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['rf2-i0'])[0].values[0][0];
     assert.equal(
       h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, afterId,

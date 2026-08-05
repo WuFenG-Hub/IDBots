@@ -77,6 +77,17 @@ export interface GroupTaskStatusEvent {
   at: number;
 }
 
+export interface GroupTaskOwnerReportDeliveryEvent {
+  type: 'groupTask:ownerReportDelivery';
+  taskId: number;
+  outcome: 'sent' | 'failed';
+  pinId?: string | null;
+  sessionId?: string | null;
+  displayError?: string | null;
+  error?: string | null;
+  at: number;
+}
+
 export interface GroupTaskCreateInput {
   title: string;
   goal: string;
