@@ -523,13 +523,15 @@ test('writeMetaIdPin rejects modify and revoke slash paths before authorization 
   assert.equal(createPinCalls, 0);
 });
 
-test('session permissions authorize only exact protocol creates and revoke restores confirmation', async () => {
+test('session permissions authorize only exact whitelisted protocol creates and revoke restores confirmation', async () => {
   const writes = [];
+  const auditEvents = [];
   let confirmationSequence = 0;
   const service = createBotBrowserBridgeService({
     metabotStore: createStore(),
     createConfirmationId: () => `permission-${++confirmationSequence}`,
     createConfirmationToken: () => `permission-token-${confirmationSequence}`,
+    audit: (event) => auditEvents.push(event),
     createPin: async (_store, _metabotId, payload) => {
       writes.push(payload);
       return { pinId: `pin-${writes.length}`, txids: [`tx-${writes.length}`], totalCost: 1 };
@@ -539,8 +541,8 @@ test('session permissions authorize only exact protocol creates and revoke resto
   const resourceUri = 'metaapp://app123i0';
   const sessionId = 'browser-session-1';
   const permissionPayload = {
-    grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplebuzz' }],
-    reason: 'Publish a community update',
+    grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat' }],
+    reason: 'Write chess moves automatically during the game.',
   };
 
   const phaseOne = await service.requestPermissions({
@@ -552,6 +554,7 @@ test('session permissions authorize only exact protocol creates and revoke resto
   assert.equal(phaseOne.state, 'manual_action_required');
   assert.deepEqual(phaseOne.data.confirmation.grants, permissionPayload.grants);
   assert.equal(phaseOne.data.confirmRequest.kind, 'permissions-request');
+  assert.equal(phaseOne.data.confirmation.reason, permissionPayload.reason);
 
   const granted = await service.requestPermissions({
     actorId,
@@ -561,15 +564,33 @@ test('session permissions authorize only exact protocol creates and revoke resto
   });
   assert.equal(granted.ok, true);
   assert.deepEqual(granted.data.granted, permissionPayload.grants);
+  assert.deepEqual(
+    auditEvents.map((event) => event.type),
+    ['permission-granted'],
+  );
+  assert.equal(auditEvents[0].resourceUri, resourceUri);
+  assert.equal(auditEvents[0].sessionId, sessionId);
+  assert.deepEqual(auditEvents[0].grants, permissionPayload.grants);
+  assert.equal(auditEvents[0].reason, permissionPayload.reason);
 
   const authorizedWrite = await service.writeMetaIdPin({
     actorId,
     resourceUri,
     sessionId,
-    payload: createPinWritePayload({ payload: { encoding: 'utf8', value: 'authorized' } }),
+    payload: createPinWritePayload({
+      path: '/protocols/simplegroupchat',
+      payload: { encoding: 'utf8', value: 'authorized' },
+    }),
   });
   assert.equal(authorizedWrite.ok, true);
   assert.equal(writes.length, 1);
+  assert.deepEqual(
+    auditEvents.map((event) => event.type),
+    ['permission-granted', 'granted-write'],
+  );
+  assert.equal(auditEvents[1].path, '/protocols/simplegroupchat');
+  assert.equal(auditEvents[1].pinId, 'pin-1');
+  assert.equal(auditEvents[1].txid, 'tx-1');
 
   const differentPath = await service.writeMetaIdPin({
     actorId,
@@ -591,7 +612,7 @@ test('session permissions authorize only exact protocol creates and revoke resto
     actorId,
     resourceUri,
     sessionId: 'browser-session-2',
-    payload: createPinWritePayload(),
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
   });
   assert.equal(otherSession.state, 'manual_action_required');
 
@@ -601,13 +622,17 @@ test('session permissions authorize only exact protocol creates and revoke resto
     sessionId,
     payload: { revoke: true },
   });
-  assert.deepEqual(revoked, { ok: true, state: 'success', data: { granted: [] } });
+  assert.deepEqual(revoked, { ok: true, state: 'success', data: { revoked: true } });
+  assert.deepEqual(
+    auditEvents.map((event) => event.type),
+    ['permission-granted', 'granted-write', 'permission-revoked'],
+  );
 
   const afterRevoke = await service.writeMetaIdPin({
     actorId,
     resourceUri,
     sessionId,
-    payload: createPinWritePayload(),
+    payload: createPinWritePayload({ path: '/protocols/simplegroupchat' }),
   });
   assert.equal(afterRevoke.state, 'manual_action_required');
   assert.equal(writes.length, 1);
@@ -625,7 +650,7 @@ test('permission confirmations are bound to actor, resource, session, and exact 
     resourceUri: 'metaapp://app123i0',
     sessionId: 'browser-session-1',
     payload: {
-      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplebuzz' }],
+      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupjoin' }],
     },
   };
   const phaseOne = await service.requestPermissions(base);
@@ -643,7 +668,7 @@ test('permission confirmations are bound to actor, resource, session, and exact 
 
   const newPhaseOne = await service.requestPermissions(base);
   const changedGrant = structuredClone(newPhaseOne.data.confirmRequest.payload);
-  changedGrant.grants[0].path = '/protocols/changed';
+  changedGrant.grants[0].path = '/protocols/simplegroupcreate';
   const changed = await service.requestPermissions({
     ...base,
     payload: changedGrant,
@@ -677,7 +702,7 @@ test('completeLlm validates session context and delegates only normalized messag
   assert.deepEqual(result, {
     ok: true,
     state: 'success',
-    data: { text: '  completed answer  ', model: 'model-primary', finishReason: 'stop' },
+    data: { text: 'completed answer', model: 'model-primary', finishReason: 'stop' },
   });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].metabot.llm_id, 'model-primary');
@@ -822,4 +847,259 @@ test('uploadMetaFile reports user cancellation and upload failures with stable b
   assert.equal(failed.code, 'upload_failed');
   assert.equal(failed.message.includes('/tmp/fail.png'), false);
   assert.equal(failed.message.includes('stack'), false);
+});
+
+test('completeLlm enforces a per-resource rate limit and a single in-flight completion', async () => {
+  let completed = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    now: () => 5_000_000,
+    llmTimeoutMs: 1_000,
+    completeLlm: async () => {
+      completed += 1;
+      return { text: 'ok' };
+    },
+  });
+  const base = {
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
+    payload: { messages: [{ role: 'user', content: 'move' }] },
+  };
+
+  for (let index = 0; index < 6; index += 1) {
+    const result = await service.completeLlm(base);
+    assert.equal(result.ok, true);
+  }
+  assert.equal(completed, 6);
+
+  const rateLimited = await service.completeLlm(base);
+  assert.equal(rateLimited.ok, false);
+  assert.equal(rateLimited.code, 'rate_limited');
+
+  const otherResource = await service.completeLlm({
+    ...base,
+    resourceUri: 'metaapp://other456i0',
+  });
+  assert.equal(otherResource.ok, true);
+
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let inFlightStarted = false;
+  const inFlightService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    now: () => 5_000_000,
+    llmTimeoutMs: 60_000,
+    completeLlm: async () => {
+      inFlightStarted = true;
+      return blocked;
+    },
+  });
+  const inFlightPromise = inFlightService.completeLlm(base);
+  await inFlightStarted;
+  const second = await inFlightService.completeLlm(base);
+  assert.equal(second.ok, false);
+  assert.equal(second.code, 'rate_limited');
+  release({ text: 'done' });
+  assert.equal((await inFlightPromise).ok, true);
+});
+
+test('completeLlm maps timeouts to llm_timeout, failures to llm_unavailable, and sanitizes results', async () => {
+  const hangingService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    now: () => 5_000_000,
+    llmTimeoutMs: 50,
+    completeLlm: async () => new Promise(() => {}),
+  });
+  const base = {
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
+    payload: { messages: [{ role: 'user', content: 'move' }] },
+  };
+  const timedOut = await hangingService.completeLlm(base);
+  assert.equal(timedOut.ok, false);
+  assert.equal(timedOut.code, 'llm_timeout');
+
+  const abortService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    completeLlm: async () => {
+      const error = new Error('aborted by host timeout');
+      error.name = 'AbortError';
+      throw error;
+    },
+  });
+  const aborted = await abortService.completeLlm(base);
+  assert.equal(aborted.ok, false);
+  assert.equal(aborted.code, 'llm_timeout');
+
+  const failingService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    completeLlm: async () => {
+      throw new Error('upstream provider exploded /etc/secrets');
+    },
+  });
+  const failed = await failingService.completeLlm(base);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, 'llm_unavailable');
+
+  const emptyService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    completeLlm: async () => ({ text: '   ' }),
+  });
+  const empty = await emptyService.completeLlm(base);
+  assert.equal(empty.ok, false);
+  assert.equal(empty.code, 'llm_unavailable');
+
+  const dirtyService = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    completeLlm: async () => ({
+      text: '  chess move  ',
+      model: 'api/v1/models/internal-route\nhost-secret',
+      finishReason: 'bogus',
+    }),
+  });
+  const sanitized = await dirtyService.completeLlm(base);
+  assert.equal(sanitized.ok, true);
+  assert.deepEqual(sanitized.data, {
+    text: 'chess move',
+    model: 'api/v1/models/internal-route host-secret',
+  });
+});
+
+test('permissions-request rejects off-whitelist and sensitive protocol paths with consent_denied', async () => {
+  let confirmationsIssued = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    createConfirmationId: () => `permission-${++confirmationsIssued}`,
+    createConfirmationToken: () => `permission-token-${confirmationsIssued}`,
+  });
+  const base = {
+    actorId: 'idbots-metabot-7',
+    resourceUri: 'metaapp://app123i0',
+    sessionId: 'browser-session-1',
+  };
+
+  for (const path of [
+    '/protocols/metaapp',
+    '/protocols/simplemsg',
+    '/protocols/simplebuzz',
+    '/protocols/pay',
+  ]) {
+    const result = await service.requestPermissions({
+      ...base,
+      payload: {
+        grants: [{ method: 'metaid.pin.write', operation: 'create', path }],
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'consent_denied');
+    assert.equal(result.message.includes(path), true);
+  }
+  assert.equal(confirmationsIssued, 0);
+
+  const nonExact = await service.requestPermissions({
+    ...base,
+    payload: {
+      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat/extra' }],
+    },
+  });
+  assert.equal(nonExact.ok, false);
+  assert.equal(nonExact.code, 'invalid_params');
+  assert.equal(confirmationsIssued, 0);
+
+  const whitelisted = await service.requestPermissions({
+    ...base,
+    payload: {
+      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupcreate' }],
+    },
+  });
+  assert.equal(whitelisted.state, 'manual_action_required');
+});
+
+test('granted writes enforce the 16KB payload cap and the per-resource write rate limit', async () => {
+  let createPinCalls = 0;
+  let confirmationSequence = 0;
+  const service = createBotBrowserBridgeService({
+    metabotStore: createStore(),
+    now: () => 5_000_000,
+    createConfirmationId: () => `permission-${++confirmationSequence}`,
+    createConfirmationToken: () => `permission-token-${confirmationSequence}`,
+    createPin: async () => {
+      createPinCalls += 1;
+      return { pinId: `pin-${createPinCalls}`, txids: [`tx-${createPinCalls}`], totalCost: 1 };
+    },
+  });
+  const actorId = 'idbots-metabot-7';
+  const resourceUri = 'metaapp://app123i0';
+  const sessionId = 'browser-session-1';
+
+  const phaseOne = await service.requestPermissions({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: {
+      grants: [{ method: 'metaid.pin.write', operation: 'create', path: '/protocols/simplegroupchat' }],
+    },
+  });
+  const granted = await service.requestPermissions({
+    actorId,
+    resourceUri,
+    sessionId,
+    ...phaseOne.data.confirmRequest,
+  });
+  assert.equal(granted.ok, true);
+
+  const oversized = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload({
+      path: '/protocols/simplegroupchat',
+      payload: { encoding: 'utf8', value: `${'x'.repeat(16 * 1024 + 1)}` },
+    }),
+  });
+  assert.equal(oversized.ok, false);
+  assert.equal(oversized.code, 'invalid_params');
+  assert.equal(createPinCalls, 0);
+
+  for (let index = 0; index < 12; index += 1) {
+    const result = await service.writeMetaIdPin({
+      actorId,
+      resourceUri,
+      sessionId,
+      payload: createPinWritePayload({
+        path: '/protocols/simplegroupchat',
+        payload: { encoding: 'utf8', value: `move-${index}` },
+      }),
+    });
+    assert.equal(result.ok, true);
+  }
+  assert.equal(createPinCalls, 12);
+
+  const rateLimited = await service.writeMetaIdPin({
+    actorId,
+    resourceUri,
+    sessionId,
+    payload: createPinWritePayload({
+      path: '/protocols/simplegroupchat',
+      payload: { encoding: 'utf8', value: 'move-12' },
+    }),
+  });
+  assert.equal(rateLimited.ok, false);
+  assert.equal(rateLimited.code, 'rate_limited');
+  assert.equal(createPinCalls, 12);
+
+  const otherResource = await service.writeMetaIdPin({
+    actorId,
+    resourceUri: 'metaapp://other456i0',
+    sessionId,
+    payload: createPinWritePayload({
+      path: '/protocols/simplegroupchat',
+      payload: { encoding: 'utf8', value: 'move-other' },
+    }),
+  });
+  assert.equal(otherResource.state, 'manual_action_required');
 });

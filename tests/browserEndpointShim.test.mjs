@@ -93,6 +93,7 @@ test('endpoint shim returns raw command result shapes for runtime, settings, res
         resourceUri: 'metaid://idq1peer',
         kind: 'open-conversation',
         payload: { peerGlobalMetaId: 'idq1peer' },
+        sessionId: undefined,
       },
     ],
   ]);

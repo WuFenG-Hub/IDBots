@@ -22,6 +22,19 @@ const MAX_LLM_INPUT_BYTES = 64 * 1024;
 const MAX_LLM_MESSAGES = 128;
 const MAX_PERMISSION_GRANTS = 32;
 const PROTOCOL_GRANT_PATH_PATTERN = /^\/protocols\/[A-Za-z0-9_-]+$/u;
+// Host-owned policy defaults (MetaApp Host Bridge v1.1). Hosts may tune them.
+const LLM_COMPLETE_DEFAULT_TIMEOUT_MS = 120_000;
+const LLM_COMPLETE_MAX_TIMEOUT_MS = 180_000;
+const LLM_COMPLETE_RATE_LIMIT_PER_MINUTE = 6;
+const GRANTED_WRITE_RATE_LIMIT_PER_MINUTE = 12;
+const GRANTED_WRITE_MAX_PAYLOAD_BYTES = 16 * 1024;
+// Only these exact protocol paths may appear in a session grant. Sensitive
+// protocols (metaapp, simplemsg, payment-related, ...) never qualify.
+const PROTOCOL_GRANT_WHITELIST = new Set([
+  '/protocols/simplegroupcreate',
+  '/protocols/simplegroupjoin',
+  '/protocols/simplegroupchat',
+]);
 
 export type BotBrowserBridgeErrorCode =
   | 'invalid_request'
@@ -30,9 +43,12 @@ export type BotBrowserBridgeErrorCode =
   | 'actor_required'
   | 'manual_action_required'
   | 'user_cancelled'
+  | 'consent_denied'
   | 'upload_failed'
   | 'pin_write_failed'
   | 'llm_unavailable'
+  | 'llm_timeout'
+  | 'rate_limited'
   | 'permissions_failed';
 
 export interface MetaAppBridgeActor {
@@ -164,6 +180,27 @@ export interface BotBrowserBridgeServiceDeps {
   confirmationTtlMs?: number;
   createConfirmationId?: () => string;
   createConfirmationToken?: () => string;
+  llmTimeoutMs?: number;
+  audit?: (event: BotBrowserBridgeAuditEvent) => void;
+}
+
+/**
+ * Structured host-local audit entries for session grant and granted-write
+ * events. Emitted through the host audit log (defaults to console.info so the
+ * electron-log file transport captures them) for later review.
+ */
+export interface BotBrowserBridgeAuditEvent {
+  type: 'permission-granted' | 'permission-revoked' | 'granted-write';
+  at: number;
+  actorId: number;
+  actorGlobalMetaId: string;
+  resourceUri: string;
+  sessionId: string;
+  grants?: BrowserPermissionGrant[];
+  reason?: string;
+  path?: string;
+  pinId?: string;
+  txid?: string;
 }
 
 export interface BotBrowserBridgeService {
@@ -651,6 +688,44 @@ function tokenMatches(token: string, expectedHash: Buffer): boolean {
   return actualHash.length === expectedHash.length && timingSafeEqual(actualHash, expectedHash);
 }
 
+function slidingWindowCount(
+  timestamps: Map<string, number[]>,
+  key: string,
+  nowValue: number,
+  windowMs: number,
+): number {
+  const active = (timestamps.get(key) ?? []).filter((stamp) => nowValue - stamp < windowMs);
+  if (active.length) {
+    timestamps.set(key, active);
+  } else {
+    timestamps.delete(key);
+  }
+  return active.length;
+}
+
+function recordTimestamp(timestamps: Map<string, number[]>, key: string, nowValue: number): void {
+  const active = timestamps.get(key) ?? [];
+  active.push(nowValue);
+  timestamps.set(key, active);
+}
+
+function isLlmTimeoutError(error: unknown): boolean {
+  if (!error) return false;
+  const name = text((error as { name?: unknown }).name);
+  return name === 'AbortError' || name === 'BrowserLlmTimeout';
+}
+
+function sanitizeLlmModelName(value: unknown): string {
+  const model = text(value);
+  if (!model) return '';
+  return model.replace(/[\r\n]/gu, ' ').slice(0, 64);
+}
+
+function sanitizeLlmFinishReason(value: unknown): 'stop' | 'length' | 'error' | undefined {
+  const reason = text(value);
+  return reason === 'stop' || reason === 'length' || reason === 'error' ? reason : undefined;
+}
+
 function validateUploadPayload(payload: unknown): {
   multiple: boolean;
   accept: string[];
@@ -716,15 +791,28 @@ export function createBotBrowserBridgeService(
   const pendingPinWrites = new Map<string, PendingPinWriteAuthorization>();
   const pendingPermissions = new Map<string, PendingPermissionAuthorization>();
   const activePermissions = new Map<string, ActivePermissionContext>();
+  // Per-resource sliding windows for host-owned v1.1 quotas.
+  const llmTimestamps = new Map<string, number[]>();
+  const llmInFlight = new Set<string>();
+  const grantedWriteTimestamps = new Map<string, number[]>();
   const now = deps.now ?? Date.now;
   const confirmationTtlMs = typeof deps.confirmationTtlMs === 'number'
     && Number.isFinite(deps.confirmationTtlMs)
     && deps.confirmationTtlMs >= 0
     ? deps.confirmationTtlMs
     : PIN_WRITE_CONFIRMATION_TTL_MS;
+  const llmTimeoutMs = typeof deps.llmTimeoutMs === 'number'
+    && Number.isFinite(deps.llmTimeoutMs)
+    && deps.llmTimeoutMs > 0
+    ? Math.min(deps.llmTimeoutMs, LLM_COMPLETE_MAX_TIMEOUT_MS)
+    : LLM_COMPLETE_DEFAULT_TIMEOUT_MS;
   const createConfirmationId = deps.createConfirmationId ?? randomUUID;
   const createConfirmationToken = deps.createConfirmationToken
     ?? (() => randomBytes(32).toString('base64url'));
+  const recordAudit = deps.audit
+    ?? ((event: BotBrowserBridgeAuditEvent) => {
+      console.info('[browser-bridge-audit]', JSON.stringify(event));
+    });
 
   const removeExpiredPinWrites = (currentTime: number) => {
     for (const [confirmationId, authorization] of pendingPinWrites) {
@@ -950,6 +1038,20 @@ export function createBotBrowserBridgeService(
         pendingPinWrites.delete(confirmationAttempt.id);
       }
 
+      // Granted writes skip the two-phase confirmation, so the host enforces
+      // its own quota (≤12 per minute per resource) and payload cap (≤16KB)
+      // before the request reaches the signer.
+      if (autoWriteAuthorized) {
+        const grantedResourceKey = resourceUri || 'default-granted-write';
+        if (validation.payloadSize > GRANTED_WRITE_MAX_PAYLOAD_BYTES) {
+          return failure('invalid_params', 'Granted write payload exceeds the 16KB limit.');
+        }
+        if (slidingWindowCount(grantedWriteTimestamps, grantedResourceKey, now(), 60_000) >= GRANTED_WRITE_RATE_LIMIT_PER_MINUTE) {
+          return failure('rate_limited', 'Too many granted writes in the last minute.');
+        }
+        recordTimestamp(grantedWriteTimestamps, grantedResourceKey, now());
+      }
+
       try {
         const result = await deps.createPin(
           deps.metabotStore,
@@ -961,6 +1063,19 @@ export function createBotBrowserBridgeService(
         const txid = text(result.txids?.[0]);
         if (!pinId || !txid) {
           return failure('pin_write_failed', 'MetaID PIN write failed.');
+        }
+        if (autoWriteAuthorized) {
+          recordAudit({
+            type: 'granted-write',
+            at: now(),
+            actorId: actorResult.metabot.id,
+            actorGlobalMetaId: actorResult.actor.globalMetaId,
+            resourceUri,
+            sessionId,
+            path: validation.path,
+            pinId,
+            txid,
+          });
         }
         return browserSuccess({
           pinId,
@@ -990,20 +1105,56 @@ export function createBotBrowserBridgeService(
         return failure('unsupported_method', 'Local LLM completion is not supported in this IDBots build.');
       }
 
+      // Host-owned quota: one in-flight completion per resource and ≤6 per
+      // minute per resource. Exceeded limits return rate_limited.
+      const resourceKey = resourceUri;
+      if (slidingWindowCount(llmTimestamps, resourceKey, now(), 60_000) >= LLM_COMPLETE_RATE_LIMIT_PER_MINUTE) {
+        return failure('rate_limited', 'Local LLM rate limit reached; try again in a minute.');
+      }
+      if (llmInFlight.has(resourceKey)) {
+        return failure('rate_limited', 'Another local LLM completion is already running for this MetaApp.');
+      }
+
+      llmInFlight.add(resourceKey);
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       try {
-        const result = await deps.completeLlm({
-          metabot: actorResult.metabot,
-          actor: actorResult.actor,
-          resourceUri,
-          sessionId,
-          payload: validation,
-        });
-        if (!text(result.text)) {
+        const result = await Promise.race([
+          deps.completeLlm({
+            metabot: actorResult.metabot,
+            actor: actorResult.actor,
+            resourceUri,
+            sessionId,
+            payload: validation,
+          }),
+          new Promise<never>((_resolve, reject) => {
+            timeoutHandle = setTimeout(() => {
+              const error = new Error('Local LLM completion timed out.');
+              error.name = 'BrowserLlmTimeout';
+              reject(error);
+            }, llmTimeoutMs);
+          }),
+        ]);
+        clearTimeout(timeoutHandle);
+        const completionText = text(result.text);
+        if (!completionText) {
           return failure('llm_unavailable', 'Local LLM returned an empty completion.');
         }
-        return browserSuccess(result);
-      } catch {
+        recordTimestamp(llmTimestamps, resourceKey, now());
+        // Sanitized response: display-grade model name and finish reason only.
+        const data: BrowserLlmCompleteResult = { text: completionText };
+        const model = sanitizeLlmModelName(result.model);
+        if (model) data.model = model;
+        const finishReason = sanitizeLlmFinishReason(result.finishReason);
+        if (finishReason) data.finishReason = finishReason;
+        return browserSuccess(data);
+      } catch (error) {
+        clearTimeout(timeoutHandle);
+        if (isLlmTimeoutError(error)) {
+          return failure('llm_timeout', 'Local LLM completion timed out.');
+        }
         return failure('llm_unavailable', 'Local LLM completion failed.');
+      } finally {
+        llmInFlight.delete(resourceKey);
       }
     },
 
@@ -1019,12 +1170,35 @@ export function createBotBrowserBridgeService(
 
       const rawPayload = objectRecord(input.payload);
       if (rawPayload?.revoke === true) {
-        activePermissions.delete(permissionContextKey(actorResult, resourceUri, sessionId));
-        return browserSuccess({ granted: [] });
+        const contextKey = permissionContextKey(actorResult, resourceUri, sessionId);
+        const existing = activePermissions.get(contextKey);
+        if (existing) {
+          activePermissions.delete(contextKey);
+          recordAudit({
+            type: 'permission-revoked',
+            at: now(),
+            actorId: actorResult.metabot.id,
+            actorGlobalMetaId: actorResult.actor.globalMetaId,
+            resourceUri,
+            sessionId,
+            grants: existing.grants,
+          });
+        }
+        return browserSuccess({ revoked: true } as unknown as BrowserPermissionsResult);
       }
 
       const validation = validatePermissionsRequest(input.payload);
       if (isCommandFailure(validation)) return validation;
+
+      const offWhitelist = validation.grants.find(
+        (grant) => !PROTOCOL_GRANT_WHITELIST.has(grant.path),
+      );
+      if (offWhitelist) {
+        return failure(
+          'consent_denied',
+          `The requested protocol path is not on the host whitelist: ${offWhitelist.path}`,
+        );
+      }
 
       const contextKey = permissionContextKey(actorResult, resourceUri, sessionId);
       const existing = activePermissions.get(contextKey);
@@ -1083,6 +1257,16 @@ export function createBotBrowserBridgeService(
         resourceUri,
         sessionId,
         grants,
+      });
+      recordAudit({
+        type: 'permission-granted',
+        at: now(),
+        actorId: actorResult.metabot.id,
+        actorGlobalMetaId: actorResult.actor.globalMetaId,
+        resourceUri,
+        sessionId,
+        grants,
+        ...(validation.reason ? { reason: validation.reason } : {}),
       });
       return browserSuccess({ granted: grants });
     },
