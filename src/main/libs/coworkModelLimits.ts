@@ -1,7 +1,12 @@
 export const DEFAULT_COWORK_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 8_192;
+// The whole DeepSeek V4 family shares the same 1M context window. The flash
+// variant powers cowork/A2A automation sessions (via resolveAutomationModelOverride),
+// so it must carry the same window as v4-pro or the context ring wrongly falls back
+// to DEFAULT_COWORK_CONTEXT_WINDOW (128K) for every automation-driven conversation.
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
+export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'fallback';
 
@@ -36,23 +41,41 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
   },
+  'deepseek-v4-flash': {
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+  },
   // 与 src/renderer/config.ts 预设模型保持一致的大上下文模型（2026-07 向 LobsterAI 对齐）
   'gpt-5.6-sol': { contextWindow: 1_050_000 },
   'gpt-5.6-terra': { contextWindow: 1_050_000 },
   'gpt-5.6-luna': { contextWindow: 1_050_000 },
+  // Older GPT-5.x presets still offered by the renderer; inherit the same family window.
+  'gpt-5.5': { contextWindow: 1_050_000 },
+  'gpt-5.4': { contextWindow: 1_050_000 },
   'claude-opus-4-7': { contextWindow: 1_048_576 },
   'claude-opus-4-6': { contextWindow: 1_048_576 },
   'claude-sonnet-4-6': { contextWindow: 1_048_576 },
+  // OpenRouter aliases route to the same upstream models.
+  'anthropic/claude-sonnet-4.6': { contextWindow: 1_048_576 },
+  'anthropic/claude-opus-4.7': { contextWindow: 1_048_576 },
+  'openai/gpt-5.5': { contextWindow: 1_050_000 },
+  'google/gemini-3.1-pro-preview': { contextWindow: 2_000_000 },
+  // Gemini 3.x family — 2M context per Google's Gemini 3 spec.
+  'gemini-3.1-pro-preview': { contextWindow: 2_000_000 },
+  'gemini-3-flash-preview': { contextWindow: 2_000_000 },
+  'gemini-3.1-flash-lite': { contextWindow: 2_000_000 },
   'kimi-k2.6': { contextWindow: 262_144 },
   'kimi-k2.5': { contextWindow: 262_144 },
   'glm-5.1': { contextWindow: 202_800 },
   'glm-5': { contextWindow: 202_800 },
   'glm-4.7': { contextWindow: 204_800 },
+  'glm-4.7-flash': { contextWindow: 204_800 },
   'MiniMax-M3': { contextWindow: 1_000_000 },
   'MiniMax-M2.7': { contextWindow: 204_800 },
   'MiniMax-M2.5': { contextWindow: 204_800 },
   'qwen3.6-plus': { contextWindow: 1_000_000 },
   'qwen3.5-plus': { contextWindow: 1_000_000 },
+  // Qwen3 coder / ollama-local preset; Qwen3 family supports up to 1M.
+  'qwen3-coder-next': { contextWindow: 1_000_000 },
   'mimo-v2.5-pro': { contextWindow: 1_000_000 },
   'mimo-v2.5': { contextWindow: 1_000_000 },
 };

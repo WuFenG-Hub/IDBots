@@ -212,11 +212,11 @@ const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
         { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', supportsImage: true, contextWindow: 1_050_000 },
         { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', supportsImage: true, contextWindow: 1_050_000 },
         { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', supportsImage: true, contextWindow: 1_050_000 },
-        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true },
-        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true },
+        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true, contextWindow: 1_050_000 },
       ],
       gemini: [
-        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true },
+        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true, contextWindow: 2_000_000 },
       ],
       anthropic: [
         { id: 'claude-opus-4-7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_048_576 },
@@ -239,10 +239,10 @@ const PROVIDER_MODEL_MIGRATIONS: Record<number, ProviderModelMigration> = {
         { id: 'mimo-v2.5', name: 'MiMo V2.5', supportsImage: true, contextWindow: 1_000_000 },
       ],
       openrouter: [
-        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true },
-        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true },
-        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true },
-        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true },
+        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true, contextWindow: 2_000_000 },
       ],
     },
     defaultModelRemap: {

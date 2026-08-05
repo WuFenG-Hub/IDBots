@@ -157,9 +157,18 @@ type ModelLike = {
 export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-pro';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
+// Same family, same 1M context window. The flash variant drives cowork/A2A
+// automation sessions, so it must carry a real context window or the context
+// usage ring falls back to the 128K default.
+export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
-  { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false },
+  {
+    id: 'deepseek-v4-flash',
+    name: 'DeepSeek V4 Flash',
+    supportsImage: false,
+    contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+  },
   {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
@@ -374,8 +383,8 @@ export const defaultConfig: AppConfig = {
         { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', supportsImage: true, contextWindow: 1_050_000 },
         { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', supportsImage: true, contextWindow: 1_050_000 },
         { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', supportsImage: true, contextWindow: 1_050_000 },
-        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true },
-        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true }
+        { id: 'gpt-5.5', name: 'GPT-5.5', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'gpt-5.4', name: 'GPT-5.4', supportsImage: true, contextWindow: 1_050_000 }
       ]
     },
     gemini: {
@@ -384,9 +393,9 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
       apiFormat: 'openai',
       models: [
-        { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true },
-        { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', supportsImage: true },
-        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true }
+        { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true, contextWindow: 2_000_000 },
+        { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash', supportsImage: true, contextWindow: 2_000_000 },
+        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', supportsImage: true, contextWindow: 2_000_000 }
       ]
     },
     anthropic: {
@@ -465,10 +474,10 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'https://openrouter.ai/api',
       apiFormat: 'anthropic',
       models: [
-        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true },
-        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true },
-        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true },
-        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true }
+        { id: 'anthropic/claude-sonnet-4.6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'anthropic/claude-opus-4.7', name: 'Claude Opus 4.7', supportsImage: true, contextWindow: 1_048_576 },
+        { id: 'openai/gpt-5.5', name: 'GPT 5.5', supportsImage: true, contextWindow: 1_050_000 },
+        { id: 'google/gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro', supportsImage: true, contextWindow: 2_000_000 }
       ]
     },
     ollama: {
@@ -477,8 +486,8 @@ export const defaultConfig: AppConfig = {
       baseUrl: 'http://localhost:11434',
       apiFormat: 'anthropic',
       models: [
-        { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false },
-        { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false }
+        { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false, contextWindow: 1_000_000 },
+        { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false, contextWindow: 204_800 }
       ]
     }
   },
