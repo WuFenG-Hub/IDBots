@@ -1,103 +1,147 @@
 ---
 name: metabot-upload-file
-description: 文件上链技能。用于把本地文件上传到 MetaID 链上并返回 PINID 与预览地址。当用户说“把这个文件上链”“上传附件到链上”“大文件分片上传”“把本地图片/视频/PDF 发到链上”等涉及文件上链的意图时，优先调用此技能。
+description: Use when a local file needs to be uploaded to MetaWeb and a metafile URI, preview URL, or download URL is wanted. This is the single file upload skill for both small and large local files; direct or large/chunked behavior is chosen automatically from file size instead of asking the user to pick another skill. Trigger words include upload to chain, upload attachment, chain a file, large file upload, chunked upload, or share a local image/video/PDF on-chain.
 official: true
 ---
 
-# MetaBot Upload Large File (统一文件上链)
+# MetaBot Upload File (Unified File Upload)
 
-这个技能统一处理小文件和大文件上链。
+Upload one local file to MetaWeb through the IDBots local RPC server. This is the single file upload skill for both small and large files. Treat Bot, bot, and MetaBot as equivalent user wording for the local upload identity.
 
-- `< 5 MiB`：直接上链
-- `>= 5 MiB` 且 `< 50 MiB`：自动走分片上链
-- 硬限制：`< 50 MiB`
-- 成功后必须返回 `pinId` 和预览地址
+## Actor Context
 
-预览地址格式固定为：
+IDBots runs this skill inside a MetaBot session: the runtime injects `IDBOTS_METABOT_ID` (positive integer) and `SKILLS_ROOT`. Always use the injected `IDBOTS_METABOT_ID`; never fabricate an ID. If the environment variable is missing, stop and explain that the skill must run inside an IDBots MetaBot session.
+
+## Trigger Guidance
+
+Should trigger when:
+
+- The user asks the local Bot to upload a local file and get a `metafile://...` URI.
+- A downstream workflow needs a file URI, preview URL, or download URL for a local file.
+- A downstream skill needs a file URI first, such as buzz attachments, service icons/documents, MetaApp assets, or wiki ZIP bundles.
+
+Should not trigger when:
+
+- The user asks to post buzz directly, unless upload-only preparation is explicitly requested.
+- The user asks to publish or call a paid service without needing a local file uploaded first.
+- The file is remote-only and no local path is available.
+- The user asks to manage network sources or switch identities.
+
+## Privacy Rule
+
+Never read large local files into model context. Do not paste, summarize, base64 encode, or inspect the file body in chat. Only pass the absolute local path to the script; the runtime reads and streams the bytes outside model context.
+
+## Default Command
+
+Use the path-first command for all local file uploads. The runtime chooses direct upload for files at or below the 5 MiB direct threshold and large/chunked upload for supported files above that threshold. MVC sponsor, when enabled for the selected MetaBot, applies within the same direct window.
+
+```bash
+node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
+  --file /absolute/path/to/archive.zip \
+  --content-type application/zip \
+  --verify
+```
+
+Required flag:
+
+- `--file`: absolute local path to the file.
+
+Optional flags:
+
+- `--content-type`: MIME type when known; omit it when the runtime should infer the type from the file name.
+- `--network`: `mvc`, `btc`, or `opcat`. When omitted, the runtime uses the MetaBot's configured `chain.defaultWriteNetwork` (initially `mvc`). Only pass `--network` when the human explicitly requests that chain.
+- `--verify`: request post-upload availability verification when supported by the runtime.
+
+```bash
+node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
+  --file /absolute/path/to/photo.png --content-type image/png --network mvc --verify
+node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
+  --file /absolute/path/to/photo.png --content-type image/png --network btc
+node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
+  --file /absolute/path/to/photo.png --content-type image/png --network opcat
+```
+
+DOGE is unsupported for file upload. If the human asks for a DOGE file upload, explain that this flow currently supports MVC, BTC, and OPCAT only.
+
+## Size And Chain Limits
+
+- Files at or below the 5 MiB direct threshold use direct upload semantics.
+- Files above 5 MiB require the large/chunked path.
+- The runtime enforces a 50 MiB hard cap for this skill flow. If the file is larger, stop and explain that the file exceeds the current cap.
+- Large/chunked uploads above 5 MiB are currently MVC-only. If the human explicitly requests BTC or OPCAT for a file above 5 MiB, explain the current limitation instead of inventing support.
+- MVC sponsor may apply to eligible direct MVC uploads at or below 5 MiB when the sponsor gate (`chain.mvcSponsorUploadEnabled`) is enabled for the selected MetaBot.
+- DOGE is unsupported for file upload on both direct and large/chunked paths.
+
+## Success Result
+
+Surface these fields when present:
+
+- `pinId`
+- `metafileUri`
+- `previewUrl`
+- `downloadUrl`
+- `metawebUrl`
+- `size` / `bytes`
+- `contentType`
+- `uploadMode` (direct or chunked)
+- `network`
+- `txids`
+- `totalCost`
+- `feeAssist` (sponsor metadata when the sponsor path ran)
+- `verification` (when `--verify` was requested)
+
+When `pinId` is present and the human asks to view the uploaded file locally, open it in the local Bot Browser by running the `bot_browser_open_uri` tool with `metafile://<pinId>[.<ext>]`. The local Bot Browser is the primary way for the local human to view uploaded files.
+
+When the human asks to share the file with other people, surface the MetaFile Browser URL:
 
 ```text
-https://file.metaid.io/metafile-indexer/api/v1/files/content/<pinId>
+https://openagentinternet.org/browser/metafile/<pinId>
 ```
 
-## 🧠 执行逻辑
+Use this MetaFile Browser URL only for sharing to other people, never as the way the local human views the file. When the result includes `metawebUrl`, prefer it as the share link.
 
-当用户要把一个本地文件上传到链上时，按下面流程执行：
+If verification was requested and the runtime reports verification unavailable, failed, or skipped, say that clearly. Do not invent a verification result.
 
-1. 确认用户给了真实的本地文件路径。
-2. 不要自己读取文件内容，也不要把大文件塞进上下文。
-3. 直接调用 `scripts/upload-file.js`，把文件路径传给 `--file`。
-4. 如果用户指定了 MIME 类型，传 `--content-type`；如果用户指定目标网络，传 `--network`。
-5. 读取脚本 stdout 返回的 JSON，把 `pinId` 和 `previewUrl` 明确展示给用户。
+## Required Semantics
 
-## 💻 命令语法
+- Use `/file` as the MetaWeb path for the resulting file metadata.
+- Prefer `--file /absolute/path` for human-run uploads, even when the file may be small.
+- Use the injected `IDBOTS_METABOT_ID` for the upload identity; stop if it is missing.
+- Pass `--network mvc`, `--network btc`, or `--network opcat` only when explicitly requested by the human.
+- Stop on script errors and report the structured error details from the script output.
+- Return the resulting `metafile://...` URI and URLs for later references. When the runtime can determine the file extension, prefer the extension-bearing form such as `metafile://<pinid>.zip`; bare `metafile://<pinid>` remains acceptable only when the type is unknown.
+- When returning a public share link for an uploaded file, use `metawebUrl` when present. If only `pinId` is present, derive `https://openagentinternet.org/browser/metafile/<pinId>` and label it as the share link for other people. For local viewing, open `metafile://<pinId>[.<ext>]` through the local Bot Browser.
 
-```bash
-node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
-  --file <本地文件路径> \
-  [--content-type "<mime-type>"] \
-  [--network mvc|doge|btc]
+## In Scope
+
+- One local file upload lifecycle.
+- Direct upload for files up to 5 MiB, including eligible MVC sponsor attempts inside the same window.
+- Large/chunked upload for supported files above 5 MiB and at or below 50 MiB.
+- Optional runtime verification.
+- MVC/BTC/OPCAT chain selection for supported file writes.
+
+## Out Of Scope
+
+- Buzz content authoring.
+- Provider or caller A2A service logic.
+- Production chunked upload implementation details.
+- Uploading DOGE file payloads.
+- Reading or transforming large file contents in model context.
+- Network source management and identity switching.
+
+## Handoff To
+
+- `metabot-post-buzz` to publish uploaded files in buzz content.
+- `metabot-post-skillservice` to publish service payloads that reference uploaded assets.
+- `metabot-metaapp` / `metabot-post-metaapp` for MetaApp workflows that include upload-backed package or image fields.
+- `metabot-create-wiki` for wiki ZIP bundle uploads.
+- `metabot-post-skill` for skill package ZIP uploads.
+
+## Script Reference
+
+```text
+Usage: node upload-file.js --file <path> [--content-type <mime>] [--network mvc|btc|opcat] [--verify]
+Env: IDBOTS_METABOT_ID (required), IDBOTS_RPC_URL (optional)
 ```
 
-## 📋 参数说明
-
-| 参数 | 说明 | 必填 | 默认值 |
-| --- | --- | --- | --- |
-| `--file` | 本地文件路径 | 是 | 无 |
-| `--content-type` | 指定 MIME 类型；不传则按扩展名推断 | 否 | 自动推断 |
-| `--network` | 目标网络：`mvc`、`doge`、`btc` | 否 | `mvc` |
-
-## ✅ 成功输出
-
-脚本成功时会只向 stdout 输出一行 JSON：
-
-```json
-{
-  "success": true,
-  "pinId": "abc123i0",
-  "previewUrl": "https://file.metaid.io/metafile-indexer/api/v1/files/content/abc123i0",
-  "fileName": "demo.png",
-  "size": 12345,
-  "contentType": "image/png;binary",
-  "uploadMode": "chunked"
-}
-```
-
-其中：
-
-- `pinId`：最终文件索引 PINID
-- `previewUrl`：可直接预览文件内容的地址
-- `uploadMode`：`direct` 或 `chunked`
-
-## ⚠️ 严格约束
-
-1. 不要用 `cat`、Read 工具或其它方式主动读取用户的大文件内容。只传文件路径给脚本。
-2. 文件大于等于 `50 MiB` 必须直接报错，不要尝试上传。
-3. 文件大于等于 `5 MiB` 时必须走分片上传，不能继续走 direct upload。
-4. 当前 IDBots 内置实现里，大文件分片上传只支持 `mvc`。如果用户指定 `doge` 或 `btc` 且文件大于等于 `5 MiB`，要明确报错，不要假装支持。
-5. 如果用户没有提供真实文件路径，必须先追问路径，不能捏造。
-6. 始终使用 `$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js`，不要调用 `.ts`。
-
-## ✅ 示例
-
-**1. 上传一个 PNG：**
-
-```bash
-node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
-  --file /path/to/logo.png
-```
-
-**2. 上传一个 PDF：**
-
-```bash
-node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
-  --file /path/to/report.pdf \
-  --content-type application/pdf
-```
-
-**3. 上传一个大于等于 5 MiB 的视频到 MVC：**
-
-```bash
-node "$SKILLS_ROOT/metabot-upload-file/scripts/upload-file.js" \
-  --file /path/to/demo.mp4 \
-  --network mvc
-```
+The script prints a single-line JSON result to stdout and writes errors to stderr.
