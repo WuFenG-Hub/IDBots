@@ -293,6 +293,56 @@ export class MetabotStore {
     return row ? rowToMetabot(row) : null;
   }
 
+  private ensureMetabotSettingsTable(): void {
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS metabot_settings (
+        metabot_id INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (metabot_id, key)
+      );
+    `);
+  }
+
+  /** Read one per-metabot setting value (e.g. chain.defaultWriteNetwork). */
+  getMetabotSetting(metabotId: number, key: string): string | null {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) {
+      throw new Error('metabotId must be a positive integer');
+    }
+    const normalizedKey = String(key || '').trim();
+    if (!normalizedKey) {
+      throw new Error('setting key is required');
+    }
+    this.ensureMetabotSettingsTable();
+    const row = this.getOne<{ value: string }>(
+      'SELECT value FROM metabot_settings WHERE metabot_id = ? AND key = ? LIMIT 1',
+      [metabotId, normalizedKey],
+    );
+    return row ? String(row.value) : null;
+  }
+
+  /** Write one per-metabot setting value. Returns the stored value. */
+  setMetabotSetting(metabotId: number, key: string, value: string): string {
+    if (!Number.isInteger(metabotId) || metabotId <= 0) {
+      throw new Error('metabotId must be a positive integer');
+    }
+    const normalizedKey = String(key || '').trim();
+    if (!normalizedKey) {
+      throw new Error('setting key is required');
+    }
+    const normalizedValue = String(value ?? '').trim();
+    this.ensureMetabotSettingsTable();
+    this.db.run(
+      `INSERT INTO metabot_settings (metabot_id, key, value, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (metabot_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [metabotId, normalizedKey, normalizedValue, Date.now()],
+    );
+    this.saveDb();
+    return normalizedValue;
+  }
+
   /** MetaBot row linked to a wallet (at most one expected per wallet_id). */
   getMetabotByWalletId(walletId: number): Metabot | null {
     const row = this.getOne<MetabotRow>('SELECT * FROM metabots WHERE wallet_id = ? LIMIT 1', [walletId]);
