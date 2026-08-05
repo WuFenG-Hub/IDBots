@@ -155,6 +155,12 @@ interface CoworkMessage {
   };
 }
 
+interface CoworkMessagePage {
+  messages: CoworkMessage[];
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+}
+
 interface CoworkSubmitInput {
   sessionId: string;
   submissionId: string;
@@ -714,6 +720,7 @@ interface IElectronAPI {
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
       success: boolean;

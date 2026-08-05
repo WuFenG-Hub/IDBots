@@ -6842,6 +6842,32 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:getMessagesPage', async (_event, input: {
+    sessionId?: unknown;
+    beforeSequence?: unknown;
+    limit?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:getMessagesPage', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        if (!sessionId || !getCoworkStore().getSessionMetadata(sessionId)) {
+          return { success: false, error: 'Session not found' };
+        }
+        const page = getCoworkStore().getSessionMessagesPage(sessionId, {
+          beforeSequence: typeof input?.beforeSequence === 'number' ? input.beforeSequence : null,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+        return { success: true, page };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to get session messages',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:list', async (_event, options?: { metabotId?: number | null }) => {
     return withSqliteRecovery('cowork:session:list', async () => {
       try {

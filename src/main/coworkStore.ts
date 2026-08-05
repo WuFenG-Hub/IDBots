@@ -495,6 +495,12 @@ export interface CoworkMessage {
   metadata?: CoworkMessageMetadata;
 }
 
+export interface CoworkMessagePage {
+  messages: CoworkMessage[];
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+}
+
 export interface CoworkSession {
   id: string;
   title: string;
@@ -925,6 +931,10 @@ export class CoworkStore implements MemoryBackend {
       this.db.run(`
         CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_created_at
         ON cowork_messages(session_id, created_at DESC)
+      `);
+      this.db.run(`
+        CREATE INDEX IF NOT EXISTS idx_cowork_messages_session_sequence
+        ON cowork_messages(session_id, sequence DESC)
       `);
       this.saveDb();
     } catch (error) {
@@ -2680,6 +2690,59 @@ export class CoworkStore implements MemoryBackend {
       timestamp: row.created_at,
       metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
     }));
+  }
+
+  getSessionMessagesPage(
+    sessionId: string,
+    options?: { beforeSequence?: number | null; limit?: number },
+  ): CoworkMessagePage {
+    const requestedLimit = Number(options?.limit);
+    const limit = Number.isFinite(requestedLimit)
+      ? Math.max(1, Math.min(200, Math.floor(requestedLimit)))
+      : 100;
+    const requestedBeforeSequence = Number(options?.beforeSequence);
+    const beforeSequence = Number.isFinite(requestedBeforeSequence) && requestedBeforeSequence > 0
+      ? Math.floor(requestedBeforeSequence)
+      : null;
+    const params: Array<string | number> = [sessionId];
+    const beforeClause = beforeSequence == null
+      ? ''
+      : 'AND COALESCE(sequence, 0) < ?';
+    if (beforeSequence != null) {
+      params.push(beforeSequence);
+    }
+    params.push(limit + 1);
+
+    const rows = this.getAll<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages INDEXED BY idx_cowork_messages_session_sequence
+      WHERE session_id = ?
+      ${beforeClause}
+      ORDER BY
+        COALESCE(sequence, 0) DESC,
+        created_at DESC,
+        ROWID DESC
+      LIMIT ?
+    `, params);
+    const hasMoreBefore = rows.length > limit;
+    const pageRows = rows.slice(0, limit);
+    const oldestSequence = pageRows.length > 0
+      ? Number(pageRows[pageRows.length - 1]?.sequence)
+      : null;
+
+    return {
+      messages: pageRows.reverse().map(row => ({
+        id: row.id,
+        type: row.type as CoworkMessageType,
+        content: row.content,
+        timestamp: row.created_at,
+        metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      })),
+      hasMoreBefore,
+      beforeSequence: hasMoreBefore && Number.isFinite(oldestSequence) && Number(oldestSequence) > 0
+        ? Number(oldestSequence)
+        : null,
+    };
   }
 
   getSessionLatestMessage(sessionId: string): CoworkMessage | null {

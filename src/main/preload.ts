@@ -333,6 +333,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:rename', options),
     getSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:get', sessionId),
+    getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
+      ipcRenderer.invoke('cowork:session:getMessagesPage', input),
     listSessions: (options?: { metabotId?: number | null }) =>
       ipcRenderer.invoke('cowork:session:list', options),
     processServiceRefund: (sessionId: string) =>

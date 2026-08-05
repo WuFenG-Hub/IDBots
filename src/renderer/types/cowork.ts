@@ -74,6 +74,12 @@ export interface CoworkMessage {
   metadata?: CoworkMessageMetadata;
 }
 
+export interface CoworkMessagePage {
+  messages: CoworkMessage[];
+  hasMoreBefore: boolean;
+  beforeSequence: number | null;
+}
+
 export interface CoworkServiceOrderSummary {
   role?: 'buyer' | 'seller';
   status:
