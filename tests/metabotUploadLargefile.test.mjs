@@ -9,11 +9,12 @@ const {
   validateUploadSize,
   buildUploadSuccessPayload,
   normalizeRpcUploadResult,
+  normalizeUploadNetwork,
 } = require('../dist-electron/main/services/metaFileUploadShared.js');
 
 const MIB = 1024 * 1024;
 
-test('selectUploadMode keeps files below 5 MiB direct and switches at 5 MiB', () => {
+test('selectUploadMode keeps files at or below 5 MiB direct and switches above 5 MiB', () => {
   assert.equal(
     selectUploadMode({
       sizeBytes: 5 * MIB - 1,
@@ -25,7 +26,7 @@ test('selectUploadMode keeps files below 5 MiB direct and switches at 5 MiB', ()
     selectUploadMode({
       sizeBytes: 5 * MIB,
     }),
-    'chunked',
+    'direct',
   );
 
   assert.equal(
@@ -36,24 +37,25 @@ test('selectUploadMode keeps files below 5 MiB direct and switches at 5 MiB', ()
   );
 });
 
-test('validateUploadSize rejects files at or above the 50 MiB hard ceiling', () => {
+test('validateUploadSize accepts files up to the 50 MiB ceiling and rejects above', () => {
   assert.equal(validateUploadSize({ sizeBytes: 50 * MIB - 1 }), 50 * MIB - 1);
-
-  assert.throws(
-    () =>
-      validateUploadSize({
-        sizeBytes: 50 * MIB,
-      }),
-    /50 MiB/,
-  );
+  assert.equal(validateUploadSize({ sizeBytes: 50 * MIB }), 50 * MIB);
 
   assert.throws(
     () =>
       validateUploadSize({
         sizeBytes: 50 * MIB + 1,
       }),
-    /50 MiB/,
+    /File exceeds maximum upload size/,
   );
+});
+
+test('normalizeUploadNetwork accepts mvc, btc, and opcat and rejects doge', () => {
+  assert.equal(normalizeUploadNetwork(), 'mvc');
+  assert.equal(normalizeUploadNetwork('mvc'), 'mvc');
+  assert.equal(normalizeUploadNetwork('BTC'), 'btc');
+  assert.equal(normalizeUploadNetwork('opcat'), 'opcat');
+  assert.throws(() => normalizeUploadNetwork('doge'), /DOGE is not supported for file upload/);
 });
 
 test('buildMetafileUri appends an extension from file name or content type', () => {

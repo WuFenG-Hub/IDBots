@@ -146,8 +146,11 @@ function buildChunkedMetaFilePath(fileName) {
 
 function normalizeUploadNetwork(network) {
   const normalized = String(network || '').trim().toLowerCase();
-  if (normalized === 'doge' || normalized === 'btc') {
+  if (normalized === 'mvc' || normalized === 'btc' || normalized === 'opcat') {
     return normalized;
+  }
+  if (normalized === 'doge') {
+    throw new Error('DOGE is not supported for file upload. Use mvc, btc, or opcat.');
   }
   return 'mvc';
 }
@@ -160,14 +163,14 @@ function normalizeUploaderBaseUrl(url) {
 function selectUploadMode({ sizeBytes, chunkThresholdBytes = DEFAULT_CHUNK_THRESHOLD_BYTES }) {
   assertPositiveInteger(sizeBytes, 'sizeBytes');
   assertPositiveInteger(chunkThresholdBytes, 'chunkThresholdBytes');
-  return sizeBytes >= chunkThresholdBytes ? 'chunked' : 'direct';
+  return sizeBytes > chunkThresholdBytes ? 'chunked' : 'direct';
 }
 
 function validateUploadSize({ sizeBytes, maxSizeBytes = DEFAULT_MAX_FILE_SIZE_BYTES }) {
   assertPositiveInteger(sizeBytes, 'sizeBytes');
   assertPositiveInteger(maxSizeBytes, 'maxSizeBytes');
-  if (sizeBytes >= maxSizeBytes) {
-    throw new Error(`File size must be smaller than the ${formatMiB(maxSizeBytes)} hard limit`);
+  if (sizeBytes > maxSizeBytes) {
+    throw new Error(`File exceeds maximum upload size of ${maxSizeBytes} bytes.`);
   }
   return sizeBytes;
 }

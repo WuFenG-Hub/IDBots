@@ -61,6 +61,7 @@
     "@larksuiteoapi/node-sdk": "^1.58.0",
     "@metalet/utxo-wallet-service": "^0.3.33-beta.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@opcat-labs/scrypt-ts-opcat": "^4.1.0",
     "@openagentinternet/agent-browser-core": "0.4.4",
     "@openagentinternet/agent-browser-host-contract": "0.4.4",
     "@openagentinternet/agent-browser-name-resolvers": "0.4.4",

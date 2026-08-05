@@ -16,7 +16,7 @@ function loadMetaFileUploadShared(): {
   inferContentTypeFromFilePath: (filePath: string) => string;
   normalizeRpcUploadResult: (payload: Record<string, unknown>) => Record<string, unknown>;
   normalizeUploadContentType: (contentType: string) => string;
-  normalizeUploadNetwork: (network?: string) => 'mvc' | 'btc' | 'doge';
+  normalizeUploadNetwork: (network?: string) => 'mvc' | 'btc' | 'opcat';
   validateUploadSize: (input: { sizeBytes: number; maxSizeBytes?: number }) => number;
   selectUploadMode: (input: { sizeBytes: number; chunkThresholdBytes?: number }) => 'direct' | 'chunked';
 } {
@@ -246,7 +246,7 @@ export async function uploadMetaFile(
   }
 
   if (network !== 'mvc') {
-    throw new Error('Chunked upload is currently supported only on mvc network in IDBots');
+    throw new Error('Large file upload currently supports MVC only.');
   }
 
   const metabot = metabotStore.getMetabotById(params.metabotId);
