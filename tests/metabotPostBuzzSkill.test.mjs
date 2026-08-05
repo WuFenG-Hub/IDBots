@@ -12,7 +12,7 @@ const postBuzzScript = path.join(repoRoot, 'SKILLs/metabot-post-buzz/scripts/pos
 async function createRpcServer() {
   const calls = [];
   const server = http.createServer(async (req, res) => {
-    if (req.method !== 'POST' || req.url !== '/api/metaid/create-pin') {
+    if (req.method !== 'POST') {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'not found' }));
       return;
@@ -24,6 +24,32 @@ async function createRpcServer() {
     }
     const parsed = JSON.parse(body);
     calls.push(parsed);
+
+    if (req.url === '/api/idbots/files/upload-largefile') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        pinId: `file-pin-${calls.length}`,
+        metafileUri: `metafile://file-pin-${calls.length}.png`,
+        previewUrl: `https://file.metaid.io/metafile-indexer/api/v1/files/content/file-pin-${calls.length}`,
+        downloadUrl: `https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/file-pin-${calls.length}`,
+        metawebUrl: `https://openagentinternet.org/browser/metafile/file-pin-${calls.length}`,
+        fileName: parsed.file_path ? path.basename(parsed.file_path) : 'file',
+        size: 123,
+        contentType: 'image/png;binary',
+        uploadMode: 'direct',
+        network: parsed.network || 'mvc',
+        txids: [`file-tx-${calls.length}`],
+      }));
+      return;
+    }
+
+    if (req.url !== '/api/metaid/create-pin') {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'not found' }));
+      return;
+    }
+
     const pathName = parsed?.metaidData?.path;
     const index = calls.length;
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -130,4 +156,39 @@ test('post-buzz attachment flag accepts metafile URIs without uploading them', a
   assert.equal(rpc.calls[0].metaidData.path, '/protocols/simplebuzz');
   const payload = JSON.parse(rpc.calls[0].metaidData.payload);
   assert.deepEqual(payload.attachments, ['metafile://existing-pin-2.jpg']);
+});
+
+test('post-buzz uploads local attachments through the unified upload flow', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'idbots-post-buzz-upload-'));
+  const attachmentPath = path.join(tempDir, 'photo.png');
+  await writeFile(attachmentPath, Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'utf8');
+
+  const result = await runPostBuzz([
+    '--content',
+    'hello with local attachment',
+    '--attachment',
+    attachmentPath,
+    '--network',
+    'doge',
+  ], rpc.url);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(rpc.calls.length, 2);
+
+  const uploadCall = rpc.calls[0];
+  assert.equal(uploadCall.file_path, attachmentPath);
+  assert.equal(uploadCall.content_type, 'image/png');
+  assert.equal(uploadCall.network, 'mvc');
+
+  const buzzCall = rpc.calls[1];
+  assert.equal(buzzCall.network, 'doge');
+  assert.equal(buzzCall.metaidData.path, '/protocols/simplebuzz');
+  const payload = JSON.parse(buzzCall.metaidData.payload);
+  assert.deepEqual(payload.attachments, ['metafile://file-pin-1.png']);
+
+  const output = JSON.parse(result.stdout.trim());
+  assert.deepEqual(output.attachments, ['metafile://file-pin-1.png']);
 });
