@@ -312,6 +312,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
     setEffort: (sessionId: string, effort: string | null) =>
       ipcRenderer.invoke('cowork:session:setEffort', { sessionId, effort }),
+    getAutoApproveTools: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:getAutoApproveTools', sessionId),
+    addAutoApproveTool: (sessionId: string, toolName: string) =>
+      ipcRenderer.invoke('cowork:session:addAutoApproveTool', { sessionId, toolName }),
+    removeAutoApproveTool: (sessionId: string, toolName: string) =>
+      ipcRenderer.invoke('cowork:session:removeAutoApproveTool', { sessionId, toolName }),
     endA2APrivateChat: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:endA2APrivateChat', sessionId),
     ensureA2ASession: (input: {

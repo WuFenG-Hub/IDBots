@@ -320,6 +320,27 @@ class CoworkService {
     return true;
   }
 
+  async getAutoApproveTools(sessionId: string): Promise<string[]> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.getAutoApproveTools) return [];
+    const result = await cowork.getAutoApproveTools(sessionId);
+    return result.success ? result.tools ?? [] : [];
+  }
+
+  async addAutoApproveTool(sessionId: string, toolName: string): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.addAutoApproveTool) return false;
+    const result = await cowork.addAutoApproveTool(sessionId, toolName);
+    return result.success;
+  }
+
+  async removeAutoApproveTool(sessionId: string, toolName: string): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.removeAutoApproveTool) return false;
+    const result = await cowork.removeAutoApproveTool(sessionId, toolName);
+    return result.success;
+  }
+
   async endA2APrivateChat(sessionId: string): Promise<{ success: boolean; noticeSent?: boolean; error?: string }> {
     const cowork = window.electron?.cowork;
     if (!cowork?.endA2APrivateChat) {

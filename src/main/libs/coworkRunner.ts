@@ -741,6 +741,8 @@ interface ActiveSession {
   effortOverride: string | null;
   /** Runtime thinking override from the UI toggle; null = use per-model default. */
   thinkingOverride: { type: string } | null;
+  /** Tool names auto-approved by PreToolUse hook rules (case-insensitive). */
+  autoApproveTools: Set<string>;
   /** De-dup key for the last emitted SDK runtime status (api_retry/requesting). */
   lastSdkRuntimeStatusKey?: string;
   /**
@@ -3323,6 +3325,8 @@ export class CoworkRunner extends EventEmitter {
       workspaceRoot?: string;
       confirmationMode?: 'modal' | 'text';
       permissionMode?: CoworkPermissionMode;
+      /** Tool names to auto-approve via the PreToolUse hook (case-insensitive). */
+      autoApproveTools?: string[];
     } = {}
   ): Promise<void> {
     this.stoppedSessions.delete(sessionId);
@@ -3415,6 +3419,9 @@ export class CoworkRunner extends EventEmitter {
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
       effortOverride: null,
       thinkingOverride: null,
+      autoApproveTools: new Set(
+        (options.autoApproveTools ?? []).map((name) => name.trim().toLowerCase()).filter(Boolean)
+      ),
     };
     this.activeSessions.set(sessionId, activeSession);
     if (session.cwd !== sessionCwd) {
@@ -3602,6 +3609,43 @@ export class CoworkRunner extends EventEmitter {
       activeSession.effortOverride = effort;
     }
     coworkLog('INFO', 'setEffortOverride', 'Effort override updated', { sessionId, effort });
+  }
+
+  /**
+   * Returns the auto-approve tool rules for an active session (sorted list).
+   */
+  getAutoApproveTools(sessionId: string): string[] {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return [];
+    return Array.from(activeSession.autoApproveTools).sort();
+  }
+
+  /**
+   * Adds a tool name to the auto-approve rules. Takes effect immediately for
+   * subsequent tool calls (the PreToolUse hook reads the live set).
+   */
+  addAutoApproveTool(sessionId: string, toolName: string): boolean {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return false;
+    const normalized = toolName.trim().toLowerCase();
+    if (!normalized) return false;
+    activeSession.autoApproveTools.add(normalized);
+    coworkLog('INFO', 'addAutoApproveTool', 'Added auto-approve rule', { sessionId, toolName: normalized });
+    return true;
+  }
+
+  /**
+   * Removes a tool name from the auto-approve rules. Takes effect immediately.
+   */
+  removeAutoApproveTool(sessionId: string, toolName: string): boolean {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) return false;
+    const normalized = toolName.trim().toLowerCase();
+    const removed = activeSession.autoApproveTools.delete(normalized);
+    if (removed) {
+      coworkLog('INFO', 'removeAutoApproveTool', 'Removed auto-approve rule', { sessionId, toolName: normalized });
+    }
+    return removed;
   }
 
   stopSession(
@@ -4152,6 +4196,40 @@ export class CoworkRunner extends EventEmitter {
 
         return { behavior: 'allow', updatedInput };
       },
+    };
+    // PreToolUse hook: auto-approve whitelisted tools (user-configured rules)
+    // before the SDK asks. Returns empty output for everything else so
+    // canUseTool's full policy chain still applies. This is the SDK-level
+    // enforcement layer; canUseTool remains the source of truth for hard
+    // denials (blocked web tools, plan mode, delete safety).
+    options.hooks = {
+      PreToolUse: [
+        {
+          hooks: [
+            async (input: unknown): Promise<Record<string, unknown>> => {
+              const hookInput = input as {
+                tool_name?: string;
+                tool_use_id?: string;
+              };
+              const toolName = String(hookInput.tool_name ?? '');
+              const normalized = toolName.trim().toLowerCase();
+              if (!normalized || !activeSession.autoApproveTools.has(normalized)) {
+                return {};
+              }
+              coworkLog('INFO', 'PreToolUse', 'Auto-approved tool via rule', {
+                sessionId,
+                toolName,
+                toolUseId: hookInput.tool_use_id,
+              });
+              return {
+                hookEventName: 'PreToolUse',
+                permissionDecision: 'allow',
+                permissionDecisionReason: 'Auto-approved by user rule',
+              };
+            },
+          ],
+        },
+      ],
     };
     options.agents = {
       ...(options.agents as Record<string, AgentDefinition> | undefined),

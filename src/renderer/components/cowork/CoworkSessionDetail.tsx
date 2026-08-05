@@ -13,6 +13,7 @@ import CoworkPromptInput from './CoworkPromptInput';
 import ContextUsageRing from '../ContextUsageRing';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
+import AutoApproveRulesPanel from './AutoApproveRulesPanel';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -3280,6 +3281,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             )}
             <div className="flex items-center justify-end gap-2">
+              <AutoApproveRulesPanel
+                sessionId={currentSession.id}
+                getRules={(sid) => coworkService.getAutoApproveTools(sid)}
+                addRule={(sid, toolName) => coworkService.addAutoApproveTool(sid, toolName)}
+                removeRule={(sid, toolName) => coworkService.removeAutoApproveTool(sid, toolName)}
+              />
               <EffortSelector
                 sessionId={currentSession.id}
                 currentEffort={effortOverride}

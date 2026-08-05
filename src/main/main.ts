@@ -6263,6 +6263,52 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('cowork:session:getAutoApproveTools', async (_event, sessionId: string) => {
+    try {
+      if (!sessionId) throw new Error('Session id is required');
+      return { success: true, tools: getCoworkRunner().getAutoApproveTools(sessionId) };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get auto-approve tools',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:addAutoApproveTool', async (_event, payload: {
+    sessionId: string;
+    toolName: string;
+  }) => {
+    try {
+      const { sessionId, toolName } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      const added = getCoworkRunner().addAutoApproveTool(sessionId, toolName);
+      return { success: added };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to add auto-approve tool',
+      };
+    }
+  });
+
+  ipcMain.handle('cowork:session:removeAutoApproveTool', async (_event, payload: {
+    sessionId: string;
+    toolName: string;
+  }) => {
+    try {
+      const { sessionId, toolName } = payload;
+      if (!sessionId) throw new Error('Session id is required');
+      const removed = getCoworkRunner().removeAutoApproveTool(sessionId, toolName);
+      return { success: removed };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to remove auto-approve tool',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:queueA2AGuidance', async (_event, input: {
     sessionId?: unknown;
     guidance?: unknown;
