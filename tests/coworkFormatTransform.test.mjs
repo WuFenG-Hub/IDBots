@@ -196,7 +196,7 @@ test('DeepSeek stream tool calls carry reasoning_content for future request hydr
 
   const hydrateResult = hydrateDeepSeekReasoningForRequest(request, 'deepseek', 'https://api.deepseek.com');
 
-  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, missingCount: 0 });
+  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, placeholderCount: 0 });
   assert.equal(request.messages[0].reasoning_content, 'need to inspect the file first');
 });
 
@@ -258,7 +258,7 @@ test('DeepSeek stream caches reasoning_content when MCP tool call arrives before
 
   const hydrateResult = hydrateDeepSeekReasoningForRequest(request, 'deepseek', 'https://api.deepseek.com');
 
-  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, missingCount: 0 });
+  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, placeholderCount: 0 });
   assert.equal(request.messages[0].reasoning_content, 'need to open the Sina finance article first');
 });
 
@@ -331,7 +331,7 @@ test('DeepSeek request hydration prefers complete cached reasoning over partial 
 
   const hydrateResult = hydrateDeepSeekReasoningForRequest(request, 'deepseek', 'https://api.deepseek.com');
 
-  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, missingCount: 0 });
+  assert.deepEqual(hydrateResult, { ok: true, hydratedCount: 1, placeholderCount: 0 });
   assert.equal(
     request.messages[0].reasoning_content,
     'need to navigate first, then inspect the loaded article',
@@ -378,7 +378,7 @@ test('non-DeepSeek stream tool calls do not receive DeepSeek reasoning metadata'
   assert.equal(toolUseStart.data.content_block.extra_content, undefined);
 });
 
-test('DeepSeek request validation rejects assistant tool calls when reasoning_content cannot be restored', async () => {
+test('DeepSeek request hydration falls back to placeholder when reasoning_content is unrecoverable', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     hydrateDeepSeekReasoningForRequest,
@@ -386,6 +386,11 @@ test('DeepSeek request validation rejects assistant tool calls when reasoning_co
   } = __openAICompatProxyTestUtils;
   resetDeepSeekReasoningCache();
 
+  // Simulates the real-world failure: an assistant tool-call message whose
+  // reasoning was never captured (process restart, LRU eviction, or a turn
+  // from before thinking mode was active). Previously this returned a 400 and
+  // wiped the session; now it must fall back to a placeholder so the history
+  // survives.
   const request = {
     model: 'deepseek-v4-pro',
     messages: [{
@@ -401,8 +406,44 @@ test('DeepSeek request validation rejects assistant tool calls when reasoning_co
 
   const hydrateResult = hydrateDeepSeekReasoningForRequest(request, 'deepseek', 'https://api.deepseek.com');
 
-  assert.equal(hydrateResult.ok, false);
+  assert.equal(hydrateResult.ok, true);
   assert.equal(hydrateResult.hydratedCount, 0);
-  assert.equal(hydrateResult.missingCount, 1);
-  assert.match(hydrateResult.error, /missing reasoning_content/i);
+  assert.equal(hydrateResult.placeholderCount, 1);
+  assert.equal(typeof request.messages[0].reasoning_content, 'string');
+  assert.ok(request.messages[0].reasoning_content.length > 0, 'placeholder reasoning_content must be non-empty');
+  // The placeholder must also be stashed onto the tool call's extra_content so
+  // subsequent re-hydration of the same request stays self-sufficient.
+  const extraReasoning = request.messages[0].tool_calls[0].extra_content?.deepseek?.reasoning_content;
+  assert.equal(typeof extraReasoning, 'string');
+  assert.ok(extraReasoning.length > 0, 'tool call extra_content must carry the placeholder reasoning');
+});
+
+test('DeepSeek request hydration restores real reasoning when available and does not use placeholder', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    hydrateDeepSeekReasoningForRequest,
+    resetDeepSeekReasoningCache,
+  } = __openAICompatProxyTestUtils;
+  resetDeepSeekReasoningCache();
+
+  const request = {
+    model: 'deepseek-v4-pro',
+    messages: [{
+      role: 'assistant',
+      content: null,
+      reasoning_content: 'the real reasoning from this turn',
+      tool_calls: [{
+        id: 'call_with_reasoning',
+        type: 'function',
+        function: { name: 'Read', arguments: '{"file_path":"src/main.ts"}' },
+      }],
+    }],
+  };
+
+  const hydrateResult = hydrateDeepSeekReasoningForRequest(request, 'deepseek', 'https://api.deepseek.com');
+
+  assert.equal(hydrateResult.ok, true);
+  assert.equal(hydrateResult.hydratedCount, 0);
+  assert.equal(hydrateResult.placeholderCount, 0);
+  assert.equal(request.messages[0].reasoning_content, 'the real reasoning from this turn');
 });

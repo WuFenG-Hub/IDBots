@@ -78,6 +78,12 @@ const PROXY_BIND_HOST = '0.0.0.0';
 const LOCAL_HOST = '127.0.0.1';
 const SANDBOX_HOST = '10.0.2.2';
 const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
+// DeepSeek's thinking API rejects (400) any assistant tool-call message that
+// lacks reasoning_content. When the real reasoning is unrecoverable (process
+// restart, LRU eviction, or history from turns that never produced reasoning),
+// we inject this non-empty placeholder so the request contract stays valid and
+// the conversation history is preserved instead of being wiped on retry.
+const DEEPSEEK_REASONING_PLACEHOLDER = '(reasoning unavailable)';
 
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
@@ -322,9 +328,12 @@ function isDeepSeekThinkingRequest(body: Record<string, unknown>, provider?: str
   return /\b(?:deepseek-)?(?:v4-pro|reasoner|r1)\b/.test(model);
 }
 
-type DeepSeekReasoningHydrateResult =
-  | { ok: true; hydratedCount: number; missingCount: number }
-  | { ok: false; hydratedCount: number; missingCount: number; error: string };
+type DeepSeekReasoningHydrateResult = {
+  ok: true;
+  hydratedCount: number;
+  /** Number of messages that could not be restored from cache/history and fell back to the placeholder. */
+  placeholderCount: number;
+};
 
 function resolveDeepSeekReasoningForToolCalls(toolCalls: unknown): string {
   for (const toolCall of toArray(toolCalls)) {
@@ -376,12 +385,11 @@ function hydrateDeepSeekReasoningForRequest(
   baseURL?: string
 ): DeepSeekReasoningHydrateResult {
   if (!isDeepSeekThinkingRequest(body, provider, baseURL)) {
-    return { ok: true, hydratedCount: 0, missingCount: 0 };
+    return { ok: true, hydratedCount: 0, placeholderCount: 0 };
   }
 
   let hydratedCount = 0;
-  let missingCount = 0;
-  const missingToolCallIds: string[] = [];
+  let placeholderCount = 0;
 
   for (const message of toArray(body.messages)) {
     const messageObj = toOptionalObject(message);
@@ -409,28 +417,18 @@ function hydrateDeepSeekReasoningForRequest(
       continue;
     }
 
-    missingCount += 1;
-    for (const toolCall of toolCalls) {
-      const toolCallId = toString(toOptionalObject(toolCall)?.id);
-      if (toolCallId) {
-        missingToolCallIds.push(toolCallId);
-      }
-    }
+    // The real reasoning_content is unrecoverable (process restart, LRU
+    // eviction, or this turn predates thinking mode). Injecting a non-empty
+    // placeholder satisfies DeepSeek's structural requirement and keeps the
+    // conversation history intact, avoiding the session wipe that a 400 would
+    // trigger downstream. Only the already-lost reasoning is affected; all
+    // other turns retain their real reasoning where available.
+    messageObj.reasoning_content = DEEPSEEK_REASONING_PLACEHOLDER;
+    attachDeepSeekReasoningToToolCalls(toolCalls, DEEPSEEK_REASONING_PLACEHOLDER);
+    placeholderCount += 1;
   }
 
-  if (missingCount > 0) {
-    const idPreview = missingToolCallIds.length > 0
-      ? ` Tool call ids: ${missingToolCallIds.slice(0, 5).join(', ')}.`
-      : '';
-    return {
-      ok: false,
-      hydratedCount,
-      missingCount,
-      error: `DeepSeek thinking request is missing reasoning_content for ${missingCount} assistant tool-call message(s).${idPreview}`,
-    };
-  }
-
-  return { ok: true, hydratedCount, missingCount };
+  return { ok: true, hydratedCount, placeholderCount };
 }
 
 function cacheToolCallExtraContentFromOpenAIResponse(body: unknown): void {
@@ -2485,22 +2483,10 @@ async function handleRequest(
     upstreamConfig.provider,
     upstreamConfig.baseURL
   );
-  if (!deepSeekReasoningHydrateResult.ok) {
-    const error = 'error' in deepSeekReasoningHydrateResult
-      ? deepSeekReasoningHydrateResult.error
-      : 'DeepSeek thinking request is missing reasoning_content.';
-    lastProxyError = error;
-    console.warn('[cowork-openai-compat-proxy] DeepSeek reasoning_content validation failed', {
-      hydratedCount: deepSeekReasoningHydrateResult.hydratedCount,
-      missingCount: deepSeekReasoningHydrateResult.missingCount,
-      error,
-    });
-    writeJSON(res, 400, createAnthropicErrorBody(error, 'invalid_request_error'));
-    return;
-  }
-  if (deepSeekReasoningHydrateResult.hydratedCount > 0) {
+  if (deepSeekReasoningHydrateResult.hydratedCount > 0 || deepSeekReasoningHydrateResult.placeholderCount > 0) {
     console.info('[cowork-openai-compat-proxy] Hydrated DeepSeek reasoning_content for assistant tool-call history', {
       hydratedCount: deepSeekReasoningHydrateResult.hydratedCount,
+      placeholderCount: deepSeekReasoningHydrateResult.placeholderCount,
     });
   }
 
