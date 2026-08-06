@@ -12,7 +12,6 @@ import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
-import AutoApproveRulesPanel from './AutoApproveRulesPanel';
 import SubagentPanel from './SubagentPanel';
 import UsageStatsChip from './UsageStatsChip';
 import A2AMessageItem from './A2AMessageItem';
@@ -36,7 +35,6 @@ import {
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
-import { configService } from '../../services/config';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -3501,16 +3499,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 />
               )}
               <SubagentPanel sessionId={currentSession.id} />
-              <AutoApproveRulesPanel
-                sessionId={currentSession.id}
-                getRules={(sid) => coworkService.getAutoApproveTools(sid)}
-                addRule={(sid, toolName) => coworkService.addAutoApproveTool(sid, toolName)}
-                removeRule={(sid, toolName) => coworkService.removeAutoApproveTool(sid, toolName)}
-                initialRules={configService.getConfig().autoApproveTools ?? []}
-                onRulesChange={(nextRules) => {
-                  void configService.updateConfig({ autoApproveTools: nextRules });
-                }}
-              />
               <EffortSelector
                 sessionId={currentSession.id}
                 currentEffort={effortOverride}
