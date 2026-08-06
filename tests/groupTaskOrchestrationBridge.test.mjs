@@ -138,6 +138,8 @@ test('Worker handoff, deliverable evidence, review, and owner acceptance close b
     assert.equal(accepted.groupTask.status, 'done');
     assert.equal(accepted.canonicalTask.status, 'completed');
     assert.equal(h.orchestrationStore.getStep(started.step.id).status, 'completed');
+    assert.equal(h.orchestrationStore.getAttempt(started.attempt.id).result.ownerAccepted, true);
+    assert.equal(h.orchestrationStore.getAttempt(started.attempt.id).result.verified, false);
     assert.equal(h.groupTaskStore.listDeliverables(h.groupTask.id)[0].status, 'accepted');
   } finally {
     h.sqliteStore.close();

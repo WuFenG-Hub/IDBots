@@ -80,6 +80,16 @@ The generic task model is transport-neutral:
 
 Group Task may reference an orchestration task and project status/messages into the on-chain group. It must not own the canonical execution state.
 
+The local acceptance bridge implements this projection as follows:
+
+- `group_tasks.orchestration_task_id` is an immutable one-to-one link created at Group Task creation and reconciled idempotently by the daemon.
+- Group Task `planning`, `executing`, `review`, `done`, and `cancelled` project to canonical `planning`, `running`, `review`, `completed`, and `cancelled` respectively.
+- A Group Task message that activates a Worker creates one canonical step and attempt keyed by the source message and Worker identity.
+- A sent Worker handoff completes the attempt but leaves its step in `waiting_input` until the Twin and owner review the evidence.
+- Deliverables are copied into canonical attempt evidence with host verification notes. Owner acceptance is recorded separately and never upgrades an unverified claim into deterministic proof.
+- Only owner acceptance while the Group Task is in `review` completes waiting steps, accepts pending deliverables, and closes both task models. Cancellation cascades across active canonical steps and attempts.
+- Projection failures after an on-chain send never cause the message to be resent. The daemon retries local reconciliation from durable evidence instead.
+
 Task states are `planning`, `running`, `review`, `completed`, `failed`, and `cancelled`.
 
 Step states are `blocked`, `ready`, `queued`, `running`, `waiting_input`, `completed`, `failed`, and `cancelled`.

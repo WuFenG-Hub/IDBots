@@ -9,6 +9,7 @@ export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
   id: number;
+  orchestrationTaskId: string | null;
   groupId: string | null;
   title: string;
   goal: string;

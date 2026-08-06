@@ -290,6 +290,14 @@ export class GroupTaskOrchestrationBridge {
     for (const step of steps) {
       if (step.status !== 'waiting_input') continue;
       const accepted = { ...asObject(step.acceptedResult), ownerAccepted: true };
+      if (step.activeAttemptId) {
+        const attempt = this.deps.orchestrationStore.getAttempt(step.activeAttemptId);
+        if (attempt) {
+          this.deps.orchestrationStore.updateAttempt(attempt.id, attempt.status, {
+            result: { ...asObject(attempt.result), ownerAccepted: true },
+          });
+        }
+      }
       this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', { acceptedResult: accepted });
     }
     for (const deliverable of this.deps.groupTaskStore.listDeliverables(groupTask.id)) {
