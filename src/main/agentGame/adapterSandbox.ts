@@ -16,6 +16,7 @@ import { Worker } from 'worker_threads';
 import { createHash, randomUUID } from 'crypto';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import { app } from 'electron';
 import type {
   AdapterConfig,
   GameEvent,
@@ -232,11 +233,31 @@ export async function loadAdapterSandbox(
   return sandbox;
 }
 
-/** Resolve the compiled Worker entry. The Worker source lives next to this file. */
+/**
+ * Resolve the Worker entry. The worker is a `.cjs` (not bundled by tsc/rollup),
+ * so it must be located from a stable root:
+ *  - packaged app: process.resourcesPath/agentGame/adapterSandboxWorker.cjs
+ *    (shipped via electron-builder extraResources)
+ *  - dev: the source file under app.getAppPath()/src/main/agentGame/
+ * Falls back to __dirname (tsc-compiled dist-electron) for the unit-test path.
+ */
 function resolveWorkerPath(): string {
-  // __dirname is available in the CommonJS main bundle (dev + packaged).
-  // The worker is a .cjs sibling so it runs under worker_threads verbatim.
-  return join(__dirname, 'adapterSandboxWorker.cjs');
+  const candidates = app.isPackaged
+    ? [join(process.resourcesPath, 'agentGame', 'adapterSandboxWorker.cjs')]
+    : [
+        join(app.getAppPath(), 'src', 'main', 'agentGame', 'adapterSandboxWorker.cjs'),
+        join(__dirname, 'adapterSandboxWorker.cjs'),
+      ];
+  for (const candidate of candidates) {
+    try {
+      readFileSync(candidate);
+      return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+  // Last resort: return the first candidate so the Worker error surfaces clearly.
+  return candidates[0];
 }
 
 /** Convenience: shape-check a loaded adapter module's exports (used by tests). */

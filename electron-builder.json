@@ -37,6 +37,10 @@
       "filter": [
         "**/*"
       ]
+    },
+    {
+      "from": "src/main/agentGame/adapterSandboxWorker.cjs",
+      "to": "agentGame/adapterSandboxWorker.cjs"
     }
   ],
   "mac": {
