@@ -13,6 +13,7 @@ import { createNativeSqliteDatabase } from './nativeSqliteDatabase';
 import type { SqliteDatabase } from './sqliteTypes';
 import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
 import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
+import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -1567,6 +1568,8 @@ export class SqliteStore {
     ensureMetaIDExperienceSchema(this.db);
     // Observer-owned impression observations and their rebuildable read model.
     ensureMetaIDImpressionSchema(this.db);
+    // Explicit shared-memory grants and the append-only access audit trail.
+    ensureMetaIDMemoryGrantSchema(this.db);
 
     this.save();
   }
