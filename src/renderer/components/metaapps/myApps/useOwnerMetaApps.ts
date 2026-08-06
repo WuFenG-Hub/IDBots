@@ -180,12 +180,20 @@ export function useOwnerMetaApps() {
         firstPinId: record.firstPinId || record.pinId,
       });
       if (res.success) {
-        // optimistic removal — match OAC (filter by exact pinId only). The list is already
+        // Optimistic removal — match OAC (filter by exact pinId only). The list is already
         // collapsed to one record per firstPinId group, so removing by pinId suffices and
         // avoids accidentally hiding a sibling in the same group.
-        setRecords((prev) => prev.filter((r) => r.pinId !== record.pinId));
+        const remaining = records.filter((r) => r.pinId !== record.pinId);
+        setRecords(remaining);
         setChainStatus(null);
         setModal({ kind: 'none' });
+        // If the deletion emptied the current page (e.g. it held a single app) the paging
+        // state would otherwise point at a now-empty page, so reset to the first page to keep
+        // the cursor stack and the visible list consistent.
+        if (remaining.length === 0) {
+          setCursor(''); setCursorStack(['']); setNextCursor('');
+          void loadPage(selectedBotId, '');
+        }
       } else {
         setChainStatus({ status: 'error', error: res.error });
       }
@@ -194,7 +202,7 @@ export function useOwnerMetaApps() {
     } finally {
       setSubmitting(false);
     }
-  }, [selectedBotId]);
+  }, [selectedBotId, records, loadPage]);
 
   return {
     bots, selectedBotId, setSelectedBotId,

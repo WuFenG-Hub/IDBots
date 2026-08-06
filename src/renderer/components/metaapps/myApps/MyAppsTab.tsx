@@ -232,8 +232,10 @@ const MyAppsTab: React.FC<MyAppsTabProps> = ({ onRunByPin }) => {
             })}
           </div>
 
-          {/* pagination — only render when there is more than one page to navigate (matches OAC: prev/next hidden unless navigable) */}
-          {(owner.cursorStack.length > 1 || owner.nextCursor) ? (
+          {/* pagination — only render when there is actually more than one page to navigate.
+              Hide it entirely when the current page is empty or there is no next page and we
+              are on the first page (matches OAC: prev/next hidden unless navigable). */}
+          {owner.records.length > 0 && (owner.cursorStack.length > 1 || owner.nextCursor) ? (
             <div className="flex items-center justify-center gap-3 pt-1">
               {owner.cursorStack.length > 1 ? (
                 <button type="button" onClick={owner.goPrev}
