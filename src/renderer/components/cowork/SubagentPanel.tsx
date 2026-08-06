@@ -54,13 +54,20 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = fal
   const [postHocAgents, setPostHocAgents] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
   const tasks = useSelector((state: RootState) => state.cowork.subagentTasks);
-  const taskList = Object.values(tasks).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
 
-  // On open, load post-hoc subagent ids from disk (listSubagents) and merge
-  // with live tasks. Post-hoc entries may not correlate 1:1 with live task
-  // ids (task_id != agentId), so they appear as additional rows.
+  // Only tasks belonging to the current session (the Redux map is global
+  // across sessions). Tasks without a sessionId (legacy events) are kept.
+  const taskList = Object.values(tasks)
+    .filter((task) => !sessionId || !task.sessionId || task.sessionId === sessionId)
+    .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+
+  // Load post-hoc subagent ids from disk (listSubagents) on mount and whenever
+  // the session changes — this decides whether the trigger is visible at all
+  // (a session that previously spawned subagents keeps the button even after
+  // live tasks are cleared). Post-hoc entries may not correlate 1:1 with live
+  // task ids (task_id != agentId), so they appear as additional rows.
   useEffect(() => {
-    if (!isOpen || !sessionId) return;
+    if (!sessionId) return;
     let cancelled = false;
     void coworkService.getSubagents(sessionId).then((agents) => {
       if (!cancelled) setPostHocAgents(agents);
@@ -68,7 +75,7 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = fal
     return () => {
       cancelled = true;
     };
-  }, [isOpen, sessionId]);
+  }, [sessionId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -80,6 +87,13 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = fal
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
+
+  // Hide the trigger entirely while this session has no subagent activity —
+  // no live tasks AND no post-hoc transcripts. The button only appears once
+  // a subagent has actually run.
+  if (taskList.length === 0 && postHocAgents.length === 0) {
+    return null;
+  }
 
   const runningCount = taskList.filter((t) => t.status === 'running' || t.status === 'pending').length;
 
