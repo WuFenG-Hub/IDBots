@@ -125,10 +125,35 @@ const SessionAvatarCircle: React.FC<{
 /**
  * Sidebar avatar(s) identifying which MetaBot(s) a session belongs to:
  * the executing MetaBot for standard cowork sessions, and both the local
- * MetaBot and the remote peer (overlapping) for A2A sessions.
+ * MetaBot and the remote peer (overlapping) for A2A sessions. For A2A
+ * sessions the peer avatar is clickable to force-refresh the peer's latest
+ * name/avatar from the chain (GlobalMetaID is immutable; name/avatar can
+ * change), since the background refresh is TTL-gated and may be stale.
  */
 export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> = ({ session }) => {
+  const [isRefreshingPeer, setIsRefreshingPeer] = React.useState(false);
+
+  const handleRefreshPeer = React.useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isRefreshingPeer) return;
+    const sessionId = session.id;
+    if (!sessionId) return;
+    setIsRefreshingPeer(true);
+    try {
+      await window.electron?.cowork?.refreshPeerProfile({ sessionId, force: true });
+    } catch {
+      /* best-effort; the profileRefreshed event drives the UI update */
+    } finally {
+      // Brief delay so the spinner is perceptible even on a fast refresh.
+      window.setTimeout(() => setIsRefreshingPeer(false), 400);
+    }
+  }, [isRefreshingPeer, session.id]);
+
   if (session.sessionType === 'a2a') {
+    const refreshLabel = isRefreshingPeer
+      ? i18nService.t('coworkPeerProfileRefreshing')
+      : i18nService.t('coworkPeerProfileRefresh');
     return (
       <span className="mr-2 flex flex-shrink-0 items-center">
         <SessionAvatarCircle
@@ -136,11 +161,21 @@ export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> =
           name={session.metabotName}
           className="relative z-10 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
         />
-        <SessionAvatarCircle
-          src={session.peerAvatar}
-          name={session.peerName}
-          className="-ml-2 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
-        />
+        <button
+          type="button"
+          onClick={handleRefreshPeer}
+          disabled={isRefreshingPeer}
+          aria-label={refreshLabel}
+          title={refreshLabel}
+          className={`-ml-2 rounded-full ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-claude-accent ${
+            isRefreshingPeer ? 'cursor-wait opacity-60' : 'cursor-pointer'
+          }`}
+        >
+          <SessionAvatarCircle
+            src={session.peerAvatar}
+            name={session.peerName}
+          />
+        </button>
       </span>
     );
   }
