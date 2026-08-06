@@ -1,4 +1,5 @@
 import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { selectProtocolPinContent } from './protocolPinContent';
 
 export interface ProtocolPinRecord {
   pinId: string;
@@ -35,13 +36,10 @@ const normalizeTimestampMs = (value: unknown): number | null => {
   return parsed >= 10_000_000_000 ? Math.floor(parsed) : Math.floor(parsed * 1000);
 };
 
+// Select the decoded pin body, skipping MAN content-download URLs so they never
+// poison downstream parsing. See protocolPinContent.ts for the full rationale.
 const defaultSelectContent = (item: Record<string, unknown>): unknown => (
-  item.contentSummary
-  ?? item.contentBody
-  ?? item.content
-  ?? item.originalContentBody
-  ?? item.originalContentSummary
-  ?? null
+  selectProtocolPinContent(item)
 );
 
 const buildPathListUrl = (

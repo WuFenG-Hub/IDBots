@@ -8,6 +8,7 @@ import {
   isMetaAppPinId,
 } from './metaAppProtocol';
 import type { MetaAppManifestInput } from './metaAppProtocol';
+import { parseProtocolPinContent } from './protocolPinContent';
 
 // `store` is a MetabotStore (from getMetabotStore()). It exposes getMetabotById,
 // listMetaAppOwnerCache, upsertMetaAppOwnerCache (added in Task 2), and is what
@@ -89,40 +90,13 @@ function readPinId(event: any): string | null {
   return typeof id === 'string' && isMetaAppPinId(id) ? id.toLowerCase() : null;
 }
 
-// Parse the MetaApp manifest out of a MAN indexer event.
-//
-// The MAN indexer exposes the pin body via several fields, and their meaning
-// has shifted over time, so we must be defensive:
-//   - `contentSummary` / `contentBody` / `data` hold the decoded manifest as a
-//     JSON string (or, sometimes, a pre-parsed object).
-//   - `content` is ambiguous: in older responses it carried the JSON body, but
-//     current responses make it a plain download URL
-//     (`https://manapi.metaid.io/content/<pinId>`) — NOT JSON. Treating that URL
-//     as the manifest source causes JSON.parse to fail silently, which is what
-//     left owner MetaApps with no title/cover/intro while only pin-identifying
-//     fields surfaced (the "shows raw pin data" bug).
-//
-// Strategy: prefer the explicit summary fields first. Only fall back to
-// `content` when it actually looks like JSON (starts with '{' or '['), so a URL
-// value never poisons the parse.
-function parseContentValue(value: unknown): any {
-  if (value == null) return null;
-  if (typeof value === 'object') return value;
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed) return null;
-    // Skip values that cannot be JSON objects (e.g. a content download URL).
-    if (trimmed[0] !== '{' && trimmed[0] !== '[') return null;
-    try { return JSON.parse(trimmed); } catch { return null; }
-  }
-  return null;
-}
-
+// Parse the MetaApp manifest out of a MAN indexer event using the shared
+// protocol-pin selector. This skips the content-download URL that MAN now puts
+// in `content` (which previously poisoned JSON.parse and left owner MetaApps
+// with no title/cover/intro — the "shows raw pin data" bug). See
+// protocolPinContent.ts for the full rationale.
 function readContent(event: any): any {
-  return parseContentValue(event?.contentSummary)
-    ?? parseContentValue(event?.contentBody)
-    ?? parseContentValue(event?.data)
-    ?? parseContentValue(event?.content);
+  return parseProtocolPinContent(event) ?? null;
 }
 
 function buildRecord(raw: any, ownerAddress: string): OwnerMetaAppRecord | null {

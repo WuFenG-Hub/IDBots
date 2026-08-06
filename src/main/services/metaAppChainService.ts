@@ -4,6 +4,7 @@ import { fetchContentWithFallback } from './localIndexerProxy';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
 import { getP2PLocalBase } from './p2pLocalEndpoint';
 import { extractPinIdFromReference } from './pinAssetService';
+import { parseProtocolPinContent } from './protocolPinContent';
 
 let AdmZip: typeof import('adm-zip') | null = null;
 try {
@@ -421,7 +422,10 @@ const decodeChainPayload = (item: unknown): ChainMetaAppCandidate | null => {
   // MAN marks superseded/revoked versions with a negative status; only rows with
   // status 0/1 are current (mirrors gigSquareServiceStateService.isServiceRowVisible).
   const status = Number.isFinite(Number(obj.status)) ? Math.trunc(Number(obj.status)) : 0;
-  const content = parseJsonObject(obj.contentSummary || obj.content || obj.contentBody);
+  // Use the shared selector so a MAN content-download URL in `content` can never
+  // shadow the real JSON body in `contentSummary` (which would silently drop
+  // the candidate).
+  const content = parseProtocolPinContent(obj);
   if (!content) return null;
 
   const title = asText(content.title);
