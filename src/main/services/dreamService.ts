@@ -790,18 +790,28 @@ export class DreamService {
 
     const impressionUpdates = Array.isArray(output.impressionUpdates) ? output.impressionUpdates : [];
     if (this.deps.metaidImpressionStore && observerGlobalMetaID && impressionUpdates.length > 0) {
-      const result = applyMetaIDDreamImpressionUpdates({
-        impressionStore: this.deps.metaidImpressionStore,
-        observerGlobalMetaID,
-        dreamDate: date,
-        dreamVersion: DREAM_VERSION,
-        modelId: llmId,
-        subjects: impressionSubjects,
-        updates: impressionUpdates,
-      });
-      if (result.accepted > 0 || result.rejected > 0) {
-        console.log(
-          `[DreamService] Impression updates for metabot ${metabotId}: accepted=${result.accepted}, created=${result.created}, rejected=${result.rejected}, rebuilt=${result.rebuilt}`,
+      try {
+        const result = applyMetaIDDreamImpressionUpdates({
+          impressionStore: this.deps.metaidImpressionStore,
+          observerGlobalMetaID,
+          dreamDate: date,
+          dreamVersion: DREAM_VERSION,
+          modelId: llmId,
+          subjects: impressionSubjects,
+          updates: impressionUpdates,
+        });
+        if (result.accepted > 0 || result.rejected > 0) {
+          console.log(
+            `[DreamService] Impression updates for metabot ${metabotId}: accepted=${result.accepted}, created=${result.created}, rejected=${result.rejected}, rebuilt=${result.rebuilt}`,
+          );
+        }
+      } catch (error) {
+        // Impression consolidation must never fail the dream run. The prior
+        // snapshot stays intact and the bounded diagnostic excludes private
+        // content and raw LLM output.
+        console.warn(
+          `[DreamService] MetaID impression consolidation failed for metabot ${metabotId} date ${date}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }

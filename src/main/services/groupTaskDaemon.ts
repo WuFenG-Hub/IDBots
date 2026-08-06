@@ -662,7 +662,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return block.length > GROUP_COGNITION_BLOCK_MAX_CHARS
         ? `${block.slice(0, GROUP_COGNITION_BLOCK_MAX_CHARS)}…`
         : block;
-    } catch {
+    } catch (error) {
+      deps.emitLog?.(
+        `[GroupTaskDaemon] MetaID group cognition projection unavailable for bot ${bot.id}; continuing without impression context: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
       return '';
     }
   };

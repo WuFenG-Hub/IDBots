@@ -187,7 +187,7 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.getMetaIDGroupCognitionPromptBlock
       ? { getMetaIDGroupCognitionPromptBlock: overrides.getMetaIDGroupCognitionPromptBlock }
       : {}),
-    emitLog: () => {},
+    emitLog: overrides.emitLog ?? (() => {}),
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
     chairCooldownMs: overrides.chairCooldownMs ?? 10_000,
@@ -1140,9 +1140,13 @@ test('group cognition projection is observer-relative and wired into per-bot pro
 });
 
 test('group cognition projection failure or absence omits the block without blocking the turn', async () => {
+  const logMessages = [];
   const failing = await createHarness({
     getMetaIDGroupCognitionPromptBlock: async () => {
       throw new Error('cognition service down');
+    },
+    emitLog: (message) => {
+      logMessages.push(message);
     },
   });
   try {
@@ -1154,6 +1158,10 @@ test('group cognition projection failure or absence omits the block without bloc
     await failing.loop.runTick();
     assert.equal(failing.sends.length, 1, 'reply still delivered');
     assert.ok(!failing.chatCalls[0].systemPrompt.includes('metaid_group_cognition'));
+    assert.ok(
+      logMessages.some((message) => message.includes('MetaID group cognition projection unavailable for bot 2')),
+      'failure emits a bounded diagnostic without private content',
+    );
   } finally {
     failing.cleanup();
   }
