@@ -12,6 +12,7 @@ import { writeFileAtomicSync } from './libs/atomicFile';
 import { createNativeSqliteDatabase } from './nativeSqliteDatabase';
 import type { SqliteDatabase } from './sqliteTypes';
 import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
+import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -1564,6 +1565,8 @@ export class SqliteStore {
     // MetaID-anchored objective experience ledger. The owning store calls the
     // same idempotent schema function when it is constructed independently.
     ensureMetaIDExperienceSchema(this.db);
+    // Observer-owned impression observations and their rebuildable read model.
+    ensureMetaIDImpressionSchema(this.db);
 
     this.save();
   }
