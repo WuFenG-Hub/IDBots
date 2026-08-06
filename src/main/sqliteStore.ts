@@ -1257,6 +1257,96 @@ export class SqliteStore {
       );
     `);
 
+    // Agent-Game-v2: persistent App/Game Runtime (docs/14 §5). Sessions, task
+    // grants, the idempotent write ledger, and the audit trail. These tables
+    // are user-data and must survive auto-update; column additions are guarded.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS agent_game_sessions (
+        session_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL DEFAULT 'paused',
+        app_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        seat TEXT NOT NULL,
+        rules_hash TEXT NOT NULL,
+        adapter_hash TEXT NOT NULL,
+        manifest_uri TEXT NOT NULL,
+        protocol_paths TEXT,
+        budget_llm_calls INTEGER NOT NULL DEFAULT 0,
+        budget_llm_calls_used INTEGER NOT NULL DEFAULT 0,
+        budget_writes INTEGER NOT NULL DEFAULT 0,
+        budget_writes_used INTEGER NOT NULL DEFAULT 0,
+        last_index INTEGER,
+        last_action_seq INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        expires_at INTEGER NOT NULL DEFAULT 0,
+        consent TEXT,
+        lease_id TEXT,
+        lease_expires_at INTEGER,
+        serialized_state TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_agent_game_sessions_group
+        ON agent_game_sessions(group_id);
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_agent_game_sessions_status
+        ON agent_game_sessions(status);
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS agent_game_grants (
+        resource_uri TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
+        app_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        game_id TEXT NOT NULL,
+        rules_hash TEXT NOT NULL,
+        adapter_hash TEXT NOT NULL,
+        seat TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        ttl_ms INTEGER NOT NULL DEFAULT 0,
+        expires_at INTEGER NOT NULL DEFAULT 0,
+        budget_llm_calls INTEGER NOT NULL DEFAULT 0,
+        budget_writes INTEGER NOT NULL DEFAULT 0,
+        revoked_at INTEGER,
+        reason TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (resource_uri, actor_id, app_id, group_id, game_id, rules_hash, adapter_hash, seat)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS agent_game_write_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        action_seq INTEGER NOT NULL,
+        event_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        pin_id TEXT,
+        tx_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (group_id, action_seq, event_id)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS agent_game_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        session_id TEXT,
+        actor_id TEXT,
+        fields TEXT,
+        ts INTEGER NOT NULL
+      );
+    `);
+    this.migrateAgentGameWriteLogEventIdUnique();
+
     // Migration: existing DBs with old schema (metabot_wallets.metabot_id, metabots without wallet_id, avatar TEXT)
     this.migrateMetabotWalletRelationAndAvatar(basePath);
 
@@ -1695,6 +1785,39 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatMessagesMsgIndex:', e);
+    }
+  }
+
+  /**
+   * Migration: ensure agent_game_write_log carries the idempotency unique index
+   * on (group_id, action_seq, event_id). For DBs created before the column was
+   * UNIQUE, recreate the index; no-op otherwise. Best-effort, non-destructive.
+   */
+  private migrateAgentGameWriteLogEventIdUnique(): void {
+    try {
+      const exists = this.db.exec(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='agent_game_write_log'`,
+      );
+      if (!exists[0]?.values?.length) return;
+      // Detect whether the UNIQUE constraint is already declared on the table.
+      const sqlRow = this.db.exec(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_game_write_log'`,
+      );
+      const ddl = String(sqlRow[0]?.values?.[0]?.[0] ?? '');
+      if (/event_id[^,]*UNIQUE/i.test(ddl) || /UNIQUE[^)]*event_id/i.test(ddl)) return;
+      // Backfill any duplicates (keep lowest id) before adding the constraint.
+      this.db.run(
+        `DELETE FROM agent_game_write_log WHERE id NOT IN (
+           SELECT MIN(id) FROM agent_game_write_log GROUP BY group_id, action_seq, event_id
+         )`,
+      );
+      this.db.run(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_game_write_log_dedup
+           ON agent_game_write_log(group_id, action_seq, event_id)`,
+      );
+      this.save();
+    } catch (e) {
+      console.warn('migrateAgentGameWriteLogEventIdUnique:', e);
     }
   }
 
