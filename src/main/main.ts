@@ -19,6 +19,7 @@ import {
 } from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
 import type { MemoryBackend } from './memory/memoryBackend';
+import { createOwnerMemoryScope } from './memory/memoryScope';
 import {
   CoworkRunner,
   isDelegationPriceNumeric,
@@ -44,6 +45,7 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
+import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { Scheduler } from './libs/scheduler';
@@ -109,6 +111,26 @@ import {
   startPrivateChatBackfill,
   stopPrivateChatBackfill,
 } from './services/privateChatBackfillService';
+import {
+  startGroupChatBackfill,
+  stopGroupChatBackfill,
+  setGroupChatBackfillActiveGroupIdsGetter,
+} from './services/groupChatBackfillService';
+import {
+  setGroupTaskServiceMetabotStoreGetter,
+  setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceKvStoreGetter,
+  postGroupTaskMessage,
+  createGroupTask,
+  listGroupTaskSummaries,
+  getGroupTask,
+  closeGroupTask,
+  postGroupTaskMessageAsOwner,
+} from './services/groupTaskService';
+import {
+  startGroupTaskDaemon,
+  stopGroupTaskDaemon,
+} from './services/groupTaskDaemon';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -151,7 +173,8 @@ import {
   storePrivateChatHistoryMessages,
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
-import { encryptGroupMessageECB, computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
+import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
+import { sendGroupChatMessage, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate, cleanupStaleDownloads } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
@@ -633,6 +656,17 @@ const emitProviderDiscoveryChanged = (snapshot: DiscoverySnapshot): void => {
       } catch (error) {
         console.error('Failed to forward provider discovery snapshot:', error);
       }
+    }
+  });
+};
+
+/** Broadcast a Group Task event (e.g. groupTask:statusChanged) to all renderer windows. */
+const broadcastGroupTaskEvent = <T extends { type: string }>(payload: T): void => {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send(payload.type, payload);
+      } catch { /* ignore */ }
     }
   });
 };
@@ -2852,6 +2886,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   coworkRunner = null;
   imGatewayManager = null;
   scheduledTaskStore = null;
+  groupTaskStore = null;
   metabotStore = null;
   serviceOrderStore = null;
   serviceOrderLifecycleService = null;
@@ -2987,6 +3022,12 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
 
 const startSqliteDaemons = (): void => {
   const skillMgr = getSkillManager();
+  setGroupChatTransportMetabotStoreGetter(getMetabotStore);
+  setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
+  setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
+  setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  setGroupTaskServiceKvStoreGetter(() => getStore());
+  setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
   startCognitiveOrchestrator(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -3008,21 +3049,7 @@ const startSqliteDaemons = (): void => {
     },
     performChatCompletionForOrchestrator,
     async (metabotId: number, groupId: string, nickName: string, content: string) => {
-      const encryptedContent = encryptGroupMessageECB(content, groupId);
-      const payload = {
-        groupId,
-        nickName,
-        content: encryptedContent,
-        contentType: 'text/plain',
-        encryption: 'aes',
-        timestamp: Date.now(),
-      };
-      await createPin(getMetabotStore(), metabotId, {
-        operation: 'create',
-        path: '/protocols/simplegroupchat',
-        contentType: 'application/json',
-        payload: JSON.stringify(payload),
-      });
+      await sendGroupChatMessage(metabotId, groupId, { content, nickName });
     },
     {
       getSkillsPromptForIds: (ids: string[]) => skillMgr.buildAutoRoutingPromptForSkillIds(ids),
@@ -3105,6 +3132,132 @@ const startSqliteDaemons = (): void => {
     emitLog: (msg) => console.log(msg),
   });
 
+  // Periodically reconcile Group Task group history with the indexer API so
+  // group messages missed by the socket push are recovered (INSERT OR IGNORE
+  // on pin_id keeps this idempotent against the realtime path).
+  startGroupChatBackfill({
+    db: getStore().getDatabase(),
+    saveDb: getStore().getSaveFunction(),
+    emitLog: (msg) => console.log(msg),
+  });
+
+  // Group Task daemon: group messages trigger member/chair replies under the
+  // strict chair-controlled protocol (own cursor on group_tasks, own session
+  // channel; fully separate from the cognitive orchestrator).
+  startGroupTaskDaemon({
+    getStore,
+    getGroupTaskStore,
+    getMetabotStore,
+    getCoworkStore,
+    performChat: performChatCompletionForOrchestrator,
+    postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
+    getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
+    runSkillTurn: async (params) => {
+      const roots = skillMgr.getAllSkillRoots();
+      const cwd = roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot();
+      return runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
+        sessionId: params.sessionId,
+        systemPrompt: params.systemPrompt,
+        userMessage: params.userMessage,
+        cwd,
+        activeSkillIds: params.activeSkillIds,
+      });
+    },
+    emitTaskEvent: (payload) => {
+      broadcastGroupTaskEvent(payload);
+    },
+    readPinForVerification: async (pinId) => {
+      try {
+        await getPinData(pinId, false);
+        return 'found';
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes('404') ? 'not_found' : 'unavailable';
+      }
+    },
+    sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
+      const metabotStore = getMetabotStore();
+      const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+      if (!wallet?.mnemonic?.trim()) {
+        throw new Error('chair wallet unavailable');
+      }
+      const identity = getUserIdentityStore().get();
+      if (!identity) {
+        throw new Error('owner identity unavailable');
+      }
+      const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
+      if (!peerGlobalMetaId) {
+        throw new Error('owner GlobalMetaID unavailable');
+      }
+      if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
+        throw new Error('task owner does not match the current user identity');
+      }
+      const peerChatPubkey = identity.chat_public_key.trim();
+      if (!peerChatPubkey) {
+        throw new Error('owner chat public key unavailable');
+      }
+      const sent = await sendEncryptedSimplemsg({
+        metabotId,
+        wallet,
+        peerGlobalMetaId,
+        peerChatPubkey,
+        plaintext: text,
+        createPin: async (id, payload) => createPin(metabotStore, id, payload),
+      });
+
+      let sessionId: string | null = null;
+      let displayError: string | null = null;
+      try {
+        const recorded = recordOutgoingPrivateChatA2ADisplay({
+          coworkStore: getCoworkStore(),
+          getMetabotById: (id) => metabotStore.getMetabotById(id),
+          metabotId,
+          peerGlobalMetaId,
+          peerName: identity.name,
+          peerAvatar: identity.avatar,
+          content: text,
+          chain: { txids: sent.txids, pinId: sent.pinId },
+          extraMetadata: {
+            privateChatDeliveryStatus: 'sent',
+            suppressRunningStatus: true,
+            groupTaskOwnerReport: true,
+            groupTaskId: taskId,
+          },
+        });
+        if (recorded) {
+          sessionId = recorded.sessionId;
+          if (recorded.message) {
+            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+          }
+        }
+      } catch (error) {
+        displayError = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
+          error,
+        );
+      }
+
+      return {
+        pinId: sent.pinId,
+        sessionId,
+        displayError,
+      };
+    },
+    listUserMemories: (metabotId, input) =>
+      getCoworkStore().getMemoryBackend().listUserMemories({
+        metabotId,
+        scope: createOwnerMemoryScope(),
+        usageClass: input.usageClass,
+        status: 'created',
+        includeDeleted: false,
+        limit: input.limit,
+        offset: 0,
+      }).map((entry) => ({ text: entry.text })),
+    listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    emitLog: (msg) => console.log(msg),
+  });
+
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
   startDreamService({
@@ -3138,6 +3291,8 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   await stopPrivateChatDaemon({ waitForTick: true });
   stopDreamService();
   stopPrivateChatBackfill();
+  stopGroupChatBackfill();
+  stopGroupTaskDaemon();
   await resetSqliteBackedSingletons();
   return restartState;
 };
@@ -4608,6 +4763,15 @@ const getScheduledTaskStore = () => {
     scheduledTaskStore = new ScheduledTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return scheduledTaskStore;
+};
+
+let groupTaskStore: GroupTaskStore | null = null;
+const getGroupTaskStore = () => {
+  if (!groupTaskStore) {
+    const sqliteStore = getStore();
+    groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return groupTaskStore;
 };
 
 const getMetabotStore = () => {
@@ -7745,6 +7909,114 @@ if (!gotTheLock) {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to set config',
       };
+    }
+  });
+
+  // ==================== Group Task IPC Handlers ====================
+
+  ipcMain.handle('groupTask:create', async (_event, input: {
+    title?: string;
+    goal?: string;
+    acceptanceCriteria?: string;
+    memberMetabotIds?: number[];
+  }) => {
+    try {
+      const task = await withSqliteRecovery('groupTask:create', () =>
+        createGroupTask({
+          title: String(input?.title ?? '').trim(),
+          goal: String(input?.goal ?? '').trim(),
+          acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
+          memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          createdBy: 'user',
+        }));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:list', async (_event, filter?: { status?: GroupTaskStatus }) => {
+    try {
+      const status = typeof filter?.status === 'string' && filter.status.trim()
+        ? filter.status.trim() as GroupTaskStatus
+        : undefined;
+      const tasks = await withSqliteRecovery('groupTask:list', () => listGroupTaskSummaries(
+        status ? { status } : undefined,
+      ));
+      return { success: true, tasks };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list group tasks' };
+    }
+  });
+
+  ipcMain.handle('groupTask:get', async (_event, input: { taskId?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:get', () => getGroupTask(taskId));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to get group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const status = String(input?.status ?? '').trim();
+      if (status !== 'done' && status !== 'cancelled') {
+        throw new Error("status must be 'done' or 'cancelled'");
+      }
+      const task = await withSqliteRecovery('groupTask:close', () =>
+        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to close group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:listMessages', async (_event, input: { taskId?: number; beforeId?: number; limit?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const messages = await withSqliteRecovery('groupTask:listMessages', () => {
+        const task = getGroupTaskStore().getTaskById(taskId);
+        if (!task) throw new Error(`Group task ${taskId} not found`);
+        if (!task.groupId) return [];
+        return getGroupTaskStore().listGroupChatMessages(task.groupId, {
+          beforeId: typeof input?.beforeId === 'number' ? input.beforeId : undefined,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        });
+      });
+      return { success: true, messages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list group task messages' };
+    }
+  });
+
+  ipcMain.handle('groupTask:sendUserMessage', async (_event, input: { taskId?: number; content?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const content = String(input?.content ?? '').trim();
+      if (!content) {
+        throw new Error('content is required');
+      }
+      const result = await withSqliteRecovery('groupTask:sendUserMessage', () =>
+        postGroupTaskMessageAsOwner(taskId, content));
+      return { success: true, pinId: result.pinId };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to send group task message' };
     }
   });
 

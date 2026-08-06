@@ -689,6 +689,55 @@ export class SqliteStore {
     `);
     this.migrateGroupChatTasksSupervisorGlobalmetaid();
 
+    // Group Task (任务导向群聊): task entity + members + deliverables (M1)
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT UNIQUE,
+        title TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        acceptance_criteria TEXT,
+        status TEXT NOT NULL DEFAULT 'planning'
+          CHECK(status IN ('planning','executing','review','done','cancelled')),
+        chair_metabot_id INTEGER NOT NULL,
+        created_by TEXT NOT NULL DEFAULT 'user',
+        last_processed_msg_id INTEGER NOT NULL DEFAULT 0,
+        create_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        updated_at TEXT DEFAULT (datetime('now')),
+        closed_at TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        metabot_id INTEGER,
+        globalmetaid TEXT,
+        role TEXT NOT NULL DEFAULT 'worker' CHECK(role IN ('chair','worker')),
+        joined_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(task_id, metabot_id)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_deliverables (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        kind TEXT,
+        uri TEXT,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
+        ON group_chat_messages(group_id, id);
+    `);
+    this.migrateGroupChatMessagesMsgIndex();
+
     // MetaID pins: full-field persistence from manapi.metaid.io
     this.db.run(`
       CREATE TABLE IF NOT EXISTS metaid_pins (
@@ -1534,6 +1583,46 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatTasksSupervisorGlobalmetaid:', e);
+    }
+  }
+
+  /**
+   * Migration: Add msg_index to group_chat_messages. Both the socket push and the
+   * history API GroupChatItem carry an `index` field; it is the M1 backfill cursor.
+   * Best-effort backfills existing rows from the `index` field in raw_data JSON.
+   */
+  private migrateGroupChatMessagesMsgIndex(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_chat_messages)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('msg_index')) return;
+      this.db.run('ALTER TABLE group_chat_messages ADD COLUMN msg_index INTEGER');
+      try {
+        const rowsResult = this.db.exec(
+          'SELECT id, raw_data FROM group_chat_messages WHERE raw_data IS NOT NULL'
+        );
+        const rows = rowsResult[0]?.values || [];
+        for (const row of rows) {
+          const id = row[0] as number;
+          const rawData = row[1] as string;
+          try {
+            const parsed = JSON.parse(rawData) as { index?: unknown };
+            if (typeof parsed.index === 'number' && Number.isFinite(parsed.index)) {
+              this.db.run('UPDATE group_chat_messages SET msg_index = ? WHERE id = ?', [
+                Math.trunc(parsed.index),
+                id,
+              ]);
+            }
+          } catch {
+            // Skip rows with unparseable raw_data.
+          }
+        }
+      } catch (backfillError) {
+        console.warn('migrateGroupChatMessagesMsgIndex backfill:', backfillError);
+      }
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupChatMessagesMsgIndex:', e);
     }
   }
 

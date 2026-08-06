@@ -1,0 +1,175 @@
+#!/usr/bin/env node
+/**
+ * metabot-group-task skill script: forward Group Task commands to the local
+ * IDBots RPC gateway (no chain logic here; the main process owns pins/storage).
+ *
+ * Usage:
+ *   node index.js --payload '<JSON string>'
+ *   node index.js --payload @/path/to/payload.json
+ *   echo '<JSON string>' | node index.js
+ *
+ * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'close', ... }
+ * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
+ */
+'use strict';
+
+const fs = require('fs');
+
+const RPC_URL = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/$/, '');
+
+const ACTION_PATHS = {
+  create: '/api/idbots/group-task/create',
+  list: '/api/idbots/group-task/list',
+  show: '/api/idbots/group-task/show',
+  send: '/api/idbots/group-task/send',
+  invite: '/api/idbots/group-task/invite',
+  close: '/api/idbots/group-task/close',
+  bots: '/api/idbots/list-metabots',
+};
+
+function fail(message) {
+  console.error(`Error: ${message}`);
+  process.exit(1);
+}
+
+function parsePayload() {
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--payload' && args[i + 1]) {
+      let raw = args[i + 1].trim();
+      // @file syntax: read the JSON payload from a file (avoids shell quoting issues).
+      if (raw.startsWith('@')) {
+        raw = fs.readFileSync(raw.slice(1), 'utf-8').trim();
+      }
+      return raw;
+    }
+  }
+  return fs.readFileSync(0, 'utf-8').trim();
+}
+
+async function postJson(path, body) {
+  const res = await fetch(`${RPC_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok || !json || json.success !== true) {
+    fail((json && json.error) || `RPC ${path} failed with HTTP ${res.status}`);
+  }
+  return json;
+}
+
+async function main() {
+  const raw = parsePayload();
+  let params;
+  try {
+    params = JSON.parse(raw);
+  } catch (e) {
+    fail(`invalid JSON: ${e instanceof Error ? e.message : e}`);
+  }
+
+  const action = String(params.action ?? '').trim();
+  const path = ACTION_PATHS[action];
+  if (!path) {
+    fail(`action must be one of: ${Object.keys(ACTION_PATHS).join(', ')}`);
+  }
+
+  let body;
+  switch (action) {
+    case 'bots': {
+      body = {};
+      break;
+    }
+    case 'create': {
+      const title = String(params.title ?? '').trim();
+      const goal = String(params.goal ?? '').trim();
+      if (!title || !goal) fail('title and goal are required for create');
+      body = {
+        title,
+        goal,
+        acceptance_criteria: params.acceptance_criteria,
+        member_metabot_ids: Array.isArray(params.member_metabot_ids) ? params.member_metabot_ids : undefined,
+        member_names: Array.isArray(params.member_names) ? params.member_names : undefined,
+        // The twin bot runs this skill, so it is the default creator/chair.
+        created_by: params.created_by === 'user' ? 'user' : 'twinbot',
+      };
+      break;
+    }
+    case 'list': {
+      body = {};
+      if (typeof params.status === 'string' && params.status.trim()) {
+        body.status = params.status.trim();
+      }
+      break;
+    }
+    case 'show': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for show');
+      body = { task_id: taskId };
+      break;
+    }
+    case 'send': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for send');
+      const content = String(params.content ?? '').trim();
+      if (!content) fail('content is required for send');
+      body = { task_id: taskId, content };
+      const metabotName = String(params.metabot_name ?? '').trim();
+      if (metabotName) body.metabot_name = metabotName;
+      if (typeof params.metabot_id === 'number') body.metabot_id = params.metabot_id;
+      const replyPin = String(params.reply_pin ?? '').trim();
+      if (replyPin) body.reply_pin = replyPin;
+      if (Array.isArray(params.mention) && params.mention.length) body.mention = params.mention;
+      break;
+    }
+    case 'invite': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for invite');
+      const metabotName = String(params.metabot_name ?? '').trim();
+      body = { task_id: taskId };
+      if (typeof params.metabot_id === 'number' && params.metabot_id > 0) {
+        body.metabot_id = params.metabot_id;
+      } else if (metabotName) {
+        body.metabot_name = metabotName;
+      } else {
+        fail('metabot_id or metabot_name is required for invite');
+      }
+      break;
+    }
+    case 'close': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for close');
+      const status = String(params.status ?? '').trim();
+      if (status !== 'done' && status !== 'cancelled') fail("close status must be 'done' or 'cancelled'");
+      body = { task_id: taskId, status };
+      const reason = String(params.reason ?? '').trim();
+      if (reason) body.reason = reason;
+      break;
+    }
+    default:
+      fail(`unsupported action: ${action}`);
+  }
+
+  const result = await postJson(path, body);
+
+  if (action === 'bots') {
+    const metabots = Array.isArray(result.metabots) ? result.metabots : [];
+    if (metabots.length === 0) {
+      console.log('(no local MetaBots)');
+      return;
+    }
+    for (const bot of metabots) {
+      const headline = [bot.role, bot.bio].filter(Boolean).join(' — ');
+      const status = bot.enabled ? 'enabled' : 'disabled';
+      console.log(`- ${bot.name} [${bot.metabot_type}] ${status} (id=${bot.id})`);
+      if (headline) console.log(`  ${headline}`);
+      if (bot.goal) console.log(`  Goal: ${bot.goal}`);
+    }
+    return;
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+}
+
+main().catch((e) => fail(e instanceof Error ? e.message : String(e)));

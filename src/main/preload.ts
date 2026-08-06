@@ -597,6 +597,28 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('scheduledTask:runUpdate', handler);
     },
   },
+  groupTask: {
+    create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) =>
+      ipcRenderer.invoke('groupTask:create', input),
+    list: (filter?: { status?: string }) => ipcRenderer.invoke('groupTask:list', filter),
+    get: (taskId: number) => ipcRenderer.invoke('groupTask:get', { taskId }),
+    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:close', input),
+    listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) =>
+      ipcRenderer.invoke('groupTask:listMessages', input),
+    sendUserMessage: (input: { taskId: number; content: string }) =>
+      ipcRenderer.invoke('groupTask:sendUserMessage', input),
+    onStatusChanged: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('groupTask:statusChanged', handler);
+      return () => ipcRenderer.removeListener('groupTask:statusChanged', handler);
+    },
+    onOwnerReportDelivery: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('groupTask:ownerReportDelivery', handler);
+      return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
+    },
+  },
   idbots: {
     getMetaBots: () => ipcRenderer.invoke('idbots:getMetaBots'),
     getOfficialSkillsStatus: () => ipcRenderer.invoke('idbots:getOfficialSkillsStatus'),

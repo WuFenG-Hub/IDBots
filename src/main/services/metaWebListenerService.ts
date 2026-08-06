@@ -276,17 +276,19 @@ function routeGroupChat(
   const reply_pin = D.replyPin ?? '';
   const chain_timestamp = typeof D.timestamp === 'number' ? D.timestamp : null;
   const chain = D.chain ?? null;
+  const msg_index =
+    typeof D.index === 'number' && Number.isFinite(D.index) ? Math.trunc(D.index) : null;
 
   db.run(
     `INSERT OR IGNORE INTO group_chat_messages (
       pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
       sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
-      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
     [
       pinId, tx_id, groupId, channel_id, sender_metaid, sender_global_metaid, sender_address,
       sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
-      reply_pin, mentionStr, chain_timestamp, chain, rawDataStr,
+      reply_pin, mentionStr, chain_timestamp, chain, rawDataStr, msg_index,
     ]
   );
   saveDb();
