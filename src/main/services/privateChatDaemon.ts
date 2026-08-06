@@ -90,8 +90,6 @@ import {
 import {
   A2A_SESSION_CONVERSATION_GAP_MS,
   ensureCoworkA2ASession,
-  resolveA2ASessionEpisodeRotationReason,
-  rotateCoworkA2ASessionEpisode,
 } from './coworkEnsureA2ASession';
 import {
   deriveA2AClosingPhaseTurns,
@@ -1639,7 +1637,6 @@ async function resolvePrivateConversationSession(
   sessionId: string;
   externalConversationId: string;
   episodeStarted: boolean;
-  previousEpisodeSessionId?: string;
 }> {
   const peerId = normalizePrivateConversationPeerId(row);
   const externalConversationId = buildPrivateConversationExternalConversationId(row);
@@ -1668,30 +1665,8 @@ async function resolvePrivateConversationSession(
             : null,
           startedAt: Number(existingMetadata.episodeStartedAt) || repairedSession.createdAt,
         });
-        const rotationReason = resolveA2ASessionEpisodeRotationReason({
-          mapping: existing,
-          messageCount: coworkStore.getSessionMessageCount(repairedSession.id),
-          hasBlockingServiceOrders: coworkStore.hasBlockingServiceOrdersForSession(repairedSession.id),
-          isArchived: coworkStore.isSessionArchived(repairedSession.id),
-        });
-        if (rotationReason) {
-          const rotatedSession = rotateCoworkA2ASessionEpisode({
-            coworkStore,
-            mapping: existing,
-            session: repairedSession,
-            externalConversationId,
-            reason: rotationReason,
-            localGlobalMetaId,
-            peerGlobalMetaId: peerId,
-            peerName: (row.from_name as string | null) ?? null,
-            peerAvatar: (row.from_avatar as string | null) ?? null,
-          });
-          return {
-            sessionId: rotatedSession.id,
-            externalConversationId,
-            episodeStarted: true,
-            previousEpisodeSessionId: repairedSession.id,
-          };
+        if (coworkStore.isSessionArchived(repairedSession.id)) {
+          coworkStore.unarchiveSession(repairedSession.id);
         }
         coworkStore.touchConversationMapping('metaweb_private', externalConversationId, metabotId);
         return { sessionId: existing.coworkSessionId, externalConversationId, episodeStarted: false };
@@ -1746,7 +1721,13 @@ async function resolvePrivateConversationSession(
     startedAt: session.createdAt,
   });
   coworkStore.updateConversationMappingMetadata('metaweb_private', externalConversationId, metabotId, {
+    peerGlobalMetaId: peerId,
+    peerName: (row.from_name as string | null) ?? null,
+    peerAvatar: (row.from_avatar as string | null) ?? null,
+    a2aConversationId: externalConversationId,
     a2aThreadId: registeredEpisode.threadId,
+    episodeIndex: 1,
+    episodeStartedAt: session.createdAt,
   });
   coworkStore.updateConversationMappingMetadata('cowork_ui', session.id, metabotId, {
     a2aConversationId: externalConversationId,
@@ -3801,7 +3782,6 @@ async function processOne(
         ...mappingMeta,
         byeSent: false,
         endedByAutoPolicy: false,
-        episodeRestartRequestedAt: Date.now(),
         restartedAt: Date.now(),
       });
     }
@@ -3832,7 +3812,7 @@ async function processOne(
       return;
     }
 
-    const { sessionId, episodeStarted, previousEpisodeSessionId } = await resolvePrivateConversationSession(
+    const { sessionId, episodeStarted } = await resolvePrivateConversationSession(
       coworkStore,
       metabot.id,
       metabot.globalmetaid,
@@ -3868,7 +3848,6 @@ async function processOne(
         ...(episodeStarted ? {
           refreshSessionSummary: true,
           a2aEpisodeStarted: true,
-          previousEpisodeSessionId,
         } : {}),
       },
       emitToRenderer,

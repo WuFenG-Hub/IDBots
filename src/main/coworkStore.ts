@@ -1385,6 +1385,7 @@ export class CoworkStore implements MemoryBackend {
         ON a2a_conversation_episodes(thread_id, episode_index DESC)
       `);
       this.backfillA2AConversationEpisodes();
+      this.consolidateA2AConversationEpisodes();
       this.saveDb();
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify A2A conversation schema:', error);
@@ -1478,6 +1479,201 @@ export class CoworkStore implements MemoryBackend {
           ? metadata.episodeCloseReason
           : null,
       });
+    }
+  }
+
+  /**
+   * Collapse sessions created by the retired A2A episode-rotation policy back
+   * into the original session. The logical thread tables remain as compatibility
+   * metadata, but each local-Bot/peer conversation now has one physical session.
+   */
+  private consolidateA2AConversationEpisodes(): void {
+    const threadRows = this.getAll<{ thread_id: string }>(`
+      SELECT thread_id
+      FROM a2a_conversation_episodes
+      GROUP BY thread_id
+      HAVING COUNT(*) > 1
+    `);
+    if (threadRows.length === 0) return;
+
+    this.db.run('BEGIN TRANSACTION');
+    try {
+      for (const { thread_id: threadId } of threadRows) {
+        const episodes = this.getAll<{
+          session_id: string;
+          episode_index: number | string;
+          started_at: number | string;
+          status: string;
+          pinned: number | string;
+          peer_name: string | null;
+          peer_avatar: string | null;
+          updated_at: number | string;
+        }>(`
+          SELECT
+            e.session_id,
+            e.episode_index,
+            e.started_at,
+            s.status,
+            s.pinned,
+            s.peer_name,
+            s.peer_avatar,
+            s.updated_at
+          FROM a2a_conversation_episodes e
+          JOIN cowork_sessions s ON s.id = e.session_id
+          WHERE e.thread_id = ?
+          ORDER BY e.episode_index ASC, e.started_at ASC, e.session_id ASC
+        `, [threadId]);
+        if (episodes.length < 2) continue;
+
+        const canonical = episodes[0];
+        const latest = episodes[episodes.length - 1];
+        const sessionIds = episodes.map((episode) => episode.session_id);
+        const retiredSessionIds = sessionIds.slice(1);
+        const placeholders = sessionIds.map(() => '?').join(', ');
+        const retiredPlaceholders = retiredSessionIds.map(() => '?').join(', ');
+        const messages = this.getAll<{ id: string }>(`
+          SELECT m.id
+          FROM cowork_messages m
+          JOIN a2a_conversation_episodes e ON e.session_id = m.session_id
+          WHERE m.session_id IN (${placeholders})
+          ORDER BY e.episode_index ASC, COALESCE(m.sequence, 0) ASC, m.created_at ASC, m.id ASC
+        `, sessionIds);
+
+        messages.forEach((message, index) => {
+          this.db.run(`
+            UPDATE cowork_messages
+            SET session_id = ?, sequence = ?
+            WHERE id = ?
+          `, [canonical.session_id, index + 1, message.id]);
+        });
+
+        this.db.run(`
+          DELETE FROM cowork_conversation_mappings
+          WHERE channel = 'cowork_ui'
+            AND cowork_session_id IN (${retiredPlaceholders})
+        `, retiredSessionIds);
+        this.db.run(`
+          UPDATE cowork_conversation_mappings
+          SET cowork_session_id = ?
+          WHERE cowork_session_id IN (${retiredPlaceholders})
+        `, [canonical.session_id, ...retiredSessionIds]);
+
+        const referenceColumns = [
+          ['service_orders', 'cowork_session_id'],
+          ['scheduled_tasks', 'cowork_session_id'],
+          ['scheduled_task_runs', 'session_id'],
+          ['user_memory_sources', 'session_id'],
+          ['metabot_dream_fragments', 'session_id'],
+          ['im_session_mappings', 'cowork_session_id'],
+        ] as const;
+        for (const [table, column] of referenceColumns) {
+          if (!this.tableExists(table)) continue;
+          this.db.run(`
+            UPDATE ${table}
+            SET ${column} = ?
+            WHERE ${column} IN (${retiredPlaceholders})
+          `, [canonical.session_id, ...retiredSessionIds]);
+        }
+        this.db.run(`
+          UPDATE cowork_sessions
+          SET parent_session_id = ?
+          WHERE parent_session_id IN (${retiredPlaceholders})
+        `, [canonical.session_id, ...retiredSessionIds]);
+
+        const mappings = this.getAll<{
+          channel: string;
+          external_conversation_id: string;
+          metabot_id: number | string;
+          metadata_json: string | null;
+        }>(`
+          SELECT channel, external_conversation_id, metabot_id, metadata_json
+          FROM cowork_conversation_mappings
+          WHERE cowork_session_id = ?
+            AND channel IN ('metaweb_private', 'cowork_ui')
+        `, [canonical.session_id]);
+        for (const mapping of mappings) {
+          let metadata: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(mapping.metadata_json || '{}') as unknown;
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              metadata = { ...parsed as Record<string, unknown> };
+            }
+          } catch {
+            // Preserve the mapping even when legacy metadata is malformed.
+          }
+          for (const key of [
+            'previousEpisodeSessionId',
+            'nextEpisodeSessionId',
+            'episodeReason',
+            'episodeRestartRequestedAt',
+            'episodeClosedAt',
+            'episodeCloseReason',
+          ]) {
+            delete metadata[key];
+          }
+          metadata.a2aThreadId = threadId;
+          metadata.episodeIndex = 1;
+          metadata.episodeStartedAt = Number(canonical.started_at);
+          this.db.run(`
+            UPDATE cowork_conversation_mappings
+            SET metadata_json = ?
+            WHERE channel = ? AND external_conversation_id = ? AND metabot_id = ?
+          `, [
+            JSON.stringify(metadata),
+            mapping.channel,
+            mapping.external_conversation_id,
+            Number(mapping.metabot_id),
+          ]);
+        }
+
+        const latestUpdatedAt = Math.max(...episodes.map((episode) => Number(episode.updated_at) || 0));
+        const pinned = episodes.some((episode) => Number(episode.pinned) === 1) ? 1 : 0;
+        this.db.run(`
+          UPDATE cowork_sessions
+          SET status = ?,
+              pinned = ?,
+              peer_name = COALESCE(?, peer_name),
+              peer_avatar = COALESCE(?, peer_avatar),
+              archived_at = NULL,
+              updated_at = ?
+          WHERE id = ?
+        `, [
+          latest.status,
+          pinned,
+          latest.peer_name,
+          latest.peer_avatar,
+          latestUpdatedAt,
+          canonical.session_id,
+        ]);
+        this.db.run(`
+          DELETE FROM a2a_conversation_episodes
+          WHERE session_id IN (${retiredPlaceholders})
+        `, retiredSessionIds);
+        this.db.run(`
+          UPDATE a2a_conversation_episodes
+          SET episode_index = 1,
+              previous_session_id = NULL,
+              next_session_id = NULL,
+              ended_at = NULL,
+              close_reason = NULL
+          WHERE session_id = ?
+        `, [canonical.session_id]);
+        this.db.run(`
+          DELETE FROM cowork_sessions
+          WHERE id IN (${retiredPlaceholders})
+        `, retiredSessionIds);
+        this.db.run(`
+          UPDATE a2a_conversation_threads
+          SET updated_at = ?
+          WHERE id = ?
+        `, [latestUpdatedAt, threadId]);
+      }
+
+      this.db.run('COMMIT');
+      this.saveDb();
+    } catch (error) {
+      this.db.run('ROLLBACK');
+      console.warn('[CoworkStore] Failed to consolidate A2A conversation episodes:', error);
     }
   }
 

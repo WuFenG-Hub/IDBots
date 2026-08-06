@@ -170,13 +170,17 @@ test('ensureCoworkA2ASession creates canonical metaweb private A2A session', asy
       peerName: 'Peer Bot',
       peerAvatar: 'peer-avatar',
       source: 'bot_browser',
+      a2aConversationId: 'metaweb-private:idq1peer',
+      a2aThreadId: mapping ? JSON.parse(mapping.metadataJson).a2aThreadId : undefined,
+      episodeIndex: 1,
+      episodeStartedAt: result.session.createdAt,
     });
   } finally {
     sqlite.cleanup();
   }
 });
 
-test('ensureCoworkA2ASession reuses existing canonical session and repairs display metadata', async () => {
+test('ensureCoworkA2ASession always reuses and restores the existing canonical session', async () => {
   const sqlite = await createSqliteStore();
   try {
     insertMetabot(sqlite.db, {
@@ -202,7 +206,13 @@ test('ensureCoworkA2ASession reuses existing canonical session and repairs displ
       externalConversationId: 'metaweb-private:idq1peer',
       metabotId: 8,
       coworkSessionId: existing.id,
+      metadataJson: JSON.stringify({
+        byeSent: true,
+        episodeRestartRequestedAt: 1_800_000_000_000,
+      }),
     });
+    coworkStore.addMessage(existing.id, { type: 'user', content: 'existing history' });
+    coworkStore.archiveSession(existing.id);
 
     const result = ensureCoworkA2ASession({
       coworkStore,
@@ -223,6 +233,11 @@ test('ensureCoworkA2ASession reuses existing canonical session and repairs displ
     assert.equal(result.session.id, existing.id);
     assert.equal(result.session.peerName, 'New Peer');
     assert.equal(result.session.peerAvatar, 'new-avatar');
+    assert.equal(coworkStore.isSessionArchived(existing.id), false);
+    assert.deepEqual(coworkStore.getSession(existing.id)?.messages.map((message) => message.content), [
+      'existing history',
+    ]);
+    assert.deepEqual(coworkStore.listSessions().map((session) => session.id), [existing.id]);
   } finally {
     sqlite.cleanup();
   }
