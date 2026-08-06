@@ -11,6 +11,7 @@ import { findNearestExistingFile } from './libs/runtimePaths';
 import { writeFileAtomicSync } from './libs/atomicFile';
 import { createNativeSqliteDatabase } from './nativeSqliteDatabase';
 import type { SqliteDatabase } from './sqliteTypes';
+import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -1559,6 +1560,10 @@ export class SqliteStore {
     } catch (error) {
       console.warn('Failed to migrate remote_skill_service_rating_seen detail columns:', error);
     }
+
+    // MetaID-anchored objective experience ledger. The owning store calls the
+    // same idempotent schema function when it is constructed independently.
+    ensureMetaIDExperienceSchema(this.db);
 
     this.save();
   }
