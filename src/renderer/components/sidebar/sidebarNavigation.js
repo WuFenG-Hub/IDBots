@@ -1,3 +1,8 @@
+// Feature flag: Group Tasks is not yet ready for public release. The nav entry
+// (and everything behind it) stays implemented; flipping this to `true`
+// re-exposes the link on the Bot home page once the feature matures.
+const GROUP_TASKS_NAV_ENABLED = false;
+
 export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
   return [
     {
@@ -10,6 +15,7 @@ export function getSidebarPrimaryNavModel({ t, hasRunningScheduledTask }) {
       id: 'groupTasks',
       label: t('groupTasks'),
       icon: 'userGroup',
+      hidden: !GROUP_TASKS_NAV_ENABLED,
     },
     {
       id: 'gigSquare',

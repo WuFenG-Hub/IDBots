@@ -76,7 +76,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const primaryNavItems = getSidebarPrimaryNavModel({
     t: (key) => i18nService.t(key),
     hasRunningScheduledTask,
-  });
+  }).filter((item) => !item.hidden);
 
   useEffect(() => {
     const handleSearch = () => {
