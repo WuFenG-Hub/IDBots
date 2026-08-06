@@ -1,4 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
+import {
+  LockClosedIcon,
+  ShieldCheckIcon,
+  PencilSquareIcon,
+  BoltIcon,
+} from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { CoworkPermissionMode } from '../../types/cowork';
 
@@ -36,12 +42,12 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen]);
 
-  const modeIcon = (mode: CoworkPermissionMode): string => {
+  const ModeIcon = (mode: CoworkPermissionMode): React.ReactElement => {
     switch (mode) {
-      case 'plan': return '🛡️';
-      case 'acceptEdits': return '✏️';
-      case 'bypassPermissions': return '⚡';
-      default: return '🔒';
+      case 'plan': return <ShieldCheckIcon className="h-3.5 w-3.5 flex-shrink-0" />;
+      case 'acceptEdits': return <PencilSquareIcon className="h-3.5 w-3.5 flex-shrink-0" />;
+      case 'bypassPermissions': return <BoltIcon className="h-3.5 w-3.5 flex-shrink-0" />;
+      default: return <LockClosedIcon className="h-3.5 w-3.5 flex-shrink-0" />;
     }
   };
 
@@ -49,7 +55,9 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
     switch (mode) {
       case 'plan': return 'text-blue-500';
       case 'acceptEdits': return 'text-amber-500';
-      case 'bypassPermissions': return 'text-red-500';
+      // Full-trust mode uses the brand/primary accent (same as the main send
+      // button) instead of red, which read as alarming.
+      case 'bypassPermissions': return 'text-claude-accent';
       default: return 'text-claude-accent';
     }
   };
@@ -63,7 +71,9 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
         className="flex items-center gap-1 rounded-lg border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         title={i18nService.t('coworkPermissionModeTitle')}
       >
-        <span className="text-[11px]">{modeIcon(currentMode)}</span>
+        <span className={`flex items-center ${modeColor(currentMode)}`}>
+          {ModeIcon(currentMode)}
+        </span>
         <span className={`font-medium ${modeColor(currentMode)}`}>
           {i18nService.t(`coworkPermissionMode_${currentMode}`)}
         </span>
@@ -87,7 +97,9 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
                   : 'hover:dark:bg-claude-darkSurfaceInset/60 hover:bg-claude-surfaceInset/60'
               }`}
             >
-              <span className="text-[11px] mt-0.5">{modeIcon(mode)}</span>
+              <span className={`mt-0.5 ${mode === currentMode ? modeColor(mode) : 'text-claude-textSecondary dark:text-claude-darkTextSecondary'}`}>
+                {ModeIcon(mode)}
+              </span>
               <div className="min-w-0 flex-1">
                 <div className={`font-medium ${mode === currentMode ? modeColor(mode) : 'dark:text-claude-darkText text-claude-text'}`}>
                   {i18nService.t(`coworkPermissionMode_${mode}`)}
