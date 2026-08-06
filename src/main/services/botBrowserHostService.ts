@@ -29,6 +29,7 @@ import {
 
 import type { MetaAppRecord } from '../metaAppManager';
 import type { CommunityMetaAppInstallResult } from './metaAppChainService';
+import { normalizeProfileAvatarUrl } from '../utils/avatarSource';
 
 export interface BotBrowserHostService {
   resolveResource(input: BrowserResolveInput): Promise<BrowserCommandResult<BrowserResolveResult>>;
@@ -383,7 +384,10 @@ export async function fetchLatestBotProfileInfo(
     // fetchBotProfileInfo falls back to the raw globalMetaId when no name is
     // published; treat that as "no name" so callers keep their own fallbacks.
     name: rawName && rawName !== targetId ? rawName : null,
-    avatar: rawAvatar || null,
+    // fetchBotProfileInfo turns the on-chain "no avatar" marker `/content/`
+    // into an absolute URL against the P2P base (e.g. `https://so.metaid.io/content/`,
+    // a 404). Drop such markers so we never store a broken avatar.
+    avatar: normalizeProfileAvatarUrl(rawAvatar),
   };
 }
 
