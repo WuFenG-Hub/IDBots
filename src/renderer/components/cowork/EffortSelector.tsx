@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { Cog6ToothIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 
 interface EffortSelectorProps {
@@ -8,12 +9,43 @@ interface EffortSelectorProps {
   disabled?: boolean;
 }
 
-const EFFORT_LEVELS: Array<{ value: string | null; icon: string; labelKey: string; descKey: string; color: string }> = [
-  { value: null, icon: '⚙️', labelKey: 'coworkEffort_auto', descKey: 'coworkEffort_auto_desc', color: 'text-claude-textSecondary' },
-  { value: 'low', icon: '🐇', labelKey: 'coworkEffort_low', descKey: 'coworkEffort_low_desc', color: 'text-green-500' },
-  { value: 'medium', icon: '👟', labelKey: 'coworkEffort_medium', descKey: 'coworkEffort_medium_desc', color: 'text-blue-500' },
-  { value: 'high', icon: '🏃', labelKey: 'coworkEffort_high', descKey: 'coworkEffort_high_desc', color: 'text-amber-500' },
-  { value: 'max', icon: '🚀', labelKey: 'coworkEffort_max', descKey: 'coworkEffort_max_desc', color: 'text-red-500' },
+/**
+ * Minimalist ascending-bar icon (1–4 bars) conveying reasoning effort /
+ * intensity. Single-color, inherits currentColor so it matches the rest of
+ * the cowork input's outline-icon style.
+ */
+const EffortBarsIcon: React.FC<{ level: 1 | 2 | 3 | 4; className?: string }> = ({ level, className = '' }) => {
+  const heights = [4, 7, 10, 13];
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      className={`h-3.5 w-3.5 flex-shrink-0 ${className}`}
+      aria-hidden="true"
+    >
+      {heights.map((h, i) => (
+        <line
+          key={i}
+          x1={2 + i * 3.5}
+          y1={15 - h}
+          x2={2 + i * 3.5}
+          y2={15}
+          opacity={i < level ? 1 : 0.25}
+        />
+      ))}
+    </svg>
+  );
+};
+
+const EFFORT_LEVELS: Array<{ value: string | null; icon: React.ReactElement; labelKey: string; descKey: string; color: string }> = [
+  { value: null, icon: <Cog6ToothIcon className="h-3.5 w-3.5 flex-shrink-0" />, labelKey: 'coworkEffort_auto', descKey: 'coworkEffort_auto_desc', color: 'text-claude-textSecondary' },
+  { value: 'low', icon: <EffortBarsIcon level={1} />, labelKey: 'coworkEffort_low', descKey: 'coworkEffort_low_desc', color: 'text-green-500' },
+  { value: 'medium', icon: <EffortBarsIcon level={2} />, labelKey: 'coworkEffort_medium', descKey: 'coworkEffort_medium_desc', color: 'text-blue-500' },
+  { value: 'high', icon: <EffortBarsIcon level={3} />, labelKey: 'coworkEffort_high', descKey: 'coworkEffort_high_desc', color: 'text-amber-500' },
+  { value: 'max', icon: <EffortBarsIcon level={4} />, labelKey: 'coworkEffort_max', descKey: 'coworkEffort_max_desc', color: 'text-claude-accent' },
 ];
 
 /**
@@ -51,7 +83,9 @@ const EffortSelector: React.FC<EffortSelectorProps> = ({
         className="flex items-center gap-1 rounded-lg border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         title={i18nService.t('coworkEffortTitle')}
       >
-        <span className="text-[11px]">{currentEntry.icon}</span>
+        <span className={`flex items-center ${currentEntry.color}`}>
+          {currentEntry.icon}
+        </span>
         <span className={`font-medium ${currentEntry.color}`}>
           {i18nService.t(currentEntry.labelKey)}
         </span>
@@ -75,7 +109,9 @@ const EffortSelector: React.FC<EffortSelectorProps> = ({
                   : 'hover:dark:bg-claude-darkSurfaceInset/60 hover:bg-claude-surfaceInset/60'
               }`}
             >
-              <span className="text-[11px] mt-0.5">{entry.icon}</span>
+              <span className={`mt-0.5 ${entry.value === currentEffort ? entry.color : 'text-claude-textSecondary dark:text-claude-darkTextSecondary'}`}>
+                {entry.icon}
+              </span>
               <div className="min-w-0 flex-1">
                 <div className={`font-medium ${entry.value === currentEffort ? entry.color : 'dark:text-claude-darkText text-claude-text'}`}>
                   {i18nService.t(entry.labelKey)}
