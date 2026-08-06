@@ -12,6 +12,7 @@ export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
   id: number;
+  orchestrationTaskId: string | null;
   groupId: string | null;
   title: string;
   goal: string;
@@ -92,6 +93,7 @@ export interface AddGroupTaskDeliverableInput {
 
 interface GroupTaskRow {
   id: number;
+  orchestration_task_id: string | null;
   group_id: string | null;
   title: string;
   goal: string;
@@ -185,6 +187,7 @@ function isGroupTaskStatus(value: string): value is GroupTaskStatus {
 function rowToGroupTask(row: GroupTaskRow): GroupTask {
   return {
     id: row.id,
+    orchestrationTaskId: row.orchestration_task_id ?? null,
     groupId: row.group_id ?? null,
     title: row.title,
     goal: row.goal,
@@ -308,6 +311,34 @@ export class GroupTaskStore {
   getTaskByGroupId(groupId: string): GroupTask | null {
     const row = this.getOne<GroupTaskRow>('SELECT * FROM group_tasks WHERE group_id = ?', [groupId]);
     return row ? rowToGroupTask(row) : null;
+  }
+
+  /**
+   * Bind the transport-facing Group Task to its canonical orchestration task.
+   * The relationship is immutable once established so retries cannot silently
+   * project one group onto a different owner task.
+   */
+  linkOrchestrationTask(id: number, orchestrationTaskId: string): GroupTask {
+    const task = this.getTaskById(id);
+    if (!task) throw new Error(`Group task ${id} not found`);
+    const canonicalId = orchestrationTaskId.trim();
+    if (!canonicalId) throw new Error('orchestrationTaskId is required');
+    if (task.orchestrationTaskId && task.orchestrationTaskId !== canonicalId) {
+      throw new Error(`Group task ${id} is already linked to orchestration task ${task.orchestrationTaskId}`);
+    }
+    if (task.orchestrationTaskId === canonicalId) return task;
+    this.db.run(
+      `UPDATE group_tasks
+       SET orchestration_task_id = ?, updated_at = datetime('now')
+       WHERE id = ? AND orchestration_task_id IS NULL`,
+      [canonicalId, id],
+    );
+    this.saveDb();
+    const linked = this.getTaskById(id);
+    if (!linked || linked.orchestrationTaskId !== canonicalId) {
+      throw new Error(`Failed to link group task ${id} to orchestration task ${canonicalId}`);
+    }
+    return linked;
   }
 
   listTasks(filter?: { status?: GroupTaskStatus }): GroupTask[] {

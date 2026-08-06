@@ -8,6 +8,7 @@ import type {
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import {
+  canAcceptGroupTask,
   formatGroupTaskTime,
   groupTaskStatusBadgeClass,
   isActiveGroupTaskStatus,
@@ -261,13 +262,15 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (
             <>
-              <button
-                type="button"
-                onClick={() => setConfirmAction('done')}
-                className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
-              >
-                {i18nService.t('groupTasksAcceptClose')}
-              </button>
+              {canAcceptGroupTask(detail.status) && (
+                <button
+                  type="button"
+                  onClick={() => setConfirmAction('done')}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
+                >
+                  {i18nService.t('groupTasksAcceptClose')}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}

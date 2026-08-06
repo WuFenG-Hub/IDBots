@@ -21,6 +21,12 @@ export interface RunOrchestratorSkillTurnParams {
   activeSkillIds?: string[];
   disableRemoteServicesPrompt?: boolean;
   sourceChannel?: 'metaweb_group' | 'metaweb_private' | 'orchestrator';
+  /** Optional lifecycle hook used by durable orchestration before execution starts. */
+  onSessionCreated?: (sessionId: string) => Promise<void> | void;
+  /** Background delegation may opt into a bounded permission mode. */
+  autoApprove?: boolean;
+  disableMemoryUpdates?: boolean;
+  permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
 }
 
 export interface RunExistingSessionSkillTurnParams {
@@ -60,6 +66,10 @@ export function runOrchestratorSkillTurn(
     activeSkillIds = [],
     disableRemoteServicesPrompt = true,
     sourceChannel,
+    onSessionCreated,
+    autoApprove = true,
+    disableMemoryUpdates = true,
+    permissionMode = 'default',
   } = params;
 
   const now = Date.now();
@@ -80,6 +90,12 @@ export function runOrchestratorSkillTurn(
     metabotId ?? null
   );
   const sessionId = session.id;
+
+  try {
+    onSessionCreated?.(sessionId);
+  } catch (error) {
+    return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+  }
 
   if (normalizedGroupId && sourceChannel !== 'metaweb_private') {
     try {
@@ -170,9 +186,10 @@ export function runOrchestratorSkillTurn(
         skipInitialUserMessage: true,
         skillIds: activeSkillIds,
         systemPrompt,
-        autoApprove: true,
-        disableMemoryUpdates: true,
+        autoApprove,
+        disableMemoryUpdates,
         disableRemoteServicesPrompt,
+        permissionMode,
         confirmationMode: 'text',
         workspaceRoot: cwd,
       })

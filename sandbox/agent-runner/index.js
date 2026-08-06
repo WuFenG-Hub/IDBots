@@ -1430,6 +1430,96 @@ async function handleRequest(requestId, request, requestPath) {
           }
         ),
       ];
+      if (request.twinOrchestrationEnabled === true) {
+        memoryTools.push(
+          tool(
+            'local_workers_list',
+            'List all local MetaBots for Twin orchestration. Returns sanitized identity, persona, skills, capability evidence, and availability. This tool is available only to the current Twin Bot.',
+            {},
+            async (args, { signal }) => {
+              const response = await callHostTool('local_workers_list', args, signal);
+              const text = typeof response?.text === 'string'
+                ? response.text
+                : typeof response?.error === 'string'
+                  ? response.error
+                  : '';
+              return {
+                content: [{ type: 'text', text }],
+                isError: response?.success === false,
+              };
+            }
+          )
+        );
+        memoryTools.push(
+          tool(
+            'local_worker_delegate',
+            'Delegate one concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns the durable execution result.',
+            {
+              workerMetabotId: z.number().int().positive(),
+              objective: z.string().min(1),
+              acceptanceCriteria: z.array(z.unknown()).optional(),
+              context: z.string().optional(),
+              permissionScope: z.record(z.string(), z.unknown()).optional(),
+              taskId: z.string().optional(),
+              stepId: z.string().optional(),
+              taskIntent: z.string().optional(),
+              idempotencyKey: z.string().optional(),
+            },
+            async (args, { signal }) => {
+              const response = await callHostTool('local_worker_delegate', args, signal);
+              const text = typeof response?.text === 'string'
+                ? response.text
+                : typeof response?.error === 'string'
+                  ? response.error
+                  : '';
+              return {
+                content: [{ type: 'text', text }],
+                isError: response?.success === false,
+              };
+            }
+          )
+        );
+        memoryTools.push(
+          tool(
+            'twin_task_status',
+            'Read the durable status, steps, attempts, Worker sessions, and handoff evidence for one Twin orchestration task.',
+            { taskId: z.string().min(1) },
+            async (args, { signal }) => {
+              const response = await callHostTool('twin_task_status', args, signal);
+              const text = typeof response?.text === 'string' ? response.text : typeof response?.error === 'string' ? response.error : '';
+              return { content: [{ type: 'text', text }], isError: response?.success === false };
+            }
+          ),
+          tool(
+            'twin_task_cancel',
+            'Cancel a durable Twin orchestration task and its queued or running Worker attempts.',
+            { taskId: z.string().min(1) },
+            async (args, { signal }) => {
+              const response = await callHostTool('twin_task_cancel', args, signal);
+              const text = typeof response?.text === 'string' ? response.text : typeof response?.error === 'string' ? response.error : '';
+              return { content: [{ type: 'text', text }], isError: response?.success === false };
+            }
+          ),
+          tool(
+            'twin_task_reassign',
+            'Reassign one failed or in-progress orchestration step to another persistent Worker Bot with a new idempotent attempt.',
+            {
+              stepId: z.string().min(1),
+              workerMetabotId: z.number().int().positive(),
+              objective: z.string().optional(),
+              acceptanceCriteria: z.array(z.unknown()).optional(),
+              context: z.string().optional(),
+              permissionScope: z.record(z.string(), z.unknown()).optional(),
+              idempotencyKey: z.string().optional(),
+            },
+            async (args, { signal }) => {
+              const response = await callHostTool('twin_task_reassign', args, signal);
+              const text = typeof response?.text === 'string' ? response.text : typeof response?.error === 'string' ? response.error : '';
+              return { content: [{ type: 'text', text }], isError: response?.success === false };
+            }
+          )
+        );
+      }
       if (request.memoryEnabled !== false) {
         memoryTools.push(
           tool(

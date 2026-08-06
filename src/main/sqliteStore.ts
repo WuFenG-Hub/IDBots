@@ -597,6 +597,65 @@ export class SqliteStore {
         ON scheduled_task_runs(task_id, started_at DESC);
     `);
 
+    // Twin orchestration state is additive and idempotent so active plans,
+    // worker attempts, and recovery evidence survive application upgrades.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS orchestration_tasks (
+        id TEXT PRIMARY KEY,
+        owner_intent TEXT NOT NULL,
+        enriched_goal TEXT,
+        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        source_session_id TEXT,
+        twin_metabot_id INTEGER NOT NULL,
+        owner_global_meta_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'planning' CHECK(status IN ('planning','running','review','completed','failed','cancelled')),
+        plan_version INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_tasks_owner_status
+        ON orchestration_tasks(owner_global_meta_id, status, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS orchestration_steps (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        title TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+        dependency_step_ids_json TEXT NOT NULL DEFAULT '[]',
+        assignee_metabot_id INTEGER,
+        permission_scope_json TEXT NOT NULL DEFAULT '{}',
+        deadline_at TEXT,
+        status TEXT NOT NULL DEFAULT 'blocked' CHECK(status IN ('blocked','ready','queued','running','waiting_input','completed','failed','cancelled')),
+        accepted_result_json TEXT,
+        active_attempt_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(task_id, ordinal),
+        FOREIGN KEY(task_id) REFERENCES orchestration_tasks(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_steps_assignee_status
+        ON orchestration_steps(assignee_metabot_id, status, updated_at DESC);
+      CREATE TABLE IF NOT EXISTS orchestration_attempts (
+        id TEXT PRIMARY KEY,
+        step_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        worker_metabot_id INTEGER NOT NULL,
+        worker_session_id TEXT,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN ('queued','running','completed','failed','timed_out','cancelled')),
+        prompt TEXT NOT NULL,
+        result_json TEXT,
+        error TEXT,
+        queued_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        FOREIGN KEY(step_id) REFERENCES orchestration_steps(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_orchestration_attempts_step_status
+        ON orchestration_attempts(step_id, status, queued_at DESC);
+    `);
+
     // MetaWeb listener: group chat, private chat (SDD Task 11.5 - flattened + raw_data), protocol events
     // Do not DROP: preserve existing messages across restarts and when user stops listening
     this.db.run(`
@@ -693,6 +752,7 @@ export class SqliteStore {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orchestration_task_id TEXT,
         group_id TEXT UNIQUE,
         title TEXT NOT NULL,
         goal TEXT NOT NULL,
@@ -708,6 +768,7 @@ export class SqliteStore {
         closed_at TEXT
       );
     `);
+    this.migrateGroupTaskOrchestrationLink();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1623,6 +1684,27 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatMessagesMsgIndex:', e);
+    }
+  }
+
+  /**
+   * Migration: bind each observable Group Task to at most one canonical Twin
+   * orchestration task. Existing tasks remain valid and are reconciled lazily.
+   */
+  private migrateGroupTaskOrchestrationLink(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('orchestration_task_id')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN orchestration_task_id TEXT');
+      }
+      this.db.run(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_group_tasks_orchestration_task
+          ON group_tasks(orchestration_task_id)
+      `);
+      this.save();
+    } catch (error) {
+      console.warn('migrateGroupTaskOrchestrationLink:', error);
     }
   }
 

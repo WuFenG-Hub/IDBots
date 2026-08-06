@@ -26,6 +26,7 @@ Dev-docs/
 CLAUDE.md
 localdocs/
 docs/*
+!docs/twin-bot-orchestration.md
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
 tests/*
@@ -159,6 +160,11 @@ man_base_data_pebble/
 !tests/dreamStore.test.mjs
 !tests/dreamMemoryWrites.test.mjs
 !tests/dreamPrompt.test.mjs
+!tests/twinWorkerDirectoryService.test.mjs
+!tests/orchestrationStore.test.mjs
+!tests/twinOrchestrationService.test.mjs
+!tests/twinOrchestrationPrompt.test.mjs
+!tests/groupTaskOrchestrationBridge.test.mjs
 !tests/dreamService.test.mjs
 !tests/experiencePromptBlocks.test.mjs
 !tests/dreamStoreSearch.test.mjs

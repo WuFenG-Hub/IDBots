@@ -26,7 +26,9 @@ Module._load = function patchedLoad(request, ...rest) {
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
+const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
 const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
@@ -111,6 +113,7 @@ const createHarness = async (overrides = {}) => {
   const db = store.getDatabase();
   const metabotStore = new MetabotStore(db, store.getSaveFunction());
   const groupTaskStore = new GroupTaskStore(db, store.getSaveFunction());
+  const orchestrationStore = new OrchestrationStore(db, store.getSaveFunction());
   const coworkStore = new CoworkStore(db, () => {});
 
   insertWallet(db, 1);
@@ -137,12 +140,18 @@ const createHarness = async (overrides = {}) => {
     pinOutcomes: overrides.pinOutcomes ?? {},
   };
   const seenChatErrors = new Set();
+  const orchestrationBridge = new GroupTaskOrchestrationBridge({
+    groupTaskStore,
+    orchestrationStore,
+    getMetabotById: (id) => metabotStore.getMetabotById(id),
+  });
 
   const loop = createGroupTaskDaemonLoop({
     getStore: () => store,
     getGroupTaskStore: () => groupTaskStore,
     getMetabotStore: () => metabotStore,
     getCoworkStore: () => coworkStore,
+    orchestrationBridge,
     performChat: async (systemPrompt, userMessage, llmId) => {
       chatCalls.push({ systemPrompt, userMessage, llmId });
       if (state.chatErrorAlways) {
@@ -208,7 +217,7 @@ const createHarness = async (overrides = {}) => {
   };
 
   return {
-    store, db, metabotStore, groupTaskStore, coworkStore, loop,
+    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop,
     chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
     cleanup: () => store.close(),
   };
@@ -376,6 +385,15 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
     // cursor advanced past the kickoff message
     const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['kickoff-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId);
+
+    // The observable group execution is projected into canonical Worker steps.
+    const canonicalId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    const canonical = h.orchestrationStore.getTask(canonicalId);
+    assert.equal(canonical.status, 'running');
+    const steps = h.orchestrationStore.listSteps(canonical.id);
+    assert.deepEqual(steps.map((step) => step.assigneeMetabotId).sort(), [2, 3]);
+    assert.ok(steps.every((step) => step.status === 'waiting_input'));
+    assert.ok(steps.every((step) => h.orchestrationStore.listAttempts(step.id)[0].status === 'completed'));
   } finally {
     h.cleanup();
   }

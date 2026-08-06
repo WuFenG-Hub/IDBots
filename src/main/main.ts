@@ -46,6 +46,7 @@ import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { Scheduler } from './libs/scheduler';
@@ -119,6 +120,7 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   postGroupTaskMessage,
   createGroupTask,
@@ -147,6 +149,9 @@ import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
+import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
+import { TwinOrchestrationService } from './services/twinOrchestrationService';
+import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -3026,6 +3031,7 @@ const startSqliteDaemons = (): void => {
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
   startCognitiveOrchestrator(
@@ -3149,6 +3155,7 @@ const startSqliteDaemons = (): void => {
     getGroupTaskStore,
     getMetabotStore,
     getCoworkStore,
+    orchestrationBridge: getGroupTaskOrchestrationBridge(),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
@@ -4263,6 +4270,7 @@ const getCoworkRunner = () => {
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);
         return m ? {
+          id: m.id,
           name: m.name,
           mvc_address: m.mvc_address ?? null,
           globalmetaid: m.globalmetaid ?? null,
@@ -4271,8 +4279,32 @@ const getCoworkRunner = () => {
           bio: m.bio ?? null,
           goal: m.goal ?? null,
           llm_id: m.llm_id ?? null,
+          enabled: m.enabled,
+          metabot_type: m.metabot_type,
+          boss_global_metaid: m.boss_global_metaid ?? null,
+          skills: m.skills ?? [],
+          allow_chat_skills: m.allow_chat_skills ?? [],
         } : null;
       },
+      listLocalWorkers: (sessionId: string) => buildTwinWorkerDirectory(sessionId, {
+        getSession: (id) => getCoworkStore().getSession(id),
+        listMetabots: () => getMetabotStore().listMetabots(),
+        getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+        listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
+        getActiveWorkload: (metabotId) => getOrchestrationStore().getActiveWorkload(metabotId),
+      }),
+      delegateLocalWorker: (sessionId, input) => getTwinOrchestrationService().delegateLocalWorker(sessionId, input),
+      twinTaskStatus: (sessionId, taskId) => getTwinOrchestrationService().getTaskStatus(sessionId, taskId),
+      twinTaskCancel: (sessionId, taskId) => getTwinOrchestrationService().cancelTask(sessionId, taskId),
+      twinTaskReassign: (sessionId, input) => getTwinOrchestrationService().reassignLocalWorker(sessionId, {
+        stepId: String(input.stepId ?? ''),
+        workerMetabotId: Number(input.workerMetabotId),
+        objective: typeof input.objective === 'string' ? input.objective : undefined,
+        acceptanceCriteria: Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : undefined,
+        context: typeof input.context === 'string' ? input.context : null,
+        permissionScope: input.permissionScope && typeof input.permissionScope === 'object' ? input.permissionScope as Record<string, unknown> : undefined,
+        idempotencyKey: typeof input.idempotencyKey === 'string' ? input.idempotencyKey : null,
+      }),
       openMetaApp: async (input) => {
         return openMetaApp({
           appId: input.appId,
@@ -4773,6 +4805,50 @@ const getGroupTaskStore = () => {
   }
   return groupTaskStore;
 };
+
+let orchestrationStore: OrchestrationStore | null = null;
+const getOrchestrationStore = () => {
+  if (!orchestrationStore) {
+    const sqliteStore = getStore();
+    orchestrationStore = new OrchestrationStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+    const recovered = orchestrationStore.recoverAfterRestart();
+    if (recovered.attempts > 0) {
+      console.warn(`[Orchestration] Recovered ${recovered.attempts} in-flight attempt(s) after restart`);
+    }
+  }
+  return orchestrationStore;
+};
+
+let groupTaskOrchestrationBridge: GroupTaskOrchestrationBridge | null = null;
+const getGroupTaskOrchestrationBridge = () => {
+  if (!groupTaskOrchestrationBridge) {
+    groupTaskOrchestrationBridge = new GroupTaskOrchestrationBridge({
+      groupTaskStore: getGroupTaskStore(),
+      orchestrationStore: getOrchestrationStore(),
+      getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+    });
+  }
+  return groupTaskOrchestrationBridge;
+};
+
+const getTwinOrchestrationService = () => new TwinOrchestrationService({
+  orchestrationStore: getOrchestrationStore(),
+  coworkStore: getCoworkStore(),
+  coworkRunner: getCoworkRunner(),
+  directory: {
+    getSession: (id) => getCoworkStore().getSession(id),
+    listMetabots: () => getMetabotStore().listMetabots(),
+    getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+  },
+  getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+  getWorkerWorkspace: (metabotId) => {
+    const config = getCoworkStore().getConfig();
+    const root = config.workingDirectory?.trim() || path.join(app.getPath('userData'), 'orchestration-workspace');
+    const workspace = resolveBotWorkspaceCwd(root, metabotId);
+    fs.mkdirSync(workspace, { recursive: true });
+    return workspace;
+  },
+});
 
 const getMetabotStore = () => {
   if (!metabotStore) {
@@ -7927,6 +8003,7 @@ if (!gotTheLock) {
           goal: String(input?.goal ?? '').trim(),
           acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
           memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          autoSelectWorkers: true,
           createdBy: 'user',
         }));
       return { success: true, task };

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   ACTIVE_GROUP_TASK_STATUSES,
+  canAcceptGroupTask,
   isActiveGroupTaskStatus,
   filterGroupTasksByTab,
   groupTaskStatusBadgeClass,
@@ -21,6 +22,13 @@ test('isActiveGroupTaskStatus: planning/executing/review are active, terminal st
   for (const status of ['done', 'cancelled', 'unknown', '']) {
     assert.equal(isActiveGroupTaskStatus(status), false, status);
   }
+});
+
+test('canAcceptGroupTask: owner acceptance is gated to review', () => {
+  for (const status of ['planning', 'executing', 'done', 'cancelled', 'unknown']) {
+    assert.equal(canAcceptGroupTask(status), false, status);
+  }
+  assert.equal(canAcceptGroupTask('review'), true);
 });
 
 test('filterGroupTasksByTab: active default, done, cancelled, all', () => {

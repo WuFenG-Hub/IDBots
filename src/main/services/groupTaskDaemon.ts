@@ -17,6 +17,7 @@ import type { GroupTaskStore, GroupTask, GroupTaskMember } from '../groupTaskSto
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
+import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -347,6 +348,7 @@ export interface GroupTaskDaemonDeps {
   getGroupTaskStore: () => GroupTaskStore;
   getMetabotStore: () => MetabotStore;
   getCoworkStore: () => CoworkStore;
+  orchestrationBridge?: GroupTaskOrchestrationBridge;
   performChat: GroupTaskDaemonPerformChatFn;
   postGroupTaskMessage: GroupTaskDaemonSendFn;
   getChatSkillsRoutingPrompt?: GroupTaskDaemonSkillRoutingFn;
@@ -768,8 +770,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     if (DELIVERABLE_TAG.test(content)) {
       const msgPinId = message.pinId;
+      let recordedDeliverable = msgPinId
+        ? store.listDeliverables(task.id).find((deliverable) => deliverable.msgPinId === msgPinId)
+        : undefined;
       if (msgPinId && !store.hasDeliverableWithMsgPin(task.id, msgPinId)) {
-        store.addDeliverable({
+        recordedDeliverable = store.addDeliverable({
           taskId: task.id,
           msgPinId,
           authorGlobalmetaid: message.senderGlobalMetaId,
@@ -785,6 +790,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }
+      if (recordedDeliverable && deps.orchestrationBridge) {
+        try {
+          deps.orchestrationBridge.recordDeliverable({
+            groupTaskId: task.id,
+            deliverable: recordedDeliverable,
+            verificationNotes,
+          });
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: canonical deliverable projection failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
     }
 
     const statusMatch = STATUS_TAG.exec(content);
@@ -798,6 +817,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const beforeStatus = store.getTaskById(task.id)?.status;
           const updated = store.updateTaskStatus(task.id, nextStatus);
           if (beforeStatus && updated.status !== beforeStatus) {
+            try {
+              deps.orchestrationBridge?.syncStatus(task.id);
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: canonical status projection failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
             deps.emitTaskEvent?.({
               type: 'groupTask:statusChanged',
               taskId: task.id,
@@ -959,6 +986,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     );
 
     const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+    let orchestrationAttemptId: string | null = null;
+    if (member.role === 'worker' && deps.orchestrationBridge) {
+      try {
+        const context = deps.orchestrationBridge.beginWorkerAttempt({
+          groupTaskId: task.id,
+          workerMetabotId: bot.id,
+          objective: message.content,
+          sourceMessageKey: message.pinId ?? String(message.id),
+        });
+        orchestrationAttemptId = context.attempt.id;
+        deps.orchestrationBridge.markWorkerAttemptRunning(context.attempt.id, session.id);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: canonical Worker attempt start failed for bot ${bot.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const failCanonicalAttempt = (error: unknown): void => {
+      if (!orchestrationAttemptId || !deps.orchestrationBridge) return;
+      deps.orchestrationBridge.failWorkerAttempt(
+        orchestrationAttemptId,
+        error instanceof Error ? error.message : String(error),
+      );
+    };
     coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
 
     let reply = '';
@@ -970,28 +1022,43 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         '',
         'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
       ].join('\n');
-      const skillTurnResult = await deps.runSkillTurn!({
-        sessionId: session.id,
-        systemPrompt: skillSystemPrompt,
-        userMessage,
-        activeSkillIds: routing.activeSkillIds,
-      });
+      let skillTurnResult;
+      try {
+        skillTurnResult = await deps.runSkillTurn!({
+          sessionId: session.id,
+          systemPrompt: skillSystemPrompt,
+          userMessage,
+          activeSkillIds: routing.activeSkillIds,
+        });
+      } catch (error) {
+        failCanonicalAttempt(error);
+        throw error;
+      }
       reply = (skillTurnResult.replyText ?? '').trim();
       // The runner appends the assistant message to the session itself.
     } else {
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
-      reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId })).trim();
+      try {
+        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId })).trim();
+      } catch (error) {
+        failCanonicalAttempt(error);
+        throw error;
+      }
       if (reply) {
         coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
       }
     }
-    if (!reply) return;
+    if (!reply) {
+      failCanonicalAttempt('WORKER_EMPTY_HANDOFF');
+      return;
+    }
 
     // [NO_REPLY] escape hatch: the model opted to stay silent. The assistant
     // message is already in the session (context continuity) and cooldown/budget
     // is still recorded by the caller; only the on-chain send is suppressed.
     if (NO_REPLY_PATTERN.test(reply)) {
+      failCanonicalAttempt('WORKER_NO_REPLY');
       emitLog(
         `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} answered [NO_REPLY]; ` +
         'on-chain send suppressed (debug)',
@@ -999,13 +1066,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return;
     }
 
+    let sent: { pinId: string };
     try {
-      await deps.postGroupTaskMessage(task.id, bot.id, reply);
+      sent = await deps.postGroupTaskMessage(task.id, bot.id, reply);
     } catch (error) {
+      failCanonicalAttempt(error);
       emitLog(
         `[GroupTaskDaemon] Send failed (task ${task.id}, bot ${bot.id}): ` +
         `${error instanceof Error ? error.message : String(error)}`,
       );
+      return;
+    }
+    if (orchestrationAttemptId && deps.orchestrationBridge) {
+      try {
+        deps.orchestrationBridge.completeWorkerAttempt({
+          attemptId: orchestrationAttemptId,
+          replyText: reply,
+          groupMessagePinId: sent.pinId,
+        });
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: Worker reply was sent but canonical completion failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   };
 
@@ -1013,6 +1097,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
     const db = deps.getStore().getDatabase();
+
+    if (deps.orchestrationBridge) {
+      try {
+        deps.orchestrationBridge.ensureCanonicalTask(task);
+        deps.orchestrationBridge.syncStatus(task.id);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: canonical reconciliation failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
 
     const members = store.listMembers(task.id);
     const metabotStore = deps.getMetabotStore();

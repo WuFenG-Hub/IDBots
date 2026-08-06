@@ -335,6 +335,17 @@ test('sandbox runner mirrors IDBots cross-session host tools', () => {
     source.includes("callHostTool('idbots_session_insert_user_message'"),
     'Sandbox insert tool should delegate to the matching host tool',
   );
+  assert.ok(
+    source.includes('twinOrchestrationEnabled === true') && source.includes("callHostTool('local_workers_list'"),
+    'Sandbox Twin directory tool should be gated by trusted orchestration enablement and call the host',
+  );
+  assert.ok(
+    source.includes("callHostTool('local_worker_delegate'"),
+    'Sandbox Worker delegation tool should delegate to the host',
+  );
+  for (const toolName of ['twin_task_status', 'twin_task_cancel', 'twin_task_reassign']) {
+    assert.ok(source.includes(`callHostTool('${toolName}'`), `Sandbox should delegate ${toolName} to the host`);
+  }
 });
 
 test('CoworkRunner prompt teaches IDBots session links and write boundary', () => {
@@ -360,4 +371,14 @@ test('CoworkRunner prompt teaches IDBots session links and write boundary', () =
     source.includes('A2A sessions are read-only'),
     'CoworkRunner prompt should describe the A2A write boundary',
   );
+});
+
+test('Twin orchestration tools have a host-side gate and trusted sandbox registration flag', () => {
+  const source = fs.readFileSync(coworkRunnerPath, 'utf8');
+  assert.match(source, /toolName === 'local_workers_list'[\s\S]*?isTwinSession\(sessionId\)/);
+  assert.match(source, /toolName === 'local_worker_delegate'[\s\S]*?isTwinSession\(sessionId\)/);
+  for (const toolName of ['twin_task_status', 'twin_task_cancel', 'twin_task_reassign']) {
+    assert.match(source, new RegExp(`toolName === '${toolName}'[\\s\\S]*?isTwinSession\\(sessionId\\)`));
+  }
+  assert.match(source, /twinOrchestrationEnabled: Boolean\(this\.listLocalWorkers && this\.isTwinSession\(sessionId\)\)/);
 });

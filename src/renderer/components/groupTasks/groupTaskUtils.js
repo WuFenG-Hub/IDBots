@@ -10,6 +10,11 @@ export function isActiveGroupTaskStatus(status) {
   return ACTIVE_GROUP_TASK_STATUSES.includes(status);
 }
 
+/** Owner acceptance is available only after the Twin has moved work to review. */
+export function canAcceptGroupTask(status) {
+  return status === 'review';
+}
+
 /** Client-side status filter for the list tabs: active | done | cancelled | all. */
 export function filterGroupTasksByTab(tasks, tab) {
   const list = Array.isArray(tasks) ? tasks : [];
