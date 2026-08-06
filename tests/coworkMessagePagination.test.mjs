@@ -9,13 +9,6 @@ import {
 } from './memoryTestUtils.mjs';
 
 const {
-  A2A_SESSION_CONVERSATION_GAP_MS,
-  A2A_SESSION_EPISODE_IDLE_MS,
-  A2A_SESSION_EPISODE_MESSAGE_LIMIT,
-  resolveA2ASessionEpisodeRotationReason,
-  rotateCoworkA2ASessionEpisode,
-} = await import('../dist-electron/main/services/coworkEnsureA2ASession.js');
-const {
   buildA2AConversationThreadId,
   buildA2AParticipantPairKey,
 } = getCompiledStores();
@@ -97,6 +90,103 @@ test('legacy canonical A2A sessions are idempotently backfilled into logical thr
     assert.equal(thread?.localGlobalMetaId, 'idq1local');
     assert.equal(thread?.peerGlobalMetaId, 'idq1peer');
     assert.equal(migrated.listA2AConversationEpisodes(session.id).length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test('split A2A episodes are idempotently consolidated into the original session', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    insertMetabot(db, 1, 'idq1local');
+    const original = store.createSession(
+      'Peer Bot', '/tmp/a2a', '', 'local', [], 1, 'a2a', 'idq1peer', 'Old Peer',
+    );
+    const split = store.createSession(
+      'Peer Bot', '/tmp/a2a', '', 'local', [], 1, 'a2a', 'idq1peer', 'New Peer', 'new-avatar',
+    );
+    const child = store.createSession('Child', '/tmp/a2a', '', 'local');
+    db.run('UPDATE cowork_sessions SET parent_session_id = ? WHERE id = ?', [split.id, child.id]);
+    store.addMessage(original.id, { type: 'user', content: 'original history' });
+    store.addMessage(split.id, { type: 'assistant', content: 'split history' });
+    store.setSessionPinned(split.id, true);
+    store.archiveSession(original.id);
+
+    const firstEpisode = store.registerA2AEpisode({
+      sessionId: original.id,
+      localMetabotId: 1,
+      localGlobalMetaId: 'idq1local',
+      peerGlobalMetaId: 'idq1peer',
+      episodeIndex: 1,
+      startedAt: 100,
+    });
+    store.registerA2AEpisode({
+      sessionId: split.id,
+      localMetabotId: 1,
+      localGlobalMetaId: 'idq1local',
+      peerGlobalMetaId: 'idq1peer',
+      episodeIndex: 2,
+      previousSessionId: original.id,
+      startedAt: 200,
+      previousCloseReason: 'message_limit',
+    });
+    store.upsertConversationMapping({
+      channel: 'metaweb_private',
+      externalConversationId: 'metaweb-private:idq1peer',
+      metabotId: 1,
+      coworkSessionId: split.id,
+      metadataJson: JSON.stringify({
+        a2aThreadId: firstEpisode.threadId,
+        episodeIndex: 2,
+        previousEpisodeSessionId: original.id,
+        episodeReason: 'message_limit',
+        peerName: 'New Peer',
+      }),
+    });
+    db.run(`
+      INSERT INTO service_orders (
+        id, role, local_metabot_id, counterparty_global_metaid, service_name,
+        payment_txid, payment_chain, payment_amount, payment_currency,
+        cowork_session_id, status, first_response_deadline_at, delivery_deadline_at,
+        created_at, updated_at
+      ) VALUES ('order-split', 'buyer', 1, 'idq1peer', 'Test', 'tx', 'mvc', '1', 'SPACE', ?, 'in_progress', 1, 1, 1, 1)
+    `, [split.id]);
+
+    const migrated = createCoworkStore(db);
+    createCoworkStore(db);
+
+    assert.equal(migrated.getSessionWithoutMessages(split.id), null);
+    assert.equal(migrated.isSessionArchived(original.id), false);
+    assert.equal(migrated.getSessionWithoutMessages(original.id)?.pinned, true);
+    assert.equal(migrated.getSessionWithoutMessages(original.id)?.peerName, 'New Peer');
+    assert.deepEqual(
+      db.exec('SELECT sequence, content FROM cowork_messages WHERE session_id = ? ORDER BY sequence', [original.id])[0].values,
+      [[1, 'original history'], [2, 'split history']],
+    );
+    assert.equal(
+      migrated.getConversationMapping('metaweb_private', 'metaweb-private:idq1peer', 1)?.coworkSessionId,
+      original.id,
+    );
+    const mappingMetadata = JSON.parse(
+      migrated.getConversationMapping('metaweb_private', 'metaweb-private:idq1peer', 1)?.metadataJson ?? '{}',
+    );
+    assert.equal(mappingMetadata.episodeIndex, 1);
+    assert.equal(mappingMetadata.previousEpisodeSessionId, undefined);
+    assert.equal(mappingMetadata.episodeReason, undefined);
+    assert.deepEqual(migrated.listA2AConversationEpisodes(original.id).map((episode) => ({
+      sessionId: episode.sessionId,
+      episodeIndex: episode.episodeIndex,
+      previousSessionId: episode.previousSessionId,
+      nextSessionId: episode.nextSessionId,
+    })), [{
+      sessionId: original.id,
+      episodeIndex: 1,
+      previousSessionId: null,
+      nextSessionId: null,
+    }]);
+    assert.equal(db.exec("SELECT cowork_session_id FROM service_orders WHERE id = 'order-split'")[0].values[0][0], original.id);
+    assert.equal(db.exec('SELECT parent_session_id FROM cowork_sessions WHERE id = ?', [child.id])[0].values[0][0], original.id);
   } finally {
     cleanup();
   }
@@ -200,187 +290,12 @@ test('A2A daemon queries stay bounded and preserve exact metadata for callers', 
         cowork_session_id, status, first_response_deadline_at, delivery_deadline_at,
         created_at, updated_at
       ) VALUES (?, 'buyer', 1, 'idq1peer', 'Test service', 'tx-order', 'mvc', '1', 'SPACE', ?, 'rating_pending', ?, ?, ?, ?)
-    `, ['order-1', session.id, now, now, now, now - 2 * A2A_SESSION_EPISODE_IDLE_MS]);
+    `, ['order-1', session.id, now, now, now, now - 2 * 24 * 60 * 60 * 1000]);
     assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), false);
     db.run("UPDATE service_orders SET updated_at = ? WHERE id = 'order-1'", [now]);
     assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), true);
-    db.run("UPDATE service_orders SET status = 'in_progress', updated_at = ? WHERE id = 'order-1'", [now - 2 * A2A_SESSION_EPISODE_IDLE_MS]);
+    db.run("UPDATE service_orders SET status = 'in_progress', updated_at = ? WHERE id = 'order-1'", [now - 2 * 24 * 60 * 60 * 1000]);
     assert.equal(store.hasBlockingServiceOrdersForSession(session.id, now), true);
-  } finally {
-    cleanup();
-  }
-});
-
-test('A2A episode policy rotates only at durable boundaries', () => {
-  const now = 1_800_000_000_000;
-  const mapping = {
-    lastActiveAt: now - 1_000,
-    metadataJson: JSON.stringify({ episodeIndex: 1 }),
-  };
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping,
-    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT,
-    hasBlockingServiceOrders: false,
-    isArchived: false,
-    now,
-  }), null);
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping: { ...mapping, lastActiveAt: now - A2A_SESSION_CONVERSATION_GAP_MS - 1 },
-    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT + 400,
-    hasBlockingServiceOrders: false,
-    isArchived: false,
-    now,
-  }), 'message_limit');
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping: { ...mapping, lastActiveAt: now - A2A_SESSION_EPISODE_IDLE_MS },
-    messageCount: 10,
-    hasBlockingServiceOrders: false,
-    isArchived: false,
-    now,
-  }), 'idle_timeout');
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping: { ...mapping, metadataJson: JSON.stringify({ byeSent: true }) },
-    messageCount: 10,
-    hasBlockingServiceOrders: false,
-    isArchived: false,
-    restartEndedConversation: true,
-    now,
-  }), 'conversation_restarted');
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping: { ...mapping, metadataJson: JSON.stringify({ episodeRestartRequestedAt: now }) },
-    messageCount: 10,
-    hasBlockingServiceOrders: false,
-    isArchived: false,
-    now,
-  }), 'conversation_restarted');
-  assert.equal(resolveA2ASessionEpisodeRotationReason({
-    mapping,
-    messageCount: A2A_SESSION_EPISODE_MESSAGE_LIMIT + 100,
-    hasBlockingServiceOrders: true,
-    isArchived: true,
-    restartEndedConversation: true,
-    now,
-  }), null);
-});
-
-test('rotating an A2A episode preserves stable conversation identity and archives raw history', async () => {
-  const { db, cleanup } = await createSqliteStore();
-  try {
-    const store = createCoworkStore(db);
-    const conversationId = 'metaweb-private:idq1peer';
-    const oldSession = store.createSession(
-      'Peer Bot',
-      '/tmp/a2a',
-      '',
-      'local',
-      [],
-      1,
-      'a2a',
-      'idq1peer',
-      'Peer Bot',
-    );
-    store.addMessage(oldSession.id, {
-      type: 'user',
-      content: 'old history remains intact',
-      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
-    });
-    const mapping = store.upsertConversationMapping({
-      channel: 'metaweb_private',
-      externalConversationId: conversationId,
-      metabotId: 1,
-      coworkSessionId: oldSession.id,
-      metadataJson: JSON.stringify({
-        peerGlobalMetaId: 'idq1peer',
-        episodeIndex: 1,
-        episodeStartedAt: oldSession.createdAt,
-      }),
-    });
-
-    const nextSession = rotateCoworkA2ASessionEpisode({
-      coworkStore: store,
-      mapping,
-      session: store.getSessionWithoutMessages(oldSession.id),
-      externalConversationId: conversationId,
-      reason: 'message_limit',
-      localGlobalMetaId: 'idq1local',
-      peerGlobalMetaId: 'idq1peer',
-      peerName: 'Peer Bot',
-      now: 1_800_000_000_000,
-    });
-
-    assert.notEqual(nextSession.id, oldSession.id);
-    assert.equal(store.getConversationMapping('metaweb_private', conversationId, 1)?.coworkSessionId, nextSession.id);
-    assert.equal(store.isSessionArchived(oldSession.id), true);
-    assert.deepEqual(store.getSession(oldSession.id)?.messages.map((message) => message.content), ['old history remains intact']);
-    assert.deepEqual(store.getConversationSourceContextBySession(oldSession.id), {
-      sourceChannel: 'metaweb_private',
-      externalConversationId: conversationId,
-    });
-    assert.deepEqual(store.listSessions().map((session) => session.id), [nextSession.id]);
-    assert.deepEqual(store.listArchivedSessions().map((session) => session.id), [oldSession.id]);
-    const currentMetadata = JSON.parse(
-      store.getConversationMapping('metaweb_private', conversationId, 1)?.metadataJson ?? '{}',
-    );
-    assert.equal(currentMetadata.episodeIndex, 2);
-    assert.equal(currentMetadata.previousEpisodeSessionId, oldSession.id);
-    assert.equal(currentMetadata.byeSent, false);
-
-    store.addMessage(nextSession.id, {
-      type: 'assistant',
-      content: 'new episode message 1',
-      metadata: { sourceChannel: 'metaweb_private', direction: 'outgoing' },
-    });
-    store.addMessage(nextSession.id, {
-      type: 'user',
-      content: 'new episode message 2',
-      metadata: { sourceChannel: 'metaweb_private', direction: 'incoming' },
-    });
-
-    const episodes = store.listA2AConversationEpisodes(nextSession.id);
-    assert.deepEqual(episodes.map((episode) => ({
-      sessionId: episode.sessionId,
-      episodeIndex: episode.episodeIndex,
-      previousSessionId: episode.previousSessionId,
-      nextSessionId: episode.nextSessionId,
-      endedAt: episode.endedAt,
-      closeReason: episode.closeReason,
-    })), [
-      {
-        sessionId: oldSession.id,
-        episodeIndex: 1,
-        previousSessionId: null,
-        nextSessionId: nextSession.id,
-        endedAt: 1_800_000_000_000,
-        closeReason: 'message_limit',
-      },
-      {
-        sessionId: nextSession.id,
-        episodeIndex: 2,
-        previousSessionId: oldSession.id,
-        nextSessionId: null,
-        endedAt: null,
-        closeReason: null,
-      },
-    ]);
-    const thread = store.getA2AConversationThreadBySession(nextSession.id);
-    assert.ok(thread?.id.startsWith('a2a-thread:'));
-    assert.ok(thread?.participantPairKey.startsWith('a2a-pair:'));
-
-    const latestHistory = store.getA2AConversationHistoryPage(nextSession.id, { limit: 2 });
-    assert.deepEqual(
-      latestHistory?.messages.map((entry) => [entry.episodeIndex, entry.message.content]),
-      [[2, 'new episode message 1'], [2, 'new episode message 2']],
-    );
-    assert.equal(latestHistory?.hasMoreBefore, true);
-    const earlierHistory = store.getA2AConversationHistoryPage(nextSession.id, {
-      beforeCursor: latestHistory?.beforeCursor,
-      limit: 2,
-    });
-    assert.deepEqual(
-      earlierHistory?.messages.map((entry) => [entry.episodeIndex, entry.message.content]),
-      [[1, 'old history remains intact']],
-    );
-    assert.equal(earlierHistory?.hasMoreBefore, false);
   } finally {
     cleanup();
   }

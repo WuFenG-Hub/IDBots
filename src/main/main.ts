@@ -6234,8 +6234,6 @@ if (!gotTheLock) {
         return {
           success: true,
           created: result.created,
-          rotated: result.rotated,
-          rotationReason: result.rotationReason,
           externalConversationId: result.externalConversationId,
           session: getCoworkStore().getSessionView(result.session.id) ?? result.session,
         };
