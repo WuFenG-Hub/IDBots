@@ -51,6 +51,12 @@ export const refreshA2APeerProfile = async (input: {
   fetchProfile: FetchA2APeerProfileFn;
   ttlMs?: number;
   now?: () => number;
+  /**
+   * Bypass the in-memory TTL cache and always re-fetch from the chain. Used by
+   * user-triggered refresh (e.g. clicking a peer avatar) so a peer that renamed
+   * or changed its avatar shows up immediately instead of waiting out the TTL.
+   */
+  force?: boolean;
 }): Promise<RefreshA2APeerProfileResult> => {
   const sessionId = normalizeText(input.sessionId);
   if (!sessionId) return { refreshed: false, changed: false };
@@ -62,10 +68,11 @@ export const refreshA2APeerProfile = async (input: {
 
   const ttlMs = Math.max(1, Math.floor(input.ttlMs ?? A2A_PEER_PROFILE_REFRESH_TTL_MS));
   const now = input.now ?? Date.now;
+  const force = input.force === true;
 
   let profile: A2APeerProfile | null = null;
   const cached = profileCache.get(peerGlobalMetaId);
-  if (cached && now() - cached.fetchedAt < ttlMs) {
+  if (!force && cached && now() - cached.fetchedAt < ttlMs) {
     profile = cached.profile;
   } else {
     try {

@@ -582,6 +582,50 @@ const emitCoworkStreamMessageUpdate = (
 };
 
 /**
+ * Broadcast a `cowork:session:profileRefreshed` event to every window so the
+ * renderer reloads the session list/detail after a peer profile change.
+ */
+const broadcastProfileRefreshed = (sessionId: string): void => {
+  BrowserWindow.getAllWindows().forEach((win) => {
+    if (!win.isDestroyed()) {
+      try {
+        win.webContents.send('cowork:session:profileRefreshed', { sessionId });
+      } catch { /* ignore */ }
+    }
+  });
+};
+
+/**
+ * Refresh an A2A session's stored peer name/avatar from the latest chain data.
+ * When the stored profile actually changes, all windows are notified. Returns
+ * whether the refresh succeeded and whether the stored profile changed.
+ */
+const runA2APeerProfileRefresh = async (
+  sessionId: string,
+  options: { force?: boolean } = {},
+): Promise<{ refreshed: boolean; changed: boolean }> => {
+  try {
+    const result = await refreshA2APeerProfile({
+      coworkStore: getCoworkStore(),
+      sessionId,
+      fetchProfile: (peerGlobalMetaId) => fetchLatestBotProfileInfo(peerGlobalMetaId),
+      force: options.force === true,
+    });
+    if (result.changed) {
+      broadcastProfileRefreshed(sessionId);
+    }
+    return result;
+  } catch (error) {
+    console.warn(
+      `[A2A PeerProfile] Refresh failed for session ${sessionId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+    return { refreshed: false, changed: false };
+  }
+};
+
+/**
  * Fire-and-forget refresh of an A2A session's stored peer name/avatar from
  * the latest chain data. When the stored profile actually changes, all
  * windows are notified so the renderer reloads the session list/detail.
@@ -589,29 +633,7 @@ const emitCoworkStreamMessageUpdate = (
 const scheduleA2APeerProfileRefresh = (sessionId: string): void => {
   const normalizedSessionId = toSafeString(sessionId).trim();
   if (!normalizedSessionId) return;
-  void (async () => {
-    try {
-      const result = await refreshA2APeerProfile({
-        coworkStore: getCoworkStore(),
-        sessionId: normalizedSessionId,
-        fetchProfile: (peerGlobalMetaId) => fetchLatestBotProfileInfo(peerGlobalMetaId),
-      });
-      if (!result.changed) return;
-      BrowserWindow.getAllWindows().forEach((win) => {
-        if (!win.isDestroyed()) {
-          try {
-            win.webContents.send('cowork:session:profileRefreshed', { sessionId: normalizedSessionId });
-          } catch { /* ignore */ }
-        }
-      });
-    } catch (error) {
-      console.warn(
-        `[A2A PeerProfile] Refresh failed for session ${normalizedSessionId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
-    }
-  })();
+  void runA2APeerProfileRefresh(normalizedSessionId);
 };
 
 const attachSimplemsgMetadataToCoworkMessage = (
@@ -7388,6 +7410,19 @@ if (!gotTheLock) {
         };
       }
     });
+  });
+
+  ipcMain.handle('cowork:session:refreshPeerProfile', async (_event, input: {
+    sessionId?: unknown;
+    force?: unknown;
+  }) => {
+    const sessionId = toSafeString(input?.sessionId).trim();
+    if (!sessionId) {
+      return { success: false, changed: false, error: 'sessionId is required' };
+    }
+    const force = input?.force === true;
+    const result = await runA2APeerProfileRefresh(sessionId, { force });
+    return { success: true, changed: result.changed };
   });
 
   ipcMain.handle('cowork:session:getMessagesPage', async (_event, input: {

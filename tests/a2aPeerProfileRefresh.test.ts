@@ -117,6 +117,34 @@ test('serves the profile from the TTL cache instead of refetching', async () => 
   assert.equal(fetches, 1);
 });
 
+test('force bypasses the TTL cache and refetches the latest profile', async () => {
+  const session = a2aSession({ peerName: 'Twin Bot', peerAvatar: 'metafile://old-avatar' });
+  const { coworkStore } = createStoreMock(session);
+  let fetches = 0;
+  // First fetch returns the old profile (so nothing changes on the first call
+  // and the cache is populated within the TTL window).
+  let latestName = 'Twin Bot';
+  let latestAvatar = 'metafile://old-avatar';
+  const fetchProfile = async (): Promise<A2APeerProfile> => {
+    fetches += 1;
+    return { name: latestName, avatar: latestAvatar };
+  };
+
+  await refreshA2APeerProfile({ coworkStore, sessionId: session.id, fetchProfile });
+  // Peer renames on-chain after the cache was populated.
+  latestName = 'WuFenGBot';
+  latestAvatar = 'metafile://new-avatar';
+  // Without force the TTL cache would be hit (fetches stays 1); force must bypass it.
+  const result = await refreshA2APeerProfile({
+    coworkStore,
+    sessionId: session.id,
+    fetchProfile,
+    force: true,
+  });
+  assert.equal(fetches, 2);
+  assert.deepEqual(result, { refreshed: true, changed: true });
+});
+
 test('refetches after the TTL expires', async () => {
   const session = a2aSession();
   const { coworkStore } = createStoreMock(session);

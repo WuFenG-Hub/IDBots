@@ -360,6 +360,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:rename', options),
     getSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:get', sessionId),
+    refreshPeerProfile: (input: { sessionId: string; force?: boolean }) =>
+      ipcRenderer.invoke('cowork:session:refreshPeerProfile', input),
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
       ipcRenderer.invoke('cowork:session:getMessagesPage', input),
     getA2AConversationHistoryPage: (input: {

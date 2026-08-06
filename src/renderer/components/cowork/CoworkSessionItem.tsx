@@ -4,6 +4,7 @@ import { ArchiveBoxIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSq
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
+import { isRenderableAvatarSource } from '../../utils/avatarSource';
 
 interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
@@ -79,8 +80,8 @@ const formatRelativeTime = (timestamp: number): { compact: string; full: string 
   }
 };
 
-const isRenderableAvatarSource = (src?: string | null): src is string =>
-  Boolean(src && /^(https?:|data:|blob:)/i.test(src.trim()));
+const isRenderableSessionAvatarSource = (src?: string | null): src is string =>
+  isRenderableAvatarSource(src);
 
 const avatarInitial = (name?: string | null): string => {
   const trimmed = name?.trim() ?? '';
@@ -92,26 +93,67 @@ const SessionAvatarCircle: React.FC<{
   src?: string | null;
   name?: string | null;
   className?: string;
-}> = ({ src, name, className = '' }) => (
-  <span
-    className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
-    title={name?.trim() || undefined}
-  >
-    {isRenderableAvatarSource(src) ? (
-      <img src={src} alt={name?.trim() || ''} className="h-full w-full object-cover" />
-    ) : (
-      avatarInitial(name)
-    )}
-  </span>
-);
+}> = ({ src, name, className = '' }) => {
+  const initiallyRenderable = isRenderableSessionAvatarSource(src);
+  // Track image-load failures so a broken/404 avatar URL falls back to the
+  // initial letter instead of showing a broken-image icon. Reset if the src
+  // changes back to a (different) renderable value.
+  const [imageFailed, setImageFailed] = React.useState(false);
+  React.useEffect(() => {
+    setImageFailed(false);
+  }, [src]);
+  const showImage = initiallyRenderable && !imageFailed;
+  return (
+    <span
+      className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
+      title={name?.trim() || undefined}
+    >
+      {showImage ? (
+        <img
+          src={src}
+          alt={name?.trim() || ''}
+          className="h-full w-full object-cover"
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        avatarInitial(name)
+      )}
+    </span>
+  );
+};
 
 /**
  * Sidebar avatar(s) identifying which MetaBot(s) a session belongs to:
  * the executing MetaBot for standard cowork sessions, and both the local
- * MetaBot and the remote peer (overlapping) for A2A sessions.
+ * MetaBot and the remote peer (overlapping) for A2A sessions. For A2A
+ * sessions the peer avatar is clickable to force-refresh the peer's latest
+ * name/avatar from the chain (GlobalMetaID is immutable; name/avatar can
+ * change), since the background refresh is TTL-gated and may be stale.
  */
 export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> = ({ session }) => {
+  const [isRefreshingPeer, setIsRefreshingPeer] = React.useState(false);
+
+  const handleRefreshPeer = React.useCallback(async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isRefreshingPeer) return;
+    const sessionId = session.id;
+    if (!sessionId) return;
+    setIsRefreshingPeer(true);
+    try {
+      await window.electron?.cowork?.refreshPeerProfile({ sessionId, force: true });
+    } catch {
+      /* best-effort; the profileRefreshed event drives the UI update */
+    } finally {
+      // Brief delay so the spinner is perceptible even on a fast refresh.
+      window.setTimeout(() => setIsRefreshingPeer(false), 400);
+    }
+  }, [isRefreshingPeer, session.id]);
+
   if (session.sessionType === 'a2a') {
+    const refreshLabel = isRefreshingPeer
+      ? i18nService.t('coworkPeerProfileRefreshing')
+      : i18nService.t('coworkPeerProfileRefresh');
     return (
       <span className="mr-2 flex flex-shrink-0 items-center">
         <SessionAvatarCircle
@@ -119,11 +161,21 @@ export const CoworkSessionAvatars: React.FC<{ session: CoworkSessionSummary }> =
           name={session.metabotName}
           className="relative z-10 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
         />
-        <SessionAvatarCircle
-          src={session.peerAvatar}
-          name={session.peerName}
-          className="-ml-2 ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted"
-        />
+        <button
+          type="button"
+          onClick={handleRefreshPeer}
+          disabled={isRefreshingPeer}
+          aria-label={refreshLabel}
+          title={refreshLabel}
+          className={`-ml-2 rounded-full ring-2 ring-claude-surfaceMuted dark:ring-claude-darkSurfaceMuted transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-claude-accent ${
+            isRefreshingPeer ? 'cursor-wait opacity-60' : 'cursor-pointer'
+          }`}
+        >
+          <SessionAvatarCircle
+            src={session.peerAvatar}
+            name={session.peerName}
+          />
+        </button>
       </span>
     );
   }
