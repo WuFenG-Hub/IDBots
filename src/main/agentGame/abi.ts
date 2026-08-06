@@ -226,6 +226,7 @@ export type SessionErrorCode =
   | 'group_not_found'
   | 'seat_unavailable'
   | 'adapter_error'
+  | 'adapter_timeout'
   | 'llm_unavailable'
   | 'llm_timeout'
   | 'rate_limited'
