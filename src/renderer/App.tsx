@@ -1043,6 +1043,7 @@ const App: React.FC = () => {
       isSidebarCollapsed={isSidebarCollapsed}
       onToggleSidebar={handleToggleSidebar}
       onNewChat={handleBlankNewChat}
+      onNewGroupTask={handleNewGroupTask}
       updateBadge={isSidebarCollapsed ? updateBadge : null}
     />
   ) : mainView === 'metabots' ? (
@@ -1095,7 +1096,6 @@ const App: React.FC = () => {
         onShowGigSquare={handleShowGigSquare}
         onShowMetabots={handleShowMetabots}
         onNewChat={handleBlankNewChat}
-        onNewGroupTask={handleNewGroupTask}
         mode={botBrowserShell.surfaceMode}
         onSelectHome={botBrowserShell.switchToHome}
         onSelectBrowser={() => {

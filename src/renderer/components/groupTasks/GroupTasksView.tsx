@@ -20,6 +20,7 @@ interface GroupTasksViewProps {
   isSidebarCollapsed?: boolean;
   onToggleSidebar?: () => void;
   onNewChat?: () => void;
+  onNewGroupTask?: () => void;
   updateBadge?: React.ReactNode;
 }
 
@@ -74,6 +75,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   isSidebarCollapsed,
   onToggleSidebar,
   onNewChat,
+  onNewGroupTask,
   updateBadge,
 }) => {
   const dispatch = useDispatch();
@@ -133,25 +135,36 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
         <WindowTitleBar inline />
       </div>
 
-      {/* Filter tabs */}
-      <div className="flex items-center border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
-        {FILTER_TABS.map((tab) => (
+      {/* Filter tabs + New Group Task button */}
+      <div className="flex items-center justify-between border-b dark:border-claude-darkBorder border-claude-border px-4 shrink-0">
+        <div className="flex">
+          {FILTER_TABS.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                activeTab === tab.id
+                  ? 'dark:text-claude-darkText text-claude-text'
+                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+              }`}
+            >
+              {i18nService.t(tab.labelKey)}
+              {activeTab === tab.id && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
+          ))}
+        </div>
+        {onNewGroupTask && (
           <button
-            key={tab.id}
             type="button"
-            onClick={() => setActiveTab(tab.id)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === tab.id
-                ? 'dark:text-claude-darkText text-claude-text'
-                : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-            }`}
+            onClick={onNewGroupTask}
+            className="btn-idchat-primary-filled px-3 py-1 text-sm font-medium"
           >
-            {i18nService.t(tab.labelKey)}
-            {activeTab === tab.id && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
-            )}
+            {i18nService.t('groupTasksNewTask')}
           </button>
-        ))}
+        )}
       </div>
 
       {/* Content */}
