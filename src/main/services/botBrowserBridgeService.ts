@@ -48,6 +48,7 @@ export type BotBrowserBridgeErrorCode =
   | 'pin_write_failed'
   | 'llm_unavailable'
   | 'llm_timeout'
+  | 'empty_content'
   | 'rate_limited'
   | 'permissions_failed';
 
@@ -715,6 +716,12 @@ function isLlmTimeoutError(error: unknown): boolean {
   return name === 'AbortError' || name === 'BrowserLlmTimeout';
 }
 
+function isEmptyCompletionError(error: unknown): boolean {
+  if (!error) return false;
+  const name = text((error as { name?: unknown }).name);
+  return name === 'EmptyCompletion';
+}
+
 function sanitizeLlmModelName(value: unknown): string {
   const model = text(value);
   if (!model) return '';
@@ -1137,7 +1144,7 @@ export function createBotBrowserBridgeService(
         clearTimeout(timeoutHandle);
         const completionText = text(result.text);
         if (!completionText) {
-          return failure('llm_unavailable', 'Local LLM returned an empty completion.');
+          return failure('empty_content', 'Local LLM returned an empty completion.');
         }
         recordTimestamp(llmTimestamps, resourceKey, now());
         // Sanitized response: display-grade model name and finish reason only.
@@ -1151,6 +1158,9 @@ export function createBotBrowserBridgeService(
         clearTimeout(timeoutHandle);
         if (isLlmTimeoutError(error)) {
           return failure('llm_timeout', 'Local LLM completion timed out.');
+        }
+        if (isEmptyCompletionError(error)) {
+          return failure('empty_content', (error as Error).message);
         }
         return failure('llm_unavailable', 'Local LLM completion failed.');
       } finally {

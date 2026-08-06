@@ -38,7 +38,7 @@ function formatTimestamp(): string {
   return new Date().toISOString();
 }
 
-export function coworkLog(level: 'INFO' | 'WARN' | 'ERROR', tag: string, message: string, extra?: Record<string, unknown>): void {
+export function coworkLog(level: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR', tag: string, message: string, extra?: Record<string, unknown>): void {
   try {
     rotateIfNeeded();
     const parts = [`[${formatTimestamp()}] [${level}] [${tag}] ${message}`];

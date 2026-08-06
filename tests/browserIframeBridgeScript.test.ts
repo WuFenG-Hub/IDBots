@@ -21,3 +21,15 @@ test('generated bridge script contains the expected install markers and features
   assert.match(script, /get-tab-info/);
   assert.match(script, /window-drag-move/);
 });
+
+test('actions endpoint uses a long timeout so llm-complete is not killed at 30s', () => {
+  const script = buildBrowserIframeBridgeScript();
+  assert.match(script, /ENDPOINT_TIMEOUT_ACTIONS_MS = 180000/);
+  assert.match(script, /endpointTimeoutMs/);
+  assert.match(script, /llm-complete/);
+  // Must not keep the old hard-coded 30s-only wait on every endpoint request.
+  assert.doesNotMatch(
+    script,
+    /reject\(new Error\('Browser endpoint request timed out\.'\)\);\s*\}, 30000\)/,
+  );
+});

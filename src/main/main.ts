@@ -2571,7 +2571,8 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
       return uploadMetaFile(...args);
     },
     completeLlm: async ({ metabot, payload }) => {
-      const timeoutMs = payload.options?.timeoutMs ?? 30_000;
+      // Align with bridge contract / MetaApp chess prompts (was 30s — too short).
+      const timeoutMs = payload.options?.timeoutMs ?? 120_000;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       try {

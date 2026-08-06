@@ -159,6 +159,21 @@ export function buildBrowserIframeBridgeScript(): string {
     });
   }
 
+  // Default 30s is fine for gallery/resolve. llm-complete (and other trusted
+  // actions that wait on the host LLM / user confirm) can take up to the
+  // bridge contract max (180s). A hard 30s here aborts while the host is still
+  // running — MetaApp then sees llm_unavailable "Browser endpoint request timed out."
+  var ENDPOINT_TIMEOUT_DEFAULT_MS = 30000;
+  var ENDPOINT_TIMEOUT_ACTIONS_MS = 180000;
+
+  function endpointTimeoutMs(request) {
+    var url = String((request && request.url) || '');
+    // Trusted actions (llm-complete / pin-write / permissions) all go here and
+    // may wait on the host LLM or a user confirmation card.
+    if (url.indexOf('/api/browser/actions') !== -1) return ENDPOINT_TIMEOUT_ACTIONS_MS;
+    return ENDPOINT_TIMEOUT_DEFAULT_MS;
+  }
+
   async function fetchBrowserEndpoint(input, init) {
     var id = 'endpoint-' + (++requestSeq);
     var request = {
@@ -166,6 +181,7 @@ export function buildBrowserIframeBridgeScript(): string {
       method: requestMethod(input, init),
       body: await requestBody(input, init)
     };
+    var waitMs = endpointTimeoutMs(request);
 
     var response = await new Promise(function (resolve, reject) {
       pendingRequests[id] = {
@@ -175,7 +191,7 @@ export function buildBrowserIframeBridgeScript(): string {
           if (!pendingRequests[id]) return;
           delete pendingRequests[id];
           reject(new Error('Browser endpoint request timed out.'));
-        }, 30000)
+        }, waitMs)
       };
 
       window.parent.postMessage({

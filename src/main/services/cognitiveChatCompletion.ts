@@ -138,7 +138,10 @@ async function chatCompletionSingleAttempt(
           options.temperature
         );
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
-      throw new Error(formatEmptyCompletionError(result.responseMetadata));
+      const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
+      // 让上层（botBrowserBridgeService.completeLlm）能把「空回复」从 llm_unavailable 里区分出来。
+      emptyError.name = 'EmptyCompletion';
+      throw emptyError;
     }
     return result;
   } catch (err) {
@@ -297,9 +300,13 @@ async function callAnthropicStyleWithTools(
     },
   };
   const toolCalls: ToolCallResult[] = [];
+  let thinkingText = '';
   for (const block of contentBlocks) {
     if (block.type === 'text' && block.text) {
       out.content = (out.content ?? '') + block.text;
+    } else if ((block.type === 'thinking' || block.type === 'redacted_thinking') && block.text) {
+      // DeepSeek thinking 等模型把推理放 thinking 块、text 可能为空；先收着做回退。
+      thinkingText += block.text;
     }
     if (block.type === 'tool_use' && block.id && block.name) {
       const args =
@@ -310,6 +317,15 @@ async function callAnthropicStyleWithTools(
     }
   }
   if (out.content) out.content = out.content.trim();
+  if (!out.content && thinkingText.trim()) {
+    // 没有 text 块时回退到 thinking 文本，避免上层把「空 content」误判为 llm_unavailable。
+    // （browser.llm.complete / 象棋走子：LLM 答案可能只在推理里，解析层能从中提取合法着法。）
+    out.content = thinkingText.trim();
+    out.responseMetadata.contentBlockTypes = [
+      ...(out.responseMetadata.contentBlockTypes ?? []),
+      'reasoning-fallback',
+    ];
+  }
   if (toolCalls.length) out.tool_calls = toolCalls;
   return out;
 }
@@ -352,6 +368,8 @@ async function callOpenAIStyleWithTools(
 
   type ChoiceMessage = {
     content?: string | null;
+    reasoning_content?: string | null;
+    reasoning?: string | null;
     tool_calls?: Array<{
       id: string;
       type: string;
@@ -370,20 +388,26 @@ async function callOpenAIStyleWithTools(
   }
 
   const msg = data.choices?.[0]?.message;
+  // DeepSeek thinking 等模型可能把最终答案放在 reasoning_content，content 为空；
+  // MetaApp browser.llm.complete 路径必须能读到文本，否则被映射成 llm_unavailable。
+  const primaryContent = msg?.content != null ? String(msg.content).trim() : '';
+  const reasoningFallback = String(msg?.reasoning_content || msg?.reasoning || '').trim();
+  const resolvedContent = primaryContent || reasoningFallback;
   const out: ChatCompletionResult = {
     responseMetadata: {
       apiType: 'openai',
       stopReason: data.choices?.[0]?.finish_reason ?? null,
       contentBlockTypes: [
-        ...(msg?.content ? ['text'] : []),
+        ...(primaryContent ? ['text'] : []),
+        ...(!primaryContent && reasoningFallback ? ['reasoning'] : []),
         ...(msg?.tool_calls?.length ? ['tool_calls'] : []),
       ],
       inputTokens: data.usage?.prompt_tokens ?? null,
       outputTokens: data.usage?.completion_tokens ?? null,
     },
   };
-  if (msg?.content) {
-    out.content = String(msg.content).trim();
+  if (resolvedContent) {
+    out.content = resolvedContent;
   }
   if (msg?.tool_calls?.length) {
     out.tool_calls = msg.tool_calls.map((tc) => ({
