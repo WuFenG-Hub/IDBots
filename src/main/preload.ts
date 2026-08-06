@@ -298,6 +298,10 @@ contextBridge.exposeInMainWorld('electron', {
   checkApiConfig: () => ipcRenderer.invoke('check-api-config'),
   saveApiConfig: (config: { apiKey: string; baseURL: string; model: string; apiType?: 'anthropic' | 'openai' }) =>
     ipcRenderer.invoke('save-api-config', config),
+  deepseek: {
+    // Fetch wallet balance + availability from GET /user/balance.
+    getBalance: () => ipcRenderer.invoke('deepseek:getBalance'),
+  },
   generateSessionTitle: (userInput: string | null) =>
     ipcRenderer.invoke('generate-session-title', userInput),
   getRecentCwds: (limit?: number) =>

@@ -727,6 +727,13 @@ interface IElectronAPI {
   getApiConfig: () => Promise<CoworkApiConfig | null>;
   checkApiConfig: () => Promise<{ hasConfig: boolean; config: CoworkApiConfig | null; error?: string }>;
   saveApiConfig: (config: CoworkApiConfig) => Promise<{ success: boolean; error?: string }>;
+  deepseek: {
+    /** Fetch wallet balance + availability from GET /user/balance. */
+    getBalance: () => Promise<
+      | { success: true; balance: { available: boolean; display: string; infos: Array<{ currency: string; totalBalance: number; grantedBalance: number; toppedUpBalance: number }> } }
+      | { success: false; error: string }
+    >;
+  };
   generateSessionTitle: (userInput: string | null) => Promise<string>;
   getRecentCwds: (limit?: number) => Promise<string[]>;
   appEvents: {

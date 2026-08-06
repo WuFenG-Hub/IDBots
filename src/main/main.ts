@@ -65,6 +65,7 @@ import {
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
 import { fetchMetaidInfoByAddress, fetchMetaidInfoByMetaid, fetchMetaidRestoreProfile, type MetaidAddressInfo } from './services/metabotRestoreService';
+import { fetchDeepSeekBalance } from './services/deepseekBalanceService';
 import { requestMvcGasSubsidy } from './services/mvcSubsidyService';
 import { getAddressBalance } from './services/addressBalanceService';
 import { getMetabotWalletAssets } from './services/metabotWalletAssetService';
@@ -10323,6 +10324,13 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   ipcMain.handle('check-api-config', async () => {
     const { config, error } = resolveCurrentApiConfig();
     return { hasConfig: config !== null, config, error };
+  });
+
+  // DeepSeek wallet balance: fetches GET /user/balance. Used by the balance chip
+  // in the cowork header. Event-driven (called on session start + after turns),
+  // not polled on a timer.
+  ipcMain.handle('deepseek:getBalance', async () => {
+    return fetchDeepSeekBalance();
   });
 
   ipcMain.handle('save-api-config', async (_event, config: {

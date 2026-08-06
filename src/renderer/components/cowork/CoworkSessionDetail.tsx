@@ -14,6 +14,7 @@ import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import SubagentPanel from './SubagentPanel';
 import UsageStatsChip from './UsageStatsChip';
+import DeepSeekBalanceChip from './DeepSeekBalanceChip';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -3497,6 +3498,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         <div className="p-4 shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className="flex items-center justify-end gap-2 mb-2">
+              {currentModelId?.toLowerCase().includes('deepseek') && (
+                <DeepSeekBalanceChip usageStats={currentSession.usageStats} />
+              )}
               {currentSession.usageStats && (
                 <UsageStatsChip
                   usageStats={currentSession.usageStats}
