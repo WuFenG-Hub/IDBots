@@ -6,8 +6,7 @@ import type {
 import type { Metabot } from '../types/metabot';
 import { buildCanonicalPrivateConversationExternalConversationId } from './simplemsgPeerConversation';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
-
-const RAW_GLOBAL_META_ID_VERSION_CHARS = new Set(['q', 'p', 'z', 'r', 'y', 't']);
+import { normalizeGlobalMetaID } from '../shared/globalMetaId';
 /** Keep context segmentation aligned with the runtime's definition of a new A2A conversation round. */
 export const A2A_SESSION_CONVERSATION_GAP_MS = 5 * 60 * 1000;
 
@@ -59,15 +58,6 @@ function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeGlobalMetaId(value: unknown): string {
-  const normalized = text(value).toLowerCase();
-  if (!normalized || normalized.startsWith('metaid:')) return '';
-  if (!normalized.startsWith('id')) return '';
-  if (!RAW_GLOBAL_META_ID_VERSION_CHARS.has(normalized[2] ?? '')) return '';
-  if (normalized[3] !== '1') return '';
-  return normalized;
-}
-
 function parseLocalMetabotActorId(actorId: unknown): number | null {
   const match = /^idbots-metabot-(\d+)$/.exec(text(actorId));
   if (!match) return null;
@@ -95,7 +85,7 @@ export function normalizeCoworkA2ASessionInput(
     throw new Error('A valid local Bot actor is required');
   }
 
-  const peerGlobalMetaId = normalizeGlobalMetaId(input.peerGlobalMetaId);
+  const peerGlobalMetaId = normalizeGlobalMetaID(input.peerGlobalMetaId);
   if (!peerGlobalMetaId) {
     throw new Error('A valid peer GlobalMetaID is required');
   }
@@ -117,7 +107,7 @@ export function ensureCoworkA2ASession(
     throw new Error('Local Bot not found');
   }
 
-  const localGlobalMetaId = normalizeGlobalMetaId(localMetabot.globalmetaid);
+  const localGlobalMetaId = normalizeGlobalMetaID(localMetabot.globalmetaid);
   if (!localGlobalMetaId) {
     throw new Error('Local Bot GlobalMetaID is missing');
   }
