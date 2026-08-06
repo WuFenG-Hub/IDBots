@@ -287,17 +287,22 @@ test('CoworkRunner injects SDK subagent overrides that inherit the main model', 
   );
   assert.match(
     source,
-    /Explore[\s\S]*?model:\s*'inherit'/,
+    /const agentModel = model\?\.trim\(\) \? model\.trim\(\) : undefined/,
+    'CoworkRunner should derive an explicit subagent model from the active Cowork model',
+  );
+  assert.match(
+    source,
+    /Explore[\s\S]*?\.\.\.\(agentModel \? \{ model: agentModel \} : \{\}\)/,
     'Explore subagent override should inherit the active Cowork model',
   );
   assert.match(
     source,
-    /'general-purpose'[\s\S]*?model:\s*'inherit'/,
+    /'general-purpose'[\s\S]*?\.\.\.\(agentModel \? \{ model: agentModel \} : \{\}\)/,
     'general-purpose subagent override should inherit the active Cowork model',
   );
   assert.match(
     source,
-    /options\.agents\s*=\s*\{[\s\S]*?buildCoworkSdkAgentOverrides\(\)/,
+    /options\.agents\s*=\s*\{[\s\S]*?buildCoworkSdkAgentOverrides\(apiConfig\.model\)/,
     'CoworkRunner should pass the overrides through SDK options.agents',
   );
 });
