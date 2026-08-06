@@ -101,6 +101,10 @@ export interface CoworkUsageStats {
   totalCostUsd?: number;
   /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
   source: 'deepseek' | 'anthropic' | 'none';
+  /** Number of LLM turns accumulated (for cache-miss attribution). */
+  turnCount?: number;
+  /** Per-turn cache-miss attribution trail (diagnostics). */
+  cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
 }
 
 // Live subagent / background task state, driven by SDK task_* and tool_progress

@@ -44,7 +44,10 @@ test('anthropicToOpenAI gives empty SDK web tool schemas valid OpenAI function p
     ],
   });
 
-  assert.deepEqual(converted.tools[0].function.parameters, {
+  // Tools are sorted by function name for cache-prefix stability (web_fetch < web_search).
+  assert.equal(converted.tools[0].function.name, 'web_fetch');
+  assert.equal(converted.tools[1].function.name, 'web_search');
+  assert.deepEqual(converted.tools[1].function.parameters, {
     type: 'object',
     properties: {
       query: {
@@ -64,7 +67,7 @@ test('anthropicToOpenAI gives empty SDK web tool schemas valid OpenAI function p
     },
     required: ['query'],
   });
-  assert.deepEqual(converted.tools[1].function.parameters, {
+  assert.deepEqual(converted.tools[0].function.parameters, {
     type: 'object',
     properties: {
       url: {
@@ -107,6 +110,41 @@ test('anthropicToOpenAI preserves valid explicit function tool schemas', async (
     },
     required: ['file_path'],
   });
+});
+
+test('anthropicToOpenAI sorts tools deterministically by function name for cache stability', async () => {
+  const { anthropicToOpenAI } = await importCompiled('coworkFormatTransform');
+
+  // Tools given in non-alphabetical order; the transform must sort them so the
+  // serialized tools prefix is byte-identical across turns regardless of the
+  // caller's iteration order — critical for DeepSeek's automatic context cache.
+  const converted = anthropicToOpenAI({
+    model: 'test-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [
+      { name: 'Write', input_schema: { type: 'object', properties: {} } },
+      { name: 'Bash', input_schema: { type: 'object', properties: {} } },
+      { name: 'Read', input_schema: { type: 'object', properties: {} } },
+    ],
+  });
+
+  const names = converted.tools.map((t) => t.function.name);
+  assert.deepEqual(names, ['Bash', 'Read', 'Write']);
+
+  // Same tools in a different input order must produce the same output order.
+  const reordered = anthropicToOpenAI({
+    model: 'test-model',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [
+      { name: 'Read', input_schema: { type: 'object', properties: {} } },
+      { name: 'Write', input_schema: { type: 'object', properties: {} } },
+      { name: 'Bash', input_schema: { type: 'object', properties: {} } },
+    ],
+  });
+  assert.deepEqual(
+    reordered.tools.map((t) => t.function.name),
+    ['Bash', 'Read', 'Write'],
+  );
 });
 
 function parseSSEEvents(raw) {
