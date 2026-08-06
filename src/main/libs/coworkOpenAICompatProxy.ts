@@ -79,11 +79,15 @@ const LOCAL_HOST = '127.0.0.1';
 const SANDBOX_HOST = '10.0.2.2';
 const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // DeepSeek's thinking API rejects (400) any assistant tool-call message that
-// lacks reasoning_content. When the real reasoning is unrecoverable (process
-// restart, LRU eviction, or history from turns that never produced reasoning),
-// we inject this non-empty placeholder so the request contract stays valid and
-// the conversation history is preserved instead of being wiped on retry.
-const DEEPSEEK_REASONING_PLACEHOLDER = '(reasoning unavailable)';
+// lacks the reasoning_content key. When the real reasoning is unrecoverable
+// (process restart, LRU eviction, or history from turns that never produced
+// reasoning), we inject an EMPTY STRING (not a human-readable placeholder) so
+// the request contract stays valid AND the cached prefix remains byte-stable.
+// A variable placeholder text would change the prefix per lost-reasoning set
+// and crater DeepSeek's automatic context-cache hit rate; an empty string is
+// constant and accepted by the API. Mirrors Reasonix openai.go which sends a
+// pointer to the (possibly empty) ReasoningContent field.
+const DEEPSEEK_REASONING_PLACEHOLDER = '';
 
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
@@ -418,13 +422,13 @@ function hydrateDeepSeekReasoningForRequest(
     }
 
     // The real reasoning_content is unrecoverable (process restart, LRU
-    // eviction, or this turn predates thinking mode). Injecting a non-empty
-    // placeholder satisfies DeepSeek's structural requirement and keeps the
-    // conversation history intact, avoiding the session wipe that a 400 would
-    // trigger downstream. Only the already-lost reasoning is affected; all
-    // other turns retain their real reasoning where available.
+    // eviction, or this turn predates thinking mode). Injecting an EMPTY STRING
+    // satisfies DeepSeek's structural requirement (the key must be present on
+    // assistant tool-call messages) while keeping the cached prefix byte-stable,
+    // avoiding the session wipe that a 400 would trigger downstream. We do NOT
+    // stash the empty value into tool-call extra_content — there is nothing to
+    // cache, and the message-level key is what the API validates.
     messageObj.reasoning_content = DEEPSEEK_REASONING_PLACEHOLDER;
-    attachDeepSeekReasoningToToolCalls(toolCalls, DEEPSEEK_REASONING_PLACEHOLDER);
     placeholderCount += 1;
   }
 

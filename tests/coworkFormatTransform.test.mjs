@@ -409,13 +409,11 @@ test('DeepSeek request hydration falls back to placeholder when reasoning_conten
   assert.equal(hydrateResult.ok, true);
   assert.equal(hydrateResult.hydratedCount, 0);
   assert.equal(hydrateResult.placeholderCount, 1);
+  // The placeholder is an EMPTY STRING (not a human-readable marker) so the
+  // cached prefix stays byte-stable across different sets of lost-reasoning
+  // turns. DeepSeek requires the key to be present; an empty value is accepted.
   assert.equal(typeof request.messages[0].reasoning_content, 'string');
-  assert.ok(request.messages[0].reasoning_content.length > 0, 'placeholder reasoning_content must be non-empty');
-  // The placeholder must also be stashed onto the tool call's extra_content so
-  // subsequent re-hydration of the same request stays self-sufficient.
-  const extraReasoning = request.messages[0].tool_calls[0].extra_content?.deepseek?.reasoning_content;
-  assert.equal(typeof extraReasoning, 'string');
-  assert.ok(extraReasoning.length > 0, 'tool call extra_content must carry the placeholder reasoning');
+  assert.equal(request.messages[0].reasoning_content, '', 'placeholder reasoning_content must be an empty string for cache stability');
 });
 
 test('DeepSeek request hydration restores real reasoning when available and does not use placeholder', async () => {

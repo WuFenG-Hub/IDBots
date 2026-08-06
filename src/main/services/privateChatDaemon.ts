@@ -189,7 +189,7 @@ type PrivateChatPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; fallbackLlmId?: string | null }
+  options?: { signal?: AbortSignal; fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }
 ) => Promise<string>;
 
 export interface PrivateChatA2AContextMessage {
@@ -1217,7 +1217,7 @@ export async function sendSellerOrderAcknowledgement(params: {
   paymentTxid?: string | null;
   orderPinId?: string | null;
   orderTxid?: string | null;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null }) => Promise<string>;
+  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }) => Promise<string>;
   sendEncryptedMsg: (text: string) => Promise<{ pinId?: string | null; txids?: string[] | null }>;
   serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFirstResponseSent'> | null;
   emitLog?: (msg: string) => void;
@@ -2050,7 +2050,7 @@ interface RatingFlowParams {
   sellerGlobalMetaId: string;
   sharedSecretForReply: string;
   createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null }) => Promise<string>;
+  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }) => Promise<string>;
   serviceOrderLifecycle?: ServiceOrderLifecycleService | null;
   emitLog: (msg: string) => void;
   emitToRenderer?: (channel: string, data: unknown) => void;
@@ -2440,7 +2440,7 @@ async function handleRatingFlow(params: RatingFlowParams): Promise<void> {
   const llmId = normalizeMetabotLlmId(metabot.llm_id) ?? undefined;
   const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
 
-  const ratingText = await performChat(ratingSystemPrompt, 'Write your rating, numeric score, and farewell now.', llmId, { fallbackLlmId });
+  const ratingText = await performChat(ratingSystemPrompt, 'Write your rating, numeric score, and farewell now.', llmId, { fallbackLlmId, thinking: 'disabled' });
 
   // Extract rate (1-5) from the generated text
   const rateMatch = ratingText.match(/[1-5]\s*分|评分[：:]\s*([1-5])|([1-5])\s*(?:out of|\/)\s*5|([1-5])\s*星/i)
@@ -3937,7 +3937,8 @@ async function processOne(
               }),
               plaintext,
               llmId,
-              { fallbackLlmId }
+              // Wait-notice is a short acknowledgment; skip reasoning to keep latency low.
+              { fallbackLlmId, thinking: 'disabled' }
             );
         waitNoticeText = normalizePrivateChatSkillWaitNoticeText(rawWaitNotice);
       } catch (error) {
@@ -4037,6 +4038,7 @@ async function processOne(
           reply = await performChat(systemPromptWithExperience, plaintext, llmId, {
             signal: guidanceTurn.abortController.signal,
             fallbackLlmId,
+            thinking: 'enabled',
           });
         }
       } catch (e) {

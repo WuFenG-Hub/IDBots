@@ -87,7 +87,7 @@ export type PerformChatCompletionFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { fallbackLlmId?: string | null }
+  options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }
 ) => Promise<string>;
 /** (metabotId, groupId, nickName, content) => void; signs and broadcasts via create-pin */
 export type BroadcastGroupChatFn = (
@@ -693,6 +693,9 @@ async function runReplyPipeline(
             llmId: metabot.llm_id ?? undefined,
             fallbackLlmId: metabot.fallback_llm_id ?? undefined,
             tools,
+            // Default to thinking-on for DeepSeek reasoning turns; non-DeepSeek
+            // models ignore this (resolveThinkingForModel drops it).
+            thinking: 'enabled',
           });
         } catch (err) {
           rethrowSqliteWasmBoundsError(err);
@@ -750,6 +753,7 @@ async function runReplyPipeline(
     try {
       replyText = await performChatCompletion(systemPrompt, userMessage, metabot.llm_id ?? undefined, {
         fallbackLlmId: metabot.fallback_llm_id ?? undefined,
+        thinking: 'enabled',
       });
     } catch (err) {
       rethrowSqliteWasmBoundsError(err);
