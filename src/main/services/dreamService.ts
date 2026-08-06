@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { CoworkStore } from '../coworkStore';
 import type { DreamDayActivity, DreamStore } from '../dreamStore';
+import type { MetaIDExperienceStore } from '../metaidExperienceStore';
+import type { MetaIDImpressionStore } from '../metaidImpressionStore';
 import {
   DREAM_LOOKBACK_DAYS,
   DREAM_VERSION,
@@ -23,6 +25,10 @@ import { formatBotWorkspaceDate } from '../libs/botWorkspace';
 import { resolveAutomationModelOverride, resolveCurrentModelLimits } from '../libs/claudeSettings';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
 import { normalizeMetabotLlmId } from './llmFallback';
+import {
+  applyMetaIDDreamImpressionUpdates,
+  buildMetaIDDreamImpressionContext,
+} from './metaidDreamImpressionService';
 
 /**
  * Dream consolidation service — the nightly "做梦" pipeline.
@@ -63,6 +69,7 @@ export interface DreamMetabotLike {
   soul?: string | null;
   llm_id?: string | null;
   fallback_llm_id?: string | null;
+  globalmetaid?: string | null;
   enabled?: boolean;
 }
 
@@ -89,6 +96,8 @@ export interface DreamServiceDeps {
   dreamStore: DreamStore;
   performChat?: DreamPerformChat;
   emitToRenderer?: (channel: string, payload: unknown) => void;
+  metaidExperienceStore?: MetaIDExperienceStore;
+  metaidImpressionStore?: MetaIDImpressionStore;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   now?: () => Date;
@@ -284,6 +293,21 @@ export class DreamService {
     return normalizeMetabotLlmId(metabot.fallback_llm_id);
   }
 
+  private buildDreamImpressionSubjects(
+    metabot: DreamMetabotLike,
+    date: string,
+  ) {
+    if (!this.deps.metaidExperienceStore || !this.deps.metaidImpressionStore || !metabot.globalmetaid) return [];
+    const { startMs, endMs } = getDayBoundsMs(date);
+    return buildMetaIDDreamImpressionContext({
+      experienceStore: this.deps.metaidExperienceStore,
+      impressionStore: this.deps.metaidImpressionStore,
+      observerGlobalMetaID: metabot.globalmetaid,
+      fromTime: startMs,
+      toTime: endMs,
+    });
+  }
+
   private emitDreaming(metabotId: number, dreaming: boolean): void {
     try {
       this.deps.emitToRenderer?.(DREAM_STATUS_CHANNEL, { metabotId, dreaming });
@@ -442,6 +466,7 @@ export class DreamService {
     activity: DreamDayActivity,
     llmId: string | null,
     fallbackLlmId: string | null,
+    impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
   ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
     const budgets = this.resolveDreamBudgets(llmId);
     const estimatedTokens = estimateDreamActivityTokens(activity);
@@ -453,6 +478,7 @@ export class DreamService {
         date,
         activity,
         activityTokenBudget: budgets.fastPathInputTokens,
+        impressionSubjects,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -473,6 +499,7 @@ export class DreamService {
         date,
         activity,
         activityTokenBudget: budgets.fastPathInputTokens,
+        impressionSubjects,
       });
       const output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId, budgets.maxOutputTokens);
       return { prompt, output };
@@ -499,6 +526,7 @@ export class DreamService {
       activity: synthesisActivity,
       activityTokenBudget: budgets.fastPathInputTokens,
       sourceMode: 'fragment_summaries',
+      impressionSubjects,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -526,13 +554,21 @@ export class DreamService {
     try {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
-      if (activity.sessions.length === 0 && activity.taskRuns.length === 0) {
+      const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
+      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && impressionSubjects.length === 0) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         return;
       }
 
-      const prepared = await this.prepareDreamPromptAndOutput(metabot, date, activity, llmId, fallbackLlmId);
+      const prepared = await this.prepareDreamPromptAndOutput(
+        metabot,
+        date,
+        activity,
+        llmId,
+        fallbackLlmId,
+        impressionSubjects,
+      );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
       // expansion retry instead of burning an extra LLM call on it.
@@ -546,7 +582,7 @@ export class DreamService {
           this.resolveDreamBudgets(llmId).maxOutputTokens,
         );
       }
-      this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair);
+      this.writeDreamResults(metabotId, date, output, activity, llmId, isRepair, impressionSubjects, metabot.globalmetaid);
       this.deps.dreamStore.finishRun(metabotId, date, 'completed');
       console.log(`[DreamService] Dream completed for metabot ${metabotId} date ${date}${isRepair ? ' (version repair)' : ''}`);
     } catch (error) {
@@ -618,7 +654,9 @@ export class DreamService {
     output: DreamOutput,
     activity: DreamDayActivity,
     llmId: string | null,
-    isRepair: boolean
+    isRepair: boolean,
+    impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
+    observerGlobalMetaID?: string | null,
   ): void {
     this.deps.dreamStore.upsertDailySummary({
       metabotId,
@@ -747,6 +785,24 @@ export class DreamService {
             source: { sourceType: 'dream', sourceChannel: 'dream', dreamDate: date },
           });
         }
+      }
+    }
+
+    const impressionUpdates = Array.isArray(output.impressionUpdates) ? output.impressionUpdates : [];
+    if (this.deps.metaidImpressionStore && observerGlobalMetaID && impressionUpdates.length > 0) {
+      const result = applyMetaIDDreamImpressionUpdates({
+        impressionStore: this.deps.metaidImpressionStore,
+        observerGlobalMetaID,
+        dreamDate: date,
+        dreamVersion: DREAM_VERSION,
+        modelId: llmId,
+        subjects: impressionSubjects,
+        updates: impressionUpdates,
+      });
+      if (result.accepted > 0 || result.rejected > 0) {
+        console.log(
+          `[DreamService] Impression updates for metabot ${metabotId}: accepted=${result.accepted}, created=${result.created}, rejected=${result.rejected}, rebuilt=${result.rebuilt}`,
+        );
       }
     }
   }

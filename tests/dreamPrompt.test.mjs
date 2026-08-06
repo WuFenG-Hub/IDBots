@@ -119,7 +119,7 @@ test('computeDueDreamDates: a completed run that started mid-day is not final an
 
   // Once re-dreamed after the day ended, the date is final.
   const settled = new Map([
-    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 3 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 4 }],
   ]);
   const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
   assert.equal(next.dueDates.includes('2026-08-03'), false);

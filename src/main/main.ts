@@ -49,6 +49,7 @@ import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { MetaIDExperienceStore } from './metaidExperienceStore';
+import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -2473,6 +2474,7 @@ let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
+let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -2898,6 +2900,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   metabotStore = null;
   serviceOrderStore = null;
   metaidExperienceStore = null;
+  metaidImpressionStore = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3327,10 +3330,22 @@ const startSqliteDaemons = (): void => {
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
+  let dreamExperienceStore: MetaIDExperienceStore | undefined;
+  let dreamImpressionStore: MetaIDImpressionStore | undefined;
+  try {
+    dreamExperienceStore = getMetaIDExperienceStore();
+    dreamImpressionStore = getMetaIDImpressionStore();
+  } catch (error) {
+    console.warn(
+      `[DreamService] MetaID impression layer unavailable; continuing without dream impression updates: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   startDreamService({
     coworkStore: getCoworkStore(),
     metabotStore: getMetabotStore(),
     dreamStore: getDreamStore(),
+    metaidExperienceStore: dreamExperienceStore,
+    metaidImpressionStore: dreamImpressionStore,
     emitToRenderer: (channel, data) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
@@ -4993,6 +5008,17 @@ const getMetaIDExperienceStore = (): MetaIDExperienceStore => {
     );
   }
   return metaidExperienceStore;
+};
+
+const getMetaIDImpressionStore = (): MetaIDImpressionStore => {
+  if (!metaidImpressionStore) {
+    const sqliteStore = getStore();
+    metaidImpressionStore = new MetaIDImpressionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metaidImpressionStore;
 };
 
 const captureServiceOrderExperience = (
