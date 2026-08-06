@@ -15,6 +15,10 @@ export type MetaAppSearchItem = {
   title: string;
   appName: string;
   intro: string;
+  /** MetaApp icon reference (aggregation API; not in the written contract but present in production). */
+  icon: string;
+  /** MetaApp cover image reference (aggregation API; not in the written contract but present in production). */
+  coverImg: string;
   tags: string[];
   runtime: string;
   version: string;
@@ -77,6 +81,8 @@ function normalizeItem(raw: unknown): MetaAppSearchItem {
     title: text(record.title),
     appName: text(record.appName),
     intro: text(record.intro),
+    icon: text(record.icon),
+    coverImg: text(record.coverImg),
     tags: textList(record.tags),
     runtime: text(record.runtime),
     version: text(record.version),
