@@ -10,7 +10,6 @@ import type {
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
 import CoworkPromptInput from './CoworkPromptInput';
-import ContextUsageRing from '../ContextUsageRing';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import AutoApproveRulesPanel from './AutoApproveRulesPanel';
@@ -3489,7 +3488,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 onEndConversation={handleEndA2APrivateChat}
               />
             )}
-            <div className="flex items-center justify-end gap-2">
+          </div>
+        </div>
+      ) : (
+        <div className="p-4 shrink-0">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-end gap-2 mb-2">
               {currentSession.usageStats && (
                 <UsageStatsChip
                   usageStats={currentSession.usageStats}
@@ -3522,19 +3526,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   void coworkService.setPermissionMode(currentSession.id, mode);
                 }}
               />
-              {currentSession.contextUsage && (
-                <ContextUsageRing
-                  usedTokens={currentSession.contextUsage.usedTokens}
-                  contextWindow={currentSession.contextUsage.contextWindow}
-                  isRealUsage={currentSession.contextUsage.isRealUsage}
-                  categories={currentSession.contextUsage.categories}
-                />
-              )}
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="p-4 shrink-0">
           {delegationBlocking && (
             <div className="max-w-3xl mx-auto mb-2">
               <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">

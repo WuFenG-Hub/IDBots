@@ -262,7 +262,14 @@ export function shouldBlockBuiltinWebTool(toolName: string): boolean {
   return false;
 }
 
-export function buildCoworkSdkAgentOverrides(): Record<string, AgentDefinition> {
+export function buildCoworkSdkAgentOverrides(model?: string | null): Record<string, AgentDefinition> {
+  // The SDK's AgentDefinition.model only inherits the parent session model
+  // when the field is OMITTED. The legacy 'inherit' string is not a valid
+  // value — the SDK resolves it as a model name and falls back to its own
+  // default (claude-opus-5), which DeepSeek/proxy providers reject. Explicitly
+  // pass the session model (e.g. deepseek-v4-pro) so subagents use the same
+  // provider as the main session.
+  const agentModel = model?.trim() ? model.trim() : undefined;
   return {
     Explore: {
       description: 'Fast read-only agent specialized for exploring codebases.',
@@ -276,7 +283,7 @@ Rules:
 - Use Bash only for harmless inspection commands when the dedicated file tools are not enough.
 - Return clear findings with relevant absolute file paths.`,
       disallowedTools: ['Task', 'Edit', 'Write', 'NotebookEdit', 'MultiEdit'],
-      model: 'inherit',
+      ...(agentModel ? { model: agentModel } : {}),
       criticalSystemReminder_EXPERIMENTAL:
         'CRITICAL: This is a READ-ONLY task. You CANNOT edit, write, or create files.',
     },
@@ -289,7 +296,7 @@ Complete the assigned task using the tools available to you. Search broadly when
 
 Follow the user's requested scope. Do not make unrelated changes. When reporting file findings, use absolute paths.`,
       tools: ['*'],
-      model: 'inherit',
+      ...(agentModel ? { model: agentModel } : {}),
     },
   };
 }
@@ -4310,7 +4317,7 @@ export class CoworkRunner extends EventEmitter {
     };
     options.agents = {
       ...(options.agents as Record<string, AgentDefinition> | undefined),
-      ...buildCoworkSdkAgentOverrides(),
+      ...buildCoworkSdkAgentOverrides(apiConfig.model),
     };
 
     const usedResumeForThisRun = Boolean(activeSession.claudeSessionId);
