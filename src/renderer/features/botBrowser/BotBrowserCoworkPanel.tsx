@@ -241,42 +241,44 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
             />
           </div>
         ) : null}
-        <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} compact />
-        <button
-          type="button"
-          onClick={() => void handleAddFile()}
-          className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-          title={i18nService.t('coworkAddFile')}
-          aria-label={i18nService.t('coworkAddFile')}
-        >
-          <PaperClipIcon className="h-4 w-4" />
-        </button>
-        <SkillsButton
-          onSelectSkill={handleSelectSkill}
-          onManageSkills={() => onShowSkills?.()}
-          className="shrink-0 !p-1.5 [&_svg]:h-4 [&_svg]:w-4"
-        />
-        <ActiveSkillBadge />
-        <button
-          ref={folderButtonRef}
-          type="button"
-          onClick={() => setShowFolderMenu((value) => !value)}
-          className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
-          title={workingDirectory ? getCompactFolderName(workingDirectory, 40) : i18nService.t('coworkSelectFolderFirst')}
-          aria-label={i18nService.t('coworkSelectFolderFirst')}
-        >
-          <FolderIcon className="h-4 w-4" />
-        </button>
-        <FolderSelectorPopover
-          isOpen={showFolderMenu}
-          onClose={() => setShowFolderMenu(false)}
-          onSelectFolder={(folderPath) => {
-            setWorkingDirectory(folderPath);
-            setShowFolderMenu(false);
-          }}
-          anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
-          currentFolder={workingDirectory}
-        />
+        <div className="flex shrink-0 items-center gap-0.5">
+          <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} compact />
+          <button
+            type="button"
+            onClick={() => void handleAddFile()}
+            className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+            title={i18nService.t('coworkAddFile')}
+            aria-label={i18nService.t('coworkAddFile')}
+          >
+            <PaperClipIcon className="h-4 w-4" />
+          </button>
+          <SkillsButton
+            onSelectSkill={handleSelectSkill}
+            onManageSkills={() => onShowSkills?.()}
+            className="shrink-0 !p-1.5 [&_svg]:h-4 [&_svg]:w-4"
+          />
+          <ActiveSkillBadge />
+          <button
+            ref={folderButtonRef}
+            type="button"
+            onClick={() => setShowFolderMenu((value) => !value)}
+            className="shrink-0 p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors"
+            title={workingDirectory ? getCompactFolderName(workingDirectory, 40) : i18nService.t('coworkSelectFolderFirst')}
+            aria-label={i18nService.t('coworkSelectFolderFirst')}
+          >
+            <FolderIcon className="h-4 w-4" />
+          </button>
+          <FolderSelectorPopover
+            isOpen={showFolderMenu}
+            onClose={() => setShowFolderMenu(false)}
+            onSelectFolder={(folderPath) => {
+              setWorkingDirectory(folderPath);
+              setShowFolderMenu(false);
+            }}
+            anchorRef={folderButtonRef as React.RefObject<HTMLElement>}
+            currentFolder={workingDirectory}
+          />
+        </div>
       </div>
 
       <CoworkPromptInput
