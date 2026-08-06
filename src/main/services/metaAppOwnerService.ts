@@ -89,15 +89,40 @@ function readPinId(event: any): string | null {
   return typeof id === 'string' && isMetaAppPinId(id) ? id.toLowerCase() : null;
 }
 
-function readContent(event: any): any {
-  // Content may be a parsed object (when MAN returns decoded) or a JSON string.
-  const c = event?.content ?? event?.contentSummary ?? event?.data;
-  if (c == null) return null;
-  if (typeof c === 'object') return c;
-  if (typeof c === 'string') {
-    try { return JSON.parse(c); } catch { return null; }
+// Parse the MetaApp manifest out of a MAN indexer event.
+//
+// The MAN indexer exposes the pin body via several fields, and their meaning
+// has shifted over time, so we must be defensive:
+//   - `contentSummary` / `contentBody` / `data` hold the decoded manifest as a
+//     JSON string (or, sometimes, a pre-parsed object).
+//   - `content` is ambiguous: in older responses it carried the JSON body, but
+//     current responses make it a plain download URL
+//     (`https://manapi.metaid.io/content/<pinId>`) — NOT JSON. Treating that URL
+//     as the manifest source causes JSON.parse to fail silently, which is what
+//     left owner MetaApps with no title/cover/intro while only pin-identifying
+//     fields surfaced (the "shows raw pin data" bug).
+//
+// Strategy: prefer the explicit summary fields first. Only fall back to
+// `content` when it actually looks like JSON (starts with '{' or '['), so a URL
+// value never poisons the parse.
+function parseContentValue(value: unknown): any {
+  if (value == null) return null;
+  if (typeof value === 'object') return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    // Skip values that cannot be JSON objects (e.g. a content download URL).
+    if (trimmed[0] !== '{' && trimmed[0] !== '[') return null;
+    try { return JSON.parse(trimmed); } catch { return null; }
   }
   return null;
+}
+
+function readContent(event: any): any {
+  return parseContentValue(event?.contentSummary)
+    ?? parseContentValue(event?.contentBody)
+    ?? parseContentValue(event?.data)
+    ?? parseContentValue(event?.content);
 }
 
 function buildRecord(raw: any, ownerAddress: string): OwnerMetaAppRecord | null {
