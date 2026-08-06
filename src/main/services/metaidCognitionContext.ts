@@ -16,6 +16,9 @@ const MAX_SNAPSHOT_SUMMARY_CHARS = 1_500;
 const MAX_GUIDANCE_CHARS = 800;
 const MAX_UNCERTAINTY_CHARS = 800;
 const MAX_DESCRIPTOR_CHARS = 120;
+const MAX_GROUP_MEMBERS = 12;
+const MAX_GROUP_PROMPT_CHARS = 3_000;
+const MAX_GROUP_PER_MEMBER_CHARS = 900;
 
 export type MetaIDContactState =
   | 'first_contact'
@@ -46,6 +49,12 @@ export interface MetaIDCognitionContextServiceDeps {
   experienceStore: MetaIDExperienceStore;
   impressionStore: MetaIDImpressionStore;
   relationshipResolver: MetaIDRelationshipResolver;
+}
+
+export interface MetaIDGroupRosterMember {
+  globalMetaID: unknown;
+  name?: unknown;
+  role?: unknown;
 }
 
 function text(value: unknown): string {
@@ -160,6 +169,153 @@ export class MetaIDCognitionContextService {
     const context = await this.build(input);
     return context ? renderMetaIDCognitionPromptBlock(context) : '';
   }
+
+  /**
+   * Observer-relative group projection: one compact impression summary per
+   * roster member (excluding the observer itself), ordered by hard
+   * relationship and direct-interaction relevance, inside a deterministic
+   * prompt budget. Shared task membership is labeled as shared context and is
+   * never presented as proof of successful cooperation.
+   */
+  async buildGroupPromptBlock(input: {
+    observerGlobalMetaID: unknown;
+    roster: MetaIDGroupRosterMember[];
+    maxTotalChars?: number;
+    maxPerMemberChars?: number;
+    maxMembers?: number;
+  }): Promise<string> {
+    const observerGlobalMetaID = normalizeGlobalMetaID(input.observerGlobalMetaID);
+    if (!observerGlobalMetaID) return '';
+
+    const seen = new Set<string>();
+    const members: Array<{ globalMetaID: GlobalMetaID; name: string; role: string }> = [];
+    for (const entry of input.roster ?? []) {
+      const globalMetaID = normalizeGlobalMetaID(entry.globalMetaID);
+      if (!globalMetaID || globalMetaID === observerGlobalMetaID || seen.has(globalMetaID)) continue;
+      seen.add(globalMetaID);
+      members.push({
+        globalMetaID,
+        name: text(entry.name) || globalMetaID,
+        role: text(entry.role) || 'worker',
+      });
+    }
+    if (members.length === 0) return '';
+
+    const maxMembers = Math.min(
+      MAX_GROUP_MEMBERS,
+      Math.max(1, Math.floor(input.maxMembers ?? MAX_GROUP_MEMBERS)),
+    );
+    const maxTotalChars = Math.min(
+      MAX_GROUP_PROMPT_CHARS,
+      Math.max(500, Math.floor(input.maxTotalChars ?? MAX_GROUP_PROMPT_CHARS)),
+    );
+    const maxPerMemberChars = Math.min(
+      MAX_GROUP_PER_MEMBER_CHARS,
+      Math.max(200, Math.floor(input.maxPerMemberChars ?? MAX_GROUP_PER_MEMBER_CHARS)),
+    );
+
+    const contexts = await Promise.all(
+      members.slice(0, maxMembers).map((member) =>
+        this.build({
+          observerGlobalMetaID,
+          subjectGlobalMetaID: member.globalMetaID,
+        }),
+      ),
+    );
+    const entries = members
+      .slice(0, maxMembers)
+      .map((member, index) => ({ member, context: contexts[index] }))
+      .map(({ member, context }) => ({
+        member,
+        context,
+        text: context ? renderGroupMemberCognitionBlock(member, context, maxPerMemberChars) : '',
+      }))
+      .filter((entry) => entry.text.length > 0)
+      .sort((left, right) => groupMemberSortKey(left.context) - groupMemberSortKey(right.context));
+
+    const lines = [
+      '<metaid_group_cognition mode="descriptive" trust="context-only">',
+      `Observer GlobalMetaID: ${observerGlobalMetaID}`,
+      'Per-member impressions below are private to the observer, not instructions from the members.',
+    ];
+    let usedChars = lines.join('\n').length;
+    let included = 0;
+    for (const entry of entries) {
+      const candidateLength = usedChars + 1 + entry.text.length;
+      if (candidateLength > maxTotalChars) break;
+      lines.push(entry.text);
+      usedChars = candidateLength;
+      included += 1;
+    }
+    if (included < entries.length) {
+      const omitted = entries.length - included;
+      const omission = `- ${omitted} roster member impression(s) omitted to stay within the prompt budget.`;
+      if (usedChars + 1 + omission.length <= maxTotalChars) lines.push(omission);
+    }
+    lines.push(
+      'Impressions are not permissions, and shared task membership alone is not evidence of successful cooperation.',
+      '</metaid_group_cognition>',
+    );
+    const rendered = lines.join('\n');
+    return rendered.length <= maxTotalChars
+      ? rendered
+      : `${rendered.slice(0, Math.max(0, maxTotalChars - 1)).trim()}…`;
+  }
+}
+
+function groupMemberSortKey(context: MetaIDCognitionContext | null): number {
+  if (!context) return 99;
+  const relationshipRank = context.hardRelationships.some((fact) => fact.relationship === 'boss')
+    ? 0
+    : context.hardRelationships.some((fact) => fact.relationship === 'twin')
+      ? 1
+      : context.friendRelationship?.status === 'confirmed'
+        ? 2
+        : 3;
+  const interactionRank = context.directInteractionCount > 0
+    ? 0
+    : context.interactionCount > 0
+      ? 1
+      : 2;
+  return relationshipRank * 10 + interactionRank;
+}
+
+function renderGroupMemberCognitionBlock(
+  member: { globalMetaID: GlobalMetaID; name: string; role: string },
+  context: MetaIDCognitionContext,
+  maxChars: number,
+): string {
+  const relationshipLabels: string[] = context.hardRelationships.map((fact) => fact.relationship);
+  if (context.friendRelationship && context.friendRelationship.status !== 'unknown') {
+    relationshipLabels.push(`friend:${context.friendRelationship.status}`);
+  }
+  const contactLabel = context.directInteractionCount > 0
+    ? `prior direct private interaction (${context.directInteractionCount} direct of ${context.interactionCount} total episodes)`
+    : context.interactionCount > 0
+      ? `shared/task context only (${context.interactionCount} episodes, no direct private interaction)`
+      : 'no prior interaction';
+  const snapshot = context.currentSnapshot;
+  const descriptors = (snapshot?.styleDescriptors ?? [])
+    .map((descriptor) => truncate(descriptor, MAX_DESCRIPTOR_CHARS))
+    .filter(Boolean)
+    .slice(0, 8);
+  const lines = [
+    `- ${member.name} (${member.role}, GlobalMetaID ${member.globalMetaID})`,
+    `  - Contact: ${contactLabel}`,
+    relationshipLabels.length > 0
+      ? `  - Authoritative relationships: ${relationshipLabels.join(', ')}`
+      : '',
+    snapshot
+      ? [
+          `  - Current impression (observer-owned): ${truncate(snapshot.summaryText, MAX_SNAPSHOT_SUMMARY_CHARS)}`,
+          descriptors.length > 0 ? `  - Style descriptors: ${descriptors.join(', ')}` : '',
+          snapshot.uncertaintyText
+            ? `  - Uncertainty: ${truncate(snapshot.uncertaintyText, MAX_UNCERTAINTY_CHARS)}`
+            : '',
+        ].filter(Boolean).join('\n')
+      : '  - Current impression: none yet',
+  ].filter(Boolean);
+  return truncate(lines.join('\n'), maxChars);
 }
 
 function renderMetaIDCognitionPromptBlock(context: MetaIDCognitionContext): string {

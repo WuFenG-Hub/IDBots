@@ -46,6 +46,7 @@ const MAX_VERIFICATION_CANDIDATES = 3;
 
 /** Hard cap for the appended A2A experience/memory block. */
 const EXPERIENCE_BLOCK_MAX_CHARS = 1500;
+const GROUP_COGNITION_BLOCK_MAX_CHARS = 3000;
 
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
@@ -118,6 +119,7 @@ interface GroupTaskDaemonBotFull extends GroupTaskDaemonBot {
 type DaemonPromptMember = {
   name: string;
   role: 'chair' | 'worker';
+  globalMetaId?: string | null;
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
@@ -361,6 +363,10 @@ export interface GroupTaskDaemonDeps {
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
+  getMetaIDGroupCognitionPromptBlock?: (input: {
+    observerGlobalMetaID: string;
+    roster: Array<{ globalMetaID: string | null; name: string; role: 'chair' | 'worker' }>;
+  }) => string | Promise<string>;
   experienceStore?: MetaIDExperienceStore;
   emitLog?: (message: string) => void;
   now?: () => number;
@@ -630,14 +636,47 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * Observer-relative MetaID impression summaries for the group roster, built
+   * by the shared cognition service and capped defensively. Failure omits the
+   * block without blocking the group turn.
+   */
+  const buildGroupCognitionBlockFor = async (
+    bot: GroupTaskDaemonBotFull,
+    promptMembers: DaemonPromptMember[],
+  ): Promise<string> => {
+    if (!deps.getMetaIDGroupCognitionPromptBlock || !bot.globalmetaid?.trim()) return '';
+    try {
+      const roster = promptMembers
+        .map((member) => ({
+          globalMetaID: member.globalMetaId?.trim() ?? null,
+          name: member.name,
+          role: member.role,
+        }))
+        .filter((member): member is { globalMetaID: string; name: string; role: 'chair' | 'worker' } =>
+          Boolean(member.globalMetaID));
+      const block = (await deps.getMetaIDGroupCognitionPromptBlock({
+        observerGlobalMetaID: bot.globalmetaid,
+        roster,
+      })).trim();
+      return block.length > GROUP_COGNITION_BLOCK_MAX_CHARS
+        ? `${block.slice(0, GROUP_COGNITION_BLOCK_MAX_CHARS)}…`
+        : block;
+    } catch {
+      return '';
+    }
+  };
+
   /** Full per-turn system prompt: base + fresh time line + experience block. */
-  const buildTurnSystemPrompt = (
+  const buildTurnSystemPrompt = async (
     bot: GroupTaskDaemonBotFull,
     task: GroupTask,
     promptMembers: DaemonPromptMember[],
     botRole: 'chair' | 'worker',
     ownerGlobalMetaId: string,
-  ): string => {
+  ): Promise<string> => {
+    const experienceBlock = buildExperienceBlockFor(bot);
+    const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers);
     return buildGroupTaskSystemPrompt({
       metabot: bot,
       task: {
@@ -649,7 +688,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       botRole,
       ownerGlobalMetaId: ownerGlobalMetaId || null,
       currentTimeText: formatTurnTimeText(),
-      experienceBlock: buildExperienceBlockFor(bot),
+      experienceBlock: [experienceBlock, cognitionBlock].filter(Boolean).join('\n\n'),
     });
   };
 
@@ -767,7 +806,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const store = deps.getGroupTaskStore();
       const coworkStore = deps.getCoworkStore();
-      const systemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const systemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const directive = buildOwnerReportDirective(store, task);
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
@@ -943,7 +982,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const db = sqlite.getDatabase();
       const coworkStore = deps.getCoworkStore();
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
-      const systemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const systemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const directive = buildPlanningDirective(db, task);
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
@@ -988,7 +1027,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const db = deps.getStore().getDatabase();
     const coworkStore = deps.getCoworkStore();
 
-    const baseSystemPrompt = buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
+    const baseSystemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
     let userMessage = buildGroupLogUserMessage(db, task, message);
     if (verificationNotes.length > 0) {
       // Host deliverable-verification facts accompany the chair's context.
@@ -1098,6 +1137,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         return {
           name: member.name ?? bot?.name ?? `bot-${member.metabotId}`,
           role: member.role,
+          globalMetaId: member.globalmetaid?.trim() || bot?.globalmetaid?.trim() || null,
           bio: bot?.bio ?? bot?.background ?? null,
           roleProfile: bot?.role ?? null,
           goal: bot?.goal ?? null,

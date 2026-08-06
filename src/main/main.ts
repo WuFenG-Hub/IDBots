@@ -3108,23 +3108,25 @@ const startSqliteDaemons = (): void => {
     () => triggerDaemonWasmRecovery('cognitiveOrchestrator')
   );
 
-  let getMetaIDCognitionPromptBlock:
-    | ((input: Parameters<MetaIDCognitionContextService['buildPromptBlock']>[0]) => Promise<string>)
-    | undefined;
+  let cognitionContextService: MetaIDCognitionContextService | undefined;
   try {
-    const cognitionContextService = new MetaIDCognitionContextService({
+    cognitionContextService = new MetaIDCognitionContextService({
       experienceStore: getMetaIDExperienceStore(),
       impressionStore: getMetaIDImpressionStore(),
       relationshipResolver: new MetaIDRelationshipResolver({
         listMetabots: () => getMetabotStore().listMetabots(),
       }),
     });
-    getMetaIDCognitionPromptBlock = (input) => cognitionContextService.buildPromptBlock(input);
   } catch (error) {
     console.warn(
       `[PrivateChat] MetaID cognition context unavailable; continuing without impression projection: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+  const getMetaIDCognitionPromptBlock:
+    | ((input: Parameters<MetaIDCognitionContextService['buildPromptBlock']>[0]) => Promise<string>)
+    | undefined = cognitionContextService
+      ? (input) => cognitionContextService.buildPromptBlock(input)
+      : undefined;
 
   startPrivateChatDaemon(
     getStore().getDatabase(),
@@ -3346,6 +3348,17 @@ const startSqliteDaemons = (): void => {
         offset: 0,
       }).map((entry) => ({ text: entry.text })),
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    ...(cognitionContextService
+      ? {
+          getMetaIDGroupCognitionPromptBlock: (input: {
+            observerGlobalMetaID: string;
+            roster: Array<{ globalMetaID: string | null; name: string; role: 'chair' | 'worker' }>;
+          }) => cognitionContextService.buildGroupPromptBlock({
+            observerGlobalMetaID: input.observerGlobalMetaID,
+            roster: input.roster,
+          }),
+        }
+      : {}),
     emitLog: (msg) => console.log(msg),
   });
 

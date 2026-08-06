@@ -184,6 +184,9 @@ const createHarness = async (overrides = {}) => {
     readPinForVerification: async (pinId) => state.pinOutcomes[pinId] ?? 'unavailable',
     ...(overrides.listUserMemories ? { listUserMemories: overrides.listUserMemories } : {}),
     ...(overrides.listDailySummaries ? { listDailySummaries: overrides.listDailySummaries } : {}),
+    ...(overrides.getMetaIDGroupCognitionPromptBlock
+      ? { getMetaIDGroupCognitionPromptBlock: overrides.getMetaIDGroupCognitionPromptBlock }
+      : {}),
     emitLog: () => {},
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
@@ -1094,6 +1097,79 @@ test('experience block: memory/dream deps feed the A2A builder; absent deps omit
     assert.ok(!withoutMemory.chatCalls[0].systemPrompt.includes('self_identity'));
   } finally {
     withoutMemory.cleanup();
+  }
+});
+
+test('group cognition projection is observer-relative and wired into per-bot prompts', async () => {
+  const cognitionCalls = [];
+  const h = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async (input) => {
+      cognitionCalls.push(input);
+      return [
+        '<metaid_group_cognition>',
+        `Observer: ${input.observerGlobalMetaID}`,
+        ...input.roster.map((member) => `- ${member.name} ${member.globalMetaID} (${member.role})`),
+        '</metaid_group_cognition>',
+      ].join('\n');
+    },
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'cog-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot go',
+    });
+    await h.loop.runTick();
+
+    const workerCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
+    assert.ok(workerCall, 'worker replied');
+    assert.match(workerCall.systemPrompt, /<metaid_group_cognition>/);
+    assert.match(workerCall.systemPrompt, /Observer: gmid-w2/);
+    assert.match(workerCall.systemPrompt, /- Twin Bot gmid-twin \(chair\)/);
+    assert.match(workerCall.systemPrompt, /- Coder Bot gmid-w2 \(worker\)/);
+
+    const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
+    assert.ok(workerInput, 'cognition dep called for the responding worker');
+    assert.deepEqual(
+      workerInput.roster.map((member) => member.globalMetaID).sort(),
+      ['gmid-twin', 'gmid-w2'],
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('group cognition projection failure or absence omits the block without blocking the turn', async () => {
+  const failing = await createHarness({
+    getMetaIDGroupCognitionPromptBlock: async () => {
+      throw new Error('cognition service down');
+    },
+  });
+  try {
+    failing.createTask([2]);
+    insertGroupMessage(failing.db, {
+      pinId: 'cogfail-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot go',
+    });
+    await failing.loop.runTick();
+    assert.equal(failing.sends.length, 1, 'reply still delivered');
+    assert.ok(!failing.chatCalls[0].systemPrompt.includes('metaid_group_cognition'));
+  } finally {
+    failing.cleanup();
+  }
+
+  const absent = await createHarness();
+  try {
+    absent.createTask([2]);
+    insertGroupMessage(absent.db, {
+      pinId: 'cogabsent-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot go',
+    });
+    await absent.loop.runTick();
+    assert.equal(absent.sends.length, 1, 'reply still delivered');
+    assert.ok(!absent.chatCalls[0].systemPrompt.includes('metaid_group_cognition'));
+  } finally {
+    absent.cleanup();
   }
 });
 
