@@ -93,18 +93,34 @@ const SessionAvatarCircle: React.FC<{
   src?: string | null;
   name?: string | null;
   className?: string;
-}> = ({ src, name, className = '' }) => (
-  <span
-    className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
-    title={name?.trim() || undefined}
-  >
-    {isRenderableSessionAvatarSource(src) ? (
-      <img src={src} alt={name?.trim() || ''} className="h-full w-full object-cover" />
-    ) : (
-      avatarInitial(name)
-    )}
-  </span>
-);
+}> = ({ src, name, className = '' }) => {
+  const initiallyRenderable = isRenderableSessionAvatarSource(src);
+  // Track image-load failures so a broken/404 avatar URL falls back to the
+  // initial letter instead of showing a broken-image icon. Reset if the src
+  // changes back to a (different) renderable value.
+  const [imageFailed, setImageFailed] = React.useState(false);
+  React.useEffect(() => {
+    setImageFailed(false);
+  }, [src]);
+  const showImage = initiallyRenderable && !imageFailed;
+  return (
+    <span
+      className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
+      title={name?.trim() || undefined}
+    >
+      {showImage ? (
+        <img
+          src={src}
+          alt={name?.trim() || ''}
+          className="h-full w-full object-cover"
+          onError={() => setImageFailed(true)}
+        />
+      ) : (
+        avatarInitial(name)
+      )}
+    </span>
+  );
+};
 
 /**
  * Sidebar avatar(s) identifying which MetaBot(s) a session belongs to:
