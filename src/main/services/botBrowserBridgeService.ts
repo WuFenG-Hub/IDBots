@@ -620,6 +620,10 @@ function validateLlmCompletePayload(payload: unknown):
       }
       options.timeoutMs = timeoutMs;
     }
+    if (rawOptions.thinking === 'enabled' || rawOptions.thinking === 'disabled') {
+      // DeepSeek v4-pro 默认 thinking，轻量 llm.complete 调用可显式 disabled 提速。
+      (options as { thinking?: string }).thinking = rawOptions.thinking;
+    }
     if (Object.keys(options).length > 0) {
       normalized.options = options;
     }

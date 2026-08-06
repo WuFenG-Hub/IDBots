@@ -71,6 +71,12 @@ export interface ChatCompletionOptions {
   maxTokens?: number;
   temperature?: number;
   /**
+   * Thinking-mode toggle. DeepSeek v4-pro enables thinking by default with
+   * effort=high, which makes lightweight llm.complete calls (e.g. chess moves)
+   * take minutes and hit timeouts. Client may opt out with 'disabled'.
+   */
+  thinking?: 'enabled' | 'disabled';
+  /**
    * When true, a response with neither text content nor tool_calls throws
    * inside the fallback-wrapped attempt, so a configured fallback LLM gets
    * a chance instead of the empty result passing through as success.
@@ -125,7 +131,8 @@ async function chatCompletionSingleAttempt(
           options.tools,
           options.signal,
           options.maxTokens,
-          options.temperature
+          options.temperature,
+          options.thinking
         )
       : await callOpenAIStyleWithTools(
           baseURL,
@@ -135,7 +142,8 @@ async function chatCompletionSingleAttempt(
           options.tools,
           options.signal,
           options.maxTokens,
-          options.temperature
+          options.temperature,
+          options.thinking
         );
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
       const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
@@ -209,7 +217,8 @@ async function callAnthropicStyleWithTools(
   tools?: OpenAITool[],
   signal?: AbortSignal,
   maxTokens?: number,
-  temperature?: number
+  temperature?: number,
+  thinking?: 'enabled' | 'disabled'
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/messages`;
   const systemParts: string[] = [];
@@ -261,6 +270,11 @@ async function callAnthropicStyleWithTools(
     }));
   }
   if (temperature !== undefined) body.temperature = temperature;
+  if (thinking !== undefined) {
+    // DeepSeek Anthropic 格式支持 thinking toggle（默认 enabled，effort=high）。
+    // 轻量 llm.complete 调用（如下棋走子）显式 disabled 可避免长思考与超时。
+    body.thinking = { type: thinking };
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -341,7 +355,8 @@ async function callOpenAIStyleWithTools(
   tools?: OpenAITool[],
   signal?: AbortSignal,
   maxTokens?: number,
-  temperature?: number
+  temperature?: number,
+  thinking?: 'enabled' | 'disabled'
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/chat/completions`;
   const body: Record<string, unknown> = {
@@ -353,6 +368,10 @@ async function callOpenAIStyleWithTools(
     body.tools = tools;
   }
   if (temperature !== undefined) body.temperature = temperature;
+  if (thinking !== undefined) {
+    // DeepSeek OpenAI 兼容格式同样支持 thinking toggle。
+    body.thinking = { type: thinking };
+  }
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey.trim()) {
