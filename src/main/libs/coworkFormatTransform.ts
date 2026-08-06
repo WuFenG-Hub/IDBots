@@ -28,6 +28,8 @@ export type OpenAIStreamChunk = {
     // DeepSeek reports cache hits/misses at the top level of usage.
     prompt_cache_hit_tokens?: number;
     prompt_cache_miss_tokens?: number;
+    // DeepSeek Responses API surfaces reasoning chain length separately.
+    reasoning_tokens?: number;
   };
 };
 
@@ -413,6 +415,17 @@ export function anthropicToOpenAI(body: unknown): Record<string, unknown> {
           parameters: cleanSchema(resolveToolInputSchema(toolObj), { requireObjectRoot: true }),
         },
       };
+    })
+    // Deterministic ordering by function name so the serialized tools prefix is
+    // byte-identical across turns regardless of map iteration order. DeepSeek's
+    // automatic context cache matches the longest common prefix, so an unstable
+    // tool list would invalidate the entire cached prefix every turn. Mirrors
+    // Reasonix cache_shape.go normalizeToolSchemas.
+    .sort((a, b) => {
+      const nameA = toString(a.function?.name);
+      const nameB = toString(b.function?.name);
+      if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+      return 0;
     });
 
   if (tools.length > 0) {

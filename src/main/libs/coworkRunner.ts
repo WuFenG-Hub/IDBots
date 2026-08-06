@@ -776,6 +776,16 @@ interface ActiveSession {
     cacheCreationTokens: number;
     totalCostUsd?: number;
     source: 'deepseek' | 'anthropic' | 'none';
+    /** Number of LLM turns accumulated so far (for cache-miss attribution). */
+    turnCount?: number;
+    /**
+     * Lightweight cache-miss attribution: one entry per turn where the provider
+     * reported cache-creation (miss) tokens, recording the turn index and a
+     * probable reason. The first turn is always 'cold_start' (no prefix cached
+     * yet). Subsequent misses are left as 'unknown' since we cannot inspect the
+     * exact prefix break without the full message history. Used for diagnostics.
+     */
+    cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   };
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
@@ -1188,7 +1198,22 @@ export class CoworkRunner extends EventEmitter {
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
       source: 'none' as const,
+      turnCount: 0,
+      cacheMissEvents: [] as Array<{ turn: number; reason: string; missTokens: number }>,
     };
+    const nextTurn = (prev.turnCount ?? 0) + 1;
+    // Attribute cache misses: the first turn is always a cold start (nothing was
+    // cached yet). Later misses are recorded as 'unknown' — without diffing the
+    // full message history we cannot say whether the system prompt, tools, or a
+    // compact broke the prefix. This gives a lightweight diagnostic trail.
+    const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
+    if (cacheCreationTokens > 0) {
+      cacheMissEvents.push({
+        turn: nextTurn,
+        reason: nextTurn === 1 ? 'cold_start' : 'unknown',
+        missTokens: cacheCreationTokens,
+      });
+    }
     activeSession.usageStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
@@ -1198,6 +1223,8 @@ export class CoworkRunner extends EventEmitter {
         ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
         : prev.totalCostUsd,
       source: prev.source === 'none' ? 'deepseek' : prev.source,
+      turnCount: nextTurn,
+      cacheMissEvents,
     };
   }
 

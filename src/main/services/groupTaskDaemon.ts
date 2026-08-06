@@ -269,7 +269,7 @@ export type GroupTaskDaemonPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { fallbackLlmId?: string | null },
+  options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' },
 ) => Promise<string>;
 
 export type GroupTaskDaemonSendFn = (
@@ -704,7 +704,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const directive = buildOwnerReportDirective(store, task);
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
-      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId })).trim();
+      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
       }
@@ -906,7 +906,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       // Plain LLM path: the chair is planning here, not executing skills.
-      const reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId })).trim();
+      const reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
@@ -1040,7 +1040,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       try {
-        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId })).trim();
+        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       } catch (error) {
         failCanonicalAttempt(error);
         throw error;

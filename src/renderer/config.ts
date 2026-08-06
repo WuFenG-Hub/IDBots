@@ -185,6 +185,14 @@ const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
     name: 'DeepSeek V4 Flash',
     supportsImage: false,
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    // DeepSeek-first policy: the flash model is the default for all automation
+    // paths. Enable thinking + max reasoning effort by default so orchestrator /
+    // private-chat / group-task / browser-bridge calls get full reasoning unless
+    // the caller explicitly opts out (e.g. dream needs the output budget for JSON).
+    options: {
+      reasoningEffort: 'max',
+      thinking: { type: 'enabled' },
+    },
   },
   {
     id: 'deepseek-v4-pro',

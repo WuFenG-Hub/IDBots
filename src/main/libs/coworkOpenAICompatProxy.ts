@@ -79,11 +79,15 @@ const LOCAL_HOST = '127.0.0.1';
 const SANDBOX_HOST = '10.0.2.2';
 const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // DeepSeek's thinking API rejects (400) any assistant tool-call message that
-// lacks reasoning_content. When the real reasoning is unrecoverable (process
-// restart, LRU eviction, or history from turns that never produced reasoning),
-// we inject this non-empty placeholder so the request contract stays valid and
-// the conversation history is preserved instead of being wiped on retry.
-const DEEPSEEK_REASONING_PLACEHOLDER = '(reasoning unavailable)';
+// lacks the reasoning_content key. When the real reasoning is unrecoverable
+// (process restart, LRU eviction, or history from turns that never produced
+// reasoning), we inject an EMPTY STRING (not a human-readable placeholder) so
+// the request contract stays valid AND the cached prefix remains byte-stable.
+// A variable placeholder text would change the prefix per lost-reasoning set
+// and crater DeepSeek's automatic context-cache hit rate; an empty string is
+// constant and accepted by the API. Mirrors Reasonix openai.go which sends a
+// pointer to the (possibly empty) ReasoningContent field.
+const DEEPSEEK_REASONING_PLACEHOLDER = '';
 
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
@@ -418,13 +422,13 @@ function hydrateDeepSeekReasoningForRequest(
     }
 
     // The real reasoning_content is unrecoverable (process restart, LRU
-    // eviction, or this turn predates thinking mode). Injecting a non-empty
-    // placeholder satisfies DeepSeek's structural requirement and keeps the
-    // conversation history intact, avoiding the session wipe that a 400 would
-    // trigger downstream. Only the already-lost reasoning is affected; all
-    // other turns retain their real reasoning where available.
+    // eviction, or this turn predates thinking mode). Injecting an EMPTY STRING
+    // satisfies DeepSeek's structural requirement (the key must be present on
+    // assistant tool-call messages) while keeping the cached prefix byte-stable,
+    // avoiding the session wipe that a 400 would trigger downstream. We do NOT
+    // stash the empty value into tool-call extra_content — there is nothing to
+    // cache, and the message-level key is what the API validates.
     messageObj.reasoning_content = DEEPSEEK_REASONING_PLACEHOLDER;
-    attachDeepSeekReasoningToToolCalls(toolCalls, DEEPSEEK_REASONING_PLACEHOLDER);
     placeholderCount += 1;
   }
 
@@ -559,27 +563,60 @@ function extractErrorMessage(raw: string): string {
   return raw;
 }
 
-function resolveUpstreamAPIType(provider?: string): UpstreamAPIType {
-  return provider?.toLowerCase() === 'openai' ? 'responses' : 'chat_completions';
+function resolveUpstreamAPIType(provider?: string, model?: string): UpstreamAPIType {
+  const normalizedProvider = provider?.toLowerCase();
+  // OpenAI always uses the Responses API.
+  if (normalizedProvider === 'openai') {
+    return 'responses';
+  }
+  // DeepSeek Responses API currently only serves flash models; pro and other
+  // variants fall back to chat/completions. Pro support is expected in a later
+  // DeepSeek release.
+  if (normalizedProvider === 'deepseek') {
+    const normalizedModel = (model ?? '').toLowerCase();
+    if (normalizedModel.includes('flash')) {
+      return 'responses';
+    }
+  }
+  return 'chat_completions';
 }
 
-function buildOpenAIResponsesURL(baseURL: string): string {
-  const normalized = baseURL.trim().replace(/\/+$/, '');
-  if (!normalized) {
-    return '/v1/responses';
+/**
+ * Build the Responses endpoint URL.
+ *
+ * DeepSeek exposes the endpoint at the host root (`/responses`) without a
+ * version prefix, matching the official OpenAI-SDK base_url usage documented
+ * at https://api-docs.deepseek.com/zh-cn/guides/responses_api. OpenAI and
+ * other OpenAI-compatible providers use the conventional `/v1/responses`.
+ */
+function buildOpenAIResponsesURL(baseURL: string, provider?: string): string {
+  let normalized = baseURL.trim().replace(/\/+$/, '');
+  const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
+    || provider?.toLowerCase() === 'deepseek';
+
+  // DeepSeek's Responses endpoint lives at the host root regardless of which
+  // compatibility path the user configured. Strip a trailing /anthropic or /v1
+  // so a base URL like https://api.deepseek.com/anthropic resolves correctly.
+  if (isDeepSeekHost) {
+    normalized = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
   }
-  if (normalized.endsWith('/responses')) {
+
+  const responsesPath = isDeepSeekHost ? '/responses' : '/v1/responses';
+  if (!normalized) {
+    return responsesPath;
+  }
+  if (normalized.endsWith('/responses') || normalized.endsWith(responsesPath)) {
     return normalized;
   }
-  if (normalized.endsWith('/v1')) {
+  if (!isDeepSeekHost && normalized.endsWith('/v1')) {
     return `${normalized}/responses`;
   }
-  return `${normalized}/v1/responses`;
+  return `${normalized}${responsesPath}`;
 }
 
-function buildUpstreamTargetUrls(baseURL: string, apiType: UpstreamAPIType): string[] {
+function buildUpstreamTargetUrls(baseURL: string, apiType: UpstreamAPIType, provider?: string): string[] {
   if (apiType === 'responses') {
-    return [buildOpenAIResponsesURL(baseURL)];
+    return [buildOpenAIResponsesURL(baseURL, provider)];
   }
 
   const primary = buildOpenAIChatCompletionsURL(baseURL);
@@ -729,12 +766,15 @@ function normalizeResponsesToolChoiceFromChat(toolChoice: unknown): unknown {
 }
 
 function convertChatCompletionsRequestToResponsesRequest(
-  chatRequest: Record<string, unknown>
+  chatRequest: Record<string, unknown>,
+  provider?: string
 ): Record<string, unknown> {
   const request: Record<string, unknown> = {};
   const input: Array<Record<string, unknown>> = [];
   const instructions: string[] = [];
   const unresolvedFunctionCalls = new Map<string, { name: string; hasOutput: boolean }>();
+
+  const isDeepSeek = provider?.toLowerCase() === 'deepseek';
 
   if (chatRequest.model !== undefined) {
     request.model = chatRequest.model;
@@ -748,12 +788,40 @@ function convertChatCompletionsRequestToResponsesRequest(
   if (chatRequest.top_p !== undefined) {
     request.top_p = chatRequest.top_p;
   }
+
+  // DeepSeek Responses API: inject the built-in web_search tool (server-side
+  // executed) so the agent can search the web. It must stay FIRST and stable
+  // across turns to keep the cacheable tools prefix byte-identical (mirrors
+  // Reasonix responses.go web-search handling). For non-DeepSeek we leave the
+  // tools list to the caller.
   const normalizedTools = normalizeResponsesToolsFromChat(chatRequest.tools);
-  if (normalizedTools.length > 0) {
-    request.tools = normalizedTools;
+  const responseTools = isDeepSeek
+    ? [{ type: 'web_search' }, ...normalizedTools]
+    : normalizedTools;
+  if (responseTools.length > 0) {
+    request.tools = responseTools;
   }
   if (chatRequest.tool_choice !== undefined) {
     request.tool_choice = normalizeResponsesToolChoiceFromChat(chatRequest.tool_choice);
+  } else if (isDeepSeek && responseTools.length > 0) {
+    // Default to auto so the model decides when to invoke web_search.
+    request.tool_choice = 'auto';
+  }
+
+  // DeepSeek Responses API controls reasoning depth via `reasoning.effort`,
+  // distinct from chat/completions' top-level reasoning_effort / thinking. Map
+  // the chat-style controls into the Responses reasoning object so effort set
+  // on the model preset (or by the caller) still applies.
+  if (isDeepSeek) {
+    const thinking = toOptionalObject(chatRequest.thinking);
+    const thinkingEnabled = toString(thinking?.type).toLowerCase() !== 'disabled';
+    const rawEffort = toString(chatRequest.reasoning_effort)
+      || toString(toOptionalObject(chatRequest.output_config)?.effort);
+    // Normalize effort: empty/off defaults to 'high' (matches Reasonix default).
+    const effort = normalizeDeepSeekResponsesEffort(rawEffort) ?? (thinkingEnabled ? 'high' : undefined);
+    if (effort) {
+      request.reasoning = { effort };
+    }
   }
 
   const maxOutputTokens = toNumber(chatRequest.max_output_tokens)
@@ -882,6 +950,25 @@ function convertChatCompletionsRequestToResponsesRequest(
 
 function normalizeToolName(value: unknown): string {
   return toString(value).trim().toLowerCase();
+}
+
+/**
+ * Normalize a reasoning-effort string for the DeepSeek Responses API.
+ * DeepSeek Responses accepts: low (flash only), high, max. "off"/empty → undefined
+ * (caller decides default). Unknown values map to the closest valid bucket.
+ */
+function normalizeDeepSeekResponsesEffort(effort: string): 'low' | 'high' | 'max' | undefined {
+  const normalized = effort.trim().toLowerCase();
+  if (!normalized || normalized === 'off' || normalized === 'none') {
+    return undefined;
+  }
+  if (normalized === 'max' || normalized === 'high' || normalized === 'low') {
+    return normalized;
+  }
+  if (normalized === 'medium') {
+    return 'high';
+  }
+  return 'high';
 }
 
 function filterOpenAIToolsForProvider(
@@ -1327,6 +1414,21 @@ function convertResponsesToOpenAIResponse(body: unknown): Record<string, unknown
   }
 
   const usage = toOptionalObject(responseObj.usage);
+  // DeepSeek Responses API reports cache hits under nested details objects
+  // (input_tokens_details.cached_tokens / output_tokens_details.reasoning_tokens),
+  // unlike chat/completions which uses top-level prompt_cache_hit_tokens. Map
+  // both into the unified OpenAI-style usage so downstream token accounting is
+  // consistent across the two API shapes.
+  const inputTokensDetails = toOptionalObject(usage?.input_tokens_details);
+  const outputTokensDetails = toOptionalObject(usage?.output_tokens_details);
+  const promptTokens = toNumber(usage?.input_tokens) ?? toNumber(usage?.prompt_tokens) ?? 0;
+  const cacheHitTokens = toNumber(inputTokensDetails?.cached_tokens)
+    ?? toNumber(usage?.prompt_cache_hit_tokens) ?? 0;
+  // DeepSeek Responses reports input_tokens as the TOTAL input (cached + uncached).
+  // Derive the miss so cache-read accounting stays truthful. If a relay already
+  // provides an explicit miss value, prefer it.
+  const explicitMiss = toNumber(usage?.prompt_cache_miss_tokens);
+  const cacheMissTokens = explicitMiss ?? Math.max(promptTokens - cacheHitTokens, 0);
   return {
     id: toString(responseObj.id),
     model: toString(responseObj.model),
@@ -1337,8 +1439,12 @@ function convertResponsesToOpenAIResponse(body: unknown): Record<string, unknown
       },
     ],
     usage: {
-      prompt_tokens: toNumber(usage?.input_tokens) ?? toNumber(usage?.prompt_tokens) ?? 0,
+      prompt_tokens: promptTokens,
       completion_tokens: toNumber(usage?.output_tokens) ?? toNumber(usage?.completion_tokens) ?? 0,
+      prompt_cache_hit_tokens: cacheHitTokens,
+      prompt_cache_miss_tokens: cacheMissTokens,
+      // Surface reasoning token cost separately for diagnostics.
+      reasoning_tokens: toNumber(outputTokensDetails?.reasoning_tokens) ?? 0,
     },
   };
 }
@@ -2106,13 +2212,25 @@ function processResponsesStreamEvent(
     emitResponsesCompletedFunctionCalls(res, state, context, responseObj);
 
     const usage = toOptionalObject(responseObj.usage);
+    // Responses API reports cache hits under input_tokens_details.cached_tokens;
+    // map into the unified chunk usage so cost/cache accounting works in streams.
+    const inputTokensDetails = toOptionalObject(usage?.input_tokens_details);
+    const outputTokensDetails = toOptionalObject(usage?.output_tokens_details);
+    const promptTokens = toNumber(usage?.input_tokens) ?? toNumber(usage?.prompt_tokens) ?? 0;
+    const cacheHitTokens = toNumber(inputTokensDetails?.cached_tokens)
+      ?? toNumber(usage?.prompt_cache_hit_tokens) ?? 0;
+    const explicitMiss = toNumber(usage?.prompt_cache_miss_tokens);
+    const cacheMissTokens = explicitMiss ?? Math.max(promptTokens - cacheHitTokens, 0);
     processOpenAIChunk(res, state, {
       id: toString(responseObj.id),
       model: toString(responseObj.model),
       choices: [{ finish_reason: detectResponsesFinishReason(responseObj) }],
       usage: {
-        prompt_tokens: toNumber(usage?.input_tokens) ?? toNumber(usage?.prompt_tokens) ?? 0,
+        prompt_tokens: promptTokens,
         completion_tokens: toNumber(usage?.output_tokens) ?? toNumber(usage?.completion_tokens) ?? 0,
+        prompt_cache_hit_tokens: cacheHitTokens,
+        prompt_cache_miss_tokens: cacheMissTokens,
+        reasoning_tokens: toNumber(outputTokensDetails?.reasoning_tokens) ?? 0,
       },
     });
   }
@@ -2471,11 +2589,13 @@ async function handleRequest(
     return;
   }
 
-  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider);
   const openAIRequest = anthropicToOpenAI(parsedRequestBody);
   if (!openAIRequest.model) {
     openAIRequest.model = upstreamConfig.model;
   }
+  // Resolve the upstream API type from the EFFECTIVE model so that a request
+  // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
+  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model));
   filterOpenAIToolsForProvider(openAIRequest, upstreamConfig.provider);
   hydrateOpenAIRequestToolCalls(openAIRequest, upstreamConfig.provider, upstreamConfig.baseURL);
   const deepSeekReasoningHydrateResult = hydrateDeepSeekReasoningForRequest(
@@ -2495,7 +2615,7 @@ async function handleRequest(
   }
 
   const upstreamRequest = upstreamAPIType === 'responses'
-    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest)
+    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest, upstreamConfig.provider)
     : openAIRequest;
   const stream = Boolean(upstreamRequest.stream);
 
@@ -2506,7 +2626,7 @@ async function handleRequest(
     headers.Authorization = `Bearer ${upstreamConfig.apiKey}`;
   }
 
-  const targetURLs = buildUpstreamTargetUrls(upstreamConfig.baseURL, upstreamAPIType);
+  const targetURLs = buildUpstreamTargetUrls(upstreamConfig.baseURL, upstreamAPIType, upstreamConfig.provider);
   let currentTargetURL = targetURLs[0];
 
   const sendUpstreamRequest = async (
@@ -2670,6 +2790,8 @@ export const __openAICompatProxyTestUtils = {
   processOpenAIChunk,
   processResponsesStreamEvent,
   convertChatCompletionsRequestToResponsesRequest,
+  resolveUpstreamAPIType,
+  buildOpenAIResponsesURL,
   filterOpenAIToolsForProvider,
   hydrateDeepSeekReasoningForRequest,
   resetDeepSeekReasoningCache: () => {

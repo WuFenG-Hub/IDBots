@@ -102,6 +102,31 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
           </div>
+          {(() => {
+            // Cache-hit rate + lightweight miss attribution (diagnostics).
+            const denom = usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
+            if (denom <= 0) return null;
+            const hitRate = Math.round((usageStats.cacheReadTokens / denom) * 100);
+            const recentMisses = (usageStats.cacheMissEvents ?? []).slice(-3);
+            return (
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <div className="flex justify-between">
+                  <span>{i18nService.t('deepseekCacheHitRate')}</span>
+                  <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{hitRate}%</span>
+                </div>
+                {recentMisses.length > 0 && (
+                  <div className="space-y-0.5 opacity-70">
+                    {recentMisses.map((evt) => (
+                      <div key={evt.turn} className="flex justify-between">
+                        <span>T{evt.turn} · {evt.reason}</span>
+                        <span className="font-mono">{formatTokens(evt.missTokens)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
           {showCost && (
             <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
               <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">

@@ -65,6 +65,30 @@ const getStore = (): SqliteStore | null => {
   return storeGetter();
 };
 
+/**
+ * Read the raw DeepSeek provider config (apiKey + baseUrl) from app_config,
+ * without routing through the cowork proxy. Used by services that need to call
+ * DeepSeek endpoints other than chat completions (e.g. /user/balance).
+ * Returns null when the store is unavailable or DeepSeek is not configured.
+ */
+export function getDeepSeekProviderConfig(): { apiKey: string; baseUrl: string } | null {
+  const sqliteStore = getStore();
+  if (!sqliteStore) {
+    return null;
+  }
+  const appConfig = sqliteStore.get<AppConfig>('app_config');
+  const deepseek = appConfig?.providers?.deepseek;
+  if (!deepseek) {
+    return null;
+  }
+  const apiKey = (deepseek.apiKey ?? '').trim();
+  const baseUrl = (deepseek.baseUrl ?? '').trim();
+  if (!apiKey || !baseUrl) {
+    return null;
+  }
+  return { apiKey, baseUrl };
+}
+
 export function getClaudeCodePath(): string {
   const candidates = resolveClaudeCodeBinaryCandidates();
   for (const candidate of candidates) {
@@ -337,6 +361,8 @@ function buildApiConfigFromMatched(
         baseURL: resolvedBaseURL,
         model: matched.modelId,
         apiType: 'anthropic',
+        provider: matched.providerName,
+        upstreamBaseURL: resolvedBaseURL,
       },
     };
   }
@@ -364,6 +390,8 @@ function buildApiConfigFromMatched(
       baseURL: proxyBaseURL,
       model: matched.modelId,
       apiType: 'anthropic', // proxy speaks Anthropic /v1/messages format
+      provider: matched.providerName,
+      upstreamBaseURL: resolvedBaseURL,
     },
   };
 }

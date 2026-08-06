@@ -15,6 +15,19 @@ export type CoworkApiConfig = {
    * retries with this model. Unset = no fallback (default behavior).
    */
   fallbackModel?: string;
+  /**
+   * The resolved provider key (e.g. 'deepseek', 'openai'). Used by the cognitive
+   * layer to apply provider-specific routing such as the DeepSeek Responses API.
+   * Optional because legacy callers and the SDK proxy path do not need it.
+   */
+  provider?: string;
+  /**
+   * The real upstream base URL (before any proxy indirection). When apiType is
+   * 'anthropic' this equals baseURL; for OpenAI-compat providers behind the
+   * cowork proxy this is the provider's true endpoint. The cognitive layer uses
+   * it to call provider-specific endpoints (e.g. DeepSeek /responses) directly.
+   */
+  upstreamBaseURL?: string;
 };
 
 const CONFIG_FILE_NAME = 'api-config.json';
