@@ -3403,6 +3403,8 @@ export class CoworkRunner extends EventEmitter {
       permissionMode?: CoworkPermissionMode;
       /** Tool names to auto-approve via the PreToolUse hook (case-insensitive). */
       autoApproveTools?: string[];
+      /** Initial effort override from the persisted global default. */
+      effortOverride?: string | null;
     } = {}
   ): Promise<void> {
     this.stoppedSessions.delete(sessionId);
@@ -3493,7 +3495,7 @@ export class CoworkRunner extends EventEmitter {
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
-      effortOverride: null,
+      effortOverride: options.effortOverride ?? null,
       thinkingOverride: null,
       autoApproveTools: new Set(
         (options.autoApproveTools ?? []).map((name) => name.trim().toLowerCase()).filter(Boolean)

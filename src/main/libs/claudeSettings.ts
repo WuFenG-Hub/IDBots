@@ -2,6 +2,7 @@ import { join } from 'path';
 import { existsSync } from 'fs';
 import { app } from 'electron';
 import type { SqliteStore } from '../sqliteStore';
+import type { CoworkPermissionMode } from '../coworkStore';
 import type { CoworkApiConfig } from './coworkConfigStore';
 import {
   configureCoworkOpenAICompatProxy,
@@ -419,6 +420,52 @@ export function getPersistedAutoApproveTools(): string[] {
   return tools
     .map((name) => (typeof name === 'string' ? name.trim().toLowerCase() : ''))
     .filter(Boolean);
+}
+
+/**
+ * Global default permission mode for cowork sessions, persisted in app_config.
+ * The user's latest selection is inherited by every new session/Bot.
+ */
+export function getPersistedCoworkPermissionMode(): CoworkPermissionMode {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<{ coworkPermissionMode?: unknown }>('app_config');
+  const mode = appConfig?.coworkPermissionMode;
+  return (mode === 'default' || mode === 'plan' || mode === 'acceptEdits' || mode === 'bypassPermissions')
+    ? mode
+    : 'default';
+}
+
+/**
+ * Global default effort level for cowork sessions ('low'|'medium'|'high'|
+ * 'max'), or null for auto. Persisted in app_config like permission mode.
+ */
+export function getPersistedCoworkEffortLevel(): string | null {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<{ coworkEffortLevel?: unknown }>('app_config');
+  const level = appConfig?.coworkEffortLevel;
+  return (typeof level === 'string' && level) ? level : null;
+}
+
+/**
+ * Persists a global cowork preference (permission mode / effort level) to
+ * app_config. The renderer also writes these via configService.updateConfig,
+ * but the main process persists them here on mid-session switches so the
+ * choice is global regardless of which UI path changed it.
+ */
+export function setPersistedCoworkPreference(updates: {
+  permissionMode?: CoworkPermissionMode;
+  effortLevel?: string | null;
+}): void {
+  const sqliteStore = getStore();
+  if (!sqliteStore) return;
+  const appConfig = sqliteStore.get<Record<string, unknown>>('app_config') ?? {};
+  if (updates.permissionMode !== undefined) {
+    appConfig.coworkPermissionMode = updates.permissionMode;
+  }
+  if (updates.effortLevel !== undefined) {
+    appConfig.coworkEffortLevel = updates.effortLevel;
+  }
+  sqliteStore.set('app_config', appConfig);
 }
 
 export function resolveCurrentModelLimits(modelId?: string | null): CoworkModelLimits {

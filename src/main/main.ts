@@ -27,7 +27,7 @@ import {
 import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools } from './libs/claudeSettings';
+import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
 import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
 import { flattenSubagentTranscriptMessages } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
@@ -2587,6 +2587,7 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
             signal: controller.signal,
             maxTokens: payload.options?.maxOutputTokens,
             temperature: payload.options?.temperature,
+            thinking: (payload.options as { thinking?: 'enabled' | 'disabled' } | undefined)?.thinking,
             throwOnEmptyContent: true,
           },
         );
@@ -6180,14 +6181,22 @@ if (!gotTheLock) {
       });
 
       // Start the session asynchronously (skip initial user message since we already added it).
-      // Auto-approve rules default to the persisted app-level list (latest user changes).
+      // Permission mode + effort default to the persisted app-level values (the
+      // user's latest global choices, survive restart). When the renderer
+      // passes a value it is the UI's current selection — persist it too so the
+      // global default stays in sync with what the user just picked.
+      const resolvedPermissionMode = options.permissionMode ?? getPersistedCoworkPermissionMode();
+      if (options.permissionMode && options.permissionMode !== getPersistedCoworkPermissionMode()) {
+        setPersistedCoworkPreference({ permissionMode: options.permissionMode });
+      }
       runner.startSession(session.id, options.prompt, {
         skipInitialUserMessage: true,
         skillIds: options.activeSkillIds,
         workspaceRoot: selectedWorkspaceRoot,
         confirmationMode: 'modal',
-        permissionMode: options.permissionMode ?? 'default',
+        permissionMode: resolvedPermissionMode,
         autoApproveTools: getPersistedAutoApproveTools(),
+        effortOverride: getPersistedCoworkEffortLevel(),
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
@@ -6299,6 +6308,8 @@ if (!gotTheLock) {
         const { sessionId, permissionMode } = payload;
         if (!sessionId) throw new Error('Session id is required');
         getCoworkRunner().setPermissionMode(sessionId, permissionMode);
+        // Persist as the global default so every new session/Bot inherits it.
+        setPersistedCoworkPreference({ permissionMode });
         return { success: true };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
@@ -6318,6 +6329,8 @@ if (!gotTheLock) {
       const { sessionId, effort } = payload;
       if (!sessionId) throw new Error('Session id is required');
       getCoworkRunner().setEffortOverride(sessionId, effort);
+      // Persist as the global default so every new session/Bot inherits it.
+      setPersistedCoworkPreference({ effortLevel: effort });
       return { success: true };
     } catch (error) {
       return {

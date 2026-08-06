@@ -5,6 +5,7 @@ import { clearCurrentSession, setCurrentSession, setStreaming, clearPreferredMet
 import { clearActiveSkills, setActiveSkillIds } from '../../store/slices/skillSlice';
 import { setActions, selectAction, clearSelection } from '../../store/slices/quickActionSlice';
 import { coworkService } from '../../services/cowork';
+import { configService } from '../../services/config';
 import { metaAppService } from '../../services/metaApp';
 import { skillService } from '../../services/skill';
 import { quickActionService } from '../../services/quickAction';
@@ -66,7 +67,15 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     [dispatch],
   );
   const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
-  const [permissionMode, setPermissionMode] = useState<CoworkPermissionMode>('default');
+  // Permission mode is a global preference persisted in app_config; the new
+  // task composer shows and updates the same value every session/Bot uses.
+  const [permissionMode, setPermissionModeState] = useState<CoworkPermissionMode>(
+    configService.getConfig().coworkPermissionMode ?? 'default'
+  );
+  const setPermissionMode = useCallback((mode: CoworkPermissionMode) => {
+    setPermissionModeState(mode);
+    void configService.updateConfig({ coworkPermissionMode: mode });
+  }, []);
   // Gate the empty-list selection reset below: the metabot list loads async,
   // so without this flag every mount would clear the persisted New Task
   // selection before the IPC resolves.

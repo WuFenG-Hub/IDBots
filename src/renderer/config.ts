@@ -1,3 +1,5 @@
+import type { CoworkPermissionMode } from './types/cowork';
+
 export type ModelOptions = {
   reasoningEffort?: 'low' | 'medium' | 'high' | 'max';
   thinking?: {
@@ -145,6 +147,16 @@ export interface AppConfig {
    * as the default; the user's latest changes are saved here.
    */
   autoApproveTools?: string[];
+  /**
+   * Global default permission mode for cowork sessions. The user's latest
+   * selection is persisted here and inherited by every new session (and Bot).
+   */
+  coworkPermissionMode?: CoworkPermissionMode;
+  /**
+   * Global default effort level for cowork sessions ('low'|'medium'|'high'|
+   * 'max', or null/undefined for auto). Persisted like coworkPermissionMode.
+   */
+  coworkEffortLevel?: string | null;
 }
 
 type ModelDefinition = AppConfig['model']['availableModels'][number];
@@ -159,7 +171,7 @@ type ModelLike = {
   options?: ModelOptions;
 };
 
-export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-pro';
+export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
 // Same family, same 1M context window. The flash variant drives cowork/A2A

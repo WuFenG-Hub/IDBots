@@ -35,6 +35,7 @@ import {
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
+import { configService } from '../../services/config';
 import { fetchMetaidInfoByGlobalId, resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -2221,7 +2222,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const currentModelId = useSelector((state: RootState) => state.model.selectedModel?.id);
-  const [effortOverride, setEffortOverride] = useState<string | null>(null);
+  // Effort is a global preference persisted in app_config; initialize from the
+  // persisted value so every session/Bot shows the same selection.
+  const [effortOverride, setEffortOverride] = useState<string | null>(
+    configService.getConfig().coworkEffortLevel ?? null
+  );
   const [branchActionError, setBranchActionError] = useState<string | null>(null);
   const detailRootRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -3504,6 +3509,9 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 currentEffort={effortOverride}
                 onEffortChange={(effort) => {
                   setEffortOverride(effort);
+                  // Global preference: persist so all sessions/Bots + future
+                  // restarts keep the same effort level.
+                  void configService.updateConfig({ coworkEffortLevel: effort });
                   void coworkService.setEffort(currentSession.id, effort);
                 }}
               />
