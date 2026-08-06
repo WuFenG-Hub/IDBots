@@ -23,6 +23,7 @@ import {
   sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
 } from './groupChatTransport';
+import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 
 export interface CreateGroupTaskOptions {
   title: string;
@@ -51,6 +52,7 @@ const TERMINAL_STATUSES: ReadonlySet<GroupTaskStatus> = new Set(['done', 'cancel
 
 let metabotStoreGetter: (() => MetabotStore) | null = null;
 let groupTaskStoreGetter: (() => GroupTaskStore) | null = null;
+let orchestrationBridgeGetter: (() => GroupTaskOrchestrationBridge) | null = null;
 
 export function setGroupTaskServiceMetabotStoreGetter(getter: () => MetabotStore): void {
   metabotStoreGetter = getter;
@@ -58,6 +60,12 @@ export function setGroupTaskServiceMetabotStoreGetter(getter: () => MetabotStore
 
 export function setGroupTaskServiceGroupTaskStoreGetter(getter: () => GroupTaskStore): void {
   groupTaskStoreGetter = getter;
+}
+
+export function setGroupTaskServiceOrchestrationBridgeGetter(
+  getter: (() => GroupTaskOrchestrationBridge) | null,
+): void {
+  orchestrationBridgeGetter = getter;
 }
 
 /** Minimal kv surface used for the owner-join guard (satisfied by SqliteStore). */
@@ -242,6 +250,17 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
     createdBy: opts.createdBy,
     createPinId: pinId,
   });
+
+  try {
+    orchestrationBridgeGetter?.().ensureCanonicalTask(task);
+  } catch (error) {
+    // The on-chain group already exists, so preserve the Group Task and let the
+    // daemon retry canonical reconciliation instead of duplicating chain writes.
+    console.warn(
+      `[GroupTask] Canonical task link failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
   // Chair is implicitly a member via the create pin.
   store.addMember({
@@ -435,6 +454,12 @@ export async function closeGroupTask(
   }
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
+  }
+  if (orchestrationBridgeGetter) {
+    const bridge = orchestrationBridgeGetter();
+    return opts.status === 'done'
+      ? bridge.acceptGroupTask(taskId).groupTask
+      : bridge.cancelGroupTask(taskId).groupTask;
   }
   return getGroupTaskStore().updateTaskStatus(taskId, opts.status);
 }

@@ -120,6 +120,7 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   postGroupTaskMessage,
   createGroupTask,
@@ -150,6 +151,7 @@ import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
+import { GroupTaskOrchestrationBridge } from './services/groupTaskOrchestrationBridge';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -3029,6 +3031,7 @@ const startSqliteDaemons = (): void => {
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
   startCognitiveOrchestrator(
@@ -3152,6 +3155,7 @@ const startSqliteDaemons = (): void => {
     getGroupTaskStore,
     getMetabotStore,
     getCoworkStore,
+    orchestrationBridge: getGroupTaskOrchestrationBridge(),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
@@ -4813,6 +4817,18 @@ const getOrchestrationStore = () => {
     }
   }
   return orchestrationStore;
+};
+
+let groupTaskOrchestrationBridge: GroupTaskOrchestrationBridge | null = null;
+const getGroupTaskOrchestrationBridge = () => {
+  if (!groupTaskOrchestrationBridge) {
+    groupTaskOrchestrationBridge = new GroupTaskOrchestrationBridge({
+      groupTaskStore: getGroupTaskStore(),
+      orchestrationStore: getOrchestrationStore(),
+      getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+    });
+  }
+  return groupTaskOrchestrationBridge;
 };
 
 const getTwinOrchestrationService = () => new TwinOrchestrationService({

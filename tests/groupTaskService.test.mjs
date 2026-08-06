@@ -42,6 +42,7 @@ const {
   ensureOwnerJoinedGroup,
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
@@ -104,6 +105,7 @@ const createHarness = async (overrides = {}) => {
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(() => groupTaskStore);
   setGroupTaskServiceKvStoreGetter(() => store);
+  setGroupTaskServiceOrchestrationBridgeGetter(null);
   setGroupTaskServiceTransport({
     createGroupChat: async (metabotId, opts) => {
       calls.create.push({ metabotId, opts });
@@ -140,6 +142,7 @@ const createHarness = async (overrides = {}) => {
   return {
     store, db, metabotStore, groupTaskStore, calls, state,
     cleanup: () => {
+      setGroupTaskServiceOrchestrationBridgeGetter(null);
       resetGroupTaskServiceTransport();
       store.close();
     },
@@ -224,6 +227,39 @@ test('createGroupTask auto-selects the complete local Worker roster for Twin pla
     assert.deepEqual(h.calls.join.map((call) => call.metabotId).sort(), [2, 3]);
     assert.match(h.calls.send[0].opts.content, /@Coder Bot/);
     assert.match(h.calls.send[0].opts.content, /@Designer Bot/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('create and close route through the canonical orchestration bridge when configured', async () => {
+  const h = await createHarness();
+  try {
+    const calls = { ensure: [], accept: [] };
+    setGroupTaskServiceOrchestrationBridgeGetter(() => ({
+      ensureCanonicalTask: (task) => {
+        calls.ensure.push(task.id);
+        return { id: `canonical-${task.id}` };
+      },
+      acceptGroupTask: (taskId) => {
+        calls.accept.push(taskId);
+        return {
+          groupTask: h.groupTaskStore.updateTaskStatus(taskId, 'done'),
+          canonicalTask: { id: `canonical-${taskId}`, status: 'completed' },
+        };
+      },
+      cancelGroupTask: (taskId) => {
+        return {
+          groupTask: h.groupTaskStore.updateTaskStatus(taskId, 'cancelled'),
+          canonicalTask: { id: `canonical-${taskId}`, status: 'cancelled' },
+        };
+      },
+    }));
+
+    const accepted = await createGroupTask({ title: 'Accept', goal: 'G', createdBy: 'user' });
+    assert.deepEqual(calls.ensure, [accepted.id]);
+    assert.equal((await closeGroupTask(accepted.id, { status: 'done' })).status, 'done');
+    assert.deepEqual(calls.accept, [accepted.id]);
   } finally {
     h.cleanup();
   }
