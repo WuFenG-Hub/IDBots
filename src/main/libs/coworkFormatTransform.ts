@@ -376,6 +376,18 @@ export function anthropicToOpenAI(body: unknown): Record<string, unknown> {
   if (source.top_p !== undefined) {
     output.top_p = source.top_p;
   }
+  // Preserve provider reasoning controls across the Anthropic-compatible
+  // boundary. Dropping these fields makes callers appear to disable thinking
+  // while the upstream OpenAI-compatible provider still uses its default.
+  if (source.thinking !== undefined) {
+    output.thinking = source.thinking;
+  }
+  if (source.reasoning_effort !== undefined) {
+    output.reasoning_effort = source.reasoning_effort;
+  }
+  if (source.output_config !== undefined) {
+    output.output_config = source.output_config;
+  }
   if (source.stop_sequences !== undefined) {
     output.stop = source.stop_sequences;
   }

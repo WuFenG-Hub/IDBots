@@ -117,8 +117,9 @@ export function computeDreamRetryDelayMs(attemptCount: number): number {
 /**
  * Which past dates still need dream attention for this bot.
  * - Candidates: the last `lookbackDays` calendar days, today excluded.
- * - Yesterday's dream only runs inside the nightly window, after the bot's
- *   staggered minute; older missed dates (catch-up) are due any time.
+ * - Yesterday's first attempt only runs inside the nightly window, after the
+ *   bot's staggered minute; older missed dates and failed retries are due any
+ *   time once their backoff expires.
  * - Running dates are skipped; failed dates retry after bounded exponential
  *   backoff, so a transient provider failure does not exhaust the date after
  *   a few tightly grouped attempts.
@@ -160,7 +161,10 @@ export function computeDueDreamDates(input: {
       }
       // Partial-day run: fall through and dream the date properly.
     }
-    if (daysAgo === 1 && (!inWindow || minutesSinceMidnight < staggerMinute)) continue;
+    // A first attempt for yesterday is window-gated. Once that attempt has
+    // failed, retry as soon as backoff expires even during the day; otherwise
+    // reopening the app after a nightly provider failure cannot self-heal.
+    if (daysAgo === 1 && state?.status !== 'failed' && (!inWindow || minutesSinceMidnight < staggerMinute)) continue;
     due.push(dateStr);
   }
   repair.sort((a, b) => b.localeCompare(a));

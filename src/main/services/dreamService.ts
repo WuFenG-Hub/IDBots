@@ -79,6 +79,7 @@ export type DreamPerformChat = (
     maxTokens?: number;
     fallbackLlmId?: string | null;
     throwOnEmptyContent?: boolean;
+    thinking?: 'enabled' | 'disabled';
   }
 ) => Promise<string>;
 
@@ -305,6 +306,9 @@ export class DreamService {
         signal: controller.signal,
         maxTokens: maxTokens ?? this.resolveDreamBudgets(llmId).maxOutputTokens,
         fallbackLlmId,
+        // DeepSeek automation models default to reasoning mode. Dream prompts
+        // need the output budget for the final JSON, not hidden reasoning.
+        thinking: 'disabled',
         // Empty content must fail inside runWithLlmFallback so a configured
         // secondary provider gets a chance before the dream attempt fails.
         throwOnEmptyContent: true,
