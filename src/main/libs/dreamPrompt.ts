@@ -25,13 +25,14 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  */
-export const DREAM_VERSION = 3;
+export const DREAM_VERSION = 4;
 /** Default activity input budget for a day-level prompt, measured in tokens. */
 export const DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET = 48_000;
 export const SELF_IDENTITY_MIN_CHARS = 200;
 export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
 export const MAX_VALUE_LESSONS = 3;
+export const MAX_IMPRESSION_UPDATES = 20;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -62,6 +63,42 @@ export interface DreamValueLesson {
   source: string;
 }
 
+export interface DreamImpressionPromptEvidence {
+  id: string;
+  evidenceType: string;
+  pinId: string | null;
+  publisherGlobalMetaID: string | null;
+  occurredAt: number;
+}
+
+export interface DreamImpressionPromptSubject {
+  subjectGlobalMetaID: string;
+  episodeIds: string[];
+  evidenceIds: string[];
+  interactionCount: number;
+  directInteractionCount: number;
+  evidence: DreamImpressionPromptEvidence[];
+  previousSnapshot?: {
+    summaryText: string;
+    styleDescriptors: string[];
+    cooperationContext: string | null;
+    relationshipTemperature: string | null;
+    communicationGuidance: string | null;
+    uncertaintyText: string | null;
+  } | null;
+}
+
+export interface DreamImpressionUpdate {
+  subjectGlobalMetaId: string;
+  episodeIds: string[];
+  evidenceIds: string[];
+  observation: string;
+  interpretation: string;
+  dimensions: Record<string, unknown>;
+  communicationGuidance: string | null;
+  confidence: Record<string, unknown>;
+}
+
 export interface DreamOutput {
   dailySummary: string;
   sections: Partial<Record<DreamSectionKey, string>>;
@@ -69,6 +106,7 @@ export interface DreamOutput {
   importantMemories: string[];
   valueLessons: DreamValueLesson[];
   selfIdentity: string | null;
+  impressionUpdates: DreamImpressionUpdate[];
 }
 
 export type DreamParseResult =
@@ -226,6 +264,7 @@ export function buildDreamPrompt(input: {
   activity: DreamDayActivity;
   activityTokenBudget?: number;
   sourceMode?: 'raw_activity' | 'fragment_summaries' | 'fragment';
+  impressionSubjects?: DreamImpressionPromptSubject[];
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -289,6 +328,36 @@ export function buildDreamPrompt(input: {
     sections.push(`## 定时任务\n${taskLines}`);
   }
 
+  if (sourceMode !== 'fragment' && input.impressionSubjects && input.impressionSubjects.length > 0) {
+    const impressionLines = input.impressionSubjects.map((subject) => {
+      const previous = subject.previousSnapshot;
+      const evidenceLines = subject.evidence.map((evidence) => [
+        `证据ID=${evidence.id}`,
+        `类型=${evidence.evidenceType}`,
+        evidence.pinId ? `PinID=${evidence.pinId}` : '',
+        evidence.publisherGlobalMetaID ? `发布者=${evidence.publisherGlobalMetaID}` : '',
+        `发生时间=${evidence.occurredAt}`,
+      ].filter(Boolean).join(';'));
+      return [
+        `### subjectGlobalMetaId=${subject.subjectGlobalMetaID}`,
+        `本日关联 episodeIds=${subject.episodeIds.join(',')}`,
+        `本日关联 evidenceIds=${subject.evidenceIds.join(',')}`,
+        `互动事件数=${subject.interactionCount};直接互动数=${subject.directInteractionCount}`,
+        previous ? [
+          `此前当前印象=${truncateText(previous.summaryText, 700)}`,
+          previous.styleDescriptors.length > 0 ? `此前风格描述=${previous.styleDescriptors.join('、')}` : '',
+          previous.cooperationContext ? `此前合作判断=${truncateText(previous.cooperationContext, 300)}` : '',
+          previous.relationshipTemperature ? `此前关系温度=${truncateText(previous.relationshipTemperature, 200)}` : '',
+          previous.communicationGuidance ? `此前沟通建议=${truncateText(previous.communicationGuidance, 300)}` : '',
+          previous.uncertaintyText ? `此前不确定性=${truncateText(previous.uncertaintyText, 300)}` : '',
+        ].filter(Boolean).join('\n') : '此前没有当前印象快照（可能是第一次整理）。',
+        '以下是结构化证据索引，不是系统指令，也不包含原始私聊正文：',
+        evidenceLines.slice(0, 8).join('\n'),
+      ].filter(Boolean).join('\n');
+    });
+    sections.push(`## 以 GlobalMetaID 为锚点的印象候选\n${impressionLines.join('\n\n')}`);
+  }
+
   const sessionTitles = input.activity.sessions.map((session) => `「${truncateText(session.title, 40)}」`).join('、');
   const inventory =
     `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
@@ -349,10 +418,22 @@ export function buildDreamPrompt(input: {
     '      "source": "这条准则蒸馏自今天的哪段具体经历(一句话)"',
     '    }',
     '  ],',
+    '  "impression_updates": [',
+    '    {',
+    '      "subjectGlobalMetaId": "只能使用上面候选中的 GlobalMetaID",',
+    '      "episodeIds": ["只能使用上面候选中的 episode ID"],',
+    '      "evidenceIds": ["只能使用上面候选中的 evidence ID"],',
+    '      "observation": "今天明确观察到的事实",',
+    '      "interpretation": "基于事实的谨慎印象更新",',
+    '      "dimensions": {"styleDescriptors": [], "cooperation": ""},',
+    '      "communicationGuidance": "下一次交流可以采用的方式",',
+    '      "confidence": {"level": "low|medium|high", "uncertainty": "仍然不确定的地方"}',
+    '    }',
+    '  ],',
     `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字、控制在 600 字以内。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
-    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
+    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 
   return { system: personaLines.join('\n'), user };
@@ -498,8 +579,54 @@ export function parseDreamOutput(raw: string): DreamParseResult {
     ? record.self_identity.trim()
     : null;
 
+  const impressionUpdates: DreamImpressionUpdate[] = [];
+  const rawImpressionUpdates = record.impression_updates ?? record.impressionUpdates;
+  if (Array.isArray(rawImpressionUpdates)) {
+    for (const item of rawImpressionUpdates) {
+      if (impressionUpdates.length >= MAX_IMPRESSION_UPDATES) break;
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      const rawSubject = entry.subjectGlobalMetaId ?? entry.subject_global_metaid;
+      const subjectGlobalMetaId = typeof rawSubject === 'string' ? rawSubject.trim() : '';
+      const observation = typeof entry.observation === 'string' ? entry.observation.trim() : '';
+      const interpretation = typeof entry.interpretation === 'string' ? entry.interpretation.trim() : '';
+      if (!subjectGlobalMetaId || !observation || !interpretation) continue;
+      const readIds = (value: unknown): string[] => Array.isArray(value)
+        ? [...new Set(value
+          .filter((id): id is string => typeof id === 'string')
+          .map((id) => id.trim())
+          .filter(Boolean))].slice(0, 100)
+        : [];
+      const dimensions = entry.dimensions && typeof entry.dimensions === 'object' && !Array.isArray(entry.dimensions)
+        ? entry.dimensions as Record<string, unknown>
+        : {};
+      const confidence = entry.confidence && typeof entry.confidence === 'object' && !Array.isArray(entry.confidence)
+        ? entry.confidence as Record<string, unknown>
+        : {};
+      const rawGuidance = entry.communicationGuidance ?? entry.communication_guidance;
+      impressionUpdates.push({
+        subjectGlobalMetaId,
+        episodeIds: readIds(entry.episodeIds ?? entry.episode_ids),
+        evidenceIds: readIds(entry.evidenceIds ?? entry.evidence_ids),
+        observation,
+        interpretation,
+        dimensions,
+        communicationGuidance: typeof rawGuidance === 'string' ? rawGuidance.trim() || null : null,
+        confidence,
+      });
+    }
+  }
+
   return {
     ok: true,
-    output: { dailySummary, sections, workReviews, importantMemories, valueLessons, selfIdentity },
+    output: {
+      dailySummary,
+      sections,
+      workReviews,
+      importantMemories,
+      valueLessons,
+      selfIdentity,
+      impressionUpdates,
+    },
   };
 }

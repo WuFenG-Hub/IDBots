@@ -35,6 +35,7 @@ async function createRefundSettlementServiceForTest(options = {}) {
     createRefundFinalizePin: options.createRefundFinalizePin,
     resolveLocalMetabotGlobalMetaId: options.resolveLocalMetabotGlobalMetaId,
     onOrderEvent: options.onOrderEvent,
+    onExperienceEvent: options.onExperienceEvent,
   });
   return { db, store, service };
 }
@@ -100,6 +101,7 @@ function insertRefundPendingOrder(
 
 test('processSellerRefundForSession executes the refund, writes finalize proof, and marks mirrored local rows refunded', async () => {
   const seenEvents = [];
+  let experienceAttempts = 0;
   const transferInputs = [];
   const finalizeInputs = [];
   const { db, store, service } = await createRefundSettlementServiceForTest({
@@ -129,6 +131,10 @@ test('processSellerRefundForSession executes the refund, writes finalize proof, 
     ),
     onOrderEvent: (event) => {
       seenEvents.push(`${event.type}:${event.order.role}`);
+    },
+    onExperienceEvent: () => {
+      experienceAttempts += 1;
+      throw new Error('simulated observational write failure');
     },
   });
   insertRefundPendingOrder(db, {
@@ -161,6 +167,7 @@ test('processSellerRefundForSession executes the refund, writes finalize proof, 
   assert.equal(store.getOrderById('seller-order')?.status, 'refunded');
   assert.equal(store.getOrderById('seller-order')?.refundTxid, 'b'.repeat(64));
   assert.deepEqual(seenEvents.sort(), ['refunded:buyer', 'refunded:seller']);
+  assert.equal(experienceAttempts, 2);
 });
 
 test('processSellerRefundForSession reuses a previously recorded refund txid instead of transferring twice when finalize proof must be retried', async () => {

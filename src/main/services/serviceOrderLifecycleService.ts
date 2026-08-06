@@ -101,6 +101,16 @@ export interface AttachSellerCoworkSessionInput extends ServiceOrderPaymentMatch
   coworkSessionId: string;
 }
 
+export type ServiceOrderExperienceEventType =
+  | 'created'
+  | 'first_response'
+  | 'delivered'
+  | 'failed'
+  | 'rating_requested'
+  | 'refund_requested'
+  | 'refunded'
+  | 'order_ended';
+
 interface ServiceOrderLifecycleServiceOptions {
   now?: () => number;
   resolveLocalMetabotGlobalMetaId?: (localMetabotId: number) => string | null | undefined;
@@ -117,6 +127,10 @@ interface ServiceOrderLifecycleServiceOptions {
   refundRequestRetryDelayMs?: number;
   onOrderEvent?: (event: {
     type: 'refund_requested' | 'refunded' | 'order_ended';
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
+  onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
 }
@@ -163,6 +177,10 @@ export class ServiceOrderLifecycleService {
     type: 'refund_requested' | 'refunded' | 'order_ended';
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
+  private onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
 
   constructor(
     store: ServiceOrderStore,
@@ -179,6 +197,7 @@ export class ServiceOrderLifecycleService {
     this.refundRequestRetryDelayMs =
       options.refundRequestRetryDelayMs ?? DEFAULT_REFUND_REQUEST_RETRY_DELAY_MS;
     this.onOrderEvent = options.onOrderEvent;
+    this.onExperienceEvent = options.onExperienceEvent;
   }
 
   getBuyerOrderAvailability(
@@ -211,6 +230,18 @@ export class ServiceOrderLifecycleService {
       localMetabotId,
       counterpartyGlobalMetaId,
     );
+  }
+
+  private emitExperienceEvent(type: ServiceOrderExperienceEventType, order: ServiceOrderRecord | null): void {
+    if (!order || !this.onExperienceEvent) return;
+    try {
+      const result = this.onExperienceEvent({ type, order });
+      if (result && typeof (result as Promise<void>).catch === 'function') {
+        void (result as Promise<void>).catch(() => undefined);
+      }
+    } catch {
+      // Experience capture is observational and must not alter order lifecycle behavior.
+    }
   }
 
   private assertNoPendingBuyerOrderForPayment(
@@ -256,7 +287,7 @@ export class ServiceOrderLifecycleService {
       input.counterpartyGlobalMetaId
     );
 
-    return this.store.createOrder({
+    const order = this.store.createOrder({
       role: 'buyer',
       localMetabotId: input.localMetabotId,
       counterpartyGlobalMetaid: input.counterpartyGlobalMetaId,
@@ -277,6 +308,8 @@ export class ServiceOrderLifecycleService {
       status: 'awaiting_first_response',
       now: this.now(),
     });
+    this.emitExperienceEvent('created', order);
+    return order;
   }
 
   createSellerOrder(input: CreateSellerOrderInput): ServiceOrderRecord {
@@ -284,7 +317,7 @@ export class ServiceOrderLifecycleService {
       input.localMetabotId,
       input.counterpartyGlobalMetaId
     );
-    return this.store.createOrder({
+    const order = this.store.createOrder({
       role: 'seller',
       localMetabotId: input.localMetabotId,
       counterpartyGlobalMetaid: input.counterpartyGlobalMetaId,
@@ -305,6 +338,8 @@ export class ServiceOrderLifecycleService {
       status: 'awaiting_first_response',
       now: this.now(),
     });
+    this.emitExperienceEvent('created', order);
+    return order;
   }
 
   markBuyerOrderFirstResponseReceived(
@@ -312,10 +347,12 @@ export class ServiceOrderLifecycleService {
   ): ServiceOrderRecord | null {
     const order = this.findOrderForMatch('buyer', input);
     if (!order) return null;
-    return this.store.markFirstResponseReceived(
+    const updated = this.store.markFirstResponseReceived(
       order.id,
       input.receivedAt ?? this.now()
     );
+    this.emitExperienceEvent('first_response', updated);
+    return updated;
   }
 
   markSellerOrderFirstResponseSent(
@@ -323,29 +360,35 @@ export class ServiceOrderLifecycleService {
   ): ServiceOrderRecord | null {
     const order = this.findOrderForMatch('seller', input);
     if (!order) return null;
-    return this.store.markFirstResponseReceived(
+    const updated = this.store.markFirstResponseReceived(
       order.id,
       input.sentAt ?? this.now()
     );
+    this.emitExperienceEvent('first_response', updated);
+    return updated;
   }
 
   markSellerOrderFailed(input: MarkSellerOrderFailedInput): ServiceOrderRecord | null {
     const order = this.findOrderForMatch('seller', input);
     if (!order) return null;
-    return this.store.markFailed(
+    const updated = this.store.markFailed(
       order.id,
       input.failureReason || SERVICE_ORDER_SKILL_SCOPE_UNRESOLVED_REASON,
       input.failedAt ?? this.now()
     );
+    this.emitExperienceEvent('failed', updated);
+    return updated;
   }
 
   markBuyerOrderDelivered(input: MarkBuyerOrderDeliveredInput): ServiceOrderRecord | null {
     const order = this.findOrderForMatch('buyer', input);
     if (!order) return null;
-    return this.store.markDelivered(order.id, {
+    const updated = this.store.markDelivered(order.id, {
       deliveryMessagePinId: input.deliveryMessagePinId ?? null,
       deliveredAt: input.deliveredAt ?? this.now(),
     });
+    this.emitExperienceEvent('delivered', updated);
+    return updated;
   }
 
   async markBuyerOrderFailedAndRequestRefund(
@@ -360,6 +403,7 @@ export class ServiceOrderLifecycleService {
       failedAt
     );
     if (!failedOrder) return null;
+    this.emitExperienceEvent('failed', failedOrder);
     if (failedOrder.status !== 'failed') {
       return failedOrder;
     }
@@ -369,10 +413,12 @@ export class ServiceOrderLifecycleService {
   markSellerOrderDelivered(input: MarkSellerOrderDeliveredInput): ServiceOrderRecord | null {
     const order = this.findOrderForMatch('seller', input);
     if (!order) return null;
-    return this.store.markDelivered(order.id, {
+    const updated = this.store.markDelivered(order.id, {
       deliveryMessagePinId: input.deliveryMessagePinId ?? null,
       deliveredAt: input.deliveredAt ?? this.now(),
     });
+    this.emitExperienceEvent('delivered', updated);
+    return updated;
   }
 
   markOrderRatingRequested(
@@ -381,7 +427,9 @@ export class ServiceOrderLifecycleService {
   ): ServiceOrderRecord | null {
     const order = this.findOrderForMatch(role, input);
     if (!order) return null;
-    return this.store.markRatingRequested(order.id, input.requestedAt ?? this.now());
+    const updated = this.store.markRatingRequested(order.id, input.requestedAt ?? this.now());
+    this.emitExperienceEvent('rating_requested', updated);
+    return updated;
   }
 
   markOrderEnded(
@@ -390,11 +438,13 @@ export class ServiceOrderLifecycleService {
   ): ServiceOrderRecord | null {
     const order = this.findOrderForMatch(role, input);
     if (!order) return null;
-    return this.store.markOrderEnded(order.id, {
+    const updated = this.store.markOrderEnded(order.id, {
       reason: input.reason,
       orderEndMessagePinId: input.orderEndMessagePinId,
       endedAt: input.endedAt ?? this.now(),
     });
+    this.emitExperienceEvent('order_ended', updated);
+    return updated;
   }
 
   attachCoworkSessionToSellerOrder(
@@ -418,6 +468,7 @@ export class ServiceOrderLifecycleService {
       if (!transition) continue;
       const failedOrder = this.store.markFailed(order.id, transition, now);
       if (!failedOrder) continue;
+      this.emitExperienceEvent('failed', failedOrder);
       await this.tryCreateRefundRequest(failedOrder.id, now);
     }
 
@@ -429,7 +480,7 @@ export class ServiceOrderLifecycleService {
       if (!String(order.paymentTxid || '').trim()) continue;
       const transition = getTimedOutOrderTransition(order, now);
       if (!transition) continue;
-      this.store.markFailed(order.id, transition, now);
+      this.emitExperienceEvent('failed', this.store.markFailed(order.id, transition, now));
     }
 
     const retryCandidates = this.store.listRefundRequestRetryCandidates('buyer', now);
@@ -759,32 +810,38 @@ export class ServiceOrderLifecycleService {
   }
 
   private async emitRefundRequestedEvents(orders: ServiceOrderRecord[]): Promise<void> {
-    if (!this.onOrderEvent) return;
     for (const order of orders) {
-      await this.onOrderEvent({
-        type: 'refund_requested',
-        order,
-      });
+      this.emitExperienceEvent('refund_requested', order);
+      if (this.onOrderEvent) {
+        await this.onOrderEvent({
+          type: 'refund_requested',
+          order,
+        });
+      }
     }
   }
 
   private async emitRefundResolvedEvents(orders: ServiceOrderRecord[]): Promise<void> {
-    if (!this.onOrderEvent) return;
     for (const order of orders) {
-      await this.onOrderEvent({
-        type: 'refunded',
-        order,
-      });
+      this.emitExperienceEvent('refunded', order);
+      if (this.onOrderEvent) {
+        await this.onOrderEvent({
+          type: 'refunded',
+          order,
+        });
+      }
     }
   }
 
   private async emitOrderEndedEvents(orders: ServiceOrderRecord[]): Promise<void> {
-    if (!this.onOrderEvent) return;
     for (const order of orders) {
-      await this.onOrderEvent({
-        type: 'order_ended',
-        order,
-      });
+      this.emitExperienceEvent('order_ended', order);
+      if (this.onOrderEvent) {
+        await this.onOrderEvent({
+          type: 'order_ended',
+          order,
+        });
+      }
     }
   }
 

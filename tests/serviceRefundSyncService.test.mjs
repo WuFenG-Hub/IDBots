@@ -61,12 +61,14 @@ async function createRefundSyncServiceForTest(options = {}) {
     resolveRefundMrc20RecipientAddress: options.resolveRefundMrc20RecipientAddress,
     verifyMrc20Transfer: options.verifyMrc20Transfer,
     onOrderEvent: options.onOrderEvent,
+    onExperienceEvent: options.onExperienceEvent,
   });
   return { db, store, service };
 }
 
 test('syncRequestPins synthesizes a seller refund_pending order when the refund targets a local seller without ledger state', async () => {
   const seenEvents = [];
+  let experienceAttempts = 0;
   const { store, service } = await createRefundSyncServiceForTest({
     fetchRefundRequestPins: async () => [{
       pinId: 'refund-request-pin-id',
@@ -94,6 +96,10 @@ test('syncRequestPins synthesizes a seller refund_pending order when the refund 
     onOrderEvent: (event) => {
       seenEvents.push(`${event.type}:${event.order.role}`);
     },
+    onExperienceEvent: () => {
+      experienceAttempts += 1;
+      throw new Error('simulated observational write failure');
+    },
   });
 
   await service.syncRequestPins();
@@ -114,6 +120,7 @@ test('syncRequestPins synthesizes a seller refund_pending order when the refund 
   assert.equal(order.failedAt, 1_770_000_650_000);
   assert.equal(order.refundRequestedAt, 1_770_000_700_000);
   assert.deepEqual(seenEvents, ['refund_requested:seller']);
+  assert.equal(experienceAttempts, 1);
 
   await service.syncRequestPins();
   assert.equal(store.listOrdersByRole('seller').length, 1);

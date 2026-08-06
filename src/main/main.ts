@@ -49,6 +49,10 @@ import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
+import { MetaIDExperienceStore } from './metaidExperienceStore';
+import { MetaIDImpressionStore } from './metaidImpressionStore';
+import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
+import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -118,6 +122,10 @@ import {
   stopGroupChatBackfill,
   setGroupChatBackfillActiveGroupIdsGetter,
 } from './services/groupChatBackfillService';
+import {
+  backfillMetaIDPrivateA2AExperiences,
+  runMetaIDExperienceBackfill,
+} from './services/metaidExperienceBackfillService';
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
@@ -244,7 +252,9 @@ import {
   ServiceOrderLifecycleService,
   ServiceOrderOpenOrderExistsError,
   ServiceOrderSelfOrderNotAllowedError,
+  type ServiceOrderExperienceEventType,
 } from './services/serviceOrderLifecycleService';
+import { recordMetaIDServiceOrderExperience } from './services/metaidExperienceRecorder';
 import { ServiceRefundSyncService } from './services/serviceRefundSyncService';
 import { ServiceRefundSettlementService } from './services/serviceRefundSettlementService';
 import { fetchProtocolPinsFromIndexer } from './services/protocolPinFetch';
@@ -2493,6 +2503,8 @@ let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
+let metaidExperienceStore: MetaIDExperienceStore | null = null;
+let metaidImpressionStore: MetaIDImpressionStore | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -2917,6 +2929,8 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   groupTaskStore = null;
   metabotStore = null;
   serviceOrderStore = null;
+  metaidExperienceStore = null;
+  metaidImpressionStore = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3057,6 +3071,39 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
+
+  // One-time, versioned historical cognition migration. It is deliberately
+  // run before the realtime daemons so the first dream sees old and new facts
+  // through the same owner-scoped ledger. Source tables remain untouched.
+  try {
+    const historicalExperienceStore = new MetaIDExperienceStore(
+      getStore().getDatabase(),
+      () => undefined,
+    );
+    runMetaIDExperienceBackfill({
+      db: getStore().getDatabase(),
+      experienceStore: historicalExperienceStore,
+      saveDb: getStore().getSaveFunction(),
+      migrationState: getStore(),
+      localIdentities: () => getMetabotStore().listMetabots()
+        .filter((metabot) => metabot.enabled !== false && toSafeString(metabot.globalmetaid).trim())
+        .map((metabot) => ({
+          metabotId: metabot.id,
+          globalMetaID: toSafeString(metabot.globalmetaid).trim(),
+        })),
+      serviceOrders: () => [
+        ...getServiceOrderStore().listOrdersByRole('buyer'),
+        ...getServiceOrderStore().listOrdersByRole('seller'),
+      ],
+      groupTaskStore: getGroupTaskStore(),
+      emitLog: (msg) => console.log(msg),
+    });
+  } catch (error) {
+    console.warn(
+      `[MetaIDExperienceBackfill] Startup backfill failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   startCognitiveOrchestrator(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -3089,6 +3136,26 @@ const startSqliteDaemons = (): void => {
     },
     () => triggerDaemonWasmRecovery('cognitiveOrchestrator')
   );
+
+  let cognitionContextService: MetaIDCognitionContextService | undefined;
+  try {
+    cognitionContextService = new MetaIDCognitionContextService({
+      experienceStore: getMetaIDExperienceStore(),
+      impressionStore: getMetaIDImpressionStore(),
+      relationshipResolver: new MetaIDRelationshipResolver({
+        listMetabots: () => getMetabotStore().listMetabots(),
+      }),
+    });
+  } catch (error) {
+    console.warn(
+      `[PrivateChat] MetaID cognition context unavailable; continuing without impression projection: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const getMetaIDCognitionPromptBlock:
+    | ((input: Parameters<MetaIDCognitionContextService['buildPromptBlock']>[0]) => Promise<string>)
+    | undefined = cognitionContextService
+      ? (input) => cognitionContextService.buildPromptBlock(input)
+      : undefined;
 
   startPrivateChatDaemon(
     getStore().getDatabase(),
@@ -3139,7 +3206,8 @@ const startSqliteDaemons = (): void => {
     undefined,
     (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null,
     (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
-    (sessionId) => scheduleA2APeerProfileRefresh(sessionId)
+    (sessionId) => scheduleA2APeerProfileRefresh(sessionId),
+    getMetaIDCognitionPromptBlock,
   );
 
   // Periodically reconcile private chat history with the MetaSO API so
@@ -3154,6 +3222,31 @@ const startSqliteDaemons = (): void => {
         globalMetaId: toSafeString(metabot.globalmetaid).trim(),
       })),
     historySync: getPrivateChatHistorySyncService(),
+    onMessagesStored: ({ identity, peerGlobalMetaID }) => {
+      try {
+        const backfillExperienceStore = new MetaIDExperienceStore(
+          getStore().getDatabase(),
+          () => undefined,
+        );
+        const result = backfillMetaIDPrivateA2AExperiences({
+          db: getStore().getDatabase(),
+          experienceStore: backfillExperienceStore,
+          localIdentities: [{
+            metabotId: identity.metabotId,
+            globalMetaID: identity.globalMetaId,
+          }],
+          peerGlobalMetaID,
+        });
+        getStore().getSaveFunction()();
+        if (result.recorded > 0) {
+          console.log(`[MetaIDExperienceBackfill] private_a2a incremental: recorded=${result.recorded}, skipped=${result.skipped}, errors=${result.errors}`);
+        }
+      } catch (error) {
+        console.warn(
+          `[MetaIDExperienceBackfill] private_a2a incremental failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
     shouldRun: () => {
       const config = getListenerConfigFromStore();
       return config.enabled !== false && config.privateChats !== false;
@@ -3285,15 +3378,38 @@ const startSqliteDaemons = (): void => {
         offset: 0,
       }).map((entry) => ({ text: entry.text })),
     listDailySummaries: (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
+    ...(cognitionContextService
+      ? {
+          getMetaIDGroupCognitionPromptBlock: (input: {
+            observerGlobalMetaID: string;
+            roster: Array<{ globalMetaID: string | null; name: string; role: 'chair' | 'worker' }>;
+          }) => cognitionContextService.buildGroupPromptBlock({
+            observerGlobalMetaID: input.observerGlobalMetaID,
+            roster: input.roster,
+          }),
+        }
+      : {}),
     emitLog: (msg) => console.log(msg),
   });
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
+  let dreamExperienceStore: MetaIDExperienceStore | undefined;
+  let dreamImpressionStore: MetaIDImpressionStore | undefined;
+  try {
+    dreamExperienceStore = getMetaIDExperienceStore();
+    dreamImpressionStore = getMetaIDImpressionStore();
+  } catch (error) {
+    console.warn(
+      `[DreamService] MetaID impression layer unavailable; continuing without dream impression updates: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   startDreamService({
     coworkStore: getCoworkStore(),
     metabotStore: getMetabotStore(),
     dreamStore: getDreamStore(),
+    metaidExperienceStore: dreamExperienceStore,
+    metaidImpressionStore: dreamImpressionStore,
     emitToRenderer: (channel, data) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
@@ -5016,6 +5132,50 @@ const getServiceOrderStore = () => {
   return serviceOrderStore;
 };
 
+const getMetaIDExperienceStore = (): MetaIDExperienceStore => {
+  if (!metaidExperienceStore) {
+    const sqliteStore = getStore();
+    metaidExperienceStore = new MetaIDExperienceStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metaidExperienceStore;
+};
+
+const getMetaIDImpressionStore = (): MetaIDImpressionStore => {
+  if (!metaidImpressionStore) {
+    const sqliteStore = getStore();
+    metaidImpressionStore = new MetaIDImpressionStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metaidImpressionStore;
+};
+
+const captureServiceOrderExperience = (
+  type: ServiceOrderExperienceEventType,
+  order: ServiceOrderRecord,
+): void => {
+  try {
+    const ownerGlobalMetaID = getMetabotStore().getMetabotById(order.localMetabotId)?.globalmetaid;
+    recordMetaIDServiceOrderExperience({
+      store: getMetaIDExperienceStore(),
+      ownerGlobalMetaID,
+      order,
+      event: type,
+      occurredAt: order.updatedAt,
+      sourceMetadata: { localMetabotId: order.localMetabotId },
+    });
+  } catch (error) {
+    console.warn(
+      `[ServiceOrder] Experience capture failed for order=${order.id}:`,
+      error,
+    );
+  }
+};
+
 async function sendServiceOrderSimplemsg(order: ServiceOrderRecord, plaintext: string) {
   const metabotStoreInst = getMetabotStore();
   const metabot = metabotStoreInst.getMetabotById(order.localMetabotId);
@@ -5154,6 +5314,9 @@ const getServiceOrderLifecycleService = () => {
           };
         },
         createOrderEndPin: sendRatingTimeoutOrderEndPin,
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
+        },
         onOrderEvent: async ({ type, order }) => {
           if (type === 'order_ended') {
             return;
@@ -5238,6 +5401,9 @@ const getServiceRefundSyncService = () => {
           return recipientAddress;
         },
         verifyMrc20Transfer,
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
+        },
         onOrderEvent: async ({ type, order }) => {
           if (type === 'refund_requested') {
             await recoverMissingRefundPendingOrderObserverSessions().catch((error) => {
@@ -5328,6 +5494,9 @@ const getServiceRefundSettlementService = () => {
         resolveLocalMetabotGlobalMetaId: (localMetabotId) => {
           const metabot = getMetabotStore().getMetabotById(localMetabotId);
           return metabot?.globalmetaid ?? null;
+        },
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
         },
         onOrderEvent: ({ type, order }) => {
           publishServiceOrderEventToCowork(type, order);

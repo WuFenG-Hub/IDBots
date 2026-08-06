@@ -139,6 +139,7 @@ test('computeUnprocessedAfterTimestampSec falls back to the catch-up window for 
 test('backfill recovers a directory peer whose last pin is missing locally', async () => {
   const sqlite = await createSqliteStore();
   try {
+    const storedExperienceBatches = [];
     seedPrivateChatRow(sqlite.db, {
       pinId: 'pin-old',
       fromGlobalMetaId: LOCAL_GLOBAL_META_ID,
@@ -161,6 +162,7 @@ test('backfill recovers a directory peer whose last pin is missing locally', asy
     const loop = createPrivateChatBackfillLoop({
       db: sqlite.db,
       saveDb: () => undefined,
+      onMessagesStored: (batch) => storedExperienceBatches.push(batch),
       ...harness.deps,
     });
 
@@ -169,6 +171,11 @@ test('backfill recovers a directory peer whose last pin is missing locally', asy
     assert.equal(result.probedPeers, 1);
     assert.equal(result.inserted, 3);
     assert.equal(result.failedPeers, 0);
+    assert.deepEqual(storedExperienceBatches, [{
+      identity: LOCAL_IDENTITY,
+      peerGlobalMetaID: PEER_GLOBAL_META_ID,
+      inserted: 3,
+    }]);
     assert.deepEqual(
       harness.historyCalls.map((call) => [call.metaId, call.otherMetaId]),
       [[LOCAL_GLOBAL_META_ID, PEER_GLOBAL_META_ID]],

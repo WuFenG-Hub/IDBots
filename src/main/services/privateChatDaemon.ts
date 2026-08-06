@@ -37,6 +37,8 @@ import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type { CoworkConversationMapping, CoworkMessage, CoworkMessageMetadata, CoworkStore } from '../coworkStore';
 import type { MemoryBackend } from '../memory/memoryBackend';
+import { MetaIDExperienceStore } from '../metaidExperienceStore';
+import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
@@ -191,6 +193,11 @@ type PrivateChatPerformChatFn = (
   llmId?: string | null,
   options?: { signal?: AbortSignal; fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }
 ) => Promise<string>;
+type GetMetaIDCognitionPromptBlockFn = (input: {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  excludeEvidenceIds?: string[];
+}) => string | Promise<string>;
 
 export interface PrivateChatA2AContextMessage {
   speaker: string;
@@ -2687,7 +2694,9 @@ async function processOne(
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
-  refreshA2APeerProfile?: (sessionId: string) => void
+  refreshA2APeerProfile?: (sessionId: string) => void,
+  experienceStore?: MetaIDExperienceStore,
+  getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -2740,6 +2749,28 @@ async function processOne(
               chain: { txId: row.tx_id, pinId: row.pin_id },
               emitToRenderer,
             });
+            if (recorded) {
+              try {
+                recordMetaIDPrivateA2AExperience({
+                  store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+                  ownerGlobalMetaID: senderMetabot.globalmetaid,
+                  peerGlobalMetaID: toGlobalMetaId,
+                  externalConversationId: recorded.externalConversationId,
+                  sessionId: recorded.sessionId,
+                  direction: 'outgoing',
+                  content: plaintext,
+                  messageId: recorded.message?.id ?? null,
+                  pinId: row.pin_id,
+                  replyToPinId: row.reply_pin,
+                  occurredAt: Number.isFinite(Number(row.chain_timestamp)) ? Number(row.chain_timestamp) : undefined,
+                  sourceMetadata: { txId: row.tx_id, pinId: row.pin_id },
+                });
+              } catch (error) {
+                emitLog(
+                  `[PrivateChat] Outgoing experience capture failed for ${toGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+                );
+              }
+            }
             if (recorded?.duplicate) {
               emitLog(
                 `[PrivateChat] Outgoing sync: message already tracked in session, skipping duplicate.`
@@ -3721,6 +3752,37 @@ async function processOne(
 
     const externalConversationId = buildPrivateConversationExternalConversationId(row);
 
+    if (shouldSkipPrivateChatAutoReplyText(plaintext)) {
+      emitLog(`[PrivateChat] Skip no-op private chat message from ${fromGlobalMetaId.slice(0, 12)}…`);
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
+
+    // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
+    const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
+    let currentExperienceEvidenceId: string | null = null;
+    try {
+      const recordedExperience = recordMetaIDPrivateA2AExperience({
+        store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+        ownerGlobalMetaID: metabot.globalmetaid,
+        peerGlobalMetaID: fromGlobalMetaId,
+        externalConversationId,
+        sessionId: existingMapping?.coworkSessionId ?? null,
+        direction: 'incoming',
+        content: plaintext,
+        messageId: String(row.id),
+        pinId: row.pin_id,
+        replyToPinId: row.reply_pin,
+        occurredAt: Number.isFinite(Number(row.chain_timestamp)) ? Number(row.chain_timestamp) : undefined,
+        sourceMetadata: { txId: row.tx_id, pinId: row.pin_id },
+      });
+      currentExperienceEvidenceId = recordedExperience?.evidence.id ?? null;
+    } catch (error) {
+      emitLog(
+        `[PrivateChat] Incoming experience capture failed for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
     if (hasNewerPrivateChatMessage(db, {
       currentRowId: row.id,
       fromGlobalMetaId: row.from_global_metaid,
@@ -3733,14 +3795,6 @@ async function processOne(
       return;
     }
 
-    if (shouldSkipPrivateChatAutoReplyText(plaintext)) {
-      emitLog(`[PrivateChat] Skip no-op private chat message from ${fromGlobalMetaId.slice(0, 12)}…`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
-    const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
       if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, reopenGapMs: metabot.a2a_bye_cooldown_ms ?? undefined })) {
@@ -3867,6 +3921,23 @@ async function processOne(
         })
       : '';
 
+    let cognitionContext = '';
+    if (memoryPolicy.memoryEnabled && getMetaIDCognitionPromptBlock && metabot.globalmetaid && fromGlobalMetaId) {
+      try {
+        cognitionContext = (await getMetaIDCognitionPromptBlock({
+          observerGlobalMetaID: metabot.globalmetaid,
+          subjectGlobalMetaID: fromGlobalMetaId,
+          excludeEvidenceIds: currentExperienceEvidenceId ? [currentExperienceEvidenceId] : [],
+        })).trim();
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(
+          `[PrivateChat] MetaID cognition context unavailable for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const promptMemoryContext = [memoryContext, cognitionContext].filter(Boolean).join('\n\n');
+
     const llmId = normalizeMetabotLlmId(metabot.llm_id);
     const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
     if (llmId) {
@@ -3976,7 +4047,7 @@ async function processOne(
         goal: metabot.goal,
         bio: metabot.bio,
       },
-      memoryContext,
+      memoryContext: promptMemoryContext,
       analysis: conversationAnalysis,
       skillsPrompt: canRunChatSkills ? chatSkillsRouting.prompt : null,
       skillWaitNoticeAlreadySent,
@@ -4144,6 +4215,28 @@ async function processOne(
       });
     }
 
+    try {
+      recordMetaIDPrivateA2AExperience({
+        store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+        ownerGlobalMetaID: metabot.globalmetaid,
+        peerGlobalMetaID: fromGlobalMetaId,
+        externalConversationId,
+        sessionId,
+        direction: 'outgoing',
+        content: trimmed,
+        // The chain echo is the durable source row; let its later capture
+        // attach the local private_chat_messages id instead of freezing a
+        // transient Cowork message UUID into the evidence record.
+        messageId: null,
+        replyToPinId: row.pin_id,
+        sourceMetadata: { replyToPinId: row.pin_id },
+      });
+    } catch (error) {
+      emitLog(
+        `[PrivateChat] Assistant experience capture failed for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
     if (memoryPolicy.memoryEnabled) {
       try {
         const result = await memoryBackend.applyTurnMemoryUpdates({
@@ -4268,6 +4361,7 @@ export function startPrivateChatDaemon(
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
   refreshA2APeerProfile?: (sessionId: string) => void,
+  getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -4288,6 +4382,7 @@ export function startPrivateChatDaemon(
     verifyDeliveryArtifactUpload,
     consumeA2AGuidance,
   });
+  const experienceStore = new MetaIDExperienceStore(db, saveDb);
   const performChat = performChatCompletionForOrchestrator;
   const runPollTick = async (): Promise<void> => {
     if (daemonGeneration !== privateChatDaemonGeneration) return;
@@ -4334,6 +4429,8 @@ export function startPrivateChatDaemon(
               consumeA2AGuidance,
               getRecentDailySummaries,
               refreshA2APeerProfile,
+              experienceStore,
+              getMetaIDCognitionPromptBlock,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
