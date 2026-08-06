@@ -72,7 +72,7 @@ function normalizedList(values: string[] | null | undefined): string[] {
   return Array.from(new Set((values ?? []).map((value) => String(value).trim()).filter(Boolean)));
 }
 
-function assertTwinRequester(
+export function authorizeTwinSession(
   sessionId: string,
   deps: TwinWorkerDirectoryDeps,
 ): { twin: Metabot; ownerGlobalMetaId: string } {
@@ -112,7 +112,7 @@ export function buildTwinWorkerDirectory(
   sessionId: string,
   deps: TwinWorkerDirectoryDeps,
 ): TwinWorkerDirectoryResult {
-  const { twin, ownerGlobalMetaId } = assertTwinRequester(sessionId, deps);
+  const { twin, ownerGlobalMetaId } = authorizeTwinSession(sessionId, deps);
   const workers = deps.listMetabots().map((metabot) => ({
     id: metabot.id,
     name: metabot.name.trim(),

@@ -162,6 +162,8 @@ man_base_data_pebble/
 !tests/dreamPrompt.test.mjs
 !tests/twinWorkerDirectoryService.test.mjs
 !tests/orchestrationStore.test.mjs
+!tests/twinOrchestrationService.test.mjs
+!tests/twinOrchestrationPrompt.test.mjs
 !tests/dreamService.test.mjs
 !tests/experiencePromptBlocks.test.mjs
 !tests/dreamStoreSearch.test.mjs

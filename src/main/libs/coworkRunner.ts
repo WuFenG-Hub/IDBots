@@ -45,6 +45,11 @@ import {
   TwinWorkerDirectoryAuthorizationError,
   type TwinWorkerDirectoryResult,
 } from '../services/twinWorkerDirectoryService';
+import type {
+  DelegateLocalWorkerInput,
+  DelegateLocalWorkerResult,
+  TwinTaskStatusResult,
+} from '../services/twinOrchestrationService';
 import {
   buildBotBrowserAgentTools,
   type BotBrowserControl,
@@ -907,6 +912,11 @@ export interface CoworkRunnerOptions {
   getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   /** Twin-only host capability directory. The callback must revalidate authorization. */
   listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  /** Twin-only asynchronous delegation into a dedicated Worker Cowork session. */
+  delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
+  twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
+  twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
+  twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
   mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
   /** When set, opens a local MetaApp and returns the resolved local URL. */
@@ -965,6 +975,10 @@ export class CoworkRunner extends EventEmitter {
   private getRemoteServicesPrompt?: () => string | null;
   private getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   private listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  private delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
+  private twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
+  private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
+  private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   private mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
@@ -995,6 +1009,10 @@ export class CoworkRunner extends EventEmitter {
     this.getRemoteServicesPrompt = options?.getRemoteServicesPrompt;
     this.getMetabotById = options?.getMetabotById;
     this.listLocalWorkers = options?.listLocalWorkers;
+    this.delegateLocalWorker = options?.delegateLocalWorker;
+    this.twinTaskStatus = options?.twinTaskStatus;
+    this.twinTaskCancel = options?.twinTaskCancel;
+    this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
@@ -3031,6 +3049,25 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Host-owned role overlay for the one persistent Twin Bot. This is kept
+   * separate from editable persona text so a Worker cannot promote itself by
+   * changing bio, soul, or a delegated prompt.
+   */
+  private buildTwinOrchestrationPrompt(sessionId: string): string {
+    if (!this.isTwinSession(sessionId)) return '';
+    return [
+      '## Twin Bot Orchestration Role',
+      'You are the owner\'s one persistent Twin Bot: a private digital twin and chief-of-staff assistant.',
+      'Interpret the owner\'s ambiguous intent using known context, then turn material work into a concrete goal, ordered steps, measurable acceptance criteria, and a concise progress plan.',
+      'For specialist or multi-step work, prefer suitable local persistent Worker Bots. First call local_workers_list and choose by the returned persona, skills, capability evidence, availability, and permission fit; selection must be evidence-based rather than hard-coded by task category.',
+      'Delegate with local_worker_delegate only after defining one bounded step, required evidence, and an explicit permission scope. A Worker is a persistent specialist with its own identity, memories, history, wallet, skills, workspace, and permissions; a subagent is only an ephemeral tool inside a Worker run.',
+      'Remain available to the owner while delegated work runs. Never fabricate progress or completion. Treat a Worker handoff as evidence to review, not proof; verify deliverables and report blockers, retries, reassignment, and final evidence.',
+      'Do not disclose private owner memory or unrelated conversation history in a delegated prompt. Do not broaden authority for payments, transfers, destructive actions, public publishing, or private messaging without the owner\'s explicit bounded approval.',
+      'You may directly complete a trivial request when delegation adds no value, but your default role is to coordinate the right Worker and report the verified result to the owner.',
+    ].join('\n');
+  }
+
+  /**
    * Hot-layer experience injection: the bot's protected self-identity entry
    * plus its last few days of dream summaries. Returns '' when the session
    * has no attributed bot (strict, no cross-bot guessing) or no experience
@@ -3534,7 +3571,7 @@ export class CoworkRunner extends EventEmitter {
     const experiencePromptBlocksXml = sessionMemoryEnabled
       ? this.buildExperiencePromptBlocksXml(sessionId)
       : '';
-    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3651,7 +3688,7 @@ export class CoworkRunner extends EventEmitter {
     const experiencePromptBlocksXml = sessionMemoryEnabled
       ? this.buildExperiencePromptBlocksXml(sessionId)
       : '';
-    const personaWithExperience = [personaBlock, experiencePromptBlocksXml]
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3894,6 +3931,59 @@ export class CoworkRunner extends EventEmitter {
         }
         const directory = await this.listLocalWorkers(sessionId);
         return { success: true, text: JSON.stringify({ ok: true, ...directory }) };
+      }
+
+      if (toolName === 'local_worker_delegate') {
+        if (!this.delegateLocalWorker || !this.isTwinSession(sessionId)) {
+          return {
+            success: false,
+            text: JSON.stringify({ ok: false, code: 'TWIN_TOOL_FORBIDDEN', error: 'Only the current Twin Bot may delegate work to a local Worker.' }),
+          };
+        }
+        const delegated = await this.delegateLocalWorker(sessionId, {
+          workerMetabotId: Number(toolInput.workerMetabotId),
+          objective: String(toolInput.objective ?? ''),
+          acceptanceCriteria: Array.isArray(toolInput.acceptanceCriteria) ? toolInput.acceptanceCriteria : [],
+          context: typeof toolInput.context === 'string' ? toolInput.context : null,
+          permissionScope: toolInput.permissionScope && typeof toolInput.permissionScope === 'object'
+            ? toolInput.permissionScope as Record<string, unknown>
+            : undefined,
+          taskId: typeof toolInput.taskId === 'string' ? toolInput.taskId : null,
+          stepId: typeof toolInput.stepId === 'string' ? toolInput.stepId : null,
+          taskIntent: typeof toolInput.taskIntent === 'string' ? toolInput.taskIntent : null,
+          idempotencyKey: typeof toolInput.idempotencyKey === 'string' ? toolInput.idempotencyKey : null,
+        });
+        return { success: true, text: JSON.stringify({ ok: true, ...delegated }) };
+      }
+
+      if (toolName === 'twin_task_status' || toolName === 'twin_task_cancel' || toolName === 'twin_task_reassign') {
+        if (!this.isTwinSession(sessionId)) {
+          return { success: false, text: JSON.stringify({ ok: false, code: 'TWIN_TOOL_FORBIDDEN', error: 'Only the current Twin Bot may manage orchestration tasks.' }) };
+        }
+        if (toolName === 'twin_task_status') {
+          if (!this.twinTaskStatus) return { success: false, text: JSON.stringify({ ok: false, code: 'TWIN_ORCHESTRATION_UNAVAILABLE' }) };
+          const taskId = String(toolInput.taskId ?? '').trim();
+          if (!taskId) return { success: false, text: JSON.stringify({ ok: false, code: 'TASK_ID_REQUIRED' }) };
+          return { success: true, text: JSON.stringify({ ok: true, ...this.twinTaskStatus(sessionId, taskId) }) };
+        }
+        if (toolName === 'twin_task_cancel') {
+          if (!this.twinTaskCancel) return { success: false, text: JSON.stringify({ ok: false, code: 'TWIN_ORCHESTRATION_UNAVAILABLE' }) };
+          const taskId = String(toolInput.taskId ?? '').trim();
+          if (!taskId) return { success: false, text: JSON.stringify({ ok: false, code: 'TASK_ID_REQUIRED' }) };
+          const task = await this.twinTaskCancel(sessionId, taskId);
+          return { success: true, text: JSON.stringify({ ok: true, task }) };
+        }
+        if (!this.twinTaskReassign) return { success: false, text: JSON.stringify({ ok: false, code: 'TWIN_ORCHESTRATION_UNAVAILABLE' }) };
+        const reassigned = await this.twinTaskReassign(sessionId, {
+          stepId: String(toolInput.stepId ?? ''),
+          workerMetabotId: Number(toolInput.workerMetabotId),
+          objective: typeof toolInput.objective === 'string' ? toolInput.objective : undefined,
+          acceptanceCriteria: Array.isArray(toolInput.acceptanceCriteria) ? toolInput.acceptanceCriteria : undefined,
+          context: typeof toolInput.context === 'string' ? toolInput.context : null,
+          permissionScope: toolInput.permissionScope && typeof toolInput.permissionScope === 'object' ? toolInput.permissionScope as Record<string, unknown> : undefined,
+          idempotencyKey: typeof toolInput.idempotencyKey === 'string' ? toolInput.idempotencyKey : null,
+        });
+        return { success: true, text: JSON.stringify({ ok: true, ...reassigned }) };
       }
 
       if (toolName === 'memory_user_edits') {
@@ -4545,6 +4635,71 @@ export class CoworkRunner extends EventEmitter {
                 content: [{ type: 'text', text: result.text }],
                 isError: !result.success,
               } as any;
+            }
+          )
+        );
+      }
+      if (this.delegateLocalWorker && this.isTwinSession(sessionId)) {
+        memoryTools.push(
+          tool(
+            'local_worker_delegate',
+            'Delegate one concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns immediately only after the Worker handoff is collected; use local_workers_list first to select by capability evidence.',
+            {
+              workerMetabotId: z.number().int().positive(),
+              objective: z.string().min(1),
+              acceptanceCriteria: z.array(z.unknown()).optional(),
+              context: z.string().optional(),
+              permissionScope: z.record(z.string(), z.unknown()).optional(),
+              taskId: z.string().optional(),
+              stepId: z.string().optional(),
+              taskIntent: z.string().optional(),
+              idempotencyKey: z.string().optional(),
+            },
+            async (args) => {
+              const result = await this.handleHostToolExecution({ toolName: 'local_worker_delegate', toolInput: args }, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: !result.success,
+              } as any;
+            }
+          )
+        );
+      }
+      if (this.isTwinSession(sessionId) && (this.twinTaskStatus || this.twinTaskCancel || this.twinTaskReassign)) {
+        memoryTools.push(
+          tool(
+            'twin_task_status',
+            'Read the durable status, steps, attempts, Worker sessions, and handoff evidence for one Twin orchestration task.',
+            { taskId: z.string().min(1) },
+            async (args) => {
+              const result = await this.handleHostToolExecution({ toolName: 'twin_task_status', toolInput: args }, sessionId);
+              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+            }
+          ),
+          tool(
+            'twin_task_cancel',
+            'Cancel a durable Twin orchestration task and its queued or running Worker attempts.',
+            { taskId: z.string().min(1) },
+            async (args) => {
+              const result = await this.handleHostToolExecution({ toolName: 'twin_task_cancel', toolInput: args }, sessionId);
+              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+            }
+          ),
+          tool(
+            'twin_task_reassign',
+            'Reassign one failed or in-progress orchestration step to another persistent Worker Bot with a new idempotent attempt.',
+            {
+              stepId: z.string().min(1),
+              workerMetabotId: z.number().int().positive(),
+              objective: z.string().optional(),
+              acceptanceCriteria: z.array(z.unknown()).optional(),
+              context: z.string().optional(),
+              permissionScope: z.record(z.string(), z.unknown()).optional(),
+              idempotencyKey: z.string().optional(),
+            },
+            async (args) => {
+              const result = await this.handleHostToolExecution({ toolName: 'twin_task_reassign', toolInput: args }, sessionId);
+              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
             }
           )
         );

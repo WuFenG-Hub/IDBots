@@ -98,7 +98,7 @@ const TASK_TRANSITIONS: Record<OrchestrationTaskStatus, OrchestrationTaskStatus[
 const STEP_TRANSITIONS: Record<OrchestrationStepStatus, OrchestrationStepStatus[]> = {
   blocked: ['ready', 'cancelled'],
   ready: ['queued', 'cancelled'],
-  queued: ['running', 'ready', 'cancelled'],
+  queued: ['running', 'ready', 'failed', 'cancelled'],
   running: ['waiting_input', 'completed', 'failed', 'ready', 'cancelled'],
   waiting_input: ['running', 'failed', 'cancelled'],
   completed: ['ready'],
@@ -106,7 +106,7 @@ const STEP_TRANSITIONS: Record<OrchestrationStepStatus, OrchestrationStepStatus[
   cancelled: [],
 };
 const ATTEMPT_TRANSITIONS: Record<OrchestrationAttemptStatus, OrchestrationAttemptStatus[]> = {
-  queued: ['running', 'cancelled'],
+  queued: ['running', 'failed', 'timed_out', 'cancelled'],
   running: ['completed', 'failed', 'timed_out', 'cancelled'],
   completed: [],
   failed: [],
@@ -323,6 +323,12 @@ export class OrchestrationStore {
     return row ? stepFromRow(row) : null;
   }
 
+  getTaskForStep(stepId: string): OrchestrationTask | null {
+    const row = this.getOne<Row>(`SELECT t.* FROM orchestration_tasks t
+      INNER JOIN orchestration_steps s ON s.task_id = t.id WHERE s.id = ?`, [stepId]);
+    return row ? taskFromRow(row) : null;
+  }
+
   listSteps(taskId: string): OrchestrationStep[] {
     return this.getAll<Row>('SELECT * FROM orchestration_steps WHERE task_id = ? ORDER BY ordinal ASC', [taskId]).map(stepFromRow);
   }
@@ -339,6 +345,14 @@ export class OrchestrationStore {
       patch.activeAttemptId === undefined ? current.activeAttemptId : patch.activeAttemptId,
       new Date().toISOString(), id,
     ]);
+    this.saveDb();
+    return this.getStep(id)!;
+  }
+
+  updateStepAssignee(id: string, assigneeMetabotId: number): OrchestrationStep {
+    const step = this.getStep(id);
+    if (!step) throw new Error(`Orchestration step ${id} not found`);
+    this.db.run('UPDATE orchestration_steps SET assignee_metabot_id = ?, updated_at = ? WHERE id = ?', [assigneeMetabotId, new Date().toISOString(), id]);
     this.saveDb();
     return this.getStep(id)!;
   }
@@ -395,6 +409,21 @@ export class OrchestrationStore {
     const row = this.getOne<{ count: number }>(`SELECT COUNT(*) AS count FROM orchestration_steps
       WHERE assignee_metabot_id = ? AND status IN ('ready','queued','running','waiting_input')`, [metabotId]);
     return Number(row?.count ?? 0);
+  }
+
+  cancelTaskCascade(taskId: string): OrchestrationTask {
+    const task = this.getTask(taskId);
+    if (!task) throw new Error(`Orchestration task ${taskId} not found`);
+    const now = new Date().toISOString();
+    const attempts = this.getAll<{ id: string }>(`SELECT a.id FROM orchestration_attempts a
+      INNER JOIN orchestration_steps s ON s.id = a.step_id WHERE s.task_id = ? AND a.status IN ('queued','running')`, [taskId]);
+    for (const attempt of attempts) {
+      this.db.run(`UPDATE orchestration_attempts SET status = 'cancelled', error = 'CANCELLED_BY_OWNER', finished_at = ? WHERE id = ?`, [now, attempt.id]);
+    }
+    this.db.run(`UPDATE orchestration_steps SET status = 'cancelled', updated_at = ? WHERE task_id = ? AND status NOT IN ('completed','cancelled')`, [now, taskId]);
+    this.db.run(`UPDATE orchestration_tasks SET status = 'cancelled', updated_at = ?, completed_at = ? WHERE id = ? AND status NOT IN ('completed','cancelled')`, [now, now, taskId]);
+    this.saveDb();
+    return this.getTask(taskId)!;
   }
 
   recoverAfterRestart(): { attempts: number; steps: number } {

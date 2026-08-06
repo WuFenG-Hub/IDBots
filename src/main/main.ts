@@ -149,6 +149,7 @@ import { startDreamService, stopDreamService, getDreamService } from './services
 import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
+import { TwinOrchestrationService } from './services/twinOrchestrationService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -4288,6 +4289,18 @@ const getCoworkRunner = () => {
         listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
         getActiveWorkload: (metabotId) => getOrchestrationStore().getActiveWorkload(metabotId),
       }),
+      delegateLocalWorker: (sessionId, input) => getTwinOrchestrationService().delegateLocalWorker(sessionId, input),
+      twinTaskStatus: (sessionId, taskId) => getTwinOrchestrationService().getTaskStatus(sessionId, taskId),
+      twinTaskCancel: (sessionId, taskId) => getTwinOrchestrationService().cancelTask(sessionId, taskId),
+      twinTaskReassign: (sessionId, input) => getTwinOrchestrationService().reassignLocalWorker(sessionId, {
+        stepId: String(input.stepId ?? ''),
+        workerMetabotId: Number(input.workerMetabotId),
+        objective: typeof input.objective === 'string' ? input.objective : undefined,
+        acceptanceCriteria: Array.isArray(input.acceptanceCriteria) ? input.acceptanceCriteria : undefined,
+        context: typeof input.context === 'string' ? input.context : null,
+        permissionScope: input.permissionScope && typeof input.permissionScope === 'object' ? input.permissionScope as Record<string, unknown> : undefined,
+        idempotencyKey: typeof input.idempotencyKey === 'string' ? input.idempotencyKey : null,
+      }),
       openMetaApp: async (input) => {
         return openMetaApp({
           appId: input.appId,
@@ -4801,6 +4814,25 @@ const getOrchestrationStore = () => {
   }
   return orchestrationStore;
 };
+
+const getTwinOrchestrationService = () => new TwinOrchestrationService({
+  orchestrationStore: getOrchestrationStore(),
+  coworkStore: getCoworkStore(),
+  coworkRunner: getCoworkRunner(),
+  directory: {
+    getSession: (id) => getCoworkStore().getSession(id),
+    listMetabots: () => getMetabotStore().listMetabots(),
+    getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+  },
+  getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+  getWorkerWorkspace: (metabotId) => {
+    const config = getCoworkStore().getConfig();
+    const root = config.workingDirectory?.trim() || path.join(app.getPath('userData'), 'orchestration-workspace');
+    const workspace = resolveBotWorkspaceCwd(root, metabotId);
+    fs.mkdirSync(workspace, { recursive: true });
+    return workspace;
+  },
+});
 
 const getMetabotStore = () => {
   if (!metabotStore) {
