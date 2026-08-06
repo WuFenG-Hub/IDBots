@@ -10,7 +10,7 @@
  * them. Column additions go through guarded ALTER TABLE migrations.
  */
 
-import type { Database } from 'sql.js';
+import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type {
   GameSession,
   SessionBudget,
