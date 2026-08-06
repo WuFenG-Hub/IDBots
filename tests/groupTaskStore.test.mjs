@@ -61,6 +61,11 @@ test('group task tables and index are created on open', async () => {
       assert.ok(cols.includes('id'), `${table} should exist with an id column`);
     }
     assert.ok(getColumns(db, 'group_tasks').includes('group_id'));
+    assert.ok(getColumns(db, 'group_tasks').includes('orchestration_task_id'));
+    assert.ok(
+      getIndexNames(db, 'group_tasks').includes('idx_group_tasks_orchestration_task'),
+      'idx_group_tasks_orchestration_task should exist',
+    );
     assert.ok(getColumns(db, 'group_task_members').includes('joined_pin_id'));
     assert.ok(getColumns(db, 'group_task_deliverables').includes('msg_pin_id'));
     assert.ok(
@@ -92,6 +97,19 @@ test('createTask / getTaskById / getTaskByGroupId / listTasks with status filter
     assert.equal(created.acceptanceCriteria, 'Criteria A');
     assert.equal(created.createPinId, 'pin-aaa');
     assert.equal(created.lastProcessedMsgId, 0);
+    assert.equal(created.orchestrationTaskId, null);
+
+    const linked = groupTaskStore.linkOrchestrationTask(created.id, 'orchestration-aaa');
+    assert.equal(linked.orchestrationTaskId, 'orchestration-aaa');
+    assert.equal(
+      groupTaskStore.linkOrchestrationTask(created.id, 'orchestration-aaa').orchestrationTaskId,
+      'orchestration-aaa',
+      'linking the same canonical task is idempotent',
+    );
+    assert.throws(
+      () => groupTaskStore.linkOrchestrationTask(created.id, 'orchestration-other'),
+      /already linked/,
+    );
 
     const byId = groupTaskStore.getTaskById(created.id);
     assert.equal(byId?.title, 'Task A');

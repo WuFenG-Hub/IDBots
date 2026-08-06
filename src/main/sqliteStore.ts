@@ -752,6 +752,7 @@ export class SqliteStore {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_tasks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        orchestration_task_id TEXT,
         group_id TEXT UNIQUE,
         title TEXT NOT NULL,
         goal TEXT NOT NULL,
@@ -767,6 +768,7 @@ export class SqliteStore {
         closed_at TEXT
       );
     `);
+    this.migrateGroupTaskOrchestrationLink();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1682,6 +1684,27 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatMessagesMsgIndex:', e);
+    }
+  }
+
+  /**
+   * Migration: bind each observable Group Task to at most one canonical Twin
+   * orchestration task. Existing tasks remain valid and are reconciled lazily.
+   */
+  private migrateGroupTaskOrchestrationLink(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('orchestration_task_id')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN orchestration_task_id TEXT');
+      }
+      this.db.run(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_group_tasks_orchestration_task
+          ON group_tasks(orchestration_task_id)
+      `);
+      this.save();
+    } catch (error) {
+      console.warn('migrateGroupTaskOrchestrationLink:', error);
     }
   }
 
