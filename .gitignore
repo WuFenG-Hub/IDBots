@@ -28,6 +28,7 @@ localdocs/
 docs/*
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
+!docs/deepseek-optimization.md
 tests/*
 !tests/runtimeDependencyContract.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs
@@ -169,3 +170,4 @@ man_base_data_pebble/
 !tests/archivedSessionList.test.mjs
 !tests/appUpdateSilentFlowStatic.test.mjs
 !tests/appUpdateResumableDownload.test.mjs
+!tests/deepseekResponses.test.mjs

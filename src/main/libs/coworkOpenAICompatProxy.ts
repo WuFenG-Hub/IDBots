@@ -590,9 +590,16 @@ function resolveUpstreamAPIType(provider?: string, model?: string): UpstreamAPIT
  * other OpenAI-compatible providers use the conventional `/v1/responses`.
  */
 function buildOpenAIResponsesURL(baseURL: string, provider?: string): string {
-  const normalized = baseURL.trim().replace(/\/+$/, '');
+  let normalized = baseURL.trim().replace(/\/+$/, '');
   const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
     || provider?.toLowerCase() === 'deepseek';
+
+  // DeepSeek's Responses endpoint lives at the host root regardless of which
+  // compatibility path the user configured. Strip a trailing /anthropic or /v1
+  // so a base URL like https://api.deepseek.com/anthropic resolves correctly.
+  if (isDeepSeekHost) {
+    normalized = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
+  }
 
   const responsesPath = isDeepSeekHost ? '/responses' : '/v1/responses';
   if (!normalized) {
@@ -2783,6 +2790,8 @@ export const __openAICompatProxyTestUtils = {
   processOpenAIChunk,
   processResponsesStreamEvent,
   convertChatCompletionsRequestToResponsesRequest,
+  resolveUpstreamAPIType,
+  buildOpenAIResponsesURL,
   filterOpenAIToolsForProvider,
   hydrateDeepSeekReasoningForRequest,
   resetDeepSeekReasoningCache: () => {
