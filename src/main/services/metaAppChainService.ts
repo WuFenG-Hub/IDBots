@@ -2,9 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import { fetchContentWithFallback } from './localIndexerProxy';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
-import { getP2PLocalBase } from './p2pLocalEndpoint';
 import { extractPinIdFromReference } from './pinAssetService';
-import { parseProtocolPinContent } from './protocolPinContent';
+import { searchMetaApps } from './metaAppSearchService';
+import type { MetaAppSearchItem } from './metaAppSearchService';
 
 let AdmZip: typeof import('adm-zip') | null = null;
 try {
@@ -13,17 +13,12 @@ try {
   AdmZip = null;
 }
 
-const MANAPI_BASE = 'https://manapi.metaid.io';
 const MAN_CONTENT_BASE = 'https://man.metaid.io/content';
-const METAAPP_PROTOCOL_PATH = '/protocols/metaapp';
 const METAAPPS_CONFIG_FILE_NAME = 'metaapps.config.json';
 const DEFAULT_COMMUNITY_METAAPPS_PAGE_SIZE = 30;
 const COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE = 100;
 const COMMUNITY_METAAPPS_SCAN_MAX_PAGES = 100;
 const COMMUNITY_METAAPPS_ROOT_CURSOR = '0';
-// Bounded extra raw pages a single list request may consume while filling a
-// full page of distinct apps (duplicate edit versions are skipped).
-const COMMUNITY_METAAPPS_MAX_FILL_PAGES = 10;
 
 type LocalMetaAppLike = {
   id: string;
@@ -102,9 +97,13 @@ type ChainMetaAppCandidate = {
   sourcePinId: string;
   creatorMetaId: string;
   publishedAt: number;
-  /** MAN row status; negative values mark revoked/superseded versions. */
+  /** MAN row status; negative values mark revoked/superseded versions. MetaSo items are always visible (0). */
   status: number;
   payload: ChainMetaAppPayload;
+  /** Author display name, when the source already carries it (e.g. MetaSo). */
+  authorName?: string;
+  /** Author avatar reference (metafile://… or URL), when the source already carries it. */
+  authorAvatar?: string;
 };
 
 export type CommunityMetaAppStatus = 'install' | 'installed' | 'update' | 'uninstallable';
@@ -232,26 +231,6 @@ const normalizeFetchListResult = (value: unknown): CommunityMetaAppListPage => {
   const nextCursor = asText(data?.nextCursor ?? parsed.nextCursor) || null;
 
   return { list, nextCursor };
-};
-
-const fetchListPageFromUrl = async (
-  sourceName: string,
-  targetUrl: string,
-  options?: RequestInit,
-): Promise<CommunityMetaAppListPage> => {
-  const response = await fetch(targetUrl, options);
-  if (!response.ok) {
-    throw new Error(`${sourceName} MetaApp chain list request failed: ${response.status} ${response.statusText}`);
-  }
-
-  const json = await response.json() as unknown;
-  const parsed = parseJsonObject(json);
-  const code = parsed?.code;
-  if (code !== undefined && code !== 1 && code !== '1') {
-    throw new Error(`${sourceName} MetaApp chain list request returned code ${String(code)}`);
-  }
-
-  return normalizeFetchListResult(json);
 };
 
 const authorInfoCache = new Map<string, Promise<CommunityMetaAppAuthorInfo | null>>();
@@ -411,46 +390,45 @@ const createTempDirIn = (root: string, prefix: string): string => {
   return fs.mkdtempSync(path.join(root, `${prefix}-${Date.now()}-`));
 };
 
-const decodeChainPayload = (item: unknown): ChainMetaAppCandidate | null => {
-  if (!item || typeof item !== 'object') return null;
-  const obj = item as Record<string, unknown>;
-  const sourcePinId = asText(obj.id);
+// Map a MetaSo aggregated MetaApp item to the chain candidate shape. MetaSo
+// already parses the manifest, folds the version chain to one latest record per
+// app, and excludes revoked apps, so there is no raw-pin decoding or status sign
+// to handle here. Author name/avatar are carried straight through when present.
+const mapSearchItemToChainCandidate = (item: MetaAppSearchItem): ChainMetaAppCandidate | null => {
+  const sourcePinId = asText(item.pinId || item.sourcePinId);
   if (!sourcePinId) return null;
-
-  const creatorMetaId = asText(obj.globalMetaId || obj.createMetaId || obj.metaid);
-  const publishedAt = Number(obj.timestamp) || 0;
-  // MAN marks superseded/revoked versions with a negative status; only rows with
-  // status 0/1 are current (mirrors gigSquareServiceStateService.isServiceRowVisible).
-  const status = Number.isFinite(Number(obj.status)) ? Math.trunc(Number(obj.status)) : 0;
-  // Use the shared selector so a MAN content-download URL in `content` can never
-  // shadow the real JSON body in `contentSummary` (which would silently drop
-  // the candidate).
-  const content = parseProtocolPinContent(obj);
-  if (!content) return null;
-
-  const title = asText(content.title);
-  const appName = asText(content.appName);
+  const title = asText(item.title);
+  const appName = asText(item.appName);
   if (!title && !appName) return null;
+
+  const avatarRef = asText(item.publisherAvatarId);
+  const authorAvatar = avatarRef
+    ? (avatarRef.startsWith('metafile://') || /^https?:\/\//i.test(avatarRef) || avatarRef.startsWith('/') || avatarRef.startsWith('data:')
+      ? avatarRef
+      : `metafile://${avatarRef}`)
+    : '';
 
   return {
     sourcePinId,
-    creatorMetaId,
-    publishedAt,
-    status,
+    creatorMetaId: asText(item.publisherGlobalMetaId || item.publisherMetaId),
+    publishedAt: Number(item.updatedAt) || 0,
+    status: 0, // MetaSo already filtered revoked/superseded rows.
     payload: {
       title,
       appName,
-      intro: asText(content.intro),
-      icon: asText(content.icon),
-      cover: asText(content.coverImg),
-      runtime: asText(content.runtime),
-      version: normalizeVersion(asText(content.version)),
-      indexFile: normalizeIndexFile(asText(content.indexFile)),
-      code: asText(content.code) || asText(content.content),
-      codeType: asText(content.codeType || content.contentType),
-      prompt: asText(content.prompt),
-      disabled: asBoolean(content.disabled),
+      intro: asText(item.intro),
+      icon: asText(item.icon),
+      cover: asText(item.coverImg),
+      runtime: asText(item.runtime),
+      version: normalizeVersion(asText(item.version)),
+      indexFile: normalizeIndexFile(asText(item.indexFile)),
+      code: asText(item.content),
+      codeType: '',
+      prompt: '',
+      disabled: asBoolean(item.disabled),
     },
+    authorName: asText(item.publisherName) || undefined,
+    authorAvatar: authorAvatar || undefined,
   };
 };
 
@@ -497,8 +475,10 @@ const toCommunityRecord = (
   const localApp = localMap.get(appId);
   const installability = resolveInstallability(chain, localApp);
   const codePinId = extractMetafilePinId(chain.payload.code);
-  const authorName = asText(authorInfo?.name);
-  const authorAvatar = resolveAuthorAvatarReference(authorInfo);
+  // Prefer author info already carried by the candidate (MetaSo enriches it);
+  // fall back to the separately-fetched authorInfo when the candidate has none.
+  const authorName = asText(chain.authorName) || asText(authorInfo?.name);
+  const authorAvatar = asText(chain.authorAvatar) || resolveAuthorAvatarReference(authorInfo);
 
   return {
     appId,
@@ -523,28 +503,21 @@ const toCommunityRecord = (
   };
 };
 
+// Fetch the global community MetaApp feed from the MetaSo aggregator. MetaSo
+// returns the latest version of each app already deduplicated and sorted by
+// updatedAt desc, so one page maps directly to one logical page — no client-side
+// fill/dedup loop is needed.
 const defaultFetchList: FetchListFn = async (input = {}) => {
   const cursor = normalizeListCursor(input.cursor);
   const size = normalizeListPageSize(input.size);
-  const url = new URL(`${MANAPI_BASE}/pin/path/list`);
-  url.searchParams.set('cursor', cursor);
-  url.searchParams.set('size', String(size));
-  url.searchParams.set('path', METAAPP_PROTOCOL_PATH);
-  const localPath = `/api/pin/path/list${url.search}`;
-
-  try {
-    return await fetchListPageFromUrl('Remote', url.toString());
-  } catch (remoteError) {
-    try {
-      return await fetchListPageFromUrl('Local', `${getP2PLocalBase()}${localPath}`, {
-        signal: AbortSignal.timeout(2000),
-      });
-    } catch (localError) {
-      const remoteMessage = remoteError instanceof Error ? remoteError.message : String(remoteError);
-      const localMessage = localError instanceof Error ? localError.message : String(localError);
-      throw new Error(`MetaApp chain list request failed: ${remoteMessage}; local fallback failed: ${localMessage}`);
-    }
-  }
+  const page = await searchMetaApps({
+    cursor: cursor && cursor !== COMMUNITY_METAAPPS_ROOT_CURSOR ? cursor : undefined,
+    size,
+  });
+  return {
+    list: page.items,
+    nextCursor: page.nextCursor,
+  };
 };
 
 const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
@@ -560,17 +533,10 @@ const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
   return buffer;
 };
 
-const isHiddenChainOperation = (value: unknown): boolean => {
-  const operation = asText(value).toLowerCase();
-  return operation === 'revoke' || operation === 'delete' || operation === 'deleted';
-};
-
 /**
- * Identity of a logical MetaApp. MAN's /pin/path/list does not link create /
- * modify pins of the same app through a stable id (firstPinId/originalId are
- * absent or path-like), so the app is identified by its creator + appName,
- * which is also how MAN itself marks superseded versions. When the creator is
- * unknown the pin id is used so unrelated pins never collapse together.
+ * Identity of a logical MetaApp, used as the seen-set key for paging. MetaSo
+ * already folds each app to one latest record, so this mainly keeps the
+ * backward-compatible seen-set semantics intact across cursor navigation.
  */
 const buildCommunityAppGroupKey = (candidate: ChainMetaAppCandidate): string => {
   const creator = asText(candidate.creatorMetaId);
@@ -602,83 +568,37 @@ export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): 
       });
     });
 
-    // Collect distinct apps (newest version per app) across raw MAN pages until
-    // the page is full. Older edit versions of the same app are deduplicated
-    // away, so a "page of 30" really shows 30 different apps. When a raw page
-    // pushes the collected set past the page size, the newest ones are returned
-    // and the next request re-fetches that same page; the seen-set keeps the
-    // re-fetch from re-serving apps that were already returned.
-    const bestByGroup = new Map<string, ChainMetaAppCandidate>();
-    const consumedPages = new Set<string>();
-    let rawCursor = normalizeListCursor(input.cursor);
-    let continueCursor: string | null = null;
-    let exhausted = false;
+    // MetaSo returns the global feed already deduplicated (latest version of
+    // each app) and sorted by updatedAt desc, so one request yields one logical
+    // page — no multi-page fill loop or client-side group dedup is needed. We
+    // still respect the seen-set for backward-compatible paging behavior.
+    const rawPage = normalizeFetchListResult(await fetchList({
+      cursor: normalizeListCursor(input.cursor),
+      size: pageSize,
+    }));
 
-    while (bestByGroup.size < pageSize) {
-      const rawPage = normalizeFetchListResult(await fetchList({
-        cursor: rawCursor,
-        size: pageSize,
-      }));
-      const rawList = rawPage.list;
-      if (!rawList.length) {
-        exhausted = true;
-        break;
-      }
-      for (const item of rawList) {
-        if (isHiddenChainOperation((item as Record<string, unknown>)?.operation)) {
-          continue;
-        }
-        const candidate = decodeChainPayload(item);
-        if (!candidate) {
-          continue;
-        }
-        // Revoked/superseded rows (status < 0) must never surface: MAN flips the
-        // whole chain of a revoked MetaApp to a negative status, so a revoked app
-        // simply has no visible row left (same rule as the Bot Hub service list).
-        if (candidate.status < 0) {
-          continue;
-        }
-        const key = buildCommunityAppGroupKey(candidate);
-        if (seen.has(key)) {
-          continue;
-        }
-        const current = bestByGroup.get(key);
-        if (!current || candidate.publishedAt > current.publishedAt) {
-          bestByGroup.set(key, candidate);
-        }
-      }
-
-      const nextCursor = asText(rawPage.nextCursor);
-      if (bestByGroup.size > pageSize) {
-        // Overshoot: keep the cursor on this page so the apps that did not fit
-        // into this page are re-served by the next request (seen filters the
-        // ones already returned).
-        continueCursor = rawCursor;
-        break;
-      }
-      if (bestByGroup.size === pageSize) {
-        continueCursor = nextCursor || null;
-        break;
-      }
-      consumedPages.add(rawCursor);
-      if (!nextCursor || nextCursor === rawCursor || consumedPages.has(nextCursor)) {
-        exhausted = true;
-        break;
-      }
-      rawCursor = nextCursor;
-      continueCursor = nextCursor;
-      if (consumedPages.size >= COMMUNITY_METAAPPS_MAX_FILL_PAGES) {
-        break;
-      }
+    const pageCandidates: ChainMetaAppCandidate[] = [];
+    for (const item of rawPage.list) {
+      const candidate = mapSearchItemToChainCandidate(item as MetaAppSearchItem);
+      if (!candidate) continue;
+      const key = buildCommunityAppGroupKey(candidate);
+      if (seen.has(key)) continue;
+      pageCandidates.push(candidate);
     }
 
-    const sortedCandidates = [...bestByGroup.values()]
-      .sort((a, b) => b.publishedAt - a.publishedAt || a.payload.title.localeCompare(b.payload.title));
-    const pageCandidates = sortedCandidates.slice(0, pageSize);
+    pageCandidates.sort((a, b) => b.publishedAt - a.publishedAt || a.payload.title.localeCompare(b.payload.title));
+
+    // Author info is normally carried by the MetaSo item already; only fetch for
+    // candidates missing it (and a custom fetchAuthorInfo was not injected).
     const fetchAuthorInfo = input.fetchAuthorInfo || defaultFetchAuthorInfo;
+    const missingAuthorMetaIds = [...new Set(
+      pageCandidates
+        .filter((c) => !c.authorName && !c.authorAvatar)
+        .map((c) => asText(c.creatorMetaId))
+        .filter(Boolean),
+    )];
     const authorEntries = await Promise.all(
-      [...new Set(pageCandidates.map((item) => asText(item.creatorMetaId)).filter(Boolean))]
-        .map(async (creatorMetaId) => [creatorMetaId, await fetchAuthorInfo(creatorMetaId)] as const),
+      missingAuthorMetaIds.map(async (creatorMetaId) => [creatorMetaId, await fetchAuthorInfo(creatorMetaId)] as const),
     );
     const authorMap = new Map(authorEntries);
 
@@ -694,7 +614,7 @@ export async function listCommunityMetaApps(input: ListCommunityMetaAppsInput): 
     return {
       success: true,
       apps: records,
-      nextCursor: exhausted ? null : continueCursor,
+      nextCursor: rawPage.nextCursor,
       seen: resultSeen,
     };
   } catch (error) {
@@ -721,10 +641,9 @@ const findCommunityMetaAppBySourcePinId = async (
       }));
 
       const match = rawPage.list
-        .map((item) => decodeChainPayload(item))
+        .map((item) => mapSearchItemToChainCandidate(item as MetaAppSearchItem))
         .find((candidate): candidate is ChainMetaAppCandidate => (
           Boolean(candidate)
-          && candidate.status >= 0
           && candidate.sourcePinId === input.sourcePinId
         ));
 
