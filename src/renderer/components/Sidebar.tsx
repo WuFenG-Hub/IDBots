@@ -28,7 +28,6 @@ interface SidebarProps {
   onShowGigSquare: () => void;
   onShowMetabots: () => void;
   onNewChat: () => void;
-  onNewGroupTask: () => void;
   mode: BotBrowserSurfaceMode;
   onSelectHome: () => void;
   onSelectBrowser: () => void;
@@ -53,7 +52,6 @@ const Sidebar: React.FC<SidebarProps> = ({
   onShowGigSquare,
   onShowMetabots,
   onNewChat,
-  onNewGroupTask,
   mode,
   onSelectHome,
   onSelectBrowser,
@@ -270,14 +268,6 @@ const Sidebar: React.FC<SidebarProps> = ({
                 <MagnifyingGlassIcon className="h-4 w-4" />
               </button>
             </div>
-            <button
-              type="button"
-              onClick={onNewGroupTask}
-              className="w-full inline-flex items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-            >
-              <UserGroupIcon className="h-4 w-4" />
-              {i18nService.t('groupTasksNewTask')}
-            </button>
             {primaryNavItems.map((item) => (
               <button
                 key={item.id}
