@@ -50,6 +50,8 @@ import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
+import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
+import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -3106,6 +3108,24 @@ const startSqliteDaemons = (): void => {
     () => triggerDaemonWasmRecovery('cognitiveOrchestrator')
   );
 
+  let getMetaIDCognitionPromptBlock:
+    | ((input: Parameters<MetaIDCognitionContextService['buildPromptBlock']>[0]) => Promise<string>)
+    | undefined;
+  try {
+    const cognitionContextService = new MetaIDCognitionContextService({
+      experienceStore: getMetaIDExperienceStore(),
+      impressionStore: getMetaIDImpressionStore(),
+      relationshipResolver: new MetaIDRelationshipResolver({
+        listMetabots: () => getMetabotStore().listMetabots(),
+      }),
+    });
+    getMetaIDCognitionPromptBlock = (input) => cognitionContextService.buildPromptBlock(input);
+  } catch (error) {
+    console.warn(
+      `[PrivateChat] MetaID cognition context unavailable; continuing without impression projection: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   startPrivateChatDaemon(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -3155,7 +3175,8 @@ const startSqliteDaemons = (): void => {
     undefined,
     (sessionId, metabotId) => a2aGuidanceQueue.consume(sessionId, metabotId)?.guidance ?? null,
     (metabotId, limit) => getDreamStore().listDailySummaries(metabotId, limit),
-    (sessionId) => scheduleA2APeerProfileRefresh(sessionId)
+    (sessionId) => scheduleA2APeerProfileRefresh(sessionId),
+    getMetaIDCognitionPromptBlock,
   );
 
   // Periodically reconcile private chat history with the MetaSO API so

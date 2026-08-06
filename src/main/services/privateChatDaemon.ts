@@ -193,6 +193,11 @@ type PrivateChatPerformChatFn = (
   llmId?: string | null,
   options?: { signal?: AbortSignal; fallbackLlmId?: string | null }
 ) => Promise<string>;
+type GetMetaIDCognitionPromptBlockFn = (input: {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  excludeEvidenceIds?: string[];
+}) => string | Promise<string>;
 
 export interface PrivateChatA2AContextMessage {
   speaker: string;
@@ -2691,6 +2696,7 @@ async function processOne(
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
   refreshA2APeerProfile?: (sessionId: string) => void,
   experienceStore?: MetaIDExperienceStore,
+  getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -3754,8 +3760,9 @@ async function processOne(
 
     // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
     const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
+    let currentExperienceEvidenceId: string | null = null;
     try {
-      recordMetaIDPrivateA2AExperience({
+      const recordedExperience = recordMetaIDPrivateA2AExperience({
         store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
         ownerGlobalMetaID: metabot.globalmetaid,
         peerGlobalMetaID: fromGlobalMetaId,
@@ -3769,6 +3776,7 @@ async function processOne(
         occurredAt: Number.isFinite(Number(row.chain_timestamp)) ? Number(row.chain_timestamp) : undefined,
         sourceMetadata: { txId: row.tx_id, pinId: row.pin_id },
       });
+      currentExperienceEvidenceId = recordedExperience?.evidence.id ?? null;
     } catch (error) {
       emitLog(
         `[PrivateChat] Incoming experience capture failed for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
@@ -3913,6 +3921,23 @@ async function processOne(
         })
       : '';
 
+    let cognitionContext = '';
+    if (memoryPolicy.memoryEnabled && getMetaIDCognitionPromptBlock && metabot.globalmetaid && fromGlobalMetaId) {
+      try {
+        cognitionContext = (await getMetaIDCognitionPromptBlock({
+          observerGlobalMetaID: metabot.globalmetaid,
+          subjectGlobalMetaID: fromGlobalMetaId,
+          excludeEvidenceIds: currentExperienceEvidenceId ? [currentExperienceEvidenceId] : [],
+        })).trim();
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(
+          `[PrivateChat] MetaID cognition context unavailable for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const promptMemoryContext = [memoryContext, cognitionContext].filter(Boolean).join('\n\n');
+
     const llmId = normalizeMetabotLlmId(metabot.llm_id);
     const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
     if (llmId) {
@@ -4021,7 +4046,7 @@ async function processOne(
         goal: metabot.goal,
         bio: metabot.bio,
       },
-      memoryContext,
+      memoryContext: promptMemoryContext,
       analysis: conversationAnalysis,
       skillsPrompt: canRunChatSkills ? chatSkillsRouting.prompt : null,
       skillWaitNoticeAlreadySent,
@@ -4334,6 +4359,7 @@ export function startPrivateChatDaemon(
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
   refreshA2APeerProfile?: (sessionId: string) => void,
+  getMetaIDCognitionPromptBlock?: GetMetaIDCognitionPromptBlockFn,
 ): void {
   void stopPrivateChatDaemon();
   const daemonGeneration = ++privateChatDaemonGeneration;
@@ -4402,6 +4428,7 @@ export function startPrivateChatDaemon(
               getRecentDailySummaries,
               refreshA2APeerProfile,
               experienceStore,
+              getMetaIDCognitionPromptBlock,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
