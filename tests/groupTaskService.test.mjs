@@ -207,6 +207,28 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
   }
 });
 
+test('createGroupTask auto-selects the complete local Worker roster for Twin planning', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'Choose specialists',
+      goal: 'Have the Twin select the right local Worker',
+      autoSelectWorkers: true,
+      memberMetabotIds: [99],
+      createdBy: 'user',
+    });
+
+    // The adapter exposes the complete enabled Worker roster; the planning
+    // prompt can then choose a specialist based on each Worker profile.
+    assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2, 3]);
+    assert.deepEqual(h.calls.join.map((call) => call.metabotId).sort(), [2, 3]);
+    assert.match(h.calls.send[0].opts.content, /@Coder Bot/);
+    assert.match(h.calls.send[0].opts.content, /@Designer Bot/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('createGroupTask degrades on member join failure: task created, joined_pin_id NULL', async () => {
   const h = await createHarness({ joinFailures: [3] });
   try {

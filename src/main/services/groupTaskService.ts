@@ -30,6 +30,9 @@ export interface CreateGroupTaskOptions {
   acceptanceCriteria?: string;
   /** Worker metabot ids; chair (the current twin) is added automatically. */
   memberMetabotIds?: number[];
+  /** When true, make the entire small local Worker roster available to the Twin chair;
+   * the chair's LLM selects the specialist and only its assignment is mentioned. */
+  autoSelectWorkers?: boolean;
   createdBy: 'user' | 'twinbot';
 }
 
@@ -210,7 +213,10 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
   const chair = metabotStore.getMetabotById(chairMetabotId);
   const chairName = chair?.name?.trim() || `bot-${chairMetabotId}`;
 
-  const workerIds = [...new Set((opts.memberMetabotIds ?? [])
+  const requestedWorkerIds = opts.autoSelectWorkers
+    ? metabotStore.listMetabots().filter((metabot) => metabot.metabot_type === 'worker' && metabot.enabled).map((metabot) => metabot.id)
+    : (opts.memberMetabotIds ?? []);
+  const workerIds = [...new Set(requestedWorkerIds
     .map((id) => Math.trunc(Number(id)))
     .filter((id) => Number.isFinite(id) && id > 0 && id !== chairMetabotId))];
 

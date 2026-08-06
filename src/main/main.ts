@@ -7987,6 +7987,7 @@ if (!gotTheLock) {
           goal: String(input?.goal ?? '').trim(),
           acceptanceCriteria: typeof input?.acceptanceCriteria === 'string' ? input.acceptanceCriteria : undefined,
           memberMetabotIds: Array.isArray(input?.memberMetabotIds) ? input.memberMetabotIds : [],
+          autoSelectWorkers: true,
           createdBy: 'user',
         }));
       return { success: true, task };

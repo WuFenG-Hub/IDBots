@@ -1202,6 +1202,7 @@ export function startMetaidRpcServer(
           goal,
           acceptanceCriteria: typeof parsed.acceptance_criteria === 'string' ? parsed.acceptance_criteria : undefined,
           memberMetabotIds,
+          autoSelectWorkers: true,
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
         });
         res.writeHead(200);

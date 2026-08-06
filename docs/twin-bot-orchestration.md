@@ -68,6 +68,8 @@ The first-release host tools are:
 
 The existing loopback Group Task RPC remains a compatibility adapter. New Twin orchestration must not rely on unauthenticated loopback claims for authorization.
 
+For the first acceptance pass, Group Task creation through the desktop IPC or loopback RPC exposes the complete enabled local Worker roster to the Twin chair automatically. The kickoff prompt includes each Worker's planning profile, while the Twin's planning turn decides which specialist receives each step. Callers that use the service directly may still provide an explicit member list for compatibility and deterministic tests.
+
 ### Durable orchestration state
 
 The generic task model is transport-neutral:
@@ -160,4 +162,3 @@ The first release is accepted only when:
 8. The Twin sends a concise final report with evidence and asks for acceptance or rework.
 9. A Worker attempting to invoke a Twin-only tool receives a host-level denial.
 10. Restarting IDBots does not lose active task state or repeat completed external actions.
-
