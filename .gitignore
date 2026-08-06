@@ -26,6 +26,7 @@ Dev-docs/
 CLAUDE.md
 localdocs/
 docs/*
+!docs/twin-bot-orchestration.md
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
 tests/*
