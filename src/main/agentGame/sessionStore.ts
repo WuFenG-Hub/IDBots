@@ -63,6 +63,7 @@ interface GrantRow {
   expires_at: number;
   budget_llm_calls: number;
   budget_writes: number;
+  protocol_paths: string | null;
   revoked_at: number | null;
   reason: string | null;
   created_at: number;
@@ -155,6 +156,12 @@ function rowToGrant(r: GrantRow): SessionConsent & {
   revokedAt: number | null;
   reason: string | null;
 } {
+  let protocolPaths: string[] = [];
+  try {
+    protocolPaths = r.protocol_paths ? JSON.parse(r.protocol_paths) : [];
+  } catch {
+    protocolPaths = [];
+  }
   return {
     actorId: r.actor_id,
     appId: r.app_id,
@@ -164,7 +171,7 @@ function rowToGrant(r: GrantRow): SessionConsent & {
     adapterHash: r.adapter_hash,
     seat: r.seat,
     resourceUri: r.resource_uri,
-    protocolPaths: [],
+    protocolPaths,
     ttlMs: r.ttl_ms,
     budget: { llmCalls: r.budget_llm_calls, llmCallsUsed: 0, writes: r.budget_writes, writesUsed: 0 },
     grantedAt: r.created_at,
@@ -311,15 +318,16 @@ export class AgentGameSessionStore {
     this.db.run(
       `INSERT INTO agent_game_grants (
         resource_uri, actor_id, app_id, group_id, game_id, rules_hash, adapter_hash, seat,
-        status, ttl_ms, expires_at, budget_llm_calls, budget_writes, revoked_at, reason, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, NULL, NULL, ?)
+        status, ttl_ms, expires_at, budget_llm_calls, budget_writes, protocol_paths, revoked_at, reason, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL, NULL, ?)
       ON CONFLICT(resource_uri, actor_id, app_id, group_id, game_id, rules_hash, adapter_hash, seat)
       DO UPDATE SET status='active', ttl_ms=excluded.ttl_ms, expires_at=excluded.expires_at,
         budget_llm_calls=excluded.budget_llm_calls, budget_writes=excluded.budget_writes,
-        revoked_at=NULL, reason=NULL`,
+        protocol_paths=excluded.protocol_paths, revoked_at=NULL, reason=NULL`,
       [
         g.resourceUri, g.actorId, g.appId, g.groupId, g.gameId, g.rulesHash, g.adapterHash, g.seat,
-        g.ttlMs, expiresAt, g.budget.llmCalls, g.budget.writes, createdAt,
+        g.ttlMs, expiresAt, g.budget.llmCalls, g.budget.writes, JSON.stringify(g.protocolPaths ?? []),
+        createdAt,
       ],
     );
     this.saveDb();

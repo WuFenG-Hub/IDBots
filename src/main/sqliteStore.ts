@@ -1312,12 +1312,14 @@ export class SqliteStore {
         expires_at INTEGER NOT NULL DEFAULT 0,
         budget_llm_calls INTEGER NOT NULL DEFAULT 0,
         budget_writes INTEGER NOT NULL DEFAULT 0,
+        protocol_paths TEXT,
         revoked_at INTEGER,
         reason TEXT,
         created_at INTEGER NOT NULL,
         PRIMARY KEY (resource_uri, actor_id, app_id, group_id, game_id, rules_hash, adapter_hash, seat)
       );
     `);
+    this.migrateAgentGameGrantsProtocolPaths();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS agent_game_write_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1785,6 +1787,22 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatMessagesMsgIndex:', e);
+    }
+  }
+
+  /**
+   * Migration: add protocol_paths to agent_game_grants (forward-compatible
+   * column for auto-write authorization). No-op once present.
+   */
+  private migrateAgentGameGrantsProtocolPaths(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(agent_game_grants)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('protocol_paths')) return;
+      this.db.run('ALTER TABLE agent_game_grants ADD COLUMN protocol_paths TEXT');
+      this.save();
+    } catch (e) {
+      console.warn('migrateAgentGameGrantsProtocolPaths:', e);
     }
   }
 
