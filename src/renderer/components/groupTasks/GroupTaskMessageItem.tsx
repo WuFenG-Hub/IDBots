@@ -3,6 +3,7 @@ import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { resolveMetaidAvatarSource } from '../../services/metabotInfoService';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
+import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
 import type { GroupChatTranscriptMessage } from '../../types/groupTask';
 import { formatGroupTaskTime } from './groupTaskUtils';
@@ -12,13 +13,8 @@ const DEFAULT_AVATAR = getDefaultMetabotAvatarUrl();
 /** Module-level resolution cache so the 5s transcript polling never re-resolves. */
 const avatarResolutionCache = new Map<string, string | null>();
 
-const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized.startsWith('data:image/')
-    || normalized.startsWith('http://')
-    || normalized.startsWith('https://')
-    || normalized.startsWith('blob:');
-};
+const isRenderableAvatarSource = (value: string | null | undefined): boolean =>
+  isSharedRenderableAvatarSource(value);
 
 /**
  * Resolve a sender avatar to a renderable URL. Raw MetaWeb avatar values

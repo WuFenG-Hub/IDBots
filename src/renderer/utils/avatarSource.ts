@@ -1,0 +1,68 @@
+/**
+ * Avatar source helpers shared across cowork / A2A / group-task views.
+ *
+ * Some on-chain / MetaFS user records store the literal marker `/content/`
+ * (or a bare `<base>/content/` URL) when a Bot has no avatar. A bug in the
+ * upstream profile fetcher (`@openagentinternet/agent-browser-core`'s
+ * `fetchBotProfileInfo`) turns that relative marker into an absolute URL by
+ * prepending the P2P search base, producing e.g.
+ *   `https://so.metaid.io/content/`  ->  404
+ * which then flows into session/peer avatar fields and gets rendered as an
+ * `<img>`. These guards treat such "no avatar" markers as unrenderable so the
+ * UI falls back to the default avatar instead of firing a broken request.
+ */
+
+/** Marker strings that mean "no avatar" and must never be used as an <img src>. */
+const NO_AVATAR_MARKERS: readonly string[] = [
+  '/content/',
+  '/content',
+  '/metafile-indexer/content',
+  '/metafile-indexer/thumbnail',
+  '/metafile-indexer/api/v1/files/content',
+  '/metafile-indexer/api/v1/files/accelerate/content',
+  '/metafile-indexer/api/v1/users/avatar/accelerate',
+];
+
+const isNoAvatarMarker = (normalized: string): boolean => {
+  if (!normalized) return true;
+  return NO_AVATAR_MARKERS.some((marker) => normalized === marker);
+};
+
+/**
+ * True when `value` is a directly renderable avatar source: a `data:`/`blob:`
+ * URL, an absolute `http(s)` URL, **and** not one of the "no avatar" markers.
+ * Bare MetaID references (`/content/<pinId>`, `metafile://…`, raw pin ids)
+ * return false so callers resolve them through the main-process resolver.
+ */
+export const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (!normalized) return false;
+  if (isNoAvatarMarker(normalized)) return false;
+  // Reject a marker that already got promoted to an absolute URL by the
+  // upstream fetcher (e.g. `https://so.metaid.io/content/`).
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      const parsed = new URL(normalized);
+      const path = parsed.pathname.replace(/\/+$/, '');
+      if (isNoAvatarMarker(path)) return false;
+    } catch {
+      return false;
+    }
+    return true;
+  }
+  return normalized.startsWith('data:image/') || normalized.startsWith('blob:');
+};
+
+/**
+ * Pick the first renderable value, or null. Keeps call sites concise.
+ */
+export const pickRenderableAvatarSource = (
+  ...values: Array<string | null | undefined>
+): string | null => {
+  for (const value of values) {
+    if (isRenderableAvatarSource(value)) {
+      return value!.trim() || null;
+    }
+  }
+  return null;
+};

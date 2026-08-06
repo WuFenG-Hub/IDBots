@@ -4,6 +4,7 @@ import { ArchiveBoxIcon, ClipboardDocumentIcon, EllipsisHorizontalIcon, PencilSq
 import { i18nService } from '../../services/i18n';
 import { getCoworkSessionTitleClassName, shouldShowCoworkA2ADot } from './coworkSessionPresentation.js';
 import { copyCoworkSessionLinkToClipboard } from './coworkSessionLink.js';
+import { isRenderableAvatarSource } from '../../utils/avatarSource';
 
 interface CoworkSessionItemProps {
   session: CoworkSessionSummary;
@@ -79,8 +80,8 @@ const formatRelativeTime = (timestamp: number): { compact: string; full: string 
   }
 };
 
-const isRenderableAvatarSource = (src?: string | null): src is string =>
-  Boolean(src && /^(https?:|data:|blob:)/i.test(src.trim()));
+const isRenderableSessionAvatarSource = (src?: string | null): src is string =>
+  isRenderableAvatarSource(src);
 
 const avatarInitial = (name?: string | null): string => {
   const trimmed = name?.trim() ?? '';
@@ -97,7 +98,7 @@ const SessionAvatarCircle: React.FC<{
     className={`flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-claude-surfaceHover text-[11px] font-semibold text-claude-textSecondary dark:bg-claude-darkSurfaceHover dark:text-claude-darkTextSecondary ${className}`}
     title={name?.trim() || undefined}
   >
-    {isRenderableAvatarSource(src) ? (
+    {isRenderableSessionAvatarSource(src) ? (
       <img src={src} alt={name?.trim() || ''} className="h-full w-full object-cover" />
     ) : (
       avatarInitial(name)

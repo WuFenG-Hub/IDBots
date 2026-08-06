@@ -3,6 +3,7 @@ import type { CoworkMessage } from '../../types/cowork';
 import { ChevronDownIcon, ChevronRightIcon, DocumentDuplicateIcon, ShareIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import { getDefaultMetabotAvatarUrl } from '../../utils/rendererAssetPaths';
+import { pickRenderableAvatarSource as pickSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import MarkdownContent from '../MarkdownContent';
 
 interface A2AMessageItemProps {
@@ -386,22 +387,8 @@ export const createMetafileMediaObjectUrl = async (
   return URL.createObjectURL(blob);
 };
 
-const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized.startsWith('data:image/')
-    || normalized.startsWith('http://')
-    || normalized.startsWith('https://')
-    || normalized.startsWith('blob:');
-};
-
-const pickRenderableAvatarSource = (...values: Array<string | null | undefined>): string | null => {
-  for (const value of values) {
-    if (isRenderableAvatarSource(value)) {
-      return value?.trim() || null;
-    }
-  }
-  return null;
-};
+const pickRenderableAvatarSource = (...values: Array<string | null | undefined>): string | null =>
+  pickSharedRenderableAvatarSource(...values);
 
 const normalizeA2ABotGlobalMetaId = (value: unknown): string => (
   typeof value === 'string' ? value.trim() : ''

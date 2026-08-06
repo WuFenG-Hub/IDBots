@@ -169,3 +169,4 @@ man_base_data_pebble/
 !tests/archivedSessionList.test.mjs
 !tests/appUpdateSilentFlowStatic.test.mjs
 !tests/appUpdateResumableDownload.test.mjs
+!tests/avatarSource.test.mjs

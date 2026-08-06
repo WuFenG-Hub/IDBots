@@ -41,6 +41,7 @@ import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 import { getCompactFolderName } from '../../utils/path';
+import { isRenderableAvatarSource as isSharedRenderableAvatarSource } from '../../utils/avatarSource';
 import {
   buildPrivateA2ASessionDisplayId,
   getCoworkSessionTitleClassName,
@@ -220,13 +221,8 @@ const formatShortHash = (value: string): string => {
   return `${value.slice(0, 8)}...${value.slice(-8)}`;
 };
 
-const isRenderableAvatarSource = (value: string | null | undefined): boolean => {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return normalized.startsWith('data:image/')
-    || normalized.startsWith('http://')
-    || normalized.startsWith('https://')
-    || normalized.startsWith('blob:');
-};
+const isRenderableAvatarSource = (value: string | null | undefined): boolean =>
+  isSharedRenderableAvatarSource(value);
 
 const getRefundFailureReasonLabel = (failureReason?: string | null): string | null => {
   if (failureReason === 'first_response_timeout') {
