@@ -147,6 +147,7 @@ import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
+import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { ensureCoworkA2ASession } from './services/coworkEnsureA2ASession';
 import {
   CoworkTurnSubmissionController,
@@ -4263,6 +4264,7 @@ const getCoworkRunner = () => {
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);
         return m ? {
+          id: m.id,
           name: m.name,
           mvc_address: m.mvc_address ?? null,
           globalmetaid: m.globalmetaid ?? null,
@@ -4271,8 +4273,19 @@ const getCoworkRunner = () => {
           bio: m.bio ?? null,
           goal: m.goal ?? null,
           llm_id: m.llm_id ?? null,
+          enabled: m.enabled,
+          metabot_type: m.metabot_type,
+          boss_global_metaid: m.boss_global_metaid ?? null,
+          skills: m.skills ?? [],
+          allow_chat_skills: m.allow_chat_skills ?? [],
         } : null;
       },
+      listLocalWorkers: (sessionId: string) => buildTwinWorkerDirectory(sessionId, {
+        getSession: (id) => getCoworkStore().getSession(id),
+        listMetabots: () => getMetabotStore().listMetabots(),
+        getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+        listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
+      }),
       openMetaApp: async (input) => {
         return openMetaApp({
           appId: input.appId,

@@ -42,6 +42,10 @@ import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import { CoworkCrossSessionService } from '../services/coworkCrossSession';
 import {
+  TwinWorkerDirectoryAuthorizationError,
+  type TwinWorkerDirectoryResult,
+} from '../services/twinWorkerDirectoryService';
+import {
   buildBotBrowserAgentTools,
   type BotBrowserControl,
 } from './botBrowserAgentTools';
@@ -862,6 +866,7 @@ type SandboxSkillEntry = {
 };
 
 type CoworkMetabotIdentity = {
+  id?: number | null;
   name?: string | null;
   role?: string | null;
   soul?: string | null;
@@ -872,6 +877,11 @@ type CoworkMetabotIdentity = {
   llm_id?: string | null;
   mvc_address?: string | null;
   globalmetaid?: string | null;
+  enabled?: boolean | null;
+  metabot_type?: 'twin' | 'worker' | null;
+  boss_global_metaid?: string | null;
+  skills?: string[] | null;
+  allow_chat_skills?: string[] | null;
 };
 
 /** Structural view of DreamStore consumed by the runner (DI seam). */
@@ -895,6 +905,8 @@ export interface CoworkRunnerOptions {
   /** When set, returns the XML block for available remote services to inject into the system prompt. */
   getRemoteServicesPrompt?: () => string | null;
   getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
+  /** Twin-only host capability directory. The callback must revalidate authorization. */
+  listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
   /** When set, returns enabled user-configured MCP servers for local execution. */
   mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
   /** When set, opens a local MetaApp and returns the resolved local URL. */
@@ -952,6 +964,7 @@ export class CoworkRunner extends EventEmitter {
   private getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
   private getRemoteServicesPrompt?: () => string | null;
   private getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
+  private listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
   private mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
@@ -981,6 +994,7 @@ export class CoworkRunner extends EventEmitter {
     this.getSkillSessionEnvOverrides = options?.getSkillSessionEnvOverrides;
     this.getRemoteServicesPrompt = options?.getRemoteServicesPrompt;
     this.getMetabotById = options?.getMetabotById;
+    this.listLocalWorkers = options?.listLocalWorkers;
     this.mcpServerProvider = options?.mcpServerProvider;
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
@@ -1590,6 +1604,12 @@ export class CoworkRunner extends EventEmitter {
         }),
       };
     } catch (error) {
+      if (error instanceof TwinWorkerDirectoryAuthorizationError) {
+        return {
+          success: false,
+          text: JSON.stringify({ ok: false, code: error.code, error: error.message }),
+        };
+      }
       return {
         success: true,
         text: this.formatCrossSessionToolOutput({
@@ -3805,6 +3825,14 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  private isTwinSession(sessionId: string): boolean {
+    if (!this.getMetabotById) return false;
+    const metabotId = this.store.getSession(sessionId)?.metabotId;
+    if (!Number.isInteger(metabotId) || Number(metabotId) <= 0) return false;
+    const metabot = this.getMetabotById(Number(metabotId));
+    return metabot?.enabled !== false && metabot?.metabot_type === 'twin';
+  }
+
   private async handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): Promise<{ success: boolean; text: string }> {
     const toolName = String(payload.toolName ?? payload.name ?? '');
     const rawInput = payload.toolInput ?? payload.input ?? {};
@@ -3855,6 +3883,17 @@ export class CoworkRunner extends EventEmitter {
           sessionId: typeof toolInput.sessionId === 'string' ? toolInput.sessionId : undefined,
           message: typeof toolInput.message === 'string' ? toolInput.message : undefined,
         }, sessionId);
+      }
+
+      if (toolName === 'local_workers_list') {
+        if (!this.listLocalWorkers || !this.isTwinSession(sessionId)) {
+          return {
+            success: false,
+            text: JSON.stringify({ ok: false, code: 'TWIN_TOOL_FORBIDDEN', error: 'Only the current Twin Bot may access the local Worker directory.' }),
+          };
+        }
+        const directory = await this.listLocalWorkers(sessionId);
+        return { success: true, text: JSON.stringify({ ok: true, ...directory }) };
       }
 
       if (toolName === 'memory_user_edits') {
@@ -4494,6 +4533,22 @@ export class CoworkRunner extends EventEmitter {
           }
         ),
       ];
+      if (this.listLocalWorkers && this.isTwinSession(sessionId)) {
+        memoryTools.push(
+          tool(
+            'local_workers_list',
+            'List all local MetaBots for Twin orchestration. Returns sanitized identity, persona, skills, capability evidence, and availability. This tool is available only to the current Twin Bot.',
+            {},
+            async () => {
+              const result = await this.handleHostToolExecution({ toolName: 'local_workers_list', toolInput: {} }, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: !result.success,
+              } as any;
+            }
+          )
+        );
+      }
       if (sessionMemoryEnabled) {
         memoryTools.push(
           tool(
@@ -5275,6 +5330,7 @@ export class CoworkRunner extends EventEmitter {
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,
       memoryEnabled: this.isSessionMemoryEnabled(sessionId, activeSession),
+      twinOrchestrationEnabled: Boolean(this.listLocalWorkers && this.isTwinSession(sessionId)),
       autoApprove: Boolean(activeSession.autoApprove),
       confirmationMode: activeSession.confirmationMode,
       env: sandboxEnv,
@@ -5820,6 +5876,7 @@ export class CoworkRunner extends EventEmitter {
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,
       memoryEnabled: this.isSessionMemoryEnabled(sessionId, activeSession),
+      twinOrchestrationEnabled: Boolean(this.listLocalWorkers && this.isTwinSession(sessionId)),
       autoApprove: Boolean(activeSession.autoApprove),
       confirmationMode: activeSession.confirmationMode,
       env: sandboxEnv,

@@ -1430,6 +1430,27 @@ async function handleRequest(requestId, request, requestPath) {
           }
         ),
       ];
+      if (request.twinOrchestrationEnabled === true) {
+        memoryTools.push(
+          tool(
+            'local_workers_list',
+            'List all local MetaBots for Twin orchestration. Returns sanitized identity, persona, skills, capability evidence, and availability. This tool is available only to the current Twin Bot.',
+            {},
+            async (args, { signal }) => {
+              const response = await callHostTool('local_workers_list', args, signal);
+              const text = typeof response?.text === 'string'
+                ? response.text
+                : typeof response?.error === 'string'
+                  ? response.error
+                  : '';
+              return {
+                content: [{ type: 'text', text }],
+                isError: response?.success === false,
+              };
+            }
+          )
+        );
+      }
       if (request.memoryEnabled !== false) {
         memoryTools.push(
           tool(
