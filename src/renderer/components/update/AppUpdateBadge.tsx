@@ -87,8 +87,10 @@ const AppUpdateBadge: React.FC<AppUpdateBadgeProps> = ({
     : 'non-draggable inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/12 px-3 py-1 text-xs font-medium text-emerald-600 hover:bg-emerald-500/18 dark:text-emerald-400 transition-colors';
 
   return (
-    // 面板作为 wrapper 的 DOM 子节点（fixed 定位），鼠标在按钮与面板间移动不会触发 leave
-    <div ref={wrapperRef} className="relative inline-block" onMouseEnter={showPanel} onMouseLeave={hidePanel}>
+    // 面板作为 wrapper 的 DOM 子节点（fixed 定位），鼠标在按钮与面板间移动不会触发 leave。
+    // 徽章位于侧边栏顶部的 .draggable 区域内；wrapper 自身必须显式声明 non-draggable，
+    // 否则 Electron 的拖拽区域会吞掉 mouseenter/mouseleave，悬停面板永远不会出现。
+    <div ref={wrapperRef} className="non-draggable relative inline-block" onMouseEnter={showPanel} onMouseLeave={hidePanel}>
       <button
         type="button"
         onClick={handleClick}
