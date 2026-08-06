@@ -34,6 +34,11 @@ export interface PrivateChatBackfillServiceDeps {
   db: Database;
   saveDb: () => void;
   getLocalIdentities: () => PrivateChatBackfillIdentity[];
+  onMessagesStored?: (input: {
+    identity: PrivateChatBackfillIdentity;
+    peerGlobalMetaID: string;
+    inserted: number;
+  }) => void | Promise<void>;
   historySync?: Pick<PrivateChatHistorySyncService, 'fetchRecentConversationMessages'>;
   fetchDirectoryJson?: (url: string) => Promise<unknown>;
   directoryEndpoints?: Array<{ baseUrl: string }>;
@@ -327,6 +332,15 @@ export function createPrivateChatBackfillLoop(
             unprocessedAfterTimestampSec,
           });
           result.inserted += inserted;
+          try {
+            await deps.onMessagesStored?.({
+              identity,
+              peerGlobalMetaID: peer,
+              inserted,
+            });
+          } catch (error) {
+            emitLog(`[PrivateChatBackfill] Experience reconciliation failed for ${peer.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`);
+          }
           if (inserted > 0) {
             emitLog(`[PrivateChatBackfill] Recovered ${inserted} private chat message(s) for ${identity.globalMetaId.slice(0, 12)}… ↔ ${peer.slice(0, 12)}…`);
           }

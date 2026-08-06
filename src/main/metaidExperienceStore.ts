@@ -415,7 +415,48 @@ export class MetaIDExperienceStore {
        WHERE owner_globalmetaid = ? AND source_channel = ? AND source_key = ? LIMIT 1`,
       [ownerGlobalMetaID, sourceChannel, sourceKey],
     );
-    if (existing) return { episode: rowToEpisode(existing), created: false };
+    if (existing) {
+      const requestedSessionId = asText(input.sessionId);
+      const requestedExternalConversationId = asText(input.externalConversationId);
+      const requestedTaskId = asText(input.taskId);
+      const requestedOrderId = asText(input.orderId);
+      const requestedStartedAt = input.startedAt == null ? null : asTimestamp(input.startedAt, 0);
+      const nextSessionId = existing.session_id || requestedSessionId || null;
+      const nextExternalConversationId = existing.external_conversation_id
+        || requestedExternalConversationId || null;
+      const nextTaskId = existing.task_id || requestedTaskId || null;
+      const nextOrderId = existing.order_id || requestedOrderId || null;
+      const nextStartedAt = requestedStartedAt == null
+        ? asTimestamp(existing.started_at, 0)
+        : Math.min(asTimestamp(existing.started_at, requestedStartedAt), requestedStartedAt);
+      const changed = nextSessionId !== existing.session_id
+        || nextExternalConversationId !== existing.external_conversation_id
+        || nextTaskId !== existing.task_id
+        || nextOrderId !== existing.order_id
+        || nextStartedAt !== asTimestamp(existing.started_at, 0);
+      if (changed) {
+        this.db.run(
+          `UPDATE metaid_experience_episodes
+           SET session_id = ?, external_conversation_id = ?, task_id = ?, order_id = ?,
+               started_at = ?, updated_at = ?
+           WHERE id = ?`,
+          [
+            nextSessionId,
+            nextExternalConversationId,
+            nextTaskId,
+            nextOrderId,
+            nextStartedAt,
+            this.now(),
+            existing.id,
+          ],
+        );
+        this.saveDb();
+        const refreshed = this.getEpisode(existing.id);
+        if (!refreshed) throw new Error(`Failed to refresh experience episode: ${existing.id}`);
+        return { episode: refreshed, created: false };
+      }
+      return { episode: rowToEpisode(existing), created: false };
+    }
 
     const now = this.now();
     const id = asText(input.id) || uuidv4();

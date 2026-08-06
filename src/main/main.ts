@@ -118,6 +118,10 @@ import {
   setGroupChatBackfillActiveGroupIdsGetter,
 } from './services/groupChatBackfillService';
 import {
+  backfillMetaIDPrivateA2AExperiences,
+  runMetaIDExperienceBackfill,
+} from './services/metaidExperienceBackfillService';
+import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
   setGroupTaskServiceKvStoreGetter,
@@ -3033,6 +3037,39 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
+
+  // One-time, versioned historical cognition migration. It is deliberately
+  // run before the realtime daemons so the first dream sees old and new facts
+  // through the same owner-scoped ledger. Source tables remain untouched.
+  try {
+    const historicalExperienceStore = new MetaIDExperienceStore(
+      getStore().getDatabase(),
+      () => undefined,
+    );
+    runMetaIDExperienceBackfill({
+      db: getStore().getDatabase(),
+      experienceStore: historicalExperienceStore,
+      saveDb: getStore().getSaveFunction(),
+      migrationState: getStore(),
+      localIdentities: () => getMetabotStore().listMetabots()
+        .filter((metabot) => metabot.enabled !== false && toSafeString(metabot.globalmetaid).trim())
+        .map((metabot) => ({
+          metabotId: metabot.id,
+          globalMetaID: toSafeString(metabot.globalmetaid).trim(),
+        })),
+      serviceOrders: () => [
+        ...getServiceOrderStore().listOrdersByRole('buyer'),
+        ...getServiceOrderStore().listOrdersByRole('seller'),
+      ],
+      groupTaskStore: getGroupTaskStore(),
+      emitLog: (msg) => console.log(msg),
+    });
+  } catch (error) {
+    console.warn(
+      `[MetaIDExperienceBackfill] Startup backfill failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
   startCognitiveOrchestrator(
     getStore().getDatabase(),
     getStore().getSaveFunction(),
@@ -3130,6 +3167,31 @@ const startSqliteDaemons = (): void => {
         globalMetaId: toSafeString(metabot.globalmetaid).trim(),
       })),
     historySync: getPrivateChatHistorySyncService(),
+    onMessagesStored: ({ identity, peerGlobalMetaID }) => {
+      try {
+        const backfillExperienceStore = new MetaIDExperienceStore(
+          getStore().getDatabase(),
+          () => undefined,
+        );
+        const result = backfillMetaIDPrivateA2AExperiences({
+          db: getStore().getDatabase(),
+          experienceStore: backfillExperienceStore,
+          localIdentities: [{
+            metabotId: identity.metabotId,
+            globalMetaID: identity.globalMetaId,
+          }],
+          peerGlobalMetaID,
+        });
+        getStore().getSaveFunction()();
+        if (result.recorded > 0) {
+          console.log(`[MetaIDExperienceBackfill] private_a2a incremental: recorded=${result.recorded}, skipped=${result.skipped}, errors=${result.errors}`);
+        }
+      } catch (error) {
+        console.warn(
+          `[MetaIDExperienceBackfill] private_a2a incremental failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
     shouldRun: () => {
       const config = getListenerConfigFromStore();
       return config.enabled !== false && config.privateChats !== false;

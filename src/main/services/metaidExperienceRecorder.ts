@@ -99,7 +99,10 @@ function hashContent(value: string): string {
 
 function asTimestamp(value: unknown): number | undefined {
   const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : undefined;
+  if (!Number.isFinite(parsed) || parsed < 0) return undefined;
+  // MetaWeb chain timestamps are epoch seconds; local SQLite lifecycle times
+  // are epoch milliseconds. Normalize the former at the cognition boundary.
+  return Math.floor(parsed > 0 && parsed < 1_000_000_000_000 ? parsed * 1000 : parsed);
 }
 
 /**

@@ -4197,7 +4197,10 @@ async function processOne(
         sessionId,
         direction: 'outgoing',
         content: trimmed,
-        messageId: assistantMessage.id,
+        // The chain echo is the durable source row; let its later capture
+        // attach the local private_chat_messages id instead of freezing a
+        // transient Cowork message UUID into the evidence record.
+        messageId: null,
         replyToPinId: row.pin_id,
         sourceMetadata: { replyToPinId: row.pin_id },
       });
