@@ -7,6 +7,7 @@ import {
   parseRefundRequestPayload,
 } from './serviceOrderProtocols.js';
 import { SERVICE_ORDER_SELF_ORDER_NOT_ALLOWED_ERROR_CODE } from './serviceOrderLifecycleService';
+import type { ServiceOrderExperienceEventType } from './serviceOrderLifecycleService';
 
 export interface RefundRequestPinDetail {
   pinId: string;
@@ -42,6 +43,10 @@ interface ServiceRefundSettlementServiceOptions {
     type: 'refunded';
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
+  onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
 }
 
 export interface ProcessSellerRefundResult {
@@ -71,6 +76,10 @@ export class ServiceRefundSettlementService {
     type: 'refunded';
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
+  private onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
 
   constructor(
     store: ServiceOrderStore,
@@ -84,6 +93,19 @@ export class ServiceRefundSettlementService {
     this.resolveLocalMetabotGlobalMetaId =
       options.resolveLocalMetabotGlobalMetaId ?? (() => null);
     this.onOrderEvent = options.onOrderEvent;
+    this.onExperienceEvent = options.onExperienceEvent;
+  }
+
+  private async emitExperienceEvent(
+    type: ServiceOrderExperienceEventType,
+    order: ServiceOrderRecord,
+  ): Promise<void> {
+    if (!this.onExperienceEvent) return;
+    try {
+      await this.onExperienceEvent({ type, order });
+    } catch {
+      // Experience capture is observational and must not alter refund settlement.
+    }
   }
 
   async processSellerRefundForSession(
@@ -172,9 +194,10 @@ export class ServiceRefundSettlementService {
       }))
       .filter(Boolean) as ServiceOrderRecord[];
 
-    if (this.onOrderEvent) {
+    if (this.onOrderEvent || this.onExperienceEvent) {
       for (const updatedOrder of updatedOrders) {
-        await this.onOrderEvent({
+        await this.emitExperienceEvent('refunded', updatedOrder);
+        await this.onOrderEvent?.({
           type: 'refunded',
           order: updatedOrder,
         });
@@ -207,9 +230,10 @@ export class ServiceRefundSettlementService {
       }))
       .filter(Boolean) as ServiceOrderRecord[];
 
-    if (this.onOrderEvent) {
+    if (this.onOrderEvent || this.onExperienceEvent) {
       for (const updatedOrder of updatedOrders) {
-        await this.onOrderEvent({
+        await this.emitExperienceEvent('refunded', updatedOrder);
+        await this.onOrderEvent?.({
           type: 'refunded',
           order: updatedOrder,
         });
@@ -246,9 +270,10 @@ export class ServiceRefundSettlementService {
       })
       .filter(Boolean) as ServiceOrderRecord[];
 
-    if (this.onOrderEvent) {
+    if (this.onOrderEvent || this.onExperienceEvent) {
       for (const updatedOrder of updatedOrders) {
-        await this.onOrderEvent({
+        await this.emitExperienceEvent('refunded', updatedOrder);
+        await this.onOrderEvent?.({
           type: 'refunded',
           order: updatedOrder,
         });

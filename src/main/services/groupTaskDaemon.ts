@@ -14,9 +14,11 @@ import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { CoworkStore, CoworkSession } from '../coworkStore';
 import type { GroupTaskStore, GroupTask, GroupTaskMember } from '../groupTaskStore';
+import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
+import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -59,10 +61,13 @@ const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 export interface GroupTaskDaemonMessage {
   id: number;
   pinId: string | null;
+  txId?: string | null;
   senderMetaId: string;
   senderGlobalMetaId: string | null;
   senderName: string;
   content: string;
+  chainTimestamp?: number | null;
+  replyPin?: string | null;
   /** Raw mention column (JSON array string). */
   mention: string | null;
 }
@@ -356,6 +361,7 @@ export interface GroupTaskDaemonDeps {
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
+  experienceStore?: MetaIDExperienceStore;
   emitLog?: (message: string) => void;
   now?: () => number;
   intervalMs?: number;
@@ -376,11 +382,14 @@ export interface GroupTaskDaemonLoop {
 interface GroupChatMessageRow {
   id: number;
   pin_id: string | null;
+  tx_id: string | null;
   sender_metaid: string | null;
   sender_global_metaid: string | null;
   sender_name: string | null;
   content: string | null;
   mention: string | null;
+  chain_timestamp: number | null;
+  reply_pin: string | null;
 }
 
 function mapMessageRows(result: ReturnType<Database['exec']>): GroupChatMessageRow[] {
@@ -399,11 +408,14 @@ function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
   return {
     id: row.id,
     pinId: row.pin_id ?? null,
+    txId: row.tx_id ?? null,
     senderMetaId: (row.sender_metaid ?? '').trim(),
     senderGlobalMetaId: row.sender_global_metaid ?? null,
     senderName: (row.sender_name ?? '').trim() || 'Unknown',
     content: (row.content ?? '').trim(),
     mention: row.mention ?? null,
+    chainTimestamp: row.chain_timestamp ?? null,
+    replyPin: row.reply_pin ?? null,
   };
 }
 
@@ -419,6 +431,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const contextMessageCount = Math.max(1, Math.trunc(deps.contextMessageCount ?? DEFAULT_CONTEXT_MESSAGE_COUNT));
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
+  const experienceStore = deps.experienceStore ?? new MetaIDExperienceStore(
+    deps.getStore().getDatabase(),
+    deps.getStore().getSaveFunction(),
+  );
 
   // Loop prevention state (in-memory, per loop instance; no new DB columns).
   const lastReplyAtByKey = new Map<string, number>();
@@ -430,7 +446,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
-      `SELECT id, pin_id, sender_metaid, sender_global_metaid, sender_name, content, mention
+      `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+              chain_timestamp, reply_pin
        FROM group_chat_messages
        WHERE group_id = ? AND id > ?
        ORDER BY id ASC`,
@@ -439,13 +456,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
   const queryRecentMessages = (db: Database, groupId: string, limit: number): GroupChatMessageRow[] => {
     const rows = mapMessageRows(db.exec(
-      `SELECT id, pin_id, sender_metaid, sender_global_metaid, sender_name, content, mention
+      `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+              chain_timestamp, reply_pin
        FROM group_chat_messages
        WHERE group_id = ?
        ORDER BY id DESC LIMIT ?`,
       [groupId, limit],
     ));
     return rows.reverse();
+  };
+
+  const recordGroupTaskMessageForLocalMembers = (
+    task: GroupTask,
+    message: GroupTaskDaemonMessage,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): void => {
+    const participants = members.map((member) => {
+      const bot = member.metabotId == null ? null : botsById.get(member.metabotId);
+      const globalMetaID = (member.globalmetaid ?? bot?.globalmetaid ?? '').trim();
+      return globalMetaID
+        ? { globalMetaID, role: member.role }
+        : { unresolvedActorKey: `group-task-member:${member.id}`, role: member.role };
+    });
+    const coworkStore = deps.getCoworkStore();
+    for (const member of members) {
+      if (member.metabotId == null) continue;
+      const bot = botsById.get(member.metabotId);
+      if (!bot?.globalmetaid?.trim()) continue;
+      const mapping = coworkStore.getConversationMapping(
+        CONVERSATION_CHANNEL,
+        `group-task:${task.id}`,
+        bot.id,
+      );
+      try {
+        recordMetaIDGroupTaskExperience({
+          store: experienceStore,
+          ownerGlobalMetaID: bot.globalmetaid,
+          taskId: task.id,
+          groupId: task.groupId,
+          sessionId: mapping?.coworkSessionId ?? null,
+          message: {
+            id: message.id,
+            pinId: message.pinId,
+            txId: message.txId,
+            senderGlobalMetaID: message.senderGlobalMetaId,
+            senderMetaID: message.senderMetaId,
+            content: message.content,
+            occurredAt: message.chainTimestamp,
+            replyPin: message.replyPin,
+          },
+          participants,
+        });
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: experience capture failed for bot ${bot.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   };
 
   const buildGroupLogUserMessage = (
@@ -1055,6 +1124,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     for (const row of rows) {
       const message = toDaemonMessage(row);
       try {
+        recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not

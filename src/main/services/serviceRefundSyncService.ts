@@ -19,6 +19,7 @@ import {
   type VerifyMrc20PaymentResult,
 } from './mrc20PaymentVerification';
 import { shouldHideProviderForUnresolvedRefund } from './serviceOrderState';
+import type { ServiceOrderExperienceEventType } from './serviceOrderLifecycleService';
 
 export interface RefundFinalizePinRecord {
   pinId: string;
@@ -64,6 +65,10 @@ interface ServiceRefundSyncServiceOptions {
     type: 'refund_requested' | 'refunded';
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
+  onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
 }
 
 export class ServiceRefundSyncService {
@@ -92,6 +97,10 @@ export class ServiceRefundSyncService {
     type: 'refund_requested' | 'refunded';
     order: ServiceOrderRecord;
   }) => void | Promise<void>;
+  private onExperienceEvent?: (event: {
+    type: ServiceOrderExperienceEventType;
+    order: ServiceOrderRecord;
+  }) => void | Promise<void>;
 
   constructor(
     store: ServiceOrderStore,
@@ -116,6 +125,19 @@ export class ServiceRefundSyncService {
     this.verifyMrc20Transfer =
       options.verifyMrc20Transfer ?? verifyMrc20Transfer;
     this.onOrderEvent = options.onOrderEvent;
+    this.onExperienceEvent = options.onExperienceEvent;
+  }
+
+  private async emitExperienceEvent(
+    type: ServiceOrderExperienceEventType,
+    order: ServiceOrderRecord,
+  ): Promise<void> {
+    if (!this.onExperienceEvent) return;
+    try {
+      await this.onExperienceEvent({ type, order });
+    } catch {
+      // Experience capture is observational and must not alter refund synchronization.
+    }
   }
 
   async syncRequestPins(): Promise<void> {
@@ -164,9 +186,10 @@ export class ServiceRefundSyncService {
         }
       }
 
-      if (this.onOrderEvent) {
+      if (this.onOrderEvent || this.onExperienceEvent) {
         for (const order of updatedOrders) {
-          await this.onOrderEvent({
+          await this.emitExperienceEvent('refund_requested', order);
+          await this.onOrderEvent?.({
             type: 'refund_requested',
             order,
           });
@@ -221,9 +244,10 @@ export class ServiceRefundSyncService {
         }
       }
 
-      if (this.onOrderEvent) {
+      if (this.onOrderEvent || this.onExperienceEvent) {
         for (const order of updatedOrders) {
-          await this.onOrderEvent({
+          await this.emitExperienceEvent('refunded', order);
+          await this.onOrderEvent?.({
             type: 'refunded',
             order,
           });

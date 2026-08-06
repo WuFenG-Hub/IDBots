@@ -48,6 +48,7 @@ import { ScheduledTaskStore } from './scheduledTaskStore';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
+import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -238,7 +239,9 @@ import {
   ServiceOrderLifecycleService,
   ServiceOrderOpenOrderExistsError,
   ServiceOrderSelfOrderNotAllowedError,
+  type ServiceOrderExperienceEventType,
 } from './services/serviceOrderLifecycleService';
+import { recordMetaIDServiceOrderExperience } from './services/metaidExperienceRecorder';
 import { ServiceRefundSyncService } from './services/serviceRefundSyncService';
 import { ServiceRefundSettlementService } from './services/serviceRefundSettlementService';
 import { fetchProtocolPinsFromIndexer } from './services/protocolPinFetch';
@@ -2465,6 +2468,7 @@ let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
+let metaidExperienceStore: MetaIDExperienceStore | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -2889,6 +2893,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   groupTaskStore = null;
   metabotStore = null;
   serviceOrderStore = null;
+  metaidExperienceStore = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -4917,6 +4922,39 @@ const getServiceOrderStore = () => {
   return serviceOrderStore;
 };
 
+const getMetaIDExperienceStore = (): MetaIDExperienceStore => {
+  if (!metaidExperienceStore) {
+    const sqliteStore = getStore();
+    metaidExperienceStore = new MetaIDExperienceStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metaidExperienceStore;
+};
+
+const captureServiceOrderExperience = (
+  type: ServiceOrderExperienceEventType,
+  order: ServiceOrderRecord,
+): void => {
+  try {
+    const ownerGlobalMetaID = getMetabotStore().getMetabotById(order.localMetabotId)?.globalmetaid;
+    recordMetaIDServiceOrderExperience({
+      store: getMetaIDExperienceStore(),
+      ownerGlobalMetaID,
+      order,
+      event: type,
+      occurredAt: order.updatedAt,
+      sourceMetadata: { localMetabotId: order.localMetabotId },
+    });
+  } catch (error) {
+    console.warn(
+      `[ServiceOrder] Experience capture failed for order=${order.id}:`,
+      error,
+    );
+  }
+};
+
 async function sendServiceOrderSimplemsg(order: ServiceOrderRecord, plaintext: string) {
   const metabotStoreInst = getMetabotStore();
   const metabot = metabotStoreInst.getMetabotById(order.localMetabotId);
@@ -5055,6 +5093,9 @@ const getServiceOrderLifecycleService = () => {
           };
         },
         createOrderEndPin: sendRatingTimeoutOrderEndPin,
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
+        },
         onOrderEvent: async ({ type, order }) => {
           if (type === 'order_ended') {
             return;
@@ -5139,6 +5180,9 @@ const getServiceRefundSyncService = () => {
           return recipientAddress;
         },
         verifyMrc20Transfer,
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
+        },
         onOrderEvent: async ({ type, order }) => {
           if (type === 'refund_requested') {
             await recoverMissingRefundPendingOrderObserverSessions().catch((error) => {
@@ -5229,6 +5273,9 @@ const getServiceRefundSettlementService = () => {
         resolveLocalMetabotGlobalMetaId: (localMetabotId) => {
           const metabot = getMetabotStore().getMetabotById(localMetabotId);
           return metabot?.globalmetaid ?? null;
+        },
+        onExperienceEvent: ({ type, order }) => {
+          captureServiceOrderExperience(type, order);
         },
         onOrderEvent: ({ type, order }) => {
           publishServiceOrderEventToCowork(type, order);
