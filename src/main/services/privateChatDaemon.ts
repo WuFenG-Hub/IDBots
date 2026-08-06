@@ -37,6 +37,8 @@ import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type { CoworkConversationMapping, CoworkMessage, CoworkMessageMetadata, CoworkStore } from '../coworkStore';
 import type { MemoryBackend } from '../memory/memoryBackend';
+import { MetaIDExperienceStore } from '../metaidExperienceStore';
+import { recordMetaIDPrivateA2AExperience } from './metaidExperienceRecorder';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
@@ -2687,7 +2689,8 @@ async function processOne(
   generatePrivateChatSkillWaitNotice?: GeneratePrivateChatSkillWaitNoticeFn,
   consumeA2AGuidance?: ConsumeA2AGuidanceFn,
   getRecentDailySummaries?: (metabotId: number, limit: number) => Array<{ summaryDate: string; summaryText: string }>,
-  refreshA2APeerProfile?: (sessionId: string) => void
+  refreshA2APeerProfile?: (sessionId: string) => void,
+  experienceStore?: MetaIDExperienceStore,
 ): Promise<void> {
   const taskKey = row.pin_id;
   if (thinkingTasks.has(taskKey)) return;
@@ -2740,6 +2743,28 @@ async function processOne(
               chain: { txId: row.tx_id, pinId: row.pin_id },
               emitToRenderer,
             });
+            if (recorded) {
+              try {
+                recordMetaIDPrivateA2AExperience({
+                  store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+                  ownerGlobalMetaID: senderMetabot.globalmetaid,
+                  peerGlobalMetaID: toGlobalMetaId,
+                  externalConversationId: recorded.externalConversationId,
+                  sessionId: recorded.sessionId,
+                  direction: 'outgoing',
+                  content: plaintext,
+                  messageId: recorded.message?.id ?? null,
+                  pinId: row.pin_id,
+                  replyToPinId: row.reply_pin,
+                  occurredAt: Number.isFinite(Number(row.chain_timestamp)) ? Number(row.chain_timestamp) : undefined,
+                  sourceMetadata: { txId: row.tx_id, pinId: row.pin_id },
+                });
+              } catch (error) {
+                emitLog(
+                  `[PrivateChat] Outgoing experience capture failed for ${toGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+                );
+              }
+            }
             if (recorded?.duplicate) {
               emitLog(
                 `[PrivateChat] Outgoing sync: message already tracked in session, skipping duplicate.`
@@ -3721,6 +3746,35 @@ async function processOne(
 
     const externalConversationId = buildPrivateConversationExternalConversationId(row);
 
+    if (shouldSkipPrivateChatAutoReplyText(plaintext)) {
+      emitLog(`[PrivateChat] Skip no-op private chat message from ${fromGlobalMetaId.slice(0, 12)}…`);
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
+
+    // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
+    const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
+    try {
+      recordMetaIDPrivateA2AExperience({
+        store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+        ownerGlobalMetaID: metabot.globalmetaid,
+        peerGlobalMetaID: fromGlobalMetaId,
+        externalConversationId,
+        sessionId: existingMapping?.coworkSessionId ?? null,
+        direction: 'incoming',
+        content: plaintext,
+        messageId: String(row.id),
+        pinId: row.pin_id,
+        replyToPinId: row.reply_pin,
+        occurredAt: Number.isFinite(Number(row.chain_timestamp)) ? Number(row.chain_timestamp) : undefined,
+        sourceMetadata: { txId: row.tx_id, pinId: row.pin_id },
+      });
+    } catch (error) {
+      emitLog(
+        `[PrivateChat] Incoming experience capture failed for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
     if (hasNewerPrivateChatMessage(db, {
       currentRowId: row.id,
       fromGlobalMetaId: row.from_global_metaid,
@@ -3733,14 +3787,6 @@ async function processOne(
       return;
     }
 
-    if (shouldSkipPrivateChatAutoReplyText(plaintext)) {
-      emitLog(`[PrivateChat] Skip no-op private chat message from ${fromGlobalMetaId.slice(0, 12)}…`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    // Human-ended conversations stay closed. Auto-bye conversations can restart after the cooldown.
-    const existingMapping = coworkStore.getConversationMapping('metaweb_private', externalConversationId, metabot.id);
     const mappingMeta = parseConversationMappingMetadata(existingMapping?.metadataJson);
     if (mappingMeta.byeSent === true) {
       if (shouldKeepPrivateChatConversationClosedAfterBye({ mappingMeta, reopenGapMs: metabot.a2a_bye_cooldown_ms ?? undefined })) {
@@ -4142,6 +4188,25 @@ async function processOne(
       });
     }
 
+    try {
+      recordMetaIDPrivateA2AExperience({
+        store: experienceStore ?? new MetaIDExperienceStore(db, saveDb),
+        ownerGlobalMetaID: metabot.globalmetaid,
+        peerGlobalMetaID: fromGlobalMetaId,
+        externalConversationId,
+        sessionId,
+        direction: 'outgoing',
+        content: trimmed,
+        messageId: assistantMessage.id,
+        replyToPinId: row.pin_id,
+        sourceMetadata: { replyToPinId: row.pin_id },
+      });
+    } catch (error) {
+      emitLog(
+        `[PrivateChat] Assistant experience capture failed for ${fromGlobalMetaId.slice(0, 12)}…: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
     if (memoryPolicy.memoryEnabled) {
       try {
         const result = await memoryBackend.applyTurnMemoryUpdates({
@@ -4286,6 +4351,7 @@ export function startPrivateChatDaemon(
     verifyDeliveryArtifactUpload,
     consumeA2AGuidance,
   });
+  const experienceStore = new MetaIDExperienceStore(db, saveDb);
   const performChat = performChatCompletionForOrchestrator;
   const runPollTick = async (): Promise<void> => {
     if (daemonGeneration !== privateChatDaemonGeneration) return;
@@ -4332,6 +4398,7 @@ export function startPrivateChatDaemon(
               consumeA2AGuidance,
               getRecentDailySummaries,
               refreshA2APeerProfile,
+              experienceStore,
             );
           } catch (e) {
             console.error('[PrivateChat] processOne error:', e);
