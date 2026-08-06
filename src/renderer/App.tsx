@@ -151,7 +151,12 @@ const App: React.FC = () => {
     if (!isInitialized) return;
     const config = configService.getConfig();
     if (!config.app.isDevelopment) return;
-    if (!window.location.search.includes('mockUpdate=1')) return;
+    // The dev start script hardcodes ELECTRON_START_URL, so a ?mockUpdate=1
+    // query appended by the launcher is dropped. Also accept a localStorage
+    // flag so the mock is reachable regardless of how the URL is built.
+    const hasMockFlag = window.location.search.includes('mockUpdate=1')
+      || (typeof localStorage !== 'undefined' && localStorage.getItem('idbots_mock_update') === '1');
+    if (!hasMockFlag) return;
 
     mockUpdateModeRef.current = true;
 
