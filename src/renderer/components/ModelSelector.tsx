@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useLayoutEffect } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../store';
 import { ChevronDownIcon, CheckIcon, CpuChipIcon } from '@heroicons/react/24/outline';
@@ -21,7 +21,14 @@ interface ModelSelectorProps {
 const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down', restrictToLlmId, compact = false }) => {
   const dispatch = useDispatch();
   const [isOpen, setIsOpen] = React.useState(false);
+  // When the trigger is a compact icon button in a narrow surface (e.g. the Bot
+  // Browser sidebar), the fixed-width dropdown is positioned with `fixed` so its
+  // right edge hugs the nearest clipping ancestor's right edge and it never gets
+  // clipped by an `overflow-hidden` sidebar. `null` keeps the default absolute
+  // positioning used by the full-size (non-compact) variant.
+  const [menuPos, setMenuPos] = React.useState<React.CSSProperties | null>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const triggerRef = React.useRef<HTMLButtonElement>(null);
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
   const availableModels = useSelector((state: RootState) => state.model.availableModels);
 
@@ -58,6 +65,58 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
     };
   }, [isOpen]);
 
+  // For the compact trigger, position the dropdown with `fixed` so its right
+  // edge aligns with the nearest clipping ancestor's right edge and it opens
+  // above the trigger regardless of sidebar width. Without this the fixed-width
+  // menu would overflow (and be clipped by) the sidebar's `overflow-hidden`.
+  const updateMenuPos = React.useCallback(() => {
+    if (!compact) {
+      setMenuPos(null);
+      return;
+    }
+    const triggerEl = triggerRef.current;
+    if (!triggerEl) return;
+    // Walk up to the nearest ancestor that clips (overflow hidden/auto/scroll)
+    // — this is the box whose right edge the menu must not cross.
+    let clipEl: HTMLElement | null = triggerEl.parentElement;
+    while (clipEl) {
+      const style = getComputedStyle(clipEl);
+      if (/hidden|auto|scroll/.test(style.overflowX) || /hidden|auto|scroll/.test(style.overflowY)) {
+        break;
+      }
+      clipEl = clipEl.parentElement;
+    }
+    const clipRight = clipEl ? clipEl.getBoundingClientRect().right : window.innerWidth;
+    const MENU_WIDTH = 208; // w-52
+    const margin = 4;
+    const rightSpace = clipRight - triggerEl.getBoundingClientRect().left;
+    // If the natural left-aligned menu fits, keep it left-aligned to the trigger.
+    // Otherwise pin the menu's right edge to the clip box's right edge.
+    if (rightSpace >= MENU_WIDTH) {
+      setMenuPos(null);
+    } else {
+      setMenuPos({
+        position: 'fixed',
+        // open upward, just above the trigger
+        bottom: window.innerHeight - triggerEl.getBoundingClientRect().top + margin,
+        right: Math.max(0, window.innerWidth - clipRight + margin),
+        left: 'auto',
+      });
+    }
+  }, [compact]);
+
+  useLayoutEffect(() => {
+    if (!isOpen || !compact) return;
+    updateMenuPos();
+    const onScrollOrResize = () => updateMenuPos();
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+    return () => {
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    };
+  }, [isOpen, compact, updateMenuPos]);
+
   const handleModelSelect = (model: Model) => {
     dispatch(setSelectedModel(model));
     setIsOpen(false);
@@ -90,6 +149,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
   return (
     <div ref={containerRef} className="relative cursor-pointer">
       <button
+        ref={triggerRef}
         onClick={() => setIsOpen(!isOpen)}
         className={compact
           ? `shrink-0 inline-flex items-center p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors cursor-pointer ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-darkSurfaceHover dark:text-claude-darkText text-claude-text' : ''}`
@@ -107,7 +167,10 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
       </button>
 
       {isOpen && (
-        <div className={`absolute ${dropdownPositionClass} w-52 dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}>
+        <div
+          style={menuPos ?? undefined}
+          className={`${menuPos ? '' : 'absolute '}${dropdownPositionClass} w-52 dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
+        >
           <div className="max-h-64 overflow-y-auto">
           {displayModels.map((model) => (
             <button
