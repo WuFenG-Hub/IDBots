@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import { fetchContentWithFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './localIndexerProxy';
 import { getP2PLocalBase } from './p2pLocalEndpoint';
+import { parseProtocolPinContent } from './protocolPinContent';
 
 // Dynamically require AdmZip to avoid crash if not installed
 let AdmZip: typeof import('adm-zip') | null = null;
@@ -163,17 +164,10 @@ function parseOfficialSkillDefinition(
   addressPriority: Map<string, number>,
 ): ParsedOfficialSkillDefinition | null {
   const pinObj = pin as Record<string, unknown>;
-  const contentSummary = pinObj.contentSummary ?? pinObj.content ?? pinObj.body ?? '';
-  let parsed: Record<string, unknown> = {};
-  try {
-    if (typeof contentSummary === 'string') {
-      parsed = JSON.parse(contentSummary) as Record<string, unknown>;
-    } else if (contentSummary && typeof contentSummary === 'object') {
-      parsed = contentSummary as Record<string, unknown>;
-    }
-  } catch {
-    return null;
-  }
+  // Use the shared selector so a MAN content-download URL in `content` can never
+  // shadow the real JSON body in `contentSummary` (which would silently drop the
+  // skill during sync).
+  const parsed = parseProtocolPinContent(pinObj) ?? {};
 
   const name = String(parsed.name ?? parsed.skillName ?? parsed.id ?? '').trim();
   const skillFileUri = String(
