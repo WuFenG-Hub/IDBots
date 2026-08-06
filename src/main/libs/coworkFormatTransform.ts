@@ -28,6 +28,8 @@ export type OpenAIStreamChunk = {
     // DeepSeek reports cache hits/misses at the top level of usage.
     prompt_cache_hit_tokens?: number;
     prompt_cache_miss_tokens?: number;
+    // DeepSeek Responses API surfaces reasoning chain length separately.
+    reasoning_tokens?: number;
   };
 };
 

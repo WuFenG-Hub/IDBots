@@ -337,6 +337,8 @@ function buildApiConfigFromMatched(
         baseURL: resolvedBaseURL,
         model: matched.modelId,
         apiType: 'anthropic',
+        provider: matched.providerName,
+        upstreamBaseURL: resolvedBaseURL,
       },
     };
   }
@@ -364,6 +366,8 @@ function buildApiConfigFromMatched(
       baseURL: proxyBaseURL,
       model: matched.modelId,
       apiType: 'anthropic', // proxy speaks Anthropic /v1/messages format
+      provider: matched.providerName,
+      upstreamBaseURL: resolvedBaseURL,
     },
   };
 }

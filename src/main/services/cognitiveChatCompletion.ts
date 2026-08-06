@@ -40,6 +40,10 @@ export interface ChatCompletionResponseMetadata {
   contentBlockTypes?: string[];
   inputTokens?: number | null;
   outputTokens?: number | null;
+  /** Cache-read tokens (hit) reported by the provider, if available. */
+  cacheReadTokens?: number;
+  /** Cache-creation tokens (miss) reported by the provider, if available. */
+  cacheCreationTokens?: number;
 }
 
 /** Message for chat completion (OpenAI-style). */
@@ -70,6 +74,38 @@ function resolveThinkingForModel(
   const isDeepSeekThinkingModel = normalized.includes('deepseek')
     || /(?:^|[-_/])(?:v4-(?:pro|flash)|reasoner|r1)(?:$|[-_/])/.test(normalized);
   return isDeepSeekThinkingModel ? thinking : undefined;
+}
+
+/**
+ * Whether the cognitive layer should call the DeepSeek Responses API for this
+ * model. The Responses API currently serves flash models only; pro and other
+ * variants fall back to chat/completions. See
+ * https://api-docs.deepseek.com/zh-cn/guides/responses_api
+ */
+function shouldUseDeepSeekResponses(provider: string | undefined, model: string): boolean {
+  if (provider?.toLowerCase() !== 'deepseek') {
+    return false;
+  }
+  return model.toLowerCase().includes('flash');
+}
+
+/** Build the DeepSeek Responses endpoint URL (host root, no /v1 prefix). */
+function buildDeepSeekResponsesURL(baseURL: string): string {
+  const normalized = baseURL.trim().replace(/\/+$/, '');
+  // Strip a trailing /anthropic or /v1 segment — the Responses endpoint lives
+  // at the host root regardless of which compatibility path the user configured.
+  const stripped = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
+  return `${stripped}/responses`;
+}
+
+/** Map an effort string to the DeepSeek Responses reasoning.effort value. */
+function normalizeDeepSeekResponsesEffort(effort: string | undefined): 'low' | 'high' | 'max' {
+  const normalized = (effort ?? '').trim().toLowerCase();
+  if (normalized === 'max' || normalized === 'low') {
+    return normalized;
+  }
+  // 'high' is the safe default; 'medium' maps to 'high'.
+  return 'high';
 }
 
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
@@ -132,36 +168,56 @@ async function chatCompletionSingleAttempt(
   const apiType = config.apiType ?? 'openai';
   const thinking = resolveThinkingForModel(model, options.thinking);
   const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
+  // DeepSeek flash models support the Responses API (with built-in web_search).
+  // Route them there when we have the real upstream base URL; fall back to the
+  // chat/completions or Anthropic path otherwise. Pro and non-flash stay on
+  // chat/completions until DeepSeek enables Responses for them.
+  const useDeepSeekResponses = shouldUseDeepSeekResponses(config.provider, model);
   if (process.env.NODE_ENV === 'development' || hasTools) {
     console.log(
-      `[Orchestrator] LLM call: apiType=${apiType} baseURL=${maskBaseURL(baseURL)} model=${model} tools=${hasTools ? options.tools!.length : 0}`
+      `[Orchestrator] LLM call: apiType=${apiType} baseURL=${maskBaseURL(baseURL)} model=${model} tools=${hasTools ? options.tools!.length : 0} responses=${useDeepSeekResponses}`
     );
   }
 
   try {
-    const result = apiType === 'anthropic'
-      ? await callAnthropicStyleWithTools(
-          baseURL,
-          model,
-          config.apiKey ?? '',
-          messages,
-          options.tools,
-          options.signal,
-          options.maxTokens,
-          options.temperature,
-          thinking
-        )
-      : await callOpenAIStyleWithTools(
-          baseURL,
-          model,
-          config.apiKey ?? '',
-          messages,
-          options.tools,
-          options.signal,
-          options.maxTokens,
-          options.temperature,
-          thinking
-        );
+    let result: ChatCompletionResult;
+    if (useDeepSeekResponses && config.upstreamBaseURL) {
+      result = await callDeepSeekResponsesStyle(
+        config.upstreamBaseURL,
+        model,
+        config.apiKey ?? '',
+        messages,
+        options.tools,
+        options.signal,
+        options.maxTokens,
+        options.temperature,
+        thinking
+      );
+    } else if (apiType === 'anthropic') {
+      result = await callAnthropicStyleWithTools(
+        baseURL,
+        model,
+        config.apiKey ?? '',
+        messages,
+        options.tools,
+        options.signal,
+        options.maxTokens,
+        options.temperature,
+        thinking
+      );
+    } else {
+      result = await callOpenAIStyleWithTools(
+        baseURL,
+        model,
+        config.apiKey ?? '',
+        messages,
+        options.tools,
+        options.signal,
+        options.maxTokens,
+        options.temperature,
+        thinking
+      );
+    }
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
       const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
       // 让上层（botBrowserBridgeService.completeLlm）能把「空回复」从 llm_unavailable 里区分出来。
@@ -371,6 +427,9 @@ async function callAnthropicStyleWithTools(
 export const __cognitiveChatCompletionTestUtils = {
   resolveThinkingForModel,
   extractAnthropicThinkingText,
+  shouldUseDeepSeekResponses,
+  buildDeepSeekResponsesURL,
+  normalizeDeepSeekResponsesEffort,
 };
 
 /**
@@ -464,6 +523,205 @@ async function callOpenAIStyleWithTools(
       arguments: typeof tc.function?.arguments === 'string' ? tc.function.arguments : JSON.stringify(tc.function?.arguments ?? {}),
     }));
   }
+  return out;
+}
+
+/**
+ * DeepSeek Responses API (/responses) call with optional tools.
+ *
+ * Unlike chat/completions, the Responses API takes `instructions` (system) and
+ * `input` (conversation), and supports a server-side `web_search` tool. It is
+ * stateless on DeepSeek, so the full history is sent every turn — which also
+ * maximizes DeepSeek's automatic context-cache hit rate.
+ *
+ * Response cache tokens come nested under input_tokens_details.cached_tokens
+ * (distinct from chat/completions' top-level prompt_cache_hit_tokens).
+ */
+async function callDeepSeekResponsesStyle(
+  baseURL: string,
+  model: string,
+  apiKey: string,
+  messages: ChatMessage[],
+  tools?: OpenAITool[],
+  signal?: AbortSignal,
+  maxTokens?: number,
+  temperature?: number,
+  thinking?: 'enabled' | 'disabled'
+): Promise<ChatCompletionResult> {
+  const url = buildDeepSeekResponsesURL(baseURL);
+  const instructions: string[] = [];
+  const input: Array<Record<string, unknown>> = [];
+
+  for (const m of messages) {
+    if (m.role === 'system' && m.content) {
+      instructions.push(m.content);
+      continue;
+    }
+    if (m.role === 'user' || m.role === 'assistant') {
+      const parts: Array<Record<string, unknown>> = [];
+      if (m.content) {
+        parts.push({ type: m.role === 'user' ? 'input_text' : 'output_text', text: m.content });
+      }
+      if (m.tool_calls?.length) {
+        for (const tc of m.tool_calls) {
+          input.push({
+            type: 'function_call',
+            call_id: tc.id,
+            name: tc.function.name,
+            arguments: tc.function.arguments || '{}',
+          });
+        }
+      }
+      if (parts.length > 0) {
+        input.push({ role: m.role, content: parts });
+      }
+      continue;
+    }
+    if (m.role === 'tool' && m.tool_call_id) {
+      input.push({
+        type: 'function_call_output',
+        call_id: m.tool_call_id,
+        output: m.content ?? '',
+      });
+    }
+  }
+
+  // Tools: web_search first (server-side, stable across turns for cache), then
+  // any caller-supplied function tools.
+  const responseTools: Array<Record<string, unknown>> = [{ type: 'web_search' }];
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      responseTools.push({ type: 'function', name: t.function.name, parameters: t.function.parameters ?? {} });
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    model,
+    input,
+    tools: responseTools,
+    tool_choice: 'auto',
+  };
+  if (instructions.length > 0) {
+    body.instructions = instructions.join('\n\n');
+  }
+  if (maxTokens !== undefined) {
+    body.max_output_tokens = maxTokens;
+  } else {
+    body.max_output_tokens = 4096;
+  }
+  if (temperature !== undefined) {
+    body.temperature = temperature;
+  }
+  // Reasoning effort: 'disabled' → omit reasoning (no thinking); otherwise map
+  // to the Responses reasoning object. Default effort is 'max' to match the
+  // project's DeepSeek-first thinking-on policy.
+  if (thinking !== 'disabled') {
+    body.reasoning = { effort: 'max' };
+  }
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (apiKey.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`;
+  }
+
+  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  const text = await response.text();
+  if (!response.ok) {
+    console.error('[Orchestrator] DeepSeek Responses error:', response.status, text.slice(0, 500));
+    throw new Error(`LLM request failed: ${response.status} ${text.slice(0, 300)}`);
+  }
+
+  type ResponsesOutputItem = {
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+    summary?: Array<{ text?: string }>;
+    call_id?: string;
+    id?: string;
+    name?: string;
+    arguments?: string;
+  };
+  let data: {
+    id?: string;
+    model?: string;
+    status?: string;
+    output?: ResponsesOutputItem[];
+    usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
+      input_tokens_details?: { cached_tokens?: number };
+      output_tokens_details?: { reasoning_tokens?: number };
+    };
+  };
+  try {
+    data = JSON.parse(text) as typeof data;
+  } catch {
+    console.error('[Orchestrator] DeepSeek Responses invalid JSON:', text.slice(0, 300));
+    throw new Error('LLM response was not valid JSON');
+  }
+
+  const outputItems = data.output ?? [];
+  const out: ChatCompletionResult = {
+    responseMetadata: {
+      apiType: 'openai',
+      stopReason: data.status === 'incomplete' ? 'length' : 'stop',
+      contentBlockTypes: [],
+    },
+  };
+  const toolCalls: ToolCallResult[] = [];
+  let hasWebSearch = false;
+
+  for (const item of outputItems) {
+    const itemType = item.type;
+    if (itemType === 'message') {
+      for (const part of item.content ?? []) {
+        if ((part.type === 'output_text' || part.type === 'text') && part.text) {
+          out.content = (out.content ?? '') + part.text;
+          out.responseMetadata.contentBlockTypes!.push('text');
+        }
+      }
+    } else if (itemType === 'reasoning') {
+      const reasoningText = (item.summary ?? []).map((s) => s.text ?? '').join('');
+      if (reasoningText && !out.content) {
+        // Fallback: if only reasoning is present, surface it (matches chat/completions behavior).
+        out.content = reasoningText.trim();
+        out.responseMetadata.contentBlockTypes!.push('reasoning');
+      }
+    } else if (itemType === 'web_search_call') {
+      hasWebSearch = true;
+    } else if (itemType === 'function_call' && (item.call_id || item.id) && item.name) {
+      toolCalls.push({
+        id: item.call_id || item.id || '',
+        name: item.name,
+        arguments: item.arguments || '{}',
+      });
+    }
+  }
+
+  if (hasWebSearch) {
+    out.responseMetadata.contentBlockTypes!.push('web_search');
+  }
+  if (out.content) {
+    out.content = out.content.trim();
+  }
+  if (toolCalls.length) {
+    out.tool_calls = toolCalls;
+    out.responseMetadata.contentBlockTypes!.push('tool_calls');
+  }
+
+  // Cache + token accounting from the nested Responses usage shape.
+  const promptTokens = data.usage?.input_tokens ?? null;
+  const completionTokens = data.usage?.output_tokens ?? null;
+  out.responseMetadata.inputTokens = promptTokens;
+  out.responseMetadata.outputTokens = completionTokens;
+  if (promptTokens != null) {
+    const cached = data.usage?.input_tokens_details?.cached_tokens ?? 0;
+    // Stash cache fields on metadata for the usage accumulator; cognitive-layer
+    // results don't have a dedicated cache field yet, so we encode it here for
+    // future wiring into the usage stats pipeline.
+    out.responseMetadata.cacheReadTokens = cached;
+    out.responseMetadata.cacheCreationTokens = Math.max(promptTokens - cached, 0);
+  }
+
   return out;
 }
 
