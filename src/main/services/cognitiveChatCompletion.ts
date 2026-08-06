@@ -61,6 +61,22 @@ function maskBaseURL(url: string): string {
   }
 }
 
+function resolveThinkingForModel(
+  model: string,
+  thinking: 'enabled' | 'disabled' | undefined,
+): 'enabled' | 'disabled' | undefined {
+  if (!thinking) return undefined;
+  const normalized = model.trim().toLowerCase();
+  const isDeepSeekThinkingModel = normalized.includes('deepseek')
+    || /(?:^|[-_/])(?:v4-(?:pro|flash)|reasoner|r1)(?:$|[-_/])/.test(normalized);
+  return isDeepSeekThinkingModel ? thinking : undefined;
+}
+
+function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
+  if (block.type !== 'thinking' && block.type !== 'redacted_thinking') return '';
+  return block.thinking || block.text || '';
+}
+
 /** Options for one chat completion request (with optional fallback LLM retry). */
 export interface ChatCompletionOptions {
   llmId?: string | null;
@@ -114,6 +130,7 @@ async function chatCompletionSingleAttempt(
 
   const model = config.model || 'gpt-4o';
   const apiType = config.apiType ?? 'openai';
+  const thinking = resolveThinkingForModel(model, options.thinking);
   const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
   if (process.env.NODE_ENV === 'development' || hasTools) {
     console.log(
@@ -132,7 +149,7 @@ async function chatCompletionSingleAttempt(
           options.signal,
           options.maxTokens,
           options.temperature,
-          options.thinking
+          thinking
         )
       : await callOpenAIStyleWithTools(
           baseURL,
@@ -143,7 +160,7 @@ async function chatCompletionSingleAttempt(
           options.signal,
           options.maxTokens,
           options.temperature,
-          options.thinking
+          thinking
         );
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
       const emptyError = new Error(formatEmptyCompletionError(result.responseMetadata));
@@ -167,7 +184,13 @@ export async function performChatCompletionForOrchestrator(
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options: { signal?: AbortSignal; maxTokens?: number; fallbackLlmId?: string | null; throwOnEmptyContent?: boolean } = {}
+  options: {
+    signal?: AbortSignal;
+    maxTokens?: number;
+    fallbackLlmId?: string | null;
+    throwOnEmptyContent?: boolean;
+    thinking?: 'enabled' | 'disabled';
+  } = {}
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: 'system', content: systemPrompt },
@@ -179,6 +202,7 @@ export async function performChatCompletionForOrchestrator(
     signal: options.signal,
     maxTokens: options.maxTokens,
     throwOnEmptyContent: options.throwOnEmptyContent,
+    thinking: options.thinking,
   });
   const content = result.content?.trim() ?? '';
   if (result.tool_calls?.length) {
@@ -292,7 +316,7 @@ async function callAnthropicStyleWithTools(
   }
 
   let data: {
-    content?: Array<{ type?: string; text?: string; id?: string; name?: string; input?: string }>;
+    content?: Array<{ type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: string }>;
     stop_reason?: string | null;
     usage?: { input_tokens?: number; output_tokens?: number };
   };
@@ -318,9 +342,9 @@ async function callAnthropicStyleWithTools(
   for (const block of contentBlocks) {
     if (block.type === 'text' && block.text) {
       out.content = (out.content ?? '') + block.text;
-    } else if ((block.type === 'thinking' || block.type === 'redacted_thinking') && block.text) {
+    } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
       // DeepSeek thinking 等模型把推理放 thinking 块、text 可能为空；先收着做回退。
-      thinkingText += block.text;
+      thinkingText += extractAnthropicThinkingText(block);
     }
     if (block.type === 'tool_use' && block.id && block.name) {
       const args =
@@ -343,6 +367,11 @@ async function callAnthropicStyleWithTools(
   if (toolCalls.length) out.tool_calls = toolCalls;
   return out;
 }
+
+export const __cognitiveChatCompletionTestUtils = {
+  resolveThinkingForModel,
+  extractAnthropicThinkingText,
+};
 
 /**
  * OpenAI-style API with tools. Returns content and/or tool_calls from response.

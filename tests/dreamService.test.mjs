@@ -94,7 +94,12 @@ const setup = async (performChat) => {
 test('runNow completes the full dream pipeline and writes all artifacts', async () => {
   const calls = [];
   const { cleanup, coworkStore, dreamStore, service, events } = await setup(async (system, user, llmId, options) => {
-    calls.push({ llmId, maxTokens: options?.maxTokens, throwOnEmptyContent: options?.throwOnEmptyContent });
+    calls.push({
+      llmId,
+      maxTokens: options?.maxTokens,
+      throwOnEmptyContent: options?.throwOnEmptyContent,
+      thinking: options?.thinking,
+    });
     return makePayload();
   });
   try {
@@ -106,6 +111,7 @@ test('runNow completes the full dream pipeline and writes all artifacts', async 
     assert.equal(calls.length, 1);
     assert.equal(calls[0].maxTokens, 8192);
     assert.equal(calls[0].throwOnEmptyContent, true);
+    assert.equal(calls[0].thinking, 'disabled');
 
     const summary = dreamStore.getDailySummary(5, DAY);
     assert.equal(summary.summaryText, '今天为用户交付了演示视频,获得高度赞扬。');

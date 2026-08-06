@@ -67,6 +67,21 @@ test('computeDueDreamDates: yesterday waits outside the window, older dates catc
   assert.deepEqual([...dueDates].sort(), dueDates);
 });
 
+test('computeDueDreamDates: a failed yesterday retries outside the window after backoff', () => {
+  const midday = new Date(2026, 7, 8, 12, 0);
+  const runStates = new Map([
+    ['2026-08-07', {
+      status: 'failed',
+      attemptCount: 2,
+      startedAt: new Date(2026, 7, 8, 3, 0).getTime(),
+      dreamVersion: 3,
+    }],
+  ]);
+
+  const { dueDates } = computeDueDreamDates({ now: midday, metabotId: 1, runStates });
+  assert.ok(dueDates.includes('2026-08-07'), 'failed yesterday should self-heal after backoff without waiting for another night');
+});
+
 test('computeDueDreamDates: completed/running dates are skipped and failed dates respect backoff', () => {
   const now = new Date(2026, 7, 2, 3, 0);
   const runStates = new Map([

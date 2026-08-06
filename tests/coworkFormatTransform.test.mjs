@@ -1,8 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+async function importCompiled(modulePath) {
+  try {
+    return await import(`../dist-electron/main/libs/${modulePath}.js`);
+  } catch {
+    return import(`../dist-electron/libs/${modulePath}.js`);
+  }
+}
+
+test('anthropicToOpenAI preserves reasoning controls for the upstream provider', async () => {
+  const { anthropicToOpenAI } = await importCompiled('coworkFormatTransform');
+
+  const converted = anthropicToOpenAI({
+    model: 'deepseek-v4-flash',
+    messages: [{ role: 'user', content: 'Return JSON' }],
+    thinking: { type: 'disabled' },
+    reasoning_effort: 'low',
+    output_config: { effort: 'low' },
+  });
+
+  assert.deepEqual(converted.thinking, { type: 'disabled' });
+  assert.equal(converted.reasoning_effort, 'low');
+  assert.deepEqual(converted.output_config, { effort: 'low' });
+});
+
 test('anthropicToOpenAI gives empty SDK web tool schemas valid OpenAI function parameters', async () => {
-  const { anthropicToOpenAI } = await import('../dist-electron/libs/coworkFormatTransform.js');
+  const { anthropicToOpenAI } = await importCompiled('coworkFormatTransform');
 
   const converted = anthropicToOpenAI({
     model: 'test-model',
@@ -57,7 +81,7 @@ test('anthropicToOpenAI gives empty SDK web tool schemas valid OpenAI function p
 });
 
 test('anthropicToOpenAI preserves valid explicit function tool schemas', async () => {
-  const { anthropicToOpenAI } = await import('../dist-electron/libs/coworkFormatTransform.js');
+  const { anthropicToOpenAI } = await importCompiled('coworkFormatTransform');
 
   const converted = anthropicToOpenAI({
     model: 'test-model',
@@ -115,7 +139,7 @@ function createWritableRecorder() {
 }
 
 test('DeepSeek stream tool calls carry reasoning_content for future request hydration', async () => {
-  const { __openAICompatProxyTestUtils } = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     createStreamState,
     processOpenAIChunk,
@@ -177,7 +201,7 @@ test('DeepSeek stream tool calls carry reasoning_content for future request hydr
 });
 
 test('DeepSeek stream caches reasoning_content when MCP tool call arrives before reasoning delta', async () => {
-  const { __openAICompatProxyTestUtils } = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     createStreamState,
     processOpenAIChunk,
@@ -239,7 +263,7 @@ test('DeepSeek stream caches reasoning_content when MCP tool call arrives before
 });
 
 test('DeepSeek request hydration prefers complete cached reasoning over partial inline tool metadata', async () => {
-  const { __openAICompatProxyTestUtils } = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     createStreamState,
     processOpenAIChunk,
@@ -315,7 +339,7 @@ test('DeepSeek request hydration prefers complete cached reasoning over partial 
 });
 
 test('non-DeepSeek stream tool calls do not receive DeepSeek reasoning metadata', async () => {
-  const { __openAICompatProxyTestUtils } = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     createStreamState,
     processOpenAIChunk,
@@ -355,7 +379,7 @@ test('non-DeepSeek stream tool calls do not receive DeepSeek reasoning metadata'
 });
 
 test('DeepSeek request validation rejects assistant tool calls when reasoning_content cannot be restored', async () => {
-  const { __openAICompatProxyTestUtils } = await import('../dist-electron/libs/coworkOpenAICompatProxy.js');
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const {
     hydrateDeepSeekReasoningForRequest,
     resetDeepSeekReasoningCache,
