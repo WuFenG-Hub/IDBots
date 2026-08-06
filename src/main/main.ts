@@ -46,6 +46,7 @@ import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { Scheduler } from './libs/scheduler';
@@ -4285,6 +4286,7 @@ const getCoworkRunner = () => {
         listMetabots: () => getMetabotStore().listMetabots(),
         getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
         listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
+        getActiveWorkload: (metabotId) => getOrchestrationStore().getActiveWorkload(metabotId),
       }),
       openMetaApp: async (input) => {
         return openMetaApp({
@@ -4785,6 +4787,19 @@ const getGroupTaskStore = () => {
     groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return groupTaskStore;
+};
+
+let orchestrationStore: OrchestrationStore | null = null;
+const getOrchestrationStore = () => {
+  if (!orchestrationStore) {
+    const sqliteStore = getStore();
+    orchestrationStore = new OrchestrationStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+    const recovered = orchestrationStore.recoverAfterRestart();
+    if (recovered.attempts > 0) {
+      console.warn(`[Orchestration] Recovered ${recovered.attempts} in-flight attempt(s) after restart`);
+    }
+  }
+  return orchestrationStore;
 };
 
 const getMetabotStore = () => {
