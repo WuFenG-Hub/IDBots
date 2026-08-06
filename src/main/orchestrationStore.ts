@@ -87,7 +87,7 @@ export interface CreateOrchestrationAttemptInput {
 interface Row { [key: string]: unknown }
 
 const TASK_TRANSITIONS: Record<OrchestrationTaskStatus, OrchestrationTaskStatus[]> = {
-  planning: ['running', 'failed', 'cancelled'],
+  planning: ['running', 'completed', 'failed', 'cancelled'],
   running: ['review', 'completed', 'failed', 'cancelled'],
   review: ['running', 'completed', 'failed', 'cancelled'],
   completed: [],
@@ -100,7 +100,7 @@ const STEP_TRANSITIONS: Record<OrchestrationStepStatus, OrchestrationStepStatus[
   ready: ['queued', 'cancelled'],
   queued: ['running', 'ready', 'failed', 'cancelled'],
   running: ['waiting_input', 'completed', 'failed', 'ready', 'cancelled'],
-  waiting_input: ['running', 'failed', 'cancelled'],
+  waiting_input: ['running', 'completed', 'failed', 'cancelled'],
   completed: ['ready'],
   failed: ['ready', 'cancelled'],
   cancelled: [],
@@ -288,6 +288,14 @@ export class OrchestrationStore {
     return rows.map(taskFromRow);
   }
 
+  getTaskBySourceSessionId(sourceSessionId: string): OrchestrationTask | null {
+    const row = this.getOne<Row>(
+      'SELECT * FROM orchestration_tasks WHERE source_session_id = ? ORDER BY created_at ASC LIMIT 1',
+      [sourceSessionId],
+    );
+    return row ? taskFromRow(row) : null;
+  }
+
   updateTaskStatus(id: string, status: OrchestrationTaskStatus): OrchestrationTask {
     const current = this.getTask(id);
     if (!current) throw new Error(`Orchestration task ${id} not found`);
@@ -387,13 +395,14 @@ export class OrchestrationStore {
   updateAttempt(id: string, status: OrchestrationAttemptStatus, patch: { workerSessionId?: string | null; result?: unknown; error?: string | null } = {}): OrchestrationAttempt {
     const current = this.getAttempt(id);
     if (!current) throw new Error(`Orchestration attempt ${id} not found`);
-    if (current.status === status) return current;
-    if (!ATTEMPT_TRANSITIONS[current.status].includes(status)) {
+    if (current.status !== status && !ATTEMPT_TRANSITIONS[current.status].includes(status)) {
       throw new Error(`Illegal orchestration attempt status transition: ${current.status} -> ${status}`);
     }
     const now = new Date().toISOString();
     const startedAt = status === 'running' && !current.startedAt ? now : current.startedAt;
-    const finishedAt = ['completed', 'failed', 'timed_out', 'cancelled'].includes(status) ? now : current.finishedAt;
+    const finishedAt = ['completed', 'failed', 'timed_out', 'cancelled'].includes(status) && !current.finishedAt
+      ? now
+      : current.finishedAt;
     this.db.run(`UPDATE orchestration_attempts
       SET status = ?, worker_session_id = ?, result_json = ?, error = ?, started_at = ?, finished_at = ?
       WHERE id = ?`, [
