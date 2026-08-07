@@ -3,20 +3,21 @@ import { i18nService } from '../../services/i18n';
 import type { CoworkUsageStats } from '../../types/cowork';
 
 /**
- * DeepSeek V4 pricing (USD per 1M tokens). Standard off-peak rates from the
- * official DeepSeek pricing page (api-docs.deepseek.com). Peak-hour rates
- * double (9:00–12:00 / 14:00–18:00 Beijing time) — not modeled here; the
- * displayed cost is an ESTIMATE at standard rates.
+ * DeepSeek V4 pricing (CNY per 1M tokens). Standard off-peak rates from the
+ * official DeepSeek pricing page (api-docs.deepseek.com), denominated in CNY to
+ * match the wallet balance display (the DeepSeek account is billed in CNY).
+ * Peak-hour rates double (9:00–12:00 / 14:00–18:00 Beijing time) — not modeled
+ * here; the displayed cost is an ESTIMATE at standard rates.
  */
 const DEEPSEEK_RATES: Record<string, { cacheHitPerM: number; cacheMissPerM: number; outputPerM: number }> = {
-  'deepseek-v4-pro': { cacheHitPerM: 0.003625, cacheMissPerM: 0.435, outputPerM: 0.87 },
-  'deepseek-v4-flash': { cacheHitPerM: 0.0028, cacheMissPerM: 0.14, outputPerM: 0.28 },
+  'deepseek-v4-pro': { cacheHitPerM: 0.025, cacheMissPerM: 3, outputPerM: 6 },
+  'deepseek-v4-flash': { cacheHitPerM: 0.02, cacheMissPerM: 1, outputPerM: 2 },
 };
 
 /** Defaults to the cheapest tier when the model id is unknown. */
 const DEEPSEEK_DEFAULT_RATE = DEEPSEEK_RATES['deepseek-v4-flash'];
 
-function estimateDeepSeekCostUSD(model: string | undefined, stats: CoworkUsageStats): number {
+function estimateDeepSeekCostCNY(model: string | undefined, stats: CoworkUsageStats): number {
   const rate = (model && DEEPSEEK_RATES[model]) || DEEPSEEK_DEFAULT_RATE;
   return (
     (stats.cacheReadTokens / 1_000_000) * rate.cacheHitPerM
@@ -32,7 +33,7 @@ const formatTokens = (value: number): string => {
   return String(value);
 };
 
-const formatUSD = (value: number): string => `$${value.toFixed(4)}`;
+const formatCNY = (value: number): string => `¥${value.toFixed(4)}`;
 
 /** Balance result shape mirroring the main-process DeepSeekBalanceResult. */
 type BalanceSuccess = {
@@ -99,7 +100,7 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
 
   const isDeepSeek = usageStats.source === 'deepseek';
   const estimatedCost = isDeepSeek
-    ? estimateDeepSeekCostUSD(modelId, usageStats)
+    ? estimateDeepSeekCostCNY(modelId, usageStats)
     : (usageStats.totalCostUsd ?? 0);
   const showCost = estimatedCost > 0;
   // Session cache-hit rate — shown on the chip button instead of the cost.
@@ -182,7 +183,7 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
                 {isDeepSeek ? i18nService.t('coworkUsageEstimatedCost') : i18nService.t('coworkUsageCost')}
               </span>
               <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">
-                {formatUSD(estimatedCost)}
+                {isDeepSeek ? formatCNY(estimatedCost) : `$${estimatedCost.toFixed(4)}`}
               </span>
             </div>
           )}
