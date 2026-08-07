@@ -792,6 +792,19 @@ interface ActiveSession {
      * turn hit rate — the correct signal for prefix stability.
      */
     turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
+    /**
+     * Cumulative per-model token usage from the SDK's modelUsage breakdown.
+     * The top-level counters above only cover the main loop; Task subagents
+     * and CLI side jobs (prompt suggestions, progress summaries) are billed
+     * to the provider but only show up here. Keys are CLI-requested model
+     * ids, including subagent fallback names.
+     */
+    perModelUsage?: Record<string, {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }>;
   };
   /**
    * MetaBot persona block, computed once when the session starts and reused on
@@ -1266,18 +1279,50 @@ export class CoworkRunner extends EventEmitter {
       cacheHitTokens: cacheReadTokens,
       cacheMissTokens: cacheCreationTokens,
     });
+    // Per-model breakdown from the SDK result's modelUsage. The main-loop
+    // `usage` above ignores Task subagents and CLI side jobs (prompt
+    // suggestions, progress summaries, classifiers) — all of which the proxy
+    // maps to the session model and bills to DeepSeek. modelUsage is the only
+    // place that spend shows up, so accumulate it per CLI-requested model id
+    // (subagent fallback names included) for the chip's breakdown display.
+    const perModelUsage: NonNullable<UsageStatsShape['perModelUsage']> = {
+      ...(prev.perModelUsage ?? {}),
+    };
+    const modelUsage = payload.modelUsage && typeof payload.modelUsage === 'object'
+      ? payload.modelUsage as Record<string, Record<string, unknown>>
+      : null;
+    if (modelUsage) {
+      for (const [model, entry] of Object.entries(modelUsage)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const prevEntry = perModelUsage[model] ?? {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        };
+        perModelUsage[model] = {
+          inputTokens: prevEntry.inputTokens + (typeof entry.inputTokens === 'number' ? entry.inputTokens : 0),
+          outputTokens: prevEntry.outputTokens + (typeof entry.outputTokens === 'number' ? entry.outputTokens : 0),
+          cacheReadTokens: prevEntry.cacheReadTokens
+            + (typeof entry.cacheReadInputTokens === 'number' ? entry.cacheReadInputTokens : 0),
+          cacheCreationTokens: prevEntry.cacheCreationTokens
+            + (typeof entry.cacheCreationInputTokens === 'number' ? entry.cacheCreationInputTokens : 0),
+        };
+      }
+    }
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
       cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
       cacheCreationTokens: prev.cacheCreationTokens + cacheCreationTokens,
       totalCostUsd: typeof payload.total_cost_usd === 'number'
-        ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
+        ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
       source: prev.source === 'none' ? 'deepseek' : prev.source,
       turnCount: nextTurn,
       cacheMissEvents,
       turnStats,
+      perModelUsage,
     };
     // Store in the persistent map (survives session cleanup) AND mirror onto
     // the active session for any code that reads activeSession.usageStats

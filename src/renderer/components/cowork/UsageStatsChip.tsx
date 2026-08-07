@@ -209,6 +209,31 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               </span>
             </div>
           )}
+          {(() => {
+            // Per-model breakdown from the SDK's modelUsage: the top-level
+            // counters only cover the main loop, while Task subagents and CLI
+            // side jobs (prompt suggestions, progress summaries) are billed to
+            // the provider but only appear here.
+            const perModelEntries = Object.entries(usageStats.perModelUsage ?? {})
+              .filter(([, u]) => u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens > 0);
+            if (perModelEntries.length === 0) return null;
+            return (
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <div className="opacity-70">{i18nService.t('coworkUsagePerModelTitle')}</div>
+                {perModelEntries.map(([model, u]) => {
+                  const modelInput = u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+                  return (
+                    <div key={model} className="flex justify-between gap-2">
+                      <span className="truncate" title={model}>{model}</span>
+                      <span className="font-mono whitespace-nowrap">
+                        {formatTokens(modelInput)} / {formatTokens(u.outputTokens)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
           {isDeepSeek && (
             <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
               <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
