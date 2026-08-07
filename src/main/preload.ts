@@ -114,6 +114,26 @@ contextBridge.exposeInMainWorld('electron', {
       network?: string;
     }) => ipcRenderer.invoke('botBrowser:sendPrivateChat', input),
   },
+  agentGame: {
+    // browser.app.session.* dispatch (start/list/status/pause/resume/stop).
+    session: (input: { method: string; payload?: unknown; actorId?: string }) =>
+      ipcRenderer.invoke('agentGame:session', input),
+    respondConsent: (input: { requestId: string; approved: boolean; reason?: string }) =>
+      ipcRenderer.invoke('agentGame:respondConsent', input),
+    listPendingConsent: () => ipcRenderer.invoke('agentGame:listPendingConsent'),
+    listSessions: (input?: { appId?: string; status?: string; groupId?: string }) =>
+      ipcRenderer.invoke('agentGame:listSessions', input),
+    onConsentRequired: (callback: (info: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, info: unknown) => callback(info);
+      ipcRenderer.on('agentGame:consentRequired', handler);
+      return () => ipcRenderer.removeListener('agentGame:consentRequired', handler);
+    },
+    onSessionUpdated: (callback: (session: unknown) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, session: unknown) => callback(session);
+      ipcRenderer.on('agentGame:sessionUpdated', handler);
+      return () => ipcRenderer.removeListener('agentGame:sessionUpdated', handler);
+    },
+  },
   permissions: {
     checkCalendar: () => ipcRenderer.invoke('permissions:checkCalendar'),
     requestCalendar: () => ipcRenderer.invoke('permissions:requestCalendar'),

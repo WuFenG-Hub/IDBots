@@ -12,11 +12,14 @@ import { GroupTasksView, NewGroupTaskModal } from './components/groupTasks';
 import MetabotsView from './components/metabots/MetabotsView';
 import GigSquareView from './components/gigSquare/GigSquareView';
 import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
+import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import CoworkQuestionWizard from './components/cowork/CoworkQuestionWizard';
 import { configService } from './services/config';
 import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
+import { agentGameService } from './services/agentGame';
+import { enqueuePendingConsent, dequeuePendingConsent } from './store/slices/agentGameSlice';
 import { scheduledTaskService } from './services/scheduledTask';
 import { groupTaskService } from './services/groupTaskService';
 import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
@@ -107,6 +110,8 @@ const App: React.FC = () => {
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
   const pendingPermissions = useSelector((state: RootState) => state.cowork.pendingPermissions);
   const pendingPermission = pendingPermissions[0] ?? null;
+  const pendingConsents = useSelector((state: RootState) => state.agentGame.pendingConsents);
+  const pendingConsent = pendingConsents[0] ?? null;
   const isWindows = window.electron.platform === 'win32';
   const isMac = window.electron.platform === 'darwin';
   const focusedOrderTxid = focusedOrderTarget?.sessionId === currentSessionId
@@ -725,6 +730,36 @@ const App: React.FC = () => {
     await coworkService.respondToPermission(pendingPermission.requestId, result);
   }, [pendingPermission]);
 
+  const handleConsentResponse = useCallback(
+    async (approved: boolean, reason?: string) => {
+      const current = pendingConsent;
+      if (!current) return;
+      dispatch(dequeuePendingConsent({ requestId: current.requestId }));
+      await agentGameService.respondConsent(current.requestId, approved, reason);
+    },
+    [pendingConsent, dispatch],
+  );
+
+  // Agent-Game-v2: subscribe to consent cards + session updates (toast on transitions).
+  useEffect(() => {
+    const cleanup = agentGameService.setupListeners({
+      onConsentRequired: (info) => dispatch(enqueuePendingConsent(info)),
+      onSessionUpdated: (session) => {
+        const tag = `Agent-Game ${session.gameId}`;
+        if (session.status === 'running') showToast(`${tag}: session running`);
+        else if (session.status === 'paused') showToast(`${tag}: paused${session.lastError ? ` (${session.lastError.code})` : ''}`);
+        else if (session.status === 'finished') showToast(`${tag}: match finished`);
+        else if (session.status === 'stopped') showToast(`${tag}: session stopped`);
+        else if (session.status === 'error') showToast(`${tag}: error${session.lastError ? ` (${session.lastError.code})` : ''}`);
+      },
+    });
+    // Re-hydrate any consent cards that arrived before the listener attached.
+    void agentGameService.listPendingConsent().then((cards) => {
+      cards.forEach((card) => dispatch(enqueuePendingConsent(card)));
+    });
+    return cleanup;
+  }, [dispatch, showToast]);
+
   const handleBrowserOpenConversation = useCallback(async (request: BotBrowserConversationRequest) => {
     await openBotBrowserConversationInCowork(request, {
       switchToHome: botBrowserShell.switchToHome,
@@ -927,7 +962,7 @@ const App: React.FC = () => {
     );
   }, [pendingPermission, handlePermissionResponse]);
 
-  const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0;
+  const isOverlayActive = showSettings || showUpdateModal || pendingPermissions.length > 0 || pendingConsents.length > 0;
   // 按当前 UI 语言解析更新说明（该语言无内容时回退到另一种语言），用于悬停徽章时展示
   const isEmptyChangeLog = (log?: ChangeLogEntry): boolean => !log?.title && !(log?.content?.length > 0);
   const updateChangeLog: ChangeLogEntry | null = (() => {
@@ -1194,6 +1229,9 @@ const App: React.FC = () => {
         />
       )}
       {permissionModal}
+      {pendingConsent && (
+        <AgentGameConsentCard info={pendingConsent} onRespond={handleConsentResponse} />
+      )}
     </div>
   );
 };

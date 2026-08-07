@@ -8,6 +8,7 @@ import quickActionReducer from './slices/quickActionSlice';
 import scheduledTaskReducer from './slices/scheduledTaskSlice';
 import groupTasksReducer from './slices/groupTasksSlice';
 import mcpReducer from './slices/mcpSlice';
+import agentGameReducer from './slices/agentGameSlice';
 
 export const store = configureStore({
   reducer: {
@@ -20,6 +21,7 @@ export const store = configureStore({
     scheduledTask: scheduledTaskReducer,
     groupTasks: groupTasksReducer,
     mcp: mcpReducer,
+    agentGame: agentGameReducer,
   },
 });
 

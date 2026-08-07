@@ -34,6 +34,17 @@ export interface MetaBotForListener {
 
 type EmitLogFn = (log: string) => void;
 
+/**
+ * Optional post-insert hook for group-chat messages. Set by main.ts to notify
+ * the Agent-Game runtime after a message lands. Must be a no-op when no session
+ * exists for the group (zero regression to normal group chat).
+ */
+let onGroupMessageInserted: ((groupId: string) => void) | null = null;
+
+export function setGroupMessageInsertedHook(hook: ((groupId: string) => void) | null): void {
+  onGroupMessageInserted = hook;
+}
+
 /** In-memory map: globalmetaid -> SocketIOClient */
 const activeSockets = new Map<string, SocketIOClient>();
 /** In-memory map: target globalmetaid -> 32-byte private key buffer */
@@ -292,6 +303,13 @@ function routeGroupChat(
     ]
   );
   saveDb();
+
+  // Notify the Agent-Game runtime (no-op when no session exists for this group).
+  try {
+    onGroupMessageInserted?.(groupId);
+  } catch {
+    // Hook failures must never break normal group-chat ingest.
+  }
 
   const timeStr = new Date().toLocaleTimeString('en-GB', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   emitLog(`[${timeStr}] 📡 [Target: ${targetName}] Group message from group ${groupId.slice(0, 8)}…`);

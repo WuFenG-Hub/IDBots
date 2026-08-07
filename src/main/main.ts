@@ -97,6 +97,7 @@ import {
   isListenerRunning,
   isListenerSocketConnected,
   stopMetaWebListener,
+  setGroupMessageInsertedHook,
   type ListenerConfig,
 } from './services/metaWebListenerService';
 import {
@@ -188,7 +189,10 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { createAgentGameHost, type AgentGameHost } from './agentGame';
+import type { GameManifest, GameSession } from './agentGame/abi';
+import { toSessionView as toPublicSessionView } from './agentGame/abi';
 import { assignGroupChatTask, type AssignGroupChatTaskParams } from './services/assignGroupChatTaskService';
 import { cancelActiveDownload, downloadUpdate, installUpdate, applyMacUpdateSilently, relaunchPendingMacUpdate, cleanupStaleDownloads } from './libs/appUpdateInstaller';
 import { fetchFromLocalOrFallback, fetchJsonWithFallbackOnMiss, isEmptyListDataPayload } from './services/localIndexerProxy';
@@ -3070,7 +3074,14 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
-  setGroupChatBackfillActiveGroupIdsGetter(() => getGroupTaskStore().getActiveGroupIds());
+  setGroupChatBackfillActiveGroupIdsGetter(() => {
+    // Union of group-task groups and active agent-game session groups so both
+    // receive history gap-fill from the same single backfill loop.
+    const taskGroups = getGroupTaskStore().getActiveGroupIds();
+    const host = getAgentGameHost();
+    const gameGroups = host ? host.activeGroupIds() : [];
+    return Array.from(new Set([...taskGroups, ...gameGroups]));
+  });
 
   // One-time, versioned historical cognition migration. It is deliberately
   // run before the realtime daemons so the first dream sees old and new facts
@@ -3418,6 +3429,11 @@ const startSqliteDaemons = (): void => {
       });
     },
   });
+
+  // Agent-Game-v2 persistent App/Game Runtime (docs/14). Wire the host once the
+  // sqlite stores + group-chat transport are ready. Survives MetaApp close and
+  // host restart; reuses the existing LLM / pin-write / group-chat infra.
+  startAgentGameHost();
 };
 
 const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestartState> => {
@@ -5006,6 +5022,90 @@ const getUserIdentityStore = () => {
   return userIdentityStore;
 };
 
+// Agent-Game-v2 host (docs/14). Lazily created and started; survives MetaApp
+// close and host restart. Held at module scope so IPC handlers can reach it.
+let agentGameHost: AgentGameHost | null = null;
+
+const resolveAgentGameManifest = async (manifestUri: string): Promise<GameManifest> => {
+  // manifestUri may be `metaapp://<sourcePinId>` or a metafile content URI.
+  // Resolve to the cached artifact dir and read game-manifest.json from it.
+  const pinId = manifestUri.startsWith('metaapp://')
+    ? decodeURIComponent(manifestUri.slice('metaapp://'.length))
+    : manifestUri;
+  const cache = getBotBrowserMetaAppCacheService();
+  const artifact = await cache.getMetaAppArtifactDir(pinId);
+  if (!artifact) {
+    throw new Error(`agent-game: artifact dir not cached for ${manifestUri}`);
+  }
+  const manifestPath = path.join(artifact.artifactDir, 'game-manifest.json');
+  const parsed = JSON.parse((await import('fs')).readFileSync(manifestPath, 'utf8'));
+  return parsed as GameManifest;
+};
+
+const resolveAgentGameAdapterPath = (manifestUri: string, manifest: GameManifest): string => {
+  const pinId = manifestUri.startsWith('metaapp://')
+    ? decodeURIComponent(manifestUri.slice('metaapp://'.length))
+    : manifestUri;
+  // Adapter path is resolved lazily from the manifest when the sandbox loads;
+  // here we return the manifest-declared relative path joined to the artifact.
+  // The cache lookup happens in resolveAgentGameManifest; reuse the same pin.
+  // NOTE: artifactDir resolution is deferred to the sandbox load to avoid a
+  // second async cache hit here; the sandbox reads the file and verifies hash.
+  void pinId;
+  return manifest.adapter || './adapter.js';
+};
+
+const startAgentGameHost = (): void => {
+  if (agentGameHost) return;
+  const sqliteStore = getStore();
+  const owner = getUserIdentityStore().get();
+  agentGameHost = createAgentGameHost({
+    db: sqliteStore.getDatabase(),
+    saveDb: sqliteStore.getSaveFunction(),
+    llmComplete: (messages) =>
+      chatCompletionWithTools(messages, {
+        throwOnEmptyContent: true,
+      }),
+    chainWrite: (groupId, plaintext) => sendGroupChatMessageAsIdentity(groupId, { content: plaintext, nickName: owner?.name ?? '' }),
+    manifestFetch: resolveAgentGameManifest,
+    adapterPathFor: resolveAgentGameAdapterPath,
+    resolveActor: () => owner?.globalmetaid ?? '',
+    log: (msg) => console.log(msg),
+  });
+  // Start background housekeeping + recover unfinished sessions.
+  agentGameHost.runtime.startBackground();
+  void agentGameHost.recover().catch((err) => {
+    console.warn(`[agent-game] recovery failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+  // Surface consent cards + session updates to the renderer.
+  agentGameHost.consent.on('consentRequired', (info) => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        try {
+          win.webContents.send('agentGame:consentRequired', info);
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+  });
+  agentGameHost.runtime.on('sessionUpdated', (session) => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (!win.isDestroyed()) {
+        try {
+          win.webContents.send('agentGame:sessionUpdated', toPublicSessionView(session));
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+  });
+  // Route group-chat inserts into the runtime (no-op when no session exists).
+  setGroupMessageInsertedHook((groupId) => agentGameHost?.onGroupMessage(groupId));
+};
+
+const getAgentGameHost = (): AgentGameHost | null => agentGameHost;
+
 /** Strip the mnemonic before handing an identity to the renderer. */
 const toPublicUserIdentity = (identity: UserIdentity | null): Omit<UserIdentity, 'mnemonic'> | null => {
   if (!identity) return null;
@@ -6271,6 +6371,44 @@ if (!gotTheLock) {
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  });
+
+  // Agent-Game-v2 `browser.app.session.*` host surface (docs/14 §1). IDBots is
+  // the authorization + session-state owner; ABC (when integrated) forwards.
+  ipcMain.handle('agentGame:session', async (_event, input: { method: string; payload?: unknown; actorId?: string } | undefined) => {
+    const host = getAgentGameHost();
+    if (!host) {
+      return { __error: true, code: 'unsupported_method', message: 'Agent-Game runtime not started' };
+    }
+    const method = toSafeString(input?.method);
+    const payload = input?.payload;
+    const actorId = toSafeString(input?.actorId) || (getUserIdentityStore().get()?.globalmetaid ?? '');
+    return host.handleSessionMethod(method, payload, actorId);
+  });
+
+  ipcMain.handle('agentGame:respondConsent', async (_event, input: { requestId: string; approved: boolean; reason?: string } | undefined) => {
+    const host = getAgentGameHost();
+    if (!host) {
+      return { success: false, error: 'Agent-Game runtime not started' };
+    }
+    const requestId = toSafeString(input?.requestId);
+    const approved = Boolean(input?.approved);
+    host.respondConsent(requestId, approved, toSafeString(input?.reason) || undefined);
+    return { success: true };
+  });
+
+  ipcMain.handle('agentGame:listPendingConsent', async () => {
+    const host = getAgentGameHost();
+    if (!host) return { cards: [] };
+    return { cards: host.consent.listPending() };
+  });
+
+  ipcMain.handle('agentGame:listSessions', async (_event, input: { appId?: string; status?: string; groupId?: string } | undefined) => {
+    const host = getAgentGameHost();
+    if (!host) return { sessions: [] };
+    const actorId = getUserIdentityStore().get()?.globalmetaid ?? '';
+    const status = (input?.status as 'running' | 'paused' | 'stopped' | 'finished' | 'error') || undefined;
+    return { sessions: host.runtime.list(actorId, { appId: input?.appId, status, groupId: input?.groupId }) };
   });
 
   ipcMain.handle('metaapps:list', async () => {
