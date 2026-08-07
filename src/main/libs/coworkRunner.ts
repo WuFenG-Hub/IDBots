@@ -1000,6 +1000,13 @@ export class CoworkRunner extends EventEmitter {
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
+  /**
+   * Per-session accumulated usage stats, keyed by sessionId. Independent of the
+   * activeSessions lifecycle: activeSessions is cleaned up in the run finally
+   * block (removeActiveSession), but usage stats must survive so the token/cost
+   * chip can be read after the turn completes via getSessionUsageStats.
+   */
+  private usageStatsBySessionId: Map<string, NonNullable<ActiveSession['usageStats']>> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
@@ -1173,9 +1180,6 @@ export class CoworkRunner extends EventEmitter {
    * direct Anthropic sessions (proxy providers reprice locally in the UI).
    */
   private accumulateResultUsage(sessionId: string, payload: Record<string, unknown>): void {
-    const activeSession = this.activeSessions.get(sessionId);
-    if (!activeSession) return;
-
     const usage = payload.usage && typeof payload.usage === 'object'
       ? payload.usage as Record<string, unknown>
       : null;
@@ -1192,7 +1196,11 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
-    const prev = activeSession.usageStats ?? {
+    // Read the previous accumulated stats from the persistent map (NOT from
+    // activeSession, which may have already been removed by the run finally
+    // block). The persistent map survives session cleanup so stats remain
+    // readable after the turn completes.
+    const prev = this.usageStatsBySessionId.get(sessionId) ?? {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
@@ -1214,7 +1222,7 @@ export class CoworkRunner extends EventEmitter {
         missTokens: cacheCreationTokens,
       });
     }
-    activeSession.usageStats = {
+    const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
       cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
@@ -1226,12 +1234,21 @@ export class CoworkRunner extends EventEmitter {
       turnCount: nextTurn,
       cacheMissEvents,
     };
+    // Store in the persistent map (survives session cleanup) AND mirror onto
+    // the active session for any code that reads activeSession.usageStats
+    // during the turn.
+    this.usageStatsBySessionId.set(sessionId, nextStats);
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      activeSession.usageStats = nextStats;
+    }
   }
 
-  /** Returns the accumulated usage stats for an active session, or null. */
+  /** Returns the accumulated usage stats for a session, or null. */
   getSessionUsageStats(sessionId: string): CoworkUsageStats | null {
-    const activeSession = this.activeSessions.get(sessionId);
-    return activeSession?.usageStats ?? null;
+    // Read from the persistent map so stats survive after the active session is
+    // cleaned up by removeActiveSession in the run finally block.
+    return this.usageStatsBySessionId.get(sessionId) ?? null;
   }
 
   wasSessionStopped(sessionId: string): boolean {
