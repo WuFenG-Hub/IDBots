@@ -82,13 +82,23 @@ const GlobalUsageIndicator: React.FC = () => {
   const cacheHitRate = cacheDenominator > 0
     ? Math.round((usageStats!.cacheReadTokens / cacheDenominator) * 100)
     : null;
+  // Warm-cache rate: exclude the T1 cold start (100% miss by definition) so the
+  // displayed number matches the DeepSeek dashboard's per-request hit rate.
+  const turnStats = usageStats?.turnStats ?? [];
+  const warmTurns = turnStats.length > 1 ? turnStats.slice(1) : [];
+  const warmHit = warmTurns.reduce((sum, t) => sum + t.cacheHitTokens, 0);
+  const warmMiss = warmTurns.reduce((sum, t) => sum + t.cacheMissTokens, 0);
+  const warmDenom = warmHit + warmMiss;
+  const warmCacheHitRate = warmDenom > 0
+    ? Math.round((warmHit / warmDenom) * 100)
+    : null;
   const totalTokens = usageStats
     ? usageStats.inputTokens + usageStats.outputTokens
       + usageStats.cacheReadTokens + usageStats.cacheCreationTokens
     : 0;
 
   // Hide entirely if there is no balance AND no usage data (e.g. no DeepSeek key).
-  if (!balance && !error && cacheHitRate === null) return null;
+  if (!balance && !error && warmCacheHitRate === null && cacheHitRate === null) return null;
 
   const display = balance?.display ?? (error ? '—' : '…');
 
@@ -108,10 +118,11 @@ const GlobalUsageIndicator: React.FC = () => {
           <path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4" />
         </svg>
         <span className="font-medium tabular-nums">{display}</span>
-        {cacheHitRate !== null && (
+        {/* Show the warm-cache rate (excl. T1 cold start) as the primary signal. */}
+        {(warmCacheHitRate ?? cacheHitRate) !== null && (
           <>
             <span className="opacity-30">·</span>
-            <span className="tabular-nums opacity-80">{cacheHitRate}%</span>
+            <span className="tabular-nums opacity-80">{warmCacheHitRate ?? cacheHitRate}%</span>
           </>
         )}
       </button>
@@ -158,9 +169,15 @@ const GlobalUsageIndicator: React.FC = () => {
                 <span className="font-mono">{formatTokens(totalTokens)}</span>
               </div>
               <div className="flex justify-between">
-                <span>{i18nService.t('deepseekCacheHitRate')}</span>
+                <span>{i18nService.t('deepseekCacheHitRate')} ({i18nService.t('deepseekCacheHitRateAll')})</span>
                 <span className="font-mono">{cacheHitRate ?? 0}%</span>
               </div>
+              {warmCacheHitRate !== null && (
+                <div className="flex justify-between">
+                  <span className="font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('deepseekCacheHitRate')} ({i18nService.t('deepseekCacheHitRateWarm')})</span>
+                  <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{warmCacheHitRate}%</span>
+                </div>
+              )}
               {(() => {
                 const turnStats = usageStats.turnStats ?? [];
                 const lastTurn = turnStats[turnStats.length - 1];

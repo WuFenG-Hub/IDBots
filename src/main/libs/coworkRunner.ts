@@ -4208,6 +4208,15 @@ export class CoworkRunner extends EventEmitter {
 
     const claudeCodePath = getClaudeCodePath();
     const envVars = await getEnhancedEnvWithTmpdir(cwd, 'local', apiConfig);
+    // Disable Claude Code's per-spawn git-status injection into the system
+    // prompt. Every turn spawns a fresh subprocess, and if the workspace is a
+    // git repo the injected git status/log changes as the agent edits files —
+    // which changes the first bytes of the system prompt and invalidates
+    // DeepSeek's entire cacheable prefix on every turn (~hundreds of k tokens
+    // of cache miss). This flag only stops the PROMPT injection; Claude Code
+    // can still run git commands as tools. Mirrors the cache-first principle:
+    // keep the system-prompt head byte-stable across turns.
+    envVars.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
     // So the SDK's forked process uses the correct Electron exe on Windows (avoids process.execPath returning e.g. lDBots.exe)
     envVars.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
     const skillEnvOverrides = await this.getSkillSessionEnvOverrides?.(sessionId);
