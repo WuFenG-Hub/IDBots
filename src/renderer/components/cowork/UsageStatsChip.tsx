@@ -34,6 +34,21 @@ const formatTokens = (value: number): string => {
 
 const formatUSD = (value: number): string => `$${value.toFixed(4)}`;
 
+/** Balance result shape mirroring the main-process DeepSeekBalanceResult. */
+type BalanceSuccess = {
+  success: true;
+  balance: {
+    available: boolean;
+    display: string;
+    infos: Array<{
+      currency: string;
+      totalBalance: number;
+      grantedBalance: number;
+      toppedUpBalance: number;
+    }>;
+  };
+};
+
 interface UsageStatsChipProps {
   usageStats: CoworkUsageStats;
   /** Current model id for DeepSeek rate lookup. */
@@ -48,10 +63,26 @@ interface UsageStatsChipProps {
  */
 const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [balance, setBalance] = useState<BalanceSuccess['balance'] | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Fetch the DeepSeek wallet balance fresh every time the panel opens, so the
+  // readout reflects the latest spend without a background poll.
+  const fetchBalance = React.useCallback(async () => {
+    const result = await window.electron.deepseek.getBalance();
+    if (result.success === true) {
+      setBalance(result.balance);
+      setBalanceError(null);
+    } else {
+      setBalance(null);
+      setBalanceError(result.error);
+    }
+  }, []);
 
   useEffect(() => {
     if (!isOpen) return;
+    void fetchBalance();
     const handleClickOutside = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         setIsOpen(false);
@@ -59,7 +90,7 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [isOpen]);
+  }, [isOpen, fetchBalance]);
 
   const totalTokens = usageStats.inputTokens + usageStats.outputTokens
     + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
@@ -71,6 +102,11 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     ? estimateDeepSeekCostUSD(modelId, usageStats)
     : (usageStats.totalCostUsd ?? 0);
   const showCost = estimatedCost > 0;
+  // Session cache-hit rate — shown on the chip button instead of the cost.
+  const cacheDenominator = usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
+  const cacheHitRate = cacheDenominator > 0
+    ? Math.round((usageStats.cacheReadTokens / cacheDenominator) * 100)
+    : null;
 
   return (
     <div ref={containerRef} className="relative">
@@ -82,7 +118,7 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
       >
         <span className="text-[11px]">∑</span>
         <span className="font-medium">{formatTokens(totalTokens)}</span>
-        {showCost && <span className="text-[10px] opacity-80">{formatUSD(estimatedCost)}</span>}
+        {cacheHitRate !== null && <span className="text-[10px] opacity-80">{cacheHitRate}%</span>}
       </button>
       {isOpen && (
         <div className="absolute right-0 bottom-full mb-2 w-60 rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:border-claude-darkBorder border-claude-border border p-3 z-50">
@@ -135,6 +171,20 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">
                 {formatUSD(estimatedCost)}
               </span>
+            </div>
+          )}
+          {isDeepSeek && (
+            <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
+              <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('deepseekBalanceTitle')}
+              </span>
+              {balanceError ? (
+                <span className="font-mono text-red-400" title={balanceError}>—</span>
+              ) : (
+                <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">
+                  {balance?.display ?? '…'}
+                </span>
+              )}
             </div>
           )}
         </div>
