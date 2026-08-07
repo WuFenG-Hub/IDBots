@@ -127,10 +127,42 @@ tool list would invalidate the entire cached prefix every turn.
 
 ### Prefix-stable system prompts
 
-The orchestrator and private-chat system prompts are built from static bot
-attributes (name, role, soul) with the conversation context appended at the
-end. There are no timestamps or volatile IDs in the system-prompt head, so
-the cacheable prefix is preserved across turns.
+The system prompt must be **byte-identical across turns** — it leads DeepSeek's
+cacheable prefix, and any change there invalidates the entire prefix.
+
+The dominant historical cache-breaker was the **local-time block**:
+`buildLocalTimeContextPrompt()` embedded a per-ms unix timestamp and local
+datetime into the system prompt on every turn. Since `system` is the first
+thing in the prefix, the cacheable head collapsed to just the persona block
+(a few hundred bytes) and everything after it missed every turn — this alone
+explained the ~5% hit rate.
+
+**Fix** (mirrors Reasonix, which reads the system prompt verbatim from
+persisted storage and injects volatile state into the user turn):
+- The local-time block was removed from `composeEffectiveSystemPrompt`, making
+  the system prompt immutable per session.
+- The same time context is now injected into the **current user message** in
+  `runClaudeCodeLocal` — the model still gets wall-clock time for relative-time
+  and scheduled-task requests, but it lives in the request tail (new each turn)
+  rather than the cacheable head.
+
+The orchestrator and private-chat system prompts are otherwise built from
+static bot attributes (name, role, soul) with the conversation context
+appended at the end. Memory-strategy and workspace-safety blocks are static
+text. Volatile data (time, browser tabs, session state) belongs in the user
+message, never the system head.
+
+### Reasoning-content round-trip stability
+
+DeepSeek requires `reasoning_content` on assistant tool-call messages. The
+common path is already byte-stable: the SDK replays historical `thinking`
+blocks, and `convertMessageToOpenAI` deterministically converts them back to
+`reasoning_content` (`existingReasoning` branch in
+`hydrateDeepSeekReasoningForRequest`). The in-memory LRU side-cache only
+kicks in when the SDK drops the block; unrecoverable reasoning falls back to
+an empty string (constant, cache-stable). True byte drift is limited to the
+LRU-eviction / process-restart recovery path, which is an edge case rather
+than the per-turn breaker.
 
 ### Cache-miss attribution
 
