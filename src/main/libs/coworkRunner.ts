@@ -1205,17 +1205,35 @@ export class CoworkRunner extends EventEmitter {
     // Read the previous accumulated stats from the persistent map (NOT from
     // activeSession, which may have already been removed by the run finally
     // block). The persistent map survives session cleanup so stats remain
-    // readable after the turn completes.
-    const prev = this.usageStatsBySessionId.get(sessionId) ?? {
+    // readable after the turn completes. After an app restart the map is empty,
+    // so seed `prev` from the persisted row to keep accumulating on top of
+    // historical usage instead of restarting at zero.
+    const inMemoryPrev = this.usageStatsBySessionId.get(sessionId);
+    type UsageStatsShape = NonNullable<ActiveSession['usageStats']>;
+    const defaultPrev: UsageStatsShape = {
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,
       cacheCreationTokens: 0,
-      source: 'none' as const,
+      source: 'none',
       turnCount: 0,
       cacheMissEvents: [] as Array<{ turn: number; reason: string; missTokens: number }>,
       turnStats: [] as Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>,
     };
+    let prev: UsageStatsShape = inMemoryPrev ?? defaultPrev;
+    if (!inMemoryPrev) {
+      try {
+        const persisted = this.store.getSessionUsageStats(sessionId);
+        if (persisted) {
+          prev = {
+            ...defaultPrev,
+            ...(persisted as unknown as UsageStatsShape),
+          };
+        }
+      } catch {
+        // Persisted read is best-effort; fall back to zeroed stats.
+      }
+    }
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
     // cached yet). Later misses are recorded as 'unknown' — without diffing the
@@ -1255,19 +1273,43 @@ export class CoworkRunner extends EventEmitter {
     };
     // Store in the persistent map (survives session cleanup) AND mirror onto
     // the active session for any code that reads activeSession.usageStats
-    // during the turn.
+    // during the turn. Also persist to the session row so the chip survives
+    // app restarts.
     this.usageStatsBySessionId.set(sessionId, nextStats);
     const activeSession = this.activeSessions.get(sessionId);
     if (activeSession) {
       activeSession.usageStats = nextStats;
     }
+    try {
+      this.store.setSessionUsageStats(sessionId, nextStats);
+    } catch (error) {
+      coworkLog('WARN', 'accumulateResultUsage', 'Failed to persist usage stats', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /** Returns the accumulated usage stats for a session, or null. */
   getSessionUsageStats(sessionId: string): CoworkUsageStats | null {
-    // Read from the persistent map so stats survive after the active session is
-    // cleaned up by removeActiveSession in the run finally block.
-    return this.usageStatsBySessionId.get(sessionId) ?? null;
+    // In-memory map first (covers the active run and the post-turn window when
+    // the session was cleaned up by removeActiveSession).
+    const inMemory = this.usageStatsBySessionId.get(sessionId);
+    if (inMemory) return inMemory;
+    // Fall back to the persisted row so the chip shows historical usage after
+    // an app restart (the in-memory map is gone).
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId);
+      if (persisted) {
+        return persisted as unknown as CoworkUsageStats;
+      }
+    } catch (error) {
+      coworkLog('WARN', 'getSessionUsageStats', 'Failed to read persisted usage stats', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return null;
   }
 
   wasSessionStopped(sessionId: string): boolean {

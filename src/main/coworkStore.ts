@@ -1136,6 +1136,12 @@ export class CoworkStore implements MemoryBackend {
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN fork_point_message_id TEXT;');
         changed = true;
       }
+      if (!sessionColumns.includes('usage_stats')) {
+        // Persisted per-session token/cache usage so the usage chip survives
+        // app restarts (the in-memory CoworkRunner map is lost on restart).
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN usage_stats TEXT;');
+        changed = true;
+      }
     } catch (error) {
       console.warn('[CoworkStore] Failed to verify cowork_sessions columns:', error);
     }
@@ -2993,6 +2999,34 @@ export class CoworkStore implements MemoryBackend {
     `, values);
 
     this.saveDb();
+  }
+
+  /**
+   * Persist per-session token/cache usage stats so the usage chip survives app
+   * restarts. The in-memory CoworkRunner map is lost on restart; this column
+   * is the durable copy. Accepts a null/undefined value to clear.
+   */
+  setSessionUsageStats(sessionId: string, usageStats: Record<string, unknown> | null): void {
+    const now = Date.now();
+    this.db.run(
+      'UPDATE cowork_sessions SET usage_stats = ?, updated_at = ? WHERE id = ?',
+      [usageStats ? JSON.stringify(usageStats) : null, now, sessionId]
+    );
+    this.saveDb();
+  }
+
+  /** Read persisted per-session usage stats (null when none stored). */
+  getSessionUsageStats(sessionId: string): Record<string, unknown> | null {
+    const row = this.getOne<{ usage_stats: string | null }>(
+      'SELECT usage_stats FROM cowork_sessions WHERE id = ? LIMIT 1',
+      [sessionId]
+    );
+    if (!row?.usage_stats) return null;
+    try {
+      return JSON.parse(row.usage_stats) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
   }
 
   deleteSession(id: string): void {
