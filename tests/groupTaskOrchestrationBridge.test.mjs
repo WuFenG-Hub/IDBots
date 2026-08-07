@@ -165,3 +165,75 @@ test('cancelling a Group Task cancels its canonical attempts and steps', async (
     h.sqliteStore.close();
   }
 });
+
+test('P0-1: failed noise steps do NOT block owner acceptance', async () => {
+  const h = await makeHarness();
+  try {
+    // A real worker step that completed (waiting_input after completion)
+    const real = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'real-assignment-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(real.attempt.id, 'session-real');
+    h.bridge.completeWorkerAttempt({
+      attemptId: real.attempt.id,
+      replyText: '[DELIVERABLE] metaapp: metaapp://realpin',
+      groupMessagePinId: 'real-deliverable-i0',
+    });
+
+    // A noise step that failed (mistaken mention whose skill routing failed)
+    const noise = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'noise message',
+      sourceMessageKey: 'noise-message-i0',
+    });
+    h.bridge.failWorkerAttempt(noise.attempt.id, 'SKILL_ROUTING_FAILED');
+
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    // Acceptance must NOT throw despite the failed step
+    const accepted = h.bridge.acceptGroupTask(h.groupTask.id);
+    assert.equal(accepted.groupTask.status, 'done');
+    assert.equal(accepted.canonicalTask.status, 'completed');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('P0-1b: ignoreFailedSteps demotes noise steps to completed with an ignored marker', async () => {
+  const h = await makeHarness();
+  try {
+    const noise = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'noise',
+      sourceMessageKey: 'noise-i0',
+    });
+    h.bridge.failWorkerAttempt(noise.attempt.id, 'SKILL_ROUTING_FAILED');
+    assert.equal(h.orchestrationStore.getStep(noise.step.id).status, 'failed');
+
+    const ignored = h.bridge.ignoreFailedSteps(h.groupTask.id);
+    assert.equal(ignored, 1);
+    const step = h.orchestrationStore.getStep(noise.step.id);
+    assert.equal(step.status, 'completed');
+    assert.equal(step.acceptedResult.ignored, true);
+
+    // Real steps are untouched
+    const real = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'real',
+      sourceMessageKey: 'real-i0',
+    });
+    assert.equal(h.orchestrationStore.getStep(real.step.id).status, 'queued');
+    assert.equal(h.bridge.ignoreFailedSteps(h.groupTask.id), 0, 'no more failed steps to ignore');
+  } finally {
+    h.sqliteStore.close();
+  }
+});

@@ -24,6 +24,7 @@ const ACTION_PATHS = {
   send: '/api/idbots/group-task/send',
   invite: '/api/idbots/group-task/invite',
   close: '/api/idbots/group-task/close',
+  'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
   bots: '/api/idbots/list-metabots',
 };
 
@@ -145,6 +146,14 @@ async function main() {
       body = { task_id: taskId, status };
       const reason = String(params.reason ?? '').trim();
       if (reason) body.reason = reason;
+      break;
+    }
+    case 'deliverable-delete': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for deliverable-delete');
+      const deliverableId = Number(params.deliverable_id);
+      if (!Number.isInteger(deliverableId) || deliverableId <= 0) fail('deliverable_id is required for deliverable-delete');
+      body = { task_id: taskId, deliverable_id: deliverableId };
       break;
     }
     default:

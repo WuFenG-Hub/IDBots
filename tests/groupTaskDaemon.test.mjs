@@ -95,15 +95,15 @@ const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid =
   );
 };
 
-const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null }) => {
+const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null, replyPin = '' }) => {
   db.run(
     `INSERT INTO group_chat_messages (
       pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
       sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
       reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
-    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, '', ?, NULL, 'mvc', '{}', 0, NULL)`,
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, ?, ?, NULL, 'mvc', '{}', 0, NULL)`,
     [pinId, pinId.replace(/-i0$/, ''), groupId, senderMetaId, senderGlobalMetaId, senderName, content,
-      mention ? JSON.stringify(mention) : '[]'],
+      replyPin, mention ? JSON.stringify(mention) : '[]'],
   );
 };
 
@@ -249,19 +249,33 @@ test('gating: worker responds only when mentioned (by name or mention array)', (
   );
   assert.deepEqual(byMetaIdInArray, [{ metabotId: 3, reason: 'worker_mentioned' }]);
 
-  // name match is case-insensitive
+  // name match is case-insensitive (word-boundary @ required)
   const byNameCase = decideGroupTaskResponders(
-    gateMessage({ content: 'coder bot, take it' }),
+    gateMessage({ content: '@coder bot, take it' }),
     gateTask(), GATE_MEMBERS, GATE_BOTS,
   );
   assert.deepEqual(byNameCase, [{ metabotId: 2, reason: 'worker_mentioned' }]);
+
+  // P0-3: a bare name WITHOUT the @ prefix is NOT a mention (kickoff roster
+  // lines and recaps must not trigger replies). With nobody addressed it falls
+  // to the chair's floor-control duty instead.
+  const bareName = decideGroupTaskResponders(
+    gateMessage({ content: 'coder bot, take it' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(bareName, [{ metabotId: 1, reason: 'chair_floor_control' }], 'bare name without @ must not trigger a worker');
 });
 
 test('gating: chair rules (a) mentioned, (b) owner message, (c) deliverable, (d) floor control', () => {
-  // (a) chair mentioned
+  // (a) chair mentioned (word-boundary @)
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: '@Twin Bot, your call?' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
+    [{ metabotId: 1, reason: 'chair_mentioned' }],
+  );
+  // bare chair name without @ is not a mention (still may be floor control)
   assert.deepEqual(
     decideGroupTaskResponders(gateMessage({ content: 'Twin Bot, your call?' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
-    [{ metabotId: 1, reason: 'chair_mentioned' }],
+    [{ metabotId: 1, reason: 'chair_floor_control' }],
   );
 
   // (b) owner message: no mention needed for the chair; workers get NO privilege
@@ -452,22 +466,31 @@ test('loop prevention: cooldown and per-tick cap', async () => {
     await h.loop.runTick();
     assert.equal(h.sends.length, 2, 'per-tick cap stops the third worker');
 
-    // cooldown: a fresh mention for worker 2 within 20s is skipped
+    // P0-3c: the capped worker is DEFERRED, not dropped — the next tick
+    // compensates it (its message is already behind the cursor). Coder's fresh
+    // mention is still inside its 20s cooldown, so it stays deferred.
     insertGroupMessage(h.db, {
       pinId: 'again-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
       senderName: 'Human', content: '@Coder Bot again',
     });
     await h.loop.runTick();
-    assert.equal(h.sends.length, 2, 'cooldown blocks the immediate follow-up');
+    assert.equal(h.sends.length, 3, 'deferred third worker gets its turn on the next tick');
+    assert.equal(h.sends.at(-1).metabotId, 4, 'compensation reply is from the capped Reviewer Bot');
+    assert.equal(
+      h.sends.filter((s) => s.metabotId === 2).length,
+      1,
+      'Coder Bot is still inside its cooldown; its mention is deferred, not dropped',
+    );
 
-    // past cooldown: a new mention flows again (the skipped one is behind the cursor)
+    // past cooldown: the deferred 'again' mention finally flows, and the fresh
+    // 'third' mention is deferred again (just replied).
     h.state.nowMs += 21_000;
     insertGroupMessage(h.db, {
       pinId: 'third-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
       senderName: 'Human', content: '@Coder Bot third',
     });
     await h.loop.runTick();
-    assert.equal(h.sends.length, 3);
+    assert.equal(h.sends.length, 4, 'deferred Coder reply compensates after cooldown');
     assert.equal(h.sends.at(-1).metabotId, 2);
   } finally {
     h.cleanup();
@@ -730,7 +753,7 @@ test('gating: review phase — workers never respond, chair only answers the own
   // chair mentioned -> silent
   assert.deepEqual(
     decideGroupTaskResponders(
-      gateMessage({ content: 'Twin Bot thanks!' }),
+      gateMessage({ content: '@Twin Bot thanks!' }),
       reviewTask, GATE_MEMBERS, GATE_BOTS,
     ),
     [],
@@ -1404,6 +1427,64 @@ test('owner report: send failure is logged and does not block the tick', async (
       h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, afterId,
       'tick processed the rest of the batch despite the send failure',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: chair messages and placeholder URIs never become deliverables', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+
+    // chair message quoting the planning example -> NOT collected
+    insertGroupMessage(h.db, {
+      pinId: 'chair-example-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[DELIVERABLE] example format: metaapp://<pinId> or metaapp://[PINID]',
+    });
+    // worker message with a placeholder URI -> NOT collected
+    insertGroupMessage(h.db, {
+      pinId: 'worker-placeholder-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp://<pinId>',
+    });
+    // worker message with a real URI -> collected
+    insertGroupMessage(h.db, {
+      pinId: 'worker-real-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000',
+    });
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 1, 'only the real worker deliverable is recorded');
+    assert.equal(rows[0].msgPinId, 'worker-real-i0');
+    assert.equal(rows[0].uri, 'metaapp://realpin0000');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-7: chair auto response is suppressed when the Twin already replied to that message', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // Lucy delivers; the Twin (chair) ALREADY replied on-chain to that pin
+    insertGroupMessage(h.db, {
+      pinId: 'deliver-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'chair-reply-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'thanks, verifying now', replyPin: 'deliver-i0',
+    });
+    await h.loop.runTick();
+
+    // The chair must NOT auto-respond to the deliverable (Twin already spoke).
+    // The worker mention is absent, so no worker replies either.
+    assert.equal(h.sends.length, 0, 'no duplicate chair auto response');
+    // but the deliverable is still recorded from the worker message
+    const taskId = h.groupTaskStore.listTasks()[0].id;
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 1);
   } finally {
     h.cleanup();
   }

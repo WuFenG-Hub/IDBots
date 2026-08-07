@@ -34,6 +34,7 @@ import {
   postGroupTaskMessage,
   joinGroupTaskMember,
   closeGroupTask,
+  deleteGroupTaskDeliverable,
 } from './groupTaskService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus } from '../groupTaskStore';
@@ -81,6 +82,7 @@ const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
+const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
@@ -1197,12 +1199,16 @@ export function startMetaidRpcServer(
         }
       }
       try {
+        // P0-2: explicit members (ids or names) MUST be honored. Auto-select the
+        // whole roster only when the caller did not name any member — silently
+        // overriding a provided member list with the full roster was the bug.
+        const autoSelectWorkers = memberMetabotIds.length === 0;
         const task = await createGroupTask({
           title,
           goal,
           acceptanceCriteria: typeof parsed.acceptance_criteria === 'string' ? parsed.acceptance_criteria : undefined,
           memberMetabotIds,
-          autoSelectWorkers: true,
+          autoSelectWorkers,
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
         });
         res.writeHead(200);
@@ -1423,6 +1429,43 @@ export function startMetaidRpcServer(
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_DELIVERABLE_DELETE_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: { task_id?: number; deliverable_id?: number };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      const deliverableId = Number(parsed.deliverable_id);
+      if (!Number.isInteger(deliverableId) || deliverableId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'deliverable_id is required' }));
+        return;
+      }
+      try {
+        const deleted = await deleteGroupTaskDeliverable(taskId, deliverableId);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, deleted }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

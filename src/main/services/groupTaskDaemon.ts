@@ -126,10 +126,24 @@ type DaemonPromptMember = {
   goal?: string | null;
 };
 
-/** Local equivalent of orchestrator's contentContainsBotName (kept separate by design). */
-function contentContainsBotName(content: string, botName: string): boolean {
+/**
+ * Word-boundary @-mention matching: a bot counts as "mentioned by name" ONLY
+ * when the content contains an explicit `@BotName` token (the @ must not be
+ * glued to a longer identifier and the name must match completely). A bare
+ * name occurrence (e.g. a kickoff roster line "Members: Coder Bot, …" or a
+ * recap "already checked Lucy's file") does NOT trigger a reply. This killed
+ * the "kickoff mentions the full roster -> every member responds" problem and
+ * the "one recap mentions two names -> two steps created" problem.
+ */
+function contentMentionsBotName(content: string, botName: string): boolean {
   if (!content || !botName) return false;
-  return content.toLowerCase().includes(botName.toLowerCase().trim());
+  const name = botName.trim();
+  if (!name) return false;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // @ 前不能是字母/数字/下划线（避免 @Builder 命中 @Builder2 之类粘连），
+  // @ 后必须完整匹配名字且名字结尾不在词中间；名字匹配大小写不敏感。
+  const pattern = new RegExp(`(^|[^A-Za-z0-9_])@${escaped}(?![A-Za-z0-9_])`, 'i');
+  return pattern.test(content);
 }
 
 /** Local equivalent of orchestrator's mentionContainsMetaId (kept separate by design). */
@@ -159,7 +173,7 @@ function isMentioned(
   bot: GroupTaskDaemonBot,
 ): boolean {
   return mentionContainsMetaId(message.mention, bot.globalmetaid, bot.metaid)
-    || contentContainsBotName(message.content, bot.name);
+    || contentMentionsBotName(message.content, bot.name);
 }
 
 /**
@@ -449,6 +463,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const replyCountByKey = new Map<string, number>();
   const keyOf = (taskId: number, metabotId: number): string => `${taskId}:${metabotId}`;
 
+  /**
+   * Re-trigger window (P0-3c): a decision skipped because of the per-tick reply
+   * cap or a cooldown is NOT dropped. The (task, bot, message) is queued here and
+   * retried at the start of a later tick, so the skipped worker still gets its
+   * chance (the message cursor has already advanced past it by then).
+   */
+  interface DeferredReplyEntry {
+    taskId: number;
+    metabotId: number;
+    messageId: number;
+    reason: GroupTaskResponderDecision['reason'];
+    verificationNotes: string[];
+  }
+  let deferredReplies: DeferredReplyEntry[] = [];
+  const deferReply = (entry: DeferredReplyEntry): void => {
+    const index = deferredReplies.findIndex(
+      (existing) => existing.taskId === entry.taskId && existing.metabotId === entry.metabotId,
+    );
+    if (index >= 0) {
+      deferredReplies[index] = entry; // keep only the newest pending message
+    } else {
+      deferredReplies.push(entry);
+    }
+  };
+
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
 
@@ -461,6 +500,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
        ORDER BY id ASC`,
       [groupId, afterId],
     ));
+
+  const queryMessageById = (db: Database, groupId: string, id: number): GroupChatMessageRow | null =>
+    mapMessageRows(db.exec(
+      `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
+              chain_timestamp, reply_pin
+       FROM group_chat_messages
+       WHERE group_id = ? AND id = ?
+       LIMIT 1`,
+      [groupId, id],
+    ))[0] ?? null;
+
+  /** True when the chair bot already replied to the given message pin (P2-7). */
+  const chairAlreadyRepliedTo = (
+    db: Database,
+    groupId: string,
+    messagePinId: string | null,
+    chairGlobalMetaId: string,
+  ): boolean => {
+    if (!messagePinId || !chairGlobalMetaId) return false;
+    const result = db.exec(
+      `SELECT COUNT(*) AS n FROM group_chat_messages
+       WHERE group_id = ? AND reply_pin = ? AND sender_global_metaid = ?`,
+      [groupId, messagePinId, chairGlobalMetaId],
+    );
+    const value = result[0]?.values?.[0]?.[0];
+    return Number(value) > 0;
+  };
 
   const queryRecentMessages = (db: Database, groupId: string, limit: number): GroupChatMessageRow[] => {
     const rows = mapMessageRows(db.exec(
@@ -583,10 +649,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return session;
   };
 
-  /** First URI in a [DELIVERABLE] line (metafile://…, metaapp://…, https?://…), else null. */
+  /**
+   * First REAL URI in a [DELIVERABLE] line (metafile://…, metaapp://…, https?://…),
+   * else null. Placeholder/example tokens are rejected: `<pinId>`, `[PINID]`,
+   * brackets/angle-brackets anywhere in the URI, and scheme-only fragments
+   * (`metaapp://` with nothing after the scheme) — those are planning-turn
+   * examples, not deliverables.
+   */
   const extractDeliverableUri = (content: string): string | null => {
     const match = DELIVERABLE_URI_PATTERN.exec(content);
-    return match ? match[1] : null;
+    if (!match) return null;
+    const uri = match[1];
+    // 占位符（<…> 或 […]，如 metaapp://<pinId>、metaapp://[PINID]）一律不是真实交付物
+    if (/[<>[\]]/.test(uri)) return null;
+    // scheme:// 后必须紧跟至少一个非空字符（metaapp:// 单独出现视为示例）
+    const schemeEnd = uri.indexOf('://');
+    if (schemeEnd <= 0 || uri.length <= schemeEnd + 3) return null;
+    return uri;
   };
 
   const inferDeliverableKind = (content: string): string => {
@@ -880,18 +959,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const content = message.content;
     let verificationNotes: string[] = [];
 
-    if (DELIVERABLE_TAG.test(content)) {
+    // Deliverable collection is worker-only: a chair message that merely quotes
+    // an example (`metaapp://<pinId>`) or recap must never become a deliverable.
+    const chairGlobalMetaId = (
+      members.find((member) => member.role === 'chair')?.globalmetaid ?? ''
+    ).trim();
+    const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
+    const isChairMessage = Boolean(
+      chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId,
+    );
+
+    if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
+      const uri = extractDeliverableUri(content);
+      // P1-4: a message with an URI-shaped token whose URI is a placeholder or
+      // malformed (e.g. `metaapp://<pinId>`, `metaapp://[PINID]`) is rejected
+      // as a whole — it is a planning example, not a deliverable. A [DELIVERABLE]
+      // with NO uri-shaped token at all stays valid (text deliverable, uri null).
+      const hasUriShapedToken = /(?:metafile|metaapp|https?):\/\//i.test(content);
+      const rejectAsPlaceholder = hasUriShapedToken && uri === null;
       const msgPinId = message.pinId;
       let recordedDeliverable = msgPinId
         ? store.listDeliverables(task.id).find((deliverable) => deliverable.msgPinId === msgPinId)
         : undefined;
-      if (msgPinId && !store.hasDeliverableWithMsgPin(task.id, msgPinId)) {
+      if (!rejectAsPlaceholder && msgPinId && !store.hasDeliverableWithMsgPin(task.id, msgPinId)) {
         recordedDeliverable = store.addDeliverable({
           taskId: task.id,
           msgPinId,
           authorGlobalmetaid: message.senderGlobalMetaId,
           kind: inferDeliverableKind(content),
-          uri: extractDeliverableUri(content),
+          uri,
         });
       }
       try {
@@ -948,6 +1044,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               deps.getStore().delete(`${OWNER_REPORTED_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {
+              // P0-1: failed noise steps (mistaken mentions whose skill routing
+              // failed) are auto-ignored on review entry so they never block the
+              // owner's acceptance, and the acceptance UI sees them as ignored.
+              try {
+                const ignored = deps.orchestrationBridge?.ignoreFailedSteps(task.id) ?? 0;
+                if (ignored > 0) {
+                  emitLog(`[GroupTaskDaemon] Task ${task.id}: auto-ignored ${ignored} noise step(s) on review entry`);
+                }
+              } catch (error) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: failed to auto-ignore noise steps: ` +
+                  `${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
               await maybeSendOwnerReport(task, members, botsById, promptMembers);
             }
           }
@@ -960,12 +1070,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return verificationNotes;
   };
 
-  /** System-generated planning directive for the chair planning turn. */
-  const buildPlanningDirective = (db: Database, task: GroupTask): string => {
+  /**
+   * System-generated planning directive for the chair planning turn. The full
+   * member roster (name, role, bio/role profile, goal) is embedded so the chair
+   * LLM assigns work to the right specialist instead of guessing from an empty
+   * group log (P1-5: the planning turn fired before any member message existed).
+   */
+  const buildPlanningDirective = (db: Database, task: GroupTask, promptMembers: DaemonPromptMember[]): string => {
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     const logLines = recent.map((row) => {
       const message = toDaemonMessage(row);
       return `${message.senderName}: ${message.content}`;
+    });
+    const rosterLines = promptMembers.map((member) => {
+      const profile = [member.bio, member.roleProfile].filter(Boolean).join(' — ');
+      const goal = member.goal?.trim() ? ` (goal: ${member.goal.trim()})` : '';
+      const skillsHint = member.role === 'chair' ? ' (chair, do not assign work to the chair)' : '';
+      return `- ${member.name} [${member.role}]${goal}${skillsHint}${profile ? ` — ${profile}` : ''}`;
     });
     return [
       '[SYSTEM planning directive — generated by the host, not by a group participant]',
@@ -974,6 +1095,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '(b) Assign each subtask to the SINGLE most suitable member BY NAME based on the roster profiles (never assign the same work to everyone).',
       '(c) State the sequence/dependencies and @-mention ONLY the members who should act NOW (later steps get assigned when their inputs arrive, e.g. after a [DELIVERABLE]).',
       '(d) End the message with [STATUS:EXECUTING].',
+      '',
+      'Full member roster (assign only to these members, by exact name):',
+      ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
       '',
       `[Group Task #${task.id} "${task.title}" — recent group log (last ${contextMessageCount} messages)]`,
       ...(logLines.length > 0 ? logLines : ['(no messages yet)']),
@@ -1014,7 +1138,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const coworkStore = deps.getCoworkStore();
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
-      const directive = buildPlanningDirective(db, task);
+      const directive = buildPlanningDirective(db, task, promptMembers);
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       // Plain LLM path: the chair is planning here, not executing skills.
@@ -1256,10 +1380,60 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       await maybeRunChairPlanningTurn(task, members, botsById, promptMembers);
     }
 
+    // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
+    // Deferred entries get priority over brand-new messages so a skipped worker
+    // still gets its chance (the message cursor already advanced past it).
+    const deferredForTask = deferredReplies.filter((entry) => entry.taskId === task.id);
+    if (deferredForTask.length > 0) {
+      deferredReplies = deferredReplies.filter((entry) => entry.taskId !== task.id);
+      for (const entry of deferredForTask) {
+        const member = members.find((candidate) => candidate.metabotId === entry.metabotId);
+        const bot = botsById.get(entry.metabotId);
+        if (!member || !bot) continue;
+        const row = queryMessageById(db, task.groupId, entry.messageId);
+        if (!row) continue; // message purged; drop the deferred entry
+        const deferredMessage = toDaemonMessage(row);
+        const key = keyOf(task.id, entry.metabotId);
+        const isChair = member.role === 'chair';
+        const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
+        const cooldownMs = isChair ? chairCooldownMs : workerCooldownMs;
+        if (now() - lastReplyAt < cooldownMs) {
+          deferReply(entry); // still cooling down; keep waiting
+          continue;
+        }
+        if ((replyCountByKey.get(key) ?? 0) >= replyBudget) continue; // permanently spent
+        if (isChair && entry.reason !== 'chair_mentioned' && chairAlreadyRepliedTo(db, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
+          continue; // the Twin already spoke about this message; drop the auto reply
+        }
+        try {
+          await generateAndSendReply(
+            task,
+            member,
+            bot,
+            deferredMessage,
+            promptMembers,
+            chairGlobalMetaId,
+            ownerGlobalMetaId,
+            entry.verificationNotes,
+          );
+          lastReplyAtByKey.set(key, now());
+          replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: deferred reply failed for bot ${entry.metabotId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
     const rows = queryNewMessages(db, task.groupId, task.lastProcessedMsgId);
     if (rows.length === 0) return;
 
     let workerRepliesThisTick = 0;
+    // P2-7: at most ONE chair auto response (deliverable / floor control / owner
+    // message) per tick, so the daemon never double-speaks alongside the Twin.
+    let chairAutoRepliesThisTick = 0;
 
     for (const row of rows) {
       const message = toDaemonMessage(row);
@@ -1279,14 +1453,42 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const isChair = member.role === 'chair';
           const key = keyOf(task.id, decision.metabotId);
 
+          // P2-7: a chair auto response (deliverable / floor control / owner
+          // message) is suppressed when the Twin already replied to this message
+          // on-chain — the daemon must not double-speak next to the Twin.
+          if (isChair && decision.reason !== 'chair_mentioned') {
+            if (chairAlreadyRepliedTo(db, task.groupId, message.pinId, chairGlobalMetaId)) {
+              emitLog(`[GroupTaskDaemon] Task ${task.id}: chair already replied to message ${message.id}; skipping auto response`);
+              continue;
+            }
+            if (chairAutoRepliesThisTick >= 1) {
+              emitLog(`[GroupTaskDaemon] Task ${task.id}: chair auto-reply cap (1/tick) reached; skipping`);
+              continue;
+            }
+          }
+
           if (!isChair && workerRepliesThisTick >= maxRepliesPerTaskPerTick) {
-            emitLog(`[GroupTaskDaemon] Task ${task.id}: per-tick reply cap reached; skipping bot ${decision.metabotId}`);
+            emitLog(`[GroupTaskDaemon] Task ${task.id}: per-tick reply cap reached; deferring bot ${decision.metabotId} to a later tick`);
+            deferReply({
+              taskId: task.id,
+              metabotId: decision.metabotId,
+              messageId: message.id,
+              reason: decision.reason,
+              verificationNotes: [],
+            });
             continue;
           }
           const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
           const cooldownMs = isChair ? chairCooldownMs : workerCooldownMs;
           if (now() - lastReplyAt < cooldownMs) {
-            emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} in cooldown; skipping`);
+            emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} in cooldown; deferring to a later tick`);
+            deferReply({
+              taskId: task.id,
+              metabotId: decision.metabotId,
+              messageId: message.id,
+              reason: decision.reason,
+              verificationNotes: decision.reason === 'chair_deliverable' ? verificationNotes : [],
+            });
             continue;
           }
           if ((replyCountByKey.get(key) ?? 0) >= replyBudget) {
@@ -1308,7 +1510,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           );
           lastReplyAtByKey.set(key, now());
           replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
-          if (!isChair) workerRepliesThisTick += 1;
+          if (!isChair) {
+            workerRepliesThisTick += 1;
+          } else if (decision.reason !== 'chair_mentioned') {
+            chairAutoRepliesThisTick += 1;
+          }
         }
       } catch (error) {
         // One bad message must never stall the cursor or the tick.

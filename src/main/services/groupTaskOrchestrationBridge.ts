@@ -272,6 +272,32 @@ export class GroupTaskOrchestrationBridge {
     });
   }
 
+  /**
+   * Auto-ignore noise steps: failed steps are typically noise (a mistaken worker
+   * mention whose skill routing failed) that carries no real deliverable. When a
+   * task enters review, demote them to completed with an `ignored` marker so they
+   * neither block owner acceptance nor show up as real work. Safe to call at any
+   * point; steps that already have a different status are left untouched.
+   */
+  ignoreFailedSteps(groupTaskId: number): number {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
+    if (!groupTask.orchestrationTaskId) return 0;
+    const steps = this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId);
+    let ignored = 0;
+    for (const step of steps) {
+      if (step.status !== 'failed') continue;
+      this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', {
+        acceptedResult: {
+          ignored: true,
+          reason: 'noise step auto-ignored on review entry (no real deliverable)',
+        },
+      });
+      ignored += 1;
+    }
+    return ignored;
+  }
+
   acceptGroupTask(groupTaskId: number): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
@@ -280,7 +306,12 @@ export class GroupTaskOrchestrationBridge {
       throw new Error(`Orchestration task ${canonical.id} is cancelled`);
     }
     const steps = this.deps.orchestrationStore.listSteps(canonical.id);
-    const unfinished = steps.filter((step) => !['waiting_input', 'completed'].includes(step.status));
+    // Only ACTIVE steps (ready/queued/running/blocked) block acceptance; failed and
+    // cancelled steps are noise (mistaken mentions, aborted turns) and never carry
+    // a real deliverable, so they must not trap the task in review.
+    const unfinished = steps.filter((step) =>
+      ['ready', 'queued', 'running', 'blocked'].includes(step.status),
+    );
     if (unfinished.length > 0) {
       throw new Error(`Group task ${groupTaskId} has unfinished canonical steps`);
     }

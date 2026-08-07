@@ -195,9 +195,11 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
     assert.match(kickoff.opts.content, /\[GROUP TASK\] Build MetaApp/);
     assert.match(kickoff.opts.content, /Goal: Build and publish the intro MetaApp/);
     assert.match(kickoff.opts.content, /Acceptance: Preview URL works/);
-    assert.match(kickoff.opts.content, /Chair: @Twin Bot/);
-    assert.match(kickoff.opts.content, /@Coder Bot/);
-    assert.match(kickoff.opts.content, /@Designer Bot/);
+    assert.match(kickoff.opts.content, /Chair: Twin Bot/);
+    // P0-3: the roster line must NOT carry @ prefixes (an @ roster triggers every
+    // member to respond; the chair assigns work with @ in later messages).
+    assert.match(kickoff.opts.content, /Members: Coder Bot, Designer Bot/);
+    assert.doesNotMatch(kickoff.opts.content, /@Coder Bot|@Designer Bot/);
     assert.equal(kickoff.opts.nickName, 'Twin Bot');
 
     // listed too
@@ -205,6 +207,9 @@ test('createGroupTask happy path: twin chair, joins per member, kickoff, rows pe
     const shown = await getGroupTask(detail.id);
     assert.equal(shown.members.length, 3);
     assert.deepEqual(shown.deliverables, []);
+    // P2-6: show surfaces the group transcript (mock transport writes no rows,
+    // so only the array shape is asserted here).
+    assert.ok(Array.isArray(shown.messages), 'getGroupTask returns the message flow');
   } finally {
     h.cleanup();
   }
@@ -225,8 +230,9 @@ test('createGroupTask auto-selects the complete local Worker roster for Twin pla
     // prompt can then choose a specialist based on each Worker profile.
     assert.deepEqual(detail.members.map((member) => member.metabotId).sort(), [1, 2, 3]);
     assert.deepEqual(h.calls.join.map((call) => call.metabotId).sort(), [2, 3]);
-    assert.match(h.calls.send[0].opts.content, /@Coder Bot/);
-    assert.match(h.calls.send[0].opts.content, /@Designer Bot/);
+    // P0-3: kickoff roster line has no @ prefixes (see happy-path test above).
+    assert.match(h.calls.send[0].opts.content, /Members: Designer Bot, Coder Bot/);
+    assert.doesNotMatch(h.calls.send[0].opts.content, /@Coder Bot|@Designer Bot/);
   } finally {
     h.cleanup();
   }
