@@ -4513,12 +4513,13 @@ export class CoworkRunner extends EventEmitter {
         }
 
         // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
-        // acceptEdits keeps AskUserQuestion prompts; bypassPermissions skips everything.
+        // AskUserQuestion is always routed to the interactive confirmation flow,
+        // so delete-safety prompts stay reachable even under full trust.
         if (permissionMode === 'acceptEdits' || permissionMode === 'bypassPermissions') {
-          if (permissionMode === 'bypassPermissions' || resolvedName !== 'AskUserQuestion') {
+          if (resolvedName !== 'AskUserQuestion') {
             return { behavior: 'allow', updatedInput: resolvedInput };
           }
-          // acceptEdits + AskUserQuestion: fall through to the prompt below.
+          // acceptEdits / bypassPermissions + AskUserQuestion: fall through to the prompt below.
         }
 
         if (resolvedName !== 'AskUserQuestion') {
