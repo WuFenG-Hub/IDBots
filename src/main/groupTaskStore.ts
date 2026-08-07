@@ -529,6 +529,18 @@ export class GroupTaskStore {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
     this.saveDb();
   }
+
+  /** Remove a mistakenly recorded deliverable (P1-4 cleanup hatch for the chair). */
+  deleteDeliverable(id: number): boolean {
+    const row = this.getOne<{ id: number }>(
+      'SELECT id FROM group_task_deliverables WHERE id = ?',
+      [id],
+    );
+    if (!row) return false;
+    this.db.run('DELETE FROM group_task_deliverables WHERE id = ?', [id]);
+    this.saveDb();
+    return true;
+  }
 }
 
 /** Member SELECT with metabots join (name/globalmetaid for mention matching). */

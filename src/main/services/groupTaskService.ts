@@ -14,6 +14,7 @@ import {
   type GroupTaskMember,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
+  type GroupChatTranscriptMessage,
 } from '../groupTaskStore';
 import {
   createGroupChat,
@@ -40,6 +41,8 @@ export interface CreateGroupTaskOptions {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMember[];
   deliverables: GroupTaskDeliverable[];
+  /** Latest group transcript page (P2-6: chair can read the message flow). */
+  messages: GroupChatTranscriptMessage[];
 }
 
 export interface PostGroupTaskMessageOptions {
@@ -179,7 +182,12 @@ function requireRunnableTask(taskId: number): GroupTask {
   return task;
 }
 
-/** Kickoff message posted by the chair right after group creation. */
+/**
+ * Kickoff message posted by the chair right after group creation.
+ * IMPORTANT (P0-3): the member roster line must NOT carry `@` prefixes — the
+ * daemon treats an explicit `@Name` as a work assignment. A roster line with
+ * every member @-mentioned used to trigger every member to respond.
+ */
 function buildKickoffMessage(input: {
   title: string;
   goal: string;
@@ -191,9 +199,9 @@ function buildKickoffMessage(input: {
     `[GROUP TASK] ${input.title}`,
     `Goal: ${input.goal}`,
     `Acceptance: ${input.acceptanceCriteria?.trim() || '(none specified)'}`,
-    `Chair: @${input.chairName}`,
+    `Chair: ${input.chairName}`,
     input.memberNames.length > 0
-      ? `Members: ${input.memberNames.map((name) => `@${name}`).join(', ')}`
+      ? `Members: ${input.memberNames.join(', ')}`
       : 'Members: (chair only)',
   ];
   return lines.join('\n');
@@ -362,6 +370,9 @@ export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
     ...task,
     members: store.listMembers(id),
     deliverables: store.listDeliverables(id),
+    messages: task.groupId
+      ? store.listGroupChatMessages(task.groupId, { limit: 50 })
+      : [],
   };
 }
 
@@ -439,6 +450,20 @@ export async function joinGroupTaskMember(
     role: 'worker',
     joinedPinId: pinId,
   });
+}
+
+/**
+ * Remove a mistakenly recorded deliverable (P1-4 cleanup hatch: chair can delete
+ * placeholder/junk deliverables that were ingested before the parser hardening).
+ */
+export async function deleteGroupTaskDeliverable(taskId: number, deliverableId: number): Promise<boolean> {
+  const task = requireTask(taskId);
+  const store = getGroupTaskStore();
+  const deliverable = store.listDeliverables(taskId).find((item) => item.id === deliverableId);
+  if (!deliverable) {
+    throw new Error(`Deliverable ${deliverableId} not found in group task ${taskId}`);
+  }
+  return store.deleteDeliverable(deliverableId);
 }
 
 /**

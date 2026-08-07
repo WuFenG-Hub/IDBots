@@ -102,7 +102,9 @@ const STEP_TRANSITIONS: Record<OrchestrationStepStatus, OrchestrationStepStatus[
   running: ['waiting_input', 'completed', 'failed', 'ready', 'cancelled'],
   waiting_input: ['running', 'completed', 'failed', 'cancelled'],
   completed: ['ready'],
-  failed: ['ready', 'cancelled'],
+  // failed -> completed: used when a noise step (e.g. a mistaken worker mention
+  // whose skill routing failed) is auto-ignored when the task enters review.
+  failed: ['ready', 'cancelled', 'completed'],
   cancelled: [],
 };
 const ATTEMPT_TRANSITIONS: Record<OrchestrationAttemptStatus, OrchestrationAttemptStatus[]> = {
