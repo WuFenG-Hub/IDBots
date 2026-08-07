@@ -103,10 +103,26 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     ? estimateDeepSeekCostCNY(modelId, usageStats)
     : (usageStats.totalCostUsd ?? 0);
   const showCost = estimatedCost > 0;
-  // Session cache-hit rate — shown on the chip button instead of the cost.
+  // Session cache-hit rate. Two numbers with different meaning:
+  // - cacheHitRate: cumulative over ALL turns (diluted by the T1 cold start,
+  //   which is 100% miss by definition — nothing is cached yet).
+  // - warmCacheHitRate: cumulative EXCLUDING the first turn, i.e. the rate on
+  //   a warm prefix. This matches what the DeepSeek dashboard reports (per-
+  //   request hit rate) much more closely than the all-turn average.
+  // The chip button shows the warm rate as the primary signal.
   const cacheDenominator = usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
   const cacheHitRate = cacheDenominator > 0
     ? Math.round((usageStats.cacheReadTokens / cacheDenominator) * 100)
+    : null;
+  const turnStats = usageStats.turnStats ?? [];
+  // Exclude the first turn (T1 cold start). turnStats entries are appended in
+  // order, so index 0 is T1.
+  const warmTurns = turnStats.length > 1 ? turnStats.slice(1) : [];
+  const warmHit = warmTurns.reduce((sum, t) => sum + t.cacheHitTokens, 0);
+  const warmMiss = warmTurns.reduce((sum, t) => sum + t.cacheMissTokens, 0);
+  const warmDenom = warmHit + warmMiss;
+  const warmCacheHitRate = warmDenom > 0
+    ? Math.round((warmHit / warmDenom) * 100)
     : null;
 
   return (
@@ -119,7 +135,9 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
       >
         <span className="text-[11px]">∑</span>
         <span className="font-medium">{formatTokens(totalTokens)}</span>
-        {cacheHitRate !== null && <span className="text-[10px] opacity-80">{cacheHitRate}%</span>}
+        {/* Show the warm-cache rate (excl. T1 cold start) as the primary signal.
+            Falls back to the cumulative rate when only one turn has run. */}
+        {warmCacheHitRate !== null && <span className="text-[10px] opacity-80">{warmCacheHitRate}%</span>}
       </button>
       {isOpen && (
         <div className="absolute right-0 bottom-full mb-2 w-60 rounded-xl shadow-xl dark:bg-claude-darkBg bg-claude-bg dark:border-claude-darkBorder border-claude-border border p-3 z-50">
@@ -140,13 +158,11 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
           </div>
           {(() => {
-            // Cache-hit rates: session-cumulative + most-recent-turn. The
-            // per-turn rate is the correct prefix-stability signal — the
-            // cumulative rate is diluted by cold-start turns and growing context.
-            const denom = usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
-            if (denom <= 0) return null;
-            const hitRate = Math.round((usageStats.cacheReadTokens / denom) * 100);
-            const turnStats = usageStats.turnStats ?? [];
+            // Cache-hit rates, three meanings:
+            //   cumulative (all turns, diluted by T1 cold start),
+            //   warm (excluding T1 — the honest per-request rate, matches the
+            //        DeepSeek dashboard), and last-turn (current prefix state).
+            if (cacheDenominator <= 0) return null;
             const lastTurn = turnStats[turnStats.length - 1];
             const lastTurnRate = lastTurn
               ? Math.round((lastTurn.cacheHitTokens / Math.max(lastTurn.cacheHitTokens + lastTurn.cacheMissTokens, 1)) * 100)
@@ -155,9 +171,15 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
             return (
               <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 <div className="flex justify-between">
-                  <span>{i18nService.t('deepseekCacheHitRate')}</span>
-                  <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{hitRate}%</span>
+                  <span>{i18nService.t('deepseekCacheHitRate')} ({i18nService.t('deepseekCacheHitRateAll')})</span>
+                  <span className="font-mono">{cacheHitRate}%</span>
                 </div>
+                {warmCacheHitRate !== null && (
+                  <div className="flex justify-between">
+                    <span className="font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('deepseekCacheHitRate')} ({i18nService.t('deepseekCacheHitRateWarm')})</span>
+                    <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{warmCacheHitRate}%</span>
+                  </div>
+                )}
                 {lastTurnRate !== null && (
                   <div className="flex justify-between">
                     <span>{i18nService.t('deepseekLastTurnCacheHitRate')}</span>
