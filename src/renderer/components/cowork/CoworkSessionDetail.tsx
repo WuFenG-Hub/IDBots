@@ -221,6 +221,27 @@ const formatShortHash = (value: string): string => {
   return `${value.slice(0, 8)}...${value.slice(-8)}`;
 };
 
+const formatMessageTimestamp = (timestamp: number): string => {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const date = new Date(timestamp);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hours}:${minutes}`;
+};
+
+const formatWorkedDuration = (durationMs: number): string => {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return '0s';
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+};
+
 const isRenderableAvatarSource = (value: string | null | undefined): boolean =>
   isSharedRenderableAvatarSource(value);
 
@@ -1401,6 +1422,26 @@ const CopyButton: React.FC<{
   );
 };
 
+// Message timestamp shown next to the copy button, sharing its
+// hover-visibility logic and visual style.
+const MessageTimestamp: React.FC<{
+  timestamp: number;
+  visible: boolean;
+}> = ({ timestamp, visible }) => {
+  const label = formatMessageTimestamp(timestamp);
+  if (!label) return null;
+  return (
+    <span
+      className={`text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary select-none whitespace-nowrap transition-all duration-200 ${
+        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      }`}
+      aria-hidden="true"
+    >
+      {label}
+    </span>
+  );
+};
+
 const GigSquareOrderCard: React.FC<{ payload: GigSquareOrderPayload }> = ({ payload }) => {
   const txid = typeof payload.txid === 'string' ? payload.txid : '';
   const serviceName = typeof payload.serviceName === 'string' ? payload.serviceName : '';
@@ -1601,6 +1642,10 @@ const UserMessageItem: React.FC<{
                     </span>
                   </div>
                 ))}
+                <MessageTimestamp
+                  timestamp={message.timestamp}
+                  visible={isHovered}
+                />
                 <CopyButton
                   content={message.content}
                   visible={isHovered}
@@ -1751,6 +1796,10 @@ const AssistantMessageItem: React.FC<{
         <div className="flex items-center gap-1.5 mt-1">
           <CopyButton
             content={displayContent}
+            visible={isHovered}
+          />
+          <MessageTimestamp
+            timestamp={message.timestamp}
             visible={isHovered}
           />
         </div>
@@ -2036,6 +2085,9 @@ const AssistantTurnBlock: React.FC<{
   showImagePreviews = true,
 }) => {
   const visibleAssistantItems = getVisibleAssistantItems(turn.assistantItems);
+  // Collapsed by default once a turn completes; the header expands to reveal
+  // the working process (thinking, tool calls, intermediate notes).
+  const [processExpanded, setProcessExpanded] = useState(false);
 
   const renderSystemMessage = (message: CoworkMessage) => {
     const rawContent = hasText(message.content)
@@ -2095,71 +2147,144 @@ const AssistantTurnBlock: React.FC<{
     );
   };
 
+  const renderVisibleItem = (
+    item: AssistantTurnItem,
+    index: number,
+    allItems: AssistantTurnItem[],
+  ): React.ReactNode => {
+    if (item.type === 'assistant') {
+      if (item.message.metadata?.isThinking) {
+        return (
+          <ThinkingBlock
+            key={item.message.id}
+            message={item.message}
+            mapDisplayText={mapDisplayText}
+          />
+        );
+      }
+      // Check if there are any tool_group items after this assistant message
+      const hasToolGroupAfter = allItems
+        .slice(index + 1)
+        .some(laterItem => laterItem.type === 'tool_group');
+
+      return (
+        <AssistantMessageItem
+          key={item.message.id}
+          message={item.message}
+          resolveLocalFilePath={resolveLocalFilePath}
+          mapDisplayText={mapDisplayText}
+          showCopyButton={showCopyButtons && !hasToolGroupAfter}
+        />
+      );
+    }
+
+    if (item.type === 'tool_group') {
+      const nextItem = allItems[index + 1];
+      const isLastInSequence = !nextItem || nextItem.type !== 'tool_group';
+      return (
+        <ToolCallGroup
+          key={`tool-${item.group.toolUse.id}`}
+          group={item.group}
+          isLastInSequence={isLastInSequence}
+          mapDisplayText={mapDisplayText}
+          resolveLocalFilePath={resolveLocalFilePath}
+          showImagePreviews={showImagePreviews}
+        />
+      );
+    }
+
+    if (item.type === 'system') {
+      const systemMessage = renderSystemMessage(item.message);
+      if (!systemMessage) {
+        return null;
+      }
+      return (
+        <div key={item.message.id}>
+          {systemMessage}
+        </div>
+      );
+    }
+
+    return (
+      <div key={item.message.id}>
+        {renderOrphanToolResult(item.message)}
+      </div>
+    );
+  };
+
+  // The final assistant text message is the delivery result; everything
+  // before it (thinking, tool calls, intermediate notes) is the working
+  // process. Once the turn completes, the process collapses behind a
+  // "Worked for X" header so only the delivery stays visible.
+  const isTurnComplete = !visibleAssistantItems.some((item) => {
+    const message = item.type === 'tool_group' ? item.group.toolUse : item.message;
+    return Boolean(message.metadata?.isStreaming);
+  });
+  let deliveryIndex = -1;
+  for (let i = visibleAssistantItems.length - 1; i >= 0; i--) {
+    const item = visibleAssistantItems[i];
+    if (item.type === 'assistant' && !item.message.metadata?.isThinking) {
+      deliveryIndex = i;
+      break;
+    }
+  }
+  const deliveryItem = deliveryIndex >= 0 ? visibleAssistantItems[deliveryIndex] : null;
+  const deliveryMessage = deliveryItem && deliveryItem.type === 'assistant' ? deliveryItem.message : null;
+  const processItems = deliveryMessage
+    ? visibleAssistantItems.filter((_, index) => index !== deliveryIndex)
+    : [];
+  const workedForMs = deliveryMessage && turn.userMessage
+    ? Math.max(0, deliveryMessage.timestamp - turn.userMessage.timestamp)
+    : 0;
+  const showWorkedHeader = Boolean(
+    isTurnComplete
+    && deliveryMessage
+    && processItems.length > 0
+    && turn.userMessage
+    && workedForMs > 0
+  );
+
   return (
     <div className="px-4 py-2">
       <div className="max-w-3xl mx-auto">
         <div className="flex items-start gap-3">
           <div className="flex-1 min-w-0 px-4 py-3 space-y-3">
-            {visibleAssistantItems.map((item, index) => {
-              if (item.type === 'assistant') {
-                if (item.message.metadata?.isThinking) {
-                  return (
-                    <ThinkingBlock
-                      key={item.message.id}
-                      message={item.message}
-                      mapDisplayText={mapDisplayText}
-                    />
-                  );
-                }
-                // Check if there are any tool_group items after this assistant message
-                const hasToolGroupAfter = visibleAssistantItems
-                  .slice(index + 1)
-                  .some(laterItem => laterItem.type === 'tool_group');
-
-                return (
-                  <AssistantMessageItem
-                    key={item.message.id}
-                    message={item.message}
-                    resolveLocalFilePath={resolveLocalFilePath}
-                    mapDisplayText={mapDisplayText}
-                    showCopyButton={showCopyButtons && !hasToolGroupAfter}
+            {showWorkedHeader ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setProcessExpanded((expanded) => !expanded)}
+                  className="w-full flex items-center gap-1.5 rounded-lg border dark:border-claude-darkBorder/50 border-claude-border/50 px-3 py-2 text-left dark:hover:bg-claude-darkSurfaceHover/50 hover:bg-claude-surfaceHover/50 transition-colors"
+                  aria-label={processExpanded ? i18nService.t('collapse') : i18nService.t('expand')}
+                  aria-expanded={processExpanded}
+                >
+                  <ChevronRightIcon
+                    className={`h-3.5 w-3.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0 transition-transform duration-200 ${
+                      processExpanded ? 'rotate-90' : ''
+                    }`}
                   />
-                );
-              }
-
-              if (item.type === 'tool_group') {
-                const nextItem = visibleAssistantItems[index + 1];
-                const isLastInSequence = !nextItem || nextItem.type !== 'tool_group';
-                return (
-                  <ToolCallGroup
-                    key={`tool-${item.group.toolUse.id}`}
-                    group={item.group}
-                    isLastInSequence={isLastInSequence}
-                    mapDisplayText={mapDisplayText}
-                    resolveLocalFilePath={resolveLocalFilePath}
-                    showImagePreviews={showImagePreviews}
-                  />
-                );
-              }
-
-              if (item.type === 'system') {
-                const systemMessage = renderSystemMessage(item.message);
-                if (!systemMessage) {
-                  return null;
-                }
-                return (
-                  <div key={item.message.id}>
-                    {systemMessage}
+                  <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('coworkWorkedFor')} {formatWorkedDuration(workedForMs)}
+                  </span>
+                </button>
+                {processExpanded && (
+                  <div className="space-y-3">
+                    {processItems.map((processItem) => (
+                      renderVisibleItem(processItem, visibleAssistantItems.indexOf(processItem), visibleAssistantItems)
+                    ))}
                   </div>
-                );
-              }
-
-              return (
-                <div key={item.message.id}>
-                  {renderOrphanToolResult(item.message)}
-                </div>
-              );
-            })}
+                )}
+                <AssistantMessageItem
+                  key={deliveryMessage!.id}
+                  message={deliveryMessage!}
+                  resolveLocalFilePath={resolveLocalFilePath}
+                  mapDisplayText={mapDisplayText}
+                  showCopyButton={showCopyButtons}
+                />
+              </>
+            ) : (
+              visibleAssistantItems.map((item, index) => renderVisibleItem(item, index, visibleAssistantItems))
+            )}
             {showTypingIndicator && <TypingDots />}
           </div>
         </div>
