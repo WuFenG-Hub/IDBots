@@ -3180,13 +3180,11 @@ export class CoworkRunner extends EventEmitter {
     browserContextPrompt?: string | null
   ): string {
     const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
-    const localTimePrompt = this.buildLocalTimeContextPrompt(profile.localTimeMode);
     const memoryStrategyPrompt = this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy);
     const trimmedBasePrompt = baseSystemPrompt?.trim();
     const sections = [
       personaBlock,
       safetyPrompt,
-      localTimePrompt,
       profile.includeMemoryPromptBlocks ? memoryPromptBlocksXml : null,
       memoryStrategyPrompt,
       trimmedBasePrompt,
@@ -4240,6 +4238,18 @@ export class CoworkRunner extends EventEmitter {
           '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
         );
       }
+    }
+
+    // Inject the volatile local-time context into the CURRENT user message
+    // (Reasonix pattern) instead of the system prompt. The system prompt is the
+    // first thing in DeepSeek's cacheable prefix; embedding a per-ms timestamp
+    // there collapses the prefix to a few hundred bytes and causes ~95% cache
+    // misses. Time is only relevant to the model when answering the current
+    // turn, so it belongs in the user message (the tail, which is new each turn).
+    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode);
+    if (localTimePrompt.trim()) {
+      effectivePrompt = `${localTimePrompt}\n\n${effectivePrompt}`;
     }
 
     const forceTextOnlyAttachments = shouldForceTextOnlyAttachmentMode(
