@@ -794,6 +794,14 @@ interface ActiveSession {
     turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
   };
   /**
+   * MetaBot persona block, computed once when the session starts and reused on
+   * every continued turn. Persona text lives at the head of the system prompt,
+   * so re-reading it from the DB each turn would let a mid-session persona edit
+   * silently break DeepSeek's cached prefix. Edits take effect on the next
+   * session instead (Reasonix rule: mid-session changes never touch the prefix).
+   */
+  personaBlock?: string;
+  /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
    */
@@ -3177,6 +3185,11 @@ export class CoworkRunner extends EventEmitter {
    * plus its last few days of dream summaries. Returns '' when the session
    * has no attributed bot (strict, no cross-bot guessing) or no experience
    * data exists yet.
+   *
+   * Volatile by nature (the dream service rewrites entries nightly and the
+   * summary window rolls daily), so this block is injected into the CURRENT
+   * user message via buildVolatileContextPrompt — never into the system
+   * prompt, where any change would wipe DeepSeek's cached prefix.
    */
   private buildExperiencePromptBlocksXml(sessionId: string): string {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
@@ -3280,6 +3293,13 @@ export class CoworkRunner extends EventEmitter {
     const sections: Array<string | null> = [];
     if (profile.includeMemoryPromptBlocks) {
       sections.push(this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }));
+      // Hot-layer experience injection (self-identity + recent dream summaries).
+      // The dream service rewrites these nightly and the summary window rolls
+      // daily, so they can never live in the system prompt — they belong here
+      // in the request tail with the other volatile blocks.
+      if (sessionMemoryEnabled) {
+        sections.push(this.buildExperiencePromptBlocksXml(sessionId));
+      }
     }
     if (this.getBrowserContextPrompt) {
       // Browser tab state is live; fetch async and degrade silently on failure.
@@ -3704,13 +3724,15 @@ export class CoworkRunner extends EventEmitter {
 
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Freeze the persona block for the lifetime of this active session: it sits
+    // at the head of the system prompt, so a live DB re-read per turn would let
+    // any mid-session persona edit break DeepSeek's cached prefix.
+    activeSession.personaBlock = personaBlock;
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3811,14 +3833,14 @@ export class CoworkRunner extends EventEmitter {
     // Use provided systemPrompt (e.g. with updated skill routing) or fall back to session's stored one.
     // Always prepend workspace safety prompt so folder boundary rules are enforced at prompt level.
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
-    const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Reuse the persona block frozen at session start (see startSession); fall
+    // back to a fresh read only if this active session predates the freeze.
+    const personaBlock = activeSession.personaBlock ?? this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
