@@ -3186,17 +3186,26 @@ export class CoworkRunner extends EventEmitter {
       .replace(/'/g, '&apos;');
   }
 
+  /**
+   * Compose the STABLE system prompt. Only session-invariant blocks belong
+   * here (persona, safety policy, memory strategy, base prompt) so the first
+   * bytes of every request are byte-identical across turns — DeepSeek's
+   * automatic context cache matches from byte 0, and any change here nukes the
+   * entire prefix (a ~200k-token cache miss per turn, not a small tail miss).
+   *
+   * Volatile blocks that DO change per turn (scoped memory entries re-ranked
+   * by the current user text, live browser tabs, live remote-services discovery)
+   * are injected into the CURRENT user message instead (see
+   * buildVolatileContextPrompt), so they never touch the cacheable head.
+   */
   private composeEffectiveSystemPrompt(
     baseSystemPrompt: string,
     workspaceRoot: string,
     cwd: string,
     confirmationMode: 'modal' | 'text',
-    memoryPromptBlocksXml: string,
     memoryEnabled: boolean,
-    disableRemoteServicesPrompt: boolean,
     personaBlock?: string,
-    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
-    browserContextPrompt?: string | null
+    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE
   ): string {
     const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
     const memoryStrategyPrompt = this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy);
@@ -3204,12 +3213,39 @@ export class CoworkRunner extends EventEmitter {
     const sections = [
       personaBlock,
       safetyPrompt,
-      profile.includeMemoryPromptBlocks ? memoryPromptBlocksXml : null,
       memoryStrategyPrompt,
       trimmedBasePrompt,
-      browserContextPrompt ?? null,
-      disableRemoteServicesPrompt ? null : (this.getRemoteServicesPrompt?.() ?? null),
     ];
+    return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
+  }
+
+  /**
+   * Build the volatile per-turn context blocks that used to live in the system
+   * prompt but MUST move to the current user message to keep the system-prompt
+   * prefix byte-stable (Reasonix pattern: inject volatile state into the user
+   * turn, never the cacheable head). Called fresh every turn because each block
+   * can change: memory entries are re-ranked by the current user text and new
+   * memories are written after each reply; browser tabs and remote-services
+   * discovery are live data.
+   */
+  private async buildVolatileContextPrompt(
+    sessionId: string,
+    prompt: string,
+    sessionMemoryEnabled: boolean,
+    profile: SystemPromptProfile,
+    disableRemoteServicesPrompt: boolean
+  ): Promise<string> {
+    const sections: Array<string | null> = [];
+    if (profile.includeMemoryPromptBlocks) {
+      sections.push(this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }));
+    }
+    if (this.getBrowserContextPrompt) {
+      // Browser tab state is live; fetch async and degrade silently on failure.
+      sections.push(await this.getBrowserContextPrompt(sessionId).catch(() => null));
+    }
+    if (!disableRemoteServicesPrompt) {
+      sections.push(this.getRemoteServicesPrompt?.() ?? null);
+    }
     return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
   }
 
@@ -3636,23 +3672,14 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
-      ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
-      : '';
-    const browserContextPrompt = this.getBrowserContextPrompt
-      ? await this.getBrowserContextPrompt(sessionId).catch(() => null)
-      : null;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
       sessionCwd,
       activeSession.confirmationMode,
-      memoryPromptBlocksXml,
       sessionMemoryEnabled,
-      activeSession.disableRemoteServicesPrompt,
       personaWithExperience,
-      systemPromptProfile,
-      browserContextPrompt
+      systemPromptProfile
     );
 
     // Run claude-code using the SDK
@@ -3753,23 +3780,14 @@ export class CoworkRunner extends EventEmitter {
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const memoryPromptBlocksXml = systemPromptProfile.includeMemoryPromptBlocks
-      ? this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled })
-      : '';
-    const browserContextPrompt = this.getBrowserContextPrompt
-      ? await this.getBrowserContextPrompt(sessionId).catch(() => null)
-      : null;
     const effectiveSystemPrompt = this.composeEffectiveSystemPrompt(
       baseSystemPrompt,
       this.normalizeWorkspaceRoot(activeSession.workspaceRoot, sessionCwd),
       sessionCwd,
       activeSession.confirmationMode,
-      memoryPromptBlocksXml,
       sessionMemoryEnabled,
-      activeSession.disableRemoteServicesPrompt,
       personaWithExperience,
-      systemPromptProfile,
-      browserContextPrompt
+      systemPromptProfile
     );
 
     try {
@@ -4259,16 +4277,29 @@ export class CoworkRunner extends EventEmitter {
       }
     }
 
-    // Inject the volatile local-time context into the CURRENT user message
-    // (Reasonix pattern) instead of the system prompt. The system prompt is the
-    // first thing in DeepSeek's cacheable prefix; embedding a per-ms timestamp
-    // there collapses the prefix to a few hundred bytes and causes ~95% cache
-    // misses. Time is only relevant to the model when answering the current
-    // turn, so it belongs in the user message (the tail, which is new each turn).
+    // Inject ALL volatile context into the CURRENT user message (Reasonix
+    // pattern) instead of the system prompt. The system prompt is the first
+    // thing in DeepSeek's cacheable prefix; any per-turn change there (a ms
+    // timestamp, memory entries re-ranked by the current user text, live
+    // browser tabs, live remote-services discovery) collapses the prefix and
+    // causes a ~200k-token cache miss on every turn. Volatile context is only
+    // relevant when answering the current turn, so it belongs in the user
+    // message (the tail, which is new each turn) — the system prompt stays
+    // byte-stable and the prefix keeps hitting.
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
     const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode);
-    if (localTimePrompt.trim()) {
-      effectivePrompt = `${localTimePrompt}\n\n${effectivePrompt}`;
+    const volatileBlocks = await this.buildVolatileContextPrompt(
+      sessionId,
+      prompt,
+      sessionMemoryEnabled,
+      systemPromptProfile,
+      activeSession.disableRemoteServicesPrompt
+    );
+    const volatileHead = [localTimePrompt, volatileBlocks]
+      .filter((section) => section?.trim())
+      .join('\n\n');
+    if (volatileHead) {
+      effectivePrompt = `${volatileHead}\n\n${effectivePrompt}`;
     }
 
     const forceTextOnlyAttachments = shouldForceTextOnlyAttachmentMode(

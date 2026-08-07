@@ -382,8 +382,6 @@ test('CoworkRunner uses a compact outer prompt profile for seller metaweb_order 
     '/tmp/idbots-order',
     '/tmp/idbots-order',
     'text',
-    '<ownerMemories><memory>hidden</memory></ownerMemories>',
-    true,
     true,
     personaBlock,
     profile
@@ -392,10 +390,12 @@ test('CoworkRunner uses a compact outer prompt profile for seller metaweb_order 
   assert.equal(profile.id, 'service_order_a2a');
   assert.match(systemPrompt, /<metabot_identity>/);
   assert.match(systemPrompt, /## Workspace Safety Policy/);
-  assert.match(systemPrompt, /## Local Time Context/);
   assert.match(systemPrompt, /BASE ORDER PROMPT/);
+  // Cache-first policy: volatile blocks (time, memory, remote services) are NOT
+  // part of the stable system-prompt prefix.
   assert.doesNotMatch(systemPrompt, /## Memory Strategy/);
-  assert.doesNotMatch(systemPrompt, /<ownerMemories>/);
+  assert.doesNotMatch(systemPrompt, /<ownerMemories>\n-/);
+  assert.doesNotMatch(systemPrompt, /Local Time Context/);
   assert.doesNotMatch(systemPrompt, /schedule\.type = "at"|one-time scheduled tasks/i);
   assert.doesNotMatch(systemPrompt, /AskUserQuestion/);
 });
@@ -426,8 +426,6 @@ test('CoworkRunner keeps the full common outer prompt for standard cowork sessio
     '/tmp/idbots-standard',
     '/tmp/idbots-standard',
     'text',
-    '<ownerMemories><memory>visible</memory></ownerMemories>',
-    true,
     true,
     personaBlock,
     profile
@@ -435,8 +433,12 @@ test('CoworkRunner keeps the full common outer prompt for standard cowork sessio
 
   assert.equal(profile.id, 'default');
   assert.match(systemPrompt, /## Memory Strategy/);
-  assert.match(systemPrompt, /<ownerMemories>/);
-  assert.match(systemPrompt, /schedule\.type = "at"|one-time scheduled tasks/i);
+  // Volatile memory blocks are injected into the user turn, not the stable
+  // system-prompt prefix (cache-first policy). The `<ownerMemories>` LABEL
+  // appears in the static Memory Strategy prose; the actual rendered block is
+  // `<ownerMemories>\n- <text>` — assert that form is absent from the system prompt.
+  assert.doesNotMatch(systemPrompt, /<ownerMemories>\n-/);
+  assert.doesNotMatch(systemPrompt, /Local Time Context/);
   assert.match(systemPrompt, /Do not use AskUserQuestion in this session/);
 });
 
