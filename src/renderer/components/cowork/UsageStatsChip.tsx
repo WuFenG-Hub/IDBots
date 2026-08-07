@@ -139,10 +139,17 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
           </div>
           {(() => {
-            // Cache-hit rate + lightweight miss attribution (diagnostics).
+            // Cache-hit rates: session-cumulative + most-recent-turn. The
+            // per-turn rate is the correct prefix-stability signal — the
+            // cumulative rate is diluted by cold-start turns and growing context.
             const denom = usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
             if (denom <= 0) return null;
             const hitRate = Math.round((usageStats.cacheReadTokens / denom) * 100);
+            const turnStats = usageStats.turnStats ?? [];
+            const lastTurn = turnStats[turnStats.length - 1];
+            const lastTurnRate = lastTurn
+              ? Math.round((lastTurn.cacheHitTokens / Math.max(lastTurn.cacheHitTokens + lastTurn.cacheMissTokens, 1)) * 100)
+              : null;
             const recentMisses = (usageStats.cacheMissEvents ?? []).slice(-3);
             return (
               <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -150,6 +157,12 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
                   <span>{i18nService.t('deepseekCacheHitRate')}</span>
                   <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{hitRate}%</span>
                 </div>
+                {lastTurnRate !== null && (
+                  <div className="flex justify-between">
+                    <span>{i18nService.t('deepseekLastTurnCacheHitRate')}</span>
+                    <span className="font-mono">{lastTurnRate}%</span>
+                  </div>
+                )}
                 {recentMisses.length > 0 && (
                   <div className="space-y-0.5 opacity-70">
                     {recentMisses.map((evt) => (

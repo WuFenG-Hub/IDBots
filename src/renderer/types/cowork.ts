@@ -105,6 +105,8 @@ export interface CoworkUsageStats {
   turnCount?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
+  /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */
+  turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
 }
 
 // Live subagent / background task state, driven by SDK task_* and tool_progress

@@ -786,6 +786,12 @@ interface ActiveSession {
      * exact prefix break without the full message history. Used for diagnostics.
      */
     cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
+    /**
+     * Per-turn cache hit/miss breakdown for EVERY turn. Unlike cacheMissEvents
+     * (miss-only), this records all turns so the UI can show the most-recent-
+     * turn hit rate — the correct signal for prefix stability.
+     */
+    turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
   };
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
@@ -1208,6 +1214,7 @@ export class CoworkRunner extends EventEmitter {
       source: 'none' as const,
       turnCount: 0,
       cacheMissEvents: [] as Array<{ turn: number; reason: string; missTokens: number }>,
+      turnStats: [] as Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>,
     };
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
@@ -1222,6 +1229,17 @@ export class CoworkRunner extends EventEmitter {
         missTokens: cacheCreationTokens,
       });
     }
+    // Per-turn hit/miss breakdown for EVERY turn (unlike cacheMissEvents, which
+    // only records turns that had misses). This lets the UI show both the
+    // session-cumulative hit rate and the most-recent-turn hit rate — the
+    // latter is the correct signal for prefix stability (the cumulative rate is
+    // diluted by cold-start turns and growing context).
+    const turnStats = prev.turnStats ? [...prev.turnStats] : [];
+    turnStats.push({
+      turn: nextTurn,
+      cacheHitTokens: cacheReadTokens,
+      cacheMissTokens: cacheCreationTokens,
+    });
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
@@ -1233,6 +1251,7 @@ export class CoworkRunner extends EventEmitter {
       source: prev.source === 'none' ? 'deepseek' : prev.source,
       turnCount: nextTurn,
       cacheMissEvents,
+      turnStats,
     };
     // Store in the persistent map (survives session cleanup) AND mirror onto
     // the active session for any code that reads activeSession.usageStats

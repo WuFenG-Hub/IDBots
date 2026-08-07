@@ -161,6 +161,18 @@ const GlobalUsageIndicator: React.FC = () => {
                 <span>{i18nService.t('deepseekCacheHitRate')}</span>
                 <span className="font-mono">{cacheHitRate ?? 0}%</span>
               </div>
+              {(() => {
+                const turnStats = usageStats.turnStats ?? [];
+                const lastTurn = turnStats[turnStats.length - 1];
+                if (!lastTurn) return null;
+                const lastTurnRate = Math.round((lastTurn.cacheHitTokens / Math.max(lastTurn.cacheHitTokens + lastTurn.cacheMissTokens, 1)) * 100);
+                return (
+                  <div className="flex justify-between">
+                    <span>{i18nService.t('deepseekLastTurnCacheHitRate')}</span>
+                    <span className="font-mono">{lastTurnRate}%</span>
+                  </div>
+                );
+              })()}
               <div className="flex justify-between">
                 <span>{i18nService.t('coworkUsageInput')}</span>
                 <span className="font-mono">{formatTokens(usageStats.inputTokens)}</span>
