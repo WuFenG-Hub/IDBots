@@ -5,6 +5,9 @@ export interface LocalStore {
   removeItem(key: string): Promise<void>;
 }
 
+// 订阅 store 键变更（跨窗口同步：其他窗口 store:set/remove 后触发）
+export type StoreChangedHandler = (payload: { key: string }) => void;
+
 class LocalStoreService implements LocalStore {
   async getItem<T>(key: string): Promise<T | null> {
     try {
@@ -33,6 +36,16 @@ class LocalStoreService implements LocalStore {
       throw error;
     }
   }
+
+  /** 监听任一键的变更；返回取消订阅函数 */
+  onChanged(handler: StoreChangedHandler): () => void {
+    try {
+      return window.electron.store.onChanged(handler);
+    } catch (error) {
+      console.error('Failed to subscribe to store changes:', error);
+      return () => {};
+    }
+  }
 }
 
-export const localStore = new LocalStoreService(); 
+export const localStore = new LocalStoreService();

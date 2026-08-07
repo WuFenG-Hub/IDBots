@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('electron', {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
     set: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),
     remove: (key: string) => ipcRenderer.invoke('store:remove', key),
+    onChanged: (callback: (payload: { key: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { key: string }) => callback(payload);
+      ipcRenderer.on('store:changed', handler);
+      return () => {
+        ipcRenderer.removeListener('store:changed', handler);
+      };
+    },
   },
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),

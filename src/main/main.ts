@@ -5906,8 +5906,11 @@ const getAppIconPath = (): string | undefined => {
     : path.join(basePath, 'tray-icon.png');
 };
 
-// 保存对主窗口的引用
+// 保存对主窗口的引用（首个创建的窗口；关闭后自动移交到剩余窗口）
 let mainWindow: BrowserWindow | null = null;
+
+// 进程级单次初始化标记：重维护任务/托盘/调度器只在首个窗口就绪时执行一次
+let didInitAppOnce = false;
 
 onSandboxProgress((progress) => {
   const windows = BrowserWindow.getAllWindows();
@@ -5948,41 +5951,47 @@ const getTitleBarOverlayOptions = () => {
 };
 
 const updateTitleBarOverlay = () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!isMac && !isWindows) {
-    mainWindow.setTitleBarOverlay(getTitleBarOverlayOptions());
-  }
-  // Also update the window background color to match the theme
+  const windows = BrowserWindow.getAllWindows();
   const config = getStore().get('app_config') as { theme?: string } | undefined;
   const theme = resolveThemeFromConfig(config);
-  mainWindow.setBackgroundColor(theme === 'dark' ? '#0F1117' : '#F8F9FB');
+  const backgroundColor = theme === 'dark' ? '#0F1117' : '#F8F9FB';
+  for (const win of windows) {
+    if (win.isDestroyed()) continue;
+    if (!isMac && !isWindows) {
+      win.setTitleBarOverlay(getTitleBarOverlayOptions());
+    }
+    // Also update the window background color to match the theme
+    win.setBackgroundColor(backgroundColor);
+  }
 };
 
-const emitWindowState = () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.webContents.isDestroyed()) return;
-  mainWindow.webContents.send('window:state-changed', {
-    isMaximized: mainWindow.isMaximized(),
-    isFullscreen: mainWindow.isFullScreen(),
-    isFocused: mainWindow.isFocused(),
+const emitWindowState = (win?: BrowserWindow | null) => {
+  const target = win ?? mainWindow;
+  if (!target || target.isDestroyed()) return;
+  if (target.webContents.isDestroyed()) return;
+  target.webContents.send('window:state-changed', {
+    isMaximized: target.isMaximized(),
+    isFullscreen: target.isFullScreen(),
+    isFocused: target.isFocused(),
   });
 };
 
-const showSystemMenu = (position?: { x?: number; y?: number }) => {
+const showSystemMenu = (position?: { x?: number; y?: number }, win?: BrowserWindow | null) => {
   if (!isWindows) return;
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const target = win ?? mainWindow;
+  if (!target || target.isDestroyed()) return;
 
-  const isMaximized = mainWindow.isMaximized();
+  const isMaximized = target.isMaximized();
   const menu = Menu.buildFromTemplate([
-    { label: 'Restore', enabled: isMaximized, click: () => mainWindow.restore() },
+    { label: 'Restore', enabled: isMaximized, click: () => target.restore() },
     { role: 'minimize' },
-    { label: 'Maximize', enabled: !isMaximized, click: () => mainWindow.maximize() },
+    { label: 'Maximize', enabled: !isMaximized, click: () => target.maximize() },
     { type: 'separator' },
     { role: 'close' },
   ]);
 
   menu.popup({
-    window: mainWindow,
+    window: target,
     x: Math.max(0, Math.round(position?.x ?? 0)),
     y: Math.max(0, Math.round(position?.y ?? 0)),
   });
@@ -6030,12 +6039,26 @@ if (!gotTheLock) {
     return getStore().get(key);
   });
 
+  // 广播 store 键变更到所有窗口，供多窗口之间实时同步（配置机器人信息等场景）
+  const broadcastStoreChanged = (key: string): void => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (win.isDestroyed()) return;
+      try {
+        win.webContents.send('store:changed', { key });
+      } catch (error) {
+        console.error('Failed to broadcast store:changed:', error);
+      }
+    });
+  };
+
   ipcMain.handle('store:set', (_event, key, value) => {
     getStore().set(key, value);
+    broadcastStoreChanged(key);
   });
 
   ipcMain.handle('store:remove', (_event, key) => {
     getStore().delete(key);
+    broadcastStoreChanged(key);
   });
 
   // Network status change handler
@@ -6082,40 +6105,46 @@ if (!gotTheLock) {
     }
   });
 
-  // Window control IPC handlers
-  ipcMain.on('window-minimize', () => {
-    mainWindow?.minimize();
+  // Window control IPC handlers（按消息来源窗口定位，支持多窗口）
+  const windowFromEvent = (event: { sender: Electron.WebContents }): BrowserWindow | null =>
+    BrowserWindow.fromWebContents(event.sender);
+
+  ipcMain.on('window-minimize', (event) => {
+    windowFromEvent(event)?.minimize();
   });
 
-  ipcMain.on('window-maximize', () => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize();
+  ipcMain.on('window-maximize', (event) => {
+    const win = windowFromEvent(event);
+    if (!win) return;
+    if (win.isMaximized()) {
+      win.unmaximize();
     } else {
-      mainWindow?.maximize();
+      win.maximize();
     }
   });
 
-  ipcMain.on('window-close', () => {
-    mainWindow?.close();
+  ipcMain.on('window-close', (event) => {
+    windowFromEvent(event)?.close();
   });
 
-  ipcMain.handle('window:isMaximized', () => {
-    return mainWindow?.isMaximized() ?? false;
+  ipcMain.handle('window:isMaximized', (event) => {
+    return windowFromEvent(event)?.isMaximized() ?? false;
   });
 
   // Emulated drag from the Bot Browser iframe (CSS app-region can't reach it).
-  ipcMain.on('window:move-by', (_event, input: { dx?: unknown; dy?: unknown } | undefined) => {
+  ipcMain.on('window:move-by', (event, input: { dx?: unknown; dy?: unknown } | undefined) => {
+    const win = windowFromEvent(event);
+    if (!win || win.isDestroyed()) return;
     const dx = Math.round(Number(input?.dx) || 0);
     const dy = Math.round(Number(input?.dy) || 0);
     if (!dx && !dy) return;
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
-    const [x, y] = mainWindow.getPosition();
-    mainWindow.setPosition(x + dx, y + dy);
+    if (win.isMaximized() || win.isFullScreen()) return;
+    const [x, y] = win.getPosition();
+    win.setPosition(x + dx, y + dy);
   });
 
-  ipcMain.on('window:showSystemMenu', (_event, position: { x?: number; y?: number } | undefined) => {
-    showSystemMenu(position);
+  ipcMain.on('window:showSystemMenu', (event, position: { x?: number; y?: number } | undefined) => {
+    showSystemMenu(position, windowFromEvent(event));
   });
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
@@ -11237,9 +11266,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   };
 
   // 创建主窗口
-  const createWindow = () => {
-    // 如果窗口已经存在，就不再创建新窗口
-    if (mainWindow) {
+  const createAppWindow = (options?: { focusExistingPrimary?: boolean }) => {
+    // 需要聚焦已有主窗口时（托盘/激活等场景），复用主窗口而不新建
+    if (options?.focusExistingPrimary && mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       if (!mainWindow.isVisible()) mainWindow.show();
       if (!mainWindow.isFocused()) mainWindow.focus();
@@ -11247,7 +11276,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     startupLog('createWindow begin');
-    mainWindow = new BrowserWindow({
+    const win = new BrowserWindow({
       width: 1200,
       height: 800,
       title: APP_NAME,
@@ -11286,6 +11315,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       enableLargerThanScreen: false
     });
 
+    // 第一个窗口作为主窗口引用（托盘、second-instance 聚焦等使用）
+    if (!mainWindow) {
+      mainWindow = win;
+    }
+
     // 设置 macOS Dock 图标（开发模式下 Electron 默认图标不是应用 Logo）
     if (isMac && isDev) {
       const iconPath = path.join(__dirname, '../build/icons/png/512x512.png');
@@ -11295,48 +11329,48 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     // 禁用窗口菜单
-    mainWindow.setMenu(null);
+    win.setMenu(null);
 
     // 设置窗口的最小尺寸
-    mainWindow.setMinimumSize(800, 600);
+    win.setMinimumSize(800, 600);
 
     // 设置窗口加载超时
     const loadTimeout = setTimeout(() => {
-      if (mainWindow && mainWindow.webContents.isLoadingMainFrame()) {
+      if (win.webContents.isLoadingMainFrame()) {
         console.log('Window load timed out, attempting to reload...');
-        scheduleReload('load-timeout');
+        scheduleReload('load-timeout', win.webContents);
       }
     }, 30000);
 
     // 清除超时
-    mainWindow.webContents.once('did-finish-load', () => {
+    win.webContents.once('did-finish-load', () => {
       clearTimeout(loadTimeout);
     });
-    mainWindow.webContents.on('did-finish-load', () => {
+    win.webContents.on('did-finish-load', () => {
       startupLog('main frame did-finish-load');
-      emitWindowState();
+      emitWindowState(win);
     });
     if (isDev) {
-      mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
         console.log(`[Renderer:${level}] ${sourceId}:${line} ${message}`);
       });
     }
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）
-    void applySystemProxyWithLoopbackBypass(mainWindow.webContents.session, 'window session').catch((error) => {
+    void applySystemProxyWithLoopbackBypass(win.webContents.session, 'window session').catch((error) => {
       console.error('Failed to apply system proxy to window session:', error);
     });
 
     // Block unexpected window popups/navigation; only allow explicit external links.
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    win.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedExternalUrl(url)) {
         void shell.openExternal(url);
       }
       return { action: 'deny' };
     });
 
-    mainWindow.webContents.on('will-navigate', (event, url) => {
+    win.webContents.on('will-navigate', (event, url) => {
       if (url === 'about:blank') {
         return;
       }
@@ -11358,20 +11392,18 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       }
     });
 
-    // 处理窗口关闭
-    mainWindow.on('close', (e) => {
-      // In development, close should actually quit so `npm run electron:dev`
-      // restarts from a clean process. In production we keep tray behavior.
-      if (mainWindow && !isQuitting && !isDev) {
+    // 处理窗口关闭：生产环境隐藏到托盘，开发环境真正关闭
+    win.on('close', (e) => {
+      if (!isQuitting && !isDev) {
         e.preventDefault();
-        mainWindow.hide();
+        win.hide();
       }
     });
 
     // 处理渲染进程崩溃或退出
-    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    win.webContents.on('render-process-gone', (_event, details) => {
       console.error('Window render process gone:', details);
-      scheduleReload('webContents-crashed');
+      scheduleReload('webContents-crashed', win.webContents);
     });
 
     if (isDev) {
@@ -11380,70 +11412,150 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       let retryCount = 0;
 
       const tryLoadURL = () => {
-        mainWindow?.loadURL(DEV_SERVER_URL).catch((err) => {
+        win.loadURL(DEV_SERVER_URL).catch((err) => {
           console.error('Failed to load URL:', err);
           retryCount++;
-          
+
           if (retryCount < maxRetries) {
             console.log(`Retrying to load URL (${retryCount}/${maxRetries})...`);
             setTimeout(tryLoadURL, 3000);
           } else {
             console.error('Failed to load URL after maximum retries');
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.loadFile(path.join(__dirname, '../resources/error.html'));
+            if (!win.isDestroyed()) {
+              win.loadFile(path.join(__dirname, '../resources/error.html'));
             }
           }
         });
       };
 
       tryLoadURL();
-      
+
       // 打开开发者工具
-      mainWindow.webContents.openDevTools();
+      win.webContents.openDevTools();
     } else {
       // 生产环境
-      mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+      win.loadFile(path.join(__dirname, '../dist/index.html'));
     }
 
     // 添加错误处理
-    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       console.error('Page failed to load:', errorCode, errorDescription);
       // 如果加载失败，尝试重新加载
       if (isDev) {
         setTimeout(() => {
-          scheduleReload('did-fail-load');
+          scheduleReload('did-fail-load', win.webContents);
         }, 3000);
       }
     });
 
-    // 当窗口关闭时，清除引用
-    mainWindow.on('closed', () => {
-      mainWindow = null;
+    // 当窗口关闭时，若关闭的是主窗口则把主窗口引用移交到剩余窗口
+    win.on('closed', () => {
+      if (mainWindow === win) {
+        mainWindow = BrowserWindow.getAllWindows()[0] ?? null;
+      }
     });
 
-    const forwardWindowState = () => emitWindowState();
-    mainWindow.on('maximize', forwardWindowState);
-    mainWindow.on('unmaximize', forwardWindowState);
-    mainWindow.on('enter-full-screen', forwardWindowState);
-    mainWindow.on('leave-full-screen', forwardWindowState);
-    mainWindow.on('focus', forwardWindowState);
-    mainWindow.on('blur', forwardWindowState);
+    const forwardWindowState = () => emitWindowState(win);
+    win.on('maximize', forwardWindowState);
+    win.on('unmaximize', forwardWindowState);
+    win.on('enter-full-screen', forwardWindowState);
+    win.on('leave-full-screen', forwardWindowState);
+    win.on('focus', forwardWindowState);
+    win.on('blur', forwardWindowState);
 
     // 等待内容加载完成后再显示窗口
-    mainWindow.once('ready-to-show', () => {
+    win.once('ready-to-show', () => {
       startupLog('window ready-to-show');
-      scheduleCoworkStoreHeavyMaintenance();
-      emitWindowState();
-      // 开机自启时不显示窗口，仅显示托盘图标
-      if (!isAutoLaunched()) {
-        mainWindow?.show();
+      // 进程级单次初始化：重维护任务、系统托盘与调度器只在首个窗口就绪时执行
+      if (!didInitAppOnce) {
+        didInitAppOnce = true;
+        scheduleCoworkStoreHeavyMaintenance();
+        createTray(() => mainWindow, getStore());
+        getScheduler().start();
       }
-      // 窗口就绪后创建系统托盘
-      createTray(() => mainWindow, getStore());
-
-      // Start the scheduler
-      getScheduler().start();
+      emitWindowState(win);
+      // 开机自启时不显示首个窗口，仅显示托盘图标；新窗口始终显示
+      const isPrimaryWindow = mainWindow === win;
+      if (!isAutoLaunched() || !isPrimaryWindow) {
+        win.show();
+      }
     });
+
+    return win;
+  };
+
+  // 应用菜单：File → New Window 用于多开窗口（数据同进程互通）
+  const setupApplicationMenu = (): void => {
+    const isMacMenu = process.platform === 'darwin';
+    const template: Electron.MenuItemConstructorOptions[] = [
+      ...(isMacMenu
+        ? [{
+            label: APP_NAME,
+            submenu: [
+              { role: 'about' as const },
+              { type: 'separator' as const },
+              { role: 'services' as const },
+              { type: 'separator' as const },
+              { role: 'hide' as const },
+              { role: 'hideOthers' as const },
+              { role: 'unhide' as const },
+              { type: 'separator' as const },
+              { role: 'quit' as const },
+            ],
+          } as Electron.MenuItemConstructorOptions]
+        : []),
+      {
+        label: 'File',
+        submenu: [
+          {
+            label: 'New Window',
+            accelerator: 'Shift+CmdOrCtrl+N',
+            click: () => createAppWindow(),
+          },
+          { type: 'separator' as const },
+          isMacMenu ? ({ role: 'close' } as Electron.MenuItemConstructorOptions) : ({ role: 'quit' } as Electron.MenuItemConstructorOptions),
+        ],
+      },
+      {
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' as const },
+          { role: 'redo' as const },
+          { type: 'separator' as const },
+          { role: 'cut' as const },
+          { role: 'copy' as const },
+          { role: 'paste' as const },
+          { role: 'selectAll' as const },
+        ],
+      },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' as const },
+          { role: 'forceReload' as const },
+          ...(isDev ? [{ role: 'toggleDevTools' as const }] : []),
+          { type: 'separator' as const },
+          { role: 'resetZoom' as const },
+          { role: 'zoomIn' as const },
+          { role: 'zoomOut' as const },
+          { type: 'separator' as const },
+          { role: 'togglefullscreen' as const },
+        ],
+      },
+      { role: 'windowMenu' },
+      {
+        role: 'help',
+        submenu: [
+          {
+            label: 'IDBots on GitHub',
+            click: () => {
+              void shell.openExternal('https://github.com/metaid-developers/IDBots');
+            },
+          },
+        ],
+      },
+    ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   };
 
   let isCleanupFinished = false;
@@ -11673,9 +11785,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // 设置安全策略
     setContentSecurityPolicy();
 
+    // 安装应用菜单（File → New Window 多开窗口）
+    setupApplicationMenu();
+
     // 创建窗口
     startupLog('about to create window');
-    createWindow();
+    createAppWindow();
 
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
@@ -11710,7 +11825,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         return;
       }
       if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
+        createAppWindow();
       }
     });
   };
