@@ -120,6 +120,41 @@ function toString(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
+/**
+ * Claude-native model names that must never reach an OpenAI-compatible
+ * upstream verbatim. The Claude Agent SDK 0.3.221 CLI ignores the parent
+ * session model for subagents: regardless of options.model / AgentDefinition
+ * model / AgentInput.model, subagent requests are sent with the CLI's own
+ * fallback default (e.g. claude-opus-5). DeepSeek and other OpenAI-compatible
+ * providers reject those names with a 400, which surfaced as
+ * "you passed claude-opus-5" errors in metabot/cowork sessions. The proxy only
+ * fronts OpenAI-compatible upstreams (Anthropic-native providers bypass it), so
+ * any claude-* or bare alias model here is the CLI's fallback, never a model a
+ * user configured for this upstream — map it to the configured session model.
+ */
+function isClaudeNativeFallbackModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase();
+  if (!normalized) return false;
+  if (normalized.startsWith('claude-')) return true;
+  return normalized === 'opus' || normalized === 'sonnet' || normalized === 'haiku' || normalized === 'fable';
+}
+
+/**
+ * Resolve the effective upstream model for an incoming request. Empty model
+ * (request omitted it) and Claude-native fallback names (the CLI's subagent
+ * defaults) both resolve to the configured session model; any other name
+ * (e.g. deepseek-v4-flash, gpt-5.6-sol) passes through untouched.
+ */
+export function resolveEffectiveUpstreamModel(
+  requestedModel: string,
+  configuredModel: string
+): string {
+  if (isClaudeNativeFallbackModel(requestedModel)) {
+    return configuredModel;
+  }
+  return requestedModel.trim() ? requestedModel : configuredModel;
+}
+
 function toArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
@@ -2590,9 +2625,10 @@ async function handleRequest(
   }
 
   const openAIRequest = anthropicToOpenAI(parsedRequestBody);
-  if (!openAIRequest.model) {
-    openAIRequest.model = upstreamConfig.model;
-  }
+  openAIRequest.model = resolveEffectiveUpstreamModel(
+    toString(openAIRequest.model),
+    upstreamConfig.model
+  );
   // Resolve the upstream API type from the EFFECTIVE model so that a request
   // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
   const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model));
@@ -2794,6 +2830,7 @@ export const __openAICompatProxyTestUtils = {
   buildOpenAIResponsesURL,
   filterOpenAIToolsForProvider,
   hydrateDeepSeekReasoningForRequest,
+  resolveEffectiveUpstreamModel,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningByToolCallId.clear();
     toolCallExtraContentById.clear();

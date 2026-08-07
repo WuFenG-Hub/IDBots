@@ -60,6 +60,37 @@ test('resolveUpstreamAPIType routes non-DeepSeek, non-OpenAI providers to chat_c
   assert.equal(resolveUpstreamAPIType('moonshot', 'kimi-k2.6'), 'chat_completions');
 });
 
+test('resolveEffectiveUpstreamModel maps Claude-native subagent fallbacks to the session model', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { resolveEffectiveUpstreamModel } = __openAICompatProxyTestUtils;
+
+  // CLI subagent fallback defaults (SDK 0.3.221 ignores the parent session
+  // model) must never reach the OpenAI-compatible upstream verbatim.
+  assert.equal(resolveEffectiveUpstreamModel('claude-opus-5', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('claude-opus', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('claude-sonnet-4-6', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('claude-3-5-haiku', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  // Bare aliases the CLI resolves internally are fallbacks too.
+  assert.equal(resolveEffectiveUpstreamModel('opus', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('SONNET', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('haiku', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  // Empty (request omitted model) also resolves to the configured model.
+  assert.equal(resolveEffectiveUpstreamModel('', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('  ', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+});
+
+test('resolveEffectiveUpstreamModel passes real upstream model names through untouched', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { resolveEffectiveUpstreamModel } = __openAICompatProxyTestUtils;
+
+  assert.equal(resolveEffectiveUpstreamModel('deepseek-v4-flash', 'deepseek-v4-flash'), 'deepseek-v4-flash');
+  assert.equal(resolveEffectiveUpstreamModel('deepseek-v4-pro', 'deepseek-v4-flash'), 'deepseek-v4-pro');
+  assert.equal(resolveEffectiveUpstreamModel('gpt-5.6-sol', 'deepseek-v4-flash'), 'gpt-5.6-sol');
+  assert.equal(resolveEffectiveUpstreamModel('kimi-k2.6', 'kimi-k2.6'), 'kimi-k2.6');
+  // OpenRouter-style anthropic aliases are valid upstream models, not fallbacks.
+  assert.equal(resolveEffectiveUpstreamModel('anthropic/claude-opus-4.7', 'anthropic/claude-opus-4.7'), 'anthropic/claude-opus-4.7');
+});
+
 // ---------------------------------------------------------------------------
 // Endpoint URL construction
 // ---------------------------------------------------------------------------
