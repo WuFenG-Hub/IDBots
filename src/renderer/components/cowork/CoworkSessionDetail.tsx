@@ -221,6 +221,16 @@ const formatShortHash = (value: string): string => {
   return `${value.slice(0, 8)}...${value.slice(-8)}`;
 };
 
+const formatMessageTimestamp = (timestamp: number): string => {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const date = new Date(timestamp);
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hours}:${minutes}`;
+};
+
 const isRenderableAvatarSource = (value: string | null | undefined): boolean =>
   isSharedRenderableAvatarSource(value);
 
@@ -1401,6 +1411,26 @@ const CopyButton: React.FC<{
   );
 };
 
+// Message timestamp shown next to the copy button, sharing its
+// hover-visibility logic and visual style.
+const MessageTimestamp: React.FC<{
+  timestamp: number;
+  visible: boolean;
+}> = ({ timestamp, visible }) => {
+  const label = formatMessageTimestamp(timestamp);
+  if (!label) return null;
+  return (
+    <span
+      className={`text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary select-none whitespace-nowrap transition-all duration-200 ${
+        visible ? 'opacity-100' : 'opacity-0 pointer-events-none'
+      }`}
+      aria-hidden="true"
+    >
+      {label}
+    </span>
+  );
+};
+
 const GigSquareOrderCard: React.FC<{ payload: GigSquareOrderPayload }> = ({ payload }) => {
   const txid = typeof payload.txid === 'string' ? payload.txid : '';
   const serviceName = typeof payload.serviceName === 'string' ? payload.serviceName : '';
@@ -1601,6 +1631,10 @@ const UserMessageItem: React.FC<{
                     </span>
                   </div>
                 ))}
+                <MessageTimestamp
+                  timestamp={message.timestamp}
+                  visible={isHovered}
+                />
                 <CopyButton
                   content={message.content}
                   visible={isHovered}
@@ -1751,6 +1785,10 @@ const AssistantMessageItem: React.FC<{
         <div className="flex items-center gap-1.5 mt-1">
           <CopyButton
             content={displayContent}
+            visible={isHovered}
+          />
+          <MessageTimestamp
+            timestamp={message.timestamp}
             visible={isHovered}
           />
         </div>
