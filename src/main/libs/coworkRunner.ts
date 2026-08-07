@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { type ChildProcessByStdio } from 'child_process';
+import { createHash } from 'crypto';
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
@@ -779,11 +780,13 @@ interface ActiveSession {
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
     /**
-     * Lightweight cache-miss attribution: one entry per turn where the provider
-     * reported cache-creation (miss) tokens, recording the turn index and a
-     * probable reason. The first turn is always 'cold_start' (no prefix cached
-     * yet). Subsequent misses are left as 'unknown' since we cannot inspect the
-     * exact prefix break without the full message history. Used for diagnostics.
+     * Cache-miss attribution trail: one entry per turn where the provider
+     * reported cache-creation (miss) tokens, recording the turn index and the
+     * reason. The first turn is always 'cold_start'; later misses carry the
+     * pendingCacheBreakReason recorded at the reset point (system_prompt_changed,
+     * compaction, overflow_retry, stale_session_retry, reasoning_history_retry,
+     * multimodal_retry, system_prompt_drift) or 'unknown' when no reset was
+     * tracked. Used for diagnostics in the UsageStatsChip popover.
      */
     cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
     /**
@@ -814,6 +817,20 @@ interface ActiveSession {
    * session instead (Reasonix rule: mid-session changes never touch the prefix).
    */
   personaBlock?: string;
+  /**
+   * Reason the next turn's cache prefix will be cold, set at every point that
+   * resets or rewrites the provider-visible prefix (system-prompt change,
+   * compaction, overflow/stale-session retries). Consumed by
+   * accumulateResultUsage to label the next miss event instead of 'unknown'
+   * (Reasonix CompareShape-style attribution, adapted to SDK-managed history).
+   */
+  pendingCacheBreakReason?: string | null;
+  /**
+   * SHA-256 (8 hex chars) of the effective system prompt sent on the previous
+   * turn. A change without a known reset event means silent drift — recorded
+   * as 'system_prompt_drift' and logged as a regression alarm.
+   */
+  lastSystemPromptHash?: string | null;
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
@@ -1257,14 +1274,23 @@ export class CoworkRunner extends EventEmitter {
     }
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
-    // cached yet). Later misses are recorded as 'unknown' — without diffing the
-    // full message history we cannot say whether the system prompt, tools, or a
-    // compact broke the prefix. This gives a lightweight diagnostic trail.
+    // cached yet). For later turns, consume the pending break reason recorded at
+    // the point that reset the prefix (system-prompt change, compaction,
+    // overflow/stale/reasoning/multimodal retries, or detected prompt drift) so
+    // the trail says WHY the cache broke instead of 'unknown'. Reasonix-style
+    // attribution, adapted to SDK-managed history.
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
     if (cacheCreationTokens > 0) {
+      const activeForAttribution = this.activeSessions.get(sessionId);
+      const breakReason = nextTurn === 1
+        ? 'cold_start'
+        : (activeForAttribution?.pendingCacheBreakReason ?? 'unknown');
+      if (activeForAttribution) {
+        activeForAttribution.pendingCacheBreakReason = null;
+      }
       cacheMissEvents.push({
         turn: nextTurn,
-        reason: nextTurn === 1 ? 'cold_start' : 'unknown',
+        reason: breakReason,
         missTokens: cacheCreationTokens,
       });
     }
@@ -3320,6 +3346,30 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Record the effective system prompt's hash on the active session and flag
+   * silent drift. The system prompt leads DeepSeek's cacheable prefix, so any
+   * byte change without a known reset event (system-prompt switch, compaction,
+   * retry) is a cache regression — label it so the next miss event carries
+   * 'system_prompt_drift' instead of 'unknown'.
+   */
+  private trackSystemPromptHash(activeSession: ActiveSession, sessionId: string, effectiveSystemPrompt: string): void {
+    const hash = createHash('sha256').update(effectiveSystemPrompt).digest('hex').slice(0, 8);
+    if (
+      activeSession.lastSystemPromptHash
+      && activeSession.lastSystemPromptHash !== hash
+      && !activeSession.pendingCacheBreakReason
+    ) {
+      activeSession.pendingCacheBreakReason = 'system_prompt_drift';
+      coworkLog('WARN', 'trackSystemPromptHash', 'Effective system prompt changed without a known reset event; next turn will be a full cache miss', {
+        sessionId,
+        previousHash: activeSession.lastSystemPromptHash,
+        nextHash: hash,
+      });
+    }
+    activeSession.lastSystemPromptHash = hash;
+  }
+
+  /**
    * Build the volatile per-turn context blocks that used to live in the system
    * prompt but MUST move to the current user message to keep the system-prompt
    * prefix byte-stable (Reasonix pattern: inject volatile state into the user
@@ -3790,6 +3840,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     // Run claude-code using the SDK
     try {
@@ -3862,6 +3913,7 @@ export class CoworkRunner extends EventEmitter {
     ) {
       persistedSystemPrompt = options.systemPrompt;
       activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
@@ -3898,6 +3950,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     try {
       this.markCrossSessionTurnRunning(sessionId);
@@ -4375,6 +4428,7 @@ export class CoworkRunner extends EventEmitter {
         effectivePrompt = compacted.prompt;
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'compaction';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
           sessionId,
           modelId: modelLimits.modelId,
@@ -4700,6 +4754,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.claudeSessionId = null;
       activeSession.contextOverflowRetryAllowed = false;
       activeSession.contextOverflowDetected = false;
+      activeSession.pendingCacheBreakReason = 'overflow_retry';
       coworkLog('WARN', 'runClaudeCodeLocal', 'Context window exceeded while resuming; retrying with compacted fresh SDK session', {
         sessionId,
         reason,
@@ -5319,6 +5374,7 @@ export class CoworkRunner extends EventEmitter {
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
         contextOverflowExceptionRetryAllowed = false;
         this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5372,6 +5428,7 @@ export class CoworkRunner extends EventEmitter {
       if (isStaleResumeError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
         try {
           this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5389,6 +5446,7 @@ export class CoworkRunner extends EventEmitter {
       if (isDeepSeekReasoningHistoryError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'reasoning_history_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'DeepSeek thinking history lost reasoning_content; retrying with fresh session', {
           sessionId,
           errorMessage: providerErrorSignal,
@@ -5427,6 +5485,7 @@ export class CoworkRunner extends EventEmitter {
       if (isMultimodalCompatError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'multimodal_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'Provider rejected image/document content block; retrying with fresh text-only session', {
           sessionId,
           errorMessage: providerErrorSignal,
