@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import { fetchContentWithFallback } from './localIndexerProxy';
+import {
+  assertMetaAppZipDownloadIntegrity,
+  wrapMetaAppZipExtractionError,
+} from '../libs/metaAppZipDownload';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
 import { extractPinIdFromReference } from './pinAssetService';
 import { searchMetaApps } from './metaAppSearchService';
@@ -522,7 +526,7 @@ const defaultFetchList: FetchListFn = async (input = {}) => {
 
 const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
   const fallbackUrl = `${MAN_CONTENT_BASE}/${encodeURIComponent(pinId)}`;
-  const response = await fetchContentWithFallback(pinId, fallbackUrl);
+  const response = await fetchContentWithFallback(pinId, fallbackUrl, { redirect: 'follow' });
   if (!response.ok) {
     throw new Error(`MetaApp code download failed: ${response.status} ${response.statusText}`);
   }
@@ -530,6 +534,7 @@ const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
   if (!buffer.length) {
     throw new Error('MetaApp code zip is empty');
   }
+  assertMetaAppZipDownloadIntegrity(buffer, response);
   return buffer;
 };
 
@@ -683,28 +688,37 @@ const safeExtractZip = (buffer: Buffer, destination: string): void => {
   if (!AdmZip) {
     throw new Error('adm-zip is not installed. Run: npm install adm-zip');
   }
-  const zip = new AdmZip(buffer);
-  const entries = zip.getEntries();
-  for (const entry of entries) {
-    const rawName = String(entry.entryName || '').replace(/\\/g, '/');
-    if (!rawName) continue;
-    const normalized = path.posix.normalize(rawName);
-    if (!normalized || normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
-      throw new Error(`MetaApp zip contains unsafe path: ${rawName}`);
-    }
+  let zip: InstanceType<typeof import('adm-zip')>;
+  try {
+    zip = new AdmZip(buffer);
+  } catch (error) {
+    wrapMetaAppZipExtractionError(error);
+  }
+  try {
+    const entries = zip.getEntries();
+    for (const entry of entries) {
+      const rawName = String(entry.entryName || '').replace(/\\/g, '/');
+      if (!rawName) continue;
+      const normalized = path.posix.normalize(rawName);
+      if (!normalized || normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
+        throw new Error(`MetaApp zip contains unsafe path: ${rawName}`);
+      }
 
-    const destinationPath = path.resolve(destination, ...normalized.split('/'));
-    if (!isPathInside(path.resolve(destination), destinationPath)) {
-      throw new Error(`MetaApp zip entry escapes destination: ${rawName}`);
-    }
+      const destinationPath = path.resolve(destination, ...normalized.split('/'));
+      if (!isPathInside(path.resolve(destination), destinationPath)) {
+        throw new Error(`MetaApp zip entry escapes destination: ${rawName}`);
+      }
 
-    if (entry.isDirectory) {
-      fs.mkdirSync(destinationPath, { recursive: true });
-      continue;
-    }
+      if (entry.isDirectory) {
+        fs.mkdirSync(destinationPath, { recursive: true });
+        continue;
+      }
 
-    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    fs.writeFileSync(destinationPath, entry.getData());
+      fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+      fs.writeFileSync(destinationPath, entry.getData());
+    }
+  } catch (error) {
+    wrapMetaAppZipExtractionError(error);
   }
 };
 

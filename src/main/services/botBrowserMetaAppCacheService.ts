@@ -21,16 +21,22 @@ import {
   type BrowserCommandResult,
 } from '@openagentinternet/agent-browser-host-contract';
 import { fetchContentWithFallback } from './localIndexerProxy';
+import {
+  assertMetaAppZipDownloadIntegrity,
+  isMetaAppZipIntegrityError,
+  wrapMetaAppZipExtractionError,
+} from '../libs/metaAppZipDownload';
 
 type FetchResponseLike = {
   ok: boolean;
   status: number;
   statusText?: string;
+  headers?: { get(name: string): string | null } | null;
   arrayBuffer?: () => Promise<ArrayBuffer>;
   json?: () => Promise<unknown>;
 };
 
-type FetchLike = (url: string) => Promise<FetchResponseLike>;
+type FetchLike = (url: string, init?: RequestInit) => Promise<FetchResponseLike>;
 
 type BotBrowserMetaAppCacheServiceOptions = {
   cacheRoot: string;
@@ -88,6 +94,7 @@ const LOCAL_HOST = '127.0.0.1';
 const PREVIEW_PREFIX = '/browser-cache/metaapp-preview/';
 const PREVIEW_SESSION_TTL_MS = 30 * 60 * 1000;
 const MAN_CONTENT_BASE_URL = 'https://man.metaid.io/content';
+const MAX_METAAPP_DOWNLOAD_REDIRECTS = 5;
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -273,26 +280,53 @@ async function findArtifactDir(payloadRoot: string, indexFile: string): Promise<
 }
 
 function safeExtractZip(buffer: Buffer, destination: string): void {
-  const zip = new AdmZip(buffer);
-  for (const entry of zip.getEntries()) {
-    const rawName = String(entry.entryName || '').replace(/\\/g, '/');
-    if (!rawName) {
-      continue;
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(buffer);
+  } catch (error) {
+    wrapMetaAppZipExtractionError(error);
+  }
+  try {
+    for (const entry of zip.getEntries()) {
+      const rawName = String(entry.entryName || '').replace(/\\/g, '/');
+      if (!rawName) {
+        continue;
+      }
+      const normalized = path.posix.normalize(rawName);
+      if (!normalized || normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
+        throw new Error(`MetaApp zip contains unsafe path: ${rawName}`);
+      }
+      const destinationPath = path.resolve(destination, ...normalized.split('/'));
+      if (!isInside(path.resolve(destination), destinationPath)) {
+        throw new Error(`MetaApp zip entry escapes destination: ${rawName}`);
+      }
+      if (entry.isDirectory) {
+        fsSync.mkdirSync(destinationPath, { recursive: true });
+        continue;
+      }
+      fsSync.mkdirSync(path.dirname(destinationPath), { recursive: true });
+      fsSync.writeFileSync(destinationPath, entry.getData());
     }
-    const normalized = path.posix.normalize(rawName);
-    if (!normalized || normalized === '.' || normalized.startsWith('../') || path.posix.isAbsolute(normalized)) {
-      throw new Error(`MetaApp zip contains unsafe path: ${rawName}`);
+  } catch (error) {
+    wrapMetaAppZipExtractionError(error);
+  }
+}
+
+async function fetchMetaAppArchiveResponse(fetchImpl: FetchLike, url: string): Promise<FetchResponseLike> {
+  let currentUrl = url;
+  for (let redirectCount = 0; ; redirectCount += 1) {
+    const response = await fetchImpl(currentUrl, { redirect: 'follow' });
+    if (response.status < 300 || response.status >= 400) {
+      return response;
     }
-    const destinationPath = path.resolve(destination, ...normalized.split('/'));
-    if (!isInside(path.resolve(destination), destinationPath)) {
-      throw new Error(`MetaApp zip entry escapes destination: ${rawName}`);
+    if (redirectCount >= MAX_METAAPP_DOWNLOAD_REDIRECTS) {
+      throw new Error(`MetaApp ZIP download exceeded ${MAX_METAAPP_DOWNLOAD_REDIRECTS} redirects.`);
     }
-    if (entry.isDirectory) {
-      fsSync.mkdirSync(destinationPath, { recursive: true });
-      continue;
+    const location = response.headers?.get?.('location');
+    if (!location) {
+      throw new Error(`MetaApp ZIP download redirect (HTTP ${response.status}) is missing a Location header.`);
     }
-    fsSync.mkdirSync(path.dirname(destinationPath), { recursive: true });
-    fsSync.writeFileSync(destinationPath, entry.getData());
+    currentUrl = new URL(location, currentUrl).toString();
   }
 }
 
@@ -476,11 +510,12 @@ export function createBotBrowserMetaAppCacheService(
     }
 
     let lastError = '';
+    let integrityError = '';
     for (const candidate of candidates) {
       try {
         const response = !hasInjectedFetch && candidate.pinId
-          ? await fetchContentWithFallback(candidate.pinId, candidate.url)
-          : await fetchImpl(candidate.url);
+          ? await fetchContentWithFallback(candidate.pinId, candidate.url, { redirect: 'follow' })
+          : await fetchMetaAppArchiveResponse(fetchImpl, candidate.url);
         if (!response.ok || !response.arrayBuffer) {
           lastError = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
           continue;
@@ -490,12 +525,18 @@ export function createBotBrowserMetaAppCacheService(
           lastError = 'empty response body';
           continue;
         }
+        assertMetaAppZipDownloadIntegrity(buffer, response);
         return buffer;
       } catch (error) {
-        lastError = error instanceof Error ? error.message : String(error);
+        const message = error instanceof Error ? error.message : String(error);
+        lastError = message;
+        if (isMetaAppZipIntegrityError(error) && !integrityError) {
+          integrityError = message;
+          console.warn('[bot-browser-metaapp-cache] MetaApp ZIP download integrity check failed:', candidate.url, message);
+        }
       }
     }
-    throw new Error(`MetaApp package download failed: ${lastError || 'no usable content URL'}`);
+    throw new Error(`MetaApp package download failed: ${integrityError || lastError || 'no usable content URL'}`);
   };
 
   const writeArtifact = async (input: {

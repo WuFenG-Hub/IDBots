@@ -110,17 +110,19 @@ export async function fetchJsonWithFallbackOnMiss(
 export async function fetchContentWithFallback(
   pinId: string,
   fallbackUrl: string,
+  options?: RequestInit,
 ): Promise<Response> {
   const localPath = `/content/${pinId}`;
   const localUrl = getP2PLocalBase() + localPath;
 
   try {
     const localRes = await fetch(localUrl, {
+      ...options,
       signal: AbortSignal.timeout(2000),
     });
 
     if (localRes.headers.get('x-man-content-status') === 'metadata-only') {
-      return fetch(fallbackUrl);
+      return fetch(fallbackUrl, options);
     }
 
     const contentLength = localRes.headers.get('content-length');
@@ -137,5 +139,5 @@ export async function fetchContentWithFallback(
     void _err;
   }
 
-  return fetch(fallbackUrl);
+  return fetch(fallbackUrl, options);
 }
