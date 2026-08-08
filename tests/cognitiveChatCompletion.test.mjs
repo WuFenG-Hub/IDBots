@@ -30,7 +30,7 @@ function loadTestUtils() {
   }
 }
 
-const { resolveThinkingForModel, extractAnthropicThinkingText, resolveDeepSeekResponsesReasoning } = loadTestUtils();
+const { resolveThinkingForModel, extractAnthropicThinkingText, resolveDeepSeekResponsesReasoning, resolveDefaultMaxOutputTokens } = loadTestUtils();
 
 test('one-shot completion reads the Anthropic thinking field emitted by the proxy', () => {
   assert.equal(
@@ -57,4 +57,12 @@ test('DeepSeek Responses reasoning disable must be explicit effort none', () => 
   assert.deepEqual(resolveDeepSeekResponsesReasoning('disabled'), { effort: 'none' });
   assert.deepEqual(resolveDeepSeekResponsesReasoning('enabled'), { effort: 'max' });
   assert.deepEqual(resolveDeepSeekResponsesReasoning(undefined), { effort: 'max' });
+});
+
+test('default output budget leaves headroom for thinking-mode reasoning', () => {
+  // Reasoning shares the output budget: thinking-enabled calls get 16K,
+  // thinking-disabled calls keep the lean 4K default.
+  assert.equal(resolveDefaultMaxOutputTokens('disabled'), 4_096);
+  assert.equal(resolveDefaultMaxOutputTokens('enabled'), 16_384);
+  assert.equal(resolveDefaultMaxOutputTokens(undefined), 16_384);
 });

@@ -123,6 +123,19 @@ function resolveDeepSeekResponsesReasoning(
   return thinking === 'disabled' ? { effort: 'none' } : { effort: 'max' };
 }
 
+/**
+ * Default max output tokens for one-shot cognitive calls that do not pass
+ * maxTokens. Thinking-mode reasoning shares the output budget, so a
+ * thinking-enabled call needs far more headroom than a disabled one — a 2-4K
+ * ceiling lets max-effort reasoning consume the whole budget and return
+ * truncated or empty text (the 2026-08-08 dream-diary failure mode, elsewhere).
+ * Ceilings only: billing is by actual tokens used, so short replies cost the
+ * same as before.
+ */
+function resolveDefaultMaxOutputTokens(thinking: 'enabled' | 'disabled' | undefined): number {
+  return thinking === 'disabled' ? 4_096 : 16_384;
+}
+
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
   if (block.type !== 'thinking' && block.type !== 'redacted_thinking') return '';
   return block.thinking || block.text || '';
@@ -353,7 +366,7 @@ async function callAnthropicStyleWithTools(
 
   const body: Record<string, unknown> = {
     model,
-    max_tokens: maxTokens ?? 2048,
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
     messages: anthropicMessages,
     system: systemParts.join('\n\n'),
   };
@@ -446,6 +459,7 @@ export const __cognitiveChatCompletionTestUtils = {
   buildDeepSeekResponsesURL,
   normalizeDeepSeekResponsesEffort,
   resolveDeepSeekResponsesReasoning,
+  resolveDefaultMaxOutputTokens,
 };
 
 /**
@@ -466,7 +480,7 @@ async function callOpenAIStyleWithTools(
   const body: Record<string, unknown> = {
     model,
     messages: toOpenAIMessages(messages),
-    max_tokens: maxTokens ?? 2048,
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
   };
   if (Array.isArray(tools) && tools.length > 0) {
     body.tools = tools;
@@ -620,11 +634,7 @@ async function callDeepSeekResponsesStyle(
   if (instructions.length > 0) {
     body.instructions = instructions.join('\n\n');
   }
-  if (maxTokens !== undefined) {
-    body.max_output_tokens = maxTokens;
-  } else {
-    body.max_output_tokens = 4096;
-  }
+  body.max_output_tokens = maxTokens ?? resolveDefaultMaxOutputTokens(thinking);
   if (temperature !== undefined) {
     body.temperature = temperature;
   }
