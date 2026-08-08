@@ -38,7 +38,7 @@ test('sqlite store initializes scoped memory columns and indexes for fresh datab
 test('SqliteStore.create() upgrades legacy user_memories scope columns before creating scoped indexes', async () => {
   const legacyDb = await createLegacyMemoryDb();
   const userDataPath = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-sqlitestore-memory-scope-'));
-  const { DB_FILENAME } = require('../dist-electron/appConstants.js');
+  const { DB_FILENAME } = require('../dist-electron/main/appConstants.js');
   const dbPath = path.join(userDataPath, DB_FILENAME);
   fs.writeFileSync(dbPath, Buffer.from(legacyDb.export()));
 
@@ -57,7 +57,7 @@ test('SqliteStore.create() upgrades legacy user_memories scope columns before cr
   };
 
   try {
-    const { SqliteStore } = require('../dist-electron/sqliteStore.js');
+    const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
     const sqliteStore = await SqliteStore.create(userDataPath);
     const db = sqliteStore.getDatabase();
 
