@@ -33,6 +33,14 @@ test('LocalFileLink exposes right-click menu with copy actions', () => {
   assert.match(linkSource, /window\.electron\.shell\.getOpenWithApps\(filePath\)/);
 });
 
+test('choose-other-app distinguishes a missing file from a real open failure', () => {
+  // A deleted/moved target must surface "file not found" instead of the
+  // generic open failure, so users know the path itself is gone.
+  assert.match(linkSource, /result\?\.error === 'file_not_found'/);
+  assert.match(linkSource, /i18nService\.t\('fileNotFound'\)/);
+  assert.match(linkSource, /i18nService\.t\('fileOpenWithFailed'\)/);
+});
+
 test('file context menu labels are localized in both languages', () => {
   for (const [key, zh, en] of [
     ['fileOpenWith', '用其他应用打开', 'Open With'],

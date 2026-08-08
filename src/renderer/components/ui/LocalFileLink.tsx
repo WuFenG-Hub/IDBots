@@ -213,7 +213,9 @@ const LocalFileLink: React.FC<LocalFileLinkProps> = ({
       try {
         const result = await window.electron.shell.chooseOpenWithApp(filePath);
         if (!result?.success && result?.error !== 'cancelled') {
-          showToast(i18nService.t('fileOpenWithFailed'));
+          showToast(result?.error === 'file_not_found'
+            ? i18nService.t('fileNotFound')
+            : i18nService.t('fileOpenWithFailed'));
         }
       } catch (error) {
         console.error('Failed to choose app:', filePath, error);

@@ -11062,14 +11062,26 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         const appPath = await new Promise<string | null>((resolve) => {
           const child = spawn('osascript', ['-e', 'POSIX path of (choose application with prompt "Choose an application to open this file")']);
           let output = '';
+          let errorOutput = '';
           child.stdout?.on('data', (chunk: Buffer | string) => { output += String(chunk); });
-          child.on('error', () => resolve(null));
+          child.stderr?.on('data', (chunk: Buffer | string) => { errorOutput += String(chunk); });
+          child.on('error', (error: Error) => {
+            console.error('[chooseOpenWithApp] osascript failed to start:', error.message);
+            resolve(null);
+          });
           child.on('close', (code: number | null) => {
-            if (code !== 0 || !output.trim()) {
-              resolve(null);
+            const trimmed = output.trim();
+            if (code === 0 && trimmed) {
+              resolve(trimmed);
               return;
             }
-            resolve(output.trim());
+            // User cancel surfaces as AppleScript error -128; anything else is
+            // a real failure worth surfacing instead of a silent cancel.
+            const userCancelled = /-128|User canceled|User cancelled/i.test(errorOutput);
+            if (!userCancelled && errorOutput.trim()) {
+              console.error('[chooseOpenWithApp] osascript error:', errorOutput.trim());
+            }
+            resolve(null);
           });
         });
         if (!appPath) {
