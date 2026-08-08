@@ -16,6 +16,16 @@ export interface CoworkUsageStats {
   totalCostUsd?: number;
   /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
   source: 'deepseek' | 'anthropic' | 'none';
+  /**
+   * Cumulative per-model token usage from the SDK's modelUsage breakdown,
+   * including subagent/side-job traffic the top-level counters miss.
+   */
+  perModelUsage?: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }>;
 }
 
 export interface CoworkContextUsage {

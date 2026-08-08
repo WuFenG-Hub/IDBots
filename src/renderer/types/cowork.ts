@@ -107,6 +107,16 @@ export interface CoworkUsageStats {
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */
   turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
+  /**
+   * Cumulative per-model token usage from the SDK's modelUsage breakdown,
+   * including subagent/side-job traffic the top-level counters miss.
+   */
+  perModelUsage?: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }>;
 }
 
 // Live subagent / background task state, driven by SDK task_* and tool_progress

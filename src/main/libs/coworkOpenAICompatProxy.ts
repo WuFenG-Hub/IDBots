@@ -1,5 +1,7 @@
 import http from 'http';
-import { BrowserWindow, session } from 'electron';
+import fs from 'fs';
+import path from 'path';
+import { BrowserWindow, session, app } from 'electron';
 import {
   anthropicToOpenAI,
   buildOpenAIChatCompletionsURL,
@@ -8,6 +10,7 @@ import {
   openAIToAnthropic,
   type OpenAIStreamChunk,
 } from './coworkFormatTransform';
+import { DeepSeekReasoningStore } from './deepseekReasoningStore';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -94,9 +97,28 @@ let proxyPort: number | null = null;
 let upstreamConfig: OpenAICompatUpstreamConfig | null = null;
 let lastProxyError: string | null = null;
 const toolCallExtraContentById = new Map<string, unknown>();
-const deepSeekReasoningByToolCallId = new Map<string, string>();
 const MAX_TOOL_CALL_EXTRA_CONTENT_CACHE = 1024;
 const MAX_DEEPSEEK_REASONING_CACHE = 1024;
+// Reasoning_content is persisted (JSONL in the user-data dir) so an app
+// restart no longer degrades historical reasoning to '' — that fallback is a
+// mid-history byte change that breaks DeepSeek's cached prefix. The store
+// stays memory-only when the user-data path is unavailable (e.g. tests).
+const deepSeekReasoningStore = new DeepSeekReasoningStore(MAX_DEEPSEEK_REASONING_CACHE);
+let deepSeekReasoningStoreLoaded = false;
+
+function ensureDeepSeekReasoningStoreLoaded(): void {
+  if (deepSeekReasoningStoreLoaded) {
+    return;
+  }
+  deepSeekReasoningStoreLoaded = true;
+  try {
+    const filePath = path.join(app.getPath('userData'), 'cowork', 'deepseek-reasoning-cache.jsonl');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    deepSeekReasoningStore.load(filePath);
+  } catch {
+    // Memory-only fallback (non-Electron test hosts, early app init).
+  }
+}
 
 // --- Scheduled task API dependencies ---
 interface ScheduledTaskDeps {
@@ -285,14 +307,8 @@ function cacheDeepSeekReasoningForToolCall(toolCallId: string, reasoningContent:
     return;
   }
 
-  deepSeekReasoningByToolCallId.set(toolCallId, reasoningContent);
-
-  if (deepSeekReasoningByToolCallId.size > MAX_DEEPSEEK_REASONING_CACHE) {
-    const oldestKey = deepSeekReasoningByToolCallId.keys().next().value;
-    if (typeof oldestKey === 'string') {
-      deepSeekReasoningByToolCallId.delete(oldestKey);
-    }
-  }
+  ensureDeepSeekReasoningStoreLoaded();
+  deepSeekReasoningStore.set(toolCallId, reasoningContent);
 }
 
 function cacheDeepSeekReasoningFromToolCalls(toolCalls: unknown, reasoningContent: string): void {
@@ -382,7 +398,8 @@ function resolveDeepSeekReasoningForToolCalls(toolCalls: unknown): string {
     }
 
     const toolCallId = toString(toolCallObj.id);
-    const cachedReasoning = toolCallId ? deepSeekReasoningByToolCallId.get(toolCallId) : undefined;
+    ensureDeepSeekReasoningStoreLoaded();
+    const cachedReasoning = toolCallId ? deepSeekReasoningStore.get(toolCallId) : undefined;
     if (cachedReasoning) {
       return cachedReasoning;
     }
@@ -2832,7 +2849,8 @@ export const __openAICompatProxyTestUtils = {
   hydrateDeepSeekReasoningForRequest,
   resolveEffectiveUpstreamModel,
   resetDeepSeekReasoningCache: () => {
-    deepSeekReasoningByToolCallId.clear();
+    deepSeekReasoningStoreLoaded = false;
+    deepSeekReasoningStore.clear();
     toolCallExtraContentById.clear();
   },
 };

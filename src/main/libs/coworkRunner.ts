@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { type ChildProcessByStdio } from 'child_process';
+import { createHash } from 'crypto';
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
@@ -779,11 +780,13 @@ interface ActiveSession {
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
     /**
-     * Lightweight cache-miss attribution: one entry per turn where the provider
-     * reported cache-creation (miss) tokens, recording the turn index and a
-     * probable reason. The first turn is always 'cold_start' (no prefix cached
-     * yet). Subsequent misses are left as 'unknown' since we cannot inspect the
-     * exact prefix break without the full message history. Used for diagnostics.
+     * Cache-miss attribution trail: one entry per turn where the provider
+     * reported cache-creation (miss) tokens, recording the turn index and the
+     * reason. The first turn is always 'cold_start'; later misses carry the
+     * pendingCacheBreakReason recorded at the reset point (system_prompt_changed,
+     * compaction, overflow_retry, stale_session_retry, reasoning_history_retry,
+     * multimodal_retry, system_prompt_drift) or 'unknown' when no reset was
+     * tracked. Used for diagnostics in the UsageStatsChip popover.
      */
     cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
     /**
@@ -792,7 +795,42 @@ interface ActiveSession {
      * turn hit rate — the correct signal for prefix stability.
      */
     turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
+    /**
+     * Cumulative per-model token usage from the SDK's modelUsage breakdown.
+     * The top-level counters above only cover the main loop; Task subagents
+     * and CLI side jobs (prompt suggestions, progress summaries) are billed
+     * to the provider but only show up here. Keys are CLI-requested model
+     * ids, including subagent fallback names.
+     */
+    perModelUsage?: Record<string, {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }>;
   };
+  /**
+   * MetaBot persona block, computed once when the session starts and reused on
+   * every continued turn. Persona text lives at the head of the system prompt,
+   * so re-reading it from the DB each turn would let a mid-session persona edit
+   * silently break DeepSeek's cached prefix. Edits take effect on the next
+   * session instead (Reasonix rule: mid-session changes never touch the prefix).
+   */
+  personaBlock?: string;
+  /**
+   * Reason the next turn's cache prefix will be cold, set at every point that
+   * resets or rewrites the provider-visible prefix (system-prompt change,
+   * compaction, overflow/stale-session retries). Consumed by
+   * accumulateResultUsage to label the next miss event instead of 'unknown'
+   * (Reasonix CompareShape-style attribution, adapted to SDK-managed history).
+   */
+  pendingCacheBreakReason?: string | null;
+  /**
+   * SHA-256 (8 hex chars) of the effective system prompt sent on the previous
+   * turn. A change without a known reset event means silent drift — recorded
+   * as 'system_prompt_drift' and logged as a regression alarm.
+   */
+  lastSystemPromptHash?: string | null;
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
@@ -1236,14 +1274,23 @@ export class CoworkRunner extends EventEmitter {
     }
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
-    // cached yet). Later misses are recorded as 'unknown' — without diffing the
-    // full message history we cannot say whether the system prompt, tools, or a
-    // compact broke the prefix. This gives a lightweight diagnostic trail.
+    // cached yet). For later turns, consume the pending break reason recorded at
+    // the point that reset the prefix (system-prompt change, compaction,
+    // overflow/stale/reasoning/multimodal retries, or detected prompt drift) so
+    // the trail says WHY the cache broke instead of 'unknown'. Reasonix-style
+    // attribution, adapted to SDK-managed history.
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
     if (cacheCreationTokens > 0) {
+      const activeForAttribution = this.activeSessions.get(sessionId);
+      const breakReason = nextTurn === 1
+        ? 'cold_start'
+        : (activeForAttribution?.pendingCacheBreakReason ?? 'unknown');
+      if (activeForAttribution) {
+        activeForAttribution.pendingCacheBreakReason = null;
+      }
       cacheMissEvents.push({
         turn: nextTurn,
-        reason: nextTurn === 1 ? 'cold_start' : 'unknown',
+        reason: breakReason,
         missTokens: cacheCreationTokens,
       });
     }
@@ -1258,18 +1305,50 @@ export class CoworkRunner extends EventEmitter {
       cacheHitTokens: cacheReadTokens,
       cacheMissTokens: cacheCreationTokens,
     });
+    // Per-model breakdown from the SDK result's modelUsage. The main-loop
+    // `usage` above ignores Task subagents and CLI side jobs (prompt
+    // suggestions, progress summaries, classifiers) — all of which the proxy
+    // maps to the session model and bills to DeepSeek. modelUsage is the only
+    // place that spend shows up, so accumulate it per CLI-requested model id
+    // (subagent fallback names included) for the chip's breakdown display.
+    const perModelUsage: NonNullable<UsageStatsShape['perModelUsage']> = {
+      ...(prev.perModelUsage ?? {}),
+    };
+    const modelUsage = payload.modelUsage && typeof payload.modelUsage === 'object'
+      ? payload.modelUsage as Record<string, Record<string, unknown>>
+      : null;
+    if (modelUsage) {
+      for (const [model, entry] of Object.entries(modelUsage)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const prevEntry = perModelUsage[model] ?? {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        };
+        perModelUsage[model] = {
+          inputTokens: prevEntry.inputTokens + (typeof entry.inputTokens === 'number' ? entry.inputTokens : 0),
+          outputTokens: prevEntry.outputTokens + (typeof entry.outputTokens === 'number' ? entry.outputTokens : 0),
+          cacheReadTokens: prevEntry.cacheReadTokens
+            + (typeof entry.cacheReadInputTokens === 'number' ? entry.cacheReadInputTokens : 0),
+          cacheCreationTokens: prevEntry.cacheCreationTokens
+            + (typeof entry.cacheCreationInputTokens === 'number' ? entry.cacheCreationInputTokens : 0),
+        };
+      }
+    }
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
       cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
       cacheCreationTokens: prev.cacheCreationTokens + cacheCreationTokens,
       totalCostUsd: typeof payload.total_cost_usd === 'number'
-        ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
+        ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
       source: prev.source === 'none' ? 'deepseek' : prev.source,
       turnCount: nextTurn,
       cacheMissEvents,
       turnStats,
+      perModelUsage,
     };
     // Store in the persistent map (survives session cleanup) AND mirror onto
     // the active session for any code that reads activeSession.usageStats
@@ -3177,6 +3256,11 @@ export class CoworkRunner extends EventEmitter {
    * plus its last few days of dream summaries. Returns '' when the session
    * has no attributed bot (strict, no cross-bot guessing) or no experience
    * data exists yet.
+   *
+   * Volatile by nature (the dream service rewrites entries nightly and the
+   * summary window rolls daily), so this block is injected into the CURRENT
+   * user message via buildVolatileContextPrompt — never into the system
+   * prompt, where any change would wipe DeepSeek's cached prefix.
    */
   private buildExperiencePromptBlocksXml(sessionId: string): string {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
@@ -3262,6 +3346,30 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Record the effective system prompt's hash on the active session and flag
+   * silent drift. The system prompt leads DeepSeek's cacheable prefix, so any
+   * byte change without a known reset event (system-prompt switch, compaction,
+   * retry) is a cache regression — label it so the next miss event carries
+   * 'system_prompt_drift' instead of 'unknown'.
+   */
+  private trackSystemPromptHash(activeSession: ActiveSession, sessionId: string, effectiveSystemPrompt: string): void {
+    const hash = createHash('sha256').update(effectiveSystemPrompt).digest('hex').slice(0, 8);
+    if (
+      activeSession.lastSystemPromptHash
+      && activeSession.lastSystemPromptHash !== hash
+      && !activeSession.pendingCacheBreakReason
+    ) {
+      activeSession.pendingCacheBreakReason = 'system_prompt_drift';
+      coworkLog('WARN', 'trackSystemPromptHash', 'Effective system prompt changed without a known reset event; next turn will be a full cache miss', {
+        sessionId,
+        previousHash: activeSession.lastSystemPromptHash,
+        nextHash: hash,
+      });
+    }
+    activeSession.lastSystemPromptHash = hash;
+  }
+
+  /**
    * Build the volatile per-turn context blocks that used to live in the system
    * prompt but MUST move to the current user message to keep the system-prompt
    * prefix byte-stable (Reasonix pattern: inject volatile state into the user
@@ -3280,6 +3388,13 @@ export class CoworkRunner extends EventEmitter {
     const sections: Array<string | null> = [];
     if (profile.includeMemoryPromptBlocks) {
       sections.push(this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }));
+      // Hot-layer experience injection (self-identity + recent dream summaries).
+      // The dream service rewrites these nightly and the summary window rolls
+      // daily, so they can never live in the system prompt — they belong here
+      // in the request tail with the other volatile blocks.
+      if (sessionMemoryEnabled) {
+        sections.push(this.buildExperiencePromptBlocksXml(sessionId));
+      }
     }
     if (this.getBrowserContextPrompt) {
       // Browser tab state is live; fetch async and degrade silently on failure.
@@ -3704,13 +3819,15 @@ export class CoworkRunner extends EventEmitter {
 
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Freeze the persona block for the lifetime of this active session: it sits
+    // at the head of the system prompt, so a live DB re-read per turn would let
+    // any mid-session persona edit break DeepSeek's cached prefix.
+    activeSession.personaBlock = personaBlock;
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3723,6 +3840,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     // Run claude-code using the SDK
     try {
@@ -3795,6 +3913,7 @@ export class CoworkRunner extends EventEmitter {
     ) {
       persistedSystemPrompt = options.systemPrompt;
       activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
@@ -3811,14 +3930,14 @@ export class CoworkRunner extends EventEmitter {
     // Use provided systemPrompt (e.g. with updated skill routing) or fall back to session's stored one.
     // Always prepend workspace safety prompt so folder boundary rules are enforced at prompt level.
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
-    const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Reuse the persona block frozen at session start (see startSession); fall
+    // back to a fresh read only if this active session predates the freeze.
+    const personaBlock = activeSession.personaBlock ?? this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3831,6 +3950,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     try {
       this.markCrossSessionTurnRunning(sessionId);
@@ -4308,6 +4428,7 @@ export class CoworkRunner extends EventEmitter {
         effectivePrompt = compacted.prompt;
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'compaction';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
           sessionId,
           modelId: modelLimits.modelId,
@@ -4633,6 +4754,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.claudeSessionId = null;
       activeSession.contextOverflowRetryAllowed = false;
       activeSession.contextOverflowDetected = false;
+      activeSession.pendingCacheBreakReason = 'overflow_retry';
       coworkLog('WARN', 'runClaudeCodeLocal', 'Context window exceeded while resuming; retrying with compacted fresh SDK session', {
         sessionId,
         reason,
@@ -5252,6 +5374,7 @@ export class CoworkRunner extends EventEmitter {
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
         contextOverflowExceptionRetryAllowed = false;
         this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5305,6 +5428,7 @@ export class CoworkRunner extends EventEmitter {
       if (isStaleResumeError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
         try {
           this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5322,6 +5446,7 @@ export class CoworkRunner extends EventEmitter {
       if (isDeepSeekReasoningHistoryError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'reasoning_history_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'DeepSeek thinking history lost reasoning_content; retrying with fresh session', {
           sessionId,
           errorMessage: providerErrorSignal,
@@ -5360,6 +5485,7 @@ export class CoworkRunner extends EventEmitter {
       if (isMultimodalCompatError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'multimodal_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'Provider rejected image/document content block; retrying with fresh text-only session', {
           sessionId,
           errorMessage: providerErrorSignal,
