@@ -1258,9 +1258,9 @@ export function startMetaidRpcServer(
       for await (const chunk of req) {
         body += chunk;
       }
-      let parsed: { task_id?: number };
+      let parsed: { task_id?: number; view?: string };
       try {
-        parsed = JSON.parse(body) as { task_id?: number };
+        parsed = JSON.parse(body) as { task_id?: number; view?: string };
       } catch {
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
@@ -1272,10 +1272,13 @@ export function startMetaidRpcServer(
         res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
         return;
       }
+      // Round-4: view=summary (default: status + members incl. last speak time
+      // + deliverables + last 5 messages) or view=full (everything).
+      const view = parsed.view === 'full' ? 'full' : 'summary';
       try {
-        const task = await getGroupTask(taskId);
+        const task = await getGroupTask(taskId, { view });
         res.writeHead(200);
-        res.end(JSON.stringify({ success: true, task }));
+        res.end(JSON.stringify({ success: true, task, view }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

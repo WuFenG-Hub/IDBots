@@ -610,6 +610,38 @@ export class GroupTaskStore {
     return row ? rowToGroupTaskDeliverable(row) : undefined;
   }
 
+  /**
+   * Round-4 (show summary): last chain speak timestamp (epoch seconds) per
+   * sender GlobalMetaID for one group — the summary view's member list shows
+   * when each member last spoke. Senders without any timestamp are absent.
+   */
+  getMembersLastSpeakAt(
+    groupId: string,
+    globalMetaIds: Array<string | null | undefined>,
+  ): Map<string, number> {
+    const ids = [...new Set(
+      globalMetaIds
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    const result = new Map<string, number>();
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.getAll<{ sender_global_metaid: string; last_speak_at: number }>(
+      `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_speak_at
+       FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
+         AND chain_timestamp IS NOT NULL
+       GROUP BY sender_global_metaid`,
+      [groupId, ...ids],
+    );
+    for (const row of rows) {
+      const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
+      if (key) result.set(key, Number(row.last_speak_at));
+    }
+    return result;
+  }
+
   /** Round-4: in-place update of a deliverable (correction-first aggregation). */
   updateDeliverableUri(id: number, uri: string | null, kind: string): void {
     this.db.run(

@@ -405,16 +405,44 @@ export async function listGroupTaskSummaries(
   });
 }
 
-export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
+export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Round-4 (show summary): epoch seconds of the member's last chain speech. */
+  lastSpeakAt: number | null;
+}
+
+export interface GetGroupTaskOptions {
+  /**
+   * Round-4: 'summary' (default) returns status, members (with last speak
+   * time), deliverables and the last 5 messages — readable without a huge
+   * blob; 'full' returns everything (50 messages).
+   */
+  view?: 'summary' | 'full';
+}
+
+export async function getGroupTask(
+  id: number,
+  opts?: GetGroupTaskOptions,
+): Promise<GroupTaskDetail> {
   const store = getGroupTaskStore();
   const task = requireTask(id);
   const stall = computeGroupTaskStall(task);
+  // The IPC detail view keeps the full page (50 messages); the RPC show
+  // endpoint explicitly requests view='summary' by default.
+  const view = opts?.view ?? 'full';
+  const members = store.listMembers(id);
+  const speakMap = view === 'summary' && task.groupId
+    ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
+    : new Map<string, number>();
+  const membersWithSpeakAt: GroupTaskMemberSummary[] = members.map((member) => {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    return { ...member, lastSpeakAt: gmid ? (speakMap.get(gmid) ?? null) : null };
+  });
   return {
     ...task,
-    members: store.listMembers(id),
+    members: membersWithSpeakAt,
     deliverables: store.listDeliverables(id),
     messages: task.groupId
-      ? store.listGroupChatMessages(task.groupId, { limit: 50 })
+      ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
     stall: stall.stall,
     stallAfterMinutes: stall.stallAfterMinutes,

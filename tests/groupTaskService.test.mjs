@@ -559,3 +559,47 @@ test('round-4: getGroupTask detail carries lastDrivenAt + stall fields', async (
     h.cleanup();
   }
 });
+
+test('round-4: show view=summary is compact (5 messages, members with lastSpeakAt) vs view=full', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    // insert 7 transcript rows directly (chair + worker alternation)
+    for (let i = 1; i <= 7; i += 1) {
+      const isChair = i % 2 === 1;
+      h.db.run(
+        `INSERT INTO group_chat_messages (
+          pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+          sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+          reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+        ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL,
+          '', '[]', ?, 'mvc', '{}', 0, NULL)`,
+        [
+          `show-msg-${i}-i0`, `show-tx-${i}`, task.groupId,
+          isChair ? 'metaid-1' : 'metaid-2', isChair ? 'gmid-twin' : 'gmid-coder',
+          isChair ? 'Twin Bot' : 'Coder Bot', `msg ${i}`, 1_700_000_000 + i,
+        ],
+      );
+    }
+
+    const summary = await getGroupTask(task.id, { view: 'summary' });
+    assert.equal(summary.messages.length, 5, 'summary keeps only the last 5 messages');
+    assert.equal(summary.messages[4].content, 'msg 7', 'latest message present in summary');
+    const workerMember = summary.members.find((m) => m.role === 'worker');
+    assert.ok(workerMember, 'worker member present');
+    assert.equal(workerMember.lastSpeakAt, 1_700_000_006, 'worker lastSpeakAt = max chain timestamp');
+    const chairMember = summary.members.find((m) => m.role === 'chair');
+    assert.equal(chairMember.lastSpeakAt, 1_700_000_007, 'chair lastSpeakAt');
+    assert.equal(summary.deliverables.length, 0);
+
+    const full = await getGroupTask(task.id, { view: 'full' });
+    assert.equal(full.messages.length, 7, 'full returns all messages (up to 50)');
+    assert.equal(full.messages[0].content, 'msg 1', 'full includes the oldest message');
+
+    // default (no opts) keeps the IPC/UI behavior: full page
+    const def = await getGroupTask(task.id);
+    assert.equal(def.messages.length, 7, 'default view stays full for the IPC surface');
+  } finally {
+    h.cleanup();
+  }
+});
