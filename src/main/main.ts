@@ -45,6 +45,10 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
+import { SdkCronMirrorStore, parseScheduledTasksFile } from './sdkCronMirrorStore';
+import { planTaskMigration, extractMigrationTaskId } from './sdkCronMigration';
+import { buildCronDeleteInstruction, buildCronCreateInstruction } from './sdkCronBridge';
+import type { SdkCronMirrorBridge } from './libs/coworkRunner';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
@@ -406,6 +410,8 @@ const SERVICE_ORDER_TIMEOUT_SCAN_INTERVAL_MS = 60_000;
 const SERVICE_ORDER_REFUND_SYNC_INTERVAL_MS = 60_000;
 const GIG_SQUARE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const SQLITE_MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
+/** R1：durable 任务落盘文件（.claude/scheduled_tasks.json）周期扫描间隔。 */
+const SDK_CRON_MIRROR_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const SERVICE_REFUND_REQUEST_PATH = '/protocols/service-refund-request';
 const SERVICE_REFUND_FINALIZE_PATH = '/protocols/service-refund-finalize';
 const SERVICE_REFUND_SYNC_SIZE = 200;
@@ -2511,6 +2517,10 @@ let botBrowserHostService: BotBrowserHostService | null = null;
 let botBrowserTabBridge: BotBrowserTabBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
+let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
+/** R1：各会话最后已知的 SDK cron id（会话结束对账依据），由 Stop hook 采集维护。 */
+let sdkCronMirrorLastKnownCrons: Map<string, string[]> = new Map();
+let sdkCronMirrorScanInterval: ReturnType<typeof setInterval> | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
@@ -2978,6 +2988,10 @@ const stopSqliteBackgroundJobs = async (options?: { waitForActiveJobs?: boolean 
     clearInterval(sqliteMaintenanceInterval);
     sqliteMaintenanceInterval = null;
   }
+  if (sdkCronMirrorScanInterval) {
+    clearInterval(sdkCronMirrorScanInterval);
+    sdkCronMirrorScanInterval = null;
+  }
   if (providerDiscoveryService) {
     providerDiscoveryService.stopPolling();
   }
@@ -3070,6 +3084,19 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
       },
     );
   }, SQLITE_MAINTENANCE_INTERVAL_MS);
+
+  runSqliteBackgroundJob(
+    'sdkCronMirror:initialFileScan',
+    '[SdkCronMirror] Initial durable file scan failed',
+    scanDurableCronFiles,
+  );
+  sdkCronMirrorScanInterval = setInterval(() => {
+    runSqliteBackgroundJob(
+      'sdkCronMirror:periodicFileScan',
+      '[SdkCronMirror] Periodic durable file scan failed',
+      scanDurableCronFiles,
+    );
+  }, SDK_CRON_MIRROR_SCAN_INTERVAL_MS);
 };
 
 const startSqliteDaemons = (): void => {
@@ -4732,6 +4759,7 @@ const getCoworkRunner = () => {
           return '<browser_context>Bot Browser is not open or did not respond right now. If the user asks you to control the browser, ask them to switch to Bot Browser mode first.</browser_context>';
         }
       },
+      sdkCronMirror: getSdkCronMirrorBridge(),
     });
 
     // Set up event listeners to forward to renderer
@@ -5009,6 +5037,151 @@ const getScheduledTaskStore = () => {
     scheduledTaskStore = new ScheduledTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return scheduledTaskStore;
+};
+
+/** R1：SDK cron 镜像存储（只展示不调度；镜像表随主 sqlite 持久化）。 */
+const getSdkCronMirrorStore = () => {
+  if (!sdkCronMirrorStore) {
+    const sqliteStore = getStore();
+    sdkCronMirrorStore = new SdkCronMirrorStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return sdkCronMirrorStore;
+};
+
+/**
+ * R1：Stop hook 采集与会话结束对账的宿主侧适配器。
+ * - collectSessionCrons：upsert 镜像 + 用当次列表对账该会话非 durable 行（CronDelete 后立即生效）。
+ * - reconcileSessionEnd：会话结束兜底对账（用最后已知列表），并清理内存。
+ */
+const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
+  collectSessionCrons(sessionId: string, crons: { id: string; schedule: string; recurring: boolean; prompt: string }[]): void {
+    try {
+      const store = getSdkCronMirrorStore();
+      const ids = crons.map((c) => c.id);
+      for (const cron of crons) {
+        store.upsert({ ...cron, durable: false }, sessionId, 'stop_hook');
+      }
+      sdkCronMirrorLastKnownCrons.set(sessionId, ids);
+      // 轻量对账：本次 session_crons 未包含的非 durable 行 → deleted（幂等，无变化不写盘）。
+      store.reconcileSession(sessionId, ids);
+    } catch (error) {
+      console.warn('[SdkCronMirror] Failed to collect session crons:', error);
+    }
+  },
+  reconcileSessionEnd(sessionId: string): void {
+    try {
+      const store = getSdkCronMirrorStore();
+      store.reconcileSession(sessionId, sdkCronMirrorLastKnownCrons.get(sessionId) ?? []);
+      sdkCronMirrorLastKnownCrons.delete(sessionId);
+    } catch (error) {
+      console.warn('[SdkCronMirror] Failed to reconcile session end:', error);
+    }
+  },
+});
+
+/** R1：递归查找工作区下所有 `.claude/scheduled_tasks.json`（跳过 node_modules/.git/隐藏目录，限深）。 */
+const findScheduledTasksJsonFiles = (rootDir: string, maxDepth = 6): string[] => {
+  const results: string[] = [];
+  const walk = (dir: string, depth: number): void => {
+    if (depth > maxDepth) return;
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry === 'node_modules' || entry === '.git') continue;
+      const full = path.join(dir, entry);
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(full);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        if (entry === '.claude') {
+          const candidate = path.join(full, 'scheduled_tasks.json');
+          try {
+            if (fs.statSync(candidate).isFile()) results.push(candidate);
+          } catch {
+            // 无落盘文件，忽略
+          }
+        } else if (!entry.startsWith('.')) {
+          walk(full, depth + 1);
+        }
+      }
+    }
+  };
+  walk(rootDir, 0);
+  return results;
+};
+
+/**
+ * R1：durable 文件扫描——把落盘的 SDK durable cron 镜像进宿主存储并做 durable 对账。
+ * 会话结束后跨重启的补充数据源（Stop hook 在会话结束后不再触发）。
+ */
+const scanDurableCronFiles = (): void => {
+  try {
+    const coworkConfig = getCoworkStore().getConfig();
+    const rootDir = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+    const files = findScheduledTasksJsonFiles(rootDir);
+    const store = getSdkCronMirrorStore();
+    // 先按文件归属会话分组（createdBySessionId 缺失时以文件路径为归属），全部 upsert。
+    const bySession = new Map<string, { id: string }[]>();
+    for (const file of files) {
+      let content: string;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const cron of parseScheduledTasksFile(content)) {
+        const sessionKey = cron.createdBySessionId ?? `file:${file}`;
+        const ids = bySession.get(sessionKey) ?? [];
+        ids.push({ id: cron.id });
+        bySession.set(sessionKey, ids);
+        store.upsert(
+          { id: cron.id, schedule: cron.schedule, recurring: cron.recurring, prompt: cron.prompt, durable: true },
+          sessionKey,
+          'file_scan'
+        );
+      }
+    }
+    // durable 对账：文件里已消失的 durable 行标记 deleted。
+    for (const [sessionKey, ids] of bySession) {
+      store.reconcileDurableFile(sessionKey, ids);
+    }
+    if (files.length > 0) {
+      console.log(`[SdkCronMirror] Durable file scan: ${files.length} file(s), ${bySession.size} session(s)`);
+    }
+  } catch (error) {
+    console.warn('[SdkCronMirror] Durable file scan failed:', error);
+  }
+};
+
+/**
+ * R2：迁移对账（幂等）——把镜像中带 [SDK_MIGRATE:<taskId>] 标记的 SDK cron 与原任务
+ * 建立映射并标记 migrated（原任务禁用，历史 run 保留）。重复执行安全：
+ * 已标记 migrated / migrated_task_id 非空的任务跳过。
+ * @returns 本次新完成迁移的任务数。
+ */
+const reconcileMigrationResults = (): number => {
+  const mirrorStore = getSdkCronMirrorStore();
+  const taskStore = getScheduledTaskStore();
+  const mirrors = mirrorStore.listMirrors(false);
+  let count = 0;
+  for (const mirror of mirrors) {
+    if (mirror.migratedTaskId) continue;
+    const taskId = extractMigrationTaskId(mirror.prompt);
+    if (!taskId) continue;
+    const task = taskStore.getTask(taskId);
+    if (!task || task.migrationStatus === 'migrated' || task.migratedTaskId) continue;
+    taskStore.markMigrated(taskId, mirror.id);
+    mirrorStore.setMigrationMapping(mirror.id, taskId);
+    count += 1;
+  }
+  return count;
 };
 
 let groupTaskStore: GroupTaskStore | null = null;
@@ -8744,6 +8917,158 @@ if (!gotTheLock) {
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to list all runs' };
     }
+  });
+
+  // ==================== SDK Cron Mirror IPC Handlers (方案 C R1/R2) ====================
+
+  ipcMain.handle('sdkCronMirror:list', async () => {
+    try {
+      const mirrors = getSdkCronMirrorStore().listMirrors(false);
+      const coworkStoreInstance = getCoworkStore();
+      const activeSessionIds = getCoworkRunner().getActiveSessionIds();
+      const enriched = mirrors.map((mirror) => {
+        const session = coworkStoreInstance.getSession(mirror.sessionId);
+        return {
+          ...mirror,
+          sessionTitle: session?.title ?? null,
+          sessionActive: activeSessionIds.includes(mirror.sessionId),
+        };
+      });
+      return { success: true, mirrors: enriched };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list sdk cron mirrors' };
+    }
+  });
+
+  /**
+   * R1 管理桥：UI 删除/停用 SDK cron。
+   * 宿主不能直接调 CronDelete（Agent 工具）——两步走：
+   * 1) 镜像标记 deletion_requested（UI 显示「删除中」，防重复操作）；
+   * 2) 所属会话活跃 → 注入指令由会话内 bot 执行 CronDelete（路径 A）；
+   *    不活跃 → 返回提示，用户到原会话内操作；删除后镜像经 Stop hook/文件扫描对账自动转 deleted（路径 B）。
+   */
+  ipcMain.handle('sdkCronMirror:requestDelete', async (_event, cronId: string) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) {
+        return { success: false, error: 'cronId is required' };
+      }
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirror = mirrorStore.getById(normalizedId);
+      if (!mirror) {
+        return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      }
+      if (mirror.status === 'deleted') {
+        return { success: true, status: 'deleted', injected: false, hint: '该任务已删除' };
+      }
+
+      mirrorStore.markDeletionRequested(normalizedId);
+
+      const steer = getCoworkRunner().trySubmitSteer(
+        mirror.sessionId,
+        `host-delete-cron-${normalizedId}`,
+        buildCronDeleteInstruction({ id: normalizedId, name: mirror.name })
+      );
+      if (steer.accepted) {
+        void steer.delivered.catch(() => undefined);
+        return { success: true, status: 'deletion_requested', injected: true };
+      }
+      const rejectReason = 'reason' in steer ? steer.reason : 'inactive';
+      const hint =
+        rejectReason === 'inactive'
+          ? `所属会话已结束，无法自动注入删除指令。请在原会话内让助手执行 CronDelete ${normalizedId}（名称：${mirror.name}）；删除后镜像会自动更新。`
+          : `所属会话当前不可注入（${rejectReason}），请在原会话内执行 CronDelete ${normalizedId}。`;
+      return { success: true, status: 'deletion_requested', injected: false, hint };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to request cron delete' };
+    }
+  });
+
+  /**
+   * R2 迁移规划（只读）：老 scheduledTaskStore 任务 → SDK durable cron 的迁移计划。
+   * 幂等：已迁移/禁用任务自动跳过；interval 与非法表达式进 unsupported 清单。
+   */
+  ipcMain.handle('scheduledTask:migratePlan', async () => {
+    try {
+      const plan = planTaskMigration(getScheduledTaskStore().listTasks());
+      return {
+        success: true,
+        plan: {
+          migratable: plan.migratable,
+          skipped: plan.skipped.map((item) => ({ task: item.task, reason: item.reason })),
+          unsupported: plan.unsupported.map((item) => ({ task: item.task, reason: item.reason })),
+          sevenDayLimitedCount: plan.sevenDayLimitedCount,
+          truncatedCount: plan.truncatedCount,
+        },
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to plan migration' };
+    }
+  });
+
+  /**
+   * R2 迁移执行（需 UI 人工确认后调用）：启动迁移会话，由会话内 bot 逐个执行
+   * CronCreate(durable=true)；会话结束后对账——镜像中带 [SDK_MIGRATE:<taskId>] 标记的
+   * cron 与原任务建立映射并标记 migrated（原任务禁用，历史 run 保留）。
+   * 幂等：对账以原 task.id 为键，重复执行不会产生重复 cron。
+   */
+  ipcMain.handle('scheduledTask:migrateExecute', async () => {
+    const taskStore = getScheduledTaskStore();
+    const plan = planTaskMigration(taskStore.listTasks());
+    if (plan.migratable.length === 0) {
+      return {
+        success: true,
+        migrated: 0,
+        skipped: plan.skipped.length + plan.unsupported.length,
+        unsupported: plan.unsupported.length,
+        sessionId: null,
+      };
+    }
+
+    const coworkConfig = getCoworkStore().getConfig();
+    const cwd = coworkConfig.workingDirectory || path.join(os.homedir(), 'idbots', 'project');
+    const lines = plan.migratable.map((item, index) => {
+      const instruction = buildCronCreateInstruction(item.spec!);
+      return `${index + 1}. ${instruction.replace(/\n/g, '\n   ')}`;
+    });
+
+    const session = getCoworkStore().createSession(
+      '[迁移] 老定时任务 → SDK cron',
+      cwd,
+      coworkConfig.systemPrompt,
+      'local',
+      [],
+      null
+    );
+    const sessionId = session.id;
+    getCoworkStore().updateSession(sessionId, { status: 'running' });
+    // 完整指令必须作为 startSession 的 prompt 传给 SDK（skipInitialUserMessage 只跳过
+    // store 的 user 消息展示，SDK 实际收到的输入是 prompt 参数本身）；
+    // addMessage 仅用于 UI 一致展示。
+    const instruction = [
+      '你是定时任务迁移执行器。请依次执行以下 CronCreate 调用（全部 durable=true），参数原样使用、不要遗漏、不要修改。',
+      '每创建一个任务都继续执行下一个；全部完成后回复「迁移完成」。',
+      '',
+      ...lines,
+    ].join('\n');
+    getCoworkStore().addMessage(sessionId, {
+      type: 'user',
+      content: instruction,
+    });
+
+    try {
+      await getCoworkRunner().startSession(sessionId, instruction, {
+        skipInitialUserMessage: true,
+        disableMemoryUpdates: true,
+        confirmationMode: 'text',
+      });
+    } catch (error) {
+      console.warn('[SdkCronMirror] Migration session failed (partial results still reconciled):', error);
+    }
+
+    // 对账：镜像中带 [SDK_MIGRATE:<taskId>] 标记的 cron → 建立映射并标记 migrated（幂等）。
+    const migrated = reconcileMigrationResults();
+    return { success: true, migrated, skipped: plan.skipped.length, unsupported: plan.unsupported.length, sessionId };
   });
 
   // ==================== MetaBot IPC Handlers ====================

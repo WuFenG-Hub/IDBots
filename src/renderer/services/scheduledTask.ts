@@ -11,11 +11,14 @@ import {
   addOrUpdateRun,
   setAllRuns,
   appendAllRuns,
+  setSdkMirrors,
+  setSdkMirrorsLoading,
 } from '../store/slices/scheduledTaskSlice';
 import type {
   ScheduledTaskInput,
   ScheduledTaskStatusEvent,
   ScheduledTaskRunEvent,
+  MigrationPlanItem,
 } from '../types/scheduledTask';
 
 class ScheduledTaskService {
@@ -194,6 +197,82 @@ class ScheduledTaskService {
       }
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+    }
+  }
+
+  // ==================== SDK 定时任务镜像（方案 C R1/R2） ====================
+
+  async loadSdkMirrors(): Promise<void> {
+    const api = window.electron?.scheduledTasks;
+    const mirrorApi = api?.sdkCronMirror;
+    if (!mirrorApi) return;
+
+    store.dispatch(setSdkMirrorsLoading(true));
+    try {
+      const result = await mirrorApi.list();
+      if (result.success && Array.isArray(result.mirrors)) {
+        store.dispatch(setSdkMirrors(result.mirrors));
+      }
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      store.dispatch(setSdkMirrorsLoading(false));
+    }
+  }
+
+  /** 管理桥：UI 删除/停用 SDK cron → 所属会话内 bot 执行 CronDelete。 */
+  async requestDeleteSdkCron(cronId: string): Promise<{ status?: string; injected?: boolean; hint?: string } | null> {
+    const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
+    if (!mirrorApi) return null;
+    try {
+      const result = await mirrorApi.requestDelete(cronId);
+      if (result.success) {
+        // 刷新镜像（deletion_requested 状态立即可见）
+        await this.loadSdkMirrors();
+        return { status: result.status, injected: result.injected, hint: result.hint };
+      }
+      throw new Error(result.error || 'Failed to request cron delete');
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      throw err;
+    }
+  }
+
+  /** R2：读取迁移计划（只读，展示用）。 */
+  async loadMigrationPlan(): Promise<{ migratable: MigrationPlanItem[]; unsupported: MigrationPlanItem[]; sevenDayLimitedCount: number; truncatedCount: number } | null> {
+    const api = window.electron?.scheduledTasks;
+    if (!api?.migratePlan) return null;
+    try {
+      const result = await api.migratePlan();
+      if (result.success && result.plan) {
+        return {
+          migratable: result.plan.migratable ?? [],
+          unsupported: result.plan.unsupported ?? [],
+          sevenDayLimitedCount: result.plan.sevenDayLimitedCount ?? 0,
+          truncatedCount: result.plan.truncatedCount ?? 0,
+        };
+      }
+      return null;
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      return null;
+    }
+  }
+
+  /** R2：执行迁移（需 UI 人工确认后调用）。 */
+  async migrateToSdkCron(): Promise<{ migrated: number; skipped: number; unsupported: number; sessionId: string | null } | null> {
+    const api = window.electron?.scheduledTasks;
+    if (!api?.migrateExecute) return null;
+    try {
+      const result = await api.migrateExecute();
+      if (result.success) {
+        await this.loadTasks();
+        await this.loadSdkMirrors();
+        return { migrated: result.migrated ?? 0, skipped: result.skipped ?? 0, unsupported: result.unsupported ?? 0, sessionId: result.sessionId ?? null };
+      }
+      throw new Error(result.error || 'Failed to execute migration');
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      throw err;
     }
   }
 }

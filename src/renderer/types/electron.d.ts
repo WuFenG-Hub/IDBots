@@ -947,6 +947,12 @@ interface IElectronAPI {
     listRuns: (taskId: string, limit?: number, offset?: number) => Promise<any>;
     countRuns: (taskId: string) => Promise<any>;
     listAllRuns: (limit?: number, offset?: number) => Promise<any>;
+    sdkCronMirror: {
+      list: () => Promise<any>;
+      requestDelete: (cronId: string) => Promise<any>;
+    };
+    migratePlan: () => Promise<any>;
+    migrateExecute: () => Promise<any>;
     onStatusUpdate: (callback: (data: any) => void) => () => void;
     onRunUpdate: (callback: (data: any) => void) => () => void;
   };

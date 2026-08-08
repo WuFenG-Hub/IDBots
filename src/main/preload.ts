@@ -638,6 +638,14 @@ contextBridge.exposeInMainWorld('electron', {
     listAllRuns: (limit?: number, offset?: number) =>
       ipcRenderer.invoke('scheduledTask:listAllRuns', limit, offset),
 
+    // SDK cron 镜像（方案 C R1/R2）
+    sdkCronMirror: {
+      list: () => ipcRenderer.invoke('sdkCronMirror:list'),
+      requestDelete: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:requestDelete', cronId),
+    },
+    migratePlan: () => ipcRenderer.invoke('scheduledTask:migratePlan'),
+    migrateExecute: () => ipcRenderer.invoke('scheduledTask:migrateExecute'),
+
     // Stream event listeners
     onStatusUpdate: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
