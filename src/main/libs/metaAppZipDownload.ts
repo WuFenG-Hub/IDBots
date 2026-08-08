@@ -13,6 +13,11 @@ const ZIP_EOCD_SIGNATURE = 0x06054b50; // PK\x05\x06
 const ZIP_EOCD_MIN_LENGTH = 22;
 const ZIP_EOCD_MAX_COMMENT_LENGTH = 0xffff;
 
+export const METAFILE_ACCELERATE_CONTENT_API_BASE_URL =
+  'https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/';
+export const METAFILE_CONTENT_API_BASE_URL =
+  'https://file.metaid.io/metafile-indexer/api/v1/files/content/';
+
 type HeaderLookup = {
   get(name: string): string | null;
 };
@@ -59,6 +64,35 @@ export function assertZipArchiveIntegrity(buffer: Buffer): void {
       'MetaApp ZIP download is truncated (missing end-of-central-directory record).',
     );
   }
+}
+
+/**
+ * Non-throwing ZIP-shape check used to decide whether a local/remote response
+ * can even be the requested archive before accepting it as content.
+ */
+export function looksLikeZipArchive(buffer: Buffer): boolean {
+  if (buffer.length < 4 || buffer.readUInt32LE(0) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
+    return false;
+  }
+  return hasZipEndOfCentralDirectory(buffer);
+}
+
+/**
+ * Download candidates for a metafile pin, in preference order:
+ * 1. Accelerate endpoint (307-redirects to OSS; primary path).
+ * 2. Direct content endpoint on the metafile indexer.
+ *
+ * Never include metadata-only endpoints here: `man.metaid.io/content/<pinId>`
+ * returns a JSON chunk manifest and `/metafile-indexer/content/<pinId>`
+ * returns a JSON error envelope, both of which would be consumed as a
+ * "successful" non-ZIP download and produce a misleading PK-magic failure.
+ */
+export function buildMetaAppZipCandidateUrls(pinId: string): Array<{ url: string; pinId: string }> {
+  const encodedPinId = encodeURIComponent(pinId);
+  return [
+    { url: `${METAFILE_ACCELERATE_CONTENT_API_BASE_URL}${encodedPinId}`, pinId },
+    { url: `${METAFILE_CONTENT_API_BASE_URL}${encodedPinId}`, pinId },
+  ];
 }
 
 function hasZipEndOfCentralDirectory(buffer: Buffer): boolean {

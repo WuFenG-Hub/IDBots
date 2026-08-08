@@ -106,11 +106,16 @@ export async function fetchJsonWithFallbackOnMiss(
  *
  * @param pinId       The pin identifier (appended to /content/)
  * @param fallbackUrl Full remote URL to use when local content is unavailable
+ * @param options     Optional RequestInit forwarded to both fetch calls
+ * @param validateContent Optional body validator; when the local response body
+ *                        does not pass it, the local response is treated as a
+ *                        miss and the remote fallback is used instead
  */
 export async function fetchContentWithFallback(
   pinId: string,
   fallbackUrl: string,
   options?: RequestInit,
+  validateContent?: (buffer: Buffer) => boolean,
 ): Promise<Response> {
   const localPath = `/content/${pinId}`;
   const localUrl = getP2PLocalBase() + localPath;
@@ -127,11 +132,19 @@ export async function fetchContentWithFallback(
 
     const contentLength = localRes.headers.get('content-length');
     if (localRes.ok && contentLength && parseInt(contentLength, 10) > 0) {
-      return localRes;
+      if (
+        !validateContent
+        || validateContent(Buffer.from(await localRes.clone().arrayBuffer()))
+      ) {
+        return localRes;
+      }
     }
     if (localRes.ok && !contentLength) {
       const bodyBytes = await localRes.clone().arrayBuffer();
-      if (bodyBytes.byteLength > 0) {
+      if (
+        bodyBytes.byteLength > 0
+        && (!validateContent || validateContent(Buffer.from(bodyBytes)))
+      ) {
         return localRes;
       }
     }
