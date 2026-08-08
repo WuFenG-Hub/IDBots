@@ -46,10 +46,11 @@ import {
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
-// The requested ceiling is clamped to the selected model's declared limit.
-// DeepSeek V4 Flash and unknown models stay at 8192; models declaring a larger
-// output budget can use up to 16K without sending an unsupported parameter.
-const DREAM_LLM_TARGET_MAX_TOKENS = 16_000;
+// The requested ceiling is clamped to the selected model's declared limit
+// (DeepSeek V4 declares 32K, unknown models stay at 8192). The dream JSON is
+// far smaller in practice; the headroom only matters so a long day is never
+// truncated mid-JSON, and it costs nothing on short days.
+const DREAM_LLM_TARGET_MAX_TOKENS = 32_768;
 const DREAM_FRAGMENT_MAX_TOKENS = 4_096;
 const DREAM_CONTEXT_RESERVE_TOKENS = 8_000;
 const DREAM_FAST_PATH_MAX_TOKENS = 96_000;

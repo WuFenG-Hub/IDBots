@@ -173,11 +173,15 @@ type ModelLike = {
 
 export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
+// The DeepSeek API allows up to 384K output tokens for the whole V4 family;
+// the app declares a 32K ceiling (aligned with the MetaApp bridge limit).
+// Keep in sync with src/main/libs/coworkModelLimits.ts.
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 // Same family, same 1M context window. The flash variant drives cowork/A2A
 // automation sessions, so it must carry a real context window or the context
 // usage ring falls back to the 128K default.
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
@@ -185,6 +189,7 @@ const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
     name: 'DeepSeek V4 Flash',
     supportsImage: false,
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     // DeepSeek-first policy: the flash model is the default for all automation
     // paths. Enable thinking + max reasoning effort by default so orchestrator /
     // private-chat / group-task / browser-bridge calls get full reasoning unless
