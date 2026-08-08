@@ -4,6 +4,7 @@ import { RootState } from '../../store';
 import { scheduledTaskService } from '../../services/scheduledTask';
 import type { SdkCronMirror } from '../../types/scheduledTask';
 import { ClockIcon, TrashIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import DeleteConfirmModal from './DeleteConfirmModal';
 
 /**
  * R1 展示层：SDK cron 宿主侧镜像列表（方案 C）。
@@ -40,15 +41,23 @@ const SdkCronMirrorList: React.FC = () => {
     void scheduledTaskService.loadSdkMirrors();
   }, []);
 
-  const handleDelete = async (mirror: SdkCronMirror) => {
-    if (mirror.status !== 'active' || deletingId) return;
-    const confirmed = window.confirm(
-      `确定删除 SDK 定时任务「${mirror.name}」（${mirror.id}）？\n将通知其所属会话执行 CronDelete；删除后 7 天内不会再次触发。`
-    );
-    if (!confirmed) return;
-    setDeletingId(mirror.id);
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+
+  const handleRequestDelete = useCallback(
+    (mirror: SdkCronMirror) => {
+      if (mirror.status !== 'active' || deletingId) return;
+      setDeleteTarget({ id: mirror.id, name: `${mirror.name}（${mirror.id}）` });
+    },
+    [deletingId]
+  );
+
+  const handleConfirmDelete = useCallback(async () => {
+    if (!deleteTarget) return;
+    const { id } = deleteTarget;
+    setDeleteTarget(null);
+    setDeletingId(id);
     try {
-      const result = await scheduledTaskService.requestDeleteSdkCron(mirror.id);
+      const result = await scheduledTaskService.requestDeleteSdkCron(id);
       if (result?.hint) showToast(result.hint);
       else showToast('已发起删除，等待会话确认…');
     } catch (error) {
@@ -56,7 +65,7 @@ const SdkCronMirrorList: React.FC = () => {
     } finally {
       setDeletingId(null);
     }
-  };
+  }, [deleteTarget]);
 
   const handlePlanMigration = async () => {
     if (migrating) return;
@@ -220,7 +229,7 @@ const SdkCronMirrorList: React.FC = () => {
                 <div className="flex justify-center">
                   <button
                     type="button"
-                    onClick={() => void handleDelete(mirror)}
+                    onClick={() => void handleRequestDelete(mirror)}
                     disabled={mirror.status !== 'active' || deletingId !== null}
                     className="p-1.5 rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40"
                     title="删除（经管理桥由会话内 bot 执行 CronDelete）"
@@ -237,6 +246,15 @@ const SdkCronMirrorList: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* 删除确认模态（管理桥） */}
+      {deleteTarget && (
+        <DeleteConfirmModal
+          taskName={deleteTarget.name}
+          onConfirm={() => void handleConfirmDelete()}
+          onCancel={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
   );
 };

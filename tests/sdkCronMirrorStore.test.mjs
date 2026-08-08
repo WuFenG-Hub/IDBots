@@ -44,8 +44,14 @@ test('parseScheduledTasksFile parses the real durable file format', () => {
   assert.equal(parsed[0].recurring, true);
   assert.equal(parsed[0].durable, true);
   assert.equal(parsed[0].createdBySessionId, 'sess-1');
+  assert.equal(parsed[0].createdAtMs, 1786206675341);
   assert.equal(parsed[1].recurring, false);
   assert.equal(parsed[1].createdBySessionId, null);
+  // createdAt 缺失 → null；非法值 → null
+  const noCreatedAt = parseScheduledTasksFile('{"tasks":[{"id":"x1","cron":"0 4 * * *","prompt":"p"}]}');
+  assert.equal(noCreatedAt[0].createdAtMs, null);
+  const badCreatedAt = parseScheduledTasksFile('{"tasks":[{"id":"x2","cron":"0 4 * * *","prompt":"p","createdAt":"not-a-number"}]}');
+  assert.equal(badCreatedAt[0].createdAtMs, null);
 });
 
 test('parseScheduledTasksFile handles invalid input', () => {

@@ -48,6 +48,7 @@ import { ScheduledTaskStore } from './scheduledTaskStore';
 import { SdkCronMirrorStore, parseScheduledTasksFile } from './sdkCronMirrorStore';
 import { planTaskMigration, extractMigrationTaskId } from './sdkCronMigration';
 import { buildCronDeleteInstruction, buildCronCreateInstruction } from './sdkCronBridge';
+import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
 import { OrchestrationStore } from './orchestrationStore';
@@ -2519,9 +2520,11 @@ let botBrowserTabBridge: BotBrowserTabBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
-/** R1：各会话最后已知的 SDK cron id（会话结束对账依据），由 Stop hook 采集维护。 */
-let sdkCronMirrorLastKnownCrons: Map<string, string[]> = new Map();
+/** R1：各会话最后已知的 SDK cron 全量信息（会话结束对账 + 宿主触发状态推进依据），由 Stop hook 采集维护。 */
+let sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
 let sdkCronMirrorScanInterval: ReturnType<typeof setInterval> | null = null;
+let sdkCronHostTriggerLogStore: SdkCronHostTriggerLogStore | null = null;
+let sdkCronHostTriggerBridge: SdkCronHostTriggerBridge | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
@@ -3086,16 +3089,21 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
     );
   }, SQLITE_MAINTENANCE_INTERVAL_MS);
 
+  // 镜像扫描 + 宿主触发桥串行执行（同一 job 内，避免与触发桥并发读写同一落盘文件）。
+  const runSdkCronBridgeScan = (): Promise<void> => {
+    scanDurableCronFiles();
+    return hostTriggerDueSdkCrons();
+  };
   runSqliteBackgroundJob(
     'sdkCronMirror:initialFileScan',
-    '[SdkCronMirror] Initial durable file scan failed',
-    scanDurableCronFiles,
+    '[SdkCronBridge] Initial durable scan/trigger failed',
+    runSdkCronBridgeScan,
   );
   sdkCronMirrorScanInterval = setInterval(() => {
     runSqliteBackgroundJob(
       'sdkCronMirror:periodicFileScan',
-      '[SdkCronMirror] Periodic durable file scan failed',
-      scanDurableCronFiles,
+      '[SdkCronBridge] Periodic durable scan/trigger failed',
+      runSdkCronBridgeScan,
     );
   }, SDK_CRON_MIRROR_SCAN_INTERVAL_MS);
 };
@@ -5094,7 +5102,9 @@ const getSdkCronMirrorStore = () => {
 /**
  * R1：Stop hook 采集与会话结束对账的宿主侧适配器。
  * - collectSessionCrons：upsert 镜像 + 用当次列表对账该会话非 durable 行（CronDelete 后立即生效）。
- * - reconcileSessionEnd：会话结束兜底对账（用最后已知列表），并清理内存。
+ * - reconcileSessionEnd：会话结束兜底对账（用最后已知列表），并清理内存；
+ *   同时把宿主触发状态推进到会话结束前最近一次 cron 匹配（会话内 SDK 已触发的实例
+ *   宿主不再重复触发，见 SdkCronHostTriggerBridge.advanceSessionCoverage）。
  */
 const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
   collectSessionCrons(sessionId: string, crons: { id: string; schedule: string; recurring: boolean; prompt: string }[]): void {
@@ -5104,7 +5114,7 @@ const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
       for (const cron of crons) {
         store.upsert({ ...cron, durable: false }, sessionId, 'stop_hook');
       }
-      sdkCronMirrorLastKnownCrons.set(sessionId, ids);
+      sdkCronMirrorLastKnownCrons.set(sessionId, crons);
       // 轻量对账：本次 session_crons 未包含的非 durable 行 → deleted（幂等，无变化不写盘）。
       store.reconcileSession(sessionId, ids);
     } catch (error) {
@@ -5114,7 +5124,10 @@ const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
   reconcileSessionEnd(sessionId: string): void {
     try {
       const store = getSdkCronMirrorStore();
-      store.reconcileSession(sessionId, sdkCronMirrorLastKnownCrons.get(sessionId) ?? []);
+      const lastKnown = sdkCronMirrorLastKnownCrons.get(sessionId) ?? [];
+      store.reconcileSession(sessionId, lastKnown.map((c) => c.id));
+      // 宿主触发状态推进：会话存活期间 SDK 会触发每个 cron 匹配点，推进后宿主不重复触发。
+      getSdkCronHostTriggerBridge().advanceSessionCoverage(lastKnown, Date.now());
       sdkCronMirrorLastKnownCrons.delete(sessionId);
     } catch (error) {
       console.warn('[SdkCronMirror] Failed to reconcile session end:', error);
@@ -5122,47 +5135,10 @@ const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
   },
 });
 
-/** R1：递归查找工作区下所有 `.claude/scheduled_tasks.json`（跳过 node_modules/.git/隐藏目录，限深）。 */
-const findScheduledTasksJsonFiles = (rootDir: string, maxDepth = 6): string[] => {
-  const results: string[] = [];
-  const walk = (dir: string, depth: number): void => {
-    if (depth > maxDepth) return;
-    let entries: string[];
-    try {
-      entries = fs.readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry === 'node_modules' || entry === '.git') continue;
-      const full = path.join(dir, entry);
-      let stat: fs.Stats;
-      try {
-        stat = fs.statSync(full);
-      } catch {
-        continue;
-      }
-      if (stat.isDirectory()) {
-        if (entry === '.claude') {
-          const candidate = path.join(full, 'scheduled_tasks.json');
-          try {
-            if (fs.statSync(candidate).isFile()) results.push(candidate);
-          } catch {
-            // 无落盘文件，忽略
-          }
-        } else if (!entry.startsWith('.')) {
-          walk(full, depth + 1);
-        }
-      }
-    }
-  };
-  walk(rootDir, 0);
-  return results;
-};
-
 /**
  * R1：durable 文件扫描——把落盘的 SDK durable cron 镜像进宿主存储并做 durable 对账。
  * 会话结束后跨重启的补充数据源（Stop hook 在会话结束后不再触发）。
+ * （递归查找逻辑统一由 sdkCronHostTrigger.findScheduledTasksJsonFiles 提供。）
  */
 const scanDurableCronFiles = (): void => {
   try {
@@ -5200,6 +5176,92 @@ const scanDurableCronFiles = (): void => {
     }
   } catch (error) {
     console.warn('[SdkCronMirror] Durable file scan failed:', error);
+  }
+};
+
+/** 方案 C 补充：宿主触发状态存储（触发审计 + 防重复拉起，随主 sqlite 持久化）。 */
+const getSdkCronHostTriggerLogStore = () => {
+  if (!sdkCronHostTriggerLogStore) {
+    const sqliteStore = getStore();
+    sdkCronHostTriggerLogStore = new SdkCronHostTriggerLogStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction()
+    );
+  }
+  return sdkCronHostTriggerLogStore;
+};
+
+/** 该 cwd 下是否存在 running 会话（存在则 SDK 会自行触发该文件的 durable cron，宿主整体跳过）。 */
+const isSessionRunningInCwd = (cwd: string): boolean => {
+  const target = path.resolve(cwd);
+  try {
+    const sessions = getCoworkStore().listSessions();
+    for (const session of sessions) {
+      if (session.status !== 'running') continue;
+      const full = getCoworkStore().getSessionWithoutMessages(session.id);
+      if (full && path.resolve(full.cwd) === target) return true;
+    }
+  } catch (error) {
+    console.warn('[SdkCronHostTrigger] Failed to query running sessions:', error);
+  }
+  return false;
+};
+
+/** 方案 C 补充：宿主触发桥（复用旧 Scheduler 的会话拉起逻辑，见 deps.launchSession）。 */
+const getSdkCronHostTriggerBridge = (): SdkCronHostTriggerBridge => {
+  if (!sdkCronHostTriggerBridge) {
+    sdkCronHostTriggerBridge = new SdkCronHostTriggerBridge({
+      logStore: getSdkCronHostTriggerLogStore(),
+      getConfig: () => getCoworkStore().getConfig(),
+      getSkillsPrompt: async () => {
+        try {
+          return await getSkillManager().buildAutoRoutingPrompt();
+        } catch {
+          return null;
+        }
+      },
+      getSession: (id) => getCoworkStore().getSessionWithoutMessages(id),
+      isSessionRunningInCwd,
+      launchSession: async (spec) => {
+        // 与旧 Scheduler.startCoworkSession 同构：createSession → addMessage → startSession。
+        const coworkStore = getCoworkStore();
+        const session = coworkStore.createSession(
+          spec.title,
+          spec.cwd,
+          spec.systemPrompt,
+          spec.executionMode,
+          [],
+          spec.metabotId ?? null
+        );
+        const sessionId = session.id;
+        coworkStore.updateSession(sessionId, { status: 'running' });
+        coworkStore.addMessage(sessionId, { type: 'user', content: spec.prompt });
+        await getCoworkRunner().startSession(sessionId, spec.prompt, {
+          skipInitialUserMessage: true,
+          disableMemoryUpdates: true,
+          confirmationMode: 'text',
+        });
+        return sessionId;
+      },
+      markMirrorDeleted: (cronId) => {
+        getSdkCronMirrorStore().markDeleted(cronId);
+      },
+    });
+  }
+  return sdkCronHostTriggerBridge;
+};
+
+/**
+ * 方案 C 补充：宿主触发扫描——对到点且无活跃会话的 durable SDK cron 拉起 bot 会话执行 prompt。
+ * 复用镜像扫描的 30 分钟周期与同一 rootDir（与 scanDurableCronFiles 串行，避免并发读写落盘文件）。
+ */
+const hostTriggerDueSdkCrons = async (): Promise<void> => {
+  try {
+    const coworkConfig = getCoworkStore().getConfig();
+    const rootDir = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+    await getSdkCronHostTriggerBridge().scanAndTrigger(rootDir);
+  } catch (error) {
+    console.warn('[SdkCronHostTrigger] Scan failed:', error);
   }
 };
 
