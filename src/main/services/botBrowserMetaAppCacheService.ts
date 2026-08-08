@@ -5,8 +5,6 @@ import http from 'http';
 import path from 'path';
 import AdmZip from 'adm-zip';
 import {
-  buildMetafileAcceleratedContentUrl,
-  buildMetafileContentUrl,
   resolveMetaAppPinToRecord,
   type BrowserCommandResult as CoreBrowserCommandResult,
   type MetaAppGalleryRecord,
@@ -23,7 +21,9 @@ import {
 import { fetchContentWithFallback } from './localIndexerProxy';
 import {
   assertMetaAppZipDownloadIntegrity,
+  buildMetaAppZipCandidateUrls,
   isMetaAppZipIntegrityError,
+  looksLikeZipArchive,
   wrapMetaAppZipExtractionError,
 } from '../libs/metaAppZipDownload';
 
@@ -93,7 +93,6 @@ const MANIFEST_VERSION = 1;
 const LOCAL_HOST = '127.0.0.1';
 const PREVIEW_PREFIX = '/browser-cache/metaapp-preview/';
 const PREVIEW_SESSION_TTL_MS = 30 * 60 * 1000;
-const MAN_CONTENT_BASE_URL = 'https://man.metaid.io/content';
 const MAX_METAAPP_DOWNLOAD_REDIRECTS = 5;
 
 const MIME_TYPES: Record<string, string> = {
@@ -178,11 +177,7 @@ function buildContentUrls(reference: string): Array<{ url: string; pinId?: strin
     return [];
   }
 
-  return [
-    { url: buildMetafileAcceleratedContentUrl(undefined, pinId), pinId },
-    { url: buildMetafileContentUrl(undefined, pinId), pinId },
-    { url: `${MAN_CONTENT_BASE_URL}/${encodeURIComponent(pinId)}`, pinId },
-  ];
+  return buildMetaAppZipCandidateUrls(pinId);
 }
 
 async function readJsonFile(filePath: string): Promise<unknown> {
@@ -514,7 +509,12 @@ export function createBotBrowserMetaAppCacheService(
     for (const candidate of candidates) {
       try {
         const response = !hasInjectedFetch && candidate.pinId
-          ? await fetchContentWithFallback(candidate.pinId, candidate.url, { redirect: 'follow' })
+          ? await fetchContentWithFallback(
+            candidate.pinId,
+            candidate.url,
+            { redirect: 'follow' },
+            looksLikeZipArchive,
+          )
           : await fetchMetaAppArchiveResponse(fetchImpl, candidate.url);
         if (!response.ok || !response.arrayBuffer) {
           lastError = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;

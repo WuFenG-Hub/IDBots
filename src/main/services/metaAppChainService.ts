@@ -3,6 +3,8 @@ import path from 'path';
 import { fetchContentWithFallback } from './localIndexerProxy';
 import {
   assertMetaAppZipDownloadIntegrity,
+  buildMetaAppZipCandidateUrls,
+  looksLikeZipArchive,
   wrapMetaAppZipExtractionError,
 } from '../libs/metaAppZipDownload';
 import { fetchMetaidInfoByMetaid } from './metabotRestoreService';
@@ -17,7 +19,6 @@ try {
   AdmZip = null;
 }
 
-const MAN_CONTENT_BASE = 'https://man.metaid.io/content';
 const METAAPPS_CONFIG_FILE_NAME = 'metaapps.config.json';
 const DEFAULT_COMMUNITY_METAAPPS_PAGE_SIZE = 30;
 const COMMUNITY_METAAPPS_INSTALL_SCAN_PAGE_SIZE = 100;
@@ -525,17 +526,31 @@ const defaultFetchList: FetchListFn = async (input = {}) => {
 };
 
 const defaultFetchCodeZip: FetchZipFn = async (pinId) => {
-  const fallbackUrl = `${MAN_CONTENT_BASE}/${encodeURIComponent(pinId)}`;
-  const response = await fetchContentWithFallback(pinId, fallbackUrl, { redirect: 'follow' });
-  if (!response.ok) {
-    throw new Error(`MetaApp code download failed: ${response.status} ${response.statusText}`);
+  let lastError = '';
+  for (const candidate of buildMetaAppZipCandidateUrls(pinId)) {
+    try {
+      const response = await fetchContentWithFallback(
+        candidate.pinId,
+        candidate.url,
+        { redirect: 'follow' },
+        looksLikeZipArchive,
+      );
+      if (!response.ok) {
+        lastError = `MetaApp code download failed: ${response.status} ${response.statusText}`;
+        continue;
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (!buffer.length) {
+        lastError = 'MetaApp code zip is empty';
+        continue;
+      }
+      assertMetaAppZipDownloadIntegrity(buffer, response);
+      return buffer;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
   }
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length) {
-    throw new Error('MetaApp code zip is empty');
-  }
-  assertMetaAppZipDownloadIntegrity(buffer, response);
-  return buffer;
+  throw new Error(`MetaApp code download failed: ${lastError || 'no usable content URL'}`);
 };
 
 /**
