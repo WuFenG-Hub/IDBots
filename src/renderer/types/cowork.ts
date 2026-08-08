@@ -100,8 +100,8 @@ export interface CoworkUsageStats {
   cacheCreationTokens: number;
   /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
   totalCostUsd?: number;
-  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
-  source: 'deepseek' | 'anthropic' | 'none';
+  /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, 'other' (gateway/plan providers), or none. */
+  source: 'deepseek' | 'anthropic' | 'other' | 'none';
   /** Number of LLM turns accumulated (for cache-miss attribution). */
   turnCount?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */

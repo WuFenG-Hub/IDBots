@@ -69,7 +69,10 @@ test('DeepSeek cost/totals never double-count input_tokens (it already includes 
   const costFn = chip.slice(chip.indexOf('function estimateDeepSeekCostCNY'));
   assert.ok(!costFn.slice(0, 700).includes('stats.inputTokens'),
     'estimateDeepSeekCostCNY must not add inputTokens on top of hit+miss');
-  // Totals and the per-model breakdown branch on the same semantics.
-  assert.match(chip, /const totalTokens = isDeepSeek\s*\?\s*usageStats\.inputTokens \+ usageStats\.outputTokens/);
-  assert.match(chip, /const modelInput = isDeepSeek\s*\?\s*u\.inputTokens/);
+  // Totals and the per-model breakdown branch on the same semantics: every
+  // non-Anthropic source (deepseek AND openai-compat gateways) reports
+  // input_tokens already containing the cache tokens.
+  assert.match(chip, /const cacheIncludedInInput = usageStats\.source !== 'anthropic'/);
+  assert.match(chip, /const totalTokens = cacheIncludedInInput\s*\?\s*usageStats\.inputTokens \+ usageStats\.outputTokens/);
+  assert.match(chip, /const modelInput = cacheIncludedInInput\s*\?\s*u\.inputTokens/);
 });
