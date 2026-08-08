@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels } from '../store/slices/modelSlice';
@@ -482,7 +482,26 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     createdAt: number;
     updatedAt: number;
   };
+  // Run rows power the failure fallback entries. They are read straight from
+  // metabot_dream_runs — the same table the scheduler's computeDueDreamDates
+  // uses as its only due/idle anchor — and are never written anywhere, so
+  // displaying a failed entry cannot mark the date as done or make the
+  // auto-heal retry skip it.
+  type DreamDiaryRun = {
+    id: string;
+    metabotId: number;
+    dreamDate: string;
+    status: 'running' | 'completed' | 'failed';
+    attemptCount: number;
+    llmId: string | null;
+    dreamVersion: number;
+    error: string | null;
+    startedAt: number;
+    completedAt: number | null;
+    nextRetryAt: number | null;
+  };
   const [dreamDiarySummaries, setDreamDiarySummaries] = useState<DreamDiarySummary[]>([]);
+  const [dreamDiaryRuns, setDreamDiaryRuns] = useState<DreamDiaryRun[]>([]);
   const [dreamDiaryLoading, setDreamDiaryLoading] = useState<boolean>(false);
   const [dreamDiaryMetabotId, setDreamDiaryMetabotId] = useState<number | null>(null);
   const [dreamDiaryExpandedId, setDreamDiaryExpandedId] = useState<string | null>(null);
@@ -1063,33 +1082,60 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const loadDreamDiary = useCallback(async () => {
     if (dreamDiaryMetabotId == null) {
       setDreamDiarySummaries([]);
+      setDreamDiaryRuns([]);
       return;
     }
     setDreamDiaryLoading(true);
     try {
-      const result = await window.electron?.dream?.listDailySummaries({
-        metabotId: dreamDiaryMetabotId,
-        limit: 60,
-      });
+      const [summariesResult, runsResult] = await Promise.all([
+        window.electron?.dream?.listDailySummaries({
+          metabotId: dreamDiaryMetabotId,
+          limit: 60,
+        }),
+        window.electron?.dream?.listRuns({
+          metabotId: dreamDiaryMetabotId,
+          limit: 60,
+        }),
+      ]);
       setDreamDiarySummaries(
-        (result?.success && Array.isArray(result.summaries) ? result.summaries : []) as DreamDiarySummary[]
+        (summariesResult?.success && Array.isArray(summariesResult.summaries) ? summariesResult.summaries : []) as DreamDiarySummary[]
+      );
+      setDreamDiaryRuns(
+        (runsResult?.success && Array.isArray(runsResult.runs) ? runsResult.runs : []) as DreamDiaryRun[]
       );
     } catch (loadError) {
       console.error('Failed to load dream diary:', loadError);
       setDreamDiarySummaries([]);
+      setDreamDiaryRuns([]);
     } finally {
       setDreamDiaryLoading(false);
     }
   }, [dreamDiaryMetabotId]);
 
-  const handleForceDream = async () => {
-    if (dreamDiaryMetabotId == null || !dreamDiaryRunDate || dreamDiaryRunning) return;
+  // Failed runs for dates that have no summary become fallback entries, merged
+  // newest-first with the summaries. Read-only view of the runs table — the
+  // auto-heal scheduler keys off run status (failed → retry after backoff),
+  // never off this list, so these entries cannot suppress a re-dream.
+  const dreamDiaryEntries: Array<
+    | { kind: 'summary'; date: string; summary: DreamDiarySummary }
+    | { kind: 'failed'; date: string; run: DreamDiaryRun }
+  > = [
+    ...dreamDiarySummaries.map((summary) => ({ kind: 'summary' as const, date: summary.summaryDate, summary })),
+    ...dreamDiaryRuns
+      .filter((run) => run.status === 'failed')
+      .filter((run) => !dreamDiarySummaries.some((summary) => summary.summaryDate === run.dreamDate))
+      .map((run) => ({ kind: 'failed' as const, date: run.dreamDate, run })),
+  ].sort((a, b) => b.date.localeCompare(a.date));
+
+  const handleForceDream = async (dateOverride?: string) => {
+    const targetDate = dateOverride ?? dreamDiaryRunDate;
+    if (dreamDiaryMetabotId == null || !targetDate || dreamDiaryRunning) return;
     setDreamDiaryRunning(true);
     setDreamDiaryNotice(null);
     try {
       const result = await window.electron?.dream?.runNow({
         metabotId: dreamDiaryMetabotId,
-        date: dreamDiaryRunDate,
+        date: targetDate,
       });
       if (!result?.success) {
         throw new Error(result?.error || i18nService.t('dreamDiaryForceFailed'));
@@ -1098,8 +1144,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${result.run.error || i18nService.t('dreamDiaryForceFailed')}`);
       } else {
         setDreamDiaryNotice(i18nService.t('dreamDiaryForceCompleted'));
-        await loadDreamDiary();
       }
+      await loadDreamDiary();
     } catch (runError) {
       console.error('Failed to force dream:', runError);
       setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
@@ -2595,13 +2641,58 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('loading')}
                   </div>
-                ) : dreamDiarySummaries.length === 0 ? (
+                ) : dreamDiaryEntries.length === 0 ? (
                   <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('dreamDiaryEmpty')}
                   </div>
                 ) : (
                   <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                    {dreamDiarySummaries.map((summary) => {
+                    {dreamDiaryEntries.map((entry) => {
+                      if (entry.kind === 'failed') {
+                        const { run } = entry;
+                        const retryPending = run.nextRetryAt == null || run.nextRetryAt <= Date.now();
+                        return (
+                          <div key={`failed-${run.id}`} className="px-3 py-3 text-xs">
+                            <div className="flex items-start gap-2">
+                              <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 flex-shrink-0 text-amber-500" />
+                              <span className="flex-1 min-w-0">
+                                <span className="font-medium dark:text-claude-darkText text-claude-text">{run.dreamDate}</span>
+                                <span className="ml-2 rounded-full border px-2 py-0.5 text-amber-600 border-amber-300 dark:text-amber-400 dark:border-amber-500/40">
+                                  {i18nService.t('dreamDiaryFailedBadge')}
+                                </span>
+                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                                  {`${i18nService.t('dreamDiaryFailedAttempts')}: ${run.attemptCount}`}
+                                </span>
+                                {run.error && (
+                                  <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                                    {run.error}
+                                  </span>
+                                )}
+                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  {retryPending
+                                    ? i18nService.t('dreamDiaryRetryPending')
+                                    : `${i18nService.t('dreamDiaryNextRetry')}: ${new Date(run.nextRetryAt ?? 0).toLocaleString()}`}
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDreamDiaryRunDate(run.dreamDate);
+                                  void handleForceDream(run.dreamDate);
+                                }}
+                                title={i18nService.t('dreamDiaryForceHint')}
+                                aria-label={i18nService.t('dreamDiaryRetryNow')}
+                                disabled={dreamDiaryRunning}
+                                className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <ArrowPathIcon className={`h-3.5 w-3.5 ${dreamDiaryRunning ? 'animate-spin' : ''}`} />
+                                <span>{i18nService.t('dreamDiaryRetryNow')}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+                      const summary = entry.summary;
                       const expanded = dreamDiaryExpandedId === summary.id;
                       const sectionEntries = Object.entries(summary.sections ?? {}).filter(([, text]) => typeof text === 'string' && text.trim());
                       return (

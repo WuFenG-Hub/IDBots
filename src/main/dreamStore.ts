@@ -439,6 +439,20 @@ export class DreamStore {
     return row ? this.mapRunRow(row) : null;
   }
 
+  /**
+   * Recent run rows for display (dream diary failure fallback), newest date
+   * first. Read-only: scheduling decisions use getRunStates/computeDueDreamDates
+   * on this same table, so surfacing these rows can never mark a date as done.
+   */
+  listRecentRuns(metabotId: number, limit: number = 30): DreamRun[] {
+    const clampedLimit = Math.max(1, Math.min(365, Math.floor(limit)));
+    const rows = this.getAll<DreamRunRow>(
+      'SELECT * FROM metabot_dream_runs WHERE metabot_id = ? ORDER BY dream_date DESC LIMIT ?',
+      [metabotId, clampedLimit]
+    );
+    return rows.map((row) => this.mapRunRow(row));
+  }
+
   getDreamFragment(metabotId: number, dreamDate: string, fragmentKey: string): DreamFragment | null {
     const row = this.getOne<DreamFragmentRow>(
       `SELECT * FROM metabot_dream_fragments

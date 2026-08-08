@@ -87,6 +87,33 @@ test('resetStaleRunningRuns marks interrupted runs as failed', async () => {
   }
 });
 
+test('listRecentRuns returns newest dates first with full run detail', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = new DreamStore(db, () => {});
+    store.beginRun(5, '2026-07-28', 'deepseek-v4-flash', 4);
+    store.finishRun(5, '2026-07-28', 'completed');
+    store.beginRun(5, '2026-07-30', 'deepseek-v4-flash', 4);
+    store.finishRun(5, '2026-07-30', 'failed', 'LLM returned no text');
+    store.beginRun(5, '2026-07-29', null, 4);
+    store.beginRun(6, '2026-07-30', null, 4); // other bot: not listed
+
+    const runs = store.listRecentRuns(5);
+    assert.deepEqual(runs.map((run) => run.dreamDate), ['2026-07-30', '2026-07-29', '2026-07-28']);
+    assert.equal(runs[0].status, 'failed');
+    assert.equal(runs[0].error, 'LLM returned no text');
+    assert.equal(runs[0].attemptCount, 1);
+    assert.equal(runs[1].status, 'running');
+    assert.equal(runs[2].status, 'completed');
+    assert.ok(runs.every((run) => run.metabotId === 5));
+
+    const limited = store.listRecentRuns(5, 2);
+    assert.deepEqual(limited.map((run) => run.dreamDate), ['2026-07-30', '2026-07-29']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('dream fragments are idempotent, resumable, and migrate with the dream schema', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {

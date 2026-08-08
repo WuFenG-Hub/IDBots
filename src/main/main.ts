@@ -158,6 +158,7 @@ import {
 import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
+import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
@@ -8654,6 +8655,30 @@ if (!gotTheLock) {
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to list daily summaries' };
+      }
+    });
+  });
+
+  ipcMain.handle('dream:listRuns', async (_event, options: { metabotId: number; limit?: number }) => {
+    return withSqliteRecovery('dream:listRuns', async () => {
+      try {
+        const metabotId = Number(options?.metabotId);
+        if (!Number.isInteger(metabotId) || metabotId <= 0) {
+          return { success: false, error: 'Invalid metabotId' };
+        }
+        // Read-only run rows for the dream diary failure fallback. nextRetryAt
+        // mirrors computeDueDreamDates' failed-run backoff so the UI can show
+        // when the scheduler will pick the date up again on its own.
+        const runs = getDreamStore().listRecentRuns(metabotId, options?.limit).map((run) => ({
+          ...run,
+          nextRetryAt: run.status === 'failed'
+            ? run.startedAt + computeDreamRetryDelayMs(run.attemptCount)
+            : null,
+        }));
+        return { success: true, runs };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list dream runs' };
       }
     });
   });

@@ -1188,6 +1188,24 @@ interface IElectronAPI {
       }>;
       error?: string;
     }>;
+    listRuns: (options: { metabotId: number; limit?: number }) => Promise<{
+      success: boolean;
+      runs?: Array<{
+        id: string;
+        metabotId: number;
+        dreamDate: string;
+        status: 'running' | 'completed' | 'failed';
+        attemptCount: number;
+        llmId: string | null;
+        dreamVersion: number;
+        error: string | null;
+        startedAt: number;
+        completedAt: number | null;
+        /** Failed runs only: when the scheduler's backoff makes the date eligible again. */
+        nextRetryAt: number | null;
+      }>;
+      error?: string;
+    }>;
     runNow: (options: { metabotId: number; date?: string }) => Promise<{
       success: boolean;
       metabotId?: number;
