@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import Module from 'node:module';
 
 const require = Module.createRequire(import.meta.url);
-const { buildTwinWorkerDirectory, TwinWorkerDirectoryAuthorizationError } = require('../dist-electron/main/services/twinWorkerDirectoryService.js');
+const {
+  buildTwinWorkerDirectory,
+  buildTwinLocalImpressionBlock,
+  buildTwinLocalRosterBlock,
+  TwinWorkerDirectoryAuthorizationError,
+} = require('../dist-electron/main/services/twinWorkerDirectoryService.js');
 
 function bot(id, overrides = {}) {
   return {
@@ -58,6 +63,40 @@ test('Twin directory returns sanitized capabilities and bounded evidence for eve
   assert.equal(result.workers[2].ownerBindingVerified, false);
   assert.equal(result.workers[1].capabilityEvidence[0].sessionRefs[0].sessionId, 'session-2');
   assert.equal(result.workers[1].activeOrchestrationSteps, null);
+});
+
+test('Twin roster block is stable profile-only and excludes the Twin itself', () => {
+  const directory = buildTwinWorkerDirectory('twin-session', deps({
+    bots: [
+      bot(1, { metabot_type: 'twin' }),
+      bot(2, { globalmetaid: 'gmid-2', role: 'coding specialist', skills: ['code', 'debug'] }),
+      bot(3, { enabled: false, globalmetaid: 'gmid-3' }),
+    ],
+  }));
+  const block = buildTwinLocalRosterBlock(directory);
+  assert.match(block, /Bot 2 \(id=2, enabled\)/);
+  assert.match(block, /MetaID: gmid-2/);
+  assert.match(block, /coding specialist/);
+  assert.match(block, /Skills: code, debug/);
+  assert.match(block, /Bot 3 \(id=3, disabled\)/);
+  assert.doesNotMatch(block, /\(id=1/);
+  assert.doesNotMatch(block, /local_worker_delegate/);
+});
+
+test('Twin impression block joins snapshots by Worker globalMetaID', () => {
+  const directory = buildTwinWorkerDirectory('twin-session', deps({
+    bots: [
+      bot(1, { metabot_type: 'twin' }),
+      bot(2, { globalmetaid: 'gmid-2' }),
+      bot(3, { globalmetaid: 'gmid-3' }),
+    ],
+  }));
+  const block = buildTwinLocalImpressionBlock(directory, [
+    { subjectGlobalMetaID: 'gmid-2', summaryText: 'Reliable TypeScript coder' },
+  ]);
+  assert.match(block, /Bot 2: Reliable TypeScript coder/);
+  assert.doesNotMatch(block, /Bot 3/);
+  assert.equal(buildTwinLocalImpressionBlock(directory, []), '');
 });
 
 for (const [name, setup, code] of [
