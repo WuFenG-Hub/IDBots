@@ -40,11 +40,9 @@ const EffortBarsIcon: React.FC<{ level: 1 | 2 | 3 | 4; className?: string }> = (
   );
 };
 
-// The accent level (max) renders as a yellow-fill chip — same brand yellow as
-// the main send button (#FFDC51), with dark text on top for legibility. Pure
-// yellow text on the light toolbar is too faint, so we fill the whole trigger.
-const ACCENT_TRIGGER_FILL = 'bg-[#FFDC51] dark:bg-[#FFDC51] border-transparent text-[#303133]';
-const ACCENT_ITEM_TEXT = 'text-[#303133] dark:text-[#FFDC51]';
+// Accent level (max) label uses the brand yellow (#FFDC51, same as the main
+// send button) as its TEXT color in both light and dark mode — not a fill.
+const ACCENT_ITEM_TEXT = 'text-[#FFDC51]';
 
 const EFFORT_LEVELS: Array<{ value: string | null; icon: React.ReactElement; labelKey: string; descKey: string; color: string }> = [
   { value: null, icon: <Cog6ToothIcon className="h-3.5 w-3.5 flex-shrink-0" />, labelKey: 'coworkEffort_auto', descKey: 'coworkEffort_auto_desc', color: 'text-claude-textSecondary' },
@@ -86,11 +84,7 @@ const EffortSelector: React.FC<EffortSelectorProps> = ({
         type="button"
         disabled={disabled}
         onClick={() => setIsOpen(!isOpen)}
-        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
-          currentEffort === 'max'
-            ? ACCENT_TRIGGER_FILL
-            : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset'
-        }`}
+        className="flex items-center gap-1 rounded-lg border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         title={i18nService.t('coworkEffortTitle')}
       >
         <span className={`flex items-center ${currentEntry.color}`}>
