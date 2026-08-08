@@ -112,10 +112,14 @@ SKILLs/metaid-master-wiki/
 # Local generated skills for development only; never bundled into release.
 .local-skills/
 
-# Local MetaApp installs/generated apps
+# Local MetaApp installs/generated apps (bundled buzz/chat remain tracked)
+METAAPPs/*
+!METAAPPs/buzz/
+!METAAPPs/buzz/**
+!METAAPPs/chat/
+!METAAPPs/chat/**
 METAAPPs/metaapps.config.json
-METAAPPs/IDDisk/
-METAAPPs/id-music-player/
+METAAPPs/**/.DS_Store
 
 # SKILLs runtime files
 SKILLs/**/.connection
