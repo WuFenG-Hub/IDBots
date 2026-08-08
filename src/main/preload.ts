@@ -431,6 +431,8 @@ contextBridge.exposeInMainWorld('electron', {
     listMemoryEntries: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
@@ -441,6 +443,9 @@ contextBridge.exposeInMainWorld('electron', {
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      visibility?: 'local_only' | 'external_safe';
       text: string;
       confidence?: number;
       isExplicit?: boolean;
@@ -449,6 +454,9 @@ contextBridge.exposeInMainWorld('electron', {
     updateMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      visibility?: 'local_only' | 'external_safe';
       id: string;
       text?: string;
       confidence?: number;
@@ -458,8 +466,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:memory:updateEntry', input),
     deleteMemoryEntry: (input: { sessionId?: string; metabotId?: number; id: string }) =>
       ipcRenderer.invoke('cowork:memory:deleteEntry', input),
-    getMemoryStats: (input?: { sessionId?: string; metabotId?: number }) =>
+    getMemoryStats: (input?: { sessionId?: string; metabotId?: number; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }) =>
       ipcRenderer.invoke('cowork:memory:getStats', input),
+    listMemoryScopes: (input: { metabotId?: number }) =>
+      ipcRenderer.invoke('cowork:memory:listScopes', input),
+    getSessionMemoryScope: (input: { sessionId?: string }) =>
+      ipcRenderer.invoke('cowork:memory:getSessionScope', input),
     getMemoryPolicy: (input?: { sessionId?: string; metabotId?: number }) =>
       ipcRenderer.invoke('cowork:memory:getPolicy', input),
     setMemoryPolicy: (input: {

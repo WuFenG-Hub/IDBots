@@ -819,6 +819,8 @@ interface IElectronAPI {
     listMemoryEntries: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
@@ -828,6 +830,9 @@ interface IElectronAPI {
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      visibility?: 'local_only' | 'external_safe';
       text: string;
       confidence?: number;
       isExplicit?: boolean;
@@ -835,6 +840,9 @@ interface IElectronAPI {
     updateMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      visibility?: 'local_only' | 'external_safe';
       id: string;
       text?: string;
       confidence?: number;
@@ -842,7 +850,9 @@ interface IElectronAPI {
       isExplicit?: boolean;
     }) => Promise<{ success: boolean; entry?: CoworkUserMemoryEntry; error?: string }>;
     deleteMemoryEntry: (input: { sessionId?: string; metabotId?: number; id: string }) => Promise<{ success: boolean; error?: string }>;
-    getMemoryStats: (input?: { sessionId?: string; metabotId?: number }) => Promise<{ success: boolean; stats?: CoworkMemoryStats; error?: string }>;
+    getMemoryStats: (input?: { sessionId?: string; metabotId?: number; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }) => Promise<{ success: boolean; stats?: CoworkMemoryStats; error?: string }>;
+    listMemoryScopes: (input: { metabotId?: number }) => Promise<{ success: boolean; overview?: CoworkMemoryScopesOverview; error?: string }>;
+    getSessionMemoryScope: (input: { sessionId?: string }) => Promise<{ success: boolean; sessionScope?: CoworkSessionMemoryScope; error?: string }>;
     getMemoryPolicy: (input?: { sessionId?: string; metabotId?: number }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
     setMemoryPolicy: (input: {
       metabotId: number;

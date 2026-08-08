@@ -8074,6 +8074,21 @@ if (!gotTheLock) {
     }
     return backend.resolveMetabotIdForMemory(input?.sessionId);
   };
+  const resolveMemoryScopeInputFromSession = (
+    store: CoworkStore,
+    input?: { sessionId?: string; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }
+  ): { scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string } => {
+    if (input?.scopeKind && input?.scopeKey) {
+      return { scopeKind: input.scopeKind, scopeKey: input.scopeKey };
+    }
+    if (input?.sessionId) {
+      const resolved = store.resolveMemoryScopeForSession(input.sessionId);
+      if (resolved) {
+        return { scopeKind: resolved.scope.kind, scopeKey: resolved.scope.key };
+      }
+    }
+    return {};
+  };
 
   ipcMain.handle('cowork:memory:listEntries', async (_event, input: {
     sessionId?: string;
@@ -8093,10 +8108,11 @@ if (!gotTheLock) {
       if (metabotId == null) {
         return { success: false, error: 'No MetaBot available for memory' };
       }
+      const resolvedScope = resolveMemoryScopeInputFromSession(store, input);
       const entries = memoryBackend.listUserMemories({
         metabotId,
-        scopeKind: input?.scopeKind,
-        scopeKey: input?.scopeKey,
+        scopeKind: resolvedScope.scopeKind,
+        scopeKey: resolvedScope.scopeKey,
         query: input?.query?.trim() || undefined,
         status: input?.status || 'all',
         includeDeleted: Boolean(input?.includeDeleted),
@@ -8116,6 +8132,7 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    visibility?: 'local_only' | 'external_safe';
     text: string;
     confidence?: number;
     isExplicit?: boolean;
@@ -8134,6 +8151,7 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        visibility: input?.visibility,
       });
       return { success: true, entry };
     } catch (error) {
@@ -8148,6 +8166,7 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    visibility?: 'local_only' | 'external_safe';
     id: string;
     text?: string;
     confidence?: number;
@@ -8166,6 +8185,7 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        visibility: input?.visibility,
         text: input.text,
         confidence: input.confidence,
         status: input.status,
@@ -8225,16 +8245,71 @@ if (!gotTheLock) {
       if (metabotId == null) {
         return { success: false, error: 'No MetaBot available for memory' };
       }
+      const resolvedScope = resolveMemoryScopeInputFromSession(store, input);
       const stats = memoryBackend.getUserMemoryStats({
         metabotId,
-        scopeKind: input?.scopeKind,
-        scopeKey: input?.scopeKey,
+        scopeKind: resolvedScope.scopeKind,
+        scopeKey: resolvedScope.scopeKey,
       });
       return { success: true, stats };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get memory stats',
+      };
+    }
+  });
+  ipcMain.handle('cowork:memory:listScopes', async (_event, input: {
+    metabotId?: number;
+  }) => {
+    try {
+      const store = getCoworkStore();
+      const memoryBackend = store.getMemoryBackend();
+      const metabotId = typeof input?.metabotId === 'number' && Number.isFinite(input.metabotId) && input.metabotId > 0
+        ? Math.floor(input.metabotId)
+        : null;
+      if (metabotId == null) {
+        return { success: false, error: 'No MetaBot available for memory' };
+      }
+      const overview = memoryBackend.listMemoryScopes(metabotId);
+      return { success: true, overview };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list memory scopes',
+      };
+    }
+  });
+  ipcMain.handle('cowork:memory:getSessionScope', async (_event, input: {
+    sessionId?: string;
+  }) => {
+    try {
+      const store = getCoworkStore();
+      const resolved = input?.sessionId
+        ? store.resolveMemoryScopeForSession(input.sessionId)
+        : null;
+      if (!resolved) {
+        return { success: false, error: 'No session scope available for memory' };
+      }
+      const stats = store.getUserMemoryStats({
+        metabotId: resolved.metabotId,
+        scopeKind: resolved.scope.kind,
+        scopeKey: resolved.scope.key,
+      });
+      return {
+        success: true,
+        sessionScope: {
+          scopeKind: resolved.scope.kind,
+          scopeKey: resolved.scope.key,
+          peerName: resolved.peerName ?? null,
+          peerAvatar: resolved.peerAvatar ?? null,
+          stats,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get session memory scope',
       };
     }
   });
