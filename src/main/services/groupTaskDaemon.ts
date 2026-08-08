@@ -32,6 +32,15 @@ const DELIVERABLE_URI_PATTERN = /(metafile:\/\/[^\s]+|metaapp:\/\/[^\s]+|https?:
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 
+/**
+ * P1-4 (round 2): lines carrying the [DELIVERABLE] protocol tag — the ONLY
+ * source for deliverable URIs and kinds. URIs anywhere else in the message
+ * body (directory paths like `metaapp/`, example tokens, truncated copy with
+ * ellipses) must never be picked up as deliverables.
+ */
+const deliverableTagLines = (content: string): string[] =>
+  content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
+
 const CHAIR_PLANNED_KV_PREFIX = 'group_task_chair_planned:';
 const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
@@ -52,6 +61,14 @@ const GROUP_COGNITION_BLOCK_MAX_CHARS = 3000;
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
 const DEFAULT_CHAIR_COOLDOWN_MS = 10_000;
+/**
+ * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
+ * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
+ * floor-control / owner-message). Covers scenarios the exact reply-pin match
+ * cannot: Twin replies without a reply_pin, or Twin speech on a related but
+ * different message. 0 disables the window check.
+ */
+const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
 const DEFAULT_REPLY_BUDGET = 40;
 const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
@@ -392,6 +409,17 @@ export interface GroupTaskDaemonDeps {
   replyBudget?: number;
   maxRepliesPerTaskPerTick?: number;
   contextMessageCount?: number;
+  /**
+   * P2-7 (round 2): window (ms) during which any Twin-side chair message
+   * suppresses daemon chair AUTO replies. Defaults to
+   * DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS.
+   */
+  chairTwinSuppressWindowMs?: number;
+  /**
+   * P1-5 (round 2): opt-out — the Twin chair leads the group via its own
+   * kickoff; the daemon never runs the auto planning turn for new tasks.
+   */
+  disableChairPlanningTurn?: boolean;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -451,6 +479,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     Math.trunc(deps.maxRepliesPerTaskPerTick ?? DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK),
   );
   const contextMessageCount = Math.max(1, Math.trunc(deps.contextMessageCount ?? DEFAULT_CONTEXT_MESSAGE_COUNT));
+  const chairTwinSuppressWindowMs = Math.max(
+    0,
+    Math.trunc(deps.chairTwinSuppressWindowMs ?? DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS),
+  );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
   const experienceStore = deps.experienceStore ?? new MetaIDExperienceStore(
@@ -462,6 +494,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const lastReplyAtByKey = new Map<string, number>();
   const replyCountByKey = new Map<string, number>();
   const keyOf = (taskId: number, metabotId: number): string => `${taskId}:${metabotId}`;
+
+  // P2-7 (round 2): pin_ids of messages THIS daemon posted as the chair
+  // (planning kickoff + auto replies). They must never count as "Twin
+  // activity" for the suppression window — otherwise the daemon's own cadence
+  // would self-throttle in fully autonomous groups. Bounded per task.
+  const daemonChairSentPins = new Map<number, string[]>();
+  const rememberDaemonChairPin = (taskId: number, pinId: string): void => {
+    const pins = daemonChairSentPins.get(taskId) ?? [];
+    pins.push(pinId);
+    if (pins.length > 8) pins.shift();
+    daemonChairSentPins.set(taskId, pins);
+  };
 
   /**
    * Re-trigger window (P0-3c): a decision skipped because of the per-tick reply
@@ -526,6 +570,56 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     );
     const value = result[0]?.values?.[0]?.[0];
     return Number(value) > 0;
+  };
+
+  /**
+   * P2-7 (round 2): true when the chair bot posted ANY message within the
+   * suppression window (chain seconds). Pins the daemon itself posted
+   * (planning kickoff, auto replies) are excluded — only Twin-side speech
+   * counts. Rows without a chain timestamp or pin_id are unattributable and
+   * never counted.
+   */
+  const chairSpokeInWindow = (
+    db: Database,
+    groupId: string,
+    chairGlobalMetaId: string,
+    sinceChainSec: number,
+    excludePins: ReadonlySet<string>,
+  ): boolean => {
+    if (!chairGlobalMetaId) return false;
+    const result = db.exec(
+      `SELECT pin_id FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid = ? AND pin_id IS NOT NULL AND pin_id != ''
+         AND chain_timestamp IS NOT NULL AND chain_timestamp >= ?`,
+      [groupId, chairGlobalMetaId, sinceChainSec],
+    );
+    const pins = result[0]?.values ?? [];
+    return pins.some((values) => {
+      const pin = String(values[0] ?? '');
+      return Boolean(pin) && !excludePins.has(pin);
+    });
+  };
+
+  /**
+   * P2-7 (round 2): combined "the Twin is already speaking" gate for daemon
+   * chair AUTO replies — the exact reply-pin match (Twin replied to THIS
+   * message) OR Twin speech anywhere in the recent window (covers replies
+   * without a reply_pin and speech on related messages). `chair_mentioned`
+   * stays exempt: a direct @ of the chair is the reliable path and must be
+   * answered even while the Twin is active.
+   */
+  const twinChairActive = (
+    db: Database,
+    taskId: number,
+    groupId: string,
+    messagePinId: string | null,
+    chairGlobalMetaId: string,
+  ): boolean => {
+    if (chairAlreadyRepliedTo(db, groupId, messagePinId, chairGlobalMetaId)) return true;
+    if (chairTwinSuppressWindowMs <= 0) return false;
+    const sinceChainSec = Math.floor((now() - chairTwinSuppressWindowMs) / 1000);
+    const excludePins = new Set(daemonChairSentPins.get(taskId) ?? []);
+    return chairSpokeInWindow(db, groupId, chairGlobalMetaId, sinceChainSec, excludePins);
   };
 
   const queryRecentMessages = (db: Database, groupId: string, limit: number): GroupChatMessageRow[] => {
@@ -650,28 +744,49 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * First REAL URI in a [DELIVERABLE] line (metafile://…, metaapp://…, https?://…),
-   * else null. Placeholder/example tokens are rejected: `<pinId>`, `[PINID]`,
-   * brackets/angle-brackets anywhere in the URI, and scheme-only fragments
-   * (`metaapp://` with nothing after the scheme) — those are planning-turn
-   * examples, not deliverables.
+   * First REAL URI on a [DELIVERABLE] tag line (metafile://…, metaapp://…,
+   * https?://…), else null. ONLY the tag lines are scanned — URIs anywhere
+   * else in the message body (directory paths like `metaapp/`, example
+   * tokens, truncated copy with ellipses) can never be picked up (P1-4 r2:
+   * the full-content scan let a body `metafile://…zip` beat the real
+   * tag-line URI). Unreal tokens on a tag line are rejected:
+   * - placeholder brackets (`<pinId>`, `[PINID]`, any `<>[]` in the URI);
+   * - ellipsis truncation (`…` U+2026 anywhere in the URI);
+   * - full-width Chinese-paren annotation/truncation (`（…）`): the URI is
+   *   trimmed at the first full-width paren, and the trimmed result must
+   *   still be a real URI (scheme + payload);
+   * - scheme-only fragments (`metaapp://` with nothing after the scheme).
    */
   const extractDeliverableUri = (content: string): string | null => {
-    const match = DELIVERABLE_URI_PATTERN.exec(content);
-    if (!match) return null;
-    const uri = match[1];
-    // 占位符（<…> 或 […]，如 metaapp://<pinId>、metaapp://[PINID]）一律不是真实交付物
-    if (/[<>[\]]/.test(uri)) return null;
-    // scheme:// 后必须紧跟至少一个非空字符（metaapp:// 单独出现视为示例）
-    const schemeEnd = uri.indexOf('://');
-    if (schemeEnd <= 0 || uri.length <= schemeEnd + 3) return null;
-    return uri;
+    for (const line of deliverableTagLines(content)) {
+      const match = DELIVERABLE_URI_PATTERN.exec(line);
+      if (!match) continue;
+      let uri = match[1];
+      // 占位符（<…> 或 […]，如 metaapp://<pinId>、metaapp://[PINID]）一律不是真实交付物
+      if (/[<>[\]]/.test(uri)) continue;
+      // 省略号截断（U+2026）：metafile://…zip 这类被截断的 URI 不是交付物
+      if (/…/.test(uri)) continue;
+      // 中文括号截断/注释：metaapp://92075a3c（门户页）→ 取括号前的部分；
+      // 若括号前只剩 scheme（metaapp://（））则视为示例，继续找下一个候选。
+      const parenIndex = uri.search(/[（）]/);
+      if (parenIndex >= 0) uri = uri.slice(0, parenIndex);
+      // scheme:// 后必须紧跟至少一个非空字符（metaapp:// 单独出现视为示例）
+      const schemeEnd = uri.indexOf('://');
+      if (schemeEnd <= 0 || uri.length <= schemeEnd + 3) continue;
+      return uri;
+    }
+    return null;
   };
 
-  const inferDeliverableKind = (content: string): string => {
-    if (/metafile:\/\//i.test(content)) return 'metafile';
-    if (/metaapp/i.test(content)) return 'metaapp';
-    if (/https?:\/\//i.test(content)) return 'url';
+  /**
+   * Deliverable kind from the [DELIVERABLE] tag line's URI scheme ONLY
+   * (P1-4 r2): a `metaapp/` directory path in the message body can no longer
+   * misjudge the kind; a line without any `://` scheme stays 'text'.
+   */
+  const inferDeliverableKind = (tagLine: string): string => {
+    if (/metafile:\/\//i.test(tagLine)) return 'metafile';
+    if (/metaapp:\/\//i.test(tagLine)) return 'metaapp';
+    if (/https?:\/\//i.test(tagLine)) return 'url';
     return 'text';
   };
 
@@ -795,12 +910,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * Deliverable verification hints: format-check any pinid/txid-looking token,
-   * then (when wired) an on-chain existence check via getPinData. The notes are
-   * appended to the chair's context so it verifies before accepting.
+   * Deliverable verification hints: format-check any pinid/txid-looking token
+   * ON THE [DELIVERABLE] TAG LINES ONLY (P1-4 r2 — body prose is not scanned),
+   * then (when wired) an on-chain existence check via getPinData. The notes
+   * are appended to the chair's context so it verifies before accepting.
    */
-  const verifyDeliverableCandidates = async (content: string): Promise<string[]> => {
-    const candidates = extractIdCandidates(content);
+  const verifyDeliverableCandidates = async (deliverableTagText: string): Promise<string[]> => {
+    const candidates = extractIdCandidates(deliverableTagText);
     if (candidates.length === 0) return [];
     const notes: string[] = [];
     for (const token of candidates) {
@@ -985,12 +1101,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     );
 
     if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
+      // P1-4 (round 2): everything below is scoped to the [DELIVERABLE] tag
+      // lines — the message body (directory paths, examples, truncated copy)
+      // never influences the recorded URI, kind, or rejection decision.
+      const tagLines = deliverableTagLines(content);
       const uri = extractDeliverableUri(content);
-      // P1-4: a message with an URI-shaped token whose URI is a placeholder or
-      // malformed (e.g. `metaapp://<pinId>`, `metaapp://[PINID]`) is rejected
-      // as a whole — it is a planning example, not a deliverable. A [DELIVERABLE]
-      // with NO uri-shaped token at all stays valid (text deliverable, uri null).
-      const hasUriShapedToken = /(?:metafile|metaapp|https?):\/\//i.test(content);
+      // P1-4: a message whose tag line carries an URI-shaped token whose URI is
+      // a placeholder or malformed (e.g. `metaapp://<pinId>`, `metaapp://[PINID]`,
+      // `metafile://…zip`) is rejected as a whole — it is a planning example,
+      // not a deliverable. A [DELIVERABLE] tag line with NO uri-shaped token at
+      // all stays valid (text deliverable, uri null).
+      const hasUriShapedToken = tagLines.some((line) => /(?:metafile|metaapp|https?):\/\//i.test(line));
       const rejectAsPlaceholder = hasUriShapedToken && uri === null;
       const msgPinId = message.pinId;
       let recordedDeliverable = msgPinId
@@ -1001,12 +1122,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           taskId: task.id,
           msgPinId,
           authorGlobalmetaid: message.senderGlobalMetaId,
-          kind: inferDeliverableKind(content),
+          kind: inferDeliverableKind(tagLines[0] ?? content),
           uri,
         });
       }
       try {
-        verificationNotes = await verifyDeliverableCandidates(content);
+        verificationNotes = await verifyDeliverableCandidates(tagLines.join('\n'));
       } catch (error) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: deliverable verification failed: ` +
@@ -1103,11 +1224,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const skillsHint = member.role === 'chair' ? ' (chair, do not assign work to the chair)' : '';
       return `- ${member.name} [${member.role}]${goal}${skillsHint}${profile ? ` — ${profile}` : ''}`;
     });
+    const workerCount = promptMembers.filter((member) => member.role === 'worker').length;
+    const distributionRule = workerCount >= 2
+      ? ' With 2+ workers on the roster, DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members by their strengths — never concentrate every subtask on a single member.'
+      : ' (single worker on the roster — assign all subtasks to that one member).';
     return [
       '[SYSTEM planning directive — generated by the host, not by a group participant]',
       'The group task has just been created. As the chair, post the task plan to the group NOW, in one message:',
       '(a) Decompose the goal into concrete subtasks.',
-      '(b) Assign each subtask to the SINGLE most suitable member BY NAME based on the roster profiles (never assign the same work to everyone).',
+      `(b) Assign each subtask to the SINGLE most suitable member BY NAME based on the roster profiles (never assign the same work to everyone).${distributionRule}`,
       '(c) State the sequence/dependencies and @-mention ONLY the members who should act NOW (later steps get assigned when their inputs arrive, e.g. after a [DELIVERABLE]).',
       '(d) End the message with [STATUS:EXECUTING].',
       '',
@@ -1137,6 +1262,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const sqlite = deps.getStore();
     const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
     if (sqlite.get<string>(plannedKey) === '1') return;
+    if (deps.disableChairPlanningTurn) {
+      // Host opt-out (P1-5 r2): the Twin chair leads the kickoff itself, so
+      // the daemon never runs the auto planning turn. Mark the task as
+      // "planned" so the guard stays quiet on later ticks.
+      sqlite.set(plannedKey, '1');
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: chair planning turn disabled (disableChairPlanningTurn); Twin leads the kickoff`,
+      );
+      return;
+    }
     const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
     const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
     if (attempts >= MAX_CHAIR_PLAN_ATTEMPTS) return;
@@ -1168,7 +1303,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      await deps.postGroupTaskMessage(task.id, bot.id, reply);
+      const posted = await deps.postGroupTaskMessage(task.id, bot.id, reply);
+      // P2-7 r2: the daemon's own kickoff must not count as "Twin activity".
+      rememberDaemonChairPin(task.id, posted.pinId);
       sqlite.set(plannedKey, '1');
       emitLog(`[GroupTaskDaemon] Task ${task.id}: chair planning turn posted`);
     } catch (error) {
@@ -1336,6 +1473,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
       return;
     }
+    if (member.role === 'chair') {
+      // P2-7 r2: the daemon's own auto reply must not count as "Twin activity"
+      // for the suppression window when it round-trips into the DB.
+      rememberDaemonChairPin(task.id, sent.pinId);
+    }
     if (orchestrationAttemptId && deps.orchestrationBridge) {
       try {
         deps.orchestrationBridge.completeWorkerAttempt({
@@ -1425,8 +1567,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           continue;
         }
         if ((replyCountByKey.get(key) ?? 0) >= replyBudget) continue; // permanently spent
-        if (isChair && entry.reason !== 'chair_mentioned' && chairAlreadyRepliedTo(db, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
-          continue; // the Twin already spoke about this message; drop the auto reply
+        if (isChair && entry.reason !== 'chair_mentioned' && twinChairActive(db, task.id, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
+          continue; // the Twin already spoke about this message (or in the recent window); drop the auto reply
         }
         try {
           await generateAndSendReply(
@@ -1478,10 +1620,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
           // P2-7: a chair auto response (deliverable / floor control / owner
           // message) is suppressed when the Twin already replied to this message
-          // on-chain — the daemon must not double-speak next to the Twin.
+          // on-chain OR spoke in the recent suppression window — the daemon must
+          // not double-speak next to the Twin (round 2 covers replies without a
+          // reply_pin and Twin speech on related messages).
           if (isChair && decision.reason !== 'chair_mentioned') {
-            if (chairAlreadyRepliedTo(db, task.groupId, message.pinId, chairGlobalMetaId)) {
-              emitLog(`[GroupTaskDaemon] Task ${task.id}: chair already replied to message ${message.id}; skipping auto response`);
+            if (twinChairActive(db, task.id, task.groupId, message.pinId, chairGlobalMetaId)) {
+              emitLog(`[GroupTaskDaemon] Task ${task.id}: Twin already spoke about message ${message.id}; skipping chair auto response`);
               continue;
             }
             if (chairAutoRepliesThisTick >= 1) {
