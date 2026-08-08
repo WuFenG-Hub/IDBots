@@ -240,6 +240,11 @@ import {
   getMetaIdDetail as getMetaIdDetailRemote,
 } from './services/metaIdSearchService';
 import {
+  getSocialFeed as getSocialFeedRemote,
+  getSocialPost as getSocialPostRemote,
+  getSocialPostComments as getSocialPostCommentsRemote,
+} from './services/socialRecallService';
+import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
 } from './services/botBrowserSourceLocator';
@@ -4593,6 +4598,59 @@ const getCoworkRunner = () => {
           const isOwn = getMetabotStore().listMetabots()
             .some((metabot) => metabot.globalmetaid?.trim() === profile.globalMetaId);
           return { ...profile, isOwn };
+        },
+      },
+      socialRecall: {
+        feed: async ({ keywords, publisher, publishers, since, until, sort, scope, user, chainName, size, cursor }) => {
+          // scope=following needs a subject; fall back to the identity the
+          // user acts as (default MetaBot) when the Agent did not pass one.
+          let resolvedUser = user;
+          if (scope === 'following' && !resolvedUser) {
+            const defaultMetabotId = getCoworkStore().getDefaultMetabotId();
+            resolvedUser = defaultMetabotId != null
+              ? (getMetabotStore().getMetabotById(defaultMetabotId)?.globalmetaid?.trim() || undefined)
+              : undefined;
+          }
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const page = await getSocialFeedRemote({
+            keywords,
+            publisher,
+            publishers,
+            since,
+            until,
+            sort,
+            scope,
+            user: resolvedUser,
+            chainName,
+            size,
+            cursor,
+          });
+          return {
+            items: page.items.map((item) => ({
+              ...item,
+              isOwn: ownGlobalMetaIds.has(item.author.globalMetaId),
+            })),
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
+        },
+        post: async (pinId) => {
+          const post = await getSocialPostRemote(pinId);
+          const isOwn = getMetabotStore().listMetabots()
+            .some((metabot) => metabot.globalmetaid?.trim() === post.author.globalMetaId);
+          return { ...post, isOwn };
+        },
+        comments: async ({ pinId, size, cursor }) => {
+          const page = await getSocialPostCommentsRemote({ pinId, size, cursor });
+          return {
+            items: page.items,
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
         },
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {

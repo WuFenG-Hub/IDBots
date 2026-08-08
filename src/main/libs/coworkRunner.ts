@@ -72,6 +72,10 @@ import {
   type MetaIdSearchControl,
 } from './metaIdSearchAgentTools';
 import {
+  buildSocialRecallAgentTools,
+  type SocialRecallControl,
+} from './socialRecallAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -1058,6 +1062,14 @@ export interface CoworkRunnerOptions {
    */
   metaIdSearch?: MetaIdSearchControl;
   /**
+   * When set, every cowork session gets on-chain social post search tools
+   * (search_social_posts + social_post_detail + social_post_comments) backed
+   * by the metaso-p2p Social Recall API (so.metaid.io/api/social/*). Browser
+   * sessions may open an author's page via bot_browser_open_uri; other
+   * sessions only present clickable metaid:// author links.
+   */
+  socialRecall?: SocialRecallControl;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -1085,6 +1097,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
+  private socialRecall?: SocialRecallControl;
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -1126,6 +1139,7 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
+    this.socialRecall = options?.socialRecall;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -5326,6 +5340,19 @@ export class CoworkRunner extends EventEmitter {
           ...buildMetaIdSearchAgentTools({
             tool,
             metaIdSearch: this.metaIdSearch,
+            openBestMatchInBrowser: isBrowserSession,
+          })
+        );
+      }
+      // On-chain social post search (MetaSo social recall) is registered for
+      // every cowork surface with the same posture as MetaID search: browser
+      // sessions may open an author's page; other sessions keep metaid://
+      // author links clickable only.
+      if (this.socialRecall) {
+        memoryTools.push(
+          ...buildSocialRecallAgentTools({
+            tool,
+            socialRecall: this.socialRecall,
             openBestMatchInBrowser: isBrowserSession,
           })
         );
