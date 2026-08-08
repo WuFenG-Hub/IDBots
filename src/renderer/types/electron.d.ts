@@ -409,6 +409,8 @@ interface Metabot {
   enabled: boolean;
   globalmetaid: string | null;
   metabot_type: 'twin' | 'worker';
+  /** Structured worker position slug; null for twins and legacy workers. */
+  position: string | null;
   role: string;
   soul: string;
   goal: string | null;
@@ -439,6 +441,8 @@ interface MetabotCreateInput {
   name: string;
   avatar?: string | null;
   metabot_type: 'twin' | 'worker';
+  /** Structured worker position slug; local-only, never published on-chain. */
+  position?: string | null;
   role: string;
   soul: string;
   goal?: string | null;
@@ -456,6 +460,8 @@ interface MetabotUpdateInput {
   avatar?: string | null;
   enabled?: boolean;
   metabot_type?: 'twin' | 'worker';
+  /** Structured worker position slug; null clears it. Local-only. */
+  position?: string | null;
   role?: string;
   soul?: string;
   goal?: string | null;
@@ -942,7 +948,7 @@ interface IElectronAPI {
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
   };
   idbots: {
-    getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;
+    getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string; position?: string | null }>; error?: string }>;
     getOfficialSkillsStatus: () => Promise<{ success: boolean; skills?: OfficialSkillItem[]; error?: string }>;
     installOfficialSkill: (skill: { name: string; skillFileUri: string; remoteVersion: string; remoteCreator: string }) =>
       Promise<{ success: boolean; error?: string }>;
@@ -1103,6 +1109,8 @@ interface IElectronAPI {
       a2a_bye_cooldown_ms?: number | null;
       a2a_auto_reply_enabled?: boolean | null;
       metabot_type?: 'twin' | 'worker';
+      /** Structured worker position slug; local-only, never published on-chain. */
+      position?: string | null;
       homepage?: string | null;
     }) => Promise<{
       success: boolean;
@@ -1169,6 +1177,23 @@ interface IElectronAPI {
     update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
+    getPositions: () => Promise<{
+      success: boolean;
+      error?: string;
+      positions?: Array<{
+        slug: string;
+        name: string;
+        aliases: string[];
+        summary: string;
+        role_template: string;
+        soul_template: string;
+        goal_template: string;
+        bio_template: string;
+        default_skills: string[];
+        typical_tasks: string[];
+        permission_notes: string;
+      }>;
+    }>;
   };
   dream: {
     getStatus: () => Promise<{ success: boolean; dreamingBotIds?: number[]; error?: string }>;

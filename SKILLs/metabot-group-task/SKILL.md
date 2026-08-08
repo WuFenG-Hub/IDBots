@@ -40,9 +40,9 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 ## Wish-to-task workflow (follow in order)
 
-1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
+1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, position, bio, role, and goal.
 2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
-3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes).
+3. **Pick members by fit, position first**: match each subtask to a worker whose `position` fits (code → `dev`, research/verification → `researcher`, design → `designer`, copy → `writer`, scheduled/ops → `operator`). Fall back to bio/role semantic matching only when no worker carries a fitting position (or positions are unset). Chair-only is legal for single-bot-capable wishes.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
 5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
 6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.

@@ -1,5 +1,6 @@
 import type { SqliteDatabase as Database } from './sqliteTypes';
 import { normalizeA2AAutoReplyEnabled, normalizeA2AByeCooldownMs, normalizeA2AMaxIncomingTurns } from './services/a2aChatLimits';
+import { normalizePosition } from './positions';
 import type {
   Metabot,
   MetabotInsert,
@@ -45,6 +46,7 @@ interface MetabotRow {
   metabot_info_pinid: string | null;
   metabot_type: string;
   created_by: string;
+  position?: string | null;
   role: string;
   soul: string;
   goal: string | null;
@@ -119,6 +121,7 @@ function rowToMetabot(row: MetabotRow): Metabot {
     metabot_info_pinid: row.metabot_info_pinid ?? null,
     metabot_type: row.metabot_type === 'twin' ? 'twin' : 'worker',
     created_by: row.created_by,
+    position: normalizePosition(row.position ?? null),
     role: row.role,
     soul: row.soul,
     goal: row.goal ?? null,
@@ -382,6 +385,7 @@ export class MetabotStore {
     const useBlob = this.hasAvatarBlobColumn();
     const bossId = this.normalizeBossIdForWrite(input.boss_id ?? null);
     const homepage = input.homepage ?? null;
+    const position = input.metabot_type === 'twin' ? null : normalizePosition(input.position ?? null);
 
     const params = sanitizeBindParams([
       input.wallet_id,
@@ -399,6 +403,7 @@ export class MetabotStore {
       input.metabot_info_pinid ?? null,
       input.metabot_type,
       input.created_by,
+      position,
       input.role,
       input.soul,
       input.goal ?? null,
@@ -421,8 +426,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar_blob, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          position, role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     } else {
@@ -430,8 +435,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          position, role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     }
@@ -465,6 +470,7 @@ export class MetabotStore {
       metabot_info_pinid: input.metabot_info_pinid ?? null,
       metabot_type: input.metabot_type === 'twin' ? 'twin' : 'worker',
       created_by: input.created_by,
+      position,
       role: input.role,
       soul: input.soul,
       goal: input.goal ?? null,
@@ -540,13 +546,22 @@ export class MetabotStore {
       // Machine-wide unique Twin: promoting this bot first demotes the old twin.
       this.demoteOtherTwins(id);
     }
+    // Position is worker-only: twins never carry one; promoting a worker to
+    // twin clears it; explicit null also clears it; undefined keeps the stored
+    // value.
+    const nextPosition =
+      input.metabot_type === 'twin'
+        ? null
+        : input.position !== undefined
+          ? normalizePosition(input.position)
+          : (existing.position ?? null);
 
     if (useBlob) {
       this.db.run(
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar_blob = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
+          position = ?, role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -564,6 +579,7 @@ export class MetabotStore {
           input.metabot_info_pinid !== undefined ? input.metabot_info_pinid : existing.metabot_info_pinid,
           input.metabot_type ?? existing.metabot_type,
           input.created_by ?? existing.created_by,
+          nextPosition,
           input.role ?? existing.role,
           input.soul ?? existing.soul,
           input.goal !== undefined ? input.goal : existing.goal,
@@ -590,7 +606,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
+          position = ?, role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -608,6 +624,7 @@ export class MetabotStore {
           input.metabot_info_pinid !== undefined ? input.metabot_info_pinid : existing.metabot_info_pinid,
           input.metabot_type ?? existing.metabot_type,
           input.created_by ?? existing.created_by,
+          nextPosition,
           input.role ?? existing.role,
           input.soul ?? existing.soul,
           input.goal !== undefined ? input.goal : existing.goal,

@@ -47,6 +47,8 @@ export interface MetaBotEditValues {
   name: string;
   avatar: string;
   metabot_type: 'twin' | 'worker';
+  /** Structured worker position slug ('' = unset); twin bots always keep ''. */
+  position: string;
   role: string;
   soul: string;
   goal: string;
@@ -78,12 +80,27 @@ export interface LlmOption {
   label: string;
 }
 
+/** Built-in worker position template (mirrors src/main/positions.ts). */
+export interface WorkerPositionOption {
+  slug: string;
+  name: string;
+  aliases: string[];
+  summary: string;
+  role_template: string;
+  soul_template: string;
+  goal_template: string;
+  bio_template: string;
+  default_skills: string[];
+  typical_tasks: string[];
+  permission_notes: string;
+}
+
 export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'advanced';
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
 export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]> = {
   basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id'],
-  persona: ['role', 'soul', 'goal'],
+  persona: ['position', 'role', 'soul', 'goal'],
   chatSettings: ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms', 'a2a_auto_reply_enabled'],
   advanced: ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin'],
 };
@@ -111,6 +128,7 @@ const defaultValues: MetaBotEditValues = {
   name: '',
   avatar: '',
   metabot_type: 'worker',
+  position: '',
   role: '',
   soul: '',
   goal: '',
@@ -202,6 +220,20 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [tabErrors, setTabErrors] = useState<Partial<Record<MetaBotEditTabKey, string>>>({});
   const [nameDuplicate, setNameDuplicate] = useState(false);
   const [selectedAllowChatSkillId, setSelectedAllowChatSkillId] = useState('');
+  /** Built-in worker position templates (loaded once via IPC; read-only). */
+  const [positions, setPositions] = useState<WorkerPositionOption[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    window.electron.metabot.getPositions().then((res) => {
+      if (!cancelled && res.success && res.positions) {
+        setPositions(res.positions);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Re-initialize when a different bot is loaded into the same mounted editor.
   // Saves only update the baseline (see handleSaveTab), so unsaved edits in
@@ -227,6 +259,25 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     setValues((prev) => ({ ...prev, [field]: value }));
     setTabErrors((prev) => ({ ...prev, [activeTab]: '' }));
     if (field === 'name') setNameDuplicate(false);
+  };
+
+  /**
+   * Apply a built-in position template: set the position slug and overwrite the
+   * persona text fields (role/soul/goal/bio). Text remains editable afterwards;
+   * the template is an initial value, not a lock.
+   */
+  const applyPositionTemplate = (slug: string) => {
+    const position = positions.find((p) => p.slug === slug);
+    if (!position) return;
+    setValues((prev) => ({
+      ...prev,
+      position: position.slug,
+      role: position.role_template,
+      soul: position.soul_template,
+      goal: position.goal_template,
+      bio: position.bio_template,
+    }));
+    setTabErrors((prev) => ({ ...prev, [activeTab]: '' }));
   };
 
   const isTabDirty = (tab: MetaBotEditTabKey): boolean =>
@@ -697,6 +748,73 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         <p className={hintClass}>
           {i18nService.t('metabotPersonaOptionalHint')}
         </p>
+
+        {values.metabot_type !== 'twin' && positions.length > 0 && (
+          <div className={rowClass}>
+            <label htmlFor="metabot-position" className={labelClass}>
+              {i18nService.t('metabotPosition')}
+            </label>
+            <div className="min-w-0">
+              <div className="flex items-start gap-2">
+                <select
+                  id="metabot-position"
+                  value={values.position || ''}
+                  onChange={(e) => {
+                    const slug = e.target.value;
+                    if (slug) {
+                      applyPositionTemplate(slug);
+                    } else {
+                      handleChange('position', '');
+                    }
+                  }}
+                  className={inputClass}
+                >
+                  <option value="">{i18nService.t('metabotPositionNone')}</option>
+                  {positions.map((p) => (
+                    <option key={p.slug} value={p.slug}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                {values.position && (
+                  <button
+                    type="button"
+                    onClick={() => handleChange('position', '')}
+                    className="shrink-0 px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                  >
+                    {i18nService.t('metabotPositionClear')}
+                  </button>
+                )}
+              </div>
+              {(() => {
+                const selected = positions.find((p) => p.slug === values.position);
+                if (!selected) {
+                  return (
+                    <p className={hintClass}>
+                      {i18nService.t('metabotPositionHint')}
+                    </p>
+                  );
+                }
+                return (
+                  <div className="mt-2 rounded-xl border dark:border-claude-darkBorder border-claude-border px-3 py-2 dark:bg-claude-darkSurface/50 bg-claude-surface/50 space-y-1">
+                    <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {selected.summary}
+                    </p>
+                    {selected.default_skills.length > 0 && (
+                      <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('metabotPositionDefaultSkills')}
+                        {selected.default_skills.join(', ')}
+                      </p>
+                    )}
+                    <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('metabotPositionTemplateNote')}
+                    </p>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
 
         <div className={rowClass}>
           <label htmlFor="metabot-role" className={labelClass}>

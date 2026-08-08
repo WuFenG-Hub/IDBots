@@ -5,6 +5,16 @@
 
 export type MetabotType = 'twin' | 'worker';
 
+/**
+ * Structured worker position (slug of a built-in position template, e.g.
+ * 'dev', 'researcher', 'designer', 'writer', 'operator'). Twin bots never set
+ * a position. NULL = unset (legacy workers / generic). The position is a
+ * local-only dimension: it labels the worker, seeds persona template text and
+ * default skills, and gives group-task orchestration a deterministic first
+ * match key before falling back to free-text semantic matching.
+ */
+export type MetabotPosition = string | null;
+
 /** MetaBot base info and soul (matches metabots table) */
 export interface Metabot {
   id: number;
@@ -26,6 +36,8 @@ export interface Metabot {
   metabot_info_pinid: string | null;
   metabot_type: MetabotType;
   created_by: string;
+  /** Structured worker position slug; null for twins and legacy workers. */
+  position: MetabotPosition;
   role: string;
   soul: string;
   goal: string | null;
@@ -75,6 +87,8 @@ export interface MetabotInsert {
   metabot_info_pinid?: string | null;
   metabot_type: MetabotType;
   created_by: string;
+  /** Structured worker position slug; null for twins and legacy workers. */
+  position?: MetabotPosition;
   role: string;
   soul: string;
   goal?: string | null;
@@ -111,6 +125,8 @@ export interface MetabotUpdate {
   metabot_info_pinid?: string | null;
   metabot_type?: MetabotType;
   created_by?: string;
+  /** Structured worker position slug; null clears the position. */
+  position?: MetabotPosition;
   role?: string;
   soul?: string;
   goal?: string | null;

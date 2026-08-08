@@ -1191,6 +1191,8 @@ export class SqliteStore {
         metabot_info_pinid TEXT,
         metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker')) NOT NULL,
         created_by TEXT NOT NULL,
+        -- Structured worker position slug (see src/main/positions.ts); null for twins/legacy workers.
+        position TEXT,
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
         goal TEXT,
@@ -1364,6 +1366,8 @@ export class SqliteStore {
     this.migrateMetabotFallbackLlmId();
     // Migration: add per-bot A2A private-chat limits (max turns / bye cooldown).
     this.migrateMetabotA2AChatLimits();
+    // Migration: add the structured worker position column (slug, local-only).
+    this.migrateMetabotPositionColumn();
     // Migration: clear legacy local boss_id values that point at missing/self rows.
     this.migrateOrphanMetabotBossIds();
     // One-shot migration: normalize metabot_type, collapse duplicate twins, and
@@ -1954,6 +1958,7 @@ export class SqliteStore {
       const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
       const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
       const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
+      const hasPosition = columns.includes('position');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -1986,7 +1991,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''}${hasPosition ? ', position TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -2026,6 +2031,7 @@ export class SqliteStore {
       const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
       const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
       const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
+      const hasPosition = columns.includes('position');
       // A leftover metabots_new can only be debris from an earlier failed run of
       // this migration (success renames it away); drop it before recreating.
       this.db.run('DROP TABLE IF EXISTS metabots_new');
@@ -2058,7 +2064,7 @@ export class SqliteStore {
         skills TEXT DEFAULT '[]',
         allow_chat_skills TEXT DEFAULT '[]',
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''}${hasPosition ? ', position TEXT' : ''},
         FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
         FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
       )`);
@@ -2154,6 +2160,25 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateMetabotA2AChatLimits:', error);
+    }
+  }
+
+  /**
+   * Migration: add the structured worker position column (slug, see
+   * src/main/positions.ts). NULL keeps legacy workers fully compatible: they
+   * simply have no position and orchestration falls back to free-text
+   * matching. Local-only; never published on-chain in v1.
+   */
+  private migrateMetabotPositionColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('position')) {
+        this.db.run('ALTER TABLE metabots ADD COLUMN position TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateMetabotPositionColumn:', error);
     }
   }
 

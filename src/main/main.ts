@@ -51,6 +51,7 @@ import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
+import { getPositions } from './positions';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { Scheduler } from './libs/scheduler';
@@ -8663,6 +8664,15 @@ if (!gotTheLock) {
     }
   });
 
+  // Read-only built-in worker position templates (slug/name/templates/default skills).
+  ipcMain.handle('metabot:getPositions', async () => {
+    try {
+      return { success: true, positions: getPositions() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to load positions' };
+    }
+  });
+
   ipcMain.handle('metabot:get', async (_event, id: number) => withSqliteRecovery('metabot:get', async () => {
     try {
       const metabot = getMetabotStore().getMetabotById(id);
@@ -8754,6 +8764,8 @@ if (!gotTheLock) {
     avatar?: string | null;
     enabled?: boolean;
     metabot_type?: 'twin' | 'worker';
+    /** Structured worker position slug; null clears it. Local-only. */
+    position?: string | null;
     role?: string;
     soul?: string;
     goal?: string | null;
@@ -8887,6 +8899,8 @@ if (!gotTheLock) {
     fallback_llm_id?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker';
+    /** Structured worker position slug; local-only, never published on-chain. */
+    position?: string | null;
     homepage?: string | null;
   }) => {
     const store = getMetabotStore();
@@ -8937,6 +8951,7 @@ if (!gotTheLock) {
         created_by: '0000',
         // Minimal creation may omit persona fields; store empty strings and let
         // the sync plan skip the empty persona/bio pins.
+        position: input.position ?? null,
         role: (input.role ?? '').trim(),
         soul: (input.soul ?? '').trim(),
         goal: input.goal ?? null,

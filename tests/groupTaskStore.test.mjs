@@ -381,6 +381,7 @@ test('buildMetabotDirectory: sanitized roster with profiles, disabled bots inclu
       bio: 'Chief of staff',
       role: 'Coordinator',
       goal: 'Ship things',
+      position: null,
       metabot_type: 'twin',
       enabled: true,
       globalmetaid: 'gmid-twin',
@@ -391,6 +392,7 @@ test('buildMetabotDirectory: sanitized roster with profiles, disabled bots inclu
     assert.equal(old.role, null, 'whitespace-only role becomes null');
     assert.equal(old.bio, null);
     assert.equal(old.goal, null);
+    assert.equal(old.position, null);
     assert.equal(old.globalmetaid, null);
   } finally {
     store.close();

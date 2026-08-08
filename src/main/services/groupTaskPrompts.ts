@@ -28,6 +28,8 @@ export interface GroupTaskPromptMember {
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
+  /** Structured worker position slug (dev/researcher/...); null = unset. */
+  position?: string | null;
 }
 
 /** Cap one profile field so the roster section cannot blow up the prompt. */
@@ -72,6 +74,7 @@ const SHARED_PLAYBOOK_RULES = [
 
 const CHAIR_PLAYBOOK_RULES = [
   '- You are the owner\'s digital twin and chief of staff. NEVER relay the goal verbatim — decompose it into concrete subtasks. Assign different subtasks to different members by their profiles. Sequence dependent work: assign a step only when its inputs are ready (e.g. after a `[DELIVERABLE]` arrives). When a deliverable arrives, verify it against the acceptance criteria, then assign the next step.',
+  '- Assign by POSITION first: workers carry a structured position (e.g. `dev`, `researcher`, `designer`, `writer`, `operator`). Match each subtask to the member whose position fits (code → dev, research/verification → researcher, design → designer, copy → writer, scheduled/ops → operator). Only when no member has a matching position (or positions are `generic`/unset) fall back to reading their role/bio/goal semantically. Never assign the same subtask to two workers.',
   '- You coordinate, assign, verify and report — you NEVER execute task work yourself (no searching, no writing deliverable content, no publishing). If a worker is stuck or incapable, re-assign to another member or escalate the blocker to the owner.',
   '- When a worker reports a deliverable, VERIFY it (format, plausibility, any daemon verification notes in the context) BEFORE accepting; if it looks fabricated, reject it and demand the real tool output.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
@@ -92,8 +95,16 @@ export function buildGroupTaskBlock(params: {
   currentTimeText?: string;
 }): string {
   const acceptance = (params.task.acceptanceCriteria ?? '').trim() || '(none specified)';
+  const positionLabel = (position: string | null | undefined): string => {
+    const key = (position ?? '').trim().toLowerCase();
+    return key || 'generic';
+  };
   const rosterLines = params.members.length > 0
-    ? params.members.map((member) => `- ${member.name} (${member.role})`)
+    ? params.members.map((member) =>
+        member.role === 'chair'
+          ? `- ${member.name} (chair)`
+          : `- ${member.name} (worker, position: ${positionLabel(member.position)})`
+      )
     : ['(no members)'];
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
   const ownerId = (params.ownerGlobalMetaId ?? '').trim();
@@ -105,11 +116,12 @@ export function buildGroupTaskBlock(params: {
     '',
   ];
 
-  // Roster profiles (metabots bio/role/goal, capped) so everyone knows each
-  // other's strengths; omitted entirely when no profile data exists.
+  // Roster profiles (position + metabots bio/role/goal, capped) so everyone
+  // knows each other's strengths; omitted entirely when no profile data exists.
   const profileLines = params.members
     .map((member) => {
       const fields = [
+        member.position ? `Position: ${positionLabel(member.position)}` : '',
         capProfileField(member.roleProfile) && `Role: ${capProfileField(member.roleProfile)}`,
         capProfileField(member.bio) && `Bio: ${capProfileField(member.bio)}`,
         capProfileField(member.goal) && `Goal: ${capProfileField(member.goal)}`,

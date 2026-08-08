@@ -12,6 +12,8 @@ export interface MetabotDirectoryEntry {
   bio: string | null;
   role: string | null;
   goal: string | null;
+  /** Structured worker position slug (dev/researcher/...); null = unset/twin. */
+  position: string | null;
   metabot_type: string;
   enabled: boolean;
   globalmetaid: string | null;
@@ -30,6 +32,7 @@ export function buildMetabotDirectory(metabotStore: MetabotStore): MetabotDirect
     bio: toTrimmedOrNull(metabot.bio ?? metabot.background),
     role: toTrimmedOrNull(metabot.role),
     goal: toTrimmedOrNull(metabot.goal),
+    position: toTrimmedOrNull(metabot.position),
     metabot_type: metabot.metabot_type,
     enabled: Boolean(metabot.enabled),
     globalmetaid: toTrimmedOrNull(metabot.globalmetaid),

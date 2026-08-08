@@ -735,6 +735,8 @@ contextBridge.exposeInMainWorld('electron', {
       fallback_llm_id?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
+      /** Structured worker position slug; local-only, never published on-chain. */
+      position?: string | null;
       homepage?: string | null;
     }) => ipcRenderer.invoke('idbots:createMetaBotOnChain', input),
     uploadMetabotHomepageFile: (input: {
@@ -791,6 +793,8 @@ contextBridge.exposeInMainWorld('electron', {
       avatar?: string | null;
       enabled?: boolean;
       metabot_type?: 'twin' | 'worker';
+      /** Structured worker position slug; null clears it. Local-only. */
+      position?: string | null;
       role?: string;
       soul?: string;
       goal?: string | null;
@@ -806,6 +810,7 @@ contextBridge.exposeInMainWorld('electron', {
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
+    getPositions: () => ipcRenderer.invoke('metabot:getPositions'),
   },
   dream: {
     getStatus: () => ipcRenderer.invoke('dream:getStatus'),

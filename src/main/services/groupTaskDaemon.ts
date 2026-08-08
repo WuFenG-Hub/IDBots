@@ -111,6 +111,8 @@ interface GroupTaskDaemonBotFull extends GroupTaskDaemonBot {
   goal?: string | null;
   bio?: string | null;
   background?: string | null;
+  /** Structured worker position slug (dev/researcher/...); null = unset. */
+  position?: string | null;
   llm_id?: string | null;
   fallback_llm_id?: string | null;
   allow_chat_skills?: string[] | null;
@@ -124,6 +126,8 @@ type DaemonPromptMember = {
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
+  /** Structured worker position slug (dev/researcher/...); null = unset. */
+  position?: string | null;
 };
 
 /** Local equivalent of orchestrator's contentContainsBotName (kept separate by design). */
@@ -1241,6 +1245,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           bio: bot?.bio ?? bot?.background ?? null,
           roleProfile: bot?.role ?? null,
           goal: bot?.goal ?? null,
+          position: bot?.position ?? null,
         };
       });
     const chairGlobalMetaId = (

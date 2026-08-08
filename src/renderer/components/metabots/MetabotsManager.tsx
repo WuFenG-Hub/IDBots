@@ -87,6 +87,7 @@ const buildEditFormValues = (editMetabot: Metabot): MetaBotEditValues => ({
   name: editMetabot.name,
   avatar: editMetabot.avatar || '',
   metabot_type: editMetabot.metabot_type,
+  position: editMetabot.position || '',
   role: editMetabot.role,
   soul: editMetabot.soul,
   goal: editMetabot.goal || '',
@@ -334,6 +335,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
 
     const nextName = scopedValues.name.trim();
     const nextAvatarRaw = scopedValues.avatar.trim();
+    const nextPosition = (scopedValues.position || '').trim().toLowerCase() || null;
     const nextRole = scopedValues.role.trim();
     const nextSoul = scopedValues.soul.trim();
     const nextGoalRaw = scopedValues.goal.trim();
@@ -354,6 +356,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
 
     const oldName = (current.name || '').trim();
     const oldAvatarRaw = (current.avatar || '').trim();
+    const oldPosition = (current.position || '').trim().toLowerCase() || null;
     const oldRole = (current.role || '').trim();
     const oldSoul = (current.soul || '').trim();
     const oldGoalRaw = (current.goal || '').trim();
@@ -375,6 +378,9 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const syncLlm = nextLlmRaw !== oldLlmRaw || (hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw);
     const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
     const syncHomepage = nextHomepage !== oldHomepage;
+    // position never goes on-chain; it is a local-only change tracked
+    // separately so a position edit alone still counts as a save-worthy edit.
+    const positionChanged = nextPosition !== oldPosition;
     // metabot_type never goes on-chain; it is a local-only change tracked
     // separately so a Twin transfer alone still counts as a save-worthy edit.
     const metabotTypeChanged = scopedValues.metabot_type !== current.metabot_type;
@@ -397,7 +403,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     // Gate the sync to the step groups this tab owns. With the value scoping
     // above the other flags are already false; this makes the contract explicit.
     const tabSyncStepKeys = syncStepKeys.filter((key) => EDIT_TAB_SYNC_GROUPS[tab].includes(key));
-    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged && !a2aChatLimitsChanged) {
+    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged && !a2aChatLimitsChanged && !positionChanged) {
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotNoChanges') }));
       return;
     }
@@ -406,6 +412,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       name: nextName,
       avatar: nextAvatarRaw || null,
       metabot_type: scopedValues.metabot_type,
+      position: nextPosition,
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
@@ -428,6 +435,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       name: nextName,
       avatar: nextAvatarRaw || null,
       metabot_type: scopedValues.metabot_type,
+      position: nextPosition,
       role: nextRole,
       soul: nextSoul,
       goal: nextGoalRaw || null,
