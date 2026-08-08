@@ -411,6 +411,13 @@ export type GroupTaskDaemonResolveGlobalMetaIdFn = (
   legacyMetaId: string,
 ) => Promise<string | null>;
 
+/**
+ * Round-4 deliverable link probe: returns the HTTP status of a key https://
+ * deliverable link (HEAD with GET fallback, ~8s bound). null = unavailable.
+ * Tests inject a fake; production uses the built-in fetch probe.
+ */
+export type GroupTaskDaemonProbeUrlFn = (url: string) => Promise<number | null>;
+
 export interface GroupTaskDaemonDeps {
   getStore: () => GroupTaskDaemonSqliteStoreLike;
   getGroupTaskStore: () => GroupTaskStore;
@@ -424,6 +431,7 @@ export interface GroupTaskDaemonDeps {
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
   readPinForVerification?: GroupTaskDaemonReadPinFn;
   resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
+  probeUrl?: GroupTaskDaemonProbeUrlFn;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
@@ -518,6 +526,37 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
+
+  /**
+   * Round-4 default link probe: HEAD with a GET fallback (some hosts reject
+   * HEAD), redirects followed, ~8s bound. null when the network is
+   * unavailable. Production default; tests inject a fake via deps.probeUrl.
+   */
+  const defaultProbeUrl: GroupTaskDaemonProbeUrlFn = async (url) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    try {
+      let response = await fetch(url, {
+        method: 'HEAD',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (response.status >= 400 || response.status === 405) {
+        response = await fetch(url, {
+          method: 'GET',
+          redirect: 'follow',
+          signal: controller.signal,
+          headers: { Range: 'bytes=0-0' },
+        });
+      }
+      return response.status;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  const probeUrl = deps.probeUrl ?? defaultProbeUrl;
   const experienceStore = deps.experienceStore ?? new MetaIDExperienceStore(
     deps.getStore().getDatabase(),
     deps.getStore().getSaveFunction(),
@@ -900,14 +939,16 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   /**
    * Deliverable verification hints: format-check any pinid/txid-looking token
    * ON THE [DELIVERABLE] TAG LINES ONLY (P1-4 r2 — body prose is not scanned),
-   * then (when wired) an on-chain existence check via getPinData. The notes
-   * are appended to the chair's context so it verifies before accepting.
+   * then (when wired) an on-chain existence check via getPinData. Round-4 also
+   * HTTP-probes key https:// links on the tag lines (HEAD, GET fallback) so the
+   * chair's acceptance is auto-informed — a link that returns 4xx/5xx is
+   * flagged for clarification instead of being copied verbatim (the #7
+   * /browser/buzz/ vs /browser/pin/ correction case). The notes are appended
+   * to the chair's context so it verifies before accepting.
    */
   const verifyDeliverableCandidates = async (deliverableTagText: string): Promise<string[]> => {
-    const candidates = extractIdCandidates(deliverableTagText);
-    if (candidates.length === 0) return [];
     const notes: string[] = [];
-    for (const token of candidates) {
+    for (const token of extractIdCandidates(deliverableTagText)) {
       const display = token.length > 16 ? `${token.slice(0, 12)}…` : token;
       const isPinid = PINID_FORMAT.test(token);
       const isTxid = TXID_FORMAT.test(token);
@@ -936,7 +977,33 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         notes.push(`… Host verification: ${label} format valid; on-chain check unavailable.`);
       }
     }
+    // Round-4: HTTP probe on key https:// links from the [DELIVERABLE] tag
+    // lines (only). Probe results ride the chair's verification notes.
+    const urlCandidates = extractUrlCandidates(deliverableTagText);
+    for (const url of urlCandidates) {
+      const status = await probeUrl(url);
+      const short = url.length > 48 ? `${url.slice(0, 44)}…` : url;
+      if (status == null) {
+        notes.push(`… Host verification: HTTP probe ${short} unavailable (timeout/network).`);
+      } else if (status >= 200 && status < 400) {
+        notes.push(`✓ Host verification: HTTP probe ${short} → ${status} (link reachable).`);
+      } else {
+        notes.push(
+          `⚠ Host verification: HTTP probe ${short} → ${status} — link may be invalid; verify before accepting.`,
+        );
+      }
+    }
     return notes;
+  };
+
+  /**
+   * Round-4: https?:// URLs on the [DELIVERABLE] tag lines only (deduped,
+   * capped). Body prose is never scanned (P1-4 r2 heritage).
+   */
+  const extractUrlCandidates = (content: string): string[] => {
+    const matches = content.match(/https?:\/\/[^\s()（）<>\[\]`*_]+/gi) ?? [];
+    const cleaned = matches.map((url) => url.replace(/[，。；、！？!?.,;:)+]+$/g, ''));
+    return [...new Set(cleaned)].slice(0, MAX_VERIFICATION_CANDIDATES);
   };
 
   /** System-generated owner-report directive for the review transition. */

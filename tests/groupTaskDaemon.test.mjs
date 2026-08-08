@@ -207,6 +207,7 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.resolveGlobalMetaId
       ? { resolveGlobalMetaId: overrides.resolveGlobalMetaId }
       : {}),
+    ...(overrides.probeUrl ? { probeUrl: overrides.probeUrl } : { probeUrl: async () => null }),
     emitLog: overrides.emitLog ?? (() => {}),
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
@@ -1867,6 +1868,37 @@ test('round-4: one message with two [DELIVERABLE] tag lines records two rows (ms
       'share-link row kept (previously dropped by the whole-message dedupe)',
     );
     assert.ok(!rows.some((r) => r.uri?.endsWith('**')), 'no trailing markdown in recorded URIs');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4: HTTP probe notes on https deliverable links ride the chair verification context', async () => {
+  const probeResults = {
+    [`https://openagentinternet.org/browser/pin/${REAL_PINID_2}`]: 200,
+    [`https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`]: 404,
+  };
+  const h = await createHarness({
+    probeUrl: async (url) => probeResults[url] ?? null,
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'probe-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: [
+        `[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}`,
+        `[DELIVERABLE] 旧链接: https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`,
+      ].join('\n'),
+    });
+    await h.loop.runTick();
+
+    // The chair was triggered by the deliverable tag; its context carries the
+    // probe notes: 200 marked reachable, 404 flagged for clarification.
+    const chairCall = h.chatCalls.find((call) => call.userMessage.includes('Host verification'));
+    assert.ok(chairCall, 'chair received verification notes');
+    assert.match(chairCall.userMessage, /HTTP probe .*\/browser\/pin\/.* → 200 \(link reachable\)/);
+    assert.match(chairCall.userMessage, /HTTP probe .*\/browser\/buzz\/.* → 404 — link may be invalid; verify before accepting/);
   } finally {
     h.cleanup();
   }
