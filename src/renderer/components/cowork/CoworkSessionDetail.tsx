@@ -17,6 +17,7 @@ import UsageStatsChip from './UsageStatsChip';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
+import LocalFileLink from '../ui/LocalFileLink';
 import {
   CheckIcon,
   InformationCircleIcon,
@@ -1178,11 +1179,12 @@ const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) =
   return (
     <div className="ml-4 mt-2 flex flex-wrap gap-2">
       {visiblePaths.map((imagePath) => (
-        <button
+        <LocalFileLink
           key={imagePath}
-          type="button"
-          onClick={() => { void handleOpenPath(imagePath); }}
+          filePath={imagePath}
           title={imagePath}
+          showTypeIcon={false}
+          onOpen={(path) => { void handleOpenPath(path); }}
           className="group rounded-lg border dark:border-claude-darkBorder border-claude-border overflow-hidden dark:bg-claude-darkSurface bg-claude-surface hover:border-claude-accent transition-colors"
         >
           <img
@@ -1194,7 +1196,7 @@ const ImagePreviewStrip: React.FC<{ imagePaths: string[] }> = ({ imagePaths }) =
           <div className="px-1.5 py-1 text-[10px] leading-4 dark:text-claude-darkTextSecondary text-claude-textSecondary max-w-24 truncate text-left">
             {getPathBaseName(imagePath)}
           </div>
-        </button>
+        </LocalFileLink>
       ))}
     </div>
   );

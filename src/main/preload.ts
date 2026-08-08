@@ -532,6 +532,12 @@ contextBridge.exposeInMainWorld('electron', {
     openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
     showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
     openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+    getOpenWithApps: (filePath: string) => ipcRenderer.invoke('shell:getOpenWithApps', filePath),
+    openWith: (filePath: string, appId: string) => ipcRenderer.invoke('shell:openWith', { filePath, appId }),
+    chooseOpenWithApp: (filePath: string) => ipcRenderer.invoke('shell:chooseOpenWithApp', filePath),
+  },
+  fs: {
+    readTextFile: (filePath: string, maxBytes?: number) => ipcRenderer.invoke('fs:readTextFile', { filePath, maxBytes }),
   },
   autoLaunch: {
     get: () => ipcRenderer.invoke('app:getAutoLaunch'),
