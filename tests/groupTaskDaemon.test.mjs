@@ -589,8 +589,8 @@ test('deliverable tags: kind inference, uri extraction, author recorded, dedupe 
   try {
     const task = h.createTask([2]);
     const cases = [
-      { pinId: 'd1-i0', content: '[DELIVERABLE] metafile: metafile://pin123.png see this', kind: 'metafile', uri: 'metafile://pin123.png' },
-      { pinId: 'd2-i0', content: '[DELIVERABLE] metaapp: metaapp://app456 is live', kind: 'metaapp', uri: 'metaapp://app456' },
+      { pinId: 'd1-i0', content: '[DELIVERABLE] metafile: metafile://ababababababababababababababababababababababababababababababababi0.png see this', kind: 'metafile', uri: 'metafile://ababababababababababababababababababababababababababababababababi0.png' },
+      { pinId: 'd2-i0', content: '[DELIVERABLE] metaapp: metaapp://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0 is live', kind: 'metaapp', uri: 'metaapp://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0' },
       { pinId: 'd3-i0', content: '[DELIVERABLE] url: https://example.com/preview', kind: 'url', uri: 'https://example.com/preview' },
       { pinId: 'd4-i0', content: '[deliverable] text summary: the work is done', kind: 'text', uri: null },
     ];
@@ -1467,14 +1467,14 @@ test('P1-4: chair messages and placeholder URIs never become deliverables', asyn
     // worker message with a real URI -> collected
     insertGroupMessage(h.db, {
       pinId: 'worker-real-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
     });
     await h.loop.runTick();
 
     const rows = h.groupTaskStore.listDeliverables(task.id);
     assert.equal(rows.length, 1, 'only the real worker deliverable is recorded');
     assert.equal(rows[0].msgPinId, 'worker-real-i0');
-    assert.equal(rows[0].uri, 'metaapp://realpin0000');
+    assert.equal(rows[0].uri, 'metaapp://ababababababababababababababababababababababababababababababababi0');
   } finally {
     h.cleanup();
   }
@@ -1488,7 +1488,7 @@ test('P2-7: chair auto response is suppressed when the Twin already replied to t
     // Lucy delivers; the Twin (chair) ALREADY replied on-chain to that pin
     insertGroupMessage(h.db, {
       pinId: 'deliver-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
     });
     insertGroupMessage(h.db, {
       pinId: 'chair-reply-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
@@ -1532,7 +1532,7 @@ test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and trunc
     insertGroupMessage(h.db, {
       pinId: 'r2-msg85-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: '完成：源码已打包，content=metafile://…zip（50KB，5 文件）请查收。\n[DELIVERABLE] ④ metaapp: metaapp://92075a3c',
+      content: '完成：源码已打包，content=metafile://…zip（50KB，5 文件）请查收。\n[DELIVERABLE] ④ metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
     });
 
     // Full-width paren annotation AFTER the URI on the tag line: the URI is
@@ -1540,7 +1540,7 @@ test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and trunc
     insertGroupMessage(h.db, {
       pinId: 'r2-paren-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
       senderName: 'Coder Bot',
-      content: '[DELIVERABLE] ⑤ 海报 metafile://abc123def456（1.2MB，5 文件）',
+      content: '[DELIVERABLE] ⑤ 海报 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0（1.2MB，5 文件）',
     });
 
     // Tag line whose ONLY URI is truncated garbage: rejected as a placeholder
@@ -1563,12 +1563,12 @@ test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and trunc
     );
     assert.deepEqual(
       summary(byPin('r2-msg85-i0')),
-      { kind: 'metaapp', uri: 'metaapp://92075a3c' },
+      { kind: 'metaapp', uri: 'metaapp://ababababababababababababababababababababababababababababababababi0' },
       'body ellipsis URI ignored; the tag-line metaapp:// URI is collected (was lost entirely)',
     );
     assert.deepEqual(
       summary(byPin('r2-paren-i0')),
-      { kind: 'metafile', uri: 'metafile://abc123def456' },
+      { kind: 'metafile', uri: 'metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0' },
       'full-width paren annotation trimmed from the URI',
     );
     assert.equal(byPin('r2-trunc-i0'), undefined, 'truncated-only tag line is rejected as a placeholder');
@@ -1647,7 +1647,7 @@ test('P2-7 r2: Twin speech in the window suppresses chair auto replies (incl. re
     // suppressed while the Twin is actively speaking.
     insertGroupMessage(h.db, {
       pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000', chainTimestamp: 1_000_000_005,
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0', chainTimestamp: 1_000_000_005,
     });
     await h.loop.runTick();
     assert.equal(h.sends.length, 0, 'no daemon chair auto reply while the Twin is speaking');
@@ -1663,7 +1663,7 @@ test('P2-7 r2: Twin speech in the window suppresses chair auto replies (incl. re
     });
     insertGroupMessage(h.db, {
       pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://article1234', chainTimestamp: 1_000_000_020,
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0', chainTimestamp: 1_000_000_020,
     });
     await h.loop.runTick();
     assert.equal(h.sends.length, 0, 'Twin reply without reply_pin also suppresses the auto verify');
@@ -1685,7 +1685,7 @@ test('P2-7 r2: daemon auto replies resume when the Twin is quiet, and its own re
     });
     insertGroupMessage(h.db, {
       pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000', chainTimestamp: 1_000_000_000,
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0', chainTimestamp: 1_000_000_000,
     });
     await h.loop.runTick();
     assert.equal(h.sends.length, 1, 'Twin quiet: the chair auto-verifies the deliverable');
@@ -1701,7 +1701,7 @@ test('P2-7 r2: daemon auto replies resume when the Twin is quiet, and its own re
     });
     insertGroupMessage(h.db, {
       pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
-      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://article1234', chainTimestamp: 1_000_000_035,
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0', chainTimestamp: 1_000_000_035,
     });
     await h.loop.runTick();
     assert.equal(h.sends.length, 2, "the daemon's own reply does not suppress the next auto verify");

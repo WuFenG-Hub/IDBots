@@ -13,7 +13,12 @@
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { CoworkStore, CoworkSession } from '../coworkStore';
-import type { GroupTaskStore, GroupTask, GroupTaskMember } from '../groupTaskStore';
+import type {
+  GroupTaskStore,
+  GroupTask,
+  GroupTaskMember,
+  GroupTaskDeliverable,
+} from '../groupTaskStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
@@ -24,19 +29,23 @@ import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
 } from '../libs/experiencePromptBlocks';
+import {
+  parseDeliverableLines,
+  type ParsedDeliverable,
+} from './groupTaskDeliverableParser';
 
 const CONVERSATION_CHANNEL = 'metaweb_group_task';
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
-const DELIVERABLE_URI_PATTERN = /(metafile:\/\/[^\s]+|metaapp:\/\/[^\s]+|https?:\/\/[^\s]+)/i;
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 
 /**
- * P1-4 (round 2): lines carrying the [DELIVERABLE] protocol tag — the ONLY
- * source for deliverable URIs and kinds. URIs anywhere else in the message
- * body (directory paths like `metaapp/`, example tokens, truncated copy with
- * ellipses) must never be picked up as deliverables.
+ * P1-4 / round-4: lines carrying the [DELIVERABLE] protocol tag — the ONLY
+ * source for deliverable URIs and kinds. Parsing is delegated to
+ * groupTaskDeliverableParser (one row per tag occurrence, strict
+ * placeholder/truncation filtering, 64-hex+i0 or ^https?:// validation);
+ * URIs anywhere else in the message body never influence the outcome.
  */
 const deliverableTagLines = (content: string): string[] =>
   content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
@@ -744,53 +753,6 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
-   * First REAL URI on a [DELIVERABLE] tag line (metafile://…, metaapp://…,
-   * https?://…), else null. ONLY the tag lines are scanned — URIs anywhere
-   * else in the message body (directory paths like `metaapp/`, example
-   * tokens, truncated copy with ellipses) can never be picked up (P1-4 r2:
-   * the full-content scan let a body `metafile://…zip` beat the real
-   * tag-line URI). Unreal tokens on a tag line are rejected:
-   * - placeholder brackets (`<pinId>`, `[PINID]`, any `<>[]` in the URI);
-   * - ellipsis truncation (`…` U+2026 anywhere in the URI);
-   * - full-width Chinese-paren annotation/truncation (`（…）`): the URI is
-   *   trimmed at the first full-width paren, and the trimmed result must
-   *   still be a real URI (scheme + payload);
-   * - scheme-only fragments (`metaapp://` with nothing after the scheme).
-   */
-  const extractDeliverableUri = (content: string): string | null => {
-    for (const line of deliverableTagLines(content)) {
-      const match = DELIVERABLE_URI_PATTERN.exec(line);
-      if (!match) continue;
-      let uri = match[1];
-      // 占位符（<…> 或 […]，如 metaapp://<pinId>、metaapp://[PINID]）一律不是真实交付物
-      if (/[<>[\]]/.test(uri)) continue;
-      // 省略号截断（U+2026）：metafile://…zip 这类被截断的 URI 不是交付物
-      if (/…/.test(uri)) continue;
-      // 中文括号截断/注释：metaapp://92075a3c（门户页）→ 取括号前的部分；
-      // 若括号前只剩 scheme（metaapp://（））则视为示例，继续找下一个候选。
-      const parenIndex = uri.search(/[（）]/);
-      if (parenIndex >= 0) uri = uri.slice(0, parenIndex);
-      // scheme:// 后必须紧跟至少一个非空字符（metaapp:// 单独出现视为示例）
-      const schemeEnd = uri.indexOf('://');
-      if (schemeEnd <= 0 || uri.length <= schemeEnd + 3) continue;
-      return uri;
-    }
-    return null;
-  };
-
-  /**
-   * Deliverable kind from the [DELIVERABLE] tag line's URI scheme ONLY
-   * (P1-4 r2): a `metaapp/` directory path in the message body can no longer
-   * misjudge the kind; a line without any `://` scheme stays 'text'.
-   */
-  const inferDeliverableKind = (tagLine: string): string => {
-    if (/metafile:\/\//i.test(tagLine)) return 'metafile';
-    if (/metaapp:\/\//i.test(tagLine)) return 'metaapp';
-    if (/https?:\/\//i.test(tagLine)) return 'url';
-    return 'text';
-  };
-
-  /**
    * Unambiguous per-turn local time line (mirrors coworkRunner's Local Time
    * Context intent): local datetime, UTC offset, host timezone, and the long date.
    */
@@ -1071,9 +1033,58 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Round-4 correction-first matching: find the deliverable row a correction
+   * message supersedes. The correction must come from the same author as the
+   * original and reference the same object — matched by a shared 64-hex+i0
+   * pinid token inside both URIs (the strongest signal: msg97's buzz URL and
+   * msg99's corrected preview URL share the same buzz pinid). When the
+   * candidate has no pinid token, fall back to the newest pending row of the
+   * same kind by the same author. Rows already carrying the exact same URI
+   * are never "superseded".
+   */
+  const findSupersededDeliverable = (
+    taskId: number,
+    senderGlobalMetaId: string | null,
+    candidate: ParsedDeliverable,
+  ): GroupTaskDeliverable | undefined => {
+    const author = (senderGlobalMetaId ?? '').trim().toLowerCase();
+    if (!author || !candidate.uri) return undefined;
+    const candidatePinids = new Set(
+      candidate.uri.match(/[0-9a-f]{64}i0/gi)?.map((token) => token.toLowerCase()) ?? [],
+    );
+    const candidatesByAuthor = deps.getGroupTaskStore().listDeliverables(taskId)
+      .filter((deliverable) =>
+        deliverable.status === 'pending'
+        && Boolean(deliverable.authorGlobalmetaid)
+        && deliverable.authorGlobalmetaid!.trim().toLowerCase() === author,
+      )
+      .slice()
+      .reverse(); // newest rows first
+    for (const deliverable of candidatesByAuthor) {
+      if (deliverable.uri === candidate.uri && deliverable.kind === candidate.kind) continue;
+      const oldPinids = new Set(
+        (deliverable.uri ?? '').match(/[0-9a-f]{64}i0/gi)?.map((token) => token.toLowerCase()) ?? [],
+      );
+      if (candidatePinids.size > 0 && [...candidatePinids].some((pinid) => oldPinids.has(pinid))) {
+        return deliverable;
+      }
+    }
+    // Fallback: same kind, no shared pinid — a correction that rewrites the
+    // deliverable's uri (e.g. a link that changed host) supersedes the newest
+    // same-kind row by the same author.
+    if (candidate.kind !== 'text') {
+      return candidatesByAuthor.find(
+        (deliverable) => deliverable.kind === candidate.kind && deliverable.uri !== candidate.uri,
+      );
+    }
+    return undefined;
+  };
+
+  /**
    * Protocol tags on EVERY ingested message (before/independent of reply gating):
-   * - [DELIVERABLE]: record one pending deliverable row (deduped by msg_pin_id)
-   *   and compute host verification notes for the chair.
+   * - [DELIVERABLE]: record one pending deliverable row per valid tag
+   *   candidate (deduped by msg_pin_id + uri + kind; corrections supersede in
+   *   place) and compute host verification notes for the chair.
    * - [STATUS:EXECUTING|REVIEW]: honored only from the task chair bot; illegal
    *   transitions are silently ignored; a real transition fires emitTaskEvent,
    *   entering review triggers the owner report, re-entering executing clears it.
@@ -1101,52 +1112,98 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     );
 
     if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
-      // P1-4 (round 2): everything below is scoped to the [DELIVERABLE] tag
-      // lines — the message body (directory paths, examples, truncated copy)
-      // never influences the recorded URI, kind, or rejection decision.
-      const tagLines = deliverableTagLines(content);
-      const uri = extractDeliverableUri(content);
-      // P1-4: a message whose tag line carries an URI-shaped token whose URI is
-      // a placeholder or malformed (e.g. `metaapp://<pinId>`, `metaapp://[PINID]`,
-      // `metafile://…zip`) is rejected as a whole — it is a planning example,
-      // not a deliverable. A [DELIVERABLE] tag line with NO uri-shaped token at
-      // all stays valid (text deliverable, uri null).
-      const hasUriShapedToken = tagLines.some((line) => /(?:metafile|metaapp|https?):\/\//i.test(line));
-      const rejectAsPlaceholder = hasUriShapedToken && uri === null;
+      // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
+      // (its own line or inline) produces one candidate; valid candidates each
+      // get their own row — a message with two tag lines records TWO rows.
+      // Placeholder/truncated candidates are dropped individually so a junk
+      // line can never hide a real URI on a sibling line.
       const msgPinId = message.pinId;
-      let recordedDeliverable = msgPinId
-        ? store.listDeliverables(task.id).find((deliverable) => deliverable.msgPinId === msgPinId)
-        : undefined;
-      if (!rejectAsPlaceholder && msgPinId && !store.hasDeliverableWithMsgPin(task.id, msgPinId)) {
-        recordedDeliverable = store.addDeliverable({
+      const tagLines = deliverableTagLines(content);
+      const candidates = parseDeliverableLines(content);
+      const recordedDeliverables: ParsedDeliverable[] = [];
+      const rejected = candidates.filter((candidate) => !candidate.valid);
+      if (rejected.length > 0) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${rejected.length} [DELIVERABLE] candidate(s) rejected ` +
+          `(${rejected.map((candidate) => candidate.note ?? 'invalid').join('; ')})`,
+        );
+      }
+      const isCorrection = /更正|修正|以…?为准|以此为准|请以此为准/.test(content);
+      for (const candidate of candidates) {
+        if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
+        if (!msgPinId) continue;
+        // Round-4 correction-first aggregation: a later message declaring
+        // 「更正/修正/以…为准」 for the same object (matched by a shared
+        // 64-hex pinid token, same author) supersedes the earlier row in place
+        // instead of recording a duplicate.
+        if (isCorrection && candidate.uri) {
+          const superseded = findSupersededDeliverable(task.id, message.senderGlobalMetaId, candidate);
+          if (superseded) {
+            store.updateDeliverableUri(superseded.id, candidate.uri, candidate.kind);
+            verificationNotes.push(
+              `✓ 更正优先：交付物 #${superseded.id}（${superseded.kind ?? 'text'}）已就地更新为 ${candidate.uri}`,
+            );
+            if (deps.orchestrationBridge) {
+              try {
+                deps.orchestrationBridge.recordDeliverable({
+                  groupTaskId: task.id,
+                  deliverable: store.listDeliverables(task.id)
+                    .find((deliverable) => deliverable.id === superseded.id)!,
+                  verificationNotes,
+                });
+              } catch (error) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: canonical correction projection failed: ` +
+                  `${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
+            }
+            continue;
+          }
+        }
+        const existing = store.findDeliverableByMsgPinAndUri(
+          task.id,
+          msgPinId,
+          candidate.uri,
+          candidate.kind,
+        );
+        if (existing) {
+          recordedDeliverables.push(candidate);
+          continue;
+        }
+        const deliverable = store.addDeliverable({
           taskId: task.id,
           msgPinId,
           authorGlobalmetaid: message.senderGlobalMetaId,
-          kind: inferDeliverableKind(tagLines[0] ?? content),
-          uri,
+          kind: candidate.kind,
+          uri: candidate.uri,
         });
+        recordedDeliverables.push(candidate);
+        if (deps.orchestrationBridge) {
+          try {
+            deps.orchestrationBridge.recordDeliverable({
+              groupTaskId: task.id,
+              deliverable,
+              verificationNotes,
+            });
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: canonical deliverable projection failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
       }
       try {
-        verificationNotes = await verifyDeliverableCandidates(tagLines.join('\n'));
+        const notes = await verifyDeliverableCandidates(tagLines.join('\n'));
+        if (notes.length > 0) {
+          verificationNotes = [...verificationNotes, ...notes];
+        }
       } catch (error) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: deliverable verification failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
-      }
-      if (recordedDeliverable && deps.orchestrationBridge) {
-        try {
-          deps.orchestrationBridge.recordDeliverable({
-            groupTaskId: task.id,
-            deliverable: recordedDeliverable,
-            verificationNotes,
-          });
-        } catch (error) {
-          emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: canonical deliverable projection failed: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
       }
     }
 

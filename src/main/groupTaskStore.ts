@@ -525,6 +525,37 @@ export class GroupTaskStore {
     return Boolean(row);
   }
 
+  /**
+   * Round-4: one message now carries one row PER [DELIVERABLE] tag line (a
+   * message with two tag lines yields two rows), so the old whole-message
+   * msg_pin_id dedupe would drop real URIs. Dedupe is per
+   * (msg_pin_id, uri, kind) — identical rows from a retried message are
+   * skipped, distinct tag lines are each recorded.
+   */
+  findDeliverableByMsgPinAndUri(
+    taskId: number,
+    msgPinId: string,
+    uri: string | null,
+    kind: string | null,
+  ): GroupTaskDeliverable | undefined {
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND msg_pin_id = ? AND uri IS ? AND kind = ?
+       LIMIT 1`,
+      [taskId, msgPinId, uri, kind],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /** Round-4: in-place update of a deliverable (correction-first aggregation). */
+  updateDeliverableUri(id: number, uri: string | null, kind: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET uri = ?, kind = ? WHERE id = ?',
+      [uri, kind, id],
+    );
+    this.saveDb();
+  }
+
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
     this.saveDb();
