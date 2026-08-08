@@ -1003,9 +1003,26 @@ export interface CoworkExperienceStore {
   ): Array<{ summaryDate: string; summaryText: string; sessionRefs?: Array<{ sessionId: string; title: string }> }>;
 }
 
+/**
+ * R1：SDK 定时任务宿主侧镜像桥（方案 C）。
+ * 宿主（main.ts）实现并注入：Stop hook 的 session_crons 采集 + 会话结束对账。
+ * 用接口而非直接依赖 SdkCronMirrorStore，避免 coworkRunner 与 sqlite 存储耦合、便于测试。
+ */
+export interface SdkCronMirrorBridge {
+  /** Stop hook 每轮结束调用：把该会话当前 SDK cron 任务采集进宿主镜像（幂等 upsert）。 */
+  collectSessionCrons(
+    sessionId: string,
+    crons: { id: string; schedule: string; recurring: boolean; prompt: string }[]
+  ): void;
+  /** 会话结束（自然结束/停止/abort）调用：对账该会话镜像（SDK 侧已删的标记 deleted）。 */
+  reconcileSessionEnd(sessionId: string): void;
+}
+
 export interface CoworkRunnerOptions {
   /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
   loadClaudeSdk?: typeof loadClaudeSdk;
+  /** R1: When set, Stop-hook session_crons are mirrored into host storage for UI display. */
+  sdkCronMirror?: SdkCronMirrorBridge;
   /** When set, env overrides (e.g. Twin wallet for metabot-basic) are merged into session env for tool execution. */
   getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
   /** When set, fetches MetaBot by id for persona injection into system prompt. */
@@ -1098,6 +1115,7 @@ export class CoworkRunner extends EventEmitter {
   private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
   private socialRecall?: SocialRecallControl;
+  private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -1140,6 +1158,7 @@ export class CoworkRunner extends EventEmitter {
     this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
     this.socialRecall = options?.socialRecall;
+    this.sdkCronMirror = options?.sdkCronMirror;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -1168,6 +1187,14 @@ export class CoworkRunner extends EventEmitter {
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.close();
     this.activeSessions.delete(sessionId);
+    // R1 会话结束对账：SDK 侧已删的会话内 cron 从镜像标记 deleted（幂等，失败仅告警）。
+    if (this.sdkCronMirror) {
+      try {
+        this.sdkCronMirror.reconcileSessionEnd(sessionId);
+      } catch (error) {
+        console.warn('Failed to reconcile sdk cron mirror for session end:', error);
+      }
+    }
     if (
       !activeSession.turnSettlementResolved
       && typeof activeSession.resolveTurnSettled === 'function'
@@ -4859,6 +4886,42 @@ export class CoworkRunner extends EventEmitter {
                 permissionDecision: 'allow',
                 permissionDecisionReason: 'Auto-approved by user rule',
               };
+            },
+          ],
+        },
+      ],
+      Stop: [
+        {
+          hooks: [
+            async (input: unknown): Promise<Record<string, unknown>> => {
+              // R1 镜像采集：每轮结束把会话内 SDK cron（session_crons）镜像进宿主存储。
+              // 纯展示用途；删除/停用走管理桥（会话内 CronDelete）。失败仅告警，不阻断会话。
+              const mirror = this.sdkCronMirror;
+              if (!mirror) return {};
+              try {
+                const hookInput = input as { session_crons?: unknown };
+                const rawCrons = Array.isArray(hookInput.session_crons)
+                  ? hookInput.session_crons
+                  : [];
+                const crons = rawCrons
+                  .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === 'object')
+                  .map((c) => ({
+                    id: String(c.id ?? ''),
+                    schedule: String(c.schedule ?? ''),
+                    recurring: c.recurring !== false,
+                    prompt: String(c.prompt ?? ''),
+                  }))
+                  .filter((c) => c.id && c.schedule);
+                if (crons.length > 0) {
+                  mirror.collectSessionCrons(sessionId, crons);
+                }
+              } catch (error) {
+                coworkLog('WARN', 'Stop', 'Failed to mirror SDK cron tasks', {
+                  sessionId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+              return {};
             },
           ],
         },
