@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../store';
 import { coworkService } from '../services/cowork';
@@ -41,6 +41,20 @@ interface SidebarProps {
   updateBadge?: React.ReactNode;
 }
 
+/**
+ * Task-record list categories: standard human↔MetaBot chats, A2A MetaBot↔MetaBot
+ * chats, and group-task chat channels (session_type = 'group_task', created by
+ * the Group Task daemon). The sidebar keeps them in separate tabs so the
+ * history list does not mix unrelated conversation kinds.
+ */
+type TaskRecordTab = 'local' | 'a2a' | 'group';
+
+const TASK_RECORD_TABS: Array<{ id: TaskRecordTab; labelKey: string; emptyKey: string }> = [
+  { id: 'local', labelKey: 'coworkTabLocal', emptyKey: 'coworkEmptyLocal' },
+  { id: 'a2a', labelKey: 'coworkTabA2A', emptyKey: 'coworkEmptyA2A' },
+  { id: 'group', labelKey: 'coworkTabGroup', emptyKey: 'coworkEmptyGroup' },
+];
+
 const Sidebar: React.FC<SidebarProps> = ({
   onShowSettings,
   activeView,
@@ -65,10 +79,30 @@ const Sidebar: React.FC<SidebarProps> = ({
   const sessions = useSelector((state: RootState) => state.cowork.sessions);
   // Bot Browser panel sessions live in their own surface; keep them out of the
   // home history list and the search modal.
-  const homeSessions = sessions.filter((session) => session.sessionType !== 'browser');
+  const homeSessions = useMemo(
+    () => sessions.filter((session) => session.sessionType !== 'browser'),
+    [sessions],
+  );
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
   const scheduledTasks = useSelector((state: RootState) => state.scheduledTask.tasks);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  // Which task-record category the home history list shows. Session-level state
+  // keeps the tab across navigation; it resets on app restart.
+  const [taskRecordTab, setTaskRecordTab] = useState<TaskRecordTab>('local');
+  const activeTaskRecordTab = TASK_RECORD_TABS.find((tab) => tab.id === taskRecordTab) ?? TASK_RECORD_TABS[0];
+  const tabbedSessions = useMemo(() => {
+    switch (taskRecordTab) {
+      case 'a2a':
+        return homeSessions.filter((session) => session.sessionType === 'a2a');
+      case 'group':
+        return homeSessions.filter((session) => session.sessionType === 'group_task');
+      default:
+        // Legacy sessions without a session_type are human↔MetaBot chats.
+        return homeSessions.filter(
+          (session) => session.sessionType !== 'a2a' && session.sessionType !== 'group_task'
+        );
+    }
+  }, [homeSessions, taskRecordTab]);
   const isMac = window.electron.platform === 'darwin';
   const hasRunningScheduledTask = scheduledTasks.some(
     (task) => task.enabled && task.state.runningAtMs !== null && task.state.lastStatus === 'running'
@@ -288,16 +322,40 @@ const Sidebar: React.FC<SidebarProps> = ({
       </div>
       {mode === 'home' ? (
         <div className="flex-1 overflow-y-auto px-2.5 pb-4 pt-2 mt-1">
-          <div className="px-3 pb-2 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {i18nService.t('coworkHistory')}
+          <div className="px-3 pb-2 space-y-2">
+            <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {i18nService.t('coworkHistory')}
+            </div>
+            <div
+              role="group"
+              aria-label={i18nService.t('coworkHistory')}
+              className="grid w-full grid-cols-3 gap-1 rounded-lg border border-claude-border/70 bg-claude-bg/80 p-1 dark:border-claude-darkBorder/70 dark:bg-claude-darkBg/80"
+            >
+              {TASK_RECORD_TABS.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  aria-pressed={taskRecordTab === tab.id}
+                  onClick={() => setTaskRecordTab(tab.id)}
+                  className={`non-draggable inline-flex h-7 min-w-0 items-center justify-center rounded-md px-1 text-xs font-medium leading-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/40 ${
+                    taskRecordTab === tab.id
+                      ? 'btn-idchat-primary-filled still'
+                      : 'text-claude-textSecondary hover:bg-claude-surfaceHover/70 hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover/70 dark:hover:text-claude-darkText'
+                  }`}
+                >
+                  <span className="truncate">{i18nService.t(tab.labelKey)}</span>
+                </button>
+              ))}
+            </div>
           </div>
           <CoworkSessionList
-            sessions={homeSessions}
+            sessions={tabbedSessions}
             currentSessionId={currentSessionId}
             onSelectSession={handleSelectSession}
             onDeleteSession={handleDeleteSession}
             onTogglePin={handleTogglePin}
             onRenameSession={handleRenameSession}
+            emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
           />
         </div>
       ) : (

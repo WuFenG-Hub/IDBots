@@ -139,7 +139,7 @@ interface CoworkSession {
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;
-  sessionType?: 'standard' | 'a2a';
+  sessionType?: 'standard' | 'a2a' | 'group_task';
   peerGlobalMetaId?: string | null;
   peerName?: string | null;
   peerAvatar?: string | null;
@@ -233,7 +233,7 @@ interface CoworkSessionSummary {
   updatedAt: number;
   metabotId?: number | null;
   archivedAt?: number | null;
-  sessionType?: 'standard' | 'a2a';
+  sessionType?: 'standard' | 'a2a' | 'group_task';
   peerName?: string | null;
   peerAvatar?: string | null;
   metabotName?: string | null;
