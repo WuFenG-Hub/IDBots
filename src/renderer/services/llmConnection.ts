@@ -78,16 +78,37 @@ function buildOpenAICompatibleChatCompletionsUrl(baseUrl: string, provider: stri
   return `${normalized}/v1/chat/completions`;
 }
 
-function buildOpenAIResponsesUrl(baseUrl: string): string {
-  const normalized = baseUrl.trim().replace(/\/+$/, '');
+export function buildOpenAIResponsesUrl(baseUrl: string, provider?: string): string {
+  let normalized = baseUrl.trim().replace(/\/+$/, '');
+  // DeepSeek's Responses endpoint lives at the host root (`/responses`) without a
+  // version prefix, matching https://api-docs.deepseek.com/zh-cn/guides/responses_api.
+  // Strip a trailing /anthropic or /v1 so a base URL like
+  // https://api.deepseek.com/anthropic resolves to the root responses path.
+  const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
+    || provider?.toLowerCase() === 'deepseek';
+  if (isDeepSeekHost) {
+    normalized = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
+    if (!normalized) return '/responses';
+    return normalized.endsWith('/responses') ? normalized : `${normalized}/responses`;
+  }
   if (!normalized) return '/v1/responses';
   if (normalized.endsWith('/responses')) return normalized;
   if (normalized.endsWith('/v1')) return `${normalized}/responses`;
   return `${normalized}/v1/responses`;
 }
 
-function shouldUseOpenAIResponsesForProvider(provider: string): boolean {
-  return provider === 'openai';
+function shouldUseOpenAIResponsesForProvider(provider: string, modelId?: string): boolean {
+  // OpenAI always uses the Responses API.
+  if (provider === 'openai') {
+    return true;
+  }
+  // DeepSeek Responses API currently only serves flash models; pro and other
+  // variants fall back to chat/completions. Mirrors the host proxy logic in
+  // coworkOpenAICompatProxy.ts resolveUpstreamAPIType().
+  if (provider === 'deepseek') {
+    return (modelId ?? '').toLowerCase().includes('flash');
+  }
+  return false;
 }
 
 function shouldUseMaxCompletionTokensForOpenAI(provider: string, modelId?: string): boolean {
@@ -152,12 +173,12 @@ export async function testProviderConnection(
         }),
       });
     } else {
-      // Responses API when the provider defaults to it (openai) or the
-      // user-selected API format is 'responses'.
+      // Responses API when the provider defaults to it (openai / deepseek flash)
+      // or the user-selected API format is 'responses'.
       const useResponsesApi = providerConfig.apiFormat === 'responses'
-        || shouldUseOpenAIResponsesForProvider(providerKey);
+        || shouldUseOpenAIResponsesForProvider(providerKey, firstModel.id);
       const openaiUrl = useResponsesApi
-        ? buildOpenAIResponsesUrl(normalizedBaseUrl)
+        ? buildOpenAIResponsesUrl(normalizedBaseUrl, providerKey)
         : buildOpenAICompatibleChatCompletionsUrl(normalizedBaseUrl, providerKey);
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (providerConfig.apiKey) {

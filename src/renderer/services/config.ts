@@ -320,6 +320,69 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
   };
 };
 
+// ---------------------------------------------------------------------------
+// 版本化 Provider API 格式语义迁移
+//
+// 背景：当出厂默认 apiFormat 的含义/取值发生变化时（例如 opencode 从 chat
+// completions 切换到 Responses），stored config 会用旧默认值覆盖 defaultConfig，
+// 导致老用户拿不到新默认。这里做幂等的版本化迁移，只纠正仍处于出厂默认状态
+// （apiKey 为空）的 provider，已自定义配置（填了 key 或改过格式）的用户保持不动。
+// ---------------------------------------------------------------------------
+
+export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 1;
+
+type ProviderApiFormatValue = 'anthropic' | 'openai' | 'responses';
+
+/**
+ * v1：opencode 默认 apiFormat 由 'openai'（chat completions）升级为 'responses'。
+ *
+ * OpenCode Go 网关三个端点共用同一 Base URL，DeepSeek Flash 在 Responses 格式下
+ * 可携带 reasoning，故 Responses 成为更合适的默认。仅在用户尚未自定义 opencode
+ * （apiKey 仍为空且 apiFormat 仍是旧默认 'openai'）时纠正，已填 key 或手动切换过
+ * 格式的用户不受影响。
+ */
+const migrateOpencodeApiFormatToResponses = (
+  providers: NonNullable<AppConfig['providers']>,
+): NonNullable<AppConfig['providers']> => {
+  const opencode = providers.opencode;
+  if (!opencode) {
+    return providers;
+  }
+  const hasCustomApiKey = typeof opencode.apiKey === 'string' && opencode.apiKey.trim() !== '';
+  const isLegacyDefaultApiFormat = (opencode.apiFormat as ProviderApiFormatValue | undefined) === 'openai';
+  // Respect existing customization: only upgrade providers still on the factory default.
+  if (hasCustomApiKey || !isLegacyDefaultApiFormat) {
+    return providers;
+  }
+  return {
+    ...providers,
+    opencode: { ...opencode, apiFormat: 'responses' },
+  };
+};
+
+export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig => {
+  const currentVersion = config.providerApiFormatMigrationVersion ?? 0;
+  if (currentVersion >= PROVIDER_API_FORMAT_MIGRATION_VERSION) {
+    return config;
+  }
+
+  let nextProviders = config.providers;
+
+  for (let version = currentVersion + 1; version <= PROVIDER_API_FORMAT_MIGRATION_VERSION; version += 1) {
+    if (version === 1) {
+      nextProviders = nextProviders
+        ? migrateOpencodeApiFormatToResponses(nextProviders as NonNullable<AppConfig['providers']>)
+        : nextProviders;
+    }
+  }
+
+  return {
+    ...config,
+    providers: nextProviders,
+    providerApiFormatMigrationVersion: PROVIDER_API_FORMAT_MIGRATION_VERSION,
+  };
+};
+
 class ConfigService {
   private config: AppConfig = defaultConfig;
 
@@ -351,7 +414,9 @@ class ConfigService {
           providers: mergedProviders as AppConfig['providers'],
         };
 
-        const normalizedConfig = normalizeDeepSeekAppConfig(applyProviderModelMigrations(mergedConfig));
+        const normalizedConfig = normalizeDeepSeekAppConfig(
+          applyProviderModelMigrations(applyProviderApiFormatMigrations(mergedConfig)),
+        );
         this.config = normalizedConfig;
 
         if (JSON.stringify(normalizedConfig) !== JSON.stringify(mergedConfig)) {

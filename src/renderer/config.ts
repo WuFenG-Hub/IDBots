@@ -127,6 +127,8 @@ export interface AppConfig {
   language_initialized?: boolean;
   // Provider 预设模型迁移版本号 (升级后自动注入新模型/移除已淘汰模型，详见 services/config.ts)
   providerModelMigrationVersion?: number;
+  // Provider API 格式语义迁移版本号 (升级后自动纠正出厂默认 apiFormat，详见 services/config.ts)
+  providerApiFormatMigrationVersion?: number;
   // 应用配置
   app: {
     port: number;
@@ -528,8 +530,10 @@ export const defaultConfig: AppConfig = {
       apiKey: '',
       // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
       // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
+      // Default to the Responses endpoint: DeepSeek Flash carries reasoning there and
+      // the gateway serves pro/flash alike on /v1/responses.
       baseUrl: 'https://opencode.ai/zen/go/v1',
-      apiFormat: 'openai',
+      apiFormat: 'responses',
       models: [
         { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
       ]
