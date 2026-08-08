@@ -1084,7 +1084,7 @@ test('prompts: worldview block, time line, honesty and chair boundary', () => {
   assert.match(prompt, /<self_identity>I am the twin\.<\/self_identity>/);
 });
 
-test('turn prompts include the fresh current-time line from the injected now()', async () => {
+test('turn prompts keep the system prompt stable and put the fresh current-time line in the user message', async () => {
   const h = await createHarness();
   try {
     h.createTask([2]);
@@ -1097,11 +1097,18 @@ test('turn prompts include the fresh current-time line from the injected now()',
     const date = new Date(h.state.nowMs);
     const pad = (v) => String(v).padStart(2, '0');
     const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    // Cache-prefix discipline: the minute-precision time line must NEVER sit in
+    // the system prompt (it would change every turn and reset the SDK session);
+    // it rides the user message instead.
     assert.ok(
-      h.chatCalls[0].systemPrompt.includes(`Current time: ${local} (`),
-      `prompt carries the injected-now local time (expected prefix "Current time: ${local} (")`,
+      !h.chatCalls[0].systemPrompt.includes('Current time:'),
+      'system prompt must not carry the per-turn time line',
     );
-    assert.match(h.chatCalls[0].systemPrompt, /today is \w+day, /);
+    assert.ok(
+      h.chatCalls[0].userMessage.includes(`Current time: ${local} (`),
+      `user message carries the injected-now local time (expected prefix "Current time: ${local} (")`,
+    );
+    assert.match(h.chatCalls[0].userMessage, /today is \w+day, /);
     assert.match(h.chatCalls[0].systemPrompt, /## Group task environment/);
   } finally {
     h.cleanup();
@@ -1121,8 +1128,10 @@ test('experience block: memory/dream deps feed the A2A builder; absent deps omit
       senderName: 'Human', content: '@Coder Bot go',
     });
     await withMemory.loop.runTick();
-    assert.match(withMemory.chatCalls[0].systemPrompt, /I am the search specialist\./);
-    assert.match(withMemory.chatCalls[0].systemPrompt, /Searched the web for the owner\./);
+    assert.match(withMemory.chatCalls[0].userMessage, /I am the search specialist\./);
+    assert.match(withMemory.chatCalls[0].userMessage, /Searched the web for the owner\./);
+    assert.ok(!withMemory.chatCalls[0].systemPrompt.includes('I am the search specialist.'),
+      'experience block must not sit in the system prompt (volatile, cache-prefix breaker)');
   } finally {
     withMemory.cleanup();
   }
@@ -1164,10 +1173,12 @@ test('group cognition projection is observer-relative and wired into per-bot pro
 
     const workerCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
     assert.ok(workerCall, 'worker replied');
-    assert.match(workerCall.systemPrompt, /<metaid_group_cognition>/);
-    assert.match(workerCall.systemPrompt, /Observer: gmid-w2/);
-    assert.match(workerCall.systemPrompt, /- Twin Bot gmid-twin \(chair\)/);
-    assert.match(workerCall.systemPrompt, /- Coder Bot gmid-w2 \(worker\)/);
+    assert.match(workerCall.userMessage, /<metaid_group_cognition>/);
+    assert.match(workerCall.userMessage, /Observer: gmid-w2/);
+    assert.match(workerCall.userMessage, /- Twin Bot gmid-twin \(chair\)/);
+    assert.match(workerCall.userMessage, /- Coder Bot gmid-w2 \(worker\)/);
+    assert.ok(!workerCall.systemPrompt.includes('<metaid_group_cognition>'),
+      'cognition block must not sit in the system prompt (volatile, cache-prefix breaker)');
 
     const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
     assert.ok(workerInput, 'cognition dep called for the responding worker');
