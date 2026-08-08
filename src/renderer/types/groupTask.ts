@@ -32,6 +32,10 @@ export interface GroupTaskMember {
   role: GroupTaskMemberRole;
   joinedPinId: string | null;
   createdAt: string | null;
+  /** Inviter-side name snapshot for remote members (no local metabots row). */
+  displayName?: string | null;
+  /** Set when the member was kicked (M3); active members have null. */
+  removedAt?: string | null;
   name: string | null;
 }
 
