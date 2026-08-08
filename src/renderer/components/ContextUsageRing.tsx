@@ -41,8 +41,11 @@ const ContextUsageRing: React.FC<ContextUsageRingProps> = ({
   const dashOffset = circumference * (1 - ratio);
   const percent = Math.round(ratio * 100);
 
+  // Arc color: normal = brand yellow accent; warning = amber; critical = deep
+  // amber. Pure red (the previous critical color) clashes with the yellow
+  // brand palette, especially in light mode.
   const arcColorClass = ratio >= CRITICAL_RATIO
-    ? 'text-red-500'
+    ? 'text-amber-700 dark:text-amber-500'
     : ratio >= WARNING_RATIO
       ? 'text-amber-500'
       : 'text-claude-accent';

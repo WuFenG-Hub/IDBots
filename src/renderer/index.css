@@ -11,7 +11,11 @@
   --bg-panel: #FFFFFF;
   --bg-hover: #F1F5F9;
   --color-primary: #ffdc51;
-  --color-accent-text: 194 65 12;
+  /* Accent text: a golden yellow (Tailwind yellow-700) that stays in the
+     brand-yellow family and remains legible on light backgrounds. The old
+     value (#C2410C = 194 65 12, a burnt red-orange) made every accent label
+     (context ring, 极限, 完全信任, etc.) read as red in light mode. */
+  --color-accent-text: 161 98 7;
   --color-accent: #06B6D4;
   --text-primary: #303133;
   --text-secondary: #64748B;
