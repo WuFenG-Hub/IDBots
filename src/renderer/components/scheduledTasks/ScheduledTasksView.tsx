@@ -139,6 +139,20 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
             </button>
             <button
               type="button"
+              onClick={() => handleTabChange('sdk')}
+              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                activeTab === 'sdk'
+                  ? 'dark:text-claude-darkText text-claude-text'
+                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+              }`}
+            >
+              定时任务
+              {activeTab === 'sdk' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
+            <button
+              type="button"
               onClick={() => handleTabChange('history')}
               className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
                 activeTab === 'history'
@@ -148,20 +162,6 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
             >
               {i18nService.t('scheduledTasksTabHistory')}
               {activeTab === 'history' && (
-                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => handleTabChange('sdk')}
-              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
-                activeTab === 'sdk'
-                  ? 'dark:text-claude-darkText text-claude-text'
-                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
-              }`}
-            >
-              SDK 任务
-              {activeTab === 'sdk' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
