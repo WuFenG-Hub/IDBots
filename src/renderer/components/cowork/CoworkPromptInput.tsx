@@ -10,7 +10,7 @@ import { SkillsButton, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
-import { setDraftPrompt } from '../../store/slices/coworkSlice';
+import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
 import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
@@ -143,9 +143,14 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     } = props;
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
-    const initialDraftRef = useRef(scopeKey ? '' : draftPrompt);
+    const sessionDrafts = useSelector((state: RootState) => state.cowork.sessionDrafts);
+    // Scoped composers (session steer input, Bot Browser panel) restore their
+    // draft from the per-scope store entry, so switching sessions keeps each
+    // session's typed text; the unscoped New Task composer owns the global draft.
+    const initialDraftRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.value ?? '') : draftPrompt);
+    const initialAttachmentsRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.attachments ?? []) : []);
     const [value, setValue] = useState(initialDraftRef.current);
-    const [attachments, setAttachments] = useState<CoworkAttachment[]>([]);
+    const [attachments, setAttachments] = useState<CoworkAttachment[]>(initialAttachmentsRef.current);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
@@ -153,23 +158,31 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
     const activeScopeKeyRef = useRef(scopeKey);
+    // Publish composer state: scoped composers write to the per-session draft
+    // store, the unscoped New Task composer keeps owning the global draft. The
+    // versioned fields call this on every change, including takeAndClear after
+    // a submit, which is what makes drafts persist across session switches.
+    const publishComposerState = useCallback((nextValue: string, nextAttachments: CoworkAttachment[]) => {
+      const scope = activeScopeKeyRef.current;
+      if (scope) {
+        dispatch(setSessionDraft({ sessionId: scope, value: nextValue, attachments: nextAttachments }));
+      } else {
+        dispatch(setDraftPrompt(nextValue));
+      }
+    }, [dispatch]);
     const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
     const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
     if (!draftFieldRef.current) {
       draftFieldRef.current = createVersionedComposerField(initialDraftRef.current, () => '', (nextValue) => {
         setValue(nextValue);
-        // Only the unscoped composer (the New Task home page) owns the global
-        // draft. Scoped composers (session steer input, Bot Browser panel)
-        // are local-only: they must never overwrite or clear the New Task
-        // draft, otherwise opening a conversation wipes the text the user
-        // typed on the home page.
-        if (!activeScopeKeyRef.current) {
-          dispatch(setDraftPrompt(nextValue));
-        }
+        publishComposerState(nextValue, attachmentFieldRef.current?.get() ?? []);
       });
     }
     if (!attachmentFieldRef.current) {
-      attachmentFieldRef.current = createVersionedComposerField([], () => [], setAttachments);
+      attachmentFieldRef.current = createVersionedComposerField(initialAttachmentsRef.current, () => [], (nextAttachments) => {
+        setAttachments(nextAttachments);
+        publishComposerState(draftFieldRef.current?.get() ?? '', nextAttachments);
+      });
     }
 
   // 暴露方法给父组件
@@ -243,27 +256,30 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   useEffect(() => {
     if (activeScopeKeyRef.current !== scopeKey) {
+      // The composer is reused with a different scope (normally CoworkSessionDetail
+      // remounts it per session via key, so this is defensive): invalidate any
+      // in-flight submission snapshots and load the new scope's stored draft.
+      activeScopeKeyRef.current = scopeKey;
       draftFieldRef.current?.invalidate();
       attachmentFieldRef.current?.invalidate();
-      activeScopeKeyRef.current = scopeKey;
-    }
-    if (scopeKey) {
-      draftFieldRef.current?.set('');
-      attachmentFieldRef.current?.set([]);
-    }
-  }, [scopeKey]);
-
-  useEffect(() => {
-    const handleFocusInput = (event: Event) => {
-      const detail = (event as CustomEvent<{ clear?: boolean }>).detail;
-      const shouldClear = detail?.clear ?? true;
-      // Never clear the unscoped New Task composer from navigation events;
-      // its content is the persistent home-page draft. Clearing stays
-      // available for scoped composers and after a successful submit.
-      if (shouldClear && activeScopeKeyRef.current) {
-        draftFieldRef.current?.set('');
+      if (scopeKey) {
+        const stored = sessionDrafts[scopeKey];
+        draftFieldRef.current?.set(stored?.value ?? '');
+        attachmentFieldRef.current?.set(stored?.attachments ?? []);
+      } else {
+        draftFieldRef.current?.set(draftPrompt);
         attachmentFieldRef.current?.set([]);
       }
+    }
+  }, [scopeKey, sessionDrafts, draftPrompt]);
+
+  useEffect(() => {
+    const handleFocusInput = () => {
+      // Navigation events (New Chat, session shortcuts) only focus the input;
+      // they must never clear it. Drafts are owned by their scope: the New
+      // Task composer keeps the global draft and each session keeps its own
+      // stored draft. They are cleared only by a successful submit or when
+      // the session itself is deleted.
       requestAnimationFrame(() => {
         textareaRef.current?.focus();
       });

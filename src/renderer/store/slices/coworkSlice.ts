@@ -22,6 +22,12 @@ interface CoworkState {
   /** MetaBot selected on the New Task home page; persisted globally so the single-instance page keeps its state across navigation. */
   newTaskMetabotId: number | null;
   draftPrompt: string;
+  /**
+   * Composer drafts keyed by session id (the steer input of each session
+   * detail view). Kept in the store so switching sessions restores the text
+   * the user typed in every session's input instead of wiping it.
+   */
+  sessionDrafts: Record<string, { value: string; attachments: Array<{ path: string; name: string }> }>;
   unreadSessionIds: string[];
   isCoworkActive: boolean;
   isStreaming: boolean;
@@ -40,6 +46,7 @@ const initialState: CoworkState = {
   preferredMetabotId: null,
   newTaskMetabotId: null,
   draftPrompt: '',
+  sessionDrafts: {},
   unreadSessionIds: [],
   isCoworkActive: false,
   isStreaming: false,
@@ -153,6 +160,20 @@ const coworkSlice = createSlice({
       state.draftPrompt = action.payload;
     },
 
+    /**
+     * Persist one session's composer draft (text + attachments). Empty drafts
+     * are dropped so idle sessions do not accumulate entries.
+     */
+    setSessionDraft(state, action: PayloadAction<{ sessionId: string; value: string; attachments: Array<{ path: string; name: string }> }>) {
+      const { sessionId, value, attachments } = action.payload;
+      if (!sessionId) return;
+      if (!value && attachments.length === 0) {
+        delete state.sessionDrafts[sessionId];
+        return;
+      }
+      state.sessionDrafts[sessionId] = { value, attachments };
+    },
+
     setNewTaskMetabotId(state, action: PayloadAction<number | null>) {
       state.newTaskMetabotId = action.payload;
     },
@@ -210,6 +231,8 @@ const coworkSlice = createSlice({
       const sessionId = action.payload;
       state.sessions = state.sessions.filter(s => s.id !== sessionId);
       state.unreadSessionIds = state.unreadSessionIds.filter((id) => id !== sessionId);
+      // A deleted session can never be reopened, so its composer draft is gone too.
+      delete state.sessionDrafts[sessionId];
 
       if (state.currentSessionId === sessionId) {
         state.currentSessionId = null;
@@ -404,6 +427,7 @@ export const {
   setCurrentSessionId,
   setCurrentSession,
   setDraftPrompt,
+  setSessionDraft,
   setNewTaskMetabotId,
   addSession,
   registerBackgroundSession,
