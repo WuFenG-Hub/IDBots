@@ -57,6 +57,7 @@ import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
+import { MetaIDContactViewService } from './services/metaidContactViewService';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -11855,6 +11856,51 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         success: false,
         avatarUrl: null,
         error: error instanceof Error ? error.message : 'Failed to resolve avatar',
+      };
+    }
+  });
+
+  const getMetaIDContactViewService = (): MetaIDContactViewService => {
+    const sqliteStore = getStore();
+    return new MetaIDContactViewService({
+      db: sqliteStore.getDatabase(),
+      experienceStore: getMetaIDExperienceStore(),
+      impressionStore: getMetaIDImpressionStore(),
+    });
+  };
+
+  ipcMain.handle('metaid:contacts:list', async (_event, input: { observerGlobalMetaId?: string }) => {
+    try {
+      const observerGlobalMetaId = toSafeString(input?.observerGlobalMetaId).trim();
+      if (!observerGlobalMetaId) {
+        return { success: false, error: 'Missing observerGlobalMetaId' };
+      }
+      const contacts = getMetaIDContactViewService().listContacts(observerGlobalMetaId);
+      return { success: true, contacts };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list MetaID contacts',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:contacts:detail', async (_event, input: {
+    observerGlobalMetaId?: string;
+    subjectGlobalMetaId?: string;
+  }) => {
+    try {
+      const observerGlobalMetaId = toSafeString(input?.observerGlobalMetaId).trim();
+      const subjectGlobalMetaId = toSafeString(input?.subjectGlobalMetaId).trim();
+      if (!observerGlobalMetaId || !subjectGlobalMetaId) {
+        return { success: false, error: 'Missing observer/subject GlobalMetaId' };
+      }
+      const detail = getMetaIDContactViewService().getContactDetail(observerGlobalMetaId, subjectGlobalMetaId);
+      return { success: true, detail };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to load MetaID contact detail',
       };
     }
   });

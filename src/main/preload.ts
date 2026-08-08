@@ -868,6 +868,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaid:getUserInfo', params),
     resolveAvatarSource: (params: { reference: string }) =>
       ipcRenderer.invoke('metaid:resolveAvatarSource', params),
+    listContacts: (params: { observerGlobalMetaId: string }) =>
+      ipcRenderer.invoke('metaid:contacts:list', params),
+    getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) =>
+      ipcRenderer.invoke('metaid:contacts:detail', params),
     onStatusUpdate: (callback: (status: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
       ipcRenderer.on('p2p:statusUpdate', handler);

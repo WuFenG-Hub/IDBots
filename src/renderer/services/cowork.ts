@@ -36,6 +36,8 @@ import type {
   CoworkMemoryPolicy,
   CoworkMemoryScopesOverview,
   CoworkSessionMemoryScope,
+  CoworkMetaIDContactSummary,
+  CoworkMetaIDContactDetail,
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
@@ -937,6 +939,25 @@ class CoworkService {
     const result = await api(input);
     if (!result?.success || !result.policy) return null;
     return result.policy;
+  }
+
+  async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {
+    const api = window.electron?.p2p?.listContacts;
+    if (!api) return [];
+    const result = await api(input);
+    if (!result?.success || !Array.isArray(result.contacts)) return [];
+    return result.contacts;
+  }
+
+  async getMetaIDContactDetail(input: {
+    observerGlobalMetaId: string;
+    subjectGlobalMetaId: string;
+  }): Promise<CoworkMetaIDContactDetail | null> {
+    const api = window.electron?.p2p?.getContactDetail;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.detail) return null;
+    return result.detail;
   }
 
   onSandboxDownloadProgress(callback: (progress: CoworkSandboxProgress) => void): () => void {

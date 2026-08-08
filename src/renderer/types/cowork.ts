@@ -383,6 +383,101 @@ export interface CoworkSessionMemoryScope {
   stats: CoworkMemoryStats;
 }
 
+/** One contact (subject) in the ID-anchored contact list of an observer bot. */
+export interface CoworkMetaIDContactSummary {
+  globalMetaID: string;
+  name: string | null;
+  lastSeenAt: number | null;
+  interactionCount: number;
+  directInteractionCount: number;
+}
+
+export interface CoworkMetaIDImpressionSnapshot {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  interactionCount: number;
+  directInteractionCount: number;
+  summaryText: string;
+  styleDescriptors: string[];
+  cooperationContext: string | null;
+  relationshipTemperature: string | null;
+  communicationGuidance: string | null;
+  uncertaintyText: string | null;
+  latestObservationId: string;
+  snapshotVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoworkMetaIDImpressionObservation {
+  id: string;
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  episodeId: string | null;
+  observationText: string;
+  interpretationText: string;
+  dimensions: Record<string, unknown>;
+  communicationGuidance: string | null;
+  confidence: Record<string, unknown>;
+  dreamDate: string;
+  status: 'active' | 'superseded' | 'rejected';
+  createdAt: number;
+}
+
+export interface CoworkMetaIDExperienceEpisode {
+  id: string;
+  ownerGlobalMetaID: string;
+  episodeType: 'direct_interaction' | 'task_participation' | 'service_order' | 'scheduled_task' | 'public_pin_observation' | 'third_party_reference';
+  sourceChannel: string;
+  sourceKey: string;
+  sessionId: string | null;
+  externalConversationId: string | null;
+  taskId: string | null;
+  orderId: string | null;
+  status: 'open' | 'completed' | 'failed' | 'abandoned';
+  startedAt: number;
+  endedAt: number | null;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoworkMetaIDExperienceEvidence {
+  id: string;
+  episodeId: string;
+  evidenceType: string;
+  sourceKey: string;
+  pinId: string | null;
+  publisherGlobalMetaID: string | null;
+  messageId: string | null;
+  occurredAt: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface CoworkMetaIDContactEvidenceText {
+  content: string | null;
+  senderName: string | null;
+  pinId: string | null;
+  direction: string | null;
+}
+
+export interface CoworkMetaIDContactEpisodeView {
+  episode: CoworkMetaIDExperienceEpisode;
+  evidence: CoworkMetaIDExperienceEvidence[];
+  evidenceTexts: CoworkMetaIDContactEvidenceText[];
+}
+
+export interface CoworkMetaIDContactDetail {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  subjectName: string | null;
+  snapshot: CoworkMetaIDImpressionSnapshot | null;
+  observations: CoworkMetaIDImpressionObservation[];
+  episodes: CoworkMetaIDContactEpisodeView[];
+}
+
 export interface CoworkMemoryStats {
   total: number;
   created: number;
