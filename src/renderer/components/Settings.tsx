@@ -2954,36 +2954,38 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           <div className="flex h-full">
             {/* Provider List - Left Side */}
             <div className="w-2/5 border-r dark:border-claude-darkBorder border-claude-border pr-3 space-y-1.5 overflow-y-auto">
-              <div className="flex items-center justify-between mb-2 px-1">
-                <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                  {i18nService.t('modelProviders')}
-                </h3>
-                <div className="flex items-center space-x-1">
-                  <button
-                    type="button"
-                    onClick={handleAddCustomProviderClick}
-                    className="btn-idchat-primary-filled inline-flex items-center px-2 py-1 text-[11px] font-medium"
-                  >
-                    <PlusCircleIcon className="h-3 w-3 mr-1" />
-                    {i18nService.t('addProvider')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleImportProvidersClick}
-                    disabled={isImportingProviders || isExportingProviders}
-                    className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
-                  >
-                    {i18nService.t('import')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleExportProviders}
-                    disabled={isImportingProviders || isExportingProviders}
-                    className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
-                  >
-                    {i18nService.t('export')}
-                  </button>
+              <div className="mb-1.5 px-1">
+                <div className="flex items-center justify-between mb-1.5">
+                  <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('modelProviders')}
+                  </h3>
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={handleImportProvidersClick}
+                      disabled={isImportingProviders || isExportingProviders}
+                      className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+                    >
+                      {i18nService.t('import')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportProviders}
+                      disabled={isImportingProviders || isExportingProviders}
+                      className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+                    >
+                      {i18nService.t('export')}
+                    </button>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleAddCustomProviderClick}
+                  className="btn-idchat-primary-filled inline-flex items-center justify-center w-full px-2 py-1 text-[10px] font-medium"
+                >
+                  <PlusCircleIcon className="h-2.5 w-2.5 mr-1" />
+                  {i18nService.t('addProvider')}
+                </button>
               </div>
               <input
                 ref={importInputRef}
