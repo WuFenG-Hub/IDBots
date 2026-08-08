@@ -20,7 +20,17 @@ export interface GroupTask {
   status: GroupTaskStatus;
   chairMetabotId: number;
   createdBy: string;
+  /**
+   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
+   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
+   * retried (bounded) and never silently skipped.
+   */
   lastProcessedMsgId: number;
+  /**
+   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
+   * for the stall signal). null when the daemon has never driven the task.
+   */
+  lastDrivenAt: number | null;
   createPinId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -63,6 +73,12 @@ export interface GroupChatTranscriptMessage {
   chainTimestamp: number | null;
   msgIndex: number | null;
   replyPin: string | null;
+  /**
+   * Round-4 attribution: true when the chain-signature GlobalMetaID could not
+   * be resolved OR is neither a task member nor the owner — display-only flag,
+   * the sender must never be inferred from senderName.
+   */
+  senderSuspect: boolean;
 }
 
 export interface CreateGroupTaskInput {
@@ -102,6 +118,7 @@ interface GroupTaskRow {
   chair_metabot_id: number;
   created_by: string;
   last_processed_msg_id: number;
+  last_driven_at: number | null;
   create_pin_id: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -143,6 +160,7 @@ interface GroupChatTranscriptRow {
   chain_timestamp: number | null;
   msg_index: number | null;
   reply_pin: string | null;
+  sender_suspect?: number | null;
 }
 
 function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChatTranscriptMessage {
@@ -158,6 +176,7 @@ function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChat
     chainTimestamp: row.chain_timestamp ?? null,
     msgIndex: row.msg_index ?? null,
     replyPin: row.reply_pin ?? null,
+    senderSuspect: Number(row.sender_suspect ?? 0) === 1,
   };
 }
 
@@ -196,6 +215,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     chairMetabotId: row.chair_metabot_id,
     createdBy: row.created_by,
     lastProcessedMsgId: row.last_processed_msg_id ?? 0,
+    lastDrivenAt: row.last_driven_at ?? null,
     createPinId: row.create_pin_id ?? null,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
@@ -395,6 +415,15 @@ export class GroupTaskStore {
     this.saveDb();
   }
 
+  /** Round-4: heartbeat of the last daemon drive (epoch seconds). */
+  updateLastDrivenAt(id: number, epochSec: number): void {
+    this.db.run(
+      'UPDATE group_tasks SET last_driven_at = ? WHERE id = ?',
+      [Math.trunc(epochSec), id],
+    );
+    this.saveDb();
+  }
+
   /** group_id of every non-terminal task (backfill targets). */
   getActiveGroupIds(): string[] {
     const rows = this.getAll<{ group_id: string }>(
@@ -419,7 +448,7 @@ export class GroupTaskStore {
       ? Math.trunc(opts.beforeId)
       : null;
     const columns = `id, pin_id, tx_id, sender_name, sender_global_metaid, sender_avatar,
-      content, content_type, chain_timestamp, msg_index, reply_pin`;
+      content, content_type, chain_timestamp, msg_index, reply_pin, sender_suspect`;
     const rows = (beforeId != null
       ? this.getAll<GroupChatTranscriptRow>(
           `SELECT ${columns} FROM group_chat_messages
@@ -433,6 +462,40 @@ export class GroupTaskStore {
         )
     ).reverse();
     return rows.map(rowToGroupChatTranscriptMessage);
+  }
+
+  /**
+   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
+   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
+   * retried (bounded) and never silently skipped.
+   */
+  lastProcessedMsgId: number;
+  /**
+   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
+   * for the stall signal). null when the daemon has never driven the task.
+   */
+  lastDrivenAt: number | null;
+  /**
+   * Round-4 attribution: persist the GlobalMetaID resolved from the message's
+   * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
+   * chain signature is the ONLY identity source; sender_name is never used
+   * for attribution.
+   */
+  updateMessageSenderGlobalMetaId(id: number, globalMetaId: string): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_global_metaid = ? WHERE id = ?',
+      [globalMetaId.trim(), id],
+    );
+    this.saveDb();
+  }
+
+  /** Round-4 attribution: mark a message whose sender fails the member/owner check. */
+  setMessageSenderSuspect(id: number, suspect: boolean): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_suspect = ? WHERE id = ?',
+      [suspect ? 1 : 0, id],
+    );
+    this.saveDb();
   }
 
   // --- group_task_members ---
@@ -523,6 +586,69 @@ export class GroupTaskStore {
       [taskId, msgPinId],
     );
     return Boolean(row);
+  }
+
+  /**
+   * Round-4: one message now carries one row PER [DELIVERABLE] tag line (a
+   * message with two tag lines yields two rows), so the old whole-message
+   * msg_pin_id dedupe would drop real URIs. Dedupe is per
+   * (msg_pin_id, uri, kind) — identical rows from a retried message are
+   * skipped, distinct tag lines are each recorded.
+   */
+  findDeliverableByMsgPinAndUri(
+    taskId: number,
+    msgPinId: string,
+    uri: string | null,
+    kind: string | null,
+  ): GroupTaskDeliverable | undefined {
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND msg_pin_id = ? AND uri IS ? AND kind = ?
+       LIMIT 1`,
+      [taskId, msgPinId, uri, kind],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
+   * Round-4 (show summary): last chain speak timestamp (epoch seconds) per
+   * sender GlobalMetaID for one group — the summary view's member list shows
+   * when each member last spoke. Senders without any timestamp are absent.
+   */
+  getMembersLastSpeakAt(
+    groupId: string,
+    globalMetaIds: Array<string | null | undefined>,
+  ): Map<string, number> {
+    const ids = [...new Set(
+      globalMetaIds
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    const result = new Map<string, number>();
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.getAll<{ sender_global_metaid: string; last_speak_at: number }>(
+      `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_speak_at
+       FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
+         AND chain_timestamp IS NOT NULL
+       GROUP BY sender_global_metaid`,
+      [groupId, ...ids],
+    );
+    for (const row of rows) {
+      const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
+      if (key) result.set(key, Number(row.last_speak_at));
+    }
+    return result;
+  }
+
+  /** Round-4: in-place update of a deliverable (correction-first aggregation). */
+  updateDeliverableUri(id: number, uri: string | null, kind: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET uri = ?, kind = ? WHERE id = ?',
+      [uri, kind, id],
+    );
+    this.saveDb();
   }
 
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {

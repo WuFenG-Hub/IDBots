@@ -42,6 +42,7 @@ tests/*
 !tests/groupChatMsgIndexMigration.test.mjs
 !tests/groupChatTransport.test.mjs
 !tests/groupTaskDaemon.test.mjs
+!tests/groupTaskDeliverableParser.test.mjs
 !tests/groupTaskUtils.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs

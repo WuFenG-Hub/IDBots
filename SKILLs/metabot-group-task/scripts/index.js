@@ -108,6 +108,9 @@ async function main() {
       const taskId = Number(params.task_id);
       if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for show');
       body = { task_id: taskId };
+      // Round-4: view=summary (default) keeps the output small; view=full returns everything.
+      const view = String(params.view ?? '').trim();
+      body.view = view === 'full' ? 'full' : 'summary';
       break;
     }
     case 'send': {

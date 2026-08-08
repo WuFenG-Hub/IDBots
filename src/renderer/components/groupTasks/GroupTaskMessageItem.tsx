@@ -106,6 +106,10 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   isChairSender,
   isOwnerSender,
 }) => {
+  // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
+  // source. A message whose sender is neither a task member nor the owner is
+  // flagged SUSPECT — never attributed by senderName.
+  const isSuspectSender = message.senderSuspect === true;
   const senderName = message.senderName?.trim() || 'Unknown';
   const timestamp = formatGroupTaskTime(message.chainTimestamp);
   const avatarSrc = useSenderAvatar(message);
@@ -127,6 +131,14 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
             {senderName}
           </span>
+          {isSuspectSender && (
+            <span
+              className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-amber-500/15 text-amber-600 dark:text-amber-400"
+              title="Sender GlobalMetaID is not a task member — not attributed by display name"
+            >
+              SUSPECT
+            </span>
+          )}
           {isChairSender && (
             <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-claude-accent/15 text-claude-accent">
               {i18nService.t('groupTasksChairBadge')}

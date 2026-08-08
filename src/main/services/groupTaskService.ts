@@ -43,6 +43,48 @@ export interface GroupTaskDetail extends GroupTask {
   deliverables: GroupTaskDeliverable[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
+  /**
+   * Round-4 stall signal: true when a NON-TERMINAL task has had no host drive
+   * (lastDrivenAt, falling back to updatedAt) for longer than
+   * stallAfterMinutes — the pipeline looks stuck.
+   */
+  stall: boolean;
+  /** Round-4: the stall threshold in minutes (30 by default). */
+  stallAfterMinutes: number;
+}
+
+/** Round-4: minutes of host inactivity before a non-terminal task reads as stalled. */
+export const GROUP_TASK_STALL_AFTER_MINUTES = 30;
+
+/** sqlite datetime('now') strings are UTC 'YYYY-MM-DD HH:MM:SS'. */
+function parseSqliteUtc(value: string | null): number | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    Number(match[4]), Number(match[5]), Number(match[6]),
+  );
+}
+
+/**
+ * Round-4: lastProcessedMsgId semantics + stall. `stall` is true when the task
+ * is not terminal and the host's last drive (lastDrivenAt, else updatedAt) is
+ * older than GROUP_TASK_STALL_AFTER_MINUTES. Unknown activity (no timestamps)
+ * never claims a stall.
+ */
+export function computeGroupTaskStall(
+  task: GroupTask,
+  nowMs: number = Date.now(),
+): { stall: boolean; stallAfterMinutes: number } {
+  if (TERMINAL_STATUSES.has(task.status)) {
+    return { stall: false, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
+  }
+  const drivenMs = task.lastDrivenAt != null ? task.lastDrivenAt * 1000 : null;
+  const lastActivityMs = drivenMs ?? parseSqliteUtc(task.updatedAt);
+  const stall = lastActivityMs != null
+    && nowMs - lastActivityMs > GROUP_TASK_STALL_AFTER_MINUTES * 60_000;
+  return { stall, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
 }
 
 export interface PostGroupTaskMessageOptions {
@@ -363,16 +405,47 @@ export async function listGroupTaskSummaries(
   });
 }
 
-export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
+export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Round-4 (show summary): epoch seconds of the member's last chain speech. */
+  lastSpeakAt: number | null;
+}
+
+export interface GetGroupTaskOptions {
+  /**
+   * Round-4: 'summary' (default) returns status, members (with last speak
+   * time), deliverables and the last 5 messages — readable without a huge
+   * blob; 'full' returns everything (50 messages).
+   */
+  view?: 'summary' | 'full';
+}
+
+export async function getGroupTask(
+  id: number,
+  opts?: GetGroupTaskOptions,
+): Promise<GroupTaskDetail> {
   const store = getGroupTaskStore();
   const task = requireTask(id);
+  const stall = computeGroupTaskStall(task);
+  // The IPC detail view keeps the full page (50 messages); the RPC show
+  // endpoint explicitly requests view='summary' by default.
+  const view = opts?.view ?? 'full';
+  const members = store.listMembers(id);
+  const speakMap = view === 'summary' && task.groupId
+    ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
+    : new Map<string, number>();
+  const membersWithSpeakAt: GroupTaskMemberSummary[] = members.map((member) => {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    return { ...member, lastSpeakAt: gmid ? (speakMap.get(gmid) ?? null) : null };
+  });
   return {
     ...task,
-    members: store.listMembers(id),
+    members: membersWithSpeakAt,
     deliverables: store.listDeliverables(id),
     messages: task.groupId
-      ? store.listGroupChatMessages(task.groupId, { limit: 50 })
+      ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
+    stall: stall.stall,
+    stallAfterMinutes: stall.stallAfterMinutes,
   };
 }
 

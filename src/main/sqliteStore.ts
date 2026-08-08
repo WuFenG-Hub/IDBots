@@ -772,6 +772,7 @@ export class SqliteStore {
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
+    this.migrateGroupTasksLastDrivenAt();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -801,6 +802,7 @@ export class SqliteStore {
         ON group_chat_messages(group_id, id);
     `);
     this.migrateGroupChatMessagesMsgIndex();
+    this.migrateGroupChatMessagesSenderSuspect();
 
     // MetaID pins: full-field persistence from manapi.metaid.io
     this.db.run(`
@@ -1791,6 +1793,25 @@ export class SqliteStore {
   }
 
   /**
+   * Migration (round-4 attribution): add sender_suspect to group_chat_messages.
+   * The chain-signature GlobalMetaID is the ONLY identity source for group-task
+   * attribution; a message whose resolved GlobalMetaID is neither a task member
+   * nor the owner is flagged (default 0 = trusted) so the daemon and the UI can
+   * surface [SUSPECT] instead of misattributing by sender_name.
+   */
+  private migrateGroupChatMessagesSenderSuspect(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_chat_messages)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('sender_suspect')) return;
+      this.db.run('ALTER TABLE group_chat_messages ADD COLUMN sender_suspect INTEGER NOT NULL DEFAULT 0');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupChatMessagesSenderSuspect:', e);
+    }
+  }
+
+  /**
    * Migration: add protocol_paths to agent_game_grants (forward-compatible
    * column for auto-write authorization). No-op once present.
    */
@@ -1860,7 +1881,24 @@ export class SqliteStore {
     }
   }
 
-  private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
+  /**
+   * Migration (round-4): add last_driven_at (epoch seconds) to group_tasks —
+   * heartbeat of the daemon's last drive, used for the stall signal. No-op
+   * once present; existing tasks get null (stall falls back to updated_at).
+   */
+  private migrateGroupTasksLastDrivenAt(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('last_driven_at')) return;
+      this.db.run('ALTER TABLE group_tasks ADD COLUMN last_driven_at INTEGER');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksLastDrivenAt:', e);
+    }
+  }
+
+    private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
     try {
       const walletCols = this.db.exec("PRAGMA table_info(metabot_wallets);");
       const walletColumnNames = (walletCols[0]?.values.map((row) => row[1]) || []) as string[];
