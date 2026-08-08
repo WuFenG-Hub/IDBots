@@ -5,8 +5,16 @@ export const DEFAULT_COWORK_MAX_OUTPUT_TOKENS = 8_192;
 // so it must carry the same window as v4-pro or the context ring wrongly falls back
 // to DEFAULT_COWORK_CONTEXT_WINDOW (128K) for every automation-driven conversation.
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
+// The DeepSeek API allows up to 384K output tokens for the whole V4 family
+// (https://api-docs.deepseek.com/zh-cn/quick_start/pricing). 32K is the app's
+// declared ceiling — aligned with the MetaApp bridge's maxOutputTokens
+// validation limit (botBrowserBridgeService) — and only caps generation; it
+// costs nothing for short replies since billing is by actual tokens used.
+// Thinking-mode reasoning shares this budget, so small ceilings truncate
+// thinking-enabled replies (the 2026-08-08 dream-diary failure mode).
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
 
 export type CoworkModelLimitSource = 'provider-model' | 'available-model' | 'known-model' | 'fallback';
 
@@ -43,6 +51,7 @@ const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contex
   },
   'deepseek-v4-flash': {
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
   },
   // 与 src/renderer/config.ts 预设模型保持一致的大上下文模型（2026-07 向 LobsterAI 对齐）
   'gpt-5.6-sol': { contextWindow: 1_050_000 },

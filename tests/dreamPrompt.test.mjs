@@ -56,10 +56,10 @@ test('computeDueDreamDates: yesterday is due inside the window after the stagger
   assert.equal(notYet.includes('2026-08-01'), false, 'yesterday should wait for the staggered minute');
 });
 
-test('computeDueDreamDates: yesterday waits outside the window, older dates catch up any time', () => {
+test('computeDueDreamDates: yesterday catches up outside the window, older dates catch up any time', () => {
   const midday = new Date(2026, 7, 8, 12, 0);
   const { dueDates } = computeDueDreamDates({ now: midday, metabotId: 1, runStates: new Map() });
-  assert.equal(dueDates.includes('2026-08-07'), false, 'yesterday must wait for the next nightly window');
+  assert.ok(dueDates.includes('2026-08-07'), 'a missed nightly window must self-heal during the day');
   assert.ok(dueDates.includes('2026-08-06'), 'two days ago should catch up immediately');
   assert.ok(dueDates.includes('2026-08-02'), 'six days ago should catch up');
   assert.equal(dueDates.includes('2026-07-31'), false, 'beyond the 7-day lookback');

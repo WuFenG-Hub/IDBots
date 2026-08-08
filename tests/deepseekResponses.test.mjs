@@ -147,18 +147,33 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   assert.equal(result.input[0].role, 'user');
 });
 
-test('convertChatCompletionsRequestToResponsesRequest omits reasoning when thinking is disabled', async () => {
+test('convertChatCompletionsRequestToResponsesRequest disables thinking via effort none', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
 
-  const result = convertChatCompletionsRequestToResponsesRequest(
+  // DeepSeek Responses defaults to thinking ON when `reasoning` is omitted, so
+  // disabling must be explicit — omitting the field silently re-enables it.
+  const disabled = convertChatCompletionsRequestToResponsesRequest(
     { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], thinking: { type: 'disabled' } },
     'deepseek',
   );
-
-  assert.equal(result.reasoning, undefined);
+  assert.deepEqual(disabled.reasoning, { effort: 'none' });
   // web_search is still injected.
-  assert.equal(result.tools[0].type, 'web_search');
+  assert.equal(disabled.tools[0].type, 'web_search');
+
+  // An explicit 'none'/'off' effort request disables thinking the same way.
+  const effortNone = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }], reasoning_effort: 'none' },
+    'deepseek',
+  );
+  assert.deepEqual(effortNone.reasoning, { effort: 'none' });
+
+  // Thinking enabled with no effort preference keeps the 'high' default.
+  const enabledDefault = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+    'deepseek',
+  );
+  assert.deepEqual(enabledDefault.reasoning, { effort: 'high' });
 });
 
 test('convertChatCompletionsRequestToResponsesRequest does NOT inject web_search for non-DeepSeek', async () => {

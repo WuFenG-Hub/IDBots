@@ -74,9 +74,22 @@ test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by mode
   assert.deepEqual(limits, {
     modelId: 'deepseek-v4-pro',
     contextWindow: 1_000_000,
-    maxOutputTokens: 16_000,
+    maxOutputTokens: 32_768,
     source: 'known-model',
   });
+});
+
+test('deepseek-v4-flash declares a 32K output ceiling instead of the 8192 fallback', async () => {
+  const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'deepseek-v4-flash', availableModels: [] },
+    providers: {},
+  });
+
+  assert.equal(limits.source, 'known-model');
+  assert.equal(limits.contextWindow, 1_000_000);
+  assert.equal(limits.maxOutputTokens, 32_768);
 });
 
 // ---------------------------------------------------------------------------

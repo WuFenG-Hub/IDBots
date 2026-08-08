@@ -863,17 +863,21 @@ function convertChatCompletionsRequestToResponsesRequest(
   // DeepSeek Responses API controls reasoning depth via `reasoning.effort`,
   // distinct from chat/completions' top-level reasoning_effort / thinking. Map
   // the chat-style controls into the Responses reasoning object so effort set
-  // on the model preset (or by the caller) still applies.
+  // on the model preset (or by the caller) still applies. The API defaults to
+  // thinking ON (effort 'high') when `reasoning` is omitted, so disabling
+  // thinking requires an explicit { effort: 'none' } — omitting the field
+  // silently turns thinking back on.
   if (isDeepSeek) {
     const thinking = toOptionalObject(chatRequest.thinking);
     const thinkingEnabled = toString(thinking?.type).toLowerCase() !== 'disabled';
     const rawEffort = toString(chatRequest.reasoning_effort)
       || toString(toOptionalObject(chatRequest.output_config)?.effort);
-    // Normalize effort: empty/off defaults to 'high' (matches Reasonix default).
-    const effort = normalizeDeepSeekResponsesEffort(rawEffort) ?? (thinkingEnabled ? 'high' : undefined);
-    if (effort) {
-      request.reasoning = { effort };
-    }
+    // 'off'/'none' effort requests disable thinking just like thinking.disabled;
+    // empty effort keeps the 'high' default (matches Reasonix default).
+    const effort = thinkingEnabled
+      ? (normalizeDeepSeekResponsesEffort(rawEffort) ?? (rawEffort ? 'none' : 'high'))
+      : 'none';
+    request.reasoning = { effort };
   }
 
   const maxOutputTokens = toNumber(chatRequest.max_output_tokens)

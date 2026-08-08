@@ -818,6 +818,8 @@ contextBridge.exposeInMainWorld('electron', {
     getStatus: () => ipcRenderer.invoke('dream:getStatus'),
     listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) =>
       ipcRenderer.invoke('dream:listDailySummaries', options),
+    listRuns: (options: { metabotId: number; limit?: number }) =>
+      ipcRenderer.invoke('dream:listRuns', options),
     runNow: (options: { metabotId: number; date?: string }) =>
       ipcRenderer.invoke('dream:runNow', options),
     onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => {
