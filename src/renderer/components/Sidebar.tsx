@@ -372,18 +372,28 @@ const Sidebar: React.FC<SidebarProps> = ({
             <div
               role="group"
               aria-label={i18nService.t('coworkHistory')}
-              className="grid w-full grid-cols-3 gap-1 mt-2"
+              className="grid w-full grid-cols-3 gap-1 rounded-lg border border-claude-border/70 bg-claude-bg/80 p-1 mt-2 dark:border-claude-darkBorder/70 dark:bg-claude-darkBg/80"
             >
-              {TASK_RECORD_TABS.map((tab) => {
+              {TASK_RECORD_TABS.map((tab, index) => {
                 const isActive = taskRecordTab === tab.id;
                 const stats = tabStats[tab.id];
+                // Per-tab item count is only shown on hover, as a tip under the
+                // tab; the label itself stays clean. Edge tabs align the tip to
+                // the outer edge so it never clips at the sidebar boundary.
+                const countTipKey = tab.id === 'group' ? 'coworkTabCountGroup' : 'coworkTabCountChats';
+                const countTip = i18nService.t(countTipKey).replace('{count}', String(stats.count));
+                const tooltipAlign = index === 0
+                  ? 'left-0'
+                  : index === TASK_RECORD_TABS.length - 1
+                    ? 'right-0'
+                    : 'left-1/2 -translate-x-1/2';
                 return (
                   <button
                     key={tab.id}
                     type="button"
                     aria-pressed={isActive}
                     onClick={() => handleSetTaskRecordTab(tab.id)}
-                    className={`non-draggable inline-flex h-7 min-w-0 items-center justify-center gap-1 rounded-md px-1 text-xs font-medium leading-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/40 ${
+                    className={`non-draggable group relative inline-flex h-7 min-w-0 items-center justify-center gap-1 rounded-md px-1 text-xs font-medium leading-none transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-claude-accent/40 ${
                       isActive
                         ? 'btn-idchat-primary-filled still'
                         : 'text-claude-textSecondary hover:bg-claude-surfaceHover/70 hover:text-claude-text dark:text-claude-darkTextSecondary dark:hover:bg-claude-darkSurfaceHover/70 dark:hover:text-claude-darkText'
@@ -394,12 +404,10 @@ const Sidebar: React.FC<SidebarProps> = ({
                     )}
                     <span className="truncate">{i18nService.t(tab.labelKey)}</span>
                     <span
-                      className={`shrink-0 text-[10px] tabular-nums leading-none ${
-                        isActive ? 'text-white/80' : 'dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70'
-                      }`}
+                      className={`pointer-events-none absolute top-full mt-1.5 z-50 ${tooltipAlign} whitespace-nowrap rounded-md border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface px-2 py-1 text-[11px] font-normal leading-none dark:text-claude-darkText text-claude-text shadow-lg opacity-0 transition-opacity duration-150 group-hover:opacity-100`}
                       aria-hidden
                     >
-                      {stats.count}
+                      {countTip}
                     </span>
                   </button>
                 );
