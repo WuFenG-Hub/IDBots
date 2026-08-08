@@ -752,17 +752,26 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
-  /** Full per-turn system prompt: base + fresh time line + experience block. */
+  /**
+   * Per-turn prompt split into a STABLE system prompt (base only — no time, no
+   * experience/cognition blocks) and a volatile tail for the user message.
+   * The system prompt leads DeepSeek's cacheable prefix and is also compared
+   * against the cowork session's stored prompt: any byte change resets the
+   * underlying SDK session (full cold start). Minute-precision time and
+   * nightly-rewritten dream summaries used to live in the system prompt, so
+   * every group turn reset the session and missed the entire cache. They now
+   * ride the user message instead (Reasonix: volatile state in the turn tail).
+   */
   const buildTurnSystemPrompt = async (
     bot: GroupTaskDaemonBotFull,
     task: GroupTask,
     promptMembers: DaemonPromptMember[],
     botRole: 'chair' | 'worker',
     ownerGlobalMetaId: string,
-  ): Promise<string> => {
+  ): Promise<{ systemPrompt: string; volatileContext: string }> => {
     const experienceBlock = buildExperienceBlockFor(bot);
     const cognitionBlock = await buildGroupCognitionBlockFor(bot, promptMembers);
-    return buildGroupTaskSystemPrompt({
+    const systemPrompt = buildGroupTaskSystemPrompt({
       metabot: bot,
       task: {
         title: task.title,
@@ -772,9 +781,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       members: promptMembers,
       botRole,
       ownerGlobalMetaId: ownerGlobalMetaId || null,
-      currentTimeText: formatTurnTimeText(),
-      experienceBlock: [experienceBlock, cognitionBlock].filter(Boolean).join('\n\n'),
     });
+    const volatileContext = [formatTurnTimeText(), experienceBlock, cognitionBlock]
+      .filter((section) => section?.trim())
+      .join('\n\n');
+    return { systemPrompt, volatileContext };
   };
 
   /** Plausible pinid/txid candidates in a [DELIVERABLE] line (deduped, capped). */
@@ -891,8 +902,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const store = deps.getGroupTaskStore();
       const coworkStore = deps.getCoworkStore();
-      const systemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
-      const directive = buildOwnerReportDirective(store, task);
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const systemPrompt = systemPromptParts.systemPrompt;
+      // Volatile context (time + experience/cognition) rides the user turn.
+      const directive = [systemPromptParts.volatileContext, buildOwnerReportDirective(store, task)]
+        .filter(Boolean)
+        .join('\n\n');
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
@@ -1137,8 +1152,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const db = sqlite.getDatabase();
       const coworkStore = deps.getCoworkStore();
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
-      const systemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
-      const directive = buildPlanningDirective(db, task, promptMembers);
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const systemPrompt = systemPromptParts.systemPrompt;
+      // Volatile context (time + experience/cognition) rides the user turn.
+      const directive = [systemPromptParts.volatileContext, buildPlanningDirective(db, task, promptMembers)]
+        .filter(Boolean)
+        .join('\n\n');
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       // Plain LLM path: the chair is planning here, not executing skills.
@@ -1182,8 +1201,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const db = deps.getStore().getDatabase();
     const coworkStore = deps.getCoworkStore();
 
-    const baseSystemPrompt = await buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
-    let userMessage = buildGroupLogUserMessage(db, task, message);
+    const { systemPrompt: baseSystemPrompt, volatileContext } = await buildTurnSystemPrompt(bot, task, promptMembers, member.role, ownerGlobalMetaId);
+    // Volatile context (time + experience/cognition) rides the user turn so
+    // the system prompt stays byte-stable across group turns.
+    let userMessage = [volatileContext, buildGroupLogUserMessage(db, task, message)]
+      .filter(Boolean)
+      .join('\n\n');
     if (verificationNotes.length > 0) {
       // Host deliverable-verification facts accompany the chair's context.
       userMessage = `${userMessage}\n${verificationNotes.join('\n')}`;

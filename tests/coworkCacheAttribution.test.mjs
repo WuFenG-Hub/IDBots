@@ -36,10 +36,17 @@ test('every claudeSessionId reset point records a pendingCacheBreakReason', () =
 test('accumulateResultUsage consumes the pending reason for non-first-turn misses', () => {
   const source = read('src/main/libs/coworkRunner.ts');
 
-  assert.match(source, /pendingCacheBreakReason \?\? 'unknown'/);
+  assert.match(source, /pendingCacheBreakReason \?\? untrackedMissReason/);
   assert.match(source, /activeForAttribution\.pendingCacheBreakReason = null;/);
   // First turn stays a cold start regardless of any pending reason.
   assert.match(source, /nextTurn === 1\s*\?\s*'cold_start'/);
+});
+
+test('ActiveSession declares the attribution fields', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  assert.match(source, /pendingCacheBreakReason\?: string \| null;/);
+  assert.match(source, /lastSystemPromptHash\?: string \| null;/);
 });
 
 test('system prompt drift is hashed and labeled as a regression alarm', () => {
@@ -53,9 +60,20 @@ test('system prompt drift is hashed and labeled as a regression alarm', () => {
   assert.ok(callCount >= 2, `expected trackSystemPromptHash calls in start and continue, got ${callCount}`);
 });
 
-test('ActiveSession declares the attribution fields', () => {
+test('startSession system-prompt reset also records the attribution (no silent unknown)', () => {
   const source = read('src/main/libs/coworkRunner.ts');
 
-  assert.match(source, /pendingCacheBreakReason\?: string \| null;/);
-  assert.match(source, /lastSystemPromptHash\?: string \| null;/);
+  assert.match(source, /let systemPromptChanged = false;/);
+  assert.match(source, /if \(systemPromptChanged\) \{\s*\n\s*\/\/ Same attribution as continueSession's reset/);
+  assert.match(source, /activeSession\.pendingCacheBreakReason = 'system_prompt_changed';/);
+});
+
+test('untracked misses are labeled append_only vs unknown by the turn hit ratio', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  // Normal turns always miss on the newly appended tail; only a near-total
+  // miss means an untracked prefix break. 'append_only' must be the default
+  // label so the chip is not flooded with meaningless 'unknown' entries.
+  assert.match(source, /turnHitRatio < 0\.3 \? 'unknown' : 'append_only'/);
+  assert.match(source, /pendingCacheBreakReason \?\? untrackedMissReason/);
 });
