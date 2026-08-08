@@ -910,6 +910,19 @@ const DEFAULT_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   includeMemoryStrategy: true,
 };
 
+/**
+ * R4 防护：定时任务唤醒轮的用户消息优先级约束（方案 C）。
+ * 8/8 事故中 SDK cron 触发 prompt 与用户消息竞争同一会话队列，cron 连续 4 轮
+ * 抢先导致用户消息从未被消费（SDK 无优先级配置——如实记录为 SDK 限制）。
+ * 宿主侧缓解：在系统提示中约束模型——cron 唤醒轮若存在未响应的用户消息，
+ * 先响应用户消息再处理定时任务内容。
+ */
+const SDK_CRON_USER_PRIORITY_GUARD = [
+  '## 定时任务与用户消息优先级',
+  '当本轮输入包含「定时任务触发/调度内容」，且会话中同时存在尚未响应的用户消息时，',
+  '必须先完整响应用户消息，再处理定时任务内容；不要忽略或推迟用户的提问。',
+].join('\n');
+
 const SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   id: 'service_order_a2a',
   workspaceSafetyMode: 'compact',
@@ -3434,6 +3447,11 @@ export class CoworkRunner extends EventEmitter {
       safetyPrompt,
       memoryStrategyPrompt,
       trimmedBasePrompt,
+      // R4 防护（追加在末尾，避免破坏 DeepSeek 前缀缓存的首段）：
+      // SDK 定时任务触发（cron prompt）与用户消息在同一会话队列竞争（8/8 事故根因，
+      // SDK 无优先级配置），此约束让模型在 cron 唤醒轮优先处理未响应的用户消息。
+      // 常量文本，字节级稳定，不随会话变化。
+      SDK_CRON_USER_PRIORITY_GUARD,
     ];
     return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
   }

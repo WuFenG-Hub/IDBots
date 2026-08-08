@@ -8967,7 +8967,7 @@ if (!gotTheLock) {
       const steer = getCoworkRunner().trySubmitSteer(
         mirror.sessionId,
         `host-delete-cron-${normalizedId}`,
-        `[HOST-ADMIN] 用户在定时任务面板发起了删除操作，请立即执行 CronDelete 删除定时任务 ${normalizedId}（名称：${mirror.name}）。只执行删除，不要做其他操作。`
+        buildCronDeleteInstruction({ id: normalizedId, name: mirror.name })
       );
       if (steer.accepted) {
         void steer.delivered.catch(() => undefined);
@@ -9028,9 +9028,8 @@ if (!gotTheLock) {
     const coworkConfig = getCoworkStore().getConfig();
     const cwd = coworkConfig.workingDirectory || path.join(os.homedir(), 'idbots', 'project');
     const lines = plan.migratable.map((item, index) => {
-      const spec = item.spec!;
-      const promptJson = JSON.stringify(spec.prompt);
-      return `${index + 1}. CronCreate(durable=true, recurring=${spec.recurring}, cron=${JSON.stringify(spec.cronExpression)}, prompt=${promptJson})`;
+      const instruction = buildCronCreateInstruction(item.spec!);
+      return `${index + 1}. ${instruction.replace(/\n/g, '\n   ')}`;
     });
 
     const session = getCoworkStore().createSession(

@@ -16,8 +16,9 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 
-// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot, browser = Bot Browser co-work panel
-export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
+// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot,
+// browser = Bot Browser co-work panel, group_task = group task chat channel
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
 
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 

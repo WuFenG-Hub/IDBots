@@ -9,6 +9,7 @@ import TaskForm from './TaskForm';
 import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
+import SdkCronMirrorList from './SdkCronMirrorList';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -21,7 +22,7 @@ interface ScheduledTasksViewProps {
   updateBadge?: React.ReactNode;
 }
 
-type TabType = 'tasks' | 'history';
+type TabType = 'tasks' | 'history' | 'sdk';
 
 const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   isSidebarCollapsed,
@@ -150,6 +151,20 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
             </button>
+            <button
+              type="button"
+              onClick={() => handleTabChange('sdk')}
+              className={`px-4 py-2.5 text-sm font-medium transition-colors relative ${
+                activeTab === 'sdk'
+                  ? 'dark:text-claude-darkText text-claude-text'
+                  : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
+              }`}
+            >
+              SDK 任务
+              {activeTab === 'sdk' && (
+                <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
+              )}
+            </button>
           </div>
           {activeTab === 'tasks' && (
             <button
@@ -167,6 +182,8 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
       <div className="flex-1 overflow-y-auto">
         {showTabs && activeTab === 'history' ? (
           <AllRunsHistory />
+        ) : showTabs && activeTab === 'sdk' ? (
+          <SdkCronMirrorList />
         ) : (
           <>
             {viewMode === 'list' && <TaskList onRequestDelete={handleRequestDelete} />}
