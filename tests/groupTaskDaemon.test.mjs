@@ -95,15 +95,15 @@ const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid =
   );
 };
 
-const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null, replyPin = '' }) => {
+const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null, replyPin = '', chainTimestamp = null }) => {
   db.run(
     `INSERT INTO group_chat_messages (
       pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
       sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
       reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
-    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, ?, ?, NULL, 'mvc', '{}', 0, NULL)`,
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, ?, ?, ?, 'mvc', '{}', 0, NULL)`,
     [pinId, pinId.replace(/-i0$/, ''), groupId, senderMetaId, senderGlobalMetaId, senderName, content,
-      replyPin, mention ? JSON.stringify(mention) : '[]'],
+      replyPin, mention ? JSON.stringify(mention) : '[]', chainTimestamp],
   );
 };
 
@@ -202,6 +202,12 @@ const createHarness = async (overrides = {}) => {
     chairCooldownMs: overrides.chairCooldownMs ?? 10_000,
     replyBudget: overrides.replyBudget ?? 40,
     maxRepliesPerTaskPerTick: overrides.maxRepliesPerTaskPerTick ?? 3,
+    ...(overrides.chairTwinSuppressWindowMs != null
+      ? { chairTwinSuppressWindowMs: overrides.chairTwinSuppressWindowMs }
+      : {}),
+    ...(overrides.disableChairPlanningTurn != null
+      ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
+      : {}),
   });
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
@@ -1496,6 +1502,210 @@ test('P2-7: chair auto response is suppressed when the Twin already replied to t
     // but the deliverable is still recorded from the worker message
     const taskId = h.groupTaskStore.listTasks()[0].id;
     assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P1-4 line-scoped [DELIVERABLE] parsing (new obs. 3)
+// ---------------------------------------------------------------------------
+
+test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and truncated URIs never pollute', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const summary = (row) => ({ kind: row.kind, uri: row.uri });
+
+    // Case ① (doc msg83): the tag line carries no URI; the BODY mentions a
+    // `metaapp/` directory path. Must be a text deliverable (uri null),
+    // never kind=metaapp.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-msg83-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '门户 MetaApp 页面已完成，本地目录 metaapp/agent-daily-portal 验收通过。\n[DELIVERABLE] ② 门户 MetaApp 页面（已开发+本地验收通过）',
+    });
+
+    // Case ② (doc msg85): a truncated `metafile://…zip（50KB，5 文件）` in the
+    // body must NOT win; the real metaapp:// URI on the tag line is collected
+    // and the kind follows that line's scheme.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-msg85-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '完成：源码已打包，content=metafile://…zip（50KB，5 文件）请查收。\n[DELIVERABLE] ④ metaapp: metaapp://92075a3c',
+    });
+
+    // Full-width paren annotation AFTER the URI on the tag line: the URI is
+    // trimmed at the paren; the deliverable is recorded with the clean URI.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-paren-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] ⑤ 海报 metafile://abc123def456（1.2MB，5 文件）',
+    });
+
+    // Tag line whose ONLY URI is truncated garbage: rejected as a placeholder
+    // (planning-style example, not a deliverable).
+    insertGroupMessage(h.db, {
+      pinId: 'r2-trunc-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] 示例：metafile://…zip（50KB，5 文件）',
+    });
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    const byPin = (pinId) => rows.find((r) => r.msgPinId === pinId);
+    assert.equal(rows.length, 3, 'only the three real deliverables are recorded');
+
+    assert.deepEqual(
+      summary(byPin('r2-msg83-i0')),
+      { kind: 'text', uri: null },
+      'body `metaapp/` dir path must not misjudge the kind (was kind=metaapp, uri=null)',
+    );
+    assert.deepEqual(
+      summary(byPin('r2-msg85-i0')),
+      { kind: 'metaapp', uri: 'metaapp://92075a3c' },
+      'body ellipsis URI ignored; the tag-line metaapp:// URI is collected (was lost entirely)',
+    );
+    assert.deepEqual(
+      summary(byPin('r2-paren-i0')),
+      { kind: 'metafile', uri: 'metafile://abc123def456' },
+      'full-width paren annotation trimmed from the URI',
+    );
+    assert.equal(byPin('r2-trunc-i0'), undefined, 'truncated-only tag line is rejected as a placeholder');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P1-5 planning-directive distribution + opt-out (obs. 1/5)
+// ---------------------------------------------------------------------------
+
+test('P1-5 r2: planning directive demands distribution across at least 2 members when 2+ workers exist', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2, 3], { activate: false }); // planning; two workers on the roster
+    await h.loop.runTick();
+    const planningCall = h.chatCalls[0];
+    assert.match(
+      planningCall.userMessage,
+      /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members by their strengths/,
+      'with 2+ workers the directive forbids concentrating every subtask on one member',
+    );
+    assert.match(planningCall.userMessage, /never concentrate every subtask on a single member/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-5 r2: planning directive with a single worker assigns all work to that member', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.match(
+      h.chatCalls[0].userMessage,
+      /single worker on the roster — assign all subtasks to that one member/,
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-5 r2: disableChairPlanningTurn opts out of the auto planning turn (Twin leads the kickoff)', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no auto plan posted');
+    assert.equal(h.chatCalls.length, 0, 'no LLM planning call');
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'task marked as host-planned');
+
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'guard stays quiet on later ticks');
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P2-7 windowed Twin-activity suppression (new obs. 4)
+// ---------------------------------------------------------------------------
+
+test('P2-7 r2: Twin speech in the window suppresses chair auto replies (incl. replies without reply_pin)', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // The Twin speaks proactively (no reply_pin) at chain second 1_000_000_000.
+    insertGroupMessage(h.db, {
+      pinId: 'twin-active-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，这个任务我来主导，按计划推进。', chainTimestamp: 1_000_000_000,
+    });
+    // A worker deliverable arrives 5s later — the daemon auto verify must be
+    // suppressed while the Twin is actively speaking.
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000', chainTimestamp: 1_000_000_005,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no daemon chair auto reply while the Twin is speaking');
+    let taskId = h.groupTaskStore.listTasks()[0].id;
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 1, 'deliverable row still recorded');
+
+    // The Twin replies to the NEXT deliverable WITHOUT a reply_pin — the exact
+    // pin match cannot see this; the window check must.
+    h.state.nowMs += 10_000;
+    insertGroupMessage(h.db, {
+      pinId: 'twin-reply-nopin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '已核实，收下。', chainTimestamp: 1_000_000_015,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://article1234', chainTimestamp: 1_000_000_020,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'Twin reply without reply_pin also suppresses the auto verify');
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 2, 'deliverable rows still recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-7 r2: daemon auto replies resume when the Twin is quiet, and its own replies do not self-suppress', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // Twin spoke LONG ago (outside the 60s window) — the daemon auto verify runs.
+    insertGroupMessage(h.db, {
+      pinId: 'twin-old-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '旧消息：不在窗口内。', chainTimestamp: 999_000_000,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://realpin0000', chainTimestamp: 1_000_000_000,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'Twin quiet: the chair auto-verifies the deliverable');
+    assert.equal(h.sends[0].metabotId, 1);
+
+    // The daemon's own reply round-trips on-chain (pin send-pin-1). Another
+    // deliverable arrives inside the window — the daemon must NOT treat its
+    // own reply as Twin activity and must verify again.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'send-pin-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: h.sends[0].content, chainTimestamp: 1_000_000_030,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://article1234', chainTimestamp: 1_000_000_035,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, "the daemon's own reply does not suppress the next auto verify");
+    assert.equal(h.sends[1].metabotId, 1);
   } finally {
     h.cleanup();
   }
