@@ -14,7 +14,6 @@ import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import SubagentPanel from './SubagentPanel';
 import UsageStatsChip from './UsageStatsChip';
-import MemoryScopeChip from './MemoryScopeChip';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import MarkdownContent from '../MarkdownContent';
@@ -3628,7 +3627,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 />
               )}
               <SubagentPanel sessionId={currentSession.id} />
-              <MemoryScopeChip sessionId={currentSession.id} />
               <EffortSelector
                 sessionId={currentSession.id}
                 currentEffort={effortOverride}
