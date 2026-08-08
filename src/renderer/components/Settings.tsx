@@ -21,12 +21,15 @@ import type {
   CoworkMemoryStats,
   CoworkMemoryPolicy,
   CoworkMemoryScopesOverview,
+  CoworkMetaIDContactSummary,
+  CoworkMetaIDContactDetail,
   CoworkSandboxProgress,
   CoworkSandboxStatus,
   CoworkSessionSummary,
 } from '../types/cowork';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
+import MetaIDContactPanel from './settings/MetaIDContactPanel';
 import SkillMcpManager from './skills/SkillMcpManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
@@ -76,6 +79,7 @@ type MemoryMetabotOption = {
   name: string;
   avatar: string | null;
   metabot_type: string;
+  globalmetaid: string | null;
 };
 type MetabotMemoryPolicyDraft = Pick<
   CoworkMemoryPolicy,
@@ -534,6 +538,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [showMemoryModal, setShowMemoryModal] = useState<boolean>(false);
   const [coworkMemoryScopes, setCoworkMemoryScopes] = useState<CoworkMemoryScopesOverview | null>(null);
   const [coworkMemorySelectedScope, setCoworkMemorySelectedScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string }>({ kind: 'owner', key: 'owner:self' });
+  const [coworkMemoryContacts, setCoworkMemoryContacts] = useState<CoworkMetaIDContactSummary[]>([]);
+  const [coworkMemoryContactDetail, setCoworkMemoryContactDetail] = useState<CoworkMetaIDContactDetail | null>(null);
+  const [coworkMemoryContactDetailLoading, setCoworkMemoryContactDetailLoading] = useState<boolean>(false);
   const [coworkMemoryDraftScope, setCoworkMemoryDraftScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string } | null>(null);
   const [coworkMemoryDraftUsageClass, setCoworkMemoryDraftUsageClass] = useState<CoworkMemoryEditableUsageClass>('profile_fact');
   const [coworkMemoryDraftVisibility, setCoworkMemoryDraftVisibility] = useState<'local_only' | 'external_safe'>('local_only');
@@ -1097,16 +1104,66 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   }, []);
 
+  const loadCoworkMemoryContacts = useCallback(async (metabotId: number | null) => {
+    if (metabotId == null) {
+      setCoworkMemoryContacts([]);
+      return;
+    }
+    try {
+      const observer = coworkMemoryMetabots.find((metabot) => metabot.id === metabotId);
+      const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
+      if (!observerGlobalMetaId) {
+        setCoworkMemoryContacts([]);
+        return;
+      }
+      const contacts = await coworkService.listMetaIDContacts({ observerGlobalMetaId });
+      setCoworkMemoryContacts(contacts);
+    } catch (loadError) {
+      console.error('Failed to load MetaID contacts:', loadError);
+      setCoworkMemoryContacts([]);
+    }
+  }, [coworkMemoryMetabots]);
+
+  const loadCoworkMemoryContactDetail = useCallback(async (observerGlobalMetaId: string | null, subjectGlobalMetaId: string | null) => {
+    if (!observerGlobalMetaId || !subjectGlobalMetaId) {
+      setCoworkMemoryContactDetail(null);
+      return;
+    }
+    setCoworkMemoryContactDetailLoading(true);
+    try {
+      const detail = await coworkService.getMetaIDContactDetail({
+        observerGlobalMetaId,
+        subjectGlobalMetaId,
+      });
+      setCoworkMemoryContactDetail(detail);
+    } catch (loadError) {
+      console.error('Failed to load MetaID contact detail:', loadError);
+      setCoworkMemoryContactDetail(null);
+    } finally {
+      setCoworkMemoryContactDetailLoading(false);
+    }
+  }, []);
+
   const loadCoworkMemoryMetabots = useCallback(async () => {
     try {
-      const result = await window.electron?.idbots?.getMetaBots();
+      // `metabot:list` carries `globalmetaid`, which the ID-anchored contact
+      // view needs to resolve the observer bot's on-chain identity.
+      const result = await window.electron?.metabot?.list();
       const list = result?.success && Array.isArray(result.list)
-        ? result.list.filter((item): item is MemoryMetabotOption => (
+        ? result.list
+          .filter((item) => (
             typeof item?.id === 'number'
             && Number.isFinite(item.id)
             && item.id > 0
             && typeof item?.name === 'string'
           ))
+          .map((item) => ({
+            id: item.id,
+            name: item.name,
+            avatar: item.avatar ?? null,
+            metabot_type: item.metabot_type === 'worker' ? 'worker' : 'twin',
+            globalmetaid: item.globalmetaid ?? null,
+          }))
         : [];
       setCoworkMemoryMetabots(list);
       setCoworkMemoryMetabotId((current) => {
@@ -1147,6 +1204,36 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     if (activeTab !== 'coworkMemory') return;
     void loadCoworkMemoryScopes(coworkMemoryMetabotId);
   }, [activeTab, loadCoworkMemoryScopes, coworkMemoryMetabotId]);
+
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    void loadCoworkMemoryContacts(coworkMemoryMetabotId);
+  }, [activeTab, loadCoworkMemoryContacts, coworkMemoryMetabotId]);
+
+  // Load the ID-anchored contact detail (impression + events) whenever a
+  // contact scope is selected.
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    if (coworkMemorySelectedScope.kind !== 'contact') {
+      setCoworkMemoryContactDetail(null);
+      return;
+    }
+    const observer = coworkMemoryMetabots.find((metabot) => metabot.id === coworkMemoryMetabotId);
+    const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
+    const subjectGlobalMetaId = coworkMemoryContacts.find((contact) =>
+      contact.globalMetaID === coworkMemorySelectedScope.key.split(':peer:').pop(),
+    )?.globalMetaID
+      ?? coworkMemorySelectedScope.key.split(':peer:').pop()
+      ?? null;
+    void loadCoworkMemoryContactDetail(observerGlobalMetaId, subjectGlobalMetaId);
+  }, [
+    activeTab,
+    coworkMemorySelectedScope,
+    coworkMemoryMetabotId,
+    coworkMemoryMetabots,
+    coworkMemoryContacts,
+    loadCoworkMemoryContactDetail,
+  ]);
 
   const loadArchivedChats = useCallback(async () => {
     setArchivedChatsLoading(true);
@@ -2593,18 +2680,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                         setCoworkMemorySelectedScope({ kind, key });
                       }
                     }}
-                    className="min-w-[220px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                    disabled={coworkMemoryMetabotId == null || coworkMemoryScopes == null}
+                    className="min-w-[240px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                    disabled={coworkMemoryMetabotId == null || (coworkMemoryScopes == null && coworkMemoryContacts.length === 0)}
                   >
                     <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
                       {`${i18nService.t('coworkMemoryScopeOwner')}${coworkMemoryScopes?.owner ? ` (${coworkMemoryScopes.owner.count})` : ''}`}
                     </option>
-                    {coworkMemoryScopes && coworkMemoryScopes.contacts.length > 0 ? (
-                      coworkMemoryScopes.contacts.map((scope) => {
-                        const peerName = scope.peerName?.trim() || scope.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+                    {coworkMemoryContacts.length > 0 ? (
+                      coworkMemoryContacts.map((contact) => {
+                        const contactName = contact.name?.trim() || i18nService.t('coworkMemoryPeerUnknown');
                         return (
-                          <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
-                            {`${i18nService.t('coworkMemoryScopeContact')}: ${peerName} (${scope.count})`}
+                          <option key={contact.globalMetaID} value={`contact:metaweb_private:peer:${contact.globalMetaID}`}>
+                            {`${i18nService.t('coworkMemoryScopeContact')}: ${contactName} (${contact.interactionCount})`}
                           </option>
                         );
                       })
@@ -2735,7 +2822,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 )}
               </div>
 
-              {coworkMemoryStats && (
+              {coworkMemoryStats && coworkMemorySelectedScope.kind !== 'contact' && (
                 <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                   {`${i18nService.t('coworkMemoryTotalLabel')}: ${coworkMemoryStats.created + coworkMemoryStats.stale} · ${i18nService.t('coworkMemoryActiveLabel')}: ${coworkMemoryStats.created} · ${i18nService.t('coworkMemoryInactiveLabel')}: ${coworkMemoryStats.stale}`}
                 </div>
@@ -2747,90 +2834,105 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               )}
 
-              <input
-                type="text"
-                value={coworkMemoryQuery}
-                onChange={(event) => setCoworkMemoryQuery(event.target.value)}
-                placeholder={i18nService.t('coworkMemorySearchPlaceholder')}
-                disabled={coworkMemoryMetabotId == null}
-                className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              />
-
-              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
-                {coworkMemoryListLoading ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {coworkMemorySelectedScope.kind === 'contact' ? (
+                coworkMemoryContactDetailLoading ? (
+                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('loading')}
                   </div>
-                ) : coworkMemoryEntries.length === 0 ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                ) : coworkMemoryContactDetail ? (
+                  <MetaIDContactPanel
+                    detail={coworkMemoryContactDetail}
+                    facts={coworkMemoryEntries}
+                    factsLoading={coworkMemoryListLoading}
+                    onEditFact={handleEditCoworkMemoryEntry}
+                    onDeleteFact={(entry) => { void handleDeleteCoworkMemoryEntry(entry); }}
+                  />
+                ) : (
+                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('coworkMemoryEmpty')}
                   </div>
-                ) : (
-                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                    {coworkMemoryEntries.map((entry) => (
-                      <div key={entry.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 space-y-1 min-w-0">
-                            <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
-                              {entry.text}
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                              <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                {getMemoryStatusLabel(entry.status)}
-                              </span>
-                              {entry.scopeKind && entry.scopeKey && (
-                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                  {getMemoryScopeLabel({ kind: entry.scopeKind, key: entry.scopeKey }, coworkMemoryScopes)}
-                                </span>
-                              )}
-                              {getMemoryUsageClassLabel(entry.usageClass) && (
-                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
-                                  {getMemoryUsageClassLabel(entry.usageClass)}
-                                </span>
-                              )}
-                              {entry.visibility === 'external_safe' ? (
-                                <span className="rounded-full border px-2 py-0.5 border-emerald-500/50 text-emerald-600 dark:text-emerald-400">
-                                  {getMemoryVisibilityLabel(entry.visibility)}
-                                </span>
-                              ) : (
-                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                  {getMemoryVisibilityLabel(entry.visibility)}
-                                </span>
-                              )}
-                              <span>
-                                {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            {/* self_identity entries are maintained exclusively by the dream
-                                service; the store rejects edits/deletes, so hide the actions. */}
-                            {entry.usageClass !== 'self_identity' && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => handleEditCoworkMemoryEntry(entry)}
-                                  className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                                >
-                                  {i18nService.t('edit')}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
-                                  className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
-                                  disabled={coworkMemoryListLoading}
-                                >
-                                  {i18nService.t('delete')}
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </div>
+                )
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={coworkMemoryQuery}
+                    onChange={(event) => setCoworkMemoryQuery(event.target.value)}
+                    placeholder={i18nService.t('coworkMemorySearchPlaceholder')}
+                    disabled={coworkMemoryMetabotId == null}
+                    className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                  />
+
+                  <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                    {coworkMemoryListLoading ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('loading')}
                       </div>
-                    ))}
+                    ) : coworkMemoryEntries.length === 0 ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryEmpty')}
+                      </div>
+                    ) : (
+                      <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                        {coworkMemoryEntries.map((entry) => (
+                          <div key={entry.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 space-y-1 min-w-0">
+                                <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                                  {entry.text}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                    {getMemoryStatusLabel(entry.status)}
+                                  </span>
+                                  {getMemoryUsageClassLabel(entry.usageClass) && (
+                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
+                                      {getMemoryUsageClassLabel(entry.usageClass)}
+                                    </span>
+                                  )}
+                                  {entry.visibility === 'external_safe' ? (
+                                    <span className="rounded-full border px-2 py-0.5 border-emerald-500/50 text-emerald-600 dark:text-emerald-400">
+                                      {getMemoryVisibilityLabel(entry.visibility)}
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                      {getMemoryVisibilityLabel(entry.visibility)}
+                                    </span>
+                                  )}
+                                  <span>
+                                    {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                {entry.usageClass !== 'self_identity' && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditCoworkMemoryEntry(entry)}
+                                      className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                                    >
+                                      {i18nService.t('edit')}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
+                                      className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
+                                      disabled={coworkMemoryListLoading}
+                                    >
+                                      {i18nService.t('delete')}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
             </div>
 
           </div>
