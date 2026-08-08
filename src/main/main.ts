@@ -46,6 +46,7 @@ import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { OpenTeamMembershipStore } from './openTeamMembershipStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
@@ -3076,12 +3077,14 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => {
-    // Union of group-task groups and active agent-game session groups so both
-    // receive history gap-fill from the same single backfill loop.
+    // Union of group-task groups, active OpenTeam membership groups, and active
+    // agent-game session groups so all receive history gap-fill from the same
+    // single backfill loop.
     const taskGroups = getGroupTaskStore().getActiveGroupIds();
+    const openTeamGroups = getOpenTeamMembershipStore().listActiveGroupIds();
     const host = getAgentGameHost();
     const gameGroups = host ? host.activeGroupIds() : [];
-    return Array.from(new Set([...taskGroups, ...gameGroups]));
+    return Array.from(new Set([...taskGroups, ...openTeamGroups, ...gameGroups]));
   });
 
   // One-time, versioned historical cognition migration. It is deliberately
@@ -4960,6 +4963,18 @@ const getGroupTaskStore = () => {
     groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return groupTaskStore;
+};
+
+let openTeamMembershipStore: OpenTeamMembershipStore | null = null;
+const getOpenTeamMembershipStore = () => {
+  if (!openTeamMembershipStore) {
+    const sqliteStore = getStore();
+    openTeamMembershipStore = new OpenTeamMembershipStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return openTeamMembershipStore;
 };
 
 let orchestrationStore: OrchestrationStore | null = null;

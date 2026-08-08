@@ -796,6 +796,40 @@ export class SqliteStore {
         created_at TEXT DEFAULT (datetime('now'))
       );
     `);
+    // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
+    this.migrateGroupTaskMembersOpenTeamColumns();
+
+    // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_memberships (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        metabot_id INTEGER NOT NULL,
+        globalmetaid TEXT,
+        inviter_globalmetaid TEXT,
+        task_title TEXT,
+        invite_pin_id TEXT,
+        joined_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','left')),
+        created_at TEXT DEFAULT (datetime('now')),
+        UNIQUE(group_id, metabot_id)
+      );
+    `);
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        group_id TEXT NOT NULL,
+        invitee_globalmetaid TEXT NOT NULL,
+        invitee_name TEXT,
+        invite_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','accepted','declined','expired')),
+        decline_reason TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        responded_at TEXT
+      );
+    `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
         ON group_chat_messages(group_id, id);
@@ -1836,6 +1870,33 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateAgentGameWriteLogEventIdUnique:', e);
+    }
+  }
+
+  /**
+   * Migration: OpenTeam remote members — display_name is the inviter-side name
+   * snapshot for members without a local metabots row (metabot_id IS NULL);
+   * removed_at marks kicked members (M3) without deleting history.
+   */
+  private migrateGroupTaskMembersOpenTeamColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_members)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('display_name')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN display_name TEXT');
+        columns = [...columns, 'display_name'];
+        changed = true;
+      }
+      if (!columns.includes('removed_at')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN removed_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
     }
   }
 
