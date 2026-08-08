@@ -155,9 +155,11 @@ export function computeDreamRetryDelayMs(attemptCount: number): number {
 /**
  * Which past dates still need dream attention for this bot.
  * - Candidates: the last `lookbackDays` calendar days, today excluded.
- * - Yesterday's first attempt only runs inside the nightly window, after the
- *   bot's staggered minute; older missed dates and failed retries are due any
- *   time once their backoff expires.
+ * - Yesterday's first attempt runs inside the nightly window after the bot's
+ *   staggered minute; when the window was missed (app off or asleep
+ *   overnight) it is caught up at any time of day instead of waiting for the
+ *   next night. Older missed dates and failed retries are due any time once
+ *   their backoff expires.
  * - Running dates are skipped; failed dates retry after bounded exponential
  *   backoff, so a transient provider failure does not exhaust the date after
  *   a few tightly grouped attempts.
@@ -199,10 +201,13 @@ export function computeDueDreamDates(input: {
       }
       // Partial-day run: fall through and dream the date properly.
     }
-    // A first attempt for yesterday is window-gated. Once that attempt has
-    // failed, retry as soon as backoff expires even during the day; otherwise
-    // reopening the app after a nightly provider failure cannot self-heal.
-    if (daysAgo === 1 && state?.status !== 'failed' && (!inWindow || minutesSinceMidnight < staggerMinute)) continue;
+    // A first attempt for yesterday waits for the bot's staggered minute
+    // inside the nightly window. Once the window has passed (or the app was
+    // off/asleep overnight), yesterday is caught up at any time of day —
+    // waiting for the next night would leave such machines without a diary
+    // for a full extra day. Failed attempts retry as soon as backoff expires,
+    // so reopening the app after a nightly provider failure also self-heals.
+    if (daysAgo === 1 && state?.status !== 'failed' && inWindow && minutesSinceMidnight < staggerMinute) continue;
     due.push(dateStr);
   }
   repair.sort((a, b) => b.localeCompare(a));
