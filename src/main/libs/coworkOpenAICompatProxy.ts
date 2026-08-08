@@ -84,6 +84,8 @@ type ResponsesStreamContext = {
   functionCallByItemId: Map<string, ResponsesFunctionCallState>;
   nextToolIndex: number;
   hasAnyDelta: boolean;
+  /** True once any reasoning delta was forwarded to the client this stream. */
+  hasReasoningDeltas: boolean;
 };
 
 const PROXY_BIND_HOST = '0.0.0.0';
@@ -100,6 +102,13 @@ const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // constant and accepted by the API. Mirrors Reasonix openai.go which sends a
 // pointer to the (possibly empty) ReasoningContent field.
 const DEEPSEEK_REASONING_PLACEHOLDER = '';
+
+// DeepSeek's Responses API is stricter than chat/completions: it REJECTS an
+// empty reasoning pass-back (`reasoning` input items with empty text) with the
+// same 400. When the real reasoning is unrecoverable in the Responses path we
+// inject this CONSTANT placeholder instead — byte-stable across turns (any set
+// of lost-reasoning turns serializes identically), unlike a variable text.
+const DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER = '[reasoning unavailable]';
 
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
@@ -455,16 +464,43 @@ function cacheToolCallExtraContentFromOpenAIToolCalls(toolCalls: unknown): void 
   }
 }
 
-function isDeepSeekProvider(provider?: string, baseURL?: string): boolean {
+/**
+ * Whether a model id is a DeepSeek thinking-capable model. Used to apply the
+ * DeepSeek reasoning round-trip machinery to gateway providers (e.g. the
+ * opencode "Console Go" upstream serving `deepseek-v4-flash`), whose provider
+ * name/base URL carry no "deepseek" marker.
+ */
+function isDeepSeekModel(model?: string): boolean {
+  const normalized = (model ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes('deepseek')
+    || normalized.includes('v4-flash')
+    || normalized.includes('v4-pro')
+    || normalized.includes('reasoner')
+    || normalized === 'r1'
+    || normalized.startsWith('r1-');
+}
+
+function isDeepSeekProvider(provider?: string, baseURL?: string, model?: string): boolean {
   const normalizedProvider = provider?.trim().toLowerCase();
   if (normalizedProvider === 'deepseek') {
+    return true;
+  }
+  if (isDeepSeekModel(model)) {
     return true;
   }
   return Boolean(baseURL?.toLowerCase().includes('deepseek'));
 }
 
-function isDeepSeekThinkingRequest(body: Record<string, unknown>, provider?: string, baseURL?: string): boolean {
-  if (!isDeepSeekProvider(provider, baseURL)) {
+function isDeepSeekThinkingRequest(
+  body: Record<string, unknown>,
+  provider?: string,
+  baseURL?: string,
+  model?: string
+): boolean {
+  if (!isDeepSeekProvider(provider, baseURL, model ?? toString(body.model))) {
     return false;
   }
 
@@ -477,8 +513,10 @@ function isDeepSeekThinkingRequest(body: Record<string, unknown>, provider?: str
     return true;
   }
 
-  const model = toString(body.model).toLowerCase();
-  return /\b(?:deepseek-)?(?:v4-pro|reasoner|r1)\b/.test(model);
+  const resolvedModel = toString(body.model).toLowerCase();
+  // Any DeepSeek thinking-capable model (flash defaults to thinking ON, like
+  // pro/reasoner/r1) needs reasoning pass-back; plain `deepseek-chat` does not.
+  return /\b(?:deepseek-)?(?:v4-flash|v4-pro|reasoner|r1)\b/.test(resolvedModel);
 }
 
 type DeepSeekReasoningHydrateResult = {
@@ -607,14 +645,14 @@ function cacheToolCallExtraContentFromOpenAIResponse(body: unknown): void {
 function attachDeepSeekReasoningToOpenAIResponseToolCalls(
   body: unknown,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): void {
-  if (!isDeepSeekProvider(provider, baseURL)) {
-    return;
-  }
-
   const responseObj = toOptionalObject(body);
   if (!responseObj) {
+    return;
+  }
+  if (!isDeepSeekProvider(provider, baseURL, model ?? toString(responseObj.model))) {
     return;
   }
 
@@ -929,7 +967,8 @@ function convertChatCompletionsRequestToResponsesRequest(
   const instructions: string[] = [];
   const unresolvedFunctionCalls = new Map<string, { name: string; hasOutput: boolean }>();
 
-  const isDeepSeek = provider?.toLowerCase() === 'deepseek';
+  const isDeepSeek = provider?.toLowerCase() === 'deepseek'
+    || isDeepSeekModel(toString(chatRequest.model));
 
   if (chatRequest.model !== undefined) {
     request.model = chatRequest.model;
@@ -1020,6 +1059,31 @@ function convertChatCompletionsRequestToResponsesRequest(
 
     if (role === 'assistant') {
       const text = extractTextFromChatContent(messageObj.content);
+      const toolCalls = toArray(messageObj.tool_calls);
+      const hasToolCalls = toolCalls.length > 0;
+
+      // DeepSeek's Responses API requires the assistant's chain-of-thought to
+      // be passed back as a `reasoning` input item whenever the turn made tool
+      // calls (thinking mode; empty reasoning text is rejected with a 400).
+      // `reasoning_content` was hydrated onto the message by
+      // hydrateDeepSeekReasoningForRequest (or replayed as thinking blocks);
+      // unrecoverable reasoning falls back to a constant placeholder so the
+      // request stays valid and the cached prefix stays byte-stable. For
+      // non-DeepSeek Responses providers (OpenAI etc.) plain-text reasoning
+      // items are not part of their contract, so we only emit them for
+      // DeepSeek models.
+      if (isDeepSeek) {
+        const reasoningContent = toString(messageObj.reasoning_content) || toString(messageObj.reasoning);
+        const effectiveReasoning = reasoningContent
+          || (hasToolCalls ? DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER : '');
+        if (effectiveReasoning) {
+          input.push({
+            type: 'reasoning',
+            content: [{ type: 'reasoning_text', text: effectiveReasoning }],
+          });
+        }
+      }
+
       if (text) {
         input.push({
           role: 'assistant',
@@ -1027,7 +1091,7 @@ function convertChatCompletionsRequestToResponsesRequest(
         });
       }
 
-      for (const toolCall of toArray(messageObj.tool_calls)) {
+      for (const toolCall of toolCalls) {
         const toolCallObj = toOptionalObject(toolCall);
         const functionObj = toOptionalObject(toolCallObj?.function);
         if (!toolCallObj || !functionObj) {
@@ -1437,6 +1501,7 @@ function createResponsesStreamContext(): ResponsesStreamContext {
     functionCallByItemId: new Map<string, ResponsesFunctionCallState>(),
     nextToolIndex: 0,
     hasAnyDelta: false,
+    hasReasoningDeltas: false,
   };
 }
 
@@ -2285,6 +2350,13 @@ function processResponsesStreamEvent(
   if (
     eventType === 'response.reasoning_summary_text.delta'
     || eventType === 'response.reasoning.delta'
+    // DeepSeek's Responses API streams chain-of-thought via
+    // `response.reasoning_text.delta` (not the OpenAI summary events). Without
+    // this handler the reasoning is silently dropped: the CLI never sees
+    // thinking blocks, the reasoning store stays empty, and the next request
+    // fails with "The `reasoning_text` in the thinking mode must be passed
+    // back to the API".
+    || eventType === 'response.reasoning_text.delta'
   ) {
     const thinkingDelta = toString(payloadObj.delta);
     if (thinkingDelta) {
@@ -2292,6 +2364,28 @@ function processResponsesStreamEvent(
         id: toString(payloadObj.response_id),
         model: toString(payloadObj.model),
         choices: [{ delta: { reasoning: thinkingDelta } }],
+      });
+      context.hasAnyDelta = true;
+      context.hasReasoningDeltas = true;
+    }
+    return;
+  }
+
+  if (
+    eventType === 'response.reasoning_text.done'
+    || eventType === 'response.reasoning_summary_text.done'
+  ) {
+    // Some providers emit the full reasoning only on the `*_done` event. Skip
+    // when deltas already streamed it to avoid duplicating the chain-of-thought.
+    if (context.hasReasoningDeltas) {
+      return;
+    }
+    const fullReasoning = toString(payloadObj.text) || toString(payloadObj.summary);
+    if (fullReasoning) {
+      processOpenAIChunk(res, state, {
+        id: toString(payloadObj.response_id),
+        model: toString(payloadObj.model),
+        choices: [{ delta: { reasoning: fullReasoning } }],
       });
       context.hasAnyDelta = true;
     }
@@ -2399,7 +2493,8 @@ async function handleResponsesStreamResponse(
   upstreamResponse: Response,
   res: http.ServerResponse,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2416,7 +2511,7 @@ async function handleResponsesStreamResponse(
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   const state = createStreamState({
-    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL),
+    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL, model),
   });
   const context = createResponsesStreamContext();
 
@@ -2493,7 +2588,8 @@ async function handleChatCompletionsStreamResponse(
   upstreamResponse: Response,
   res: http.ServerResponse,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2510,7 +2606,7 @@ async function handleChatCompletionsStreamResponse(
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   const state = createStreamState({
-    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL),
+    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL, model),
   });
 
   let buffer = '';
@@ -2961,14 +3057,16 @@ async function handleRequest(
         upstreamResponse,
         res,
         upstreamConfig.provider,
-        upstreamConfig.baseURL
+        upstreamConfig.baseURL,
+        toString(openAIRequest.model)
       );
     } else {
       await handleChatCompletionsStreamResponse(
         upstreamResponse,
         res,
         upstreamConfig.provider,
-        upstreamConfig.baseURL
+        upstreamConfig.baseURL,
+        toString(openAIRequest.model)
       );
     }
     return;
@@ -2985,6 +3083,12 @@ async function handleRequest(
 
   if (upstreamAPIType === 'responses') {
     const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(upstreamJSON);
+    attachDeepSeekReasoningToOpenAIResponseToolCalls(
+      syntheticOpenAIResponse,
+      upstreamConfig.provider,
+      upstreamConfig.baseURL,
+      toString(syntheticOpenAIResponse.model)
+    );
     cacheToolCallExtraContentFromOpenAIResponse(syntheticOpenAIResponse);
     cacheToolCallExtraContentFromResponsesResponse(upstreamJSON);
     const anthropicResponse = openAIToAnthropic(syntheticOpenAIResponse);
@@ -2995,7 +3099,8 @@ async function handleRequest(
   attachDeepSeekReasoningToOpenAIResponseToolCalls(
     upstreamJSON,
     upstreamConfig.provider,
-    upstreamConfig.baseURL
+    upstreamConfig.baseURL,
+    toString(openAIRequest.model)
   );
   cacheToolCallExtraContentFromOpenAIResponse(upstreamJSON);
 

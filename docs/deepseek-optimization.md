@@ -111,6 +111,44 @@ byte-stable (constant regardless of which turns lost reasoning) and is
 accepted by the API. This mirrors Reasonix's `openai.go`, which sends a
 pointer to the (possibly empty) `ReasoningContent` field.
 
+### Gateway providers and the Responses API round-trip (third pass)
+
+Two gaps remained after the placeholder fix, both reproducing the user-visible
+`400 ... reasoning_content in the thinking mode must be passed back` error:
+
+1. **Gateway providers serving DeepSeek models were invisible to the whole
+   reasoning machinery.** `isDeepSeekProvider` matched only the provider name
+   `deepseek` or a base URL containing `deepseek`. The opencode "Console Go"
+   upstream (`https://opencode.ai/zen/go/v1`, provider name `opencode`) serves
+   `deepseek-v4-flash` with thinking enabled, so every request it proxied went
+   out without `reasoning_content` — hydration, the placeholder fallback, the
+   streaming cache, and the persisted `DeepSeekReasoningStore` were all
+   skipped. The detection is now **model-aware** (`isDeepSeekModel`): any
+   request whose effective model is a DeepSeek thinking model
+   (`deepseek-v4-*`, `deepseek-reasoner`, `r1`) gets the full reasoning
+   round-trip regardless of the provider name / base URL.
+
+2. **The Responses API path dropped reasoning in both directions.** DeepSeek's
+   `/responses` streams chain-of-thought via `response.reasoning_text.delta`
+   (not the OpenAI `response.reasoning_summary_text.delta` events), so the
+   proxy silently discarded every reasoning delta: the CLI never received
+   `thinking` blocks, the reasoning store stayed empty, and subsequent
+   requests carried no reasoning pass-back. On the request side, the
+   chat→Responses converter never emitted `reasoning` input items (the
+   Responses API rejects requests whose tool-call turns lack them; empty
+   reasoning text is also rejected, unlike chat/completions). Fixes:
+   - `processResponsesStreamEvent` now handles `response.reasoning_text.delta`
+     and `.done` (plus `reasoning_summary_text.done`), forwarding thinking to
+     the CLI and populating the reasoning store for future hydration.
+   - `convertChatCompletionsRequestToResponsesRequest` emits
+     `{ type: 'reasoning', content: [{ type: 'reasoning_text', text }] }`
+     items before each assistant message / `function_call` for DeepSeek
+     models, falling back to a **constant** non-empty placeholder
+     (`[reasoning unavailable]`) when the real reasoning is unrecoverable
+     (empty text is rejected by the Responses API).
+   - Non-streaming responses responses now also cache reasoning for tool
+     calls, matching the chat/completions path.
+
 ## 3. Cache Hit Rate Improvements
 
 DeepSeek has no explicit caching API — the entire strategy is **prefix
