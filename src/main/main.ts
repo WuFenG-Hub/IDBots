@@ -3310,6 +3310,37 @@ const startSqliteDaemons = (): void => {
         return message.includes('404') ? 'not_found' : 'unavailable';
       }
     },
+    // Round-4 attribution: resolve a chain-signature legacy metaid to its
+    // GlobalMetaID (manapi /api/info/metaid/{metaid}). Process-lifetime cache;
+    // resolved values are also persisted onto the message rows, so restarts do
+    // not re-hit the API. Null on failure -> the message is marked SUSPECT.
+    resolveGlobalMetaId: (() => {
+      const cache = new Map<string, string | null>();
+      return async (legacyMetaId) => {
+        const key = legacyMetaId.trim().toLowerCase();
+        if (!key) return null;
+        if (cache.has(key)) return cache.get(key) ?? null;
+        try {
+          const response = await fetch(
+            `https://manapi.metaid.io/api/info/metaid/${encodeURIComponent(key)}`,
+            { headers: { Accept: 'application/json' } },
+          );
+          if (!response.ok) {
+            cache.set(key, null);
+            return null;
+          }
+          const json = await response.json() as { data?: { globalMetaId?: unknown } };
+          const resolved = typeof json?.data?.globalMetaId === 'string'
+            ? json.data.globalMetaId.trim()
+            : '';
+          cache.set(key, resolved || null);
+          return resolved || null;
+        } catch {
+          cache.set(key, null);
+          return null;
+        }
+      };
+    })(),
     sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
       const metabotStore = getMetabotStore();
       const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);

@@ -98,6 +98,13 @@ export interface GroupTaskDaemonMessage {
   replyPin?: string | null;
   /** Raw mention column (JSON array string). */
   mention: string | null;
+  /**
+   * Round-4 attribution: true when the chain-signature GlobalMetaID is missing
+   * or is neither a task member nor the owner. Such messages must never be
+   * attributed by senderName, never trigger replies, and never contribute
+   * deliverables.
+   */
+  senderSuspect?: boolean;
 }
 
 export interface GroupTaskDaemonTask {
@@ -225,6 +232,10 @@ export function decideGroupTaskResponders(
   const content = (message.content ?? '').trim();
   if (!content) return decisions;
   if (task.status === 'done' || task.status === 'cancelled') return decisions;
+  // Round-4 attribution: a SUSPECT sender (chain GlobalMetaID neither a task
+  // member nor the owner) never triggers replies. The owner is exempt from the
+  // suspect flag, so owner messages still reach the chair.
+  if (message.senderSuspect) return decisions;
   const isReviewPhase = task.status === 'review';
 
   const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
@@ -390,6 +401,16 @@ export type GroupTaskDaemonListDailySummariesFn = (
   limit: number,
 ) => Array<{ summaryDate: string; summaryText: string }>;
 
+/**
+ * Round-4 attribution: resolve a chain-signature LEGACY metaid to its
+ * GlobalMetaID (wired to manapi /api/info/metaid/{metaid} in main.ts). The
+ * chain signature is the ONLY identity source for group-task attribution;
+ * null when the signature cannot be resolved (message becomes SUSPECT).
+ */
+export type GroupTaskDaemonResolveGlobalMetaIdFn = (
+  legacyMetaId: string,
+) => Promise<string | null>;
+
 export interface GroupTaskDaemonDeps {
   getStore: () => GroupTaskDaemonSqliteStoreLike;
   getGroupTaskStore: () => GroupTaskStore;
@@ -402,6 +423,7 @@ export interface GroupTaskDaemonDeps {
   runSkillTurn?: GroupTaskDaemonRunSkillTurnFn;
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
   readPinForVerification?: GroupTaskDaemonReadPinFn;
+  resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
@@ -449,6 +471,7 @@ interface GroupChatMessageRow {
   mention: string | null;
   chain_timestamp: number | null;
   reply_pin: string | null;
+  sender_suspect?: number | null;
 }
 
 function mapMessageRows(result: ReturnType<Database['exec']>): GroupChatMessageRow[] {
@@ -475,6 +498,7 @@ function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
     mention: row.mention ?? null,
     chainTimestamp: row.chain_timestamp ?? null,
     replyPin: row.reply_pin ?? null,
+    senderSuspect: Number(row.sender_suspect ?? 0) === 1,
   };
 }
 
@@ -547,7 +571,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const queryNewMessages = (db: Database, groupId: string, afterId: number): GroupChatMessageRow[] =>
     mapMessageRows(db.exec(
       `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
-              chain_timestamp, reply_pin
+              chain_timestamp, reply_pin, sender_suspect
        FROM group_chat_messages
        WHERE group_id = ? AND id > ?
        ORDER BY id ASC`,
@@ -557,7 +581,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const queryMessageById = (db: Database, groupId: string, id: number): GroupChatMessageRow | null =>
     mapMessageRows(db.exec(
       `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
-              chain_timestamp, reply_pin
+              chain_timestamp, reply_pin, sender_suspect
        FROM group_chat_messages
        WHERE group_id = ? AND id = ?
        LIMIT 1`,
@@ -634,7 +658,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const queryRecentMessages = (db: Database, groupId: string, limit: number): GroupChatMessageRow[] => {
     const rows = mapMessageRows(db.exec(
       `SELECT id, pin_id, tx_id, sender_metaid, sender_global_metaid, sender_name, content, mention,
-              chain_timestamp, reply_pin
+              chain_timestamp, reply_pin, sender_suspect
        FROM group_chat_messages
        WHERE group_id = ?
        ORDER BY id DESC LIMIT ?`,
@@ -702,7 +726,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     const lines = recent.map((row) => {
       const message = toDaemonMessage(row);
-      const line = `${message.senderName}: ${message.content}`;
+      // Round-4: SUSPECT senders are flagged in context — the bot must never
+      // mistake a non-member's display name for a member's identity.
+      const line = `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${message.content}`;
       return row.id === triggering.id
         ? `>>> ${line} <<< (the message you are responding to)`
         : line;
@@ -1111,7 +1137,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       chairGlobalMetaId && senderGlobalMetaId && senderGlobalMetaId === chairGlobalMetaId,
     );
 
-    if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
+    // Round-4 attribution: deliverables are only collected from messages whose
+    // chain-signature GlobalMetaID is a task member. SUSPECT senders (neither
+    // member nor owner) are marked on the row but never contribute deliverables.
+    if (message.senderSuspect) {
+      // no deliverable collection for non-member speakers
+    } else if (DELIVERABLE_TAG.test(content) && !isChairMessage) {
       // Round-4: per-candidate ingestion. Every [DELIVERABLE] tag occurrence
       // (its own line or inline) produces one candidate; valid candidates each
       // get their own row — a message with two tag lines records TWO rows.
@@ -1273,7 +1304,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     const logLines = recent.map((row) => {
       const message = toDaemonMessage(row);
-      return `${message.senderName}: ${message.content}`;
+      return `${message.senderName}${message.senderSuspect ? ' [SUSPECT]' : ''}: ${message.content}`;
     });
     const rosterLines = promptMembers.map((member) => {
       const profile = [member.bio, member.roleProfile].filter(Boolean).join(' — ');
@@ -1551,6 +1582,68 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * Round-4 attribution enrichment. The chain-signature GlobalMetaID is the
+   * ONLY identity source for group-task attribution:
+   * - a row whose sender_global_metaid is empty is resolved from its legacy
+   *   sender_metaid via the injected manapi resolver and the row is updated
+   *   once (so every consumer — daemon, experience ledger, show — agrees);
+   * - a message whose GlobalMetaID is neither a task member nor the owner is
+   *   marked SUSPECT (persisted); senderName is NEVER used for attribution.
+   */
+  const memberGlobalMetaIdSet = (members: GroupTaskMember[]): Set<string> => {
+    const set = new Set<string>();
+    for (const member of members) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      if (gmid) set.add(gmid);
+    }
+    return set;
+  };
+
+  const enrichMessageAttribution = async (
+    message: GroupTaskDaemonMessage,
+    memberGmids: Set<string>,
+    ownerGlobalMetaId: string,
+  ): Promise<GroupTaskDaemonMessage> => {
+    let globalMetaId = (message.senderGlobalMetaId ?? '').trim();
+    const legacy = (message.senderMetaId ?? '').trim();
+    if (!globalMetaId && legacy && deps.resolveGlobalMetaId) {
+      try {
+        const resolved = (await deps.resolveGlobalMetaId(legacy))?.trim();
+        if (resolved) {
+          globalMetaId = resolved;
+          try {
+            deps.getGroupTaskStore().updateMessageSenderGlobalMetaId(message.id, resolved);
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Message ${message.id}: resolved GlobalMetaID persist failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Message ${message.id}: legacy metaid resolution failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    const normalized = globalMetaId.toLowerCase();
+    const suspect = !globalMetaId
+      || (!memberGmids.has(normalized) && normalized !== ownerGlobalMetaId.toLowerCase());
+    if (suspect !== Boolean(message.senderSuspect)) {
+      try {
+        deps.getGroupTaskStore().setMessageSenderSuspect(message.id, suspect);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Message ${message.id}: suspect flag persist failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return { ...message, senderGlobalMetaId: globalMetaId || null, senderSuspect: suspect };
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -1657,8 +1750,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // message) per tick, so the daemon never double-speaks alongside the Twin.
     let chairAutoRepliesThisTick = 0;
 
+    const memberGmids = memberGlobalMetaIdSet(members);
     for (const row of rows) {
-      const message = toDaemonMessage(row);
+      // Round-4 attribution first: resolve the chain-signature GlobalMetaID
+      // (persisted once) and mark SUSPECT when the sender is neither a task
+      // member nor the owner. Everything downstream (deliverable collection,
+      // gating, replies, experience capture) consumes the enriched message.
+      const message = await enrichMessageAttribution(
+        toDaemonMessage(row),
+        memberGmids,
+        ownerGlobalMetaId,
+      );
+      if (message.senderSuspect) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: message ${message.id} from non-member sender ` +
+          `(globalMetaId=${message.senderGlobalMetaId ?? 'unresolved'}, name=${message.senderName}) ` +
+          'marked SUSPECT — no deliverables recorded, no replies triggered',
+        );
+      }
       try {
         recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);

@@ -63,6 +63,12 @@ export interface GroupChatTranscriptMessage {
   chainTimestamp: number | null;
   msgIndex: number | null;
   replyPin: string | null;
+  /**
+   * Round-4 attribution: true when the chain-signature GlobalMetaID could not
+   * be resolved OR is neither a task member nor the owner — display-only flag,
+   * the sender must never be inferred from senderName.
+   */
+  senderSuspect: boolean;
 }
 
 export interface CreateGroupTaskInput {
@@ -143,6 +149,7 @@ interface GroupChatTranscriptRow {
   chain_timestamp: number | null;
   msg_index: number | null;
   reply_pin: string | null;
+  sender_suspect?: number | null;
 }
 
 function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChatTranscriptMessage {
@@ -158,6 +165,7 @@ function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChat
     chainTimestamp: row.chain_timestamp ?? null,
     msgIndex: row.msg_index ?? null,
     replyPin: row.reply_pin ?? null,
+    senderSuspect: Number(row.sender_suspect ?? 0) === 1,
   };
 }
 
@@ -419,7 +427,7 @@ export class GroupTaskStore {
       ? Math.trunc(opts.beforeId)
       : null;
     const columns = `id, pin_id, tx_id, sender_name, sender_global_metaid, sender_avatar,
-      content, content_type, chain_timestamp, msg_index, reply_pin`;
+      content, content_type, chain_timestamp, msg_index, reply_pin, sender_suspect`;
     const rows = (beforeId != null
       ? this.getAll<GroupChatTranscriptRow>(
           `SELECT ${columns} FROM group_chat_messages
@@ -433,6 +441,29 @@ export class GroupTaskStore {
         )
     ).reverse();
     return rows.map(rowToGroupChatTranscriptMessage);
+  }
+
+  /**
+   * Round-4 attribution: persist the GlobalMetaID resolved from the message's
+   * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
+   * chain signature is the ONLY identity source; sender_name is never used
+   * for attribution.
+   */
+  updateMessageSenderGlobalMetaId(id: number, globalMetaId: string): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_global_metaid = ? WHERE id = ?',
+      [globalMetaId.trim(), id],
+    );
+    this.saveDb();
+  }
+
+  /** Round-4 attribution: mark a message whose sender fails the member/owner check. */
+  setMessageSenderSuspect(id: number, suspect: boolean): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_suspect = ? WHERE id = ?',
+      [suspect ? 1 : 0, id],
+    );
+    this.saveDb();
   }
 
   // --- group_task_members ---

@@ -801,6 +801,7 @@ export class SqliteStore {
         ON group_chat_messages(group_id, id);
     `);
     this.migrateGroupChatMessagesMsgIndex();
+    this.migrateGroupChatMessagesSenderSuspect();
 
     // MetaID pins: full-field persistence from manapi.metaid.io
     this.db.run(`
@@ -1787,6 +1788,25 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupChatMessagesMsgIndex:', e);
+    }
+  }
+
+  /**
+   * Migration (round-4 attribution): add sender_suspect to group_chat_messages.
+   * The chain-signature GlobalMetaID is the ONLY identity source for group-task
+   * attribution; a message whose resolved GlobalMetaID is neither a task member
+   * nor the owner is flagged (default 0 = trusted) so the daemon and the UI can
+   * surface [SUSPECT] instead of misattributing by sender_name.
+   */
+  private migrateGroupChatMessagesSenderSuspect(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_chat_messages)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('sender_suspect')) return;
+      this.db.run('ALTER TABLE group_chat_messages ADD COLUMN sender_suspect INTEGER NOT NULL DEFAULT 0');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupChatMessagesSenderSuspect:', e);
     }
   }
 

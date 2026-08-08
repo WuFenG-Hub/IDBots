@@ -1317,7 +1317,12 @@ export function startMetaidRpcServer(
         return;
       }
       try {
-        // Default sender: the task chair (twin) when no explicit metabot is given.
+        // Round-4 attribution: group messages MUST carry an explicit sender
+        // identity (metabot_id or metabot_name). The old "default to the task
+        // chair" fallback silently signed non-chair messages with the chair's
+        // identity — the exact misattribution observed in #7 (Lucy's promotion
+        // recorded under the chair because she did not specify an identity).
+        // The chain signature is the ONLY identity source: no identity, no send.
         let metabotId = Number(parsed.metabot_id);
         if (!Number.isInteger(metabotId) || metabotId <= 0) {
           const name = typeof parsed.metabot_name === 'string' ? parsed.metabot_name.trim() : '';
@@ -1330,7 +1335,12 @@ export function startMetaidRpcServer(
             }
             metabotId = resolved;
           } else {
-            metabotId = (await getGroupTask(taskId)).chairMetabotId;
+            res.writeHead(400);
+            res.end(JSON.stringify({
+              success: false,
+              error: 'metabot_id or metabot_name is required: group messages must be sent with an explicit sender identity (the chair default was removed)',
+            }));
+            return;
           }
         }
         const mention = Array.isArray(parsed.mention)

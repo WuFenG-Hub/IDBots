@@ -69,6 +69,8 @@ export interface GroupChatTranscriptMessage {
   chainTimestamp: number | null;
   msgIndex: number | null;
   replyPin: string | null;
+  /** Round-4 attribution: chain GlobalMetaID is not a task member/owner. */
+  senderSuspect?: boolean;
 }
 
 export interface GroupTaskStatusEvent {
