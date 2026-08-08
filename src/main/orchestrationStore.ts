@@ -112,7 +112,12 @@ const ATTEMPT_TRANSITIONS: Record<OrchestrationAttemptStatus, OrchestrationAttem
   running: ['completed', 'failed', 'timed_out', 'cancelled'],
   completed: [],
   failed: [],
-  timed_out: [],
+  // timed_out is NOT terminal: the skill-turn watchdog can fire while the
+  // worker session is still running. Such an attempt is parked as timed_out
+  // and must be correctable to completed when the session delivers a late
+  // result, or settled to failed/cancelled when it terminates without output,
+  // the recovery window expires, or the owner cancels/reassigns.
+  timed_out: ['completed', 'failed', 'cancelled'],
   cancelled: [],
 };
 
@@ -402,9 +407,12 @@ export class OrchestrationStore {
     }
     const now = new Date().toISOString();
     const startedAt = status === 'running' && !current.startedAt ? now : current.startedAt;
-    const finishedAt = ['completed', 'failed', 'timed_out', 'cancelled'].includes(status) && !current.finishedAt
-      ? now
-      : current.finishedAt;
+    // timed_out parks the attempt at the watchdog moment; when a late result
+    // later recovers it to completed, refresh finishedAt to the real
+    // completion time instead of keeping the (early) parked timestamp.
+    const finishedAt = !current.finishedAt
+      ? (['completed', 'failed', 'timed_out', 'cancelled'].includes(status) ? now : current.finishedAt)
+      : (status === 'completed' && current.status === 'timed_out' ? now : current.finishedAt);
     this.db.run(`UPDATE orchestration_attempts
       SET status = ?, worker_session_id = ?, result_json = ?, error = ?, started_at = ?, finished_at = ?
       WHERE id = ?`, [
@@ -427,7 +435,7 @@ export class OrchestrationStore {
     if (!task) throw new Error(`Orchestration task ${taskId} not found`);
     const now = new Date().toISOString();
     const attempts = this.getAll<{ id: string }>(`SELECT a.id FROM orchestration_attempts a
-      INNER JOIN orchestration_steps s ON s.id = a.step_id WHERE s.task_id = ? AND a.status IN ('queued','running')`, [taskId]);
+      INNER JOIN orchestration_steps s ON s.id = a.step_id WHERE s.task_id = ? AND a.status IN ('queued','running','timed_out')`, [taskId]);
     for (const attempt of attempts) {
       this.db.run(`UPDATE orchestration_attempts SET status = 'cancelled', error = 'CANCELLED_BY_OWNER', finished_at = ? WHERE id = ?`, [now, attempt.id]);
     }
@@ -439,7 +447,10 @@ export class OrchestrationStore {
 
   recoverAfterRestart(): { attempts: number; steps: number } {
     const now = new Date().toISOString();
-    const running = this.getAll<{ id: string; step_id: string }>(`SELECT id, step_id FROM orchestration_attempts WHERE status = 'running'`);
+    // 'timed_out' attempts are also unrecoverable after a restart: the worker
+    // session lives inside the runner process and dies with it, so no late
+    // result can ever arrive. Settle them to failed and free the step.
+    const running = this.getAll<{ id: string; step_id: string }>(`SELECT id, step_id FROM orchestration_attempts WHERE status IN ('running','timed_out')`);
     for (const attempt of running) {
       this.db.run(`UPDATE orchestration_attempts SET status = 'failed', error = ?, finished_at = ? WHERE id = ?`, ['RECOVERED_AFTER_RESTART', now, attempt.id]);
       this.db.run(`UPDATE orchestration_steps SET status = 'ready', active_attempt_id = NULL, updated_at = ? WHERE id = ? AND status IN ('running','queued')`, [now, attempt.step_id]);

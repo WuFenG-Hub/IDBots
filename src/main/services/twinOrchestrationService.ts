@@ -1,5 +1,6 @@
 import {
   runOrchestratorSkillTurn,
+  SkillTurnTimeoutError,
   type RunOrchestratorSkillTurnParams,
 } from './orchestratorCoworkBridge';
 import type { CoworkRunner } from '../libs/coworkRunner';
@@ -55,6 +56,14 @@ function jsonBlock(value: unknown): string {
   try { return JSON.stringify(value ?? {}, null, 2); } catch { return '{}'; }
 }
 
+function isSkillTurnTimeoutError(error: unknown): error is { sessionId: string; timeoutMs: number } {
+  if (error instanceof SkillTurnTimeoutError) return true;
+  return typeof error === 'object'
+    && error !== null
+    && (error as { name?: unknown }).name === 'SkillTurnTimeoutError'
+    && typeof (error as { sessionId?: unknown }).sessionId === 'string';
+}
+
 function buildWorkerPrompt(input: DelegateLocalWorkerInput, task: OrchestrationTask, step: OrchestrationStep): string {
   return [
     '<twin_delegation>',
@@ -92,6 +101,7 @@ export class TwinOrchestrationService {
     input: DelegateLocalWorkerInput,
   ): Promise<void> {
     const prompt = buildWorkerPrompt(input, task, step);
+    const attemptId = attempt.id;
     try {
       const replyText = await this.runWorkerTurn({
         systemPrompt: 'You are a persistent Worker Bot executing one delegated step for the owner Twin Bot. Use your own persona, memories, skills, wallet, and permissions. Do not broaden the permission scope or claim unverifiable completion.',
@@ -108,6 +118,23 @@ export class TwinOrchestrationService {
           this.deps.orchestrationStore.updateStepStatus(step.id, 'running', { activeAttemptId: attempt.id });
           this.deps.orchestrationStore.updateAttempt(attempt.id, 'running', { workerSessionId: sessionId });
         },
+        // Recovery hooks: when the skill-turn watchdog fires at 300s the worker
+        // session keeps running inside CoworkRunner. These callbacks align the
+        // attempt state with whatever the session eventually delivers — a late
+        // completion corrects the attempt to completed; a late error/stop or a
+        // silent recovery window settles it to failed.
+        onLateCompletion: (late) => {
+          this.applyLateAttemptResult(task, step, attemptId, late.replyText);
+        },
+        onLateTermination: (late) => {
+          const error = late.reason === 'error'
+            ? (late.message?.trim() || 'WORKER_ATTEMPT_FAILED')
+            : 'WORKER_SESSION_STOPPED';
+          this.settleTimedOutAttempt(attemptId, error);
+        },
+        onRecoveryExpired: () => {
+          this.settleTimedOutAttempt(attemptId, 'SKILL_TURN_TIMEOUT_NO_RECOVERY');
+        },
       });
       if (!replyText?.trim()) throw new Error('WORKER_EMPTY_HANDOFF');
       const result = { replyText: replyText.trim(), verified: false };
@@ -116,17 +143,81 @@ export class TwinOrchestrationService {
       this.deps.orchestrationStore.updateTaskStatus(task.id, 'review');
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const isTimeout = isSkillTurnTimeoutError(error);
       const currentAttempt = this.deps.orchestrationStore.getAttempt(attempt.id);
       if (currentAttempt && ['queued', 'running'].includes(currentAttempt.status)) {
-        this.deps.orchestrationStore.updateAttempt(attempt.id, 'failed', { error: message });
+        if (isTimeout) {
+          // Watchdog fired but the worker session is still alive: park the
+          // attempt as timed_out (recoverable) instead of failed, so a late
+          // completion can still correct it to completed.
+          this.deps.orchestrationStore.updateAttempt(attempt.id, 'timed_out', { error: message });
+        } else {
+          this.deps.orchestrationStore.updateAttempt(attempt.id, 'failed', { error: message });
+        }
       }
       const currentStep = this.deps.orchestrationStore.getStep(step.id);
-      if (currentStep && ['queued', 'running', 'waiting_input'].includes(currentStep.status)) {
+      if (currentStep && ['queued', 'running', 'waiting_input'].includes(currentStep.status) && !isTimeout) {
         this.deps.orchestrationStore.updateStepStatus(step.id, 'failed');
       }
       const currentTask = this.deps.orchestrationStore.getTask(task.id);
-      if (currentTask?.status === 'running') this.deps.orchestrationStore.updateTaskStatus(task.id, 'failed');
-      console.warn(`[TwinOrchestration] Worker attempt ${attempt.id} failed: ${message}`);
+      if (currentTask?.status === 'running' && !isTimeout) {
+        this.deps.orchestrationStore.updateTaskStatus(task.id, 'failed');
+      }
+      if (isTimeout) {
+        console.warn(
+          `[TwinOrchestration] Worker attempt ${attempt.id} timed out (${message}); session ${error.sessionId} still running — parked as timed_out, awaiting late completion or recovery expiry`
+        );
+      } else {
+        console.warn(`[TwinOrchestration] Worker attempt ${attempt.id} failed: ${message}`);
+      }
+    }
+  }
+
+  /**
+   * Late-completion recovery: the worker session finished after the skill-turn
+   * watchdog fired. If the attempt is still awaiting its result and still owns
+   * the step, correct the state to completed and move the task to review —
+   * the same flow a normal completion takes. Attempts cancelled, reassigned or
+   * already completed in the meantime are left untouched.
+   */
+  private applyLateAttemptResult(task: OrchestrationTask, step: OrchestrationStep, attemptId: string, replyText: string): void {
+    const store = this.deps.orchestrationStore;
+    const currentAttempt = store.getAttempt(attemptId);
+    if (!currentAttempt || !['queued', 'running', 'timed_out'].includes(currentAttempt.status)) return;
+    const currentStep = store.getStep(step.id);
+    if (!currentStep || currentStep.activeAttemptId !== attemptId || !['queued', 'running'].includes(currentStep.status)) return;
+    if (!replyText?.trim()) {
+      this.settleTimedOutAttempt(attemptId, 'WORKER_EMPTY_HANDOFF');
+      return;
+    }
+    const result = { replyText: replyText.trim(), verified: false };
+    // Clear the parked timeout error: the attempt completed with a real result.
+    store.updateAttempt(attemptId, 'completed', { result, error: null });
+    store.updateStepStatus(step.id, 'completed', { acceptedResult: result });
+    const currentTask = store.getTask(task.id);
+    if (currentTask && ['planning', 'running', 'review'].includes(currentTask.status)) {
+      store.updateTaskStatus(task.id, 'review');
+    }
+  }
+
+  /**
+   * Late-termination / recovery-expiry settlement: the session ended without a
+   * usable result (errored, stopped, or silent for the whole recovery window).
+   * Only now is the attempt marked failed — matching "only mark failed when the
+   * session truly produced no output".
+   */
+  private settleTimedOutAttempt(attemptId: string, error: string): void {
+    const store = this.deps.orchestrationStore;
+    const currentAttempt = store.getAttempt(attemptId);
+    if (!currentAttempt || !['queued', 'running', 'timed_out'].includes(currentAttempt.status)) return;
+    store.updateAttempt(attemptId, 'failed', { error });
+    const currentStep = store.getStep(currentAttempt.stepId);
+    if (currentStep && ['queued', 'running'].includes(currentStep.status) && currentStep.activeAttemptId === attemptId) {
+      store.updateStepStatus(currentStep.id, 'failed');
+    }
+    const currentTask = store.getTaskForStep(currentAttempt.stepId);
+    if (currentTask && currentTask.status === 'running') {
+      store.updateTaskStatus(currentTask.id, 'failed');
     }
   }
 
@@ -262,7 +353,7 @@ export class TwinOrchestrationService {
     const step = status.steps.find((candidate) => candidate.id === input.stepId);
     if (!step) throw new Error('ORCHESTRATION_STEP_NOT_FOUND');
     const activeAttempt = step.attempts.find((attempt) => attempt.id === step.activeAttemptId);
-    if (activeAttempt && ['queued', 'running'].includes(activeAttempt.status)) {
+    if (activeAttempt && ['queued', 'running', 'timed_out'].includes(activeAttempt.status)) {
       this.deps.orchestrationStore.updateAttempt(activeAttempt.id, 'cancelled', { error: 'REASSIGNED_TO_ANOTHER_WORKER' });
     }
     if (step.status !== 'ready') this.deps.orchestrationStore.updateStepStatus(step.id, 'ready', { activeAttemptId: null });
