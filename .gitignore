@@ -186,3 +186,5 @@ man_base_data_pebble/
 !tests/deepseekResponses.test.mjs
 !tests/deepseekReasoningRoundtrip.test.mjs
 !tests/avatarSource.test.mjs
+
+!tests/sdkCronHostTrigger.test.mjs
