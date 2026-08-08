@@ -142,6 +142,8 @@ type DaemonPromptMember = {
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
+  /** OpenTeam remote teammate: no local bot row; replies come from its own machine. */
+  remote?: boolean;
 };
 
 // Mention gating (contentMentionsBotName / mentionContainsMetaId / isMentioned)
@@ -1176,7 +1178,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const profile = [member.bio, member.roleProfile].filter(Boolean).join(' — ');
       const goal = member.goal?.trim() ? ` (goal: ${member.goal.trim()})` : '';
       const skillsHint = member.role === 'chair' ? ' (chair, do not assign work to the chair)' : '';
-      return `- ${member.name} [${member.role}]${goal}${skillsHint}${profile ? ` — ${profile}` : ''}`;
+      const remoteHint = member.remote ? ' (remote teammate via OpenTeam — replies come from their own machine, may be delayed)' : '';
+      return `- ${member.name} [${member.role}]${goal}${skillsHint}${remoteHint}${profile ? ` — ${profile}` : ''}`;
     });
     const workerCount = promptMembers.filter((member) => member.role === 'worker').length;
     const distributionRule = workerCount >= 2
@@ -1473,19 +1476,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const bot = metabotStore.getMetabotById(member.metabotId);
       if (bot) botsById.set(member.metabotId, bot);
     }
-    const promptMembers: DaemonPromptMember[] = members
-      .filter((member) => member.metabotId != null)
-      .map((member) => {
-        const bot = botsById.get(member.metabotId!);
+    // Remote OpenTeam teammates (metabotId == null) join the prompt roster so
+    // the chair and local workers can see and @ them; botsById and responder
+    // gating stay local-only because their replies come from their own machine.
+    const promptMembers: DaemonPromptMember[] = members.map((member) => {
+      if (member.metabotId == null) {
+        const globalMetaId = member.globalmetaid?.trim() || null;
         return {
-          name: member.name ?? bot?.name ?? `bot-${member.metabotId}`,
+          // The roster name must stay exactly the display_name snapshot — the
+          // invitee's guest daemon name-gates on its real bot name.
+          name: member.name ?? `remote-${(globalMetaId ?? '').slice(0, 10) || 'unknown'}`,
           role: member.role,
-          globalMetaId: member.globalmetaid?.trim() || bot?.globalmetaid?.trim() || null,
-          bio: bot?.bio ?? bot?.background ?? null,
-          roleProfile: bot?.role ?? null,
-          goal: bot?.goal ?? null,
+          globalMetaId,
+          bio: null,
+          roleProfile: null,
+          goal: null,
+          remote: true,
         };
-      });
+      }
+      const bot = botsById.get(member.metabotId);
+      return {
+        name: member.name ?? bot?.name ?? `bot-${member.metabotId}`,
+        role: member.role,
+        globalMetaId: member.globalmetaid?.trim() || bot?.globalmetaid?.trim() || null,
+        bio: bot?.bio ?? bot?.background ?? null,
+        roleProfile: bot?.role ?? null,
+        goal: bot?.goal ?? null,
+      };
+    });
     const chairGlobalMetaId = (
       members.find((member) => member.role === 'chair')?.globalmetaid ?? ''
     ).trim();

@@ -1035,6 +1035,54 @@ test('chair trust: worker responding to a chair-sender message gets allowAllEnab
   }
 });
 
+test('remote OpenTeam member joins the prompt roster; never produces a local reply', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-alicia',
+      displayName: 'Alicia Remote',
+      role: 'worker',
+      joinedPinId: 'pin-join-alicia',
+    });
+
+    // Local worker mentioned by a plain participant: its prompt roster must
+    // include the remote teammate (annotated, exact name), and only the local
+    // bot replies (the chair stays silent — the message is addressed).
+    insertGroupMessage(h.db, {
+      pinId: 'mention-coder-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      senderName: 'Human', content: '@Coder Bot please start the research',
+    });
+    await h.loop.runTick();
+
+    const coderCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
+    assert.ok(coderCall, 'local worker replied to the mention');
+    assert.match(coderCall.systemPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+    assert.match(coderCall.systemPrompt, /profile not available locally/);
+    assert.ok(
+      h.sends.every((send) => send.metabotId === 2),
+      'remote member never generates a local send',
+    );
+
+    // A deliverable posted by the remote teammate (from its own machine)
+    // still triggers the chair through the normal deliverable path.
+    insertGroupMessage(h.db, {
+      pinId: 'remote-deliverable-i0', senderMetaId: 'metaid-remote', senderGlobalMetaId: 'gmid-remote-alicia',
+      senderName: 'Alicia Remote', content: '[DELIVERABLE] doc: metaapp://abc123',
+    });
+    await h.loop.runTick();
+
+    const chairCall = h.chatCalls.find((call) => call.llmId === 'llm-1');
+    assert.ok(chairCall, 'chair responds to a remote teammate deliverable');
+    assert.match(chairCall.systemPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+    assert.match(chairCall.systemPrompt, /OpenTeam remote teammates/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('prompts: roster profiles include bio/role/goal with the length cap', () => {
   const longBio = `bio-start ${'x'.repeat(500)} bio-end`;
   const prompt = buildGroupTaskSystemPrompt({
@@ -1057,6 +1105,38 @@ test('prompts: roster profiles include bio/role/goal with the length cap', () =>
   const bioLine = prompt.split('\n').find((line) => line.startsWith('- Coder Bot (worker) — Bio:'));
   const renderedBio = bioLine.replace('- Coder Bot (worker) — Bio: ', '');
   assert.ok(renderedBio.length <= 200, `bio capped at 200 chars (got ${renderedBio.length})`);
+});
+
+test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playbooks', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker', bio: 'Search and code specialist' },
+    { name: 'Alicia Remote', role: 'worker', remote: true },
+  ];
+  const chairPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'chair',
+  });
+
+  // Roster annotation keeps the exact name intact for @-mention matching.
+  assert.match(chairPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+  assert.match(chairPrompt, /- Alicia Remote \(worker\) — external teammate via OpenTeam; profile not available locally/);
+  assert.match(chairPrompt, /OpenTeam remote teammates \(marked "remote teammate via OpenTeam" in the roster\) are external collaborators/);
+  assert.match(chairPrompt, /Welcome them as you would a new colleague/);
+  assert.match(chairPrompt, /Their replies come from their own machine and may arrive late or not at all/);
+  assert.match(chairPrompt, /re-assign the work and explain the change to the owner/);
+
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+  });
+  assert.match(workerPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+  assert.match(workerPrompt, /treat them as equal teammates and be polite/);
+  assert.ok(!workerPrompt.includes('OpenTeam remote teammates (marked'), 'chair-only etiquette stays out of the worker playbook');
 });
 
 // ---------------------------------------------------------------------------

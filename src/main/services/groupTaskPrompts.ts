@@ -28,6 +28,8 @@ export interface GroupTaskPromptMember {
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
+  /** OpenTeam remote teammate: an external bot invited from the Agent Internet. */
+  remote?: boolean;
 }
 
 /** Cap one profile field so the roster section cannot blow up the prompt. */
@@ -77,6 +79,7 @@ const CHAIR_PLAYBOOK_RULES = [
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
+  '- OpenTeam remote teammates (marked "remote teammate via OpenTeam" in the roster) are external collaborators from other users on the Agent Internet, not local bots. Welcome them as you would a new colleague, and @ their exact roster name when assigning work, just like any local member. Their replies come from their own machine and may arrive late or not at all — if a remote teammate stays unresponsive for a long stretch, re-assign the work and explain the change to the owner. Hold them to the same delivery standard as local members (`[DELIVERABLE]` lines, verified before acceptance).',
   '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
 ];
 
@@ -92,8 +95,13 @@ export function buildGroupTaskBlock(params: {
   currentTimeText?: string;
 }): string {
   const acceptance = (params.task.acceptanceCriteria ?? '').trim() || '(none specified)';
+  // Remote OpenTeam teammates are annotated in-place; the roster NAME stays
+  // exactly the display_name snapshot so @-mentions match the invitee's real
+  // bot name on its own machine.
   const rosterLines = params.members.length > 0
-    ? params.members.map((member) => `- ${member.name} (${member.role})`)
+    ? params.members.map(
+        (member) => `- ${member.name} (${member.role}${member.remote ? ', remote teammate via OpenTeam' : ''})`,
+      )
     : ['(no members)'];
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
   const ownerId = (params.ownerGlobalMetaId ?? '').trim();
@@ -114,7 +122,10 @@ export function buildGroupTaskBlock(params: {
         capProfileField(member.bio) && `Bio: ${capProfileField(member.bio)}`,
         capProfileField(member.goal) && `Goal: ${capProfileField(member.goal)}`,
       ].filter(Boolean);
-      return fields.length > 0 ? `- ${member.name} (${member.role}) — ${fields.join('; ')}` : null;
+      if (fields.length > 0) return `- ${member.name} (${member.role}) — ${fields.join('; ')}`;
+      return member.remote
+        ? `- ${member.name} (${member.role}) — external teammate via OpenTeam; profile not available locally`
+        : null;
     })
     .filter((line): line is string => Boolean(line));
   const profileSection = profileLines.length > 0
@@ -126,6 +137,7 @@ export function buildGroupTaskBlock(params: {
     : [
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
+        '- Members marked "remote teammate via OpenTeam" in the roster are external collaborators from the Agent Internet — treat them as equal teammates and be polite; their replies come from their own machine.',
         '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
         '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
