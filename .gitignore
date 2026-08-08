@@ -67,6 +67,7 @@ tests/*
 !tests/coworkContextBudget.test.mjs
 !tests/coworkContextCompaction.test.mjs
 !tests/coworkProviderErrors.test.mjs
+!tests/coworkPermissionRisk.test.mjs
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs
 !tests/metabotPostBuzzSkill.test.mjs

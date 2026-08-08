@@ -27,6 +27,7 @@ import {
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
 import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
+import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
@@ -4645,6 +4646,23 @@ export class CoworkRunner extends EventEmitter {
             };
           }
           return { behavior: 'allow', updatedInput: resolvedInput };
+        }
+
+        // Risk-tiered auto-approval under full trust: AskUserQuestion payloads
+        // whose questions are all explicitly marked low-risk (header
+        // LOW_RISK_QUESTION_HEADER) are answered automatically with their first
+        // option, so routine low-risk deletions (merged branches, worktrees)
+        // never open the confirmation modal. Anything unmarked or multi-select
+        // still routes to the interactive flow below.
+        if (permissionMode === 'bypassPermissions' && resolvedName === 'AskUserQuestion') {
+          const autoAnswers = tryAutoAnswerLowRiskQuestion(resolvedInput);
+          if (autoAnswers) {
+            coworkLog('INFO', 'canUseTool', 'Auto-approved low-risk question under full trust', {
+              sessionId,
+              questionCount: Object.keys(autoAnswers).length,
+            });
+            return { behavior: 'allow', updatedInput: { ...resolvedInput, answers: autoAnswers } };
+          }
         }
 
         // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
