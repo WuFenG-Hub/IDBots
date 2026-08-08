@@ -60,10 +60,14 @@ interface UsageStatsChipProps {
 }
 
 /**
- * Per-session token/cost indicator (DeepSeek-first). Shows a compact chip in
- * the session header with token total; hover reveals the breakdown: input /
- * output / cache hit / cache miss tokens, an estimated USD cost at DeepSeek
- * rates (for proxy sessions), or the SDK-priced cost (Anthropic direct).
+ * Per-session token/cost indicator. Shows a compact chip in the session
+ * header with token total; hover reveals the breakdown: input / output /
+ * cache hit / cache miss tokens, cache-hit rates, and — matching the ACTUAL
+ * billing account — a CNY estimate at DeepSeek rates (DeepSeek-billed proxy
+ * sessions), the SDK-priced USD cost (Anthropic direct), or no cost at all
+ * (plan/subscription/per-request providers like opencode, where a fabricated
+ * cost estimate would be misleading). The DeepSeek wallet balance row is
+ * shown ONLY for DeepSeek-billed sessions.
  */
 const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -96,22 +100,31 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen, fetchBalance]);
 
-  // Total token display. For DeepSeek (via the proxy) input_tokens is the
-  // TOTAL input — it already includes the cache hit/miss tokens, so adding
-  // them again would double the number. For direct Anthropic sessions
-  // input_tokens excludes cache tokens (Anthropic semantics), so all four
-  // counters are summed there.
+  // Total token display. For anything except Anthropic-native sessions (i.e.
+  // DeepSeek via the proxy AND OpenAI-compat gateways like opencode) the
+  // upstream reports input_tokens as the TOTAL input — it already includes
+  // the cache hit/miss tokens, so adding them again would double the number.
+  // Only direct Anthropic sessions exclude cache tokens from input_tokens
+  // (Anthropic semantics), so all four counters are summed there.
   const isDeepSeek = usageStats.source === 'deepseek';
-  const totalTokens = isDeepSeek
+  const cacheIncludedInInput = usageStats.source !== 'anthropic';
+  const totalTokens = cacheIncludedInInput
     ? usageStats.inputTokens + usageStats.outputTokens
     : usageStats.inputTokens + usageStats.outputTokens
       + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
 
   if (totalTokens <= 0) return null;
 
+  // Cost display follows the actual billing account:
+  // - deepseek: CNY estimate at DeepSeek standard rates (wallet is billed in CNY).
+  // - anthropic: SDK-priced USD cost (real Anthropic pricing).
+  // - other (opencode plans, openrouter, custom gateways, ollama, ...): these
+  //   are billed per request or by subscription — no cost estimate is shown.
   const estimatedCost = isDeepSeek
     ? estimateDeepSeekCostCNY(modelId, usageStats)
-    : (usageStats.totalCostUsd ?? 0);
+    : usageStats.source === 'anthropic'
+      ? (usageStats.totalCostUsd ?? 0)
+      : 0;
   const showCost = estimatedCost > 0;
   // Session cache-hit rate. Two numbers with different meaning:
   // - cacheHitRate: cumulative over ALL turns (diluted by the T1 cold start,
@@ -231,9 +244,10 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 <div className="opacity-70">{i18nService.t('coworkUsagePerModelTitle')}</div>
                 {perModelEntries.map(([model, u]) => {
-                  // Same input_tokens semantics as the top counters: DeepSeek
-                  // entries already include cache tokens in inputTokens.
-                  const modelInput = isDeepSeek
+                  // Same input_tokens semantics as the top counters: non-
+                  // Anthropic entries already include cache tokens in
+                  // inputTokens.
+                  const modelInput = cacheIncludedInInput
                     ? u.inputTokens
                     : u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
                   return (

@@ -14,8 +14,8 @@ export interface CoworkUsageStats {
   cacheCreationTokens: number;
   /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
   totalCostUsd?: number;
-  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
-  source: 'deepseek' | 'anthropic' | 'none';
+  /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, or none. */
+  source: 'deepseek' | 'anthropic' | 'other' | 'none';
   /**
    * Cumulative per-model token usage from the SDK's modelUsage breakdown,
    * including subagent/side-job traffic the top-level counters miss.

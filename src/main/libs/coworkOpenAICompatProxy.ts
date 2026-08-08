@@ -494,6 +494,32 @@ function isDeepSeekProvider(provider?: string, baseURL?: string, model?: string)
   return Boolean(baseURL?.toLowerCase().includes('deepseek'));
 }
 
+/**
+ * Billing identity of a CoWork session's upstream. Unlike isDeepSeekProvider
+ * (which also matches deepseek MODELS served through gateways like opencode —
+ * needed for reasoning round-trips), this is the strict "who do we pay"
+ * signal: only a deepseek provider key or a deepseek host means the DeepSeek
+ * account balance and CNY rate estimate apply. Everything else ('other':
+ * opencode plans, openrouter, custom gateways, ollama, ...) is billed by its
+ * own plan/counter and must not show DeepSeek balances or cost estimates.
+ */
+export function resolveCoworkBillingSource(
+  provider?: string,
+  baseURL?: string
+): 'deepseek' | 'anthropic' | 'other' {
+  const normalizedProvider = provider?.trim().toLowerCase();
+  if (normalizedProvider === 'deepseek') {
+    return 'deepseek';
+  }
+  if (normalizedProvider === 'anthropic') {
+    return 'anthropic';
+  }
+  if (Boolean(baseURL?.toLowerCase().includes('deepseek'))) {
+    return 'deepseek';
+  }
+  return 'other';
+}
+
 function isDeepSeekThinkingRequest(
   body: Record<string, unknown>,
   provider?: string,

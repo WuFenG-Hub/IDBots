@@ -35,6 +35,7 @@ import {
   getCoworkOpenAICompatProxyStatus,
   getCoworkSnipHeadTokens,
   resetCoworkSnipHeadTokens,
+  resolveCoworkBillingSource,
   setCoworkSnipHeadTokens,
 } from './coworkOpenAICompatProxy';
 import {
@@ -817,6 +818,14 @@ interface ActiveSession {
   lastSubagentThrottleAt?: number;
   /** Task id of the last throttled subagent progress emit. */
   lastSubagentThrottleTaskId?: string;
+  /**
+   * Billing identity resolved from the API config at run start ('deepseek'
+   * only when the DeepSeek account is actually billed — provider key
+   * 'deepseek' or a deepseek host; gateway providers serving deepseek models
+   * count as 'other'). The usage chip uses it to decide whether DeepSeek
+   * balance/CNY estimates apply at all.
+   */
+  billingSource?: 'deepseek' | 'anthropic' | 'other';
   /** Accumulated token usage from SDK result events (drives cost display). */
   usageStats?: {
     inputTokens: number;
@@ -824,7 +833,7 @@ interface ActiveSession {
     cacheReadTokens: number;
     cacheCreationTokens: number;
     totalCostUsd?: number;
-    source: 'deepseek' | 'anthropic' | 'none';
+    source: 'deepseek' | 'anthropic' | 'other' | 'none';
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
     /**
@@ -1449,7 +1458,13 @@ export class CoworkRunner extends EventEmitter {
       totalCostUsd: typeof payload.total_cost_usd === 'number'
         ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
-      source: prev.source === 'none' ? 'deepseek' : prev.source,
+      // Source of truth is the billing source resolved from the API config at
+      // run start — NOT the model id (gateway providers can serve deepseek
+      // models without billing the DeepSeek account). Fall back to the
+      // persisted source when no active session is available (e.g. a stale
+      // result event); 'other' is the neutral default for unknown providers.
+      source: this.activeSessions.get(sessionId)?.billingSource
+        ?? (prev.source === 'none' ? 'other' : prev.source),
       turnCount: nextTurn,
       cacheMissEvents,
       turnStats,
@@ -4485,6 +4500,11 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
     const modelLimits = resolveCurrentModelLimits(apiConfig.model);
+    // Record who actually bills this session: only a deepseek provider key or
+    // deepseek host gets the DeepSeek balance/CNY treatment in the usage chip.
+    // Gateway providers (opencode plans, custom gateways, ...) serving deepseek
+    // models are 'other' — tokens only, no account balance, no rate estimate.
+    activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
 
     const claudeCodePath = getClaudeCodePath();
     const envVars = await getEnhancedEnvWithTmpdir(cwd, 'local', apiConfig);
@@ -5955,6 +5975,7 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
+    activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
 
     const paths = ensureCoworkSandboxDirs(sessionId);
     const cwdMapping = resolveSandboxCwd(cwd);
