@@ -19,10 +19,13 @@ const DEEPSEEK_DEFAULT_RATE = DEEPSEEK_RATES['deepseek-v4-flash'];
 
 function estimateDeepSeekCostCNY(model: string | undefined, stats: CoworkUsageStats): number {
   const rate = (model && DEEPSEEK_RATES[model]) || DEEPSEEK_DEFAULT_RATE;
+  // The proxy maps DeepSeek usage so input_tokens is the TOTAL input
+  // (cached + uncached) and cacheRead/cacheCreation partition it — do NOT add
+  // inputTokens on top, or the input side is billed twice (the estimate came
+  // out ~7x the real charge: hit*0.02 + miss*1 + output*2 only).
   return (
     (stats.cacheReadTokens / 1_000_000) * rate.cacheHitPerM
     + (stats.cacheCreationTokens / 1_000_000) * rate.cacheMissPerM
-    + (stats.inputTokens / 1_000_000) * rate.cacheMissPerM
     + (stats.outputTokens / 1_000_000) * rate.outputPerM
   );
 }
@@ -93,12 +96,19 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen, fetchBalance]);
 
-  const totalTokens = usageStats.inputTokens + usageStats.outputTokens
-    + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
+  // Total token display. For DeepSeek (via the proxy) input_tokens is the
+  // TOTAL input — it already includes the cache hit/miss tokens, so adding
+  // them again would double the number. For direct Anthropic sessions
+  // input_tokens excludes cache tokens (Anthropic semantics), so all four
+  // counters are summed there.
+  const isDeepSeek = usageStats.source === 'deepseek';
+  const totalTokens = isDeepSeek
+    ? usageStats.inputTokens + usageStats.outputTokens
+    : usageStats.inputTokens + usageStats.outputTokens
+      + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
 
   if (totalTokens <= 0) return null;
 
-  const isDeepSeek = usageStats.source === 'deepseek';
   const estimatedCost = isDeepSeek
     ? estimateDeepSeekCostCNY(modelId, usageStats)
     : (usageStats.totalCostUsd ?? 0);
@@ -221,7 +231,11 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                 <div className="opacity-70">{i18nService.t('coworkUsagePerModelTitle')}</div>
                 {perModelEntries.map(([model, u]) => {
-                  const modelInput = u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+                  // Same input_tokens semantics as the top counters: DeepSeek
+                  // entries already include cache tokens in inputTokens.
+                  const modelInput = isDeepSeek
+                    ? u.inputTokens
+                    : u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
                   return (
                     <div key={model} className="flex justify-between gap-2">
                       <span className="truncate" title={model}>{model}</span>

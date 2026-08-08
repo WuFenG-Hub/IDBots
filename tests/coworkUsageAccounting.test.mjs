@@ -59,3 +59,17 @@ test('UsageStatsChip renders the per-model breakdown with i18n in zh and en', ()
   const occurrences = i18n.split('coworkUsagePerModelTitle:').length - 1;
   assert.ok(occurrences >= 2, 'coworkUsagePerModelTitle must exist in both zh and en dictionaries');
 });
+
+test('DeepSeek cost/totals never double-count input_tokens (it already includes cache tokens)', () => {
+  const chip = read('src/renderer/components/cowork/UsageStatsChip.tsx');
+
+  // The proxy maps DeepSeek usage so input_tokens = hit + miss (verified
+  // against a live session: 15.1M + 2.4M = 17.5M exactly). The cost formula
+  // must therefore bill ONLY hit + miss + output.
+  const costFn = chip.slice(chip.indexOf('function estimateDeepSeekCostCNY'));
+  assert.ok(!costFn.slice(0, 700).includes('stats.inputTokens'),
+    'estimateDeepSeekCostCNY must not add inputTokens on top of hit+miss');
+  // Totals and the per-model breakdown branch on the same semantics.
+  assert.match(chip, /const totalTokens = isDeepSeek\s*\?\s*usageStats\.inputTokens \+ usageStats\.outputTokens/);
+  assert.match(chip, /const modelInput = isDeepSeek\s*\?\s*u\.inputTokens/);
+});
