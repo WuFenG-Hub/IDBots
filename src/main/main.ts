@@ -10909,6 +10909,194 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  // ---- File right-click menu support (Open with / copy content) ----
+  interface OpenWithAppCandidate {
+    id: string;
+    name: string;
+    /** Executable path (win/linux) or 'open' (macOS). */
+    exec: string;
+    /** macOS app bundle name used with `open -a`. */
+    macBundle?: string;
+  }
+
+  const MAX_TEXT_COPY_BYTES = 512 * 1024;
+
+  const macAppExists = (bundle: string): boolean => {
+    const roots = ['/Applications', '/System/Applications', path.join(os.homedir(), 'Applications')];
+    return roots.some((root) => fs.existsSync(path.join(root, `${bundle}.app`)));
+  };
+
+  const linuxCommandExists = (command: string): boolean => {
+    try {
+      const { spawnSync } = require('child_process') as typeof import('child_process');
+      const result = spawnSync('which', [command], { encoding: 'utf8' });
+      return result.status === 0;
+    } catch {
+      return false;
+    }
+  };
+
+  const buildOpenWithAppList = (): OpenWithAppCandidate[] => {
+    if (isMac) {
+      const macCandidates: OpenWithAppCandidate[] = [
+        { id: 'textedit', name: 'TextEdit', exec: 'open', macBundle: 'TextEdit' },
+        { id: 'vscode', name: 'Visual Studio Code', exec: 'open', macBundle: 'Visual Studio Code' },
+        { id: 'cursor', name: 'Cursor', exec: 'open', macBundle: 'Cursor' },
+        { id: 'windsurf', name: 'Windsurf', exec: 'open', macBundle: 'Windsurf' },
+        { id: 'sublime', name: 'Sublime Text', exec: 'open', macBundle: 'Sublime Text' },
+        { id: 'zed', name: 'Zed', exec: 'open', macBundle: 'Zed' },
+        { id: 'xcode', name: 'Xcode', exec: 'open', macBundle: 'Xcode' },
+        { id: 'bbedit', name: 'BBEdit', exec: 'open', macBundle: 'BBEdit' },
+      ];
+      return macCandidates.filter((candidate) => candidate.macBundle && macAppExists(candidate.macBundle));
+    }
+
+    if (isWindows) {
+      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+      const windowsDir = process.env.WINDIR || 'C:\\Windows';
+      const winCandidates: OpenWithAppCandidate[] = [
+        { id: 'notepad', name: 'Notepad', exec: path.join(windowsDir, 'System32', 'notepad.exe') },
+        { id: 'vscode', name: 'Visual Studio Code', exec: path.join(localAppData, 'Programs', 'Microsoft VS Code', 'Code.exe') },
+        { id: 'cursor', name: 'Cursor', exec: path.join(localAppData, 'Programs', 'cursor', 'Cursor.exe') },
+        { id: 'notepadpp', name: 'Notepad++', exec: path.join(programFiles, 'Notepad++', 'notepad++.exe') },
+        { id: 'notepadpp-x86', name: 'Notepad++ (x86)', exec: path.join(programFilesX86, 'Notepad++', 'notepad++.exe') },
+        { id: 'sublime', name: 'Sublime Text', exec: path.join(programFiles, 'Sublime Text', 'sublime_text.exe') },
+      ];
+      return winCandidates.filter((candidate) => fs.existsSync(candidate.exec));
+    }
+
+    const linuxCandidates: OpenWithAppCandidate[] = [
+      { id: 'gedit', name: 'gedit', exec: 'gedit' },
+      { id: 'kate', name: 'Kate', exec: 'kate' },
+      { id: 'xed', name: 'Xed', exec: 'xed' },
+      { id: 'vscode', name: 'VS Code', exec: 'code' },
+      { id: 'sublime', name: 'Sublime Text', exec: 'sublime' },
+    ];
+    return linuxCandidates.filter((candidate) => linuxCommandExists(candidate.exec));
+  };
+
+  const openFileWithApp = (candidate: OpenWithAppCandidate, filePath: string): { success: boolean; error?: string } => {
+    try {
+      if (isMac && candidate.macBundle) {
+        const { spawn } = require('child_process') as typeof import('child_process');
+        spawn('open', ['-a', candidate.macBundle, filePath], { stdio: 'ignore' }).unref();
+        return { success: true };
+      }
+      const { spawn } = require('child_process') as typeof import('child_process');
+      spawn(candidate.exec, [filePath], { stdio: 'ignore' }).unref();
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  };
+
+  ipcMain.handle('shell:getOpenWithApps', async (_event, filePath: string): Promise<{ success: boolean; apps: { id: string; name: string }[]; error?: string }> => {
+    try {
+      const normalizedPath = normalizeWindowsShellPath(filePath);
+      if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+        return { success: false, apps: [], error: 'file_not_found' };
+      }
+      const apps = buildOpenWithAppList().map(({ id, name }) => ({ id, name }));
+      return { success: true, apps };
+    } catch (error) {
+      return { success: false, apps: [], error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('shell:openWith', async (_event, payload: { filePath: string; appId: string }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
+      const appId = payload?.appId ?? '';
+      if (!filePath) {
+        return { success: false, error: 'empty_path' };
+      }
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: 'file_not_found' };
+      }
+      const candidate = buildOpenWithAppList().find((item) => item.id === appId);
+      if (!candidate) {
+        return { success: false, error: 'app_not_found' };
+      }
+      return openFileWithApp(candidate, filePath);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('shell:chooseOpenWithApp', async (_event, filePath: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const normalizedPath = normalizeWindowsShellPath(filePath);
+      if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+        return { success: false, error: 'file_not_found' };
+      }
+      const { spawn, exec } = require('child_process') as typeof import('child_process');
+
+      if (isMac) {
+        const appPath = await new Promise<string | null>((resolve) => {
+          const child = spawn('osascript', ['-e', 'POSIX path of (choose application with prompt "Choose an application to open this file")']);
+          let output = '';
+          child.stdout?.on('data', (chunk: Buffer | string) => { output += String(chunk); });
+          child.on('error', () => resolve(null));
+          child.on('close', (code: number | null) => {
+            if (code !== 0 || !output.trim()) {
+              resolve(null);
+              return;
+            }
+            resolve(output.trim());
+          });
+        });
+        if (!appPath) {
+          return { success: false, error: 'cancelled' };
+        }
+        const result = openFileWithApp({ id: 'chosen', name: 'Chosen', exec: 'open', macBundle: appPath }, normalizedPath);
+        return result;
+      }
+
+      if (isWindows) {
+        // The system "Open with" dialog opens asynchronously; nothing to await.
+        exec(`rundll32 shell32.dll,OpenAs_RunDLL "${normalizedPath}"`);
+        return { success: true };
+      }
+
+      if (linuxCommandExists('mimeopen')) {
+        spawn('mimeopen', ['-a', normalizedPath], { stdio: 'ignore' }).unref();
+        return { success: true };
+      }
+      return { success: false, error: 'no_chooser_available' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('fs:readTextFile', async (_event, payload: { filePath: string; maxBytes?: number }): Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }> => {
+    try {
+      const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
+      if (!filePath) {
+        return { success: false, error: 'empty_path' };
+      }
+      const stats = await fs.promises.stat(filePath);
+      if (!stats.isFile()) {
+        return { success: false, error: 'not_a_file' };
+      }
+      const limit = typeof payload?.maxBytes === 'number' && payload.maxBytes > 0
+        ? payload.maxBytes
+        : MAX_TEXT_COPY_BYTES;
+      if (stats.size > limit) {
+        return { success: false, error: 'file_too_large', size: stats.size, limit };
+      }
+      const content = await fs.promises.readFile(filePath, 'utf8');
+      return { success: true, content };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') {
+        return { success: false, error: 'file_not_found' };
+      }
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
   // App update download & install
   ipcMain.handle('appUpdate:download', async (event, payload: { url: string; version?: string; sha256?: string }) => {
     try {
