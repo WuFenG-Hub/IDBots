@@ -26,12 +26,23 @@ import {
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
-import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
+import { getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
-import { getCoworkOpenAICompatProxyStatus } from './coworkOpenAICompatProxy';
+import {
+  getCoworkOpenAICompatProxyStatus,
+  getCoworkSnipHeadTokens,
+  resetCoworkSnipHeadTokens,
+  setCoworkSnipHeadTokens,
+} from './coworkOpenAICompatProxy';
+import {
+  COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS,
+  COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS,
+  snipStaleToolResultBlocks,
+  type AnthropicMessageLike,
+} from './coworkToolResultSnip';
 import {
   buildUserConfiguredMcpServerConfigs,
   type UserConfiguredMcpServerDefinition,
@@ -476,6 +487,38 @@ function shouldForceTextOnlyAttachmentMode(
   return normalizedModel.startsWith('deepseek');
 }
 
+/**
+ * Estimate the token savings a snip boundary would buy for a session, by
+ * projecting its cowork store messages into Anthropic-shaped messages and
+ * running the same deterministic snip the proxy will run on the wire. The
+ * store truncates tool results for display, so this is a lower bound — the
+ * same is true of the budget estimate it is compared against.
+ */
+function estimateCoworkStoreToolResultSnipSavings(
+  messages: CoworkMessage[],
+  headTokenBudget: number
+): number {
+  const projected: AnthropicMessageLike[] = [];
+  for (const message of messages) {
+    if (!shouldIncludeCoworkContextMessage(message)) {
+      continue;
+    }
+    if (message.type === 'tool_result') {
+      const toolUseId = typeof message.metadata?.toolUseId === 'string' ? message.metadata.toolUseId : message.id;
+      projected.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: message.content }],
+      });
+      continue;
+    }
+    projected.push({
+      role: message.type === 'user' ? 'user' : 'assistant',
+      content: message.content,
+    });
+  }
+  return snipStaleToolResultBlocks(projected, headTokenBudget).stats.savedTokens;
+}
+
 function isUnsupportedMultimodalContentError(message: string): boolean {
   if (!message) return false;
   const normalized = message.toLowerCase();
@@ -785,7 +828,7 @@ interface ActiveSession {
      * reported cache-creation (miss) tokens, recording the turn index and the
      * reason. The first turn is always 'cold_start'; later misses carry the
      * pendingCacheBreakReason recorded at the reset point (system_prompt_changed,
-     * compaction, overflow_retry, stale_session_retry, reasoning_history_retry,
+     * compaction, snip, overflow_retry, stale_session_retry, reasoning_history_retry,
      * multimodal_retry, system_prompt_drift) or 'unknown' when no reset was
      * tracked. Used for diagnostics in the UsageStatsChip popover.
      */
@@ -821,7 +864,7 @@ interface ActiveSession {
   /**
    * Reason the next turn's cache prefix will be cold, set at every point that
    * resets or rewrites the provider-visible prefix (system-prompt change,
-   * compaction, overflow/stale-session retries). Consumed by
+   * compaction, tool-result snip, overflow/stale-session retries). Consumed by
    * accumulateResultUsage to label the next miss event instead of 'unknown'
    * (Reasonix CompareShape-style attribution, adapted to SDK-managed history).
    */
@@ -4401,6 +4444,16 @@ export class CoworkRunner extends EventEmitter {
     if (skillEnvOverrides && Object.keys(skillEnvOverrides).length > 0) {
       Object.assign(envVars, skillEnvOverrides);
     }
+    // Route this session's Anthropic traffic through the session-scoped proxy
+    // path (/s/<coworkSessionId>/v1/messages) so the proxy can apply the
+    // per-session tool-result snip boundary (tiered compaction tier 1). The
+    // Anthropic SDK joins baseURL + path via plain string concat, so appending
+    // the segment here suffices. Use the CoWork session id — it survives SDK
+    // session resets and hard compactions, unlike claudeSessionId. Local mode
+    // only: sandbox envs come from buildSandboxEnv and stay untouched.
+    if (envVars.ANTHROPIC_BASE_URL) {
+      envVars.ANTHROPIC_BASE_URL = `${envVars.ANTHROPIC_BASE_URL.replace(/\/+$/, '')}/s/${encodeURIComponent(sessionId)}`;
+    }
     let stderrTail = '';
 
     // Kept for child processes spawned down the tool chain (node/npx shims run
@@ -4436,32 +4489,73 @@ export class CoworkRunner extends EventEmitter {
       });
 
       if (budget.shouldCompact) {
-        const compacted = buildCoworkCompactedPrompt({
-          messages: sessionSnapshotForBudget?.messages ?? [],
-          currentPrompt: prompt,
-          modelLimits,
-        });
-        effectivePrompt = compacted.prompt;
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        activeSession.pendingCacheBreakReason = 'compaction';
-        coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
-          sessionId,
-          modelId: modelLimits.modelId,
-          contextWindow: modelLimits.contextWindow,
-          maxOutputTokens: modelLimits.maxOutputTokens,
-          limitSource: modelLimits.source,
-          estimatedTokens: budget.estimatedTokens,
-          softThresholdTokens: budget.softThresholdTokens,
-          usableInputTokens: budget.usableInputTokens,
-          compactedEstimatedTokens: compacted.estimatedTokens,
-          compactedRecentMessages: compacted.recentMessages,
-          compactedSummarizedMessages: compacted.summarizedMessages,
-        });
-        this.addSystemMessage(
-          sessionId,
-          '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
-        );
+        // Tiered compaction tier 1 (Reasonix-style tool-result snipping):
+        // raise this session's persisted snip boundary so the proxy shortens
+        // stale tool_result blocks in the head region while keeping a
+        // COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS tail byte-stable. The SDK
+        // session survives; only the prefix after the first newly snipped
+        // block breaks. Hysteresis: the boundary only advances in big steps,
+        // so ordinary turns never re-break the prefix.
+        const snipHeadTokens = Math.max(0, budget.estimatedTokens - COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS);
+        const persistedSnipHeadTokens = getCoworkSnipHeadTokens(sessionId);
+        let snipApplied = false;
+        if (snipHeadTokens >= persistedSnipHeadTokens + COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS) {
+          const snipSavedTokens = estimateCoworkStoreToolResultSnipSavings(
+            sessionSnapshotForBudget?.messages ?? [],
+            snipHeadTokens
+          );
+          const effectiveEstimatedTokens = budget.estimatedTokens - snipSavedTokens;
+          if (effectiveEstimatedTokens < budget.softThresholdTokens) {
+            setCoworkSnipHeadTokens(sessionId, snipHeadTokens);
+            activeSession.pendingCacheBreakReason = 'snip';
+            snipApplied = true;
+            coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; snipping stale tool results instead of compacting the SDK session', {
+              sessionId,
+              modelId: modelLimits.modelId,
+              estimatedTokens: budget.estimatedTokens,
+              softThresholdTokens: budget.softThresholdTokens,
+              usableInputTokens: budget.usableInputTokens,
+              snipHeadTokens,
+              previousSnipHeadTokens: persistedSnipHeadTokens,
+              snipSavedTokens,
+              effectiveEstimatedTokens,
+            });
+          }
+        }
+
+        if (!snipApplied) {
+          // Tier 2 (existing behavior): flatten history into one synthetic
+          // message and reset the SDK session — a full cold start. The fresh
+          // session rebuilds history from scratch, so the old snip boundary
+          // no longer applies.
+          resetCoworkSnipHeadTokens(sessionId);
+          const compacted = buildCoworkCompactedPrompt({
+            messages: sessionSnapshotForBudget?.messages ?? [],
+            currentPrompt: prompt,
+            modelLimits,
+          });
+          effectivePrompt = compacted.prompt;
+          this.store.updateSession(sessionId, { claudeSessionId: null });
+          activeSession.claudeSessionId = null;
+          activeSession.pendingCacheBreakReason = 'compaction';
+          coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
+            sessionId,
+            modelId: modelLimits.modelId,
+            contextWindow: modelLimits.contextWindow,
+            maxOutputTokens: modelLimits.maxOutputTokens,
+            limitSource: modelLimits.source,
+            estimatedTokens: budget.estimatedTokens,
+            softThresholdTokens: budget.softThresholdTokens,
+            usableInputTokens: budget.usableInputTokens,
+            compactedEstimatedTokens: compacted.estimatedTokens,
+            compactedRecentMessages: compacted.recentMessages,
+            compactedSummarizedMessages: compacted.summarizedMessages,
+          });
+          this.addSystemMessage(
+            sessionId,
+            '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
+          );
+        }
       }
     }
 
