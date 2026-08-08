@@ -507,3 +507,55 @@ test('listGroupTaskSummaries enriches with member count and chair/member names',
     h.cleanup();
   }
 });
+
+test('round-4: computeGroupTaskStall — non-terminal + stale drive → stall, fresh → no stall, terminal → no stall', async () => {
+  const { computeGroupTaskStall } = require('../dist-electron/main/services/groupTaskService.js');
+  const nowMs = 1_000_000_000_000;
+  const base = {
+    id: 1, orchestrationTaskId: null, groupId: 'g-i0', title: 'T', goal: 'G',
+    acceptanceCriteria: null, status: 'executing', chairMetabotId: 1, createdBy: 'user',
+    lastProcessedMsgId: 10, lastDrivenAt: null, createPinId: null,
+    createdAt: null, updatedAt: null, closedAt: null,
+  };
+
+  // stale lastDrivenAt (older than 30 min) → stalled
+  assert.equal(computeGroupTaskStall(
+    { ...base, lastDrivenAt: Math.floor(nowMs / 1000) - 60 * 60 }, nowMs,
+  ).stall, true, '60min-old drive → stall');
+
+  // fresh lastDrivenAt → not stalled
+  assert.equal(computeGroupTaskStall(
+    { ...base, lastDrivenAt: Math.floor(nowMs / 1000) - 10 }, nowMs,
+  ).stall, false, '10s-old drive → no stall');
+
+  // no lastDrivenAt → updatedAt fallback (UTC sqlite string), stale → stall
+  assert.equal(computeGroupTaskStall(
+    { ...base, lastDrivenAt: null, updatedAt: '2001-01-01 00:00:00' }, nowMs,
+  ).stall, true, 'stale updatedAt fallback → stall');
+
+  // no timestamps at all → unknown, never claims a stall
+  assert.equal(computeGroupTaskStall(base, nowMs).stall, false, 'unknown activity → no stall');
+
+  // terminal tasks never stall
+  assert.equal(computeGroupTaskStall(
+    { ...base, status: 'done', lastDrivenAt: Math.floor(nowMs / 1000) - 60 * 60 }, nowMs,
+  ).stall, false, 'terminal → no stall');
+  assert.equal(computeGroupTaskStall(
+    { ...base, status: 'cancelled', lastDrivenAt: null, updatedAt: '2026-01-01 00:00:00' }, nowMs,
+  ).stall, false, 'cancelled → no stall');
+
+  assert.equal(computeGroupTaskStall(base, nowMs).stallAfterMinutes, 30);
+});
+
+test('round-4: getGroupTask detail carries lastDrivenAt + stall fields', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createGroupTask({ title: 'T', goal: 'G', memberMetabotIds: [2], createdBy: 'user' });
+    const detail = await getGroupTask(task.id);
+    assert.equal(typeof detail.stall, 'boolean');
+    assert.equal(detail.stallAfterMinutes, 30);
+    assert.ok('lastDrivenAt' in detail, 'lastDrivenAt surfaced on the detail');
+  } finally {
+    h.cleanup();
+  }
+});

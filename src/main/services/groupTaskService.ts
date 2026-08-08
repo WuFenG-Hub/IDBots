@@ -43,6 +43,48 @@ export interface GroupTaskDetail extends GroupTask {
   deliverables: GroupTaskDeliverable[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
+  /**
+   * Round-4 stall signal: true when a NON-TERMINAL task has had no host drive
+   * (lastDrivenAt, falling back to updatedAt) for longer than
+   * stallAfterMinutes — the pipeline looks stuck.
+   */
+  stall: boolean;
+  /** Round-4: the stall threshold in minutes (30 by default). */
+  stallAfterMinutes: number;
+}
+
+/** Round-4: minutes of host inactivity before a non-terminal task reads as stalled. */
+export const GROUP_TASK_STALL_AFTER_MINUTES = 30;
+
+/** sqlite datetime('now') strings are UTC 'YYYY-MM-DD HH:MM:SS'. */
+function parseSqliteUtc(value: string | null): number | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    Number(match[4]), Number(match[5]), Number(match[6]),
+  );
+}
+
+/**
+ * Round-4: lastProcessedMsgId semantics + stall. `stall` is true when the task
+ * is not terminal and the host's last drive (lastDrivenAt, else updatedAt) is
+ * older than GROUP_TASK_STALL_AFTER_MINUTES. Unknown activity (no timestamps)
+ * never claims a stall.
+ */
+export function computeGroupTaskStall(
+  task: GroupTask,
+  nowMs: number = Date.now(),
+): { stall: boolean; stallAfterMinutes: number } {
+  if (TERMINAL_STATUSES.has(task.status)) {
+    return { stall: false, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
+  }
+  const drivenMs = task.lastDrivenAt != null ? task.lastDrivenAt * 1000 : null;
+  const lastActivityMs = drivenMs ?? parseSqliteUtc(task.updatedAt);
+  const stall = lastActivityMs != null
+    && nowMs - lastActivityMs > GROUP_TASK_STALL_AFTER_MINUTES * 60_000;
+  return { stall, stallAfterMinutes: GROUP_TASK_STALL_AFTER_MINUTES };
 }
 
 export interface PostGroupTaskMessageOptions {
@@ -366,6 +408,7 @@ export async function listGroupTaskSummaries(
 export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
   const store = getGroupTaskStore();
   const task = requireTask(id);
+  const stall = computeGroupTaskStall(task);
   return {
     ...task,
     members: store.listMembers(id),
@@ -373,6 +416,8 @@ export async function getGroupTask(id: number): Promise<GroupTaskDetail> {
     messages: task.groupId
       ? store.listGroupChatMessages(task.groupId, { limit: 50 })
       : [],
+    stall: stall.stall,
+    stallAfterMinutes: stall.stallAfterMinutes,
   };
 }
 

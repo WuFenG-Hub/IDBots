@@ -55,6 +55,9 @@ const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
 
 const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
+/** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
+const MSG_RETRY_MAX_FAILURES = 5;
 
 /** Deliverable verification: strict formats (lowercase hex only). */
 const PINID_FORMAT = /^[0-9a-f]{64}i0$/;
@@ -1714,7 +1717,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
-    const db = deps.getStore().getDatabase();
+    const sqlite = deps.getStore();
+    const db = sqlite.getDatabase();
 
     if (deps.orchestrationBridge) {
       try {
@@ -1756,6 +1760,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const ownerGlobalMetaId = (
       chairMemberId != null ? botsById.get(chairMemberId)?.boss_global_metaid ?? '' : ''
     ).trim();
+
+    // Round-4: per-tick heartbeat — lastDrivenAt (epoch seconds) is the host's
+    // last drive timestamp, the primary input for the show stall signal.
+    try {
+      store.updateLastDrivenAt(task.id, Math.floor(now() / 1000));
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: lastDrivenAt heartbeat failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {
@@ -1916,14 +1931,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             chairAutoRepliesThisTick += 1;
           }
         }
+        // Round-4: cursor advances only on SUCCESSFUL processing.
+        store.updateLastProcessedMsgId(task.id, message.id);
+        const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
+        if (sqlite.get<number>(retryKey) != null) {
+          sqlite.delete(retryKey); // recovered after earlier failures
+        }
       } catch (error) {
-        // One bad message must never stall the cursor or the tick.
+        // Round-4 cursor semantics: lastProcessedMsgId is the id of the LAST
+        // MESSAGE THE HOST SUCCESSFULLY PROCESSED — it only advances on
+        // success. A failing message is retried on later ticks (bounded by a
+        // kv failure counter) so a transient error never loses the message,
+        // while a permanently broken message is dropped after
+        // MSG_RETRY_MAX_FAILURES so it cannot stall the pipeline forever.
+        const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
+        const failures = (Number(sqlite.get<number>(retryKey) ?? 0) || 0) + 1;
+        sqlite.set(retryKey, failures);
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: message ${message.id} failed: ` +
+          `[GroupTaskDaemon] Task ${task.id}: message ${message.id} failed ` +
+          `(attempt ${failures}/${MSG_RETRY_MAX_FAILURES}): ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
-      } finally {
-        store.updateLastProcessedMsgId(task.id, message.id);
+        if (failures >= MSG_RETRY_MAX_FAILURES) {
+          sqlite.delete(retryKey);
+          store.updateLastProcessedMsgId(task.id, message.id);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: message ${message.id} dropped after ` +
+            `${failures} consecutive failures (cursor advanced past it)`,
+          );
+        }
       }
     }
   };

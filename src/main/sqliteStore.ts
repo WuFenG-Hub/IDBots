@@ -772,6 +772,7 @@ export class SqliteStore {
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
+    this.migrateGroupTasksLastDrivenAt();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1880,7 +1881,24 @@ export class SqliteStore {
     }
   }
 
-  private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
+  /**
+   * Migration (round-4): add last_driven_at (epoch seconds) to group_tasks —
+   * heartbeat of the daemon's last drive, used for the stall signal. No-op
+   * once present; existing tasks get null (stall falls back to updated_at).
+   */
+  private migrateGroupTasksLastDrivenAt(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('last_driven_at')) return;
+      this.db.run('ALTER TABLE group_tasks ADD COLUMN last_driven_at INTEGER');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksLastDrivenAt:', e);
+    }
+  }
+
+    private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
     try {
       const walletCols = this.db.exec("PRAGMA table_info(metabot_wallets);");
       const walletColumnNames = (walletCols[0]?.values.map((row) => row[1]) || []) as string[];

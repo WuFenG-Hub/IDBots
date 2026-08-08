@@ -20,7 +20,17 @@ export interface GroupTask {
   status: GroupTaskStatus;
   chairMetabotId: number;
   createdBy: string;
+  /**
+   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
+   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
+   * retried (bounded) and never silently skipped.
+   */
   lastProcessedMsgId: number;
+  /**
+   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
+   * for the stall signal). null when the daemon has never driven the task.
+   */
+  lastDrivenAt: number | null;
   createPinId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
@@ -108,6 +118,7 @@ interface GroupTaskRow {
   chair_metabot_id: number;
   created_by: string;
   last_processed_msg_id: number;
+  last_driven_at: number | null;
   create_pin_id: string | null;
   created_at: string | null;
   updated_at: string | null;
@@ -204,6 +215,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     chairMetabotId: row.chair_metabot_id,
     createdBy: row.created_by,
     lastProcessedMsgId: row.last_processed_msg_id ?? 0,
+    lastDrivenAt: row.last_driven_at ?? null,
     createPinId: row.create_pin_id ?? null,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
@@ -403,6 +415,15 @@ export class GroupTaskStore {
     this.saveDb();
   }
 
+  /** Round-4: heartbeat of the last daemon drive (epoch seconds). */
+  updateLastDrivenAt(id: number, epochSec: number): void {
+    this.db.run(
+      'UPDATE group_tasks SET last_driven_at = ? WHERE id = ?',
+      [Math.trunc(epochSec), id],
+    );
+    this.saveDb();
+  }
+
   /** group_id of every non-terminal task (backfill targets). */
   getActiveGroupIds(): string[] {
     const rows = this.getAll<{ group_id: string }>(
@@ -443,6 +464,17 @@ export class GroupTaskStore {
     return rows.map(rowToGroupChatTranscriptMessage);
   }
 
+  /**
+   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
+   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
+   * retried (bounded) and never silently skipped.
+   */
+  lastProcessedMsgId: number;
+  /**
+   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
+   * for the stall signal). null when the daemon has never driven the task.
+   */
+  lastDrivenAt: number | null;
   /**
    * Round-4 attribution: persist the GlobalMetaID resolved from the message's
    * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The

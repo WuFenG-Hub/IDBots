@@ -1903,3 +1903,71 @@ test('round-4: HTTP probe notes on https deliverable links ride the chair verifi
     h.cleanup();
   }
 });
+
+test('round-4 cursor semantics: failing message is retried, cursor advances only on success', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // one-shot LLM failure: tick 1 fails, tick 2 succeeds
+    h.state.chatError = 'transient boom';
+    insertGroupMessage(h.db, {
+      pinId: 'retry-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot go',
+    });
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['retry-i0'])[0].values[0][0];
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor does NOT advance on a failed message (retry semantics)');
+    assert.equal(h.chatCalls.length, 1, 'first attempt failed');
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advances once the message is processed successfully');
+    assert.equal(h.chatCalls.length, 2, 'message was retried');
+    assert.equal(h.sends.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 cursor semantics: permanently failing message is dropped after the bounded retries', async () => {
+  const h = await createHarness({ chatErrorAlways: 'always boom' });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do the impossible',
+    });
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-i0'])[0].values[0][0];
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      await h.loop.runTick();
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+        `tick ${tick}: cursor held until the retry budget is spent`);
+    }
+    // the 5th failure spends the budget: the message is dropped, cursor advances
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced past the permanently failing message after the bounded retries');
+    assert.equal(h.chatCalls.length, 5, 'exactly MSG_RETRY_MAX_FAILURES attempts');
+
+    // the 6th tick has nothing left to process
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 5, 'no further attempts after the drop');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    await h.loop.runTick();
+    const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+  } finally {
+    h.cleanup();
+  }
+});
