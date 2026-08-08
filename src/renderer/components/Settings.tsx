@@ -374,6 +374,44 @@ const getDefaultActiveProvider = (): ProviderType => {
   return firstEnabledProvider ?? providerKeys[0];
 };
 
+// --- 自定义供应商辅助 ---
+// 自定义供应商由用户通过"添加供应商"创建，key 形如 custom-<slug>，
+// 不在 providerKeys / providerMeta 内置注册表内，显示名存于配置的 name 字段。
+const isCustomProviderKey = (key: string): boolean => (
+  !(providerKeys as readonly string[]).includes(key)
+);
+
+const getProviderDisplayLabel = (key: ProviderType, config?: ProviderConfig): string => {
+  if (isCustomProviderKey(key)) {
+    return config?.name?.trim() || key.charAt(0).toUpperCase() + key.slice(1);
+  }
+  return providerMeta[key]?.label ?? key;
+};
+
+const getProviderIcon = (key: ProviderType): React.ReactNode => {
+  if (isCustomProviderKey(key)) {
+    return <CustomProviderIcon />;
+  }
+  return providerMeta[key]?.icon;
+};
+
+const generateCustomProviderKey = (name: string, existingKeys: string[]): string => {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  const base = slug ? `custom-${slug}` : 'custom-provider';
+  let candidate = base;
+  let suffix = 2;
+  while (existingKeys.includes(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+};
+
 const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const dispatch = useDispatch();
   // 状态
@@ -454,6 +492,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [newModelId, setNewModelId] = useState('');
   const [newModelSupportsImage, setNewModelSupportsImage] = useState(false);
   const [modelFormError, setModelFormError] = useState<string | null>(null);
+
+  // State for the custom provider add dialog
+  const [isAddingCustomProvider, setIsAddingCustomProvider] = useState(false);
+  const [customProviderName, setCustomProviderName] = useState('');
+  const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
+  const [customProviderApiKey, setCustomProviderApiKey] = useState('');
+  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('anthropic');
+  const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
+  const [customModelName, setCustomModelName] = useState('');
+  const [customModelId, setCustomModelId] = useState('');
+  const [customProviderError, setCustomProviderError] = useState<string | null>(null);
 
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
@@ -772,7 +821,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     return unsubscribe;
   }, []);
 
-  // All LLM providers shown uniformly (no language filtering per SDD)
+  // All LLM providers shown uniformly (no language filtering per SDD),
+  // plus user-created custom providers (keys outside the built-in registry).
   const visibleProviders = useMemo(() => {
     const visibleKeys = getVisibleProviders(language);
     const filtered: Partial<ProvidersConfig> = {};
@@ -780,6 +830,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       if (providers[key as keyof ProvidersConfig]) {
         filtered[key as keyof ProvidersConfig] = providers[key as keyof ProvidersConfig];
       }
+    }
+    for (const key of Object.keys(providers)) {
+      if (visibleKeys.includes(key)) {
+        continue;
+      }
+      filtered[key as keyof ProvidersConfig] = providers[key as keyof ProvidersConfig];
     }
     return filtered as ProvidersConfig;
   }, [language, providers]);
@@ -1396,6 +1452,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       setNewModelId('');
       setNewModelSupportsImage(false);
       setModelFormError(null);
+      handleCancelCustomProvider();
     }
     if (tab === 'paramsConfig') {
       loadFeeRates();
@@ -1522,6 +1579,102 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  // --- 自定义供应商添加/删除 ---
+  const handleAddCustomProviderClick = () => {
+    setCustomProviderName('');
+    setCustomProviderBaseUrl('');
+    setCustomProviderApiKey('');
+    setCustomProviderApiFormat('anthropic');
+    setCustomProviderModels([]);
+    setCustomModelName('');
+    setCustomModelId('');
+    setCustomProviderError(null);
+    setIsAddingCustomProvider(true);
+  };
+
+  const handleCancelCustomProvider = () => {
+    setIsAddingCustomProvider(false);
+    setCustomProviderError(null);
+  };
+
+  const handleAddCustomModelDraft = () => {
+    const modelName = customModelName.trim();
+    const modelId = customModelId.trim();
+    if (!modelName || !modelId) {
+      setCustomProviderError(i18nService.t('modelNameAndIdRequired'));
+      return;
+    }
+    if (customProviderModels.some(model => model.id === modelId)) {
+      setCustomProviderError(i18nService.t('modelIdExists'));
+      return;
+    }
+    setCustomProviderModels(prev => [
+      ...prev,
+      { id: modelId, name: modelName, supportsImage: false },
+    ]);
+    setCustomModelName('');
+    setCustomModelId('');
+    setCustomProviderError(null);
+  };
+
+  const handleRemoveCustomModelDraft = (modelId: string) => {
+    setCustomProviderModels(prev => prev.filter(model => model.id !== modelId));
+  };
+
+  const handleAddCustomProvider = () => {
+    const name = customProviderName.trim();
+    const baseUrl = customProviderBaseUrl.trim();
+    if (!name) {
+      setCustomProviderError(i18nService.t('providerNameRequired'));
+      return;
+    }
+    if (!baseUrl) {
+      setCustomProviderError(i18nService.t('providerBaseUrlRequired'));
+      return;
+    }
+    const providerKey = generateCustomProviderKey(name, Object.keys(providers));
+    setProviders(prev => ({
+      ...prev,
+      [providerKey]: {
+        enabled: false,
+        apiKey: customProviderApiKey.trim(),
+        baseUrl,
+        apiFormat: customProviderApiFormat,
+        name,
+        models: customProviderModels.length > 0 ? customProviderModels : undefined,
+      },
+    }));
+    setTestResult(null);
+    setIsAddingCustomProvider(false);
+    setCustomProviderError(null);
+    setActiveProvider(providerKey as ProviderType);
+  };
+
+  const handleCustomProviderDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelCustomProvider();
+    }
+  };
+
+  const handleDeleteCustomProvider = (providerKey: string) => {
+    const displayName = providers[providerKey]?.name?.trim() || providerKey;
+    if (!window.confirm(i18nService.t('deleteCustomProviderConfirm').replace('{name}', displayName))) {
+      return;
+    }
+    setProviders(prev => {
+      const next = { ...prev };
+      delete next[providerKey];
+      return next;
+    });
+    setTestResult(null);
+    if (activeProvider === providerKey) {
+      const remainingKeys = Object.keys(visibleProviders).filter(key => key !== providerKey);
+      const firstEnabled = remainingKeys.find(key => visibleProviders[key]?.enabled);
+      setActiveProvider((firstEnabled ?? remainingKeys[0]) as ProviderType);
+    }
+  };
+
   // 测试 API 连接
   const handleTestConnection = async () => {
     setIsTesting(true);
@@ -1644,6 +1797,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             baseUrl: providerConfig.baseUrl,
             apiFormat: getEffectiveApiFormat(providerKey, providerConfig.apiFormat),
             models: providerConfig.models,
+            name: isCustomProviderKey(providerKey) ? (providerConfig as ProviderConfig).name : undefined,
           },
         ] as const;
       })
@@ -1747,11 +1901,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     try {
       const providerUpdates: Partial<ProvidersConfig> = {};
       let hadDecryptFailure = false;
-      for (const providerKey of providerKeys) {
+      // Built-in providers plus any custom provider keys present in the file
+      const importKeys = Array.from(new Set([
+        ...providerKeys,
+        ...Object.keys(payload.providers ?? {}).filter(key => !(providerKeys as readonly string[]).includes(key)),
+      ]));
+      for (const providerKey of importKeys) {
         const providerData = payload.providers?.[providerKey];
         if (!providerData) {
           continue;
         }
+        const existing = providers[providerKey] as ProviderConfig | undefined;
 
         let apiKey: string | undefined;
         if (typeof providerData.apiKey === 'string') {
@@ -1775,11 +1935,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         const models = normalizeModels(providerData.models);
 
         providerUpdates[providerKey] = {
-          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : providers[providerKey].enabled,
-          apiKey: apiKey ?? providers[providerKey].apiKey,
-          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : providers[providerKey].baseUrl,
-          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? providers[providerKey].apiFormat),
-          models: models ?? providers[providerKey].models,
+          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : existing?.enabled ?? false,
+          apiKey: apiKey ?? existing?.apiKey ?? '',
+          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : existing?.baseUrl ?? '',
+          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? existing?.apiFormat),
+          models: models ?? existing?.models,
+          name: typeof providerData.name === 'string' ? providerData.name : existing?.name,
         };
       }
 
@@ -1826,11 +1987,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const providerUpdates: Partial<ProvidersConfig> = {};
       let hadDecryptFailure = false;
 
-      for (const providerKey of providerKeys) {
+      // Built-in providers plus any custom provider keys present in the file
+      const importKeys = Array.from(new Set([
+        ...providerKeys,
+        ...Object.keys(payload.providers ?? {}).filter(key => !(providerKeys as readonly string[]).includes(key)),
+      ]));
+      for (const providerKey of importKeys) {
         const providerData = payload.providers[providerKey];
         if (!providerData) {
           continue;
         }
+        const existing = providers[providerKey] as ProviderConfig | undefined;
 
         let apiKey: string | undefined;
         if (typeof providerData.apiKey === 'string') {
@@ -1851,11 +2018,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         const models = normalizeModels(providerData.models);
 
         providerUpdates[providerKey] = {
-          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : providers[providerKey].enabled,
-          apiKey: apiKey ?? providers[providerKey].apiKey,
-          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : providers[providerKey].baseUrl,
-          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? providers[providerKey].apiFormat),
-          models: models ?? providers[providerKey].models,
+          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : existing?.enabled ?? false,
+          apiKey: apiKey ?? existing?.apiKey ?? '',
+          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : existing?.baseUrl ?? '',
+          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? existing?.apiFormat),
+          models: models ?? existing?.models,
+          name: typeof providerData.name === 'string' ? providerData.name : existing?.name,
         };
       }
 
@@ -2793,6 +2961,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 <div className="flex items-center space-x-1">
                   <button
                     type="button"
+                    onClick={handleAddCustomProviderClick}
+                    className="btn-idchat-primary-filled inline-flex items-center px-2 py-1 text-[11px] font-medium"
+                  >
+                    <PlusCircleIcon className="h-3 w-3 mr-1" />
+                    {i18nService.t('addProvider')}
+                  </button>
+                  <button
+                    type="button"
                     onClick={handleImportProvidersClick}
                     disabled={isImportingProviders || isExportingProviders}
                     className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
@@ -2818,14 +2994,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               />
               {Object.entries(visibleProviders).map(([provider, config]) => {
                 const providerKey = provider as ProviderType;
-                const providerInfo = providerMeta[providerKey];
                 const missingApiKey = providerRequiresApiKey(providerKey) && !config.apiKey.trim();
                 const canToggleProvider = config.enabled || !missingApiKey;
                 return (
                   <div
                     key={provider}
                     onClick={() => handleProviderChange(providerKey)}
-                    className={`flex items-center p-2 rounded-xl cursor-pointer transition-colors ${
+                    className={`flex items-center p-2 rounded-xl cursor-pointer transition-colors group ${
                       activeProvider === provider
                         ? 'bg-claude-accent/10 dark:bg-claude-accent/20 border border-claude-accent/30 shadow-subtle'
                         : 'dark:bg-claude-darkSurface/50 bg-claude-surface hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover border border-transparent'
@@ -2834,7 +3009,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     <div className="flex flex-1 items-center">
                       <div className="mr-2 flex h-7 w-7 items-center justify-center">
                         <span className="dark:text-claude-darkText text-claude-text">
-                          {providerInfo?.icon}
+                          {getProviderIcon(providerKey)}
                         </span>
                       </div>
                       <span className={`text-sm font-medium truncate ${
@@ -2842,10 +3017,23 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           ? 'text-claude-accent'
                           : 'dark:text-claude-darkText text-claude-text'
                       }`}>
-                        {providerInfo?.label ?? provider.charAt(0).toUpperCase() + provider.slice(1)}
+                        {getProviderDisplayLabel(providerKey, config)}
                       </span>
                     </div>
                     <div className="flex items-center ml-2">
+                      {isCustomProviderKey(providerKey) && (
+                        <button
+                          type="button"
+                          title={i18nService.t('deleteProvider')}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteCustomProvider(providerKey);
+                          }}
+                          className="p-1 mr-1 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <TrashIcon className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <div
                         title={!canToggleProvider ? i18nService.t('configureApiKey') : undefined}
                         className={`w-7 h-4 rounded-full flex items-center transition-colors ${
@@ -2877,7 +3065,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             <div className="w-3/5 pl-4 space-y-4 overflow-y-auto">
               <div className="flex items-center justify-between pb-2 border-b dark:border-claude-darkBorder border-claude-border">
                 <h3 className="text-base font-medium dark:text-claude-darkText text-claude-text">
-                  {(providerMeta[activeProvider]?.label ?? activeProvider.charAt(0).toUpperCase() + activeProvider.slice(1))} {i18nService.t('providerSettings')}
+                  {getProviderDisplayLabel(activeProvider, providers[activeProvider])} {i18nService.t('providerSettings')}
                 </h3>
                 <div
                   className={`px-2 py-0.5 rounded-lg text-xs font-medium ${
@@ -2926,13 +3114,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   <label htmlFor={`${activeProvider}-apiFormat`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('apiFormat')}
                   </label>
-                  <div className="flex items-center space-x-4">
+                  <div className="flex items-center space-x-4 flex-wrap gap-y-1.5">
                     <label className="flex items-center">
                       <input
                         type="radio"
                         name={`${activeProvider}-apiFormat`}
                         value="anthropic"
-                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) !== 'openai'}
+                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'}
                         onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'anthropic')}
                         className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
                       />
@@ -2951,6 +3139,19 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       />
                       <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
                         {i18nService.t('apiFormatOpenAI')}
+                      </span>
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name={`${activeProvider}-apiFormat`}
+                        value="responses"
+                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'responses'}
+                        onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'responses')}
+                        className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
+                      />
+                      <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
+                        {i18nService.t('apiFormatResponses')}
                       </span>
                     </label>
                   </div>
@@ -3390,6 +3591,199 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     className="btn-idchat-primary-filled px-3 py-1.5 text-xs"
                   >
                     {i18nService.t('save')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isAddingCustomProvider && (
+            <div
+              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4"
+              onClick={handleCancelCustomProvider}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={i18nService.t('addCustomProviderTitle')}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={handleCustomProviderDialogKeyDown}
+                className="w-full max-w-md rounded-2xl dark:bg-claude-darkSurface bg-claude-bg dark:border-claude-darkBorder border-claude-border border shadow-modal p-4"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <h4 className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('addCustomProviderTitle')}
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={handleCancelCustomProvider}
+                    className="p-1 dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:text-claude-darkText hover:text-claude-text rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                <p className="mb-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('addCustomProviderDesc')}
+                </p>
+
+                {customProviderError && (
+                  <p className="mb-3 text-xs text-red-600 dark:text-red-400">
+                    {customProviderError}
+                  </p>
+                )}
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('providerName')}
+                    </label>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={customProviderName}
+                      onChange={(e) => {
+                        setCustomProviderName(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('providerNamePlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('baseUrl')}
+                    </label>
+                    <input
+                      type="text"
+                      value={customProviderBaseUrl}
+                      onChange={(e) => {
+                        setCustomProviderBaseUrl(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('providerBaseUrlPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('apiKey')}
+                    </label>
+                    <input
+                      type="password"
+                      value={customProviderApiKey}
+                      onChange={(e) => {
+                        setCustomProviderApiKey(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('apiKeyPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('apiFormat')}
+                    </label>
+                    <select
+                      value={customProviderApiFormat}
+                      onChange={(e) => {
+                        setCustomProviderApiFormat(e.target.value as 'anthropic' | 'openai' | 'responses');
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                    >
+                      <option value="anthropic">{i18nService.t('apiFormatNative')}</option>
+                      <option value="openai">{i18nService.t('apiFormatOpenAI')}</option>
+                      <option value="responses">{i18nService.t('apiFormatResponses')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('availableModels')}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleAddCustomModelDraft}
+                        className="inline-flex items-center text-xs text-claude-accent hover:text-claude-accentHover"
+                      >
+                        <PlusCircleIcon className="h-3.5 w-3.5 mr-1" />
+                        {i18nService.t('addModel')}
+                      </button>
+                    </div>
+                    <div className="flex items-center space-x-2 mb-2">
+                      <input
+                        type="text"
+                        value={customModelName}
+                        onChange={(e) => setCustomModelName(e.target.value)}
+                        className="block w-1/2 rounded-lg bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-2.5 py-1.5 text-xs"
+                        placeholder={i18nService.t('modelName')}
+                      />
+                      <input
+                        type="text"
+                        value={customModelId}
+                        onChange={(e) => setCustomModelId(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddCustomModelDraft();
+                          }
+                        }}
+                        className="block w-1/2 rounded-lg bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-2.5 py-1.5 text-xs"
+                        placeholder={i18nService.t('modelId')}
+                      />
+                    </div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {customProviderModels.map(model => (
+                        <div
+                          key={model.id}
+                          className="dark:bg-claude-darkSurface/50 bg-claude-surface/50 p-2 rounded-lg dark:border-claude-darkBorder border-claude-border border group/model"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-1.5 min-w-0">
+                              <span className="dark:text-claude-darkText text-claude-text font-medium text-[11px] truncate">{model.name}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">{model.id}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCustomModelDraft(model.id)}
+                              className="p-0.5 ml-1 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 opacity-0 group-hover/model:opacity-100 transition-opacity"
+                            >
+                              <TrashIcon className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {customProviderModels.length === 0 && (
+                        <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          {i18nService.t('noModelsAvailable')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end space-x-2 mt-4">
+                  <button
+                    type="button"
+                    onClick={handleCancelCustomProvider}
+                    className="px-3 py-1.5 text-xs dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover rounded-xl border dark:border-claude-darkBorder border-claude-border"
+                  >
+                    {i18nService.t('cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddCustomProvider}
+                    className="btn-idchat-primary-filled px-3 py-1.5 text-xs"
+                  >
+                    {i18nService.t('addProvider')}
                   </button>
                 </div>
               </div>
