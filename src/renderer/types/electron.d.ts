@@ -874,6 +874,12 @@ interface IElectronAPI {
     openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+    getOpenWithApps: (filePath: string) => Promise<{ success: boolean; apps: OpenWithAppInfo[]; error?: string }>;
+    openWith: (filePath: string, appId: string) => Promise<{ success: boolean; error?: string }>;
+    chooseOpenWithApp: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  };
+  fs: {
+    readTextFile: (filePath: string, maxBytes?: number) => Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }>;
   };
   autoLaunch: {
     get: () => Promise<{ enabled: boolean }>;
@@ -1437,6 +1443,12 @@ interface IMMessage {
 declare global {
   interface Window {
     electron: IElectronAPI;
+  }
+
+  /** An application detected on the current OS that can open a file (used by the file right-click menu). */
+  interface OpenWithAppInfo {
+    id: string;
+    name: string;
   }
 }
 
