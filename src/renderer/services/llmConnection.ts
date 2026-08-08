@@ -38,10 +38,17 @@ const PROVIDER_DEFAULT_BASE_URLS: Record<string, { anthropic: string; openai: st
   xiaomi: { anthropic: 'https://api.xiaomimimo.com/anthropic', openai: 'https://api.xiaomimimo.com/v1/chat/completions' },
   openrouter: { anthropic: 'https://openrouter.ai/api', openai: 'https://openrouter.ai/api/v1' },
   ollama: { anthropic: 'http://localhost:11434', openai: 'http://localhost:11434/v1' },
+  opencode: { anthropic: 'https://opencode.ai/zen/go/v1', openai: 'https://opencode.ai/zen/go/v1' },
 };
 
 /** Default base URL for a provider and API format (same as Settings). */
-export function getProviderDefaultBaseUrl(provider: string, apiFormat: 'anthropic' | 'openai'): string | null {
+export function getProviderDefaultBaseUrl(
+  provider: string,
+  apiFormat: 'anthropic' | 'openai' | 'responses'
+): string | null {
+  if (apiFormat === 'responses') {
+    return null;
+  }
   return PROVIDER_DEFAULT_BASE_URLS[provider]?.[apiFormat] ?? null;
 }
 

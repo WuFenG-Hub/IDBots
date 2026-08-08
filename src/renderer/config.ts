@@ -519,6 +519,17 @@ export const defaultConfig: AppConfig = {
         { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false, contextWindow: 204_800 }
       ]
+    },
+    opencode: {
+      enabled: false,
+      apiKey: '',
+      // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
+      // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiFormat: 'openai',
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
+      ]
     }
   },
   theme: 'system',
@@ -555,7 +566,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
+  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
 ] as const;
 
 /**
