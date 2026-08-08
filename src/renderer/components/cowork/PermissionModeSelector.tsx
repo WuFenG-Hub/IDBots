@@ -51,14 +51,22 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
     }
   };
 
+  // Accent modes (default + full-trust) render their trigger as a yellow-fill
+  // chip — same brand yellow as the main send button (#FFDC51) with dark text,
+  // because pure-yellow text on the light toolbar is too faint to read.
+  const isAccentMode = (mode: CoworkPermissionMode): boolean =>
+    mode === 'default' || mode === 'bypassPermissions';
+
+  const ACCENT_TRIGGER_FILL = 'bg-[#FFDC51] dark:bg-[#FFDC51] border-transparent text-[#303133]';
+  const ACCENT_ITEM_TEXT = 'text-[#303133] dark:text-[#FFDC51]';
+
   const modeColor = (mode: CoworkPermissionMode): string => {
     switch (mode) {
       case 'plan': return 'text-blue-500';
       case 'acceptEdits': return 'text-amber-500';
-      // Full-trust mode uses the brand/primary accent (same as the main send
-      // button) instead of red, which read as alarming.
-      case 'bypassPermissions': return 'text-claude-accent';
-      default: return 'text-claude-accent';
+      // Accent modes use the chip treatment, not a plain text color.
+      case 'bypassPermissions': return ACCENT_ITEM_TEXT;
+      default: return ACCENT_ITEM_TEXT;
     }
   };
 
@@ -68,7 +76,11 @@ const PermissionModeSelector: React.FC<PermissionModeSelectorProps> = ({
         type="button"
         disabled={disabled}
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-1 rounded-lg border dark:border-claude-darkBorder border-claude-border px-2 py-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+          isAccentMode(currentMode)
+            ? ACCENT_TRIGGER_FILL
+            : 'dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset'
+        }`}
         title={i18nService.t('coworkPermissionModeTitle')}
       >
         <span className={`flex items-center ${modeColor(currentMode)}`}>
