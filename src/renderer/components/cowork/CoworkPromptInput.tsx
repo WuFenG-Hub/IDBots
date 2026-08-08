@@ -51,6 +51,57 @@ export const deriveCoworkPromptInputState = ({
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
 };
 
+export interface CoworkContextMenuDerivedState {
+  canCut: boolean;
+  canCopy: boolean;
+  canSelectAll: boolean;
+}
+
+export const deriveCoworkContextMenuState = ({
+  valueLength,
+  selectionStart,
+  selectionEnd,
+  disabled,
+}: {
+  valueLength: number;
+  selectionStart: number;
+  selectionEnd: number;
+  disabled: boolean;
+}): CoworkContextMenuDerivedState => {
+  const hasSelection = selectionStart >= 0 && selectionEnd > selectionStart;
+  return {
+    canCut: !disabled && hasSelection,
+    canCopy: hasSelection,
+    canSelectAll: !disabled && valueLength > 0,
+  };
+};
+
+const CONTEXT_MENU_WIDTH = 176;
+const CONTEXT_MENU_HEIGHT = 168;
+const CONTEXT_MENU_PADDING = 8;
+
+const ContextMenuItem: React.FC<{
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}> = ({ label, shortcut, disabled = false, onClick }) => (
+  <button
+    type="button"
+    role="menuitem"
+    onClick={onClick}
+    disabled={disabled}
+    className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-40 disabled:hover:bg-transparent disabled:dark:hover:bg-transparent disabled:cursor-not-allowed"
+  >
+    <span className="flex-1 truncate">{label}</span>
+    {shortcut && (
+      <span className="flex-shrink-0 text-xs opacity-50 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        {shortcut}
+      </span>
+    )}
+  </button>
+);
+
 const getFileNameFromPath = (path: string): string => {
   const parts = path.split(/[/\\]/);
   return parts[parts.length - 1] || path;
@@ -141,6 +192,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       permissionMode,
       onPermissionModeChange,
     } = props;
+    const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
     const initialDraftRef = useRef(scopeKey ? '' : draftPrompt);
@@ -152,6 +204,12 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
+    const contextMenuRef = useRef<HTMLDivElement>(null);
+    // Selection captured when the context menu opened; only drives the
+    // enabled/disabled state of the menu items. Actions re-read the live
+    // selection from the textarea so streaming updates cannot desync them.
+    const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
+    const [contextMenuSelection, setContextMenuSelection] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
     const activeScopeKeyRef = useRef(scopeKey);
     const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
     const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
@@ -529,6 +587,139 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     void handleIncomingFiles(files);
   }, [disabled, handleIncomingFiles, isStreaming]);
 
+  const closeContextMenu = useCallback(() => {
+    setContextMenuPosition(null);
+  }, []);
+
+  const handleTextareaContextMenu = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (disabled || (isStreaming && steerDisabled)) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenuSelection({
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    });
+    const x = Math.min(
+      Math.max(CONTEXT_MENU_PADDING, event.clientX),
+      window.innerWidth - CONTEXT_MENU_WIDTH - CONTEXT_MENU_PADDING
+    );
+    const y = Math.min(
+      Math.max(CONTEXT_MENU_PADDING, event.clientY),
+      window.innerHeight - CONTEXT_MENU_HEIGHT - CONTEXT_MENU_PADDING
+    );
+    setContextMenuPosition({ x, y });
+  };
+
+  const contextMenuDerived = deriveCoworkContextMenuState({
+    valueLength: value.length,
+    selectionStart: contextMenuSelection.start,
+    selectionEnd: contextMenuSelection.end,
+    disabled: disabled || (isStreaming && steerDisabled),
+  });
+
+  /** Re-read the live selection from the focused textarea (menu keeps it focused). */
+  const readLiveSelection = (): { start: number; end: number } => {
+    const textarea = textareaRef.current;
+    if (!textarea) return { start: 0, end: 0 };
+    return { start: textarea.selectionStart, end: textarea.selectionEnd };
+  };
+
+  /**
+   * Apply a text change through the DOM and let React's onChange drive the
+   * versioned composer field, keeping cursor/selection semantics intact.
+   */
+  const applyTextareaChange = (replaceFrom: number, replaceTo: number, text: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.setRangeText(text, replaceFrom, replaceTo, 'end');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const runContextMenuSelectAll = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.select();
+  };
+
+  const runContextMenuCopy = () => {
+    closeContextMenu();
+    const { start, end } = readLiveSelection();
+    const selectedText = (draftFieldRef.current?.get() ?? '').slice(start, end);
+    if (!selectedText) return;
+    void navigator.clipboard.writeText(selectedText).catch((error) => {
+      console.error('Failed to copy from cowork input:', error);
+    });
+  };
+
+  const runContextMenuCut = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const { start, end } = readLiveSelection();
+    const selectedText = (draftFieldRef.current?.get() ?? '').slice(start, end);
+    if (!selectedText) return;
+    void (async () => {
+      try {
+        // Only remove the text after the clipboard write succeeds, otherwise
+        // a failed copy would silently delete the selection.
+        await navigator.clipboard.writeText(selectedText);
+        applyTextareaChange(start, end, '');
+      } catch (error) {
+        console.error('Failed to cut from cowork input:', error);
+      }
+    })();
+  };
+
+  const runContextMenuPaste = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const { start, end } = readLiveSelection();
+    void (async () => {
+      let text: string;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (error) {
+        console.error('Failed to read clipboard for cowork paste:', error);
+        return;
+      }
+      // Clipboard items without text (e.g. copied files) must not replace
+      // the current selection with nothing.
+      if (!text) return;
+      applyTextareaChange(start, end, text);
+    })();
+  };
+
+  useEffect(() => {
+    if (!contextMenuPosition) return;
+    const handleMouseDownOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!contextMenuRef.current?.contains(target)) {
+        closeContextMenu();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+    const handleScroll = () => closeContextMenu();
+    document.addEventListener('mousedown', handleMouseDownOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleScroll);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDownOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleScroll);
+    };
+  }, [contextMenuPosition, closeContextMenu]);
+
   const { isSteerSubmit, showStopButton, canSubmit } = deriveCoworkPromptInputState({
     value,
     isStreaming,
@@ -591,6 +782,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onContextMenu={handleTextareaContextMenu}
               placeholder={effectivePlaceholder}
               disabled={disabled || (isStreaming && steerDisabled)}
               rows={isLarge ? 2 : 1}
@@ -697,6 +889,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onContextMenu={handleTextareaContextMenu}
               placeholder={effectivePlaceholder}
               disabled={disabled || (isStreaming && steerDisabled)}
               rows={1}
@@ -762,6 +955,42 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               <span className="truncate">{suggestion}</span>
             </button>
           ))}
+        </div>
+      )}
+      {contextMenuPosition && (
+        <div
+          ref={contextMenuRef}
+          role="menu"
+          className="fixed z-50 min-w-[176px] rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg overflow-hidden py-1"
+          style={{ left: contextMenuPosition.x, top: contextMenuPosition.y }}
+          onContextMenu={(event) => event.preventDefault()}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          <ContextMenuItem
+            label={i18nService.t('contextMenuCut')}
+            shortcut={isMac ? '⌘X' : 'Ctrl+X'}
+            disabled={!contextMenuDerived.canCut}
+            onClick={runContextMenuCut}
+          />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuCopy')}
+            shortcut={isMac ? '⌘C' : 'Ctrl+C'}
+            disabled={!contextMenuDerived.canCopy}
+            onClick={runContextMenuCopy}
+          />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuPaste')}
+            shortcut={isMac ? '⌘V' : 'Ctrl+V'}
+            disabled={disabled || (isStreaming && steerDisabled)}
+            onClick={runContextMenuPaste}
+          />
+          <div className="my-1 h-px dark:bg-claude-darkBorder bg-claude-border" />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuSelectAll')}
+            shortcut={isMac ? '⌘A' : 'Ctrl+A'}
+            disabled={!contextMenuDerived.canSelectAll}
+            onClick={runContextMenuSelectAll}
+          />
         </div>
       )}
     </div>
