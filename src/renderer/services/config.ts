@@ -337,9 +337,9 @@ type ProviderApiFormatValue = 'anthropic' | 'openai' | 'responses';
  * v1：opencode 默认 apiFormat 由 'openai'（chat completions）升级为 'responses'。
  *
  * OpenCode Go 网关三个端点共用同一 Base URL，DeepSeek Flash 在 Responses 格式下
- * 可携带 reasoning，故 Responses 成为更合适的默认。仅在用户尚未自定义 opencode
- * （apiKey 仍为空且 apiFormat 仍是旧默认 'openai'）时纠正，已填 key 或手动切换过
- * 格式的用户不受影响。
+ * 可携带 reasoning，故 Responses 成为更合适的默认。对所有仍停留在旧默认 'openai'
+ * 的 opencode 用户（含已配置 apiKey 正在使用的）一律升级；用户若手动选过 'responses'
+ * 或 'anthropic'，则尊重其选择保持不变。
  */
 const migrateOpencodeApiFormatToResponses = (
   providers: NonNullable<AppConfig['providers']>,
@@ -348,10 +348,9 @@ const migrateOpencodeApiFormatToResponses = (
   if (!opencode) {
     return providers;
   }
-  const hasCustomApiKey = typeof opencode.apiKey === 'string' && opencode.apiKey.trim() !== '';
-  const isLegacyDefaultApiFormat = (opencode.apiFormat as ProviderApiFormatValue | undefined) === 'openai';
-  // Respect existing customization: only upgrade providers still on the factory default.
-  if (hasCustomApiKey || !isLegacyDefaultApiFormat) {
+  // Only migrate providers still on the legacy 'openai' (chat completions) default.
+  // A user who explicitly picked 'responses' or 'anthropic' is left untouched.
+  if ((opencode.apiFormat as ProviderApiFormatValue | undefined) !== 'openai') {
     return providers;
   }
   return {

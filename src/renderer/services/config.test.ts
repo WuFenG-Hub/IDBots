@@ -42,8 +42,10 @@ test('applyProviderApiFormatMigrations upgrades factory-default opencode to resp
   assert.equal(result.providerApiFormatMigrationVersion, PROVIDER_API_FORMAT_MIGRATION_VERSION);
 });
 
-test('applyProviderApiFormatMigrations leaves customized opencode untouched', () => {
-  // User already filled in an API key — respect their existing config.
+test('applyProviderApiFormatMigrations migrates opencode even when an API key is configured', () => {
+  // An actively-used opencode (filled-in key) still on the legacy 'openai'
+  // default must be upgraded to 'responses', matching the product intent that
+  // all opencode users move to the Responses endpoint.
   const config = makeConfig({
     opencode: {
       enabled: true,
@@ -55,11 +57,11 @@ test('applyProviderApiFormatMigrations leaves customized opencode untouched', ()
   });
 
   const result = applyProviderApiFormatMigrations(config);
-  assert.equal(result.providers!.opencode.apiFormat, 'openai');
+  assert.equal(result.providers!.opencode.apiFormat, 'responses');
 });
 
 test('applyProviderApiFormatMigrations leaves manually-chosen responses untouched', () => {
-  // User already switched format away from the legacy default — keep it.
+  // User already switched to 'responses' — keep it.
   const config = makeConfig({
     opencode: {
       enabled: false,
@@ -72,6 +74,22 @@ test('applyProviderApiFormatMigrations leaves manually-chosen responses untouche
 
   const result = applyProviderApiFormatMigrations(config);
   assert.equal(result.providers!.opencode.apiFormat, 'responses');
+});
+
+test('applyProviderApiFormatMigrations leaves manually-chosen anthropic untouched', () => {
+  // A user who deliberately picked the Anthropic-compatible format keeps it.
+  const config = makeConfig({
+    opencode: {
+      enabled: true,
+      apiKey: 'sk-user-key',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiFormat: 'anthropic',
+      models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }],
+    },
+  });
+
+  const result = applyProviderApiFormatMigrations(config);
+  assert.equal(result.providers!.opencode.apiFormat, 'anthropic');
 });
 
 test('applyProviderApiFormatMigrations is idempotent at the current version', () => {
