@@ -15,7 +15,28 @@ import {
   type OrchestrationTask,
   type OrchestrationStep,
 } from '../orchestrationStore';
+import {
+  CoworkCrossSessionService,
+  type CoworkCrossSessionInsertResult,
+} from './coworkCrossSession';
 import type { Metabot } from '../types/metabot';
+
+/**
+ * Round-4 r6: cross-session notify seam — defaults to CoworkCrossSessionService
+ * over the cowork store; tests inject a recording implementation.
+ */
+export type TwinOrchestrationInsertCrossSessionMessageFn = (input: {
+  sourceSessionId: string;
+  targetSessionId: string;
+  message: string;
+}) => CoworkCrossSessionInsertResult;
+
+/** Minimal kv surface for the terminal-state notify guard (SqliteStore in main.ts). */
+export interface TwinOrchestrationKvStore {
+  get<T = unknown>(key: string): T | undefined;
+  set<T = unknown>(key: string, value: T): void;
+  delete(key: string): void;
+}
 
 export interface DelegateLocalWorkerInput {
   workerMetabotId: number;
@@ -50,6 +71,18 @@ export interface TwinOrchestrationServiceDeps {
   getMetabotById(id: number): Metabot | null;
   getWorkerWorkspace(metabotId: number): string;
   runWorkerTurn?: (params: RunOrchestratorSkillTurnParams) => Promise<string>;
+  /**
+   * Round-4 r6: worker-completion notification to the Twin. Defaults to
+   * CoworkCrossSessionService over the cowork store; tests inject a recording
+   * implementation. Returns the insert result (never throws).
+   */
+  insertCrossSessionUserMessage?: TwinOrchestrationInsertCrossSessionMessageFn;
+  /**
+   * Round-4 r6: persistent idempotency guard for terminal-state notifications
+   * (kv key `orch_notify:<taskId>:<status>`). Without it a process restart
+   * between a notification and the guard write could double-notify.
+   */
+  kv?: TwinOrchestrationKvStore;
 }
 
 function jsonBlock(value: unknown): string {
@@ -88,9 +121,63 @@ function buildWorkerPrompt(input: DelegateLocalWorkerInput, task: OrchestrationT
 
 export class TwinOrchestrationService {
   private readonly runWorkerTurn: (params: RunOrchestratorSkillTurnParams) => Promise<string>;
+  private readonly insertCrossSession: TwinOrchestrationInsertCrossSessionMessageFn;
 
   constructor(private readonly deps: TwinOrchestrationServiceDeps) {
     this.runWorkerTurn = deps.runWorkerTurn ?? ((params) => runOrchestratorSkillTurn(deps.coworkRunner, deps.coworkStore, params));
+    this.insertCrossSession = deps.insertCrossSessionUserMessage
+      ?? ((input) => new CoworkCrossSessionService(deps.coworkStore).insertUserMessage(input));
+  }
+
+  /**
+   * Round-4 r6: one short [ORCH-NOTIFY] status message into the Twin session
+   * that delegated the task (task.sourceSessionId). Idempotent per terminal
+   * state via kv `orch_notify:<taskId>:<completed|failed>`; the fixed prefix
+   * + taskId lets the Twin's own context recognize it as a status update.
+   * Never throws into the orchestration flow: any failure (missing session,
+   * A2A target, kv absence) is logged and skipped.
+   */
+  private notifyTwinTerminalState(
+    task: OrchestrationTask,
+    attempt: OrchestrationAttempt,
+    workerName: string,
+    outcome: 'completed' | 'failed',
+    detail?: string | null,
+  ): void {
+    try {
+      const targetSessionId = (task.sourceSessionId ?? '').trim();
+      const workerSessionId = (attempt.workerSessionId ?? '').trim();
+      if (!targetSessionId) return; // no Twin session to notify
+      const guardKey = `orch_notify:${task.id}:${outcome}`;
+      if (this.deps.kv?.get<string>(guardKey) === '1') return; // one notify per terminal state
+      if (!workerSessionId) return; // no worker session identity to attribute the message to
+      const text = outcome === 'completed'
+        ? `[ORCH-NOTIFY] worker ${workerName} 已完成 task ${task.id} → review，请验收`
+        : `[ORCH-NOTIFY] worker ${workerName} 未完成 task ${task.id}：${(detail ?? '').trim() || 'WORKER_ATTEMPT_FAILED'}（failed）`;
+      const result = this.insertCrossSession({
+        sourceSessionId: workerSessionId,
+        targetSessionId,
+        message: text,
+      });
+      if ('code' in result) {
+        // CoworkCrossSessionError (insert failed: missing session, A2A target…)
+        console.warn(
+          `[TwinOrchestration] Twin notification skipped (${result.code}): ${result.message}`,
+        );
+        return;
+      }
+      this.deps.kv?.set(guardKey, '1');
+      console.log(`[TwinOrchestration] Twin notified (${task.id} → ${outcome}): ${text}`);
+    } catch (error) {
+      console.warn(
+        `[TwinOrchestration] Twin notification failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private workerNameOf(metabotId: number): string {
+    return this.deps.getMetabotById(metabotId)?.name?.trim() || `bot-${metabotId}`;
   }
 
   private async executeAttempt(
@@ -141,6 +228,13 @@ export class TwinOrchestrationService {
       this.deps.orchestrationStore.updateAttempt(attempt.id, 'completed', { result });
       this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', { acceptedResult: result });
       this.deps.orchestrationStore.updateTaskStatus(task.id, 'review');
+      // Round-4 r6: normal-completion terminal state → notify the Twin.
+      this.notifyTwinTerminalState(
+        task,
+        this.deps.orchestrationStore.getAttempt(attempt.id) ?? attempt,
+        worker.name,
+        'completed',
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const isTimeout = isSkillTurnTimeoutError(error);
@@ -153,6 +247,14 @@ export class TwinOrchestrationService {
           this.deps.orchestrationStore.updateAttempt(attempt.id, 'timed_out', { error: message });
         } else {
           this.deps.orchestrationStore.updateAttempt(attempt.id, 'failed', { error: message });
+          // Round-4 r6: direct-failure terminal state → notify the Twin.
+          this.notifyTwinTerminalState(
+            task,
+            this.deps.orchestrationStore.getAttempt(attempt.id) ?? currentAttempt,
+            worker.name,
+            'failed',
+            message,
+          );
         }
       }
       const currentStep = this.deps.orchestrationStore.getStep(step.id);
@@ -198,6 +300,14 @@ export class TwinOrchestrationService {
     if (currentTask && ['planning', 'running', 'review'].includes(currentTask.status)) {
       store.updateTaskStatus(task.id, 'review');
     }
+    // Round-4 r6: late-completion terminal state → notify the Twin (kv guard
+    // makes it idempotent even if the normal path already notified).
+    this.notifyTwinTerminalState(
+      currentTask ?? task,
+      store.getAttempt(attemptId) ?? currentAttempt,
+      this.workerNameOf(currentAttempt.workerMetabotId),
+      'completed',
+    );
   }
 
   /**
@@ -218,6 +328,16 @@ export class TwinOrchestrationService {
     const currentTask = store.getTaskForStep(currentAttempt.stepId);
     if (currentTask && currentTask.status === 'running') {
       store.updateTaskStatus(currentTask.id, 'failed');
+    }
+    // Round-4 r6: late-failure terminal state → notify the Twin with the reason.
+    if (currentTask) {
+      this.notifyTwinTerminalState(
+        currentTask,
+        store.getAttempt(attemptId) ?? currentAttempt,
+        this.workerNameOf(currentAttempt.workerMetabotId),
+        'failed',
+        error,
+      );
     }
   }
 

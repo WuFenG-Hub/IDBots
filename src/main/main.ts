@@ -5035,6 +5035,9 @@ const getTwinOrchestrationService = () => new TwinOrchestrationService({
     fs.mkdirSync(workspace, { recursive: true });
     return workspace;
   },
+  // Round-4 r6: persistent idempotency guard for [ORCH-NOTIFY] terminal-state
+  // messages to the Twin session (kv key orch_notify:<taskId>:<status>).
+  kv: getStore(),
 });
 
 const getMetabotStore = () => {
