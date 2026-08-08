@@ -349,11 +349,37 @@ export interface CoworkUserMemoryEntry {
   isExplicit: boolean;
   status: CoworkUserMemoryStatus;
   /** 'self_identity' entries are dream-written and protected from edit/delete. */
-  usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review';
+  usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review' | 'value_boundary';
+  scopeKind?: 'owner' | 'contact' | 'conversation';
+  scopeKey?: string;
+  visibility?: 'local_only' | 'external_safe';
   origin?: 'conversation' | 'dream';
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+}
+
+export interface CoworkMemoryScopeSummary {
+  kind: 'owner' | 'contact' | 'conversation';
+  key: string;
+  count: number;
+  peerGlobalMetaId?: string | null;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+}
+
+export interface CoworkMemoryScopesOverview {
+  owner: CoworkMemoryScopeSummary | null;
+  contacts: CoworkMemoryScopeSummary[];
+  conversations: CoworkMemoryScopeSummary[];
+}
+
+export interface CoworkSessionMemoryScope {
+  scopeKind: 'owner' | 'contact' | 'conversation';
+  scopeKey: string;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+  stats: CoworkMemoryStats;
 }
 
 export interface CoworkMemoryStats {

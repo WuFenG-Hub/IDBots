@@ -159,6 +159,29 @@ export interface ApplyTurnMemoryUpdatesResult {
   skipped: number;
 }
 
+export interface MemoryScopeSummary {
+  kind: MemoryScopeKind;
+  key: string;
+  /** Number of non-deleted entries in this scope. */
+  count: number;
+  peerGlobalMetaId?: string | null;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+}
+
+export interface MemoryScopesOverview {
+  owner: MemoryScopeSummary | null;
+  contacts: MemoryScopeSummary[];
+  conversations: MemoryScopeSummary[];
+}
+
+export interface MemorySessionScopeResolution {
+  metabotId: number;
+  scope: MemoryScope;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+}
+
 export interface MemoryBackend {
   resolveMetabotIdForMemory(sessionId?: string | null): number | null;
   getEffectiveMemoryPolicyForMetabot(metabotId?: number | null): MemoryEffectivePolicy;
@@ -172,4 +195,8 @@ export interface MemoryBackend {
   getUserMemoryStats(input: { metabotId: number } & MemoryScopeSelectorInput): MemoryUserMemoryStats;
   getUserMemoryStats(metabotId: number): MemoryUserMemoryStats;
   applyTurnMemoryUpdates(options: ApplyTurnMemoryUpdatesOptions): Promise<ApplyTurnMemoryUpdatesResult>;
+  /** Aggregate of all memory scopes under one MetaBot, with peer identity resolved where possible. */
+  listMemoryScopes(metabotId: number): MemoryScopesOverview;
+  /** Resolve the write scope for a session (owner for local sessions, contact/conversation for external ones). */
+  resolveMemoryScopeForSession(sessionId?: string | null): MemorySessionScopeResolution | null;
 }

@@ -17,6 +17,9 @@ import type {
   MemoryDeleteUserMemoryInput,
   MemoryListUserMemoriesOptions,
   MemoryScopeSelectorInput,
+  MemoryScopesOverview,
+  MemoryScopeSummary,
+  MemorySessionScopeResolution,
   MemoryUpdateUserMemoryInput,
   MemoryUserMemoryStats,
 } from './memory/memoryBackend';
@@ -26,8 +29,10 @@ import {
   normalizeMemoryScopeSelector,
   normalizeScopeChannel,
   normalizeScopeIdentity,
+  parseContactScopeKey,
   type MemoryOrigin,
   type MemoryScope,
+  type MemoryScopeKind,
   type MemoryUsageClass,
   type MemoryVisibility,
 } from './memory/memoryScope';
@@ -5856,6 +5861,91 @@ export class CoworkStore implements MemoryBackend {
     }
 
     return stats;
+  }
+
+  listMemoryScopes(metabotId: number): MemoryScopesOverview {
+    const rows = this.getAll<{
+      scope_kind: string;
+      scope_key: string;
+      count: number;
+    }>(`
+      SELECT scope_kind, scope_key, COUNT(*) AS count
+      FROM user_memories
+      WHERE metabot_id = ? AND status != 'deleted'
+      GROUP BY scope_kind, scope_key
+      ORDER BY scope_key ASC
+    `, [metabotId]);
+
+    const overview: MemoryScopesOverview = {
+      owner: null,
+      contacts: [],
+      conversations: [],
+    };
+
+    for (const row of rows) {
+      const kind: MemoryScopeKind = row.scope_kind === 'contact' || row.scope_kind === 'conversation'
+        ? row.scope_kind
+        : 'owner';
+      const key = normalizeScopeIdentity(row.scope_key) || OWNER_SCOPE_KEY;
+      const count = Number(row.count) || 0;
+      const summary: MemoryScopeSummary = { kind, key, count };
+
+      if (kind === 'contact') {
+        const parsed = parseContactScopeKey(key);
+        const peerGlobalMetaId = parsed?.peerGlobalMetaId ?? null;
+        summary.peerGlobalMetaId = peerGlobalMetaId;
+        if (peerGlobalMetaId) {
+          const peer = this.getOne<{ peer_name: string | null; peer_avatar: string | null }>(`
+            SELECT peer_name, peer_avatar
+            FROM cowork_sessions
+            WHERE peer_global_metaid = ?
+              AND peer_name IS NOT NULL AND peer_name != ''
+            ORDER BY updated_at DESC
+            LIMIT 1
+          `, [peerGlobalMetaId]);
+          summary.peerName = peer?.peer_name ?? null;
+          summary.peerAvatar = peer?.peer_avatar ?? null;
+        }
+        overview.contacts.push(summary);
+      } else if (kind === 'conversation') {
+        overview.conversations.push(summary);
+      } else {
+        overview.owner = summary;
+      }
+    }
+
+    // Always present the owner scope even when empty so the UI can default to it.
+    if (!overview.owner) {
+      overview.owner = { kind: 'owner', key: OWNER_SCOPE_KEY, count: 0 };
+    }
+
+    return overview;
+  }
+
+  resolveMemoryScopeForSession(sessionId?: string | null): MemorySessionScopeResolution | null {
+    const metabotId = this.resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return null;
+    }
+    const resolved = resolveMemoryScopes(this.buildResolvedMemoryScopeInput({ metabotId, sessionId }));
+    let peerName: string | null = null;
+    let peerAvatar: string | null = null;
+    if (resolved.writeScope.kind === 'contact' && sessionId) {
+      const sessionRow = this.getOne<{ peer_name: string | null; peer_avatar: string | null }>(`
+        SELECT peer_name, peer_avatar
+        FROM cowork_sessions
+        WHERE id = ?
+        LIMIT 1
+      `, [sessionId]);
+      peerName = sessionRow?.peer_name ?? null;
+      peerAvatar = sessionRow?.peer_avatar ?? null;
+    }
+    return {
+      metabotId,
+      scope: resolved.writeScope,
+      peerName,
+      peerAvatar,
+    };
   }
 
   autoDeleteNonPersonalMemories(metabotId?: number, scopeSelector?: MemoryScopeSelectorInput): number {

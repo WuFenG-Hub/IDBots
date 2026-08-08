@@ -34,6 +34,8 @@ import type {
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
   CoworkMemoryPolicy,
+  CoworkMemoryScopesOverview,
+  CoworkSessionMemoryScope,
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
@@ -825,6 +827,8 @@ class CoworkService {
   async listMemoryEntries(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
     includeDeleted?: boolean;
@@ -841,6 +845,10 @@ class CoworkService {
   async createMemoryEntry(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     text: string;
     confidence?: number;
     isExplicit?: boolean;
@@ -855,6 +863,10 @@ class CoworkService {
   async updateMemoryEntry(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     id: string;
     text?: string;
     confidence?: number;
@@ -875,12 +887,33 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
-  async getMemoryStats(input?: { sessionId?: string; metabotId?: number }): Promise<CoworkMemoryStats | null> {
+  async getMemoryStats(input?: {
+    sessionId?: string;
+    metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+  }): Promise<CoworkMemoryStats | null> {
     const api = window.electron?.cowork?.getMemoryStats;
     if (!api) return null;
     const result = await api(input);
     if (!result?.success || !result.stats) return null;
     return result.stats;
+  }
+
+  async listMemoryScopes(input: { metabotId?: number }): Promise<CoworkMemoryScopesOverview | null> {
+    const api = window.electron?.cowork?.listMemoryScopes;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.overview) return null;
+    return result.overview;
+  }
+
+  async getSessionMemoryScope(input: { sessionId?: string }): Promise<CoworkSessionMemoryScope | null> {
+    const api = window.electron?.cowork?.getSessionMemoryScope;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.sessionScope) return null;
+    return result.sessionScope;
   }
 
   async getMemoryPolicy(input?: { sessionId?: string; metabotId?: number }): Promise<CoworkMemoryPolicy | null> {
