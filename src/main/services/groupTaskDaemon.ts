@@ -17,6 +17,7 @@ import type { GroupTaskStore, GroupTask, GroupTaskMember } from '../groupTaskSto
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
+import { isMentioned } from './groupChatMentionUtils';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
@@ -143,55 +144,8 @@ type DaemonPromptMember = {
   goal?: string | null;
 };
 
-/**
- * Word-boundary @-mention matching: a bot counts as "mentioned by name" ONLY
- * when the content contains an explicit `@BotName` token (the @ must not be
- * glued to a longer identifier and the name must match completely). A bare
- * name occurrence (e.g. a kickoff roster line "Members: Coder Bot, …" or a
- * recap "already checked Lucy's file") does NOT trigger a reply. This killed
- * the "kickoff mentions the full roster -> every member responds" problem and
- * the "one recap mentions two names -> two steps created" problem.
- */
-function contentMentionsBotName(content: string, botName: string): boolean {
-  if (!content || !botName) return false;
-  const name = botName.trim();
-  if (!name) return false;
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // @ 前不能是字母/数字/下划线（避免 @Builder 命中 @Builder2 之类粘连），
-  // @ 后必须完整匹配名字且名字结尾不在词中间；名字匹配大小写不敏感。
-  const pattern = new RegExp(`(^|[^A-Za-z0-9_])@${escaped}(?![A-Za-z0-9_])`, 'i');
-  return pattern.test(content);
-}
-
-/** Local equivalent of orchestrator's mentionContainsMetaId (kept separate by design). */
-function mentionContainsMetaId(
-  mentionJson: string | null,
-  globalMetaId: string | null,
-  metaId: string | undefined,
-): boolean {
-  if (!mentionJson) return false;
-  let ids: unknown[] = [];
-  try {
-    const parsed = JSON.parse(mentionJson) as unknown;
-    ids = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return false;
-  }
-  if (ids.length === 0) return false;
-  const targets = [globalMetaId, metaId]
-    .map((value) => (value ?? '').trim())
-    .filter(Boolean);
-  if (targets.length === 0) return false;
-  return ids.some((id) => targets.includes(String(id).trim()));
-}
-
-function isMentioned(
-  message: GroupTaskDaemonMessage,
-  bot: GroupTaskDaemonBot,
-): boolean {
-  return mentionContainsMetaId(message.mention, bot.globalmetaid, bot.metaid)
-    || contentMentionsBotName(message.content, bot.name);
-}
+// Mention gating (contentMentionsBotName / mentionContainsMetaId / isMentioned)
+// lives in groupChatMentionUtils.ts, shared with the OpenTeam guest daemon.
 
 /**
  * Decide which local member bots respond to one group message.

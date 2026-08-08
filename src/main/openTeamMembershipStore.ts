@@ -20,6 +20,8 @@ export interface OpenTeamMembership {
   joinedPinId: string | null;
   status: OpenTeamMembershipStatus;
   createdAt: string | null;
+  /** Guest-daemon cursor: group_chat_messages.id up to which this bot processed. */
+  lastProcessedMsgId: number;
 }
 
 export interface OpenTeamInvite {
@@ -64,6 +66,7 @@ interface OpenTeamMembershipRow {
   joined_pin_id: string | null;
   status: string;
   created_at: string | null;
+  last_processed_msg_id: number | null;
 }
 
 interface OpenTeamInviteRow {
@@ -91,6 +94,7 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
     joinedPinId: row.joined_pin_id ?? null,
     status: row.status === 'left' ? 'left' : 'active',
     createdAt: row.created_at ?? null,
+    lastProcessedMsgId: Number(row.last_processed_msg_id) || 0,
   };
 }
 
@@ -253,6 +257,41 @@ export class OpenTeamMembershipStore {
     );
     this.saveDb();
     return true;
+  }
+
+  /**
+   * Advance the guest-daemon message cursor (group_chat_messages.id processed
+   * so far). Monotonic: never moves backwards, mirroring
+   * groupTaskStore.updateLastProcessedMsgId semantics.
+   */
+  updateLastProcessedMsgId(groupId: string, metabotId: number, msgId: number): void {
+    const id = Math.trunc(Number(msgId));
+    if (!Number.isFinite(id) || id <= 0) return;
+    this.db.run(
+      `UPDATE openteam_memberships
+       SET last_processed_msg_id = MAX(last_processed_msg_id, ?)
+       WHERE group_id = ? AND metabot_id = ?`,
+      [id, groupId, metabotId],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * Fast-forward the cursor to the newest group_chat_messages row currently in
+   * the local DB. Called right after a join so the guest daemon only responds
+   * to messages arriving after the bot entered the group.
+   */
+  catchUpCursorToLatest(groupId: string, metabotId: number): void {
+    this.db.run(
+      `UPDATE openteam_memberships
+       SET last_processed_msg_id = MAX(
+         last_processed_msg_id,
+         COALESCE((SELECT MAX(id) FROM group_chat_messages WHERE group_id = ?), 0)
+       )
+       WHERE group_id = ? AND metabot_id = ?`,
+      [groupId, groupId, metabotId],
+    );
+    this.saveDb();
   }
 
   // --- openteam_invites ---

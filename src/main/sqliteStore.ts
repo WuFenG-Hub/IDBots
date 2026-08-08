@@ -812,9 +812,12 @@ export class SqliteStore {
         joined_pin_id TEXT,
         status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','left')),
         created_at TEXT DEFAULT (datetime('now')),
+        last_processed_msg_id INTEGER NOT NULL DEFAULT 0,
         UNIQUE(group_id, metabot_id)
       );
     `);
+    // Migration: add last_processed_msg_id to openteam_memberships (guest daemon cursor).
+    this.migrateOpenTeamMembershipsCursorColumn();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1897,6 +1900,27 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
+    }
+  }
+
+  /**
+   * Migration: guest-daemon message cursor on openteam_memberships (OpenTeam
+   * M1). PRAGMA-guarded and idempotent, same pattern as the other column
+   * migrations; existing rows start at 0 (process from the group history the
+   * daemon already sees, then the accept flow catches the cursor up).
+   */
+  private migrateOpenTeamMembershipsCursorColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('last_processed_msg_id')) {
+        this.db.run(
+          'ALTER TABLE openteam_memberships ADD COLUMN last_processed_msg_id INTEGER NOT NULL DEFAULT 0',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsCursorColumn:', error);
     }
   }
 

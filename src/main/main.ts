@@ -144,6 +144,11 @@ import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
 } from './services/groupTaskDaemon';
+import {
+  startOpenTeamGuestDaemon,
+  stopOpenTeamGuestDaemon,
+} from './services/openTeamGuestDaemon';
+import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -191,7 +196,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3407,6 +3412,30 @@ const startSqliteDaemons = (): void => {
     emitLog: (msg) => console.log(msg),
   });
 
+  // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
+  // invite envelopes intercepted by the private-chat daemon (join the external
+  // group + ACCEPT/DECLINE reply); the guest daemon then lets the invited bot
+  // participate in those external groups under the same mention gating as
+  // local group-task workers.
+  setOpenTeamGuestServiceDeps({
+    getMetabotStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    joinGroupChat: (metabotId, groupId) => joinGroupChat(metabotId, groupId),
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+    emitLog: (msg) => console.log(msg),
+  });
+  startOpenTeamGuestDaemon({
+    getStore,
+    getMetabotStore,
+    getOpenTeamMembershipStore,
+    performChat: performChatCompletionForOrchestrator,
+    sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    emitLog: (msg) => console.log(msg),
+  });
+
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
   let dreamExperienceStore: MetaIDExperienceStore | undefined;
@@ -3459,6 +3488,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
+  stopOpenTeamGuestDaemon();
   await resetSqliteBackedSingletons();
   return restartState;
 };
