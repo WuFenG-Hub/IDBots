@@ -20,6 +20,7 @@ import type {
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
   CoworkMemoryPolicy,
+  CoworkMemoryScopesOverview,
   CoworkSandboxProgress,
   CoworkSandboxStatus,
   CoworkSessionSummary,
@@ -84,6 +85,8 @@ type MetabotMemoryPolicyDraft = Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
 >;
+/** Usage classes a user may assign manually. `self_identity` is dream-protected. */
+type CoworkMemoryEditableUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
 
 interface ProviderExportEntry {
   enabled: boolean;
@@ -529,6 +532,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [coworkMemoryEditingId, setCoworkMemoryEditingId] = useState<string | null>(null);
   const [coworkMemoryDraftText, setCoworkMemoryDraftText] = useState<string>('');
   const [showMemoryModal, setShowMemoryModal] = useState<boolean>(false);
+  const [coworkMemoryScopes, setCoworkMemoryScopes] = useState<CoworkMemoryScopesOverview | null>(null);
+  const [coworkMemorySelectedScope, setCoworkMemorySelectedScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string }>({ kind: 'owner', key: 'owner:self' });
+  const [coworkMemoryDraftScope, setCoworkMemoryDraftScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string } | null>(null);
+  const [coworkMemoryDraftUsageClass, setCoworkMemoryDraftUsageClass] = useState<CoworkMemoryEditableUsageClass>('profile_fact');
+  const [coworkMemoryDraftVisibility, setCoworkMemoryDraftVisibility] = useState<'local_only' | 'external_safe'>('local_only');
   const [coworkSandboxStatus, setCoworkSandboxStatus] = useState<CoworkSandboxStatus | null>(null);
   const [coworkSandboxLoading, setCoworkSandboxLoading] = useState(true);
   const [coworkSandboxProgress, setCoworkSandboxProgress] = useState<CoworkSandboxProgress | null>(null);
@@ -1041,9 +1049,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const [entries, stats] = await Promise.all([
         coworkService.listMemoryEntries({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
           query: coworkMemoryQuery.trim() || undefined,
         }),
-        coworkService.getMemoryStats({ metabotId: coworkMemoryMetabotId }),
+        coworkService.getMemoryStats({
+          metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
+        }),
       ]);
       setCoworkMemoryEntries(entries);
       setCoworkMemoryStats(stats);
@@ -1057,7 +1071,31 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, [
     coworkMemoryQuery,
     coworkMemoryMetabotId,
+    coworkMemorySelectedScope.kind,
+    coworkMemorySelectedScope.key,
   ]);
+
+  const loadCoworkMemoryScopes = useCallback(async (metabotId: number | null) => {
+    if (metabotId == null) {
+      setCoworkMemoryScopes(null);
+      return;
+    }
+    try {
+      const overview = await coworkService.listMemoryScopes({ metabotId });
+      setCoworkMemoryScopes(overview);
+      setCoworkMemorySelectedScope((current) => {
+        if (!overview) return current;
+        const stillExists = (overview.owner?.key === current.key)
+          || overview.contacts.some((scope) => scope.key === current.key)
+          || overview.conversations.some((scope) => scope.key === current.key);
+        if (stillExists) return current;
+        return { kind: 'owner', key: overview.owner?.key ?? 'owner:self' };
+      });
+    } catch (loadError) {
+      console.error('Failed to load cowork memory scopes:', loadError);
+      setCoworkMemoryScopes(null);
+    }
+  }, []);
 
   const loadCoworkMemoryMetabots = useCallback(async () => {
     try {
@@ -1104,6 +1142,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     if (activeTab !== 'coworkMemory') return;
     void loadCoworkMemoryData();
   }, [activeTab, loadCoworkMemoryData]);
+
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    void loadCoworkMemoryScopes(coworkMemoryMetabotId);
+  }, [activeTab, loadCoworkMemoryScopes, coworkMemoryMetabotId]);
 
   const loadArchivedChats = useCallback(async () => {
     setArchivedChatsLoading(true);
@@ -1254,12 +1297,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const resetCoworkMemoryEditor = () => {
     setCoworkMemoryEditingId(null);
     setCoworkMemoryDraftText('');
+    setCoworkMemoryDraftScope(null);
+    setCoworkMemoryDraftUsageClass('profile_fact');
+    setCoworkMemoryDraftVisibility('local_only');
     setShowMemoryModal(false);
   };
 
   useEffect(() => {
     setCoworkMemoryEditingId(null);
     setCoworkMemoryDraftText('');
+    setCoworkMemoryDraftScope(null);
+    setCoworkMemoryDraftUsageClass('profile_fact');
+    setCoworkMemoryDraftVisibility('local_only');
     setShowMemoryModal(false);
   }, [coworkMemoryMetabotId]);
 
@@ -1273,20 +1322,30 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       if (coworkMemoryEditingId) {
         await coworkService.updateMemoryEntry({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
+          usageClass: coworkMemoryDraftUsageClass,
+          visibility: coworkMemoryDraftVisibility,
           id: coworkMemoryEditingId,
           text,
           status: 'created',
           isExplicit: true,
         });
       } else {
+        const draftScope = coworkMemoryDraftScope ?? { kind: 'owner', key: 'owner:self' };
         await coworkService.createMemoryEntry({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: draftScope.kind,
+          scopeKey: draftScope.key,
+          usageClass: coworkMemoryDraftUsageClass,
+          visibility: coworkMemoryDraftVisibility,
           text,
           isExplicit: true,
         });
       }
       resetCoworkMemoryEditor();
       await loadCoworkMemoryData();
+      await loadCoworkMemoryScopes(coworkMemoryMetabotId);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : i18nService.t('coworkMemoryCrudSaveFailed'));
     } finally {
@@ -1297,6 +1356,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const handleEditCoworkMemoryEntry = (entry: CoworkUserMemoryEntry) => {
     setCoworkMemoryEditingId(entry.id);
     setCoworkMemoryDraftText(entry.text);
+    setCoworkMemoryDraftScope(entry.scopeKind && entry.scopeKey
+      ? { kind: entry.scopeKind, key: entry.scopeKey }
+      : null);
+    setCoworkMemoryDraftUsageClass(entry.usageClass === 'operational_preference'
+      || entry.usageClass === 'work_review'
+      || entry.usageClass === 'value_boundary'
+      || entry.usageClass === 'preference'
+      ? entry.usageClass
+      : 'profile_fact');
+    setCoworkMemoryDraftVisibility(entry.visibility === 'external_safe' ? 'external_safe' : 'local_only');
     setShowMemoryModal(true);
   };
 
@@ -1331,9 +1400,41 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  const getMemoryScopeLabel = (scope: { kind: 'owner' | 'contact' | 'conversation'; key: string }, overview: CoworkMemoryScopesOverview | null): string => {
+    if (scope.kind === 'owner') return i18nService.t('coworkMemoryScopeOwner');
+    const summary = (overview?.contacts ?? []).find((item) => item.key === scope.key)
+      ?? (overview?.conversations ?? []).find((item) => item.key === scope.key);
+    if (summary?.kind === 'contact') {
+      const peerName = summary.peerName?.trim() || summary.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+      return `${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`;
+    }
+    if (summary) {
+      const shortKey = scope.key.length > 32 ? `${scope.key.slice(0, 29)}...` : scope.key;
+      return `${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`;
+    }
+    return scope.kind === 'conversation' ? i18nService.t('coworkMemoryScopeConversation') : i18nService.t('coworkMemoryScopeContact');
+  };
+
+  const getMemoryUsageClassLabel = (usageClass?: CoworkUserMemoryEntry['usageClass']): string | null => {
+    if (usageClass === 'self_identity') return i18nService.t('coworkMemorySelfIdentity');
+    if (usageClass === 'profile_fact') return i18nService.t('coworkMemoryUsageProfileFact');
+    if (usageClass === 'preference') return i18nService.t('coworkMemoryUsagePreference');
+    if (usageClass === 'operational_preference') return i18nService.t('coworkMemoryUsageOperationalPreference');
+    if (usageClass === 'work_review') return i18nService.t('coworkMemoryUsageWorkReview');
+    if (usageClass === 'value_boundary') return i18nService.t('coworkMemoryUsageValueBoundary');
+    return null;
+  };
+
+  const getMemoryVisibilityLabel = (visibility?: CoworkUserMemoryEntry['visibility']): string => {
+    return visibility === 'external_safe'
+      ? i18nService.t('coworkMemoryVisibilityExternalSafe')
+      : i18nService.t('coworkMemoryVisibilityLocalOnly');
+  };
+
   const handleOpenCoworkMemoryModal = () => {
     if (coworkMemoryMetabotId == null) return;
     resetCoworkMemoryEditor();
+    setCoworkMemoryDraftScope({ ...coworkMemorySelectedScope });
     setShowMemoryModal(true);
   };
 
@@ -2457,7 +2558,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     {i18nService.t('coworkMemoryManageHint')}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('coworkMemoryScopeMetabot')}
                   </div>
@@ -2478,6 +2579,53 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           {metabot.name}
                         </option>
                       ))
+                    )}
+                  </select>
+                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('coworkMemoryScopeSelect')}
+                  </div>
+                  <select
+                    value={`${coworkMemorySelectedScope.kind}:${coworkMemorySelectedScope.key}`}
+                    onChange={(event) => {
+                      const [kind, ...keyParts] = event.target.value.split(':');
+                      const key = keyParts.join(':');
+                      if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
+                        setCoworkMemorySelectedScope({ kind, key });
+                      }
+                    }}
+                    className="min-w-[220px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                    disabled={coworkMemoryMetabotId == null || coworkMemoryScopes == null}
+                  >
+                    <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
+                      {`${i18nService.t('coworkMemoryScopeOwner')}${coworkMemoryScopes?.owner ? ` (${coworkMemoryScopes.owner.count})` : ''}`}
+                    </option>
+                    {coworkMemoryScopes && coworkMemoryScopes.contacts.length > 0 ? (
+                      coworkMemoryScopes.contacts.map((scope) => {
+                        const peerName = scope.peerName?.trim() || scope.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+                        return (
+                          <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                            {`${i18nService.t('coworkMemoryScopeContact')}: ${peerName} (${scope.count})`}
+                          </option>
+                        );
+                      })
+                    ) : (
+                      <option value="" disabled>
+                        {i18nService.t('coworkMemoryScopeNoContacts')}
+                      </option>
+                    )}
+                    {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 ? (
+                      coworkMemoryScopes.conversations.map((scope) => {
+                        const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
+                        return (
+                          <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                            {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey} (${scope.count})`}
+                          </option>
+                        );
+                      })
+                    ) : (
+                      <option value="" disabled>
+                        {i18nService.t('coworkMemoryScopeNoConversations')}
+                      </option>
                     )}
                   </select>
                   <button
@@ -2630,9 +2778,23 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                               <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
                                 {getMemoryStatusLabel(entry.status)}
                               </span>
-                              {entry.usageClass === 'self_identity' && (
+                              {entry.scopeKind && entry.scopeKey && (
+                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                  {getMemoryScopeLabel({ kind: entry.scopeKind, key: entry.scopeKey }, coworkMemoryScopes)}
+                                </span>
+                              )}
+                              {getMemoryUsageClassLabel(entry.usageClass) && (
                                 <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
-                                  {i18nService.t('coworkMemorySelfIdentity')}
+                                  {getMemoryUsageClassLabel(entry.usageClass)}
+                                </span>
+                              )}
+                              {entry.visibility === 'external_safe' ? (
+                                <span className="rounded-full border px-2 py-0.5 border-emerald-500/50 text-emerald-600 dark:text-emerald-400">
+                                  {getMemoryVisibilityLabel(entry.visibility)}
+                                </span>
+                              ) : (
+                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                  {getMemoryVisibilityLabel(entry.visibility)}
                                 </span>
                               )}
                               <span>
@@ -3397,6 +3559,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  const coworkMemoryDraftExternalSafeAllowed = (
+    coworkMemoryDraftScope?.kind ?? 'owner'
+  ) === 'owner' && coworkMemoryDraftUsageClass === 'operational_preference';
+  const coworkMemoryEditingTagLabel = coworkMemoryDraftScope
+    ? `${i18nService.t('coworkMemoryEditingTag')} · ${getMemoryScopeLabel(coworkMemoryDraftScope, coworkMemoryScopes)}`
+    : i18nService.t('coworkMemoryEditingTag');
+
   return (
     <div
       className="fixed inset-0 z-50 modal-backdrop flex items-center justify-center"
@@ -3811,7 +3980,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 <div className="px-5 py-4 space-y-4">
                   {coworkMemoryEditingId && (
                     <div className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {i18nService.t('coworkMemoryEditingTag')}
+                      {coworkMemoryEditingTagLabel}
                     </div>
                   )}
                   <textarea
@@ -3821,6 +3990,96 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     autoFocus
                     className="min-h-[200px] w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30"
                   />
+                  {!coworkMemoryEditingId && (
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryScopeSelect')}
+                      </span>
+                      <select
+                        value={`${coworkMemoryDraftScope?.kind ?? 'owner'}:${coworkMemoryDraftScope?.key ?? 'owner:self'}`}
+                        onChange={(event) => {
+                          const [kind, ...keyParts] = event.target.value.split(':');
+                          const key = keyParts.join(':');
+                          if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
+                            setCoworkMemoryDraftScope({ kind, key });
+                            if (kind !== 'owner') {
+                              setCoworkMemoryDraftVisibility('local_only');
+                            }
+                          }
+                        }}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                      >
+                        <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
+                          {i18nService.t('coworkMemoryScopeOwner')}
+                        </option>
+                        {coworkMemoryScopes && coworkMemoryScopes.contacts.length > 0 && (
+                          coworkMemoryScopes.contacts.map((scope) => {
+                            const peerName = scope.peerName?.trim() || scope.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+                            return (
+                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                                {`${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`}
+                              </option>
+                            );
+                          })
+                        )}
+                        {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 && (
+                          coworkMemoryScopes.conversations.map((scope) => {
+                            const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
+                            return (
+                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                                {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`}
+                              </option>
+                            );
+                          })
+                        )}
+                      </select>
+                    </label>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryCategoryAll')}
+                      </span>
+                      <select
+                        value={coworkMemoryDraftUsageClass}
+                        onChange={(event) => {
+                          const next = event.target.value as CoworkMemoryEditableUsageClass;
+                          setCoworkMemoryDraftUsageClass(next);
+                          if (next !== 'operational_preference') {
+                            setCoworkMemoryDraftVisibility('local_only');
+                          }
+                        }}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                      >
+                        <option value="profile_fact">{i18nService.t('coworkMemoryUsageProfileFact')}</option>
+                        <option value="preference">{i18nService.t('coworkMemoryUsagePreference')}</option>
+                        <option value="operational_preference">{i18nService.t('coworkMemoryUsageOperationalPreference')}</option>
+                        <option value="work_review">{i18nService.t('coworkMemoryUsageWorkReview')}</option>
+                        <option value="value_boundary">{i18nService.t('coworkMemoryUsageValueBoundary')}</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryVisibility')}
+                      </span>
+                      <select
+                        value={coworkMemoryDraftVisibility}
+                        onChange={(event) => {
+                          setCoworkMemoryDraftVisibility(event.target.value === 'external_safe' ? 'external_safe' : 'local_only');
+                        }}
+                        disabled={!coworkMemoryDraftExternalSafeAllowed}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface disabled:opacity-60"
+                      >
+                        <option value="local_only">{i18nService.t('coworkMemoryVisibilityLocalOnly')}</option>
+                        <option value="external_safe">{i18nService.t('coworkMemoryVisibilityExternalSafe')}</option>
+                      </select>
+                    </label>
+                  </div>
+                  {!coworkMemoryDraftExternalSafeAllowed && (
+                    <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('coworkMemoryVisibilityLockedHint')}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-end space-x-2 px-5 pb-5">

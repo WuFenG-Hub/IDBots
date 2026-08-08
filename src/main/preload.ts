@@ -445,6 +445,7 @@ contextBridge.exposeInMainWorld('electron', {
       metabotId?: number;
       scopeKind?: 'owner' | 'contact' | 'conversation';
       scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
       visibility?: 'local_only' | 'external_safe';
       text: string;
       confidence?: number;
@@ -456,6 +457,7 @@ contextBridge.exposeInMainWorld('electron', {
       metabotId?: number;
       scopeKind?: 'owner' | 'contact' | 'conversation';
       scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
       visibility?: 'local_only' | 'external_safe';
       id: string;
       text?: string;

@@ -8132,6 +8132,7 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
     visibility?: 'local_only' | 'external_safe';
     text: string;
     confidence?: number;
@@ -8151,6 +8152,7 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        usageClass: input?.usageClass,
         visibility: input?.visibility,
       });
       return { success: true, entry };
@@ -8166,6 +8168,7 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
     visibility?: 'local_only' | 'external_safe';
     id: string;
     text?: string;
@@ -8185,6 +8188,7 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        usageClass: input?.usageClass,
         visibility: input?.visibility,
         text: input.text,
         confidence: input.confidence,
