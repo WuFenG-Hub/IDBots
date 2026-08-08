@@ -30,7 +30,7 @@ function loadTestUtils() {
   }
 }
 
-const { resolveThinkingForModel, extractAnthropicThinkingText } = loadTestUtils();
+const { resolveThinkingForModel, extractAnthropicThinkingText, resolveDeepSeekResponsesReasoning } = loadTestUtils();
 
 test('one-shot completion reads the Anthropic thinking field emitted by the proxy', () => {
   assert.equal(
@@ -49,4 +49,12 @@ test('thinking controls are sent only to compatible DeepSeek models', () => {
   assert.equal(resolveThinkingForModel('deepseek-reasoner', 'enabled'), 'enabled');
   assert.equal(resolveThinkingForModel('claude-sonnet-4-6', 'disabled'), undefined);
   assert.equal(resolveThinkingForModel('gpt-5.6-sol', 'disabled'), undefined);
+});
+
+test('DeepSeek Responses reasoning disable must be explicit effort none', () => {
+  // Omitting `reasoning` leaves DeepSeek's server-side default (thinking ON,
+  // effort high) in effect — the 2026-08-08 dream-diary outage root cause.
+  assert.deepEqual(resolveDeepSeekResponsesReasoning('disabled'), { effort: 'none' });
+  assert.deepEqual(resolveDeepSeekResponsesReasoning('enabled'), { effort: 'max' });
+  assert.deepEqual(resolveDeepSeekResponsesReasoning(undefined), { effort: 'max' });
 });

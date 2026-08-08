@@ -108,6 +108,21 @@ function normalizeDeepSeekResponsesEffort(effort: string | undefined): 'low' | '
   return 'high';
 }
 
+/**
+ * Reasoning object for the DeepSeek Responses API. The API defaults to
+ * thinking ON (effort 'high') when `reasoning` is omitted, so 'disabled' must
+ * be sent explicitly as { effort: 'none' } — omitting the field does NOT
+ * disable thinking and lets the chain-of-thought consume the whole
+ * max_output_tokens budget (status=incomplete with empty output).
+ * Enabled/undefined stays at 'max' to match the project's DeepSeek-first
+ * thinking-on policy. See https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+ */
+function resolveDeepSeekResponsesReasoning(
+  thinking: 'enabled' | 'disabled' | undefined,
+): { effort: 'none' | 'max' } {
+  return thinking === 'disabled' ? { effort: 'none' } : { effort: 'max' };
+}
+
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
   if (block.type !== 'thinking' && block.type !== 'redacted_thinking') return '';
   return block.thinking || block.text || '';
@@ -430,6 +445,7 @@ export const __cognitiveChatCompletionTestUtils = {
   shouldUseDeepSeekResponses,
   buildDeepSeekResponsesURL,
   normalizeDeepSeekResponsesEffort,
+  resolveDeepSeekResponsesReasoning,
 };
 
 /**
@@ -612,12 +628,9 @@ async function callDeepSeekResponsesStyle(
   if (temperature !== undefined) {
     body.temperature = temperature;
   }
-  // Reasoning effort: 'disabled' → omit reasoning (no thinking); otherwise map
-  // to the Responses reasoning object. Default effort is 'max' to match the
-  // project's DeepSeek-first thinking-on policy.
-  if (thinking !== 'disabled') {
-    body.reasoning = { effort: 'max' };
-  }
+  // Reasoning effort: 'disabled' must be explicit ({ effort: 'none' }) — an
+  // omitted field means thinking stays ON. See resolveDeepSeekResponsesReasoning.
+  body.reasoning = resolveDeepSeekResponsesReasoning(thinking);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey.trim()) {
