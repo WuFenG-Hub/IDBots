@@ -51,6 +51,7 @@ import { buildCronDeleteInstruction, buildCronCreateInstruction } from './sdkCro
 import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { OpenTeamMembershipStore } from './openTeamMembershipStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
@@ -148,7 +149,19 @@ import {
 import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
+  type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
+import {
+  startOpenTeamGuestDaemon,
+  stopOpenTeamGuestDaemon,
+} from './services/openTeamGuestDaemon';
+import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
+import {
+  resumeOpenTeamInviteWatchers,
+  setOpenTeamServiceDeps,
+  stopOpenTeamInviteWatchers,
+} from './services/openTeamService';
+import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -196,7 +209,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3117,12 +3130,14 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupChatBackfillActiveGroupIdsGetter(() => {
-    // Union of group-task groups and active agent-game session groups so both
-    // receive history gap-fill from the same single backfill loop.
+    // Union of group-task groups, active OpenTeam membership groups, and active
+    // agent-game session groups so all receive history gap-fill from the same
+    // single backfill loop.
     const taskGroups = getGroupTaskStore().getActiveGroupIds();
+    const openTeamGroups = getOpenTeamMembershipStore().listActiveGroupIds();
     const host = getAgentGameHost();
     const gameGroups = host ? host.activeGroupIds() : [];
-    return Array.from(new Set([...taskGroups, ...gameGroups]));
+    return Array.from(new Set([...taskGroups, ...openTeamGroups, ...gameGroups]));
   });
 
   // One-time, versioned historical cognition migration. It is deliberately
@@ -3319,6 +3334,79 @@ const startSqliteDaemons = (): void => {
   // Group Task daemon: group messages trigger member/chair replies under the
   // strict chair-controlled protocol (own cursor on group_tasks, own session
   // channel; fully separate from the cognitive orchestrator).
+  //
+  // Owner private-report channel (encrypted simplemsg from the chair bot +
+  // A2A display record), shared by the group-task daemon and the OpenTeam
+  // inviter service wired below.
+  const sendGroupTaskOwnerPrivateReport: GroupTaskDaemonSendOwnerReportFn = async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
+    const metabotStore = getMetabotStore();
+    const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet?.mnemonic?.trim()) {
+      throw new Error('chair wallet unavailable');
+    }
+    const identity = getUserIdentityStore().get();
+    if (!identity) {
+      throw new Error('owner identity unavailable');
+    }
+    const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
+    if (!peerGlobalMetaId) {
+      throw new Error('owner GlobalMetaID unavailable');
+    }
+    if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
+      throw new Error('task owner does not match the current user identity');
+    }
+    const peerChatPubkey = identity.chat_public_key.trim();
+    if (!peerChatPubkey) {
+      throw new Error('owner chat public key unavailable');
+    }
+    const sent = await sendEncryptedSimplemsg({
+      metabotId,
+      wallet,
+      peerGlobalMetaId,
+      peerChatPubkey,
+      plaintext: text,
+      createPin: async (id, payload) => createPin(metabotStore, id, payload),
+    });
+
+    let sessionId: string | null = null;
+    let displayError: string | null = null;
+    try {
+      const recorded = recordOutgoingPrivateChatA2ADisplay({
+        coworkStore: getCoworkStore(),
+        getMetabotById: (id) => metabotStore.getMetabotById(id),
+        metabotId,
+        peerGlobalMetaId,
+        peerName: identity.name,
+        peerAvatar: identity.avatar,
+        content: text,
+        chain: { txids: sent.txids, pinId: sent.pinId },
+        extraMetadata: {
+          privateChatDeliveryStatus: 'sent',
+          suppressRunningStatus: true,
+          groupTaskOwnerReport: true,
+          groupTaskId: taskId,
+        },
+      });
+      if (recorded) {
+        sessionId = recorded.sessionId;
+        if (recorded.message) {
+          emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+        }
+      }
+    } catch (error) {
+      displayError = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
+        error,
+      );
+    }
+
+    return {
+      pinId: sent.pinId,
+      sessionId,
+      displayError,
+    };
+  };
   startGroupTaskDaemon({
     getStore,
     getGroupTaskStore,
@@ -3382,75 +3470,7 @@ const startSqliteDaemons = (): void => {
         }
       };
     })(),
-    sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
-      const metabotStore = getMetabotStore();
-      const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
-      if (!wallet?.mnemonic?.trim()) {
-        throw new Error('chair wallet unavailable');
-      }
-      const identity = getUserIdentityStore().get();
-      if (!identity) {
-        throw new Error('owner identity unavailable');
-      }
-      const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
-      if (!peerGlobalMetaId) {
-        throw new Error('owner GlobalMetaID unavailable');
-      }
-      if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
-        throw new Error('task owner does not match the current user identity');
-      }
-      const peerChatPubkey = identity.chat_public_key.trim();
-      if (!peerChatPubkey) {
-        throw new Error('owner chat public key unavailable');
-      }
-      const sent = await sendEncryptedSimplemsg({
-        metabotId,
-        wallet,
-        peerGlobalMetaId,
-        peerChatPubkey,
-        plaintext: text,
-        createPin: async (id, payload) => createPin(metabotStore, id, payload),
-      });
-
-      let sessionId: string | null = null;
-      let displayError: string | null = null;
-      try {
-        const recorded = recordOutgoingPrivateChatA2ADisplay({
-          coworkStore: getCoworkStore(),
-          getMetabotById: (id) => metabotStore.getMetabotById(id),
-          metabotId,
-          peerGlobalMetaId,
-          peerName: identity.name,
-          peerAvatar: identity.avatar,
-          content: text,
-          chain: { txids: sent.txids, pinId: sent.pinId },
-          extraMetadata: {
-            privateChatDeliveryStatus: 'sent',
-            suppressRunningStatus: true,
-            groupTaskOwnerReport: true,
-            groupTaskId: taskId,
-          },
-        });
-        if (recorded) {
-          sessionId = recorded.sessionId;
-          if (recorded.message) {
-            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
-          }
-        }
-      } catch (error) {
-        displayError = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
-          error,
-        );
-      }
-
-      return {
-        pinId: sent.pinId,
-        sessionId,
-        displayError,
-      };
-    },
+    sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({
         metabotId,
@@ -3475,6 +3495,54 @@ const startSqliteDaemons = (): void => {
       : {}),
     emitLog: (msg) => console.log(msg),
   });
+
+  // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
+  // invite envelopes intercepted by the private-chat daemon (join the external
+  // group + ACCEPT/DECLINE reply); the guest daemon then lets the invited bot
+  // participate in those external groups under the same mention gating as
+  // local group-task workers.
+  setOpenTeamGuestServiceDeps({
+    getMetabotStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    joinGroupChat: (metabotId, groupId) => joinGroupChat(metabotId, groupId),
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+    emitLog: (msg) => console.log(msg),
+  });
+  startOpenTeamGuestDaemon({
+    getStore,
+    getMetabotStore,
+    getOpenTeamMembershipStore,
+    performChat: performChatCompletionForOrchestrator,
+    sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    emitLog: (msg) => console.log(msg),
+  });
+
+  // OpenTeam (M1): inviter-side wiring. The service searches on-chain online
+  // bots, sends [OPENTEAM_INVITE] envelopes from the twin wallet and runs
+  // per-invite watchers that turn the guest's ACCEPT into a remote task member.
+  // Pending invites resume their watchers here after every (re)start.
+  setOpenTeamServiceDeps({
+    getMetabotStore,
+    getGroupTaskStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    searchMetaIds,
+    getMetaIdDetail,
+    fetchOnlineStatus: (globalMetaIds) => getIdchatPresenceService().fetchOnlineStatus(globalMetaIds),
+    waitForMemberJoined,
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+    sendOwnerPrivateReport: (params) => sendGroupTaskOwnerPrivateReport(params),
+    emitLog: (msg) => console.log(msg),
+  });
+  const resumedInviteWatchers = resumeOpenTeamInviteWatchers();
+  if (resumedInviteWatchers > 0) {
+    console.log(`[OpenTeam] Resumed ${resumedInviteWatchers} pending invite watcher(s)`);
+  }
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
@@ -3528,6 +3596,8 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
+  stopOpenTeamGuestDaemon();
+  stopOpenTeamInviteWatchers();
   await resetSqliteBackedSingletons();
   return restartState;
 };
@@ -5296,6 +5366,18 @@ const getGroupTaskStore = () => {
     groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return groupTaskStore;
+};
+
+let openTeamMembershipStore: OpenTeamMembershipStore | null = null;
+const getOpenTeamMembershipStore = () => {
+  if (!openTeamMembershipStore) {
+    const sqliteStore = getStore();
+    openTeamMembershipStore = new OpenTeamMembershipStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return openTeamMembershipStore;
 };
 
 let orchestrationStore: OrchestrationStore | null = null;

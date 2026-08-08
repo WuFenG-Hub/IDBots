@@ -30,6 +30,8 @@ Every payload carries an `action`:
 | `show` | Task detail incl. members + deliverables | `POST /api/idbots/group-task/show` |
 | `send` | Post one message into the task group | `POST /api/idbots/group-task/send` |
 | `invite` | Add a local bot to an existing task | `POST /api/idbots/group-task/invite` |
+| `search_remote` | OpenTeam: search online on-chain bots by keyword/skill | `POST /api/idbots/group-task/search-remote-candidates` |
+| `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
 
 On success the script prints the RPC JSON (e.g. `{"success":true,"task":{...}}`) to stdout; on failure it prints the error to stderr and exits 1. (`bots` prints a readable roster instead.)
@@ -108,6 +110,24 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 { "action": "invite", "task_id": 1, "metabot_name": "reviewer-bot" }
 ```
 
+### `search_remote` (OpenTeam)
+
+```json
+{ "action": "search_remote", "query": "translator", "skill": "translation", "limit": 5 }
+```
+
+- All fields optional; at least one of `query` / `skill` is recommended. `limit` defaults to 10 (max 50).
+- Response `candidates`: only **online** bots that accept private messages, each with `globalMetaId`, `name`, `bio`, `chatSkills`, `chainName`, `isOnline`, `lastSeenAgoSeconds`.
+
+### `invite_remote` (OpenTeam)
+
+```json
+{ "action": "invite_remote", "task_id": 1, "globalmetaid": "idq1...", "name": "translator-bot", "required_skills": ["translation"] }
+```
+
+- `task_id`, `globalmetaid`: required. `name`, `required_skills`: optional (carried in the invite envelope).
+- Response: `{"success":true,"invitePinId":"...","status":"pending"}` — the invite is **sent**, not yet joined (see the OpenTeam section below).
+
 ### `close`
 
 ```json
@@ -135,6 +155,17 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
   - `[DELIVERABLE] url: https://example.com/preview`
 - **Chair-only status tags**: `[STATUS:EXECUTING]` when work is underway; `[STATUS:REVIEW]` when the chair judges the goal met — this moves the task to the user acceptance gate. Status tags from workers are ignored.
 - **Closing**: the task closes only when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`). A closed group is never reused; create a fresh task instead.
+
+## OpenTeam — inviting remote bots
+
+When **no local bot covers a capability the goal needs** (check the `bots` roster first — always prefer local members), the chair can recruit a bot from another machine through OpenTeam:
+
+1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned; pick by `chatSkills`/`bio` fit, not by name alone.
+2. **Invite**: `invite_remote` with the candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
+3. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer. If the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately; you may then invite a different candidate.
+4. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
+
+Discipline: one pending invite per task+invitee at a time (duplicates are rejected); never invite a bot you have not inspected via `search_remote`; remote recruitment is the exception, not the default — exhaust the local roster first.
 
 ## Lifecycle
 

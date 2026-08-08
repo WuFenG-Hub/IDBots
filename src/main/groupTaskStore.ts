@@ -45,7 +45,11 @@ export interface GroupTaskMember {
   role: GroupTaskMemberRole;
   joinedPinId: string | null;
   createdAt: string | null;
-  /** Joined from metabots for display / mention matching (null for remote members). */
+  /** Inviter-side name snapshot for remote members (no local metabots row). */
+  displayName: string | null;
+  /** Set when the member was kicked (M3); active members have NULL. */
+  removedAt: string | null;
+  /** Joined from metabots for display / mention matching (falls back to displayName for remote members). */
   name: string | null;
 }
 
@@ -97,6 +101,8 @@ export interface AddGroupTaskMemberInput {
   globalmetaid?: string | null;
   role: GroupTaskMemberRole;
   joinedPinId?: string | null;
+  /** Name snapshot for remote members (metabotId === null). */
+  displayName?: string | null;
 }
 
 export interface AddGroupTaskDeliverableInput {
@@ -133,6 +139,8 @@ interface GroupTaskMemberRow {
   role: string;
   joined_pin_id: string | null;
   created_at: string | null;
+  display_name: string | null;
+  removed_at: string | null;
   metabot_name: string | null;
   metabot_globalmetaid: string | null;
 }
@@ -233,7 +241,11 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
     role: row.role === 'chair' ? 'chair' : 'worker',
     joinedPinId: row.joined_pin_id ?? null,
     createdAt: row.created_at ?? null,
-    name: row.metabot_name ?? null,
+    displayName: row.display_name ?? null,
+    removedAt: row.removed_at ?? null,
+    // Local members get the metabots-table name; remote members fall back to
+    // the display_name snapshot recorded at invite time.
+    name: row.metabot_name ?? row.display_name ?? null,
   };
 }
 
@@ -500,38 +512,90 @@ export class GroupTaskStore {
 
   // --- group_task_members ---
 
+  /**
+   * Add a member row, idempotently. Local members dedupe on (task_id, metabot_id)
+   * (backed by the UNIQUE constraint); remote members (metabotId === null) dedupe
+   * in code on (task_id, globalmetaid) among active rows, because the UNIQUE
+   * constraint does not apply to NULL metabot_id. Returns the existing row when
+   * the member is already present instead of throwing after a no-op insert.
+   */
   addMember(input: AddGroupTaskMemberInput): GroupTaskMember {
+    const isRemote = input.metabotId == null;
+    const remoteGlobalmetaid = isRemote ? (input.globalmetaid ?? '').trim() : '';
+    if (isRemote && !remoteGlobalmetaid) {
+      throw new Error(`addMember failed for task ${input.taskId}: remote member requires globalmetaid`);
+    }
+
+    // Code-level pre-check: an already-present member is returned as-is.
+    const existing = isRemote
+      ? this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+          [input.taskId, remoteGlobalmetaid],
+        )
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, input.metabotId!],
+        );
+    if (existing) return rowToGroupTaskMember(existing);
+
     this.db.run(
-      `INSERT OR IGNORE INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name)
+       VALUES (?, ?, ?, ?, ?, ?)`,
       [
         input.taskId,
         input.metabotId,
-        input.globalmetaid ?? null,
+        isRemote ? remoteGlobalmetaid : input.globalmetaid ?? null,
         input.role,
         input.joinedPinId ?? null,
+        input.displayName ?? null,
       ],
     );
     this.saveDb();
-    const existing = input.metabotId != null
+    const inserted = isRemote
       ? this.getOne<GroupTaskMemberRow>(
-          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
-          [input.taskId, input.metabotId],
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+          [input.taskId, remoteGlobalmetaid],
         )
-      : undefined;
-    if (!existing) throw new Error(`addMember failed for task ${input.taskId}`);
-    return rowToGroupTaskMember(existing);
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, input.metabotId!],
+        );
+    if (!inserted) throw new Error(`addMember failed for task ${input.taskId}`);
+    return rowToGroupTaskMember(inserted);
   }
 
-  listMembers(taskId: number): GroupTaskMember[] {
-    const rows = this.getAll<GroupTaskMemberRow>(
-      `${MEMBER_SELECT} WHERE m.task_id = ? ORDER BY m.id ASC`,
-      [taskId],
-    );
+  /**
+   * Members of one task, oldest first. By default only active members are
+   * returned (removed_at IS NULL); pass includeRemoved for the full history.
+   */
+  listMembers(taskId: number, opts?: { includeRemoved?: boolean }): GroupTaskMember[] {
+    const rows = opts?.includeRemoved
+      ? this.getAll<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? ORDER BY m.id ASC`,
+          [taskId],
+        )
+      : this.getAll<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.removed_at IS NULL ORDER BY m.id ASC`,
+          [taskId],
+        );
     return rows.map(rowToGroupTaskMember);
   }
 
-  isMember(taskId: number, metabotId: number): boolean {
+  /**
+   * Membership check. Local members match on metabot_id; remote members
+   * (metabotId === null) match on globalmetaid among active rows.
+   */
+  isMember(taskId: number, metabotId: number | null, globalmetaid?: string | null): boolean {
+    if (metabotId == null) {
+      const gmid = (globalmetaid ?? '').trim();
+      if (!gmid) return false;
+      const row = this.getOne<{ found: number }>(
+        `SELECT 1 AS found FROM group_task_members
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL LIMIT 1`,
+        [taskId, gmid],
+      );
+      return Boolean(row);
+    }
     const row = this.getOne<{ found: number }>(
       'SELECT 1 AS found FROM group_task_members WHERE task_id = ? AND metabot_id = ? LIMIT 1',
       [taskId, metabotId],
@@ -539,7 +603,29 @@ export class GroupTaskStore {
     return Boolean(row);
   }
 
-  updateMemberJoinedPinId(taskId: number, metabotId: number, joinedPinId: string | null): void {
+  /**
+   * Record the on-chain join pin. Local members match on metabot_id; remote
+   * members (metabotId === null) match the active row by globalmetaid.
+   */
+  updateMemberJoinedPinId(
+    taskId: number,
+    metabotId: number | null,
+    joinedPinId: string | null,
+    globalmetaid?: string | null,
+  ): void {
+    if (metabotId == null) {
+      const gmid = (globalmetaid ?? '').trim();
+      if (!gmid) {
+        throw new Error(`updateMemberJoinedPinId failed for task ${taskId}: remote member requires globalmetaid`);
+      }
+      this.db.run(
+        `UPDATE group_task_members SET joined_pin_id = ?
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL`,
+        [joinedPinId, taskId, gmid],
+      );
+      this.saveDb();
+      return;
+    }
     this.db.run(
       'UPDATE group_task_members SET joined_pin_id = ? WHERE task_id = ? AND metabot_id = ?',
       [joinedPinId, taskId, metabotId],

@@ -22,6 +22,7 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
+import { isMentioned } from './groupChatMentionUtils';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
@@ -160,57 +161,12 @@ type DaemonPromptMember = {
   bio?: string | null;
   roleProfile?: string | null;
   goal?: string | null;
+  /** OpenTeam remote teammate: no local bot row; replies come from its own machine. */
+  remote?: boolean;
 };
 
-/**
- * Word-boundary @-mention matching: a bot counts as "mentioned by name" ONLY
- * when the content contains an explicit `@BotName` token (the @ must not be
- * glued to a longer identifier and the name must match completely). A bare
- * name occurrence (e.g. a kickoff roster line "Members: Coder Bot, …" or a
- * recap "already checked Lucy's file") does NOT trigger a reply. This killed
- * the "kickoff mentions the full roster -> every member responds" problem and
- * the "one recap mentions two names -> two steps created" problem.
- */
-function contentMentionsBotName(content: string, botName: string): boolean {
-  if (!content || !botName) return false;
-  const name = botName.trim();
-  if (!name) return false;
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // @ 前不能是字母/数字/下划线（避免 @Builder 命中 @Builder2 之类粘连），
-  // @ 后必须完整匹配名字且名字结尾不在词中间；名字匹配大小写不敏感。
-  const pattern = new RegExp(`(^|[^A-Za-z0-9_])@${escaped}(?![A-Za-z0-9_])`, 'i');
-  return pattern.test(content);
-}
-
-/** Local equivalent of orchestrator's mentionContainsMetaId (kept separate by design). */
-function mentionContainsMetaId(
-  mentionJson: string | null,
-  globalMetaId: string | null,
-  metaId: string | undefined,
-): boolean {
-  if (!mentionJson) return false;
-  let ids: unknown[] = [];
-  try {
-    const parsed = JSON.parse(mentionJson) as unknown;
-    ids = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return false;
-  }
-  if (ids.length === 0) return false;
-  const targets = [globalMetaId, metaId]
-    .map((value) => (value ?? '').trim())
-    .filter(Boolean);
-  if (targets.length === 0) return false;
-  return ids.some((id) => targets.includes(String(id).trim()));
-}
-
-function isMentioned(
-  message: GroupTaskDaemonMessage,
-  bot: GroupTaskDaemonBot,
-): boolean {
-  return mentionContainsMetaId(message.mention, bot.globalmetaid, bot.metaid)
-    || contentMentionsBotName(message.content, bot.name);
-}
+// Mention gating (contentMentionsBotName / mentionContainsMetaId / isMentioned)
+// lives in groupChatMentionUtils.ts, shared with the OpenTeam guest daemon.
 
 /**
  * Decide which local member bots respond to one group message.
@@ -1380,7 +1336,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const profile = [member.bio, member.roleProfile].filter(Boolean).join(' — ');
       const goal = member.goal?.trim() ? ` (goal: ${member.goal.trim()})` : '';
       const skillsHint = member.role === 'chair' ? ' (chair, do not assign work to the chair)' : '';
-      return `- ${member.name} [${member.role}]${goal}${skillsHint}${profile ? ` — ${profile}` : ''}`;
+      const remoteHint = member.remote ? ' (remote teammate via OpenTeam — replies come from their own machine, may be delayed)' : '';
+      return `- ${member.name} [${member.role}]${goal}${skillsHint}${remoteHint}${profile ? ` — ${profile}` : ''}`;
     });
     const workerCount = promptMembers.filter((member) => member.role === 'worker').length;
     const distributionRule = workerCount >= 2
@@ -1740,19 +1697,34 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const bot = metabotStore.getMetabotById(member.metabotId);
       if (bot) botsById.set(member.metabotId, bot);
     }
-    const promptMembers: DaemonPromptMember[] = members
-      .filter((member) => member.metabotId != null)
-      .map((member) => {
-        const bot = botsById.get(member.metabotId!);
+    // Remote OpenTeam teammates (metabotId == null) join the prompt roster so
+    // the chair and local workers can see and @ them; botsById and responder
+    // gating stay local-only because their replies come from their own machine.
+    const promptMembers: DaemonPromptMember[] = members.map((member) => {
+      if (member.metabotId == null) {
+        const globalMetaId = member.globalmetaid?.trim() || null;
         return {
-          name: member.name ?? bot?.name ?? `bot-${member.metabotId}`,
+          // The roster name must stay exactly the display_name snapshot — the
+          // invitee's guest daemon name-gates on its real bot name.
+          name: member.name ?? `remote-${(globalMetaId ?? '').slice(0, 10) || 'unknown'}`,
           role: member.role,
-          globalMetaId: member.globalmetaid?.trim() || bot?.globalmetaid?.trim() || null,
-          bio: bot?.bio ?? bot?.background ?? null,
-          roleProfile: bot?.role ?? null,
-          goal: bot?.goal ?? null,
+          globalMetaId,
+          bio: null,
+          roleProfile: null,
+          goal: null,
+          remote: true,
         };
-      });
+      }
+      const bot = botsById.get(member.metabotId);
+      return {
+        name: member.name ?? bot?.name ?? `bot-${member.metabotId}`,
+        role: member.role,
+        globalMetaId: member.globalmetaid?.trim() || bot?.globalmetaid?.trim() || null,
+        bio: bot?.bio ?? bot?.background ?? null,
+        roleProfile: bot?.role ?? null,
+        goal: bot?.goal ?? null,
+      };
+    });
     const chairGlobalMetaId = (
       members.find((member) => member.role === 'chair')?.globalmetaid ?? ''
     ).trim();

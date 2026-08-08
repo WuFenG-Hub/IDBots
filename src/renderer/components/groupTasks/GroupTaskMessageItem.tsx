@@ -99,12 +99,15 @@ interface GroupTaskMessageItemProps {
   message: GroupChatTranscriptMessage;
   isChairSender: boolean;
   isOwnerSender: boolean;
+  /** Sender is a remote member who joined via OpenTeam (matched by globalmetaid). */
+  isRemoteSender?: boolean;
 }
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   message,
   isChairSender,
   isOwnerSender,
+  isRemoteSender,
 }) => {
   // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
   // source. A message whose sender is neither a task member nor the owner is
@@ -147,6 +150,11 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           {isOwnerSender && (
             <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
               {i18nService.t('groupTasksOwnerBadge')}
+            </span>
+          )}
+          {isRemoteSender && (
+            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-green-500/15 text-green-600 dark:text-green-400">
+              {i18nService.t('groupTasksRemoteBadge')}
             </span>
           )}
           {timestamp && (

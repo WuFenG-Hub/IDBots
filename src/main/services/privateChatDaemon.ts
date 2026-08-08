@@ -45,6 +45,11 @@ import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
+import { parseOpenTeamEnvelope } from './openTeamProtocols';
+import {
+  handleIncomingOpenTeamInvite,
+  handleIncomingOpenTeamResponse,
+} from './openTeamGuestService';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -2738,6 +2743,11 @@ async function processOne(
           emitLog(
             `[PrivateChat] Outgoing sync: skipping transport handshake ${normalizeHandshakeWord(plaintext)}.`
           );
+        } else if (parseOpenTeamEnvelope(plaintext)) {
+          // OpenTeam envelopes are transport-level protocol messages, not chat
+          // content — keep them out of the local A2A session display on the
+          // outgoing path too (the inbound side is intercepted in processOne).
+          emitLog('[PrivateChat] Outgoing sync: skipping OpenTeam protocol envelope.');
         } else {
           try {
             const recorded = recordOutgoingPrivateChatA2ADisplay({
@@ -2896,6 +2906,38 @@ async function processOne(
 
     const handshakeWord = normalizeHandshakeWord(plaintext.trim());
     const fromGlobalMetaId = (row.from_global_metaid || row.from_metaid || '').trim();
+
+    // OpenTeam protocol envelopes (invite/accept/decline) are handled by the
+    // OpenTeam guest/inviter flows and must never reach the LLM reply path —
+    // same interception pattern as the MetaSwarm handshake and [ORDER]
+    // protocols. `metabot` here is the local RECIPIENT bot of this message, so
+    // invite handling always runs in the invitee's context.
+    const openTeamEnvelope = parseOpenTeamEnvelope(plaintext);
+    if (openTeamEnvelope) {
+      try {
+        if (openTeamEnvelope.kind === 'invite') {
+          await handleIncomingOpenTeamInvite({
+            metabot,
+            invite: openTeamEnvelope.invite,
+            replyContext: {
+              peerGlobalMetaId: fromGlobalMetaId,
+              peerChatPubkey: fromChatPubkey,
+              invitePinId: openTeamEnvelope.invite.inviteId,
+            },
+          });
+        } else {
+          handleIncomingOpenTeamResponse(openTeamEnvelope);
+        }
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        emitLog(
+          `[OpenTeam] Envelope handling failed for message ${row.id}: ${error instanceof Error ? error.message : error}`
+        );
+      }
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
+
     const createSimpleMsgPin = async (payload: string) => createPinWithMvcSubsidyRetry({
       metabot,
       wallet,

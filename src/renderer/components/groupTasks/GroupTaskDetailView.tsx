@@ -211,6 +211,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
   const chairMember = detail.members.find((member) => member.role === 'chair');
+  // Remote members (metabotId == null) joined via OpenTeam; their messages are
+  // matched by globalmetaid so the transcript can flag them.
+  const remoteMemberGlobalMetaIds = new Set(
+    detail.members
+      .filter((member) => member.metabotId == null && member.globalmetaid)
+      .map((member) => member.globalmetaid as string),
+  );
   const deliverableAuthorName = (authorGlobalMetaId: string | null): string => {
     if (!authorGlobalMetaId) return '—';
     const member = detail.members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
@@ -341,6 +348,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   isOwnerSender={Boolean(
                     ownerGlobalMetaId && message.senderGlobalMetaId === ownerGlobalMetaId,
                   )}
+                  isRemoteSender={Boolean(
+                    message.senderGlobalMetaId
+                    && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
+                  )}
                 />
               ))
             )}
@@ -392,11 +403,20 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               {detail.members.map((member) => (
                 <div key={member.id} className="flex items-center gap-2">
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
-                    {member.name ?? `bot-${member.metabotId}`}
+                    {member.name ?? (member.metabotId != null
+                      ? `bot-${member.metabotId}`
+                      : member.globalmetaid
+                        ? `${member.globalmetaid.slice(0, 10)}…`
+                        : 'remote bot')}
                   </span>
                   {member.role === 'chair' && (
                     <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-claude-accent/15 text-claude-accent">
                       {i18nService.t('groupTasksChairBadge')}
+                    </span>
+                  )}
+                  {member.metabotId == null && (
+                    <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-green-500/15 text-green-600 dark:text-green-400">
+                      {i18nService.t('groupTasksRemoteBadge')}
                     </span>
                   )}
                 </div>
