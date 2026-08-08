@@ -71,7 +71,7 @@ function getProvidersForOnboarding(): NonNullable<AppConfig['providers']> {
   return result as NonNullable<AppConfig['providers']>;
 }
 
-const DEFAULT_ONBOARDING_API_FORMAT: 'anthropic' | 'openai' = 'openai';
+const DEFAULT_ONBOARDING_API_FORMAT: 'anthropic' | 'openai' | 'responses' = 'openai';
 
 const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
   const [step, setStep] = useState<OnboardingStep>(1);
@@ -80,7 +80,7 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
   );
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
-  const [apiFormat, setApiFormat] = useState<'anthropic' | 'openai'>(DEFAULT_ONBOARDING_API_FORMAT);
+  const [apiFormat, setApiFormat] = useState<'anthropic' | 'openai' | 'responses'>(DEFAULT_ONBOARDING_API_FORMAT);
   const [llmError, setLlmError] = useState('');
   const [validating, setValidating] = useState(false);
   const [selectedLlmId, setSelectedLlmId] = useState<string | null>(null);

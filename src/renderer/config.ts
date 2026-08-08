@@ -35,85 +35,88 @@ export interface AppConfig {
       apiKey: string;
       baseUrl: string;
       // API 协议格式：anthropic 为 Anthropic 兼容，openai 为 OpenAI 兼容
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     deepseek: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     moonshot: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     zhipu: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     minimax: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     qwen: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     openrouter: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     gemini: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     anthropic: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     xiaomi: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     ollama: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     [key: string]: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      // API 协议格式：anthropic 为 Anthropic Messages，openai 为 Chat Completions，responses 为 OpenAI Responses
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
+      // 自定义供应商显示名称（内置供应商无此字段，label 来自 providerMeta）
+      name?: string;
     };
   };
   // 主题配置
@@ -519,6 +522,17 @@ export const defaultConfig: AppConfig = {
         { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false, contextWindow: 204_800 }
       ]
+    },
+    opencode: {
+      enabled: false,
+      apiKey: '',
+      // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
+      // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiFormat: 'openai',
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
+      ]
     }
   },
   theme: 'system',
@@ -555,7 +569,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
+  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
 ] as const;
 
 /**

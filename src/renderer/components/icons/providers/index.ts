@@ -10,4 +10,5 @@ export { default as XiaomiIcon } from './XiaomiIcon';
 export { default as OpenRouterIcon } from './OpenRouterIcon';
 export { default as OllamaIcon } from './OllamaIcon';
 export { default as VolcengineIcon } from './VolcengineIcon';
+export { default as OpenCodeIcon } from './OpenCodeIcon';
 export { default as CustomProviderIcon } from './CustomProviderIcon';

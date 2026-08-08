@@ -19,6 +19,13 @@ export type OpenAICompatUpstreamConfig = {
   apiKey?: string;
   model: string;
   provider?: string;
+  /**
+   * User-selected API format from the provider config. 'responses' forces the
+   * Responses upstream regardless of the provider name; 'openai' / absent
+   * keep the provider-based resolution (openai -> Responses, deepseek flash ->
+   * Responses, everything else -> Chat Completions).
+   */
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
 };
 
 export type OpenAICompatProxyTarget = 'local' | 'sandbox';
@@ -615,7 +622,12 @@ function extractErrorMessage(raw: string): string {
   return raw;
 }
 
-function resolveUpstreamAPIType(provider?: string, model?: string): UpstreamAPIType {
+function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: string): UpstreamAPIType {
+  // An explicit user-selected 'responses' format always wins so custom
+  // providers pointing at Responses-only endpoints work.
+  if (apiFormat === 'responses') {
+    return 'responses';
+  }
   const normalizedProvider = provider?.toLowerCase();
   // OpenAI always uses the Responses API.
   if (normalizedProvider === 'openai') {
@@ -2652,7 +2664,7 @@ async function handleRequest(
   );
   // Resolve the upstream API type from the EFFECTIVE model so that a request
   // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
-  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model));
+  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model), upstreamConfig.apiFormat);
   filterOpenAIToolsForProvider(openAIRequest, upstreamConfig.provider);
   hydrateOpenAIRequestToolCalls(openAIRequest, upstreamConfig.provider, upstreamConfig.baseURL);
   const deepSeekReasoningHydrateResult = hydrateDeepSeekReasoningForRequest(
