@@ -1276,15 +1276,22 @@ export class CoworkRunner extends EventEmitter {
     // Attribute cache misses: the first turn is always a cold start (nothing was
     // cached yet). For later turns, consume the pending break reason recorded at
     // the point that reset the prefix (system-prompt change, compaction,
-    // overflow/stale/reasoning/multimodal retries, or detected prompt drift) so
-    // the trail says WHY the cache broke instead of 'unknown'. Reasonix-style
-    // attribution, adapted to SDK-managed history.
+    // overflow/stale/reasoning/multimodal retries, or detected prompt drift).
+    // Without a pending reason the label depends on the turn's own hit ratio:
+    // every turn's miss includes the newly appended tail (previous turn's
+    // output + the new user message), which is normal append-only growth — but
+    // a turn where almost nothing hit means the prefix itself broke through a
+    // path we did not track (e.g. SDK-internal autocompact), and that stays
+    // 'unknown' as an investigation signal.
+    const turnInputTotal = inputTokens + cacheReadTokens + cacheCreationTokens;
+    const turnHitRatio = turnInputTotal > 0 ? cacheReadTokens / turnInputTotal : 1;
+    const untrackedMissReason = turnHitRatio < 0.3 ? 'unknown' : 'append_only';
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
     if (cacheCreationTokens > 0) {
       const activeForAttribution = this.activeSessions.get(sessionId);
       const breakReason = nextTurn === 1
         ? 'cold_start'
-        : (activeForAttribution?.pendingCacheBreakReason ?? 'unknown');
+        : (activeForAttribution?.pendingCacheBreakReason ?? untrackedMissReason);
       if (activeForAttribution) {
         activeForAttribution.pendingCacheBreakReason = null;
       }
@@ -3726,12 +3733,14 @@ export class CoworkRunner extends EventEmitter {
 
     let persistedSystemPrompt = session.systemPrompt;
     let persistedClaudeSessionId = session.claudeSessionId;
+    let systemPromptChanged = false;
     if (
       typeof options.systemPrompt === 'string'
       && options.systemPrompt !== session.systemPrompt
     ) {
       persistedSystemPrompt = options.systemPrompt;
       persistedClaudeSessionId = null;
+      systemPromptChanged = true;
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
@@ -3813,6 +3822,11 @@ export class CoworkRunner extends EventEmitter {
       ),
     };
     this.activeSessions.set(sessionId, activeSession);
+    if (systemPromptChanged) {
+      // Same attribution as continueSession's reset: the next turn's miss must
+      // be labeled 'system_prompt_changed', not 'unknown'.
+      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
+    }
     if (session.cwd !== sessionCwd) {
       this.store.updateSession(sessionId, { cwd: sessionCwd });
     }
