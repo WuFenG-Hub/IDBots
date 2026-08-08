@@ -1271,6 +1271,8 @@ interface IElectronAPI {
     getPeers: () => Promise<string[]>;
     getUserInfo: (params: { globalMetaId: string }) => Promise<unknown>;
     resolveAvatarSource: (params: { reference: string }) => Promise<unknown>;
+    listContacts: (params: { observerGlobalMetaId: string }) => Promise<{ success: boolean; contacts?: CoworkMetaIDContactSummary[]; error?: string }>;
+    getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) => Promise<{ success: boolean; detail?: CoworkMetaIDContactDetail; error?: string }>;
     onStatusUpdate: (callback: (status: ElectronP2PStatus) => void) => () => void;
     onSyncProgress: (callback: (data: unknown) => void) => () => void;
   };
