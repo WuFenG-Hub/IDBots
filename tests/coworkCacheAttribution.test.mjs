@@ -19,6 +19,7 @@ test('every claudeSessionId reset point records a pendingCacheBreakReason', () =
   for (const reason of [
     'system_prompt_changed',
     'compaction',
+    'snip',
     'overflow_retry',
     'reasoning_history_retry',
     'multimodal_retry',
