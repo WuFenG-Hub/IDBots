@@ -1064,12 +1064,14 @@ test('remote OpenTeam member joins the prompt roster; never produces a local rep
       joinedPinId: 'pin-join-alicia',
     });
 
-    // Local worker mentioned by a plain participant: its prompt roster must
+    // Local worker mentioned by the chair: its prompt roster must
     // include the remote teammate (annotated, exact name), and only the local
-    // bot replies (the chair stays silent — the message is addressed).
+    // bot replies (the chair stays silent — it is the sender itself).
+    // (Round-4 attribution: a non-member chain identity would be SUSPECT and
+    // never trigger replies, so the sender is a task member.)
     insertGroupMessage(h.db, {
-      pinId: 'mention-coder-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
-      senderName: 'Human', content: '@Coder Bot please start the research',
+      pinId: 'mention-coder-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please start the research',
     });
     await h.loop.runTick();
 
