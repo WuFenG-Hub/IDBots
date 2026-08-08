@@ -56,7 +56,10 @@ import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import { CoworkCrossSessionService } from '../services/coworkCrossSession';
 import {
+  buildTwinLocalImpressionBlock,
+  buildTwinLocalRosterBlock,
   TwinWorkerDirectoryAuthorizationError,
+  type TwinImpressionEntry,
   type TwinWorkerDirectoryResult,
 } from '../services/twinWorkerDirectoryService';
 import type {
@@ -1053,6 +1056,13 @@ export interface CoworkRunnerOptions {
   getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   /** Twin-only host capability directory. The callback must revalidate authorization. */
   listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  /**
+   * Twin-only distilled impressions of local Workers, keyed by each subject
+   * Worker's globalMetaID (observer is the current Twin). Nightly dream
+   * consolidation rewrites these, so the rendered block lives in the volatile
+   * per-turn tail, never the cached system-prompt prefix.
+   */
+  listTwinImpressions?: (observerGlobalMetaID: string) => TwinImpressionEntry[] | Promise<TwinImpressionEntry[]>;
   /** Twin-only asynchronous delegation into a dedicated Worker Cowork session. */
   delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
   twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
@@ -1124,6 +1134,7 @@ export class CoworkRunner extends EventEmitter {
   private getRemoteServicesPrompt?: () => string | null;
   private getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   private listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  private listTwinImpressions?: (observerGlobalMetaID: string) => TwinImpressionEntry[] | Promise<TwinImpressionEntry[]>;
   private delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
   private twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
@@ -1167,6 +1178,7 @@ export class CoworkRunner extends EventEmitter {
     this.getRemoteServicesPrompt = options?.getRemoteServicesPrompt;
     this.getMetabotById = options?.getMetabotById;
     this.listLocalWorkers = options?.listLocalWorkers;
+    this.listTwinImpressions = options?.listTwinImpressions;
     this.delegateLocalWorker = options?.delegateLocalWorker;
     this.twinTaskStatus = options?.twinTaskStatus;
     this.twinTaskCancel = options?.twinTaskCancel;
@@ -3365,11 +3377,52 @@ export class CoworkRunner extends EventEmitter {
       'You are the owner\'s one persistent Twin Bot: a private digital twin and chief-of-staff assistant.',
       'Interpret the owner\'s ambiguous intent using known context, then turn material work into a concrete goal, ordered steps, measurable acceptance criteria, and a concise progress plan.',
       'For specialist or multi-step work, prefer suitable local persistent Worker Bots. First call local_workers_list and choose by the returned persona, skills, capability evidence, availability, and permission fit; selection must be evidence-based rather than hard-coded by task category.',
+      'The host provides Twin-only orchestration tools — local_workers_list, local_worker_delegate, twin_task_status, twin_task_reassign, and twin_task_cancel — so you always have the capability to inspect every local Worker and delegate concrete steps to the best-fit Worker instead of doing specialist work yourself.',
+      'When the owner\'s wish needs multiple specialists to coordinate (research + build + publish, multi-step content production, etc.), you can also organize an on-chain Group Task via the metabot-group-task skill: you chair it, local Workers join as members, and you drive planning, assignments, verification, and the final report.',
       'Delegate with local_worker_delegate only after defining one bounded step, required evidence, and an explicit permission scope. A Worker is a persistent specialist with its own identity, memories, history, wallet, skills, workspace, and permissions; a subagent is only an ephemeral tool inside a Worker run.',
       'Remain available to the owner while delegated work runs. Never fabricate progress or completion. Treat a Worker handoff as evidence to review, not proof; verify deliverables and report blockers, retries, reassignment, and final evidence.',
       'Do not disclose private owner memory or unrelated conversation history in a delegated prompt. Do not broaden authority for payments, transfers, destructive actions, public publishing, or private messaging without the owner\'s explicit bounded approval.',
-      'You may directly complete a trivial request when delegation adds no value, but your default role is to coordinate the right Worker and report the verified result to the owner.',
+      'Do not personally perform specialist execution — editing code or files, writing deliverables, publishing, or similar hands-on work — when a suitable local Worker or a Group Task can carry it out. Delegate, supervise, verify, and report; complete a request yourself only when it is trivial and delegation would add no value.',
+      'Local Workers are preferred, never mandatory. When no suitable local Worker exists — including a fresh machine with only the Twin Bot — execute the work yourself with your own skills and tools, then verify and report; never refuse or stall the owner\'s request just because no Worker is available.',
     ].join('\n');
+  }
+
+  /**
+   * Stable local Worker roster for the Twin system prompt. The roster only
+   * changes when a Bot is created or edited, so it is safe in the cached
+   * system-prompt prefix (unlike dream-written impressions, which live in the
+   * per-turn tail). Failures degrade to '' — the Twin keeps its overlay and
+   * orchestration tools.
+   */
+  private async buildTwinLocalRosterPrompt(sessionId: string): Promise<string> {
+    if (!this.isTwinSession(sessionId) || !this.listLocalWorkers) return '';
+    try {
+      const directory = await this.listLocalWorkers(sessionId);
+      return buildTwinLocalRosterBlock(directory);
+    } catch (error) {
+      coworkLog('WARN', 'buildTwinLocalRosterPrompt', 'Local Worker roster unavailable', { sessionId });
+      return '';
+    }
+  }
+
+  /**
+   * Volatile Twin impressions of local Workers (nightly dream layer). Injected
+   * into the current user-message tail via buildVolatileContextPrompt so dream
+   * rewrites never invalidate the cached system-prompt prefix. Failures
+   * degrade to ''.
+   */
+  private async buildTwinLocalImpressionPrompt(sessionId: string): Promise<string> {
+    if (!this.isTwinSession(sessionId) || !this.listLocalWorkers || !this.listTwinImpressions) return '';
+    try {
+      const directory = await this.listLocalWorkers(sessionId);
+      const twinGlobalMetaID = this.getMetabotById?.(directory.requester.twinId)?.globalmetaid?.trim();
+      if (!twinGlobalMetaID) return '';
+      const impressions = await this.listTwinImpressions(twinGlobalMetaID);
+      return buildTwinLocalImpressionBlock(directory, impressions);
+    } catch (error) {
+      coworkLog('WARN', 'buildTwinLocalImpressionPrompt', 'Local Worker impressions unavailable', { sessionId });
+      return '';
+    }
   }
 
   /**
@@ -3520,6 +3573,10 @@ export class CoworkRunner extends EventEmitter {
       // in the request tail with the other volatile blocks.
       if (sessionMemoryEnabled) {
         sections.push(this.buildExperiencePromptBlocksXml(sessionId));
+        // Twin-side distilled impressions of local Workers also ride the
+        // per-turn tail: the dream layer rewrites them nightly, so they must
+        // never enter the cached system-prompt prefix.
+        sections.push(await this.buildTwinLocalImpressionPrompt(sessionId));
       }
     }
     if (this.getBrowserContextPrompt) {
@@ -3960,7 +4017,11 @@ export class CoworkRunner extends EventEmitter {
     // Only session-invariant blocks belong in the system prompt. The hot-layer
     // experience injection (self-identity + dream summaries, rewritten nightly)
     // rides the current user message via buildVolatileContextPrompt instead.
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
+    const personaWithExperience = [
+      personaBlock,
+      this.buildTwinOrchestrationPrompt(sessionId),
+      await this.buildTwinLocalRosterPrompt(sessionId),
+    ]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -4070,7 +4131,11 @@ export class CoworkRunner extends EventEmitter {
     // Only session-invariant blocks belong in the system prompt. The hot-layer
     // experience injection (self-identity + dream summaries, rewritten nightly)
     // rides the current user message via buildVolatileContextPrompt instead.
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId)]
+    const personaWithExperience = [
+      personaBlock,
+      this.buildTwinOrchestrationPrompt(sessionId),
+      await this.buildTwinLocalRosterPrompt(sessionId),
+    ]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);

@@ -22,6 +22,7 @@ export interface TwinWorkerDirectoryEntry {
   name: string;
   type: Metabot['metabot_type'];
   enabled: boolean;
+  globalMetaID: string | null;
   ownerGlobalMetaId: string | null;
   ownerBindingVerified: boolean;
   role: string;
@@ -48,6 +49,17 @@ export interface TwinWorkerDirectoryResult {
   workers: TwinWorkerDirectoryEntry[];
 }
 
+/**
+ * One distilled impression the Twin holds about a Worker, keyed by the
+ * subject Worker's globalMetaID. Backed by metaid_impression_snapshots and
+ * rewritten by nightly dream consolidation.
+ */
+export interface TwinImpressionEntry {
+  subjectGlobalMetaID: string;
+  summaryText: string | null;
+  updatedAt?: number | null;
+}
+
 export class TwinWorkerDirectoryAuthorizationError extends Error {
   readonly code: string;
 
@@ -61,6 +73,9 @@ export class TwinWorkerDirectoryAuthorizationError extends Error {
 const MAX_TEXT_LENGTH = 2_000;
 const MAX_EVIDENCE_LENGTH = 800;
 const MAX_EVIDENCE_ITEMS = 3;
+const ROSTER_FIELD_CAP = 200;
+const ROSTER_SKILLS_CAP = 8;
+const IMPRESSION_SUMMARY_CAP = 240;
 
 function boundedText(value: string | null | undefined, maxLength = MAX_TEXT_LENGTH): string | null {
   const text = String(value ?? '').trim();
@@ -70,6 +85,12 @@ function boundedText(value: string | null | undefined, maxLength = MAX_TEXT_LENG
 
 function normalizedList(values: string[] | null | undefined): string[] {
   return Array.from(new Set((values ?? []).map((value) => String(value).trim()).filter(Boolean)));
+}
+
+function capText(value: string | null | undefined, maxLength: number): string {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
 
 export function authorizeTwinSession(
@@ -118,6 +139,7 @@ export function buildTwinWorkerDirectory(
     name: metabot.name.trim(),
     type: metabot.metabot_type,
     enabled: metabot.enabled,
+    globalMetaID: (metabot.globalmetaid ?? '').trim() || null,
     ownerGlobalMetaId: boundedText(metabot.boss_global_metaid, 256),
     ownerBindingVerified: Boolean(
       metabot.boss_global_metaid?.trim()
@@ -147,4 +169,70 @@ export function buildTwinWorkerDirectory(
     requester: { sessionId, twinId: twin.id, ownerGlobalMetaId },
     workers,
   };
+}
+
+/**
+ * Stable local Worker roster for the Twin system prompt. Contains only
+ * metabots-table profile data (identity, role, specialty, skills), which
+ * changes only when a Bot is created or edited — safe in the cached system
+ * prompt prefix. Volatile dream impressions belong in the per-turn tail and
+ * are rendered separately by buildTwinLocalImpressionBlock.
+ */
+export function buildTwinLocalRosterBlock(directory: TwinWorkerDirectoryResult): string {
+  const workers = directory.workers
+    .filter((worker) => worker.type !== 'twin')
+    .sort((left, right) => left.id - right.id);
+  if (workers.length === 0) return '';
+
+  const lines = workers.map((worker) => {
+    const fields: string[] = [];
+    const metaId = (worker.globalMetaID ?? '').trim();
+    if (metaId) fields.push(`MetaID: ${metaId}`);
+    const role = capText(worker.role, ROSTER_FIELD_CAP);
+    if (role) fields.push(`Role: ${role}`);
+    const bio = capText(worker.bio, ROSTER_FIELD_CAP);
+    if (bio) fields.push(`Bio: ${bio}`);
+    const goal = capText(worker.goal, ROSTER_FIELD_CAP);
+    if (goal) fields.push(`Goal: ${goal}`);
+    if (worker.skills.length > 0) {
+      const shown = worker.skills.slice(0, ROSTER_SKILLS_CAP);
+      fields.push(`Skills: ${shown.join(', ')}${worker.skills.length > ROSTER_SKILLS_CAP ? ', …' : ''}`);
+    }
+    return `- ${worker.name} (id=${worker.id}, ${worker.enabled ? 'enabled' : 'disabled'})${fields.length > 0 ? ` — ${fields.join('; ')}` : ''}`;
+  });
+
+  return [
+    '## Local Worker Roster',
+    'This is the current roster of persistent local Worker Bots. Recognize a Worker by name or id immediately; you do NOT need to call local_workers_list just to identify who someone is or what their role is.',
+    ...lines,
+    '- Disabled Workers exist but cannot be delegated to until re-enabled.',
+  ].join('\n');
+}
+
+/**
+ * Twin's distilled impressions of local Workers (nightly dream layer).
+ * Volatile by nature, so this block rides the per-turn user-message tail and
+ * never enters the cached system-prompt prefix.
+ */
+export function buildTwinLocalImpressionBlock(
+  directory: TwinWorkerDirectoryResult,
+  impressions: TwinImpressionEntry[],
+): string {
+  const bySubject = new Map(impressions.map((entry) => [entry.subjectGlobalMetaID, entry]));
+  const lines = directory.workers
+    .filter((worker) => worker.type !== 'twin' && Boolean(worker.globalMetaID))
+    .sort((left, right) => left.id - right.id)
+    .map((worker) => {
+      const entry = bySubject.get(worker.globalMetaID as string);
+      const summary = capText(entry?.summaryText, IMPRESSION_SUMMARY_CAP);
+      return summary ? `- ${worker.name}: ${summary}` : null;
+    })
+    .filter((line): line is string => Boolean(line));
+  if (lines.length === 0) return '';
+  return [
+    '<local_worker_impressions>',
+    'Your latest distilled impressions of local Workers (updated by nightly dream consolidation):',
+    ...lines,
+    '</local_worker_impressions>',
+  ].join('\n');
 }

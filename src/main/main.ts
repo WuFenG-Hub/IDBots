@@ -4482,6 +4482,17 @@ const getCoworkRunner = () => {
         listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
         getActiveWorkload: (metabotId) => getOrchestrationStore().getActiveWorkload(metabotId),
       }),
+      listTwinImpressions: (observerGlobalMetaID: string) => {
+        try {
+          return getMetaIDImpressionStore().listSnapshots(observerGlobalMetaID, 100).map((snapshot) => ({
+            subjectGlobalMetaID: snapshot.subjectGlobalMetaID,
+            summaryText: snapshot.summaryText,
+            updatedAt: snapshot.updatedAt,
+          }));
+        } catch {
+          return [];
+        }
+      },
       delegateLocalWorker: (sessionId, input) => getTwinOrchestrationService().delegateLocalWorker(sessionId, input),
       twinTaskStatus: (sessionId, taskId) => getTwinOrchestrationService().getTaskStatus(sessionId, taskId),
       twinTaskCancel: (sessionId, taskId) => getTwinOrchestrationService().cancelTask(sessionId, taskId),
