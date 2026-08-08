@@ -21,6 +21,8 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
   const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Default to the chat-first guide; the manual form is a fallback entry.
+  const [showForm, setShowForm] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -85,6 +87,17 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
         <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text mb-4">
           {i18nService.t('groupTasksCreateTitle')}
         </h3>
+
+        {showForm ? (
+          <>
+            <button
+              type="button"
+              onClick={() => setShowForm(false)}
+              disabled={submitting}
+              className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary hover:underline mb-4 disabled:opacity-50"
+            >
+              {i18nService.t('groupTasksBackToGuide')}
+            </button>
 
         <div className="space-y-4">
           <div>
@@ -171,6 +184,38 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
             </button>
           </div>
         </div>
+          </>
+        ) : (
+          <div className="space-y-5">
+            <p className="text-sm dark:text-claude-darkText text-claude-text leading-relaxed">
+              {i18nService.t('groupTasksChatGuideTitle')}
+            </p>
+
+            <blockquote className="rounded-lg border-l-2 border-claude-accent bg-claude-surfaceHover/40 dark:bg-claude-darkSurfaceHover/40 px-4 py-3">
+              <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary leading-relaxed">
+                {i18nService.t('groupTasksChatGuideExample')}
+              </p>
+            </blockquote>
+
+            <div className="pt-2 space-y-3">
+              <button
+                type="button"
+                onClick={() => setShowForm(true)}
+                className="block text-sm font-medium text-claude-accent hover:underline"
+              >
+                {i18nService.t('groupTasksManualEntry')}
+              </button>
+
+              <button
+                type="button"
+                onClick={onClose}
+                className="w-full px-4 py-2 text-sm rounded-lg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+              >
+                {i18nService.t('cancel')}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
