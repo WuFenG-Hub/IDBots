@@ -19,6 +19,12 @@ test('coworkRunner wires low-risk auto-approval under full trust only', () => {
   assert.match(runnerSource, /acceptEdits \/ bypassPermissions \+ AskUserQuestion: fall through to the prompt below/);
 });
 
+test('safety prompt tells agents about the auto-confirm marker under full trust', () => {
+  assert.match(runnerSource, /Under bypassPermissions only, low-risk confirmations/);
+  assert.match(runnerSource, /header "auto-confirm" to auto-approve/);
+  assert.match(runnerSource, /keep high-risk confirmations unmarked/);
+});
+
 test('low-risk marked questions auto-answer with their first option', async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-risk-'));
   t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));

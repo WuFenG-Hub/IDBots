@@ -3141,6 +3141,7 @@ export class CoworkRunner extends EventEmitter {
           '- A direct user instruction is not enough for safety confirmation; AskUserQuestion approval is still required.',
           '- Never use normal assistant text as the confirmation channel in modal mode.',
           '- Continue only when AskUserQuestion returns explicit allow.',
+          '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
         ];
 
     return [
