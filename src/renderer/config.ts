@@ -35,85 +35,88 @@ export interface AppConfig {
       apiKey: string;
       baseUrl: string;
       // API 协议格式：anthropic 为 Anthropic 兼容，openai 为 OpenAI 兼容
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     deepseek: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     moonshot: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     zhipu: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     minimax: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     qwen: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     openrouter: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     gemini: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     anthropic: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     xiaomi: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     ollama: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     [key: string]: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      // API 协议格式：anthropic 为 Anthropic Messages，openai 为 Chat Completions，responses 为 OpenAI Responses
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
+      // 自定义供应商显示名称（内置供应商无此字段，label 来自 providerMeta）
+      name?: string;
     };
   };
   // 主题配置

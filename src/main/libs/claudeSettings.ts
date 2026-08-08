@@ -32,7 +32,7 @@ type ProviderConfig = {
   enabled: boolean;
   apiKey: string;
   baseUrl: string;
-  apiFormat?: 'anthropic' | 'openai' | 'native';
+  apiFormat?: 'anthropic' | 'openai' | 'responses' | 'native';
   models?: ProviderModel[];
 };
 
@@ -377,6 +377,7 @@ function buildApiConfigFromMatched(
     apiKey: resolvedApiKey || undefined,
     model: matched.modelId,
     provider: matched.providerName,
+    apiFormat: matched.apiFormat,
   });
 
   const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL(target);

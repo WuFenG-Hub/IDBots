@@ -16,11 +16,14 @@ function getFixedApiFormatForProvider(provider: string): 'anthropic' | 'openai' 
   return null;
 }
 
-function normalizeApiFormat(value: unknown): 'anthropic' | 'openai' {
+function normalizeApiFormat(value: unknown): 'anthropic' | 'openai' | 'responses' {
+  if (value === 'responses') {
+    return 'responses';
+  }
   return value === 'openai' ? 'openai' : 'anthropic';
 }
 
-export function getEffectiveApiFormat(provider: string, value: unknown): 'anthropic' | 'openai' {
+export function getEffectiveApiFormat(provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' {
   return getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value);
 }
 
@@ -104,7 +107,7 @@ function shouldUseMaxCompletionTokensForOpenAI(provider: string, modelId?: strin
 export interface ProviderConfigForTest {
   apiKey: string;
   baseUrl: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
   models?: Array<{ id: string; options?: import('../config').ModelOptions }>;
 }
 
@@ -149,7 +152,10 @@ export async function testProviderConnection(
         }),
       });
     } else {
-      const useResponsesApi = shouldUseOpenAIResponsesForProvider(providerKey);
+      // Responses API when the provider defaults to it (openai) or the
+      // user-selected API format is 'responses'.
+      const useResponsesApi = providerConfig.apiFormat === 'responses'
+        || shouldUseOpenAIResponsesForProvider(providerKey);
       const openaiUrl = useResponsesApi
         ? buildOpenAIResponsesUrl(normalizedBaseUrl)
         : buildOpenAICompatibleChatCompletionsUrl(normalizedBaseUrl, providerKey);

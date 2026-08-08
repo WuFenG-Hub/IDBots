@@ -11,7 +11,7 @@ export interface ApiConfig {
   apiKey: string;
   baseUrl: string;
   provider?: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
 }
 
 export class ApiError extends Error {
@@ -51,7 +51,10 @@ class ApiService {
     this.currentRequestId = null;
   }
 
-  private normalizeApiFormat(apiFormat: unknown): 'anthropic' | 'openai' {
+  private normalizeApiFormat(apiFormat: unknown): 'anthropic' | 'openai' | 'responses' {
+    if (apiFormat === 'responses') {
+      return 'responses';
+    }
     if (apiFormat === 'openai') {
       return 'openai';
     }
@@ -261,11 +264,15 @@ class ApiService {
   // 检测当前选择的模型属于哪个 provider
   private detectProvider(modelId: string, providerHint?: string): string {
     const normalizedHint = providerHint?.toLowerCase();
-    if (
-      normalizedHint
-      && ['openai', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'openrouter', 'gemini', 'anthropic', 'xiaomi', 'ollama'].includes(normalizedHint)
-    ) {
-      return normalizedHint;
+    // The hint is the (capitalized) provider key. Built-in and custom
+    // providers alike are resolved against the config so opencode and
+    // user-created providers route to their own credentials instead of
+    // falling back to the OpenAI defaults.
+    if (normalizedHint) {
+      const appConfig = configService.getConfig();
+      if (appConfig?.providers?.[normalizedHint]) {
+        return normalizedHint;
+      }
     }
     const normalizedModelId = modelId.toLowerCase();
     if (normalizedModelId.startsWith('claude')) {
@@ -338,11 +345,12 @@ class ApiService {
 
     // 根据 API 协议格式决定调用方式：
     // - anthropic: Anthropic 兼容协议 (/v1/messages)
-    // - openai: OpenAI 兼容协议 (OpenAI provider uses /v1/responses)
+    // - openai: OpenAI 兼容协议 (Chat Completions)
+    // - responses: OpenAI Responses 协议 (/v1/responses)
     const normalizedApiFormat = this.normalizeApiFormat(effectiveConfig.apiFormat);
-    const useOpenAIFormat = normalizedApiFormat === 'openai';
+    const useAnthropicFormat = normalizedApiFormat === 'anthropic';
 
-    if (!useOpenAIFormat) {
+    if (useAnthropicFormat) {
       return this.chatWithAnthropic(
         userMessage,
         onProgress,
@@ -552,7 +560,9 @@ class ApiService {
       this.cancelOngoingRequest();
       const requestId = generateRequestId();
       this.currentRequestId = requestId;
-      const useResponsesApi = this.shouldUseOpenAIResponsesApi(provider);
+      // The Responses API is used by providers that default to it (openai) or
+      // by any provider whose user-selected API format is 'responses'.
+      const useResponsesApi = this.shouldUseOpenAIResponsesApi(provider) || config.apiFormat === 'responses';
 
       const userMessage: ChatMessagePayload = {
         role: 'user',

@@ -89,8 +89,10 @@ interface ProviderExportEntry {
   enabled: boolean;
   apiKey: PasswordEncryptedPayload;
   baseUrl: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
   models?: Model[];
+  /** 自定义供应商显示名称，内置供应商无此字段 */
+  name?: string;
 }
 
 interface ProvidersExportPayload {
@@ -111,8 +113,10 @@ interface ProvidersImportEntry {
   apiKeyEncrypted?: string;
   apiKeyIv?: string;
   baseUrl?: string;
-  apiFormat?: 'anthropic' | 'openai' | 'native';
+  apiFormat?: 'anthropic' | 'openai' | 'responses' | 'native';
   models?: Model[];
+  /** 自定义供应商显示名称，内置供应商无此字段 */
+  name?: string;
 }
 
 interface ProvidersImportPayload {
@@ -256,7 +260,7 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   }
   return null;
 };
-const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' => (
+const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => (
   getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value)
 );
 const shouldShowApiFormatSelector = (provider: string): boolean => (
@@ -264,8 +268,11 @@ const shouldShowApiFormatSelector = (provider: string): boolean => (
 );
 const getProviderDefaultBaseUrl = (
   provider: ProviderType,
-  apiFormat: 'anthropic' | 'openai'
+  apiFormat: 'anthropic' | 'openai' | 'responses'
 ): string | null => {
+  if (apiFormat === 'responses') {
+    return null;
+  }
   const defaults = providerSwitchableDefaultBaseUrls[provider];
   return defaults ? defaults[apiFormat] : null;
 };

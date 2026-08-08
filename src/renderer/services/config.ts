@@ -38,10 +38,13 @@ const normalizeProviderBaseUrl = (providerKey: string, baseUrl: unknown): string
   return 'https://generativelanguage.googleapis.com/v1beta/openai';
 };
 
-const normalizeProviderApiFormat = (providerKey: string, apiFormat: unknown): 'anthropic' | 'openai' => {
+const normalizeProviderApiFormat = (providerKey: string, apiFormat: unknown): 'anthropic' | 'openai' | 'responses' => {
   const fixed = getFixedProviderApiFormat(providerKey);
   if (fixed) {
     return fixed;
+  }
+  if (apiFormat === 'responses') {
+    return 'responses';
   }
   if (apiFormat === 'openai') {
     return 'openai';
