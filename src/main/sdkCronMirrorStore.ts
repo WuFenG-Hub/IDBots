@@ -118,6 +118,17 @@ export function truncateCronPrompt(prompt: string, limit = 1000): string {
   return `${clipped}… [+${source.length - limit} chars]`;
 }
 
+export interface ParsedDurableCronTask {
+  id: string;
+  schedule: string;
+  recurring: boolean;
+  prompt: string;
+  durable: true;
+  createdBySessionId: string | null;
+  /** 创建时刻（epoch ms）。一次性任务首次触发与 7 天过期计算依赖此值。 */
+  createdAtMs: number | null;
+}
+
 /**
  * 解析 durable 任务落盘文件 `.claude/scheduled_tasks.json`。
  * 实测格式（2026-08-09 会话内 CronCreate durable 实证）：
@@ -126,9 +137,7 @@ export function truncateCronPrompt(prompt: string, limit = 1000): string {
  * 文件中无 durable 字段——文件存在即意味着 durable（SDK 语义）。
  * createdBySessionId 用于镜像归属（创建该任务的会话）。
  */
-export function parseScheduledTasksFile(
-  content: string
-): { id: string; schedule: string; recurring: boolean; prompt: string; durable: true; createdBySessionId: string | null }[] {
+export function parseScheduledTasksFile(content: string): ParsedDurableCronTask[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(content);
@@ -138,7 +147,7 @@ export function parseScheduledTasksFile(
   const tasks = (parsed as { tasks?: unknown })?.tasks;
   if (!Array.isArray(tasks)) return [];
 
-  const result: { id: string; schedule: string; recurring: boolean; prompt: string; durable: true; createdBySessionId: string | null }[] = [];
+  const result: ParsedDurableCronTask[] = [];
   for (const item of tasks) {
     if (!item || typeof item !== 'object') continue;
     const record = item as Record<string, unknown>;
@@ -155,6 +164,7 @@ export function parseScheduledTasksFile(
         typeof record.createdBySessionId === 'string' && record.createdBySessionId.trim()
           ? record.createdBySessionId.trim()
           : null,
+      createdAtMs: typeof record.createdAt === 'number' && Number.isFinite(record.createdAt) ? record.createdAt : null,
     });
   }
   return result;
