@@ -11,6 +11,8 @@ import {
   type OpenAIStreamChunk,
 } from './coworkFormatTransform';
 import { DeepSeekReasoningStore } from './deepseekReasoningStore';
+import { writeFileAtomicSync } from './atomicFile';
+import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -124,6 +126,95 @@ function ensureDeepSeekReasoningStoreLoaded(): void {
     deepSeekReasoningStore.load(filePath);
   } catch {
     // Memory-only fallback (non-Electron test hosts, early app init).
+  }
+}
+
+// --- Per-session tool-result snip boundaries ---
+// Reasonix-style tiered truncation: instead of flattening the whole history
+// when the context estimate crosses the soft threshold (a full cold start for
+// DeepSeek's cached prefix), the runner raises a per-session HEAD boundary
+// and the proxy snips stale tool_result blocks below it (see
+// coworkToolResultSnip.ts). The boundary is monotonic per session so a
+// previously snipped prefix stays byte-identical, and it is persisted across
+// restarts for the same reason as the DeepSeek reasoning cache above. The
+// in-memory map is the hot path (lookups happen on every /v1/messages
+// request); the JSON file is only rewritten when a boundary actually moves.
+const snipHeadTokensBySession = new Map<string, number>();
+let snipHeadTokensLoaded = false;
+let snipHeadTokensFilePath: string | null = null;
+
+function ensureSnipHeadTokensLoaded(): void {
+  if (snipHeadTokensLoaded) {
+    return;
+  }
+  snipHeadTokensLoaded = true;
+  try {
+    snipHeadTokensFilePath = path.join(app.getPath('userData'), 'cowork', 'tool-result-snip.json');
+    const parsed = JSON.parse(fs.readFileSync(snipHeadTokensFilePath, 'utf8')) as { sessions?: unknown };
+    const sessions = parsed?.sessions;
+    if (sessions && typeof sessions === 'object' && !Array.isArray(sessions)) {
+      for (const [key, value] of Object.entries(sessions as Record<string, unknown>)) {
+        if (key && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          snipHeadTokensBySession.set(key, Math.floor(value));
+        }
+      }
+    }
+  } catch {
+    // Missing/corrupt file or non-Electron host: memory-only, start empty.
+  }
+}
+
+function persistSnipHeadTokens(): void {
+  if (!snipHeadTokensFilePath) {
+    return;
+  }
+  try {
+    const sessions: Record<string, number> = {};
+    for (const [key, value] of snipHeadTokensBySession) {
+      sessions[key] = value;
+    }
+    fs.mkdirSync(path.dirname(snipHeadTokensFilePath), { recursive: true });
+    writeFileAtomicSync(snipHeadTokensFilePath, Buffer.from(JSON.stringify({ sessions })));
+  } catch {
+    // Best effort; the in-memory map still serves this run.
+  }
+}
+
+/** Current snip boundary (estimated head tokens) for a session; 0 when unset. */
+export function getCoworkSnipHeadTokens(sessionKey: string): number {
+  if (!sessionKey) {
+    return 0;
+  }
+  ensureSnipHeadTokensLoaded();
+  return snipHeadTokensBySession.get(sessionKey) ?? 0;
+}
+
+/**
+ * Raise a session's snip boundary. Monotonic: a value at or below the
+ * persisted one is ignored — lowering the boundary would un-snip previously
+ * snipped blocks and break the cached prefix a second time.
+ */
+export function setCoworkSnipHeadTokens(sessionKey: string, tokens: number): void {
+  if (!sessionKey || !Number.isFinite(tokens) || tokens <= 0) {
+    return;
+  }
+  ensureSnipHeadTokensLoaded();
+  const existing = snipHeadTokensBySession.get(sessionKey) ?? 0;
+  if (tokens <= existing) {
+    return;
+  }
+  snipHeadTokensBySession.set(sessionKey, Math.floor(tokens));
+  persistSnipHeadTokens();
+}
+
+/** Forget a session's boundary (session deleted, or history fully compacted into a fresh SDK session). */
+export function resetCoworkSnipHeadTokens(sessionKey: string): void {
+  if (!sessionKey) {
+    return;
+  }
+  ensureSnipHeadTokensLoaded();
+  if (snipHeadTokensBySession.delete(sessionKey)) {
+    persistSnipHeadTokens();
   }
 }
 
@@ -2603,6 +2694,36 @@ async function handleCreateScheduledTask(
   }
 }
 
+const MESSAGES_ROUTE_PATH = '/v1/messages';
+const SESSION_MESSAGES_ROUTE_PATTERN = /^\/s\/([^/]+)\/v1\/messages$/;
+// Snipping runs on every session-scoped request while a boundary is set; skip
+// the walk entirely for conversations too short to have a meaningful head
+// region beyond the always-intact tail.
+const MIN_MESSAGES_FOR_TOOL_RESULT_SNIP = 6;
+
+/**
+ * Match the Anthropic messages route. Returns null for the plain
+ * `/v1/messages` form, the decoded session key for the session-scoped
+ * `/s/<sessionKey>/v1/messages` form, and undefined for anything else. The
+ * runner points the CLI at the session-scoped form by appending
+ * `/s/<sessionId>` to ANTHROPIC_BASE_URL (the Anthropic SDK joins
+ * baseURL + path via plain string concat).
+ */
+function parseMessagesRouteSessionKey(pathname: string): string | null | undefined {
+  if (pathname === MESSAGES_ROUTE_PATH) {
+    return null;
+  }
+  const match = SESSION_MESSAGES_ROUTE_PATTERN.exec(pathname);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(match[1]) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -2626,7 +2747,8 @@ async function handleRequest(
     return;
   }
 
-  if (method !== 'POST' || url.pathname !== '/v1/messages') {
+  const messagesRouteSessionKey = parseMessagesRouteSessionKey(url.pathname);
+  if (method !== 'POST' || messagesRouteSessionKey === undefined) {
     writeJSON(res, 404, createAnthropicErrorBody('Not found', 'not_found_error'));
     return;
   }
@@ -2657,7 +2779,36 @@ async function handleRequest(
     return;
   }
 
-  const openAIRequest = anthropicToOpenAI(parsedRequestBody);
+  let anthropicRequestBody = parsedRequestBody;
+  if (messagesRouteSessionKey) {
+    // Tiered compaction tier 1: deterministically snip stale tool_result
+    // blocks in the head region of this session's conversation. Same input
+    // bytes + same persisted boundary => same output bytes, so DeepSeek's
+    // cached prefix only breaks once per boundary raise.
+    const snipHeadTokens = getCoworkSnipHeadTokens(messagesRouteSessionKey);
+    const requestMessages = toOptionalObject(parsedRequestBody)?.messages;
+    if (
+      snipHeadTokens > 0
+      && Array.isArray(requestMessages)
+      && requestMessages.length >= MIN_MESSAGES_FOR_TOOL_RESULT_SNIP
+    ) {
+      const snipResult = snipStaleToolResultBlocks(requestMessages, snipHeadTokens);
+      if (snipResult.stats.snippedBlocks > 0) {
+        anthropicRequestBody = {
+          ...(parsedRequestBody as Record<string, unknown>),
+          messages: snipResult.messages,
+        };
+        console.info('[cowork-openai-compat-proxy] Snipped stale tool_result blocks in head region', {
+          sessionKey: messagesRouteSessionKey,
+          snippedBlocks: snipResult.stats.snippedBlocks,
+          savedTokens: snipResult.stats.savedTokens,
+          snipHeadTokens,
+        });
+      }
+    }
+  }
+
+  const openAIRequest = anthropicToOpenAI(anthropicRequestBody);
   openAIRequest.model = resolveEffectiveUpstreamModel(
     toString(openAIRequest.model),
     upstreamConfig.model
@@ -2864,6 +3015,7 @@ export const __openAICompatProxyTestUtils = {
   filterOpenAIToolsForProvider,
   hydrateDeepSeekReasoningForRequest,
   resolveEffectiveUpstreamModel,
+  parseMessagesRouteSessionKey,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;
     deepSeekReasoningStore.clear();
