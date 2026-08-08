@@ -143,12 +143,19 @@ import {
 import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
+  type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
 import {
   startOpenTeamGuestDaemon,
   stopOpenTeamGuestDaemon,
 } from './services/openTeamGuestDaemon';
 import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
+import {
+  resumeOpenTeamInviteWatchers,
+  setOpenTeamServiceDeps,
+  stopOpenTeamInviteWatchers,
+} from './services/openTeamService';
+import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -196,7 +203,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3286,6 +3293,79 @@ const startSqliteDaemons = (): void => {
   // Group Task daemon: group messages trigger member/chair replies under the
   // strict chair-controlled protocol (own cursor on group_tasks, own session
   // channel; fully separate from the cognitive orchestrator).
+  //
+  // Owner private-report channel (encrypted simplemsg from the chair bot +
+  // A2A display record), shared by the group-task daemon and the OpenTeam
+  // inviter service wired below.
+  const sendGroupTaskOwnerPrivateReport: GroupTaskDaemonSendOwnerReportFn = async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
+    const metabotStore = getMetabotStore();
+    const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet?.mnemonic?.trim()) {
+      throw new Error('chair wallet unavailable');
+    }
+    const identity = getUserIdentityStore().get();
+    if (!identity) {
+      throw new Error('owner identity unavailable');
+    }
+    const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
+    if (!peerGlobalMetaId) {
+      throw new Error('owner GlobalMetaID unavailable');
+    }
+    if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
+      throw new Error('task owner does not match the current user identity');
+    }
+    const peerChatPubkey = identity.chat_public_key.trim();
+    if (!peerChatPubkey) {
+      throw new Error('owner chat public key unavailable');
+    }
+    const sent = await sendEncryptedSimplemsg({
+      metabotId,
+      wallet,
+      peerGlobalMetaId,
+      peerChatPubkey,
+      plaintext: text,
+      createPin: async (id, payload) => createPin(metabotStore, id, payload),
+    });
+
+    let sessionId: string | null = null;
+    let displayError: string | null = null;
+    try {
+      const recorded = recordOutgoingPrivateChatA2ADisplay({
+        coworkStore: getCoworkStore(),
+        getMetabotById: (id) => metabotStore.getMetabotById(id),
+        metabotId,
+        peerGlobalMetaId,
+        peerName: identity.name,
+        peerAvatar: identity.avatar,
+        content: text,
+        chain: { txids: sent.txids, pinId: sent.pinId },
+        extraMetadata: {
+          privateChatDeliveryStatus: 'sent',
+          suppressRunningStatus: true,
+          groupTaskOwnerReport: true,
+          groupTaskId: taskId,
+        },
+      });
+      if (recorded) {
+        sessionId = recorded.sessionId;
+        if (recorded.message) {
+          emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+        }
+      }
+    } catch (error) {
+      displayError = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
+        error,
+      );
+    }
+
+    return {
+      pinId: sent.pinId,
+      sessionId,
+      displayError,
+    };
+  };
   startGroupTaskDaemon({
     getStore,
     getGroupTaskStore,
@@ -3318,75 +3398,7 @@ const startSqliteDaemons = (): void => {
         return message.includes('404') ? 'not_found' : 'unavailable';
       }
     },
-    sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
-      const metabotStore = getMetabotStore();
-      const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
-      if (!wallet?.mnemonic?.trim()) {
-        throw new Error('chair wallet unavailable');
-      }
-      const identity = getUserIdentityStore().get();
-      if (!identity) {
-        throw new Error('owner identity unavailable');
-      }
-      const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
-      if (!peerGlobalMetaId) {
-        throw new Error('owner GlobalMetaID unavailable');
-      }
-      if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
-        throw new Error('task owner does not match the current user identity');
-      }
-      const peerChatPubkey = identity.chat_public_key.trim();
-      if (!peerChatPubkey) {
-        throw new Error('owner chat public key unavailable');
-      }
-      const sent = await sendEncryptedSimplemsg({
-        metabotId,
-        wallet,
-        peerGlobalMetaId,
-        peerChatPubkey,
-        plaintext: text,
-        createPin: async (id, payload) => createPin(metabotStore, id, payload),
-      });
-
-      let sessionId: string | null = null;
-      let displayError: string | null = null;
-      try {
-        const recorded = recordOutgoingPrivateChatA2ADisplay({
-          coworkStore: getCoworkStore(),
-          getMetabotById: (id) => metabotStore.getMetabotById(id),
-          metabotId,
-          peerGlobalMetaId,
-          peerName: identity.name,
-          peerAvatar: identity.avatar,
-          content: text,
-          chain: { txids: sent.txids, pinId: sent.pinId },
-          extraMetadata: {
-            privateChatDeliveryStatus: 'sent',
-            suppressRunningStatus: true,
-            groupTaskOwnerReport: true,
-            groupTaskId: taskId,
-          },
-        });
-        if (recorded) {
-          sessionId = recorded.sessionId;
-          if (recorded.message) {
-            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
-          }
-        }
-      } catch (error) {
-        displayError = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
-          error,
-        );
-      }
-
-      return {
-        pinId: sent.pinId,
-        sessionId,
-        displayError,
-      };
-    },
+    sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({
         metabotId,
@@ -3435,6 +3447,30 @@ const startSqliteDaemons = (): void => {
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
     emitLog: (msg) => console.log(msg),
   });
+
+  // OpenTeam (M1): inviter-side wiring. The service searches on-chain online
+  // bots, sends [OPENTEAM_INVITE] envelopes from the twin wallet and runs
+  // per-invite watchers that turn the guest's ACCEPT into a remote task member.
+  // Pending invites resume their watchers here after every (re)start.
+  setOpenTeamServiceDeps({
+    getMetabotStore,
+    getGroupTaskStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    searchMetaIds,
+    getMetaIdDetail,
+    fetchOnlineStatus: (globalMetaIds) => getIdchatPresenceService().fetchOnlineStatus(globalMetaIds),
+    waitForMemberJoined,
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+    sendOwnerPrivateReport: (params) => sendGroupTaskOwnerPrivateReport(params),
+    emitLog: (msg) => console.log(msg),
+  });
+  const resumedInviteWatchers = resumeOpenTeamInviteWatchers();
+  if (resumedInviteWatchers > 0) {
+    console.log(`[OpenTeam] Resumed ${resumedInviteWatchers} pending invite watcher(s)`);
+  }
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
@@ -3489,6 +3525,7 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
   stopOpenTeamGuestDaemon();
+  stopOpenTeamInviteWatchers();
   await resetSqliteBackedSingletons();
   return restartState;
 };

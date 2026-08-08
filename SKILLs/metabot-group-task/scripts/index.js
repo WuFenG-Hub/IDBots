@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'close', ... }
+ * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'close'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -25,6 +25,8 @@ const ACTION_PATHS = {
   invite: '/api/idbots/group-task/invite',
   close: '/api/idbots/group-task/close',
   'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
+  search_remote: '/api/idbots/group-task/search-remote-candidates',
+  invite_remote: '/api/idbots/group-task/invite-remote',
   bots: '/api/idbots/list-metabots',
 };
 
@@ -135,6 +137,32 @@ async function main() {
         body.metabot_name = metabotName;
       } else {
         fail('metabot_id or metabot_name is required for invite');
+      }
+      break;
+    }
+    case 'search_remote': {
+      body = {};
+      const query = String(params.query ?? '').trim();
+      const skill = String(params.skill ?? '').trim();
+      if (query) body.query = query;
+      if (skill) body.skill = skill;
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for search_remote');
+        body.limit = limit;
+      }
+      break;
+    }
+    case 'invite_remote': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for invite_remote');
+      const globalmetaid = String(params.globalmetaid ?? '').trim();
+      if (!globalmetaid) fail('globalmetaid is required for invite_remote');
+      body = { task_id: taskId, globalmetaid };
+      const name = String(params.name ?? '').trim();
+      if (name) body.name = name;
+      if (Array.isArray(params.required_skills) && params.required_skills.length) {
+        body.required_skills = params.required_skills.map((s) => String(s ?? '').trim()).filter(Boolean);
       }
       break;
     }

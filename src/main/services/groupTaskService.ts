@@ -171,7 +171,11 @@ function requireTask(taskId: number): GroupTask {
   return task;
 }
 
-function requireRunnableTask(taskId: number): GroupTask {
+/**
+ * Shared runnable guard (also used by the OpenTeam inviter service): the task
+ * exists, is not terminal, and has its on-chain group id.
+ */
+export function requireRunnableTask(taskId: number): GroupTask {
   const task = requireTask(taskId);
   if (TERMINAL_STATUSES.has(task.status)) {
     throw new Error(`Group task ${taskId} is ${task.status}; no further messages or members allowed`);
