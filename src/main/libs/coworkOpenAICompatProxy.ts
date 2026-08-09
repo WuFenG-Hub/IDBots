@@ -13,6 +13,8 @@ import {
 import { DeepSeekReasoningStore } from './deepseekReasoningStore';
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
+import { foldLowValueToolResults } from './coworkToolResultFold';
+import { modelSupportsVision } from './coworkModelLimits';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -514,7 +516,7 @@ export function resolveCoworkBillingSource(
   if (normalizedProvider === 'anthropic') {
     return 'anthropic';
   }
-  if (Boolean(baseURL?.toLowerCase().includes('deepseek'))) {
+  if (baseURL?.toLowerCase().includes('deepseek')) {
     return 'deepseek';
   }
   return 'other';
@@ -871,7 +873,27 @@ function extractTextFromChatContent(content: unknown): string {
   return chunks.join('');
 }
 
-function convertUserChatContentToResponsesInput(content: unknown): Array<Record<string, unknown>> {
+/** Text placeholder replacing an image block for non-vision models (GT#12 N1). */
+function imageBlockPlaceholderForNonVisionModel(imageURL: string): string {
+  if (/^data:image\//i.test(imageURL)) {
+    return '[图片块已省略：当前模型不支持视觉输入（base64 图片内容不透明，已不发送）]';
+  }
+  return `[图片已省略：当前模型不支持视觉输入（来源：${imageURL.slice(0, 120)}）]`;
+}
+
+/**
+ * N1 scheme-B fallback: degrade image content blocks to short text
+ * placeholders when the request's model has no vision capability. Scheme A
+ * (canUseTool guard) blocks new reads at the source; this catches image
+ * blocks that were persisted before the guard existed, when history is
+ * replayed through the proxy — so a non-vision model never receives base64
+ * it cannot interpret. Content blocks stay structurally valid (input_text
+ * instead of input_image).
+ */
+function convertUserChatContentToResponsesInput(
+  content: unknown,
+  supportsVision: boolean = true
+): Array<Record<string, unknown>> {
   if (typeof content === 'string') {
     return content
       ? [{ type: 'input_text', text: content }]
@@ -898,12 +920,42 @@ function convertUserChatContentToResponsesInput(content: unknown): Array<Record<
       const imageURLObj = toOptionalObject(itemObj.image_url);
       const imageURL = toString(imageURLObj?.url) || toString(itemObj.image_url);
       if (imageURL) {
-        parts.push({ type: 'input_image', image_url: imageURL });
+        if (!supportsVision) {
+          parts.push({ type: 'input_text', text: imageBlockPlaceholderForNonVisionModel(imageURL) });
+        } else {
+          parts.push({ type: 'input_image', image_url: imageURL });
+        }
       }
     }
   }
 
   return parts;
+}
+
+/**
+ * N1 scheme-B fallback for tool messages: a persisted tool_result whose
+ * content embeds image blocks (e.g. `[{"type":"image","source":{base64}}]`)
+ * is degraded to a text placeholder for non-vision models. Array content is
+ * mapped block-by-block so text blocks survive; string content that looks
+ * like an image JSON block is replaced wholesale. Pairing (tool_use_id) is
+ * preserved — only content changes.
+ */
+function sanitizeToolContentForNonVisionModel(content: unknown): unknown {
+  if (Array.isArray(content)) {
+    const nextBlocks = content.map((block) => {
+      const blockObj = toOptionalObject(block);
+      if (blockObj && toString(blockObj.type) === 'image') {
+        return { type: 'text', text: imageBlockPlaceholderForNonVisionModel('data:image/*') };
+      }
+      return block;
+    });
+    return nextBlocks;
+  }
+  const raw = stringifyUnknown(content);
+  if (raw.length > 0 && /"type"\s*:\s*"image"/i.test(raw)) {
+    return `[图片块已省略：当前模型不支持视觉输入（原 content 含 image 块，${raw.length} 字符，已不发送）]`;
+  }
+  return content;
 }
 
 function normalizeResponsesToolsFromChat(toolsInput: unknown): Array<Record<string, unknown>> {
@@ -995,6 +1047,10 @@ function convertChatCompletionsRequestToResponsesRequest(
 
   const isDeepSeek = provider?.toLowerCase() === 'deepseek'
     || isDeepSeekModel(toString(chatRequest.model));
+  // N1 scheme-B: whether the effective model can consume image blocks. Unknown
+  // models default to true (safe default), only known non-vision models
+  // (DeepSeek V4 family) degrade images to placeholders.
+  const supportsVision = modelSupportsVision(toString(chatRequest.model));
 
   if (chatRequest.model !== undefined) {
     request.model = chatRequest.model;
@@ -1072,7 +1128,12 @@ function convertChatCompletionsRequestToResponsesRequest(
 
     if (role === 'tool') {
       const toolCallId = toString(messageObj.tool_call_id);
-      const output = stringifyUnknown(messageObj.content);
+      // N1 scheme-B: degrade image blocks persisted in old tool_results before
+      // they are forwarded to a non-vision model.
+      const toolContent = supportsVision
+        ? messageObj.content
+        : sanitizeToolContentForNonVisionModel(messageObj.content);
+      const output = stringifyUnknown(toolContent);
       if (toolCallId && output) {
         input.push({
           type: 'function_call_output',
@@ -1149,7 +1210,7 @@ function convertChatCompletionsRequestToResponsesRequest(
       continue;
     }
 
-    const userParts = convertUserChatContentToResponsesInput(messageObj.content);
+    const userParts = convertUserChatContentToResponsesInput(messageObj.content, supportsVision);
     if (userParts.length > 0) {
       input.push({
         role: role || 'user',
@@ -2902,13 +2963,35 @@ async function handleRequest(
   }
 
   let anthropicRequestBody = parsedRequestBody;
+  let requestMessages = toOptionalObject(parsedRequestBody)?.messages;
+  if (messagesRouteSessionKey) {
+    if (Array.isArray(requestMessages)) {
+      // GT#12 N5: fold low-value polling tool_result blocks by CONTENT VALUE
+      // (complements tier-1 snip, which cuts by token boundary). Storage is
+      // untouched — only this replayed request body is affected. Runs before
+      // snip so the two savings compose.
+      const foldResult = foldLowValueToolResults(requestMessages);
+      if (foldResult.stats.folded > 0) {
+        anthropicRequestBody = {
+          ...(parsedRequestBody as Record<string, unknown>),
+          messages: foldResult.messages,
+        };
+        requestMessages = toOptionalObject(anthropicRequestBody)?.messages;
+        console.info('[cowork-openai-compat-proxy] Folded low-value polling tool_result blocks', {
+          sessionKey: messagesRouteSessionKey,
+          total: foldResult.stats.total,
+          folded: foldResult.stats.folded,
+          kept: foldResult.stats.kept,
+        });
+      }
+    }
+  }
   if (messagesRouteSessionKey) {
     // Tiered compaction tier 1: deterministically snip stale tool_result
     // blocks in the head region of this session's conversation. Same input
     // bytes + same persisted boundary => same output bytes, so DeepSeek's
     // cached prefix only breaks once per boundary raise.
     const snipHeadTokens = getCoworkSnipHeadTokens(messagesRouteSessionKey);
-    const requestMessages = toOptionalObject(parsedRequestBody)?.messages;
     if (
       snipHeadTokens > 0
       && Array.isArray(requestMessages)
@@ -2917,7 +3000,7 @@ async function handleRequest(
       const snipResult = snipStaleToolResultBlocks(requestMessages, snipHeadTokens);
       if (snipResult.stats.snippedBlocks > 0) {
         anthropicRequestBody = {
-          ...(parsedRequestBody as Record<string, unknown>),
+          ...(anthropicRequestBody as Record<string, unknown>),
           messages: snipResult.messages,
         };
         console.info('[cowork-openai-compat-proxy] Snipped stale tool_result blocks in head region', {
