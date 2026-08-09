@@ -174,6 +174,30 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               </span>
             )}
           </div>
+          {(() => {
+            // The REAL upstream this session is hitting — the provider key
+            // resolved at run start (metabot llm_id / defaultProvider /
+            // config-order). This is the honest answer to "am I on OpenCode
+            // or DeepSeek right now?".
+            const provider = usageStats.upstreamProvider?.trim();
+            const upstreamHost = usageStats.upstreamBaseURL
+              ? usageStats.upstreamBaseURL.replace(/^https?:\/\//, '').replace(/\/+$/, '')
+              : '';
+            if (!provider && !upstreamHost) return null;
+            const label = provider
+              ? provider.charAt(0).toUpperCase() + provider.slice(1)
+              : upstreamHost;
+            return (
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
+                <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('coworkUsageUpstream')}
+                </span>
+                <span className="font-mono truncate pl-2 dark:text-claude-darkText text-claude-text" title={upstreamHost || label}>
+                  {upstreamHost ? `${label} · ${upstreamHost}` : label}
+                </span>
+              </div>
+            );
+          })()}
           <div className="mt-2 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageInput')}</span><span className="font-mono">{formatTokens(usageStats.inputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>

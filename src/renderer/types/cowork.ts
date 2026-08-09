@@ -102,6 +102,10 @@ export interface CoworkUsageStats {
   totalCostUsd?: number;
   /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, 'other' (gateway/plan providers), or none. */
   source: 'deepseek' | 'anthropic' | 'other' | 'none';
+  /** Provider key the session actually runs on (e.g. 'opencode'), for the upstream row. */
+  upstreamProvider?: string;
+  /** Real upstream base URL the session's requests are forwarded to. */
+  upstreamBaseURL?: string;
   /** Number of LLM turns accumulated (for cache-miss attribution). */
   turnCount?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */

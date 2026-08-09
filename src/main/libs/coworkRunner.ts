@@ -832,6 +832,10 @@ interface ActiveSession {
    * balance/CNY estimates apply at all.
    */
   billingSource?: 'deepseek' | 'anthropic' | 'other';
+  /** Provider key ('deepseek', 'opencode', ...) the session actually runs on (from the resolved API config). */
+  upstreamProvider?: string;
+  /** Real upstream base URL the session's requests are forwarded to (e.g. https://opencode.ai/zen/go/v1). */
+  upstreamBaseURL?: string;
   /** Accumulated token usage from SDK result events (drives cost display). */
   usageStats?: {
     inputTokens: number;
@@ -840,6 +844,10 @@ interface ActiveSession {
     cacheCreationTokens: number;
     totalCostUsd?: number;
     source: 'deepseek' | 'anthropic' | 'other' | 'none';
+    /** Provider key the session actually runs on (observability; e.g. 'opencode'). */
+    upstreamProvider?: string;
+    /** Real upstream base URL the session's requests are forwarded to. */
+    upstreamBaseURL?: string;
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
     /**
@@ -1497,6 +1505,9 @@ export class CoworkRunner extends EventEmitter {
       // result event); 'other' is the neutral default for unknown providers.
       source: this.activeSessions.get(sessionId)?.billingSource
         ?? (prev.source === 'none' ? 'other' : prev.source),
+      // Real upstream identity for observability (usage panel "upstream" row).
+      upstreamProvider: this.activeSessions.get(sessionId)?.upstreamProvider ?? prev.upstreamProvider,
+      upstreamBaseURL: this.activeSessions.get(sessionId)?.upstreamBaseURL ?? prev.upstreamBaseURL,
       turnCount: nextTurn,
       cacheMissEvents,
       turnStats,
@@ -4645,6 +4656,19 @@ export class CoworkRunner extends EventEmitter {
     // Gateway providers (opencode plans, custom gateways, ...) serving deepseek
     // models are 'other' — tokens only, no account balance, no rate estimate.
     activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
+    // Remember the REAL upstream for observability: the usage panel and logs
+    // show which provider this session actually hits (metabot llm_id override,
+    // defaultProvider preference, or config-order fallback — whatever won).
+    activeSession.upstreamProvider = apiConfig.provider;
+    activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL;
+    coworkLog('INFO', 'runClaudeCodeLocal', 'Resolved API config for session', {
+      sessionId,
+      provider: apiConfig.provider ?? null,
+      upstreamBaseURL: apiConfig.upstreamBaseURL ?? null,
+      model: apiConfig.model,
+      apiType: apiConfig.apiType,
+      billingSource: activeSession.billingSource,
+    });
 
     const claudeCodePath = getClaudeCodePath();
     const envVars = await getEnhancedEnvWithTmpdir(cwd, 'local', apiConfig);
@@ -6116,6 +6140,8 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
     activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
+    activeSession.upstreamProvider = apiConfig.provider;
+    activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL;
 
     const paths = ensureCoworkSandboxDirs(sessionId);
     const cwdMapping = resolveSandboxCwd(cwd);
