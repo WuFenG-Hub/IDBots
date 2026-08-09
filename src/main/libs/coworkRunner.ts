@@ -125,6 +125,27 @@ const SANDBOX_WORKSPACE_GUEST_ROOT = '/workspace/project';
 const SANDBOX_WORKSPACE_LEGACY_ROOT = '/workspace';
 const SAFE_ATTACHMENT_PROMPT_LABEL = '附件路径';
 const ATTACHMENT_LINE_RE = /^\s*(?:[-*]\s*)?(输入文件|input\s*file|附件路径|附件文件|attachment\s*path|attachment\s*file)\s*[:：]\s*(.+?)\s*$/i;
+// Raster image formats the model would receive as base64 image blocks. Used by
+// the non-vision Read/View guard (N1) and the same-file read dedupe (N2).
+// Deliberately excludes .svg (text/XML — readable and useful as text) and
+// non-image binaries (handled by BINARY_ATTACHMENT_EXTENSIONS instead).
+const IMAGE_FILE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.ico',
+  '.heic',
+  '.heif',
+  '.tif',
+  '.tiff',
+  '.avif',
+]);
+/** Files at or above this size are dedupe candidates too (base64 expansion is
+ * what blew up the diagnosed session — 120KB image -> 360K chars). */
+const COWORK_READ_DEDUPE_MIN_BYTES = 50 * 1024;
 const BINARY_ATTACHMENT_EXTENSIONS = new Set([
   '.pdf',
   '.png',
@@ -535,6 +556,131 @@ function estimateCoworkStoreToolResultSnipSavings(
   return snipStaleToolResultBlocks(projected, headTokenBudget).stats.savedTokens;
 }
 
+function isImageFilePath(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext ? IMAGE_FILE_EXTENSIONS.has(ext) : false;
+}
+
+/**
+ * statSync wrapper that returns null instead of throwing (missing file,
+ * permission errors). Used by the Read dedupe / vision guard before the SDK
+ * actually executes the tool, so a stat failure must not block the read.
+ */
+function safeFileStat(filePath: string): { mtimeMs: number; size: number } | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+export interface ShouldEvaluateCoworkContextBudgetInput {
+  claudeSessionId: string | null;
+  isRetry: boolean;
+  messageCount: number;
+}
+
+/**
+ * GT#12 N4: whether the per-turn context budget must be evaluated before
+ * running. The check is decoupled from claudeSessionId: after a DeepSeek
+ * reasoning-history reset claudeSessionId is null while the cowork store
+ * history keeps growing — gating on it skipped snip/compact until the next
+ * successful resume. Any history at all (or an existing SDK session) triggers
+ * evaluation; brand-new sessions with zero messages still skip the first run,
+ * and automatic error-retry re-runs (isRetry) are skipped so a retry never
+ * double-compacts the same turn. Pure + unit-tested.
+ */
+export function shouldEvaluateCoworkContextBudget(
+  input: ShouldEvaluateCoworkContextBudgetInput
+): boolean {
+  if (input.isRetry) {
+    return false;
+  }
+  return Boolean(input.claudeSessionId) || input.messageCount > 0;
+}
+
+export type ReadImageGuardDecision =
+  | { action: 'deny'; reason: 'no-vision-image' | 'duplicate-read'; message: string }
+  | {
+      action: 'allow';
+      register?: { path: string; mtimeMs: number; size: number };
+    };
+
+export interface EvaluateReadImageGuardInput {
+  toolName: string;
+  /** Absolute path of the file the Read/View tool targets. */
+  absolutePath: string;
+  /** Pre-fetched stat (null when the file is missing / unreadable). */
+  fileStat: { mtimeMs: number; size: number } | null;
+  /** Whether the session's model can consume image content blocks. */
+  supportsVision: boolean;
+  /** Files read earlier in this session (absolute path -> stat at read time). */
+  priorReads?: ReadonlyMap<string, { mtimeMs: number; size: number }> | null;
+}
+
+/**
+ * Pure decision logic for the GT#12 Read/View guards, kept outside canUseTool
+ * so it is unit-testable without a full runner instance:
+ * - N1: a non-vision model (supportsVision=false) never reads image files —
+ *   deny before execution so base64 never enters session history.
+ * - N2: re-reading the SAME unchanged image/large file inside one session is
+ *   denied with a hint; a file whose mtime/size changed is allowed again and
+ *   re-registered. Ordinary text files (< 50KB) are never deduped.
+ */
+export function evaluateReadImageGuard(input: EvaluateReadImageGuardInput): ReadImageGuardDecision {
+  const toolName = input.toolName.trim().toLowerCase();
+  const isReadTool = toolName === 'read' || toolName === 'view';
+  if (!isReadTool) {
+    return { action: 'allow' };
+  }
+
+  const isImageFile = isImageFilePath(input.absolutePath);
+
+  if (isImageFile && input.supportsVision === false) {
+    const sizeLabel = input.fileStat
+      ? `，${Math.max(1, Math.round(input.fileStat.size / 1024))}KB`
+      : '';
+    return {
+      action: 'deny',
+      reason: 'no-vision-image',
+      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用文字描述图片内容，或切换到支持多模态输入的模型（如 Claude/GPT）。`,
+    };
+  }
+
+  const isLargeFile = input.fileStat !== null && input.fileStat.size >= COWORK_READ_DEDUPE_MIN_BYTES;
+  if (!isImageFile && !isLargeFile) {
+    return { action: 'allow' };
+  }
+
+  const priorRead = input.priorReads?.get(input.absolutePath);
+  if (
+    priorRead
+    && input.fileStat
+    && input.fileStat.mtimeMs === priorRead.mtimeMs
+    && input.fileStat.size === priorRead.size
+  ) {
+    return {
+      action: 'deny',
+      reason: 'duplicate-read',
+      message: `该文件已在本次会话读取过，内容无变化，为避免重复占用上下文未再次注入：${input.absolutePath}。如确实需要重新读取，请先修改文件后再读，或说明原因。`,
+    };
+  }
+
+  if (input.fileStat) {
+    return {
+      action: 'allow',
+      register: {
+        path: input.absolutePath,
+        mtimeMs: input.fileStat.mtimeMs,
+        size: input.fileStat.size,
+      },
+    };
+  }
+
+  return { action: 'allow' };
+}
+
 function isUnsupportedMultimodalContentError(message: string): boolean {
   if (!message) return false;
   const normalized = message.toLowerCase();
@@ -829,6 +975,13 @@ interface ActiveSession {
   lastSubagentThrottleAt?: number;
   /** Task id of the last throttled subagent progress emit. */
   lastSubagentThrottleTaskId?: string;
+  /**
+   * Files already Read/View'd in this session (absolute path -> stat at read
+   * time), used to dedupe repeated reads of the same image/large file (N2).
+   * A file whose mtime/size changed since the last read is allowed through
+   * again. Grows only with distinct read files, bounded by session lifetime.
+   */
+  readFiles?: Map<string, { mtimeMs: number; size: number }>;
   /**
    * Billing identity resolved from the API config at run start ('deepseek'
    * only when the DeepSeek account is actually billed — provider key
@@ -4118,6 +4271,7 @@ export class CoworkRunner extends EventEmitter {
       staleResumeRetryAllowed: true,
       contextOverflowDetected: false,
       contextOverflowRetryAllowed: false,
+      readFiles: new Map(),
       executionMode: session.executionMode || this.store.getConfig().executionMode || 'local',
       localAcceptedInputs: 0,
       localSettledInputs: 0,
@@ -4837,7 +4991,21 @@ export class CoworkRunner extends EventEmitter {
 
     let effectivePrompt = prompt;
     const sessionSnapshotForBudget = this.store.getSession(sessionId);
-    if (activeSession.claudeSessionId && !isRetry) {
+    // N4 (GT#12): budget evaluation must not depend on claudeSessionId being
+    // present. DeepSeek reasoning-history resets clear claudeSessionId and
+    // start a fresh SDK session while the cowork store history keeps growing;
+    // gating on claudeSessionId there skipped snip/compact until the next
+    // successful resume, letting sessions balloon to the window limit (the
+    // 2026-08-09 diagnosed session reached 605K chars with no Tier-1/Tier-2
+    // intervention). Evaluate whenever there is history to evaluate — a brand
+    // new session with zero messages still skips the first run — and keep
+    // skipping automatic error-retry re-runs (isRetry) so a retry never
+    // double-compacts the same turn.
+    if (shouldEvaluateCoworkContextBudget({
+      claudeSessionId: activeSession.claudeSessionId,
+      isRetry,
+      messageCount: sessionSnapshotForBudget?.messages?.length ?? 0,
+    })) {
       const budget = getCoworkContextBudget({
         messages: sessionSnapshotForBudget?.messages ?? [],
         currentPrompt: prompt,
@@ -5067,6 +5235,56 @@ export class CoworkRunner extends EventEmitter {
                   message: `当前模型不支持原生文档/图片块，无法直接 ${resolvedName} 二进制附件：${absoluteToolPath}。请切换支持多模态输入的模型，或先将文件转成纯文本后再读取。`,
                 };
               }
+            }
+          }
+        }
+
+        // --- N1/N2: vision capability gate + same-file read dedupe (GT#12) ---
+        // Both guards key off Read/View tool parameters BEFORE the SDK executes
+        // the tool, so a denied read never produces a tool_result and never
+        // enters session history. This is the same real execution path the
+        // text-only attachment mode above uses; the guards are capability-driven
+        // (modelLimits.supportsVision) and session-state driven
+        // (activeSession.readFiles), complementing the URL/model-string
+        // heuristics of forceTextOnlyAttachments. Decision logic lives in the
+        // pure evaluateReadImageGuard (unit-tested); this block only assembles
+        // inputs and applies the outcome.
+        if (resolvedName.trim().toLowerCase() === 'read' || resolvedName.trim().toLowerCase() === 'view') {
+          const guardFilePath = this.resolveToolFilePathFromInput(resolvedInput, cwd);
+          if (guardFilePath) {
+            const absoluteGuardPath = path.resolve(guardFilePath);
+            const guardStat = safeFileStat(absoluteGuardPath);
+            const guardDecision = evaluateReadImageGuard({
+              toolName: resolvedName,
+              absolutePath: absoluteGuardPath,
+              fileStat: guardStat,
+              supportsVision: modelLimits.supportsVision,
+              priorReads: activeSession.readFiles,
+            });
+            if (guardDecision.action === 'deny') {
+              coworkLog(
+                guardDecision.reason === 'no-vision-image' ? 'WARN' : 'INFO',
+                'runClaudeCodeLocal',
+                guardDecision.reason === 'no-vision-image'
+                  ? 'Blocked Read/View image for non-vision model'
+                  : 'Deduplicated repeated Read/View of unchanged file',
+                {
+                  sessionId,
+                  toolName: resolvedName,
+                  filePath: absoluteGuardPath,
+                  modelId: modelLimits.modelId,
+                  supportsVision: modelLimits.supportsVision,
+                  fileSize: guardStat?.size ?? null,
+                  fileMtimeMs: guardStat?.mtimeMs ?? null,
+                }
+              );
+              return { behavior: 'deny', message: guardDecision.message };
+            }
+            if (guardDecision.register) {
+              activeSession.readFiles?.set(guardDecision.register.path, {
+                mtimeMs: guardDecision.register.mtimeMs,
+                size: guardDecision.register.size,
+              });
             }
           }
         }

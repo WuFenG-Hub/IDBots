@@ -90,3 +90,95 @@ test('isContextWindowExceededError recognizes context overflow without catching 
     false
   );
 });
+
+// ---------------------------------------------------------------------------
+// GT#12 N4: budget evaluation trigger must be decoupled from claudeSessionId.
+// After a DeepSeek reasoning-history reset claudeSessionId is null while the
+// store history keeps growing; gating on it skipped snip/compact entirely.
+// ---------------------------------------------------------------------------
+
+test('N4: shouldEvaluateCoworkContextBudget evaluates with claudeSessionId present', async () => {
+  const { shouldEvaluateCoworkContextBudget } = await loadRunner();
+
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: 'sdk-abc',
+    isRetry: false,
+    messageCount: 5,
+  }), true);
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: 'sdk-abc',
+    isRetry: false,
+    messageCount: 0,
+  }), true);
+});
+
+test('N4: reset scenario — null claudeSessionId with growing history still evaluates', async () => {
+  const { shouldEvaluateCoworkContextBudget } = await loadRunner();
+
+  // The diagnosed failure: deepseek reset cleared claudeSessionId, history
+  // kept growing to 605K chars, and the old gate skipped budget checks.
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: null,
+    isRetry: false,
+    messageCount: 300,
+  }), true);
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: null,
+    isRetry: false,
+    messageCount: 1,
+  }), true);
+});
+
+test('N4: brand-new session with no history still skips the first run', async () => {
+  const { shouldEvaluateCoworkContextBudget } = await loadRunner();
+
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: null,
+    isRetry: false,
+    messageCount: 0,
+  }), false);
+});
+
+test('N4: automatic error-retry re-runs never evaluate (no double compaction)', async () => {
+  const { shouldEvaluateCoworkContextBudget } = await loadRunner();
+
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: 'sdk-abc',
+    isRetry: true,
+    messageCount: 300,
+  }), false);
+  assert.equal(shouldEvaluateCoworkContextBudget({
+    claudeSessionId: null,
+    isRetry: true,
+    messageCount: 300,
+  }), false);
+});
+
+// --- loadRunner: load the compiled coworkRunner module with an electron mock ---
+import Module from 'node:module';
+import path from 'node:path';
+
+const require = Module.createRequire(import.meta.url);
+
+async function loadRunner() {
+  const originalLoad = Module._load;
+  Module._load = function patchedLoad(request, parent, isMain) {
+    if (request === 'electron') {
+      return {
+        app: {
+          isPackaged: false,
+          getAppPath: () => process.cwd(),
+          getPath: () => path.join(process.cwd(), '.cowork-temp', 'cowork-budget-trigger-test-user-data'),
+        },
+        session: { defaultSession: { resolveProxy: async () => 'DIRECT' } },
+      };
+    }
+    return originalLoad.apply(this, arguments);
+  };
+
+  try {
+    return require('../dist-electron/main/libs/coworkRunner.js');
+  } finally {
+    Module._load = originalLoad;
+  }
+}

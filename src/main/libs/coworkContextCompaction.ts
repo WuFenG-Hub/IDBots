@@ -40,6 +40,111 @@ function truncateText(value: string, maxChars: number): string {
   return `${value.slice(0, maxChars - 16).trimEnd()}... [truncated]`;
 }
 
+function toKbLabel(charCount: number): string {
+  return `约 ${Math.max(1, Math.round(charCount / 1024))}KB`;
+}
+
+interface ExtractedImageInfo {
+  fileName?: string;
+  mediaType?: string;
+  charCount: number;
+}
+
+function extractImageInfoFromValue(value: unknown, into: ExtractedImageInfo[]): void {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      extractImageInfoFromValue(item, into);
+    }
+    return;
+  }
+  if (!value || typeof value !== 'object') {
+    return;
+  }
+  const record = value as Record<string, unknown>;
+  const type = typeof record.type === 'string' ? record.type.toLowerCase() : '';
+  if (type === 'image' || type === 'image_url') {
+    const source = record.source && typeof record.source === 'object'
+      ? (record.source as Record<string, unknown>)
+      : record;
+    const imageUrlObj = record.image_url && typeof record.image_url === 'object'
+      ? (record.image_url as Record<string, unknown>)
+      : null;
+    const urlValue = typeof source.url === 'string'
+      ? source.url
+      : (typeof record.url === 'string' ? record.url : (typeof imageUrlObj?.url === 'string' ? imageUrlObj.url : undefined));
+    const dataUriMime = urlValue ? (urlValue.match(/^data:([^;,]+)/i)?.[1] ?? undefined) : undefined;
+    const mediaType = typeof source.media_type === 'string'
+      ? source.media_type
+      : (typeof record.media_type === 'string' ? record.media_type : dataUriMime);
+    const fileName = typeof source.file_name === 'string'
+      ? source.file_name
+      : (typeof record.file_name === 'string' ? record.file_name : undefined);
+    let charCount = 0;
+    if (typeof source.data === 'string') {
+      charCount = source.data.length;
+    } else if (urlValue) {
+      charCount = urlValue.length;
+    }
+    into.push({ fileName, mediaType, charCount });
+    return;
+  }
+  // Recurse into the remaining fields (tool_result containers wrap image
+  // blocks inside content arrays with extra fields like tool_use_id).
+  for (const key of ['content', 'source', 'image_url']) {
+    if (key in record) {
+      extractImageInfoFromValue(record[key], into);
+    }
+  }
+}
+
+/**
+ * GT#12 N6: turn a message content that embeds image blocks into a semantic
+ * one-line placeholder instead of truncating raw base64 into the compact
+ * summary. Returns null when the content carries no image blocks, so plain
+ * text messages keep their previous behavior exactly.
+ */
+export function describeImageContent(content: string): string | null {
+  if (!content) {
+    return null;
+  }
+
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    parsed = null;
+  }
+
+  const images: ExtractedImageInfo[] = [];
+  if (parsed !== null) {
+    extractImageInfoFromValue(parsed, images);
+  }
+
+  if (images.length === 0) {
+    // Not valid JSON: fall back to a structural pattern check so base64 that
+    // survived stringification is still caught.
+    if (!/"type"\s*:\s*"image"/i.test(content)) {
+      return null;
+    }
+    const dataMatch = content.match(/"data"\s*:\s*"([^"]+)"/i);
+    return `[图片块：${dataMatch ? toKbLabel(dataMatch[1].length) : toKbLabel(content.length)}，内容已省略]`;
+  }
+
+  const lines: string[] = [];
+  for (const image of images) {
+    const parts: string[] = [];
+    if (image.fileName) {
+      parts.push(`文件名 ${image.fileName}`);
+    }
+    if (image.mediaType) {
+      parts.push(image.mediaType);
+    }
+    parts.push(image.charCount > 0 ? `base64 ${toKbLabel(image.charCount)}` : 'base64 长度未知');
+    lines.push(`[图片: ${parts.join('，')}，已省略]`);
+  }
+  return lines.join(' ');
+}
+
 function roleLabel(message: Pick<CoworkMessage, 'type' | 'metadata'>): string {
   if (message.type === 'tool_use') {
     const toolName = typeof message.metadata?.toolName === 'string' ? message.metadata.toolName : 'tool';
@@ -53,7 +158,10 @@ function roleLabel(message: Pick<CoworkMessage, 'type' | 'metadata'>): string {
 }
 
 function formatMessageLine(message: CoworkMessage, maxChars = MESSAGE_CONTENT_MAX_CHARS): string {
-  const content = truncateText(normalizeContent(message.content), maxChars);
+  // GT#12 N6: image blocks become semantic placeholders in the compact
+  // summary — truncating raw base64 JSON was pure garbage with no signal.
+  const imageSummary = describeImageContent(message.content);
+  const content = imageSummary ?? truncateText(normalizeContent(message.content), maxChars);
   return `- ${roleLabel(message)}: ${content}`;
 }
 

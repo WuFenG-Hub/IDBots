@@ -3689,6 +3689,39 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
+  /**
+   * Latest EXTERNALLY VISIBLE message: skips thinking drafts
+   * (metadata.isThinking=true) and unfinished streaming placeholders
+   * (metadata.isStreaming=true) so session-history consumers (readLatest /
+   * idbots_session_read_latest) never see a chain-of-thought draft or a
+   * half-streamed message masquerading as the formal reply (GT#12 N3).
+   * Same lightweight single-row query shape as getSessionLatestMessage.
+   */
+  getSessionLatestVisibleMessage(sessionId: string): CoworkMessage | null {
+    const row = this.getOne<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages
+      WHERE session_id = ?
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isThinking":true%')
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isStreaming":true%')
+      ORDER BY
+        created_at DESC,
+        COALESCE(sequence, 0) DESC,
+        ROWID DESC
+      LIMIT 1
+    `, [sessionId]);
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
+
   private shouldApplyExplicitMemoryFromUserText(text: string, guardLevel: CoworkMemoryGuardLevel): boolean {
     const trimmed = text?.trim();
     if (!trimmed) return false;

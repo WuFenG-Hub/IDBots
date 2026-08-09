@@ -206,3 +206,5 @@ man_base_data_pebble/
 
 !tests/sdkCronHostTrigger.test.mjs
 !tests/metabotSettingsService.test.mjs
+!tests/coworkReadImageGuard.test.mjs
+!tests/coworkToolResultFold.test.mjs
