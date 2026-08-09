@@ -18,6 +18,7 @@ import {
   type CoworkMessageMetadata,
 } from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
+import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
 import {
@@ -2532,6 +2533,7 @@ let dreamStore: DreamStore | null = null;
 let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
+let projectStore: ProjectStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
 let coworkTurnSubmissionController: CoworkTurnSubmissionController | null = null;
 let skillManager: SkillManager | null = null;
@@ -2969,6 +2971,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   coworkStore = null;
   dreamStore = null;
   mcpStore = null;
+  projectStore = null;
   coworkRunner = null;
   imGatewayManager = null;
   scheduledTaskStore = null;
@@ -3897,6 +3900,14 @@ const getMcpStore = () => {
   return mcpStore;
 };
 
+const getProjectStore = () => {
+  if (!projectStore) {
+    const sqliteStore = getStore();
+    projectStore = new ProjectStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return projectStore;
+};
+
 // ---------------------------------------------------------------------------
 // Delegation pipeline — orchestrates handshake, payment, order, A2A, blocking
 // ---------------------------------------------------------------------------
@@ -4819,6 +4830,9 @@ const getCoworkRunner = () => {
             .some((metabot) => metabot.globalmetaid?.trim() === profile.globalMetaId);
           return { ...profile, isOwn };
         },
+      },
+      projects: {
+        list: () => getProjectStore().listProjects(),
       },
       socialRecall: {
         feed: async ({ keywords, publisher, publishers, since, until, sort, scope, user, chainName, size, cursor }) => {
@@ -12358,6 +12372,59 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       return { success: true, servers: getMcpStore().listServers() };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update MCP server' };
+    }
+  });
+
+  ipcMain.handle('projects:list', () => {
+    try {
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list projects' };
+    }
+  });
+
+  ipcMain.handle('projects:create', (_event, data: ProjectFormData) => {
+    try {
+      getProjectStore().createProject(data);
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create project' };
+    }
+  });
+
+  ipcMain.handle('projects:update', (_event, id: string, data: Partial<ProjectFormData>) => {
+    try {
+      const updated = getProjectStore().updateProject(id, data);
+      if (!updated) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update project' };
+    }
+  });
+
+  ipcMain.handle('projects:delete', (_event, id: string) => {
+    try {
+      const deleted = getProjectStore().deleteProject(id);
+      if (!deleted) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to delete project' };
+    }
+  });
+
+  ipcMain.handle('projects:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+    try {
+      const updated = getProjectStore().setEnabled(options.id, options.enabled);
+      if (!updated) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update project' };
     }
   });
 
