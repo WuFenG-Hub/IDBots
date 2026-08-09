@@ -804,6 +804,28 @@ export class SqliteStore {
     // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
     this.migrateGroupTaskMembersOpenTeamColumns();
 
+    // Group Task status transition history (who moved the task from/to which
+    // status and when) — the source for the detail-view status timeline.
+    // CREATE TABLE IF NOT EXISTS is the idempotent first-run migration; the
+    // table simply does not exist for older user databases until this schema
+    // block runs again, and existing rows are never touched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_status_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        actor_kind TEXT NOT NULL DEFAULT 'system' CHECK(actor_kind IN ('chair','owner','system')),
+        actor_globalmetaid TEXT,
+        actor_name TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_status_events_task
+        ON group_task_status_events(task_id, id);
+    `);
+
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_memberships (

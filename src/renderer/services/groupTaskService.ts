@@ -128,6 +128,20 @@ class GroupTaskService {
     return task;
   }
 
+  /** P0-1: pull a review task back to executing (Back to work / 返回修改). */
+  async reopenTask(taskId: number): Promise<GroupTaskDetail> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.reopen({ taskId });
+    if (!result.success || !result.task) {
+      throw new Error(result.error ?? 'Failed to reopen group task');
+    }
+    const task = result.task as GroupTaskDetail;
+    store.dispatch(upsertTask(this.toSummary(task)));
+    return task;
+  }
+
   async listMessages(
     taskId: number,
     opts?: { beforeId?: number; limit?: number },

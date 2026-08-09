@@ -32,9 +32,10 @@ import {
   listGroupTasks,
   getGroupTask,
   postGroupTaskMessage,
-  joinGroupTaskMember,
+  joinGroupTaskMemberWithSession,
   closeGroupTask,
   deleteGroupTaskDeliverable,
+  getGroupTaskMemberStatus,
 } from './groupTaskService';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
@@ -83,6 +84,7 @@ const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
+const GROUP_TASK_MEMBER_STATUS_PATH = '/api/idbots/group-task/member-status';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
@@ -1402,9 +1404,49 @@ export function startMetaidRpcServer(
         metabotId = resolved;
       }
       try {
-        const member = await joinGroupTaskMember(taskId, metabotId);
+        // P1-3: the invite response carries the worker-session creation status
+        // (created/ready/failed) — the chair can tell "invited & awake" from
+        // "invited but the session could not be prepared" immediately.
+        const result = await joinGroupTaskMemberWithSession(taskId, metabotId);
         res.writeHead(200);
-        res.end(JSON.stringify({ success: true, member }));
+        res.end(JSON.stringify({
+          success: true,
+          member: result.member,
+          sessionStatus: result.sessionStatus,
+        }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_MEMBER_STATUS_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: { task_id?: number };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      try {
+        // P1-4: host-computed member work status (idle/working/error) — the
+        // chair queries instead of guessing whether a worker is alive.
+        const members = await getGroupTaskMemberStatus(taskId);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, members }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
@@ -1525,9 +1567,12 @@ export function startMetaidRpcServer(
         return;
       }
       try {
+        // The RPC close is performed by the Twin (chair) on the owner's
+        // behalf — recorded as the chair actor on the status event (P1-5).
         const task = await closeGroupTask(taskId, {
           status,
           reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+          actor: { kind: 'chair' },
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));

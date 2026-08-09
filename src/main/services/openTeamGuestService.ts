@@ -16,6 +16,7 @@
  * same setter-injection style as groupChatTransport).
  */
 
+import type { CoworkStore } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type {
@@ -34,6 +35,10 @@ import {
   type OpenTeamDeclineEnvelope,
   type OpenTeamInvitePayload,
 } from './openTeamProtocols';
+import {
+  ensureOpenTeamGuestSession,
+  injectOpenTeamGuestContext,
+} from './groupTaskSession';
 
 /** Per-metabot kill switch (metabot_settings kv): missing = allowed, '0' = off. */
 export const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
@@ -55,6 +60,18 @@ export interface OpenTeamGuestServiceDeps {
   sendEncryptedSimplemsg: OpenTeamGuestSendSimplemsgFn;
   emitLog?: (message: string) => void;
   now?: () => number;
+  /**
+   * P1-3 (invitee-side immediate wake-up): when wired, the ACCEPT flow
+   * eagerly creates the invited bot's cowork session and injects the group
+   * context (task title + recent transcript) — the worker session exists
+   * within seconds of the invite instead of waiting ~20 min for a lazy
+   * daemon-created session.
+   */
+  getCoworkStore?: () => CoworkStore;
+  listRecentGroupMessages?: (
+    groupId: string,
+    limit: number,
+  ) => Array<{ senderName: string | null; content: string | null }>;
 }
 
 export interface OpenTeamInviteReplyContext {
@@ -190,6 +207,35 @@ export async function handleOpenTeamInvite(
     // not wait on a member we cannot track. The membership UNIQUE upsert makes
     // a later re-invite converge back to active.
     return decline('membership_record_failed', errorMessage(error));
+  }
+
+  // P1-3 (invitee-side immediate wake-up): eagerly create the invited bot's
+  // cowork session and inject the group context. Best-effort — a session
+  // failure must never flip a successful join into a decline.
+  try {
+    if (deps.getCoworkStore && deps.listRecentGroupMessages) {
+      const coworkStore = deps.getCoworkStore();
+      const { session } = ensureOpenTeamGuestSession(
+        coworkStore,
+        metabot.id,
+        metabot.name?.trim() || `bot-${metabot.id}`,
+        { groupId: invite.groupId, taskTitle: invite.taskTitle },
+      );
+      injectOpenTeamGuestContext({
+        coworkStore,
+        sessionId: session.id,
+        taskTitle: invite.taskTitle,
+        inviterGlobalmetaid: invite.inviterGlobalMetaId,
+        recentMessages: deps.listRecentGroupMessages(invite.groupId, 20),
+      });
+      emitLog(
+        `[OpenTeam] MetaBot ${metabot.id}: guest session ready for group ${invite.groupId} (${session.id})`,
+      );
+    }
+  } catch (error) {
+    emitLog(
+      `[OpenTeam] MetaBot ${metabot.id}: guest session pre-creation failed (continuing without it): ${errorMessage(error)}`,
+    );
   }
 
   emitLog(

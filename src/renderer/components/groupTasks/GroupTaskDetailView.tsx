@@ -10,8 +10,10 @@ import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import {
   canAcceptGroupTask,
+  canReopenGroupTask,
   formatGroupTaskTime,
   groupTaskStatusBadgeClass,
+  groupTaskWorkStatusLabelKey,
   isActiveGroupTaskStatus,
   mergeTranscriptMessages,
   shouldStickToBottom,
@@ -56,6 +58,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [confirmAction, setConfirmAction] = useState<'done' | 'cancelled' | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [reopening, setReopening] = useState(false);
+  const [reopenError, setReopenError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -185,6 +189,21 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  // P0-1: review -> executing 补充执行通道 (Back to work / 返回修改).
+  const handleReopen = async () => {
+    if (reopening || !detail) return;
+    setReopening(true);
+    setReopenError(null);
+    try {
+      const updated = await groupTaskService.reopenTask(taskId);
+      setDetail(updated);
+    } catch (err) {
+      setReopenError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReopening(false);
+    }
+  };
+
   if (loadingDetail) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -270,6 +289,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (
             <>
+              {canReopenGroupTask(detail.status) && (
+                <button
+                  type="button"
+                  onClick={() => void handleReopen()}
+                  disabled={reopening}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
+                >
+                  {reopening ? i18nService.t('groupTasksReopening') : i18nService.t('groupTasksBackToWork')}
+                </button>
+              )}
               {canAcceptGroupTask(detail.status) && (
                 <button
                   type="button"
@@ -300,6 +329,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             <p className="text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap">
               {detail.goal}
             </p>
+            {detail.status === 'review' && (
+              <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
+                {i18nService.t('groupTasksReviewSilenceHint')}
+              </div>
+            )}
             {detail.acceptanceCriteria && (
               <details className="mt-1">
                 <summary className="text-xs cursor-pointer dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text">
@@ -335,6 +369,15 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   </p>
                 )}
               </div>
+            )}
+            {detail.driver && (
+              <p className="mt-1 text-[11px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
+                {i18nService.t('groupTasksDriverInfo')}
+                {` ${detail.driver.instanceId.slice(0, 8)} · ${formatGroupTaskTime(detail.driver.atMs)}`}
+              </p>
+            )}
+            {reopenError && (
+              <p className="mt-1 text-xs text-red-500">{reopenError}</p>
             )}
           </div>
 
@@ -440,9 +483,47 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       {i18nService.t('groupTasksRemoteBadge')}
                     </span>
                   )}
+                  {member.workStatus && member.workStatus !== 'unknown' && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
+                        member.workStatus === 'working'
+                          ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                          : member.workStatus === 'error'
+                            ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                            : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
+                      }`}
+                    >
+                      {i18nService.t(groupTaskWorkStatusLabelKey(member.workStatus))}
+                    </span>
+                  )}
                 </div>
               ))}
             </div>
+          </div>
+          <div className="px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50">
+            <details>
+              <summary className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-pointer mb-2">
+                {i18nService.t('groupTasksStatusHistory')}
+              </summary>
+              {(detail.statusEvents ?? []).length === 0 ? (
+                <p className="text-xs dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
+                  {i18nService.t('groupTasksNoStatusEvents')}
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {(detail.statusEvents ?? []).map((event) => (
+                    <div key={event.id} className="text-[11px] leading-snug">
+                      <span className="dark:text-claude-darkText text-claude-text">
+                        {event.fromStatus} → {event.toStatus}
+                      </span>
+                      <span className="dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                        {` · ${event.actorName ?? event.actorKind} · ${formatGroupTaskTime(event.createdAt)}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </details>
           </div>
           <div className="px-4 py-3">
             <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
