@@ -352,6 +352,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    stopTask: (sessionId: string, taskId: string) =>
+      ipcRenderer.invoke('cowork:session:stopTask', { sessionId, taskId }),
+    backgroundTask: (sessionId: string, toolUseId?: string) =>
+      ipcRenderer.invoke('cowork:session:backgroundTask', { sessionId, toolUseId }),
     forkSession: (sessionId: string, messageId: string, title?: string) =>
       ipcRenderer.invoke('cowork:session:fork', { sessionId, messageId, title }),
     rewindSession: (sessionId: string, messageId: string) =>

@@ -7508,6 +7508,45 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:stopTask', async (_event, payload: {
+    sessionId: string;
+    taskId: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:stopTask', async () => {
+      try {
+        const { sessionId, taskId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!taskId || !taskId.trim()) throw new Error('Task id is required');
+        return await getCoworkRunner().stopSubagentTask(sessionId, taskId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to stop task',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:backgroundTask', async (_event, payload: {
+    sessionId: string;
+    toolUseId?: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:backgroundTask', async () => {
+      try {
+        const { sessionId, toolUseId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        return await getCoworkRunner().backgroundSubagentTask(sessionId, toolUseId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to background task',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:setEffort', async (_event, payload: {
     sessionId: string;
     effort: string | null;

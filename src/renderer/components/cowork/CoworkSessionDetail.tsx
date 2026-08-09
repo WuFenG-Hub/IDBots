@@ -3560,7 +3560,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   modelId={currentModelId}
                 />
               )}
-              <SubagentPanel sessionId={currentSession.id} />
+              <SubagentPanel
+                sessionId={currentSession.id}
+                disableControls={resolvedExecutionMode === 'sandbox'}
+              />
               <TodoPanel messages={currentSession.messages} />
               <EffortSelector
                 sessionId={currentSession.id}

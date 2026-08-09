@@ -81,6 +81,7 @@ tests/*
 !tests/coworkProviderErrors.test.mjs
 !tests/coworkPermissionRisk.test.mjs
 !tests/coworkTodoList.test.ts
+!tests/coworkTaskControl.test.mjs
 !tests/localFileLinkIntegration.test.mjs
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs

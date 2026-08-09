@@ -9,6 +9,8 @@ interface SubagentPanelProps {
   /** Current session id; enables the post-hoc transcript viewer. */
   sessionId?: string;
   disabled?: boolean;
+  /** Hide stop/background controls (e.g. sandbox sessions have no host-side SDK control). */
+  disableControls?: boolean;
 }
 
 /** Post-hoc subagent entry from listSubagents, merged with live tasks. */
@@ -49,7 +51,7 @@ const formatTokens = (value?: number): string | null => {
  * tool_progress events). Each row shows type badge, description, status icon,
  * duration, token usage, AI summary (agentProgressSummaries) and the last tool.
  */
-const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = false }) => {
+const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = false, disableControls = false }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [postHocAgents, setPostHocAgents] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -150,6 +152,7 @@ const SubagentPanel: React.FC<SubagentPanelProps> = ({ sessionId, disabled = fal
                   task={entry.task}
                   agentId={entry.agentId}
                   sessionId={sessionId}
+                  disableControls={disableControls}
                 />
               ))
             )}
@@ -164,11 +167,42 @@ const SubagentTaskRow: React.FC<{
   task?: SubagentTaskState;
   agentId?: string;
   sessionId?: string;
-}> = ({ task, agentId, sessionId }) => {
+  disableControls?: boolean;
+}> = ({ task, agentId, sessionId, disableControls = false }) => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [transcript, setTranscript] = useState<CoworkMessage[] | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionInFlight, setActionInFlight] = useState<'stop' | 'background' | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  const canControl = Boolean(
+    !disableControls
+    && sessionId
+    && task
+    && (task.status === 'running' || task.status === 'pending' || task.status === 'paused')
+  );
+  const canBackground = Boolean(
+    canControl
+    && task
+    && !task.isBackgrounded
+    && task.toolUseId
+  );
+
+  const runAction = async (action: 'stop' | 'background') => {
+    if (!sessionId || !task) return;
+    setActionInFlight(action);
+    setActionError(null);
+    const result = action === 'stop'
+      ? await coworkService.stopTask(sessionId, task.taskId)
+      : await coworkService.backgroundTask(sessionId, task.toolUseId);
+    setActionInFlight(null);
+    if (!result.success) {
+      setActionError(result.error ?? i18nService.t(
+        action === 'stop' ? 'coworkSubagentStopFailed' : 'coworkSubagentBackgroundFailed'
+      ));
+    }
+  };
 
   const duration = task
     ? formatDuration(task.usage?.durationMs ?? (task.startedAt && task.updatedAt ? task.updatedAt - task.startedAt : undefined))
@@ -249,6 +283,35 @@ const SubagentTaskRow: React.FC<{
             {duration && <span>⏱ {duration}</span>}
             {tokens && <span>∑ {tokens}</span>}
           </div>
+        </div>
+      )}
+      {canControl && (
+        <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+          <button
+            type="button"
+            disabled={actionInFlight !== null}
+            onClick={() => void runAction('stop')}
+            className="inline-flex items-center gap-1 rounded-md border dark:border-claude-darkBorder border-claude-border px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            title={i18nService.t('coworkSubagentStop')}
+          >
+            {actionInFlight === 'stop' ? '…' : '⏹'} {i18nService.t('coworkSubagentStop')}
+          </button>
+          {canBackground && (
+            <button
+              type="button"
+              disabled={actionInFlight !== null}
+              onClick={() => void runAction('background')}
+              className="inline-flex items-center gap-1 rounded-md border dark:border-claude-darkBorder border-claude-border px-1.5 py-0.5 text-[10px] font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:bg-claude-darkSurfaceInset hover:bg-claude-surfaceInset transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              title={i18nService.t('coworkSubagentBackground')}
+            >
+              {actionInFlight === 'background' ? '…' : '⏸'} {i18nService.t('coworkSubagentBackground')}
+            </button>
+          )}
+        </div>
+      )}
+      {actionError && (
+        <div className="mt-1.5 text-[10px] text-red-500 dark:text-red-400">
+          {actionError}
         </div>
       )}
       {isExpanded && (

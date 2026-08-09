@@ -886,6 +886,16 @@ interface ActiveSession {
     }>;
   };
   /**
+   * Live SDK Query control surface (local mode only) used by the subagent
+   * panel to stop a running task or background a foreground task. Null/absent
+   * for sandbox sessions (the SDK runs inside the VM — there is no host-side
+   * Query object to drive).
+   */
+  sdkTaskControl?: {
+    stopTask(taskId: string): Promise<void>;
+    backgroundTasks(toolUseId?: string): Promise<boolean>;
+  } | null;
+  /**
    * MetaBot persona block, computed once when the session starts and reused on
    * every continued turn. Persona text lives at the head of the system prompt,
    * so re-reading it from the DB each turn would let a mid-session persona edit
@@ -4295,6 +4305,53 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Stops a running background/subagent task via the live SDK Query control
+   * surface (task id from task_started/task_notification events). Local mode
+   * only; sandbox sessions have no host-side Query object.
+   */
+  async stopSubagentTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
+    const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
+    if (!control) {
+      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+    }
+    const normalizedTaskId = taskId.trim();
+    if (!normalizedTaskId) {
+      return { success: false, error: 'Missing task id.' };
+    }
+    try {
+      await control.stopTask(normalizedTaskId);
+      coworkLog('INFO', 'stopSubagentTask', 'Stop requested', { sessionId, taskId: normalizedTaskId });
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'stopSubagentTask', 'Stop failed', { sessionId, taskId: normalizedTaskId, error: message });
+      return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Backgrounds a running foreground task via the live SDK Query control
+   * surface. With toolUseId, targets the single task started by that tool_use
+   * block; without it, backgrounds all foreground tasks. Local mode only.
+   */
+  async backgroundSubagentTask(sessionId: string, toolUseId?: string): Promise<{ success: boolean; backgrounded?: boolean; error?: string }> {
+    const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
+    if (!control) {
+      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+    }
+    const normalizedToolUseId = toolUseId?.trim() ? toolUseId.trim() : undefined;
+    try {
+      const backgrounded = await control.backgroundTasks(normalizedToolUseId);
+      coworkLog('INFO', 'backgroundSubagentTask', 'Background requested', { sessionId, toolUseId: normalizedToolUseId ?? null, backgrounded });
+      return { success: true, backgrounded };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'backgroundSubagentTask', 'Background failed', { sessionId, toolUseId: normalizedToolUseId ?? null, error: message });
+      return { success: false, error: message };
+    }
+  }
+
+  /**
    * Updates the effort level override for an active session. Takes effect on the
    * next turn (effort is set per query invocation). Pass null to revert to the
    * per-model default.
@@ -5784,6 +5841,9 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localAcceptedInputs = channel.acceptedCount;
 
       const result = await query({ prompt: channel, options } as any);
+      // Expose the live Query control surface so the subagent panel can stop a
+      // task or background a foreground task mid-run (local mode only).
+      activeSession.sdkTaskControl = result as unknown as NonNullable<ActiveSession['sdkTaskControl']>;
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude Code process started, iterating events');
       for await (const event of result as AsyncIterable<unknown>) {
         if (this.isSessionStopRequested(sessionId, activeSession)) {
@@ -6017,6 +6077,7 @@ export class CoworkRunner extends EventEmitter {
       this.handleError(sessionId, detailedError);
       throw runtimeError;
     } finally {
+      activeSession.sdkTaskControl = null;
       this.clearPendingPermissions(sessionId);
       this.removeActiveSession(sessionId, activeSession);
     }
