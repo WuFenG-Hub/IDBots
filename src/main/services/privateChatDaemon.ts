@@ -48,6 +48,7 @@ import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { parseOpenTeamEnvelope } from './openTeamProtocols';
 import {
   handleIncomingOpenTeamInvite,
+  handleIncomingOpenTeamKick,
   handleIncomingOpenTeamResponse,
 } from './openTeamGuestService';
 import {
@@ -2685,6 +2686,7 @@ async function resolvePeerChatPubkey(
 export interface PrivateChatOpenTeamInterceptionDeps {
   handleInvite: typeof handleIncomingOpenTeamInvite;
   handleResponse: typeof handleIncomingOpenTeamResponse;
+  handleKick: typeof handleIncomingOpenTeamKick;
   /** Async handoff used to keep the handling off the processOne call stack. */
   schedule: (task: () => void) => void;
 }
@@ -2692,6 +2694,7 @@ export interface PrivateChatOpenTeamInterceptionDeps {
 const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
   handleInvite: (input) => handleIncomingOpenTeamInvite(input),
   handleResponse: (envelope, options) => handleIncomingOpenTeamResponse(envelope, options),
+  handleKick: (input) => handleIncomingOpenTeamKick(input),
   schedule: (task) => setImmediate(task),
 };
 
@@ -2708,7 +2711,9 @@ const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
  * detached-work tracker: it never stalls the private-chat pipeline, and since
  * the row is marked processed first, an async failure can never cause the
  * same message to be handled twice. Without from_chat_pubkey no reply is
- * possible, so the envelope is only consumed (true) without dispatching.
+ * possible, so reply-bound envelopes (invite/accept/decline) are only consumed
+ * (true) without dispatching; the one-way KICK notification needs no reply and
+ * is still dispatched.
  */
 export function interceptOpenTeamEnvelope(params: {
   plaintext: string;
@@ -2724,7 +2729,7 @@ export function interceptOpenTeamEnvelope(params: {
   const envelope = parseOpenTeamEnvelope(params.plaintext);
   if (!envelope) return false;
   const emitLog = params.emitLog;
-  if (!params.fromChatPubkey) {
+  if (!params.fromChatPubkey && envelope.kind !== 'kick') {
     emitLog(
       `[OpenTeam] Message ${params.messageId}: envelope has no from_chat_pubkey; ` +
       'cannot reply, skipping without dispatch.',
@@ -2745,6 +2750,12 @@ export function interceptOpenTeamEnvelope(params: {
           peerChatPubkey: params.fromChatPubkey,
           invitePinId: envelope.invite.inviteId,
         },
+      });
+    } else if (envelope.kind === 'kick') {
+      handlers.handleKick({
+        metabot: params.metabot,
+        kick: envelope.kick,
+        senderGlobalMetaId: params.fromGlobalMetaId,
       });
     } else {
       handlers.handleResponse(envelope, { senderGlobalMetaId: params.fromGlobalMetaId });
@@ -2995,7 +3006,7 @@ async function processOne(
       }
     }
 
-    // OpenTeam protocol envelopes (invite/accept/decline) are handled by the
+    // OpenTeam protocol envelopes (invite/accept/decline/kick) are handled by the
     // OpenTeam guest/inviter flows and must never reach the LLM reply path —
     // same interception pattern as the MetaSwarm handshake and [ORDER]
     // protocols. `metabot` here is the local RECIPIENT bot of this message, so

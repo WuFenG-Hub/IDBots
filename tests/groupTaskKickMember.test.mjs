@@ -27,6 +27,7 @@ const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
 const groupTaskService = require('../dist-electron/main/services/groupTaskService.js');
+const { parseOpenTeamEnvelope } = require('../dist-electron/main/services/openTeamProtocols.js');
 
 Module._load = originalLoad;
 
@@ -42,6 +43,9 @@ const {
 } = groupTaskService;
 
 const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
+/** Canonical GlobalMetaID forms (id + version char + '1') for remote members. */
+const REMOTE_GMID = 'idq1remotemember0000000000000000000000000000001';
+const CHAT_PUBKEY_REMOTE = '02' + 'cd'.repeat(32);
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-kick-'));
 
@@ -165,6 +169,7 @@ test('store markMemberRemoved: remote member matched by globalmetaid; non-member
  * Harness: real SqliteStore + MetabotStore + GroupTaskStore, mocked transport.
  * state.removeFails: the on-chain removeuser pin rejects.
  * state.metaIdDetail: what the getMetaIdDetail seam resolves (or throws).
+ * state.memberList: what the fetchGroupMembers seam returns (R2P1-2 re-check).
  */
 const createHarness = async (overrides = {}) => {
   const tempDir = makeTempDir();
@@ -177,11 +182,14 @@ const createHarness = async (overrides = {}) => {
   insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin' });
   insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', globalmetaid: 'gmid-w2' });
 
-  const calls = { remove: [], send: [], detail: [] };
+  const calls = { remove: [], send: [], detail: [], members: [], kickNotify: [] };
   const state = {
     removeFails: overrides.removeFails ?? false,
     metaIdDetailThrows: overrides.metaIdDetailThrows ?? false,
     metaId: overrides.metaId ?? 'metaid-remote-legacy',
+    chatPubkey: overrides.chatPubkey === undefined ? CHAT_PUBKEY_REMOTE : overrides.chatPubkey,
+    memberList: overrides.memberList ?? [],
+    kickNotifyFails: overrides.kickNotifyFails ?? false,
   };
 
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
@@ -205,8 +213,19 @@ const createHarness = async (overrides = {}) => {
     getMetaIdDetail: async (identity) => {
       calls.detail.push(identity);
       if (state.metaIdDetailThrows) throw new Error('indexer unavailable');
-      return { metaId: state.metaId };
+      return { metaId: state.metaId, chatPubkey: state.chatPubkey };
     },
+    fetchGroupMembers: async (groupId) => {
+      calls.members.push(groupId);
+      return state.memberList;
+    },
+    sendEncryptedSimplemsg: async (input) => {
+      calls.kickNotify.push(input);
+      if (state.kickNotifyFails) throw new Error('simplemsg send failed');
+      return { txids: ['tx-kick-notify'], pinId: 'kick-notify-pin' };
+    },
+    kickConfirmPollIntervalMs: 1,
+    kickConfirmMaxAttempts: 3,
   });
 
   return {
@@ -322,13 +341,13 @@ test('kick remote member: legacy metaId resolved via the indexer; display name a
   try {
     const task = await createTaskWithCoder(h);
     h.groupTaskStore.addMember({
-      taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote-1', role: 'worker', displayName: 'Remote Bot One',
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: 'Remote Bot One',
     });
 
-    const removed = await kickGroupTaskMember({ taskId: task.id, globalmetaid: 'gmid-remote-1' });
+    const removed = await kickGroupTaskMember({ taskId: task.id, globalmetaid: REMOTE_GMID });
     assert.ok(removed.removedAt);
     assert.equal(h.calls.detail.length, 1);
-    assert.equal(h.calls.detail[0], 'gmid-remote-1');
+    assert.equal(h.calls.detail[0], REMOTE_GMID);
     assert.equal(h.calls.remove[0].opts.removeMetaid, 'metaid-remote-legacy');
     assert.match(h.calls.send[0].opts.content, /Moderation: Remote Bot One has been removed/);
     assert.deepEqual(
@@ -346,12 +365,177 @@ test('kick remote member: metaId resolution failure falls back to the GlobalMeta
   try {
     const task = await createTaskWithCoder(h);
     h.groupTaskStore.addMember({
-      taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote-1', role: 'worker', displayName: 'Remote Bot One',
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: 'Remote Bot One',
     });
 
-    const removed = await kickGroupTaskMember({ taskId: task.id, globalmetaid: 'gmid-remote-1' });
+    const removed = await kickGroupTaskMember({ taskId: task.id, globalmetaid: REMOTE_GMID });
     assert.ok(removed.removedAt, 'kick still succeeds on the fallback');
-    assert.equal(h.calls.remove[0].opts.removeMetaid, 'gmid-remote-1');
+    assert.equal(h.calls.remove[0].opts.removeMetaid, REMOTE_GMID);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick remote member: non-canonical globalmetaid input is rejected', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createTaskWithCoder(h);
+    await assert.rejects(
+      () => kickGroupTaskMember({ taskId: task.id, globalmetaid: 'gmid-not-canonical' }),
+      /must be a valid GlobalMetaID/,
+    );
+    assert.equal(h.calls.remove.length, 0, 'no chain write for an invalid identity');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick remote member: uppercase/padded globalmetaid input matches the normalized row', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createTaskWithCoder(h);
+    h.groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: 'Remote Bot One',
+    });
+
+    const removed = await kickGroupTaskMember({
+      taskId: task.id,
+      globalmetaid: `  ${REMOTE_GMID.toUpperCase()}  `,
+    });
+    assert.ok(removed.removedAt, 'normalized input kicks the normalized stored row');
+    assert.equal(removed.globalmetaid, REMOTE_GMID);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-2: kick notification to the remote guest ([OPENTEAM_KICK] simplemsg)
+// ---------------------------------------------------------------------------
+
+test('kick remote member: chair sends a deterministic [OPENTEAM_KICK] notification', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createTaskWithCoder(h);
+    h.groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: 'Remote Bot One',
+    });
+
+    await kickGroupTaskMember({ taskId: task.id, globalmetaid: REMOTE_GMID, reason: 'off-topic output' });
+
+    assert.equal(h.calls.kickNotify.length, 1, 'one kick notification simplemsg');
+    const notify = h.calls.kickNotify[0];
+    assert.equal(notify.metabotId, 1, 'the chair (twin) signs the notification');
+    assert.equal(notify.peerGlobalMetaId, REMOTE_GMID);
+    assert.equal(notify.peerChatPubkey, CHAT_PUBKEY_REMOTE, 'chat pubkey resolved from the indexer detail');
+    assert.deepEqual(parseOpenTeamEnvelope(notify.plaintext), {
+      kind: 'kick',
+      kick: { v: 1, groupId: GROUP_ID, taskTitle: 'Build MetaApp', reason: 'off-topic output' },
+    });
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick local member: no kick notification (the removal lands in the same machine DB)', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createTaskWithCoder(h);
+    await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(h.calls.kickNotify.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick remote member: notification failures never affect the kick result', async () => {
+  for (const overrides of [
+    { chatPubkey: '' }, // no on-chain chat pubkey
+    { kickNotifyFails: true }, // simplemsg send rejects
+    { metaIdDetailThrows: true }, // indexer detail lookup rejects
+  ]) {
+    const h = await createHarness(overrides);
+    try {
+      const task = await createTaskWithCoder(h);
+      h.groupTaskStore.addMember({
+        taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: 'Remote Bot One',
+      });
+      const removed = await kickGroupTaskMember({ taskId: task.id, globalmetaid: REMOTE_GMID });
+      assert.ok(removed.removedAt, `kick holds despite ${JSON.stringify(overrides)}`);
+      assert.equal(h.calls.remove.length, 1, 'on-chain removal still signed');
+      if (overrides.kickNotifyFails) {
+        assert.equal(h.calls.kickNotify.length, 1, 'send attempted and failed');
+      } else {
+        assert.equal(h.calls.kickNotify.length, 0, 'no pubkey/detail => send never attempted');
+      }
+    } finally {
+      h.cleanup();
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R2P1-2: post-kick on-chain removal re-check (chainRemovalConfirmed)
+// ---------------------------------------------------------------------------
+
+test('kick: chainRemovalConfirmed=true when the member list no longer contains the identity', async () => {
+  const h = await createHarness({ memberList: ['gmid-twin'] });
+  try {
+    const task = await createTaskWithCoder(h);
+    const removed = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(removed.chainRemovalConfirmed, true);
+    assert.ok(h.calls.members.length >= 1, 'member list polled');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick: chainRemovalConfirmed=false when the identity stays listed (warn only, kick holds)', async () => {
+  // The indexer keeps returning the kicked identity — poll budget spent.
+  const h = await createHarness({ memberList: ['gmid-twin', 'metaid-2'] });
+  try {
+    const task = await createTaskWithCoder(h);
+    const removed = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(removed.chainRemovalConfirmed, false, 'unconfirmed is reported, not thrown');
+    assert.ok(removed.removedAt, 'local removal still holds');
+    assert.equal(h.calls.members.length, 3, 'poll budget spent (kickConfirmMaxAttempts)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick: idempotent repeat sends no new pin but re-checks the chain state (read-only)', async () => {
+  const h = await createHarness();
+  try {
+    const task = await createTaskWithCoder(h);
+    const first = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(first.chainRemovalConfirmed, true);
+    const membersCalls = h.calls.members.length;
+    const again = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(again.chainRemovalConfirmed, true);
+    assert.equal(again.id, first.id);
+    assert.equal(h.calls.remove.length, 1, 'no second on-chain removal');
+    assert.ok(
+      h.calls.members.length > membersCalls,
+      'the repeat re-checks the member list (read-only) instead of blindly reporting success',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('kick: idempotent repeat still reports unconfirmed when the removal never landed on-chain', async () => {
+  // The indexer keeps listing the kicked identity — both the fresh kick and
+  // the idempotent repeat report unconfirmed (warn only; the kick holds).
+  const h = await createHarness({ memberList: ['gmid-twin', 'metaid-2'] });
+  try {
+    const task = await createTaskWithCoder(h);
+    const first = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(first.chainRemovalConfirmed, false);
+    const again = await kickGroupTaskMember({ taskId: task.id, metabotId: 2 });
+    assert.equal(again.chainRemovalConfirmed, false, 'repeat does not paper over the unlanded removal');
+    assert.equal(h.calls.remove.length, 1, 'still no second on-chain removal');
+    assert.equal(h.calls.send.length, 1, 'and no second moderation notice');
   } finally {
     h.cleanup();
   }

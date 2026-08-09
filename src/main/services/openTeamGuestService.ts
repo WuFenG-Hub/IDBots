@@ -1,6 +1,7 @@
 /**
  * OpenTeam guest service (M1): the invitee side of the OpenTeam handshake plus
- * the inviter-side ACCEPT/DECLINE bookkeeping.
+ * the inviter-side ACCEPT/DECLINE bookkeeping and the guest-side KICK handler
+ * (M3: the chair's kick notification marks the local membership left).
  *
  * Guest flow: validate an incoming [OPENTEAM_INVITE] envelope against local
  * policy, join the group on-chain, record the membership (which instantly
@@ -46,6 +47,7 @@ import {
   type OpenTeamAcceptEnvelope,
   type OpenTeamDeclineEnvelope,
   type OpenTeamInvitePayload,
+  type OpenTeamKickPayload,
 } from './openTeamProtocols';
 
 /** Per-metabot kill switch (metabot_settings kv): missing = allowed, '0' = off. */
@@ -464,4 +466,73 @@ export function handleIncomingOpenTeamResponse(
   options?: { senderGlobalMetaId?: string },
 ): OpenTeamResponseResult {
   return handleOpenTeamResponse(getOpenTeamGuestServiceDeps(), envelope, options);
+}
+
+export interface OpenTeamKickResult {
+  /** marked_left: the membership was flipped to left; ignored: no state change. */
+  action: 'marked_left' | 'ignored';
+  reason: string;
+}
+
+/**
+ * Guest side of the chair's one-way kick notification (M3): mark the local
+ * membership left so the guest daemon stops consuming the group, backfill
+ * stops pulling it, and the External collaborations view shows Left. The
+ * actual sender of the simplemsg must be the inviter recorded on the
+ * membership row — a KICK from anyone else is a forgery and is ignored.
+ * Local-only bookkeeping (no chain write, no reply), so it never throws into
+ * the daemon path: failures are logged and reported as ignored.
+ */
+export function handleOpenTeamKick(
+  deps: OpenTeamGuestServiceDeps,
+  input: {
+    metabot: Metabot;
+    kick: OpenTeamKickPayload;
+    /** Actual sender of the kick simplemsg row (from_global_metaid). */
+    senderGlobalMetaId?: string;
+  },
+): OpenTeamKickResult {
+  const emitLog = deps.emitLog ?? (() => undefined);
+  try {
+    const membershipStore = deps.getMembershipStore();
+    const groupId = input.kick.groupId.trim();
+    const membership = membershipStore.getMembership(groupId, input.metabot.id);
+    if (!membership) {
+      emitLog(
+        `[OpenTeam] MetaBot ${input.metabot.id}: KICK for unknown group ${groupId}; ignored`,
+      );
+      return { action: 'ignored', reason: 'no_membership' };
+    }
+    if (membership.status !== 'active') {
+      return { action: 'ignored', reason: 'already_left' };
+    }
+    const senderKey = globalMetaIdCompareKey(input.senderGlobalMetaId);
+    const inviterKey = globalMetaIdCompareKey(membership.inviterGlobalmetaid);
+    if (!senderKey || !inviterKey || senderKey !== inviterKey) {
+      emitLog(
+        `[OpenTeam] MetaBot ${input.metabot.id}: KICK for group ${groupId} from a sender that is ` +
+        'not the recorded inviter; ignored',
+      );
+      return { action: 'ignored', reason: 'sender_not_inviter' };
+    }
+    membershipStore.markLeft(groupId, input.metabot.id);
+    emitLog(
+      `[OpenTeam] MetaBot ${input.metabot.id}: KICK received for group ${groupId} ` +
+      `("${input.kick.taskTitle || 'untitled'}")` +
+      `${input.kick.reason ? `, reason: "${input.kick.reason}"` : ''}; membership marked left`,
+    );
+    return { action: 'marked_left', reason: '' };
+  } catch (error) {
+    emitLog(`[OpenTeam] KICK handling failed for MetaBot ${input.metabot.id}: ${errorMessage(error)}`);
+    return { action: 'ignored', reason: 'handler_error' };
+  }
+}
+
+/** Daemon entry point: resolves the module deps wired by main.ts. */
+export function handleIncomingOpenTeamKick(input: {
+  metabot: Metabot;
+  kick: OpenTeamKickPayload;
+  senderGlobalMetaId?: string;
+}): OpenTeamKickResult {
+  return handleOpenTeamKick(getOpenTeamGuestServiceDeps(), input);
 }

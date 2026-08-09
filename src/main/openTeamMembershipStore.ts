@@ -298,6 +298,21 @@ export class OpenTeamMembershipStore {
     return row ? rowToOpenTeamMembership(row) : null;
   }
 
+  /**
+   * True when ANY local bot has (or had — left memberships still count, their
+   * transcript stays readable) a membership row for this group. Gates the
+   * openTeamCollab:listMessages IPC so arbitrary group ids cannot be read.
+   */
+  hasMembershipForGroup(groupId: string): boolean {
+    const trimmed = (groupId ?? '').trim();
+    if (!trimmed) return false;
+    const row = this.getOne<{ found: number }>(
+      'SELECT 1 AS found FROM openteam_memberships WHERE group_id = ? LIMIT 1',
+      [trimmed],
+    );
+    return Boolean(row);
+  }
+
   /** Mark a membership as left (kick / owner opt-out). Returns false when absent. */
   markLeft(groupId: string, metabotId: number): boolean {
     const existing = this.getMembership(groupId, metabotId);

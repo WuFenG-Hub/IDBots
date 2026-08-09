@@ -139,6 +139,7 @@ import {
   setGroupTaskServiceGroupTaskStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
+  setGroupTaskServiceTransport,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
@@ -215,7 +216,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, fetchGroupMembers, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3135,6 +3136,16 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
+  // OpenTeam M3 kick loop closure: the member-list read feeds the post-kick
+  // on-chain removal re-check (R2P1-2); the simplemsg sender (createPin bound
+  // here) delivers the [OPENTEAM_KICK] notification to a kicked remote guest.
+  setGroupTaskServiceTransport({
+    fetchGroupMembers,
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+  });
   // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
   setOpenTeamImpressionServiceDepsGetter(() => ({
     groupTaskStore: getGroupTaskStore(),
@@ -3455,32 +3466,35 @@ const startSqliteDaemons = (): void => {
     // Round-4 attribution: resolve a chain-signature legacy metaid to its
     // GlobalMetaID (manapi /api/info/metaid/{metaid}). Process-lifetime cache;
     // resolved values are also persisted onto the message rows, so restarts do
-    // not re-hit the API. Null on failure -> the message is marked SUSPECT.
+    // not re-hit the API. R2P1-4: a DEFINITIVE miss (HTTP 404, or a successful
+    // answer without a GlobalMetaID) returns null and is cached -> the message
+    // is marked SUSPECT; a TRANSIENT failure (network error, non-404 HTTP
+    // status) throws uncached so the daemon's bounded retry path re-evaluates
+    // the message on a later tick instead of permanently suspecting a
+    // legitimate member.
     resolveGlobalMetaId: (() => {
       const cache = new Map<string, string | null>();
       return async (legacyMetaId) => {
         const key = legacyMetaId.trim().toLowerCase();
         if (!key) return null;
         if (cache.has(key)) return cache.get(key) ?? null;
-        try {
-          const response = await fetch(
-            `https://manapi.metaid.io/api/info/metaid/${encodeURIComponent(key)}`,
-            { headers: { Accept: 'application/json' } },
-          );
-          if (!response.ok) {
+        const response = await fetch(
+          `https://manapi.metaid.io/api/info/metaid/${encodeURIComponent(key)}`,
+          { headers: { Accept: 'application/json' } },
+        );
+        if (!response.ok) {
+          if (response.status === 404) {
             cache.set(key, null);
             return null;
           }
-          const json = await response.json() as { data?: { globalMetaId?: unknown } };
-          const resolved = typeof json?.data?.globalMetaId === 'string'
-            ? json.data.globalMetaId.trim()
-            : '';
-          cache.set(key, resolved || null);
-          return resolved || null;
-        } catch {
-          cache.set(key, null);
-          return null;
+          throw new Error(`manapi metaid resolution failed with HTTP ${response.status}`);
         }
+        const json = await response.json() as { data?: { globalMetaId?: unknown } };
+        const resolved = typeof json?.data?.globalMetaId === 'string'
+          ? json.data.globalMetaId.trim()
+          : '';
+        cache.set(key, resolved || null);
+        return resolved || null;
       };
     })(),
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
@@ -3553,6 +3567,10 @@ const startSqliteDaemons = (): void => {
     getCoworkStore,
     performChat: performChatCompletionForOrchestrator,
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    // P1-2 self-check fallback: periodic on-chain membership verification so a
+    // kicked guest marks its membership left even when the KICK simplemsg
+    // never arrives.
+    fetchGroupMembers,
     // OpenTeam M3: same chat-skill routing + skill-turn seams as the
     // group-task daemon, scoped to the guest bot's own allow_chat_skills
     // (allowAllEnabled stays false inside the daemon — external members are
@@ -9081,12 +9099,17 @@ if (!gotTheLock) {
   });
 
   // Read-only transcript for one external group. Content is already decrypted
-  // at insert time; reuse the group-task transcript query as-is.
+  // at insert time; reuse the group-task transcript query as-is. Membership
+  // gate: only groups this machine's bots actually joined (or left) may be
+  // read through this endpoint.
   ipcMain.handle('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
     try {
       const groupId = String(input?.groupId ?? '').trim();
       if (!groupId) {
         throw new Error('groupId is required');
+      }
+      if (!getOpenTeamMembershipStore().hasMembershipForGroup(groupId)) {
+        throw new Error('No OpenTeam membership for this group on this machine');
       }
       const messages = await withSqliteRecovery('openTeamCollab:listMessages', () =>
         getGroupTaskStore().listGroupChatMessages(groupId, {

@@ -423,6 +423,10 @@ const createServiceHarness = async () => {
     },
     sendGroupChatMessage: async () => ({ pinId: 'msg-pin' }),
     getMetaIdDetail: async () => ({ metaId: 'metaid-remote-legacy' }),
+    // R2P1-2/P1-2 seams: member-list re-check confirms immediately, no network.
+    fetchGroupMembers: async () => [],
+    kickConfirmPollIntervalMs: 1,
+    kickConfirmMaxAttempts: 2,
   });
   return {
     ...h,
@@ -525,6 +529,65 @@ test('hook bridge acceptGroupTask: pending deliverables accepted; verdict impres
     assert.match(observation.observationText, /was accepted by the observer side\./);
     assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: WORKER }).length, 0);
     assert.ok(localDeliverable.id !== remoteDeliverable.id);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('deliverable verdict: a kicked remote author earns NO positive impression from a bulk accept', async () => {
+  const h = await openHarness();
+  try {
+    const task = h.createTask();
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
+    const deliverable = h.groupTaskStore.addDeliverable({ taskId: task.id, msgPinId: 'pin-a1', authorGlobalmetaid: REMOTE_A, kind: 'metaapp', uri: 'metaapp://abc' });
+
+    // The author is kicked while the deliverable is still pending.
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: REMOTE_A, removePinId: 'pin-remove-a' });
+    h.groupTaskStore.updateDeliverableStatus(deliverable.id, 'accepted'); // swept up by a bulk accept
+
+    h.wireDeps();
+    assert.deepEqual(
+      recordDeliverableVerdictImpression(task.id, REMOTE_A, 'accepted', 'metaapp://abc'),
+      { recorded: 0, created: 0, skipped: 0 },
+      'accepted verdict for a removed author is skipped',
+    );
+    assert.equal(h.impressionStore.listObservations({ observerGlobalMetaID: CHAIR, subjectGlobalMetaID: REMOTE_A }).length, 0);
+
+    // A rejected verdict on a kicked author's deliverable still records (an
+    // explicit negative signal is worth keeping).
+    assert.deepEqual(
+      recordDeliverableVerdictImpression(task.id, REMOTE_A, 'rejected', 'metaapp://abc'),
+      { recorded: 1, created: 1, skipped: 0 },
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('hook bridge acceptGroupTask: a kicked remote author\'s swept-up deliverable writes no positive impression', async () => {
+  const h = await openHarness();
+  try {
+    const orchestrationStore = new OrchestrationStore(h.db, h.store.getSaveFunction());
+    const bridge = new GroupTaskOrchestrationBridge({
+      groupTaskStore: h.groupTaskStore,
+      orchestrationStore,
+      getMetabotById: (id) => h.metabotStore.getMetabotById(id),
+    });
+    const task = h.createTask();
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: REMOTE_A, role: 'worker', displayName: 'Remote Bot A' });
+    const deliverable = h.groupTaskStore.addDeliverable({ taskId: task.id, msgPinId: 'pin-a1', authorGlobalmetaid: REMOTE_A, kind: 'metaapp', uri: 'metaapp://abc' });
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: REMOTE_A, removePinId: 'pin-remove-a' });
+
+    h.wireDeps();
+    const appendCalls = h.spyOnAppend();
+    const { groupTask } = bridge.acceptGroupTask(task.id);
+    assert.equal(groupTask.status, 'done');
+    assert.equal(
+      h.groupTaskStore.listDeliverables(task.id).find((item) => item.id === deliverable.id)?.status,
+      'accepted',
+      'the pending deliverable is still accepted (status unchanged by the impression gate)',
+    );
+    assert.equal(appendCalls.length, 0, 'no positive verdict impression for the kicked author');
   } finally {
     h.cleanup();
   }

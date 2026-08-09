@@ -198,3 +198,75 @@ test('source order: interception precedes the disabled/wallet gates in processOn
   assert.ok(interceptAt < disabledGateAt, 'interception must precede the disabled gate');
   assert.ok(interceptAt < walletGateAt, 'interception must precede the wallet gate');
 });
+
+// ---------------------------------------------------------------------------
+// KICK envelopes (M3): one-way notification — dispatched to handleKick with
+// the actual row sender; no reply is needed, so a missing from_chat_pubkey
+// does NOT block the dispatch (unlike reply-bound envelopes).
+// ---------------------------------------------------------------------------
+
+const { buildOpenTeamKickMessage } = require('../dist-electron/main/services/openTeamProtocols.js');
+
+const kickPlaintext = buildOpenTeamKickMessage({
+  v: 1,
+  groupId: GROUP_ID,
+  taskTitle: 'External Task',
+  reason: 'off-topic output',
+});
+
+test('kick envelopes dispatch to the kick handler with the actual sender', async () => {
+  const handled = [];
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: kickPlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 46,
+    emitLog: () => {},
+    deps: {
+      handleInvite: async () => { throw new Error('not an invite'); },
+      handleResponse: () => { throw new Error('not a response'); },
+      handleKick: (input) => { handled.push(input); },
+      schedule: (task) => { scheduled = task; },
+    },
+  });
+  assert.equal(intercepted, true);
+  assert.equal(handled.length, 0, 'handling must not start synchronously on the processOne stack');
+
+  scheduled();
+  await flushMicrotasks();
+
+  assert.equal(handled.length, 1);
+  assert.equal(handled[0].metabot.id, 7);
+  assert.deepEqual(handled[0].kick, {
+    v: 1,
+    groupId: GROUP_ID,
+    taskTitle: 'External Task',
+    reason: 'off-topic output',
+  });
+  assert.equal(handled[0].senderGlobalMetaId, 'gmid-inviter', 'actual row sender passed for the inviter check');
+});
+
+test('a kick envelope without from_chat_pubkey is still dispatched (no reply needed)', async () => {
+  const handled = [];
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: kickPlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: '',
+    messageId: 47,
+    emitLog: () => {},
+    deps: {
+      handleInvite: async () => { throw new Error('must not run'); },
+      handleResponse: () => { throw new Error('must not run'); },
+      handleKick: (input) => { handled.push(input); },
+      schedule: (task) => { scheduled = task; },
+    },
+  });
+  assert.equal(intercepted, true, 'caller still markProcessed + returns');
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(handled.length, 1, 'kick handling does not depend on from_chat_pubkey');
+});

@@ -5,6 +5,16 @@
  */
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+
+/**
+ * Canonical GlobalMetaID form when the value parses (trim + lowercase), else
+ * the trimmed original so legacy non-canonical rows stay comparable. Applied
+ * at every globalmetaid entry point, same normalization as the invite path.
+ */
+function normalizeMemberGlobalMetaId(value: unknown): string {
+  return normalizeRawGlobalMetaId(value) ?? (typeof value === 'string' ? value.trim() : '');
+}
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
@@ -530,7 +540,7 @@ export class GroupTaskStore {
    */
   addMember(input: AddGroupTaskMemberInput): GroupTaskMember {
     const isRemote = input.metabotId == null;
-    const remoteGlobalmetaid = isRemote ? (input.globalmetaid ?? '').trim() : '';
+    const remoteGlobalmetaid = isRemote ? normalizeMemberGlobalMetaId(input.globalmetaid) : '';
     if (isRemote && !remoteGlobalmetaid) {
       throw new Error(`addMember failed for task ${input.taskId}: remote member requires globalmetaid`);
     }
@@ -572,7 +582,7 @@ export class GroupTaskStore {
       [
         input.taskId,
         input.metabotId,
-        isRemote ? remoteGlobalmetaid : input.globalmetaid ?? null,
+        isRemote ? remoteGlobalmetaid : normalizeMemberGlobalMetaId(input.globalmetaid) || null,
         input.role,
         input.joinedPinId ?? null,
         input.displayName ?? null,
@@ -616,7 +626,7 @@ export class GroupTaskStore {
    */
   isMember(taskId: number, metabotId: number | null, globalmetaid?: string | null): boolean {
     if (metabotId == null) {
-      const gmid = (globalmetaid ?? '').trim();
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
       if (!gmid) return false;
       const row = this.getOne<{ found: number }>(
         `SELECT 1 AS found FROM group_task_members
@@ -644,7 +654,7 @@ export class GroupTaskStore {
     globalmetaid?: string | null,
   ): void {
     if (metabotId == null) {
-      const gmid = (globalmetaid ?? '').trim();
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
       if (!gmid) {
         throw new Error(`updateMemberJoinedPinId failed for task ${taskId}: remote member requires globalmetaid`);
       }
@@ -672,7 +682,7 @@ export class GroupTaskStore {
    */
   markMemberRemoved(input: MarkGroupTaskMemberRemovedInput): GroupTaskMember {
     const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
-    const gmid = (input.globalmetaid ?? '').trim();
+    const gmid = normalizeMemberGlobalMetaId(input.globalmetaid);
     if (metabotId == null && !gmid) {
       throw new Error(`markMemberRemoved failed for task ${input.taskId}: metabotId or globalmetaid is required`);
     }
@@ -715,7 +725,7 @@ export class GroupTaskStore {
    * re-invite must still be able to complete its handshake).
    */
   hasRemovedMember(taskId: number, globalmetaid: string, notBeforeMs?: number): boolean {
-    const gmid = (globalmetaid ?? '').trim();
+    const gmid = normalizeMemberGlobalMetaId(globalmetaid);
     if (!gmid) return false;
     const row = notBeforeMs != null && Number.isFinite(notBeforeMs)
       ? this.getOne<{ found: number }>(

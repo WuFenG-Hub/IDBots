@@ -759,3 +759,127 @@ test('skill: a mentioned file outside the session workspace is dropped, never up
     store.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// P1-2 membership self-check fallback: every membershipCheckIntervalMs the
+// daemon re-verifies on-chain that the bot is still a group member; absence
+// marks the membership left (the KICK simplemsg may never arrive).
+// ---------------------------------------------------------------------------
+
+const membershipCheckHarness = async (overrides = {}) => {
+  const state = {
+    nowMs: 1_800_000_000_000,
+    // null = indexer failure; array = member identity strings
+    members: overrides.members === undefined ? [GUEST_GMID] : overrides.members,
+  };
+  const fetchMembersCalls = [];
+  const harness = await createHarness({
+    deps: {
+      now: () => state.nowMs,
+      membershipCheckIntervalMs: overrides.intervalMs ?? 5 * 60_000,
+      fetchGroupMembers: async (groupId) => {
+        fetchMembersCalls.push(groupId);
+        if (overrides.fetchThrows) throw new Error('indexer down');
+        return state.members;
+      },
+    },
+  });
+  return { ...harness, state, fetchMembersCalls };
+};
+
+const joinAsGuest = (membershipStore) => {
+  membershipStore.upsertActiveMembership({
+    groupId: GROUP_ID,
+    metabotId: 7,
+    globalmetaid: GUEST_GMID,
+    inviterGlobalmetaid: 'gmid-inviter',
+    taskTitle: 'External Task',
+  });
+};
+
+const insertMention = (db, pinChar) => {
+  insertGroupMessage(db, {
+    pinId: `${pinChar.repeat(64)}i0`,
+    senderMetaId: 'metaid-other',
+    senderGlobalMetaId: OTHER_GMID,
+    senderName: 'Other Bot',
+    content: '@Guest Bot can you take this?',
+  });
+};
+
+test('self-check: bot still on the member list — membership stays active, mentions answered', async () => {
+  const h = await membershipCheckHarness({ members: ['gmid-someone-else', GUEST_GMID] });
+  try {
+    joinAsGuest(h.membershipStore);
+    insertMention(h.db, 'a');
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 1, 'self-check ran on the first tick');
+    assert.equal(h.calls.send.length, 1, 'mention answered');
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: the legacy metaid form also counts as still-a-member', async () => {
+  const h = await membershipCheckHarness({ members: ['metaid-7'] });
+  try {
+    joinAsGuest(h.membershipStore);
+    await h.loop.runTick();
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: bot absent from the member list — membership marked left, consumption stops', async () => {
+  const h = await membershipCheckHarness({ members: ['gmid-someone-else'] });
+  try {
+    joinAsGuest(h.membershipStore);
+    insertMention(h.db, 'b');
+    await h.loop.runTick();
+    assert.equal(h.calls.send.length, 0, 'no reply after the kick is detected');
+    assert.equal(
+      h.membershipStore.getMembership(GROUP_ID, 7).status, 'left',
+      'absence from the on-chain member list marks the membership left',
+    );
+
+    // Later mentions are not consumed at all (active-membership list no longer includes it).
+    insertMention(h.db, 'c');
+    await h.loop.runTick();
+    assert.equal(h.calls.send.length, 0);
+    assert.equal(h.calls.chat.length, 0);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: indexer failure silently skips the round (membership untouched)', async () => {
+  for (const failure of [{ members: null }, { fetchThrows: true }]) {
+    const h = await membershipCheckHarness(failure);
+    try {
+      joinAsGuest(h.membershipStore);
+      insertMention(h.db, 'd');
+      await h.loop.runTick();
+      assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active', 'failed check never marks left');
+      assert.equal(h.calls.send.length, 1, 'messages still consumed');
+    } finally {
+      h.store.close();
+    }
+  }
+});
+
+test('self-check: throttled per membership interval', async () => {
+  const h = await membershipCheckHarness({ members: [GUEST_GMID], intervalMs: 60_000 });
+  try {
+    joinAsGuest(h.membershipStore);
+    await h.loop.runTick();
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 1, 'second tick inside the interval skips the probe');
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 2, 'probe re-runs once the interval elapsed');
+  } finally {
+    h.store.close();
+  }
+});

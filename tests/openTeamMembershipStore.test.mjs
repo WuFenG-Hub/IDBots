@@ -341,3 +341,26 @@ test('collab summaries: empty table returns an empty list', async () => {
     store.close();
   }
 });
+
+test('hasMembershipForGroup: any local membership row counts (active or left), unknown groups do not', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore } = await openStores(tempDir);
+  try {
+    assert.equal(openTeamStore.hasMembershipForGroup('group-ext-1'), false, 'unknown group');
+    assert.equal(openTeamStore.hasMembershipForGroup(''), false, 'empty group id');
+    assert.equal(openTeamStore.hasMembershipForGroup('   '), false, 'blank group id');
+
+    openTeamStore.upsertActiveMembership({ groupId: 'group-ext-1', metabotId: 7, globalmetaid: 'gmid-bot-7' });
+    assert.equal(openTeamStore.hasMembershipForGroup('group-ext-1'), true, 'active membership');
+
+    // A left membership still counts — its transcript stays readable.
+    openTeamStore.markLeft('group-ext-1', 7);
+    assert.equal(openTeamStore.hasMembershipForGroup('group-ext-1'), true, 'left membership still gates in');
+
+    // Another bot's membership for a different group does not leak across groups.
+    openTeamStore.upsertActiveMembership({ groupId: 'group-ext-2', metabotId: 8, globalmetaid: 'gmid-bot-8' });
+    assert.equal(openTeamStore.hasMembershipForGroup('group-ext-3'), false);
+  } finally {
+    store.close();
+  }
+});

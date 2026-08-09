@@ -128,13 +128,17 @@ class GroupTaskService {
     return task;
   }
 
-  /** Throws on failure so the caller (modal) can show the API error inline. */
+  /**
+   * Throws on failure so the caller (modal) can show the API error inline.
+   * Resolves with the kicked member row, including chainRemovalConfirmed
+   * (R2P1-2: false = the on-chain removal could not be confirmed yet).
+   */
   async kickMember(input: {
     taskId: number;
     metabotId?: number;
     globalmetaid?: string;
     reason?: string;
-  }): Promise<void> {
+  }): Promise<{ chainRemovalConfirmed?: boolean }> {
     const api = window.electron?.groupTask;
     if (!api) throw new Error('Group task API unavailable');
 
@@ -142,6 +146,7 @@ class GroupTaskService {
     if (!result.success) {
       throw new Error(result.error ?? 'Failed to remove the member');
     }
+    return (result.member ?? {}) as { chainRemovalConfirmed?: boolean };
   }
 
   async listMessages(

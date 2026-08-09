@@ -126,6 +126,20 @@ function isRemoteMember(
     );
 }
 
+/** True when the GlobalMetaID belongs to an ACTIVE (not kicked) remote member row. */
+function isActiveRemoteMember(
+  deps: OpenTeamImpressionServiceDeps,
+  taskId: number,
+  globalMetaID: GlobalMetaID,
+): boolean {
+  return deps.groupTaskStore
+    .listMembers(taskId)
+    .some((member) =>
+      member.metabotId == null
+      && normalizeGlobalMetaID(member.globalmetaid) === globalMetaID,
+    );
+}
+
 interface SubjectParticipationStats {
   messageCount: number;
   deliverablesTotal: number;
@@ -443,7 +457,9 @@ export function recordKickImpression(
 /**
  * Deliverable verdict: the chair records one observation about a REMOTE
  * author's deliverable being accepted/rejected. Local authors are skipped (the
- * canonical orchestration evidence + dream pipeline covers them).
+ * canonical orchestration evidence + dream pipeline covers them). An accepted
+ * verdict for an author who has already been kicked is skipped as well — a
+ * bulk task accept must not overwrite the kick's record with a positive one.
  */
 export function recordDeliverableVerdictImpression(
   taskId: number,
@@ -462,6 +478,10 @@ export function recordDeliverableVerdictImpression(
     const task = deps.groupTaskStore.getTaskById(id);
     if (!task) return result;
     if (!isRemoteMember(deps, task.id, subject)) return result; // local author or non-member
+    // A kicked (removed) remote author's pending deliverables get swept up in
+    // a bulk task accept; that must NOT earn them a positive verdict
+    // impression — the kick record already carries the collaboration outcome.
+    if (verdict === 'accepted' && !isActiveRemoteMember(deps, task.id, subject)) return result;
     const observer = resolveObserverGlobalMetaID(deps, task);
     if (!observer || observer === subject) return result;
     const now = deps.now?.() ?? Date.now();

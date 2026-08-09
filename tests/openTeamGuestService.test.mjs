@@ -572,3 +572,115 @@ test('accept from the actual invitee transitions the invite (normalized compare)
   assert.equal(result.matched, true);
   assert.deepEqual(calls.updateInviteStatus, [[{ invitePinId: INVITE_ID }, 'accepted', null]]);
 });
+
+// ---------------------------------------------------------------------------
+// KICK handler (M3): the chair's one-way kick notification marks the local
+// membership left; forged kicks (sender != recorded inviter) are ignored.
+// ---------------------------------------------------------------------------
+
+const { handleOpenTeamKick } = require('../dist-electron/main/services/openTeamGuestService.js');
+
+const makeKickDeps = (options = {}) => {
+  const calls = { markLeft: [] };
+  const membership = options.membership === undefined
+    ? {
+        id: 3,
+        groupId: GROUP_ID,
+        metabotId: 7,
+        globalmetaid: 'gmid-guest',
+        inviterGlobalmetaid: 'gmid-inviter',
+        taskTitle: 'External Task',
+        status: 'active',
+      }
+    : options.membership;
+  const deps = {
+    getMetabotStore: () => ({}),
+    getMembershipStore: () => ({
+      getMembership: () => membership,
+      markLeft: (groupId, metabotId) => {
+        calls.markLeft.push([groupId, metabotId]);
+        return true;
+      },
+    }),
+    emitLog: () => {},
+  };
+  return { deps, calls };
+};
+
+const kickPayload = (overrides = {}) => ({
+  v: 1,
+  groupId: GROUP_ID,
+  taskTitle: 'External Task',
+  reason: 'off-topic output',
+  ...overrides,
+});
+
+test('kick from the recorded inviter marks the membership left', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(result, { action: 'marked_left', reason: '' });
+  assert.deepEqual(calls.markLeft, [[GROUP_ID, 7]]);
+});
+
+test('kick sender check normalizes case (inviter match still marks left)', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'GMID-INVITER',
+  });
+  assert.equal(result.action, 'marked_left');
+  assert.equal(calls.markLeft.length, 1);
+});
+
+test('kick from a sender that is not the recorded inviter is ignored', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-attacker',
+  });
+  assert.deepEqual(result, { action: 'ignored', reason: 'sender_not_inviter' });
+  assert.equal(calls.markLeft.length, 0, 'forged KICK must not flip the membership');
+});
+
+test('kick without a sender identity is ignored', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: undefined,
+  });
+  assert.equal(result.action, 'ignored');
+  assert.equal(result.reason, 'sender_not_inviter');
+  assert.equal(calls.markLeft.length, 0);
+});
+
+test('kick for an unknown group or an already-left membership is a no-op', () => {
+  const unknown = makeKickDeps({ membership: null });
+  const r1 = handleOpenTeamKick(unknown.deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(r1, { action: 'ignored', reason: 'no_membership' });
+  assert.equal(unknown.calls.markLeft.length, 0);
+
+  const left = makeKickDeps({
+    membership: {
+      id: 3, groupId: GROUP_ID, metabotId: 7, globalmetaid: 'gmid-guest',
+      inviterGlobalmetaid: 'gmid-inviter', taskTitle: 'External Task', status: 'left',
+    },
+  });
+  const r2 = handleOpenTeamKick(left.deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(r2, { action: 'ignored', reason: 'already_left' });
+  assert.equal(left.calls.markLeft.length, 0);
+});
