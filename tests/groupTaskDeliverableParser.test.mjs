@@ -293,3 +293,14 @@ test('P0-3: parseWorkingAck extracts subtask + estimated minutes; no tag → nul
   assert.equal(hasStandbyMarker('[STANDBY] 静默观察'), true);
   assert.equal(hasStandbyMarker('nothing'), false);
 });
+
+// ---------------------------------------------------------------------------
+// P0-8: integrity declarations
+// ---------------------------------------------------------------------------
+
+test('P0-8: isIntegrityDeclaration recognizes honest correction language', () => {
+  const { isIntegrityDeclaration } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  assert.equal(isIntegrityDeclaration('更正：我此前的链接无效，正确预览如下'), true);
+  assert.equal(isIntegrityDeclaration('如实说明：该 pinid 未发布成功'), true);
+  assert.equal(isIntegrityDeclaration('普通消息没有任何关键词'), false);
+});

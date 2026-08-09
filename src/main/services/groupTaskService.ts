@@ -14,6 +14,7 @@ import {
   type GroupTaskMember,
   type GroupTaskMemberStatus,
   type GroupTaskTransition,
+  type GroupTaskIntegrityEvent,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
   type GroupChatTranscriptMessage,
@@ -62,6 +63,8 @@ export interface GroupTaskDetail extends GroupTask {
   deliverables: GroupTaskDeliverable[];
   /** P0-5: state-transition audit log (who/from/to/reason). */
   transitions: GroupTaskTransition[];
+  /** P0-8: public integrity declarations (honest corrections/reports). */
+  integrityEvents: GroupTaskIntegrityEvent[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
   /**
@@ -492,6 +495,7 @@ export async function getGroupTask(
     members: membersWithSpeakAt,
     deliverables: store.listDeliverables(id),
     transitions: store.listTaskTransitions(id),
+    integrityEvents: store.listIntegrityEvents(id),
     messages: task.groupId
       ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
@@ -734,6 +738,36 @@ export async function exportGroupTask(
     dailySummaries,
     exportedAt: new Date().toISOString(),
   };
+}
+
+/**
+ * P0-8: record a public integrity declaration (honest self-correction /
+ * truthful report) into the acceptance record. Anyone in the task group may
+ * record; dedupe is by message pin when provided.
+ */
+export async function recordGroupTaskIntegrityEvent(
+  taskId: number,
+  input: {
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    eventType?: 'correction' | 'honest_report';
+    detail?: string | null;
+  },
+): Promise<GroupTaskIntegrityEvent> {
+  const store = getGroupTaskStore();
+  requireTask(taskId);
+  const msgPinId = input.msgPinId?.trim() || null;
+  if (msgPinId && store.hasIntegrityEventWithMsgPin(taskId, msgPinId)) {
+    const existing = store.listIntegrityEvents(taskId).find((event) => event.msgPinId === msgPinId);
+    if (existing) return existing;
+  }
+  return store.addIntegrityEvent({
+    taskId,
+    msgPinId,
+    authorGlobalmetaid: input.authorGlobalmetaid?.trim() || null,
+    eventType: input.eventType === 'honest_report' ? 'honest_report' : 'correction',
+    detail: (input.detail ?? '').trim().slice(0, 500) || null,
+  });
 }
 
 /**

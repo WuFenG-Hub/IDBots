@@ -2310,3 +2310,27 @@ test('P0-4: missed delivery deadline posts ONE reminder; delivered members are s
     h.cleanup();
   }
 });
+
+test('P0-8: member correction message records an integrity event (deduped by pin)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-correction-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '更正：我此前的链接无效，正确预览如下',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const events = h.groupTaskStore.listIntegrityEvents(task.id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].eventType, 'correction');
+    assert.equal(events[0].msgPinId, 'pin-correction-1');
+
+    // same pin re-processed (retry) → no duplicate
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});

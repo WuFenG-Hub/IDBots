@@ -34,6 +34,7 @@ import {
   parseDeliverableLines,
   parseWorkingAck,
   hasStandbyMarker,
+  isIntegrityDeclaration,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 
@@ -1335,6 +1336,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch (error) {
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: deliverable verification failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    // P0-8: public integrity declarations (honest correction/report) are
+    // recorded into the acceptance record. Dedupe by message pin.
+    if (!message.senderSuspect && message.pinId && isIntegrityDeclaration(content)) {
+      try {
+        if (!store.hasIntegrityEventWithMsgPin(task.id, message.pinId)) {
+          const isCorrection = /更正|修正|纠正|以…?为准|以此为准|补正|勘误/.test(content);
+          store.addIntegrityEvent({
+            taskId: task.id,
+            msgPinId: message.pinId,
+            authorGlobalmetaid: message.senderGlobalMetaId,
+            eventType: isCorrection ? 'correction' : 'honest_report',
+            detail: content.slice(0, 500),
+          });
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${isCorrection ? 'correction' : 'report'} from ${message.senderName}`,
+          );
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: integrity event record failed: ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
       }

@@ -519,6 +519,29 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             )}
           </div>
 
+          <div className="px-4 py-3 border-t dark:border-claude-darkBorder/50 border-claude-border/50">
+            <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
+              Integrity events
+            </h3>
+            {(detail.integrityEvents ?? []).length === 0 ? (
+              <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                No integrity events yet
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {(detail.integrityEvents ?? []).map((event) => (
+                  <div key={event.id} className="text-[11px] leading-tight dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
+                    <span className={`font-medium ${event.eventType === 'correction' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                      {event.eventType === 'correction' ? 'correction' : 'honest report'}
+                    </span>
+                    <div className="text-[10px] opacity-80 line-clamp-2">{event.detail ?? ''}</div>
+                    <div className="text-[10px] opacity-70">{formatGroupTaskTime(event.createdAt)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           <div className="px-4 py-3">
             <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
               {i18nService.t('groupTasksDeliverables')}

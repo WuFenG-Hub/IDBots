@@ -821,6 +821,23 @@ export class SqliteStore {
     this.migrateGroupTaskMembersOpenTeamColumns();
     this.migrateGroupTaskMembersStatusColumns();
     this.migrateGroupTaskDeliverablesVerification();
+    // P0-8: public integrity declarations (honest corrections/reports).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_integrity_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        event_type TEXT NOT NULL DEFAULT 'correction'
+          CHECK(event_type IN ('correction','honest_report')),
+        detail TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_integrity_events_task
+        ON group_task_integrity_events(task_id, id);
+    `);
 
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`

@@ -142,6 +142,19 @@ export interface AddGroupTaskTransitionInput {
   actor?: string | null;
   reason?: string | null;
 }
+export type GroupTaskIntegrityEventType = 'correction' | 'honest_report';
+
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: GroupTaskIntegrityEventType;
+  /** Human-readable detail (the public declaration text, capped). */
+  detail: string | null;
+  createdAt: string | null;
+}
+
 
 
 interface GroupTaskRow {
@@ -200,6 +213,16 @@ interface GroupTaskTransitionRow {
   to_status: string;
   actor: string | null;
   reason: string | null;
+  created_at: string | null;
+}
+
+interface GroupTaskIntegrityEventRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  event_type: string;
+  detail: string | null;
   created_at: string | null;
 }
 
@@ -307,6 +330,19 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
       ? row.status
       : (row.role === 'chair' ? 'working' : 'assigned'),
     statusChangedAt: row.status_changed_at ?? null,
+  };
+}
+
+function rowToGroupTaskIntegrityEvent(row: GroupTaskIntegrityEventRow): GroupTaskIntegrityEvent {
+  const type = row.event_type === 'honest_report' ? 'honest_report' : 'correction';
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    eventType: type,
+    detail: row.detail ?? null,
+    createdAt: row.created_at ?? null,
   };
 }
 
@@ -830,6 +866,53 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskTransition);
+  }
+
+  /** P0-8: record a public integrity declaration (honest correction/report). */
+  addIntegrityEvent(input: {
+    taskId: number;
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    eventType: GroupTaskIntegrityEventType;
+    detail?: string | null;
+  }): GroupTaskIntegrityEvent {
+    this.db.run(
+      `INSERT INTO group_task_integrity_events (task_id, msg_pin_id, author_globalmetaid, event_type, detail)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.msgPinId ?? null,
+        input.authorGlobalmetaid ?? null,
+        input.eventType,
+        input.detail ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addIntegrityEvent failed: row ${id} not found after insert`);
+    return rowToGroupTaskIntegrityEvent(row);
+  }
+
+  /** P0-8: all integrity events for one task, oldest first. */
+  listIntegrityEvents(taskId: number): GroupTaskIntegrityEvent[] {
+    const rows = this.getAll<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskIntegrityEvent);
+  }
+
+  /** P0-8: dedupe check — an event already recorded for this message pin. */
+  hasIntegrityEventWithMsgPin(taskId: number, msgPinId: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      'SELECT 1 AS found FROM group_task_integrity_events WHERE task_id = ? AND msg_pin_id = ? LIMIT 1',
+      [taskId, msgPinId],
+    );
+    return Boolean(row);
   }
 
   // --- group_task_deliverables ---

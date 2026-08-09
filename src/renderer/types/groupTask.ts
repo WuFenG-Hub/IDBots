@@ -52,6 +52,16 @@ export interface GroupTaskMember {
 }
 
 
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: 'correction' | 'honest_report';
+  detail: string | null;
+  createdAt: string | null;
+}
+
 export interface GroupTaskTransition {
   id: number;
   taskId: number;
@@ -80,6 +90,8 @@ export interface GroupTaskDetail extends GroupTask {
   deliverables: GroupTaskDeliverable[];
   /** P0-5: state-transition audit log. */
   transitions?: GroupTaskTransition[];
+  /** P0-8: public integrity declarations (honest corrections/reports). */
+  integrityEvents?: GroupTaskIntegrityEvent[];
 }
 
 export interface GroupTaskSummary extends GroupTask {

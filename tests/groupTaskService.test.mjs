@@ -767,3 +767,31 @@ test('P0-7: exportGroupTask returns full message bodies + daily summaries', asyn
     h.cleanup();
   }
 });
+
+test('P0-8: recordGroupTaskIntegrityEvent persists + show returns integrityEvents', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-8 integrity', goal: 'record honesty', memberMetabotIds: [2], createdBy: 'user',
+    });
+    const event = await groupTaskService.recordGroupTaskIntegrityEvent(detail.id, {
+      msgPinId: 'pin-honest-1',
+      authorGlobalmetaid: 'gmid-coder',
+      eventType: 'correction',
+      detail: '更正：此前交付的 pinid 无效，正确如下',
+    });
+    assert.equal(event.eventType, 'correction');
+    // dedupe by pin
+    const dup = await groupTaskService.recordGroupTaskIntegrityEvent(detail.id, {
+      msgPinId: 'pin-honest-1',
+      authorGlobalmetaid: 'gmid-coder',
+      eventType: 'correction',
+      detail: 'duplicate',
+    });
+    assert.equal(dup.id, event.id);
+    const shown = await getGroupTask(detail.id, { view: 'summary' });
+    assert.equal(shown.integrityEvents.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});

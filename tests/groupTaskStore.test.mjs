@@ -501,3 +501,34 @@ test('P0-5: transition log table + updateTaskStatusWithLog records who/from/to/r
     store.close();
   }
 });
+
+test('P0-8: integrity events table + add/list/dedupe-by-pin', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(db, 'group_task_integrity_events').includes('event_type'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p08', title: 'P0-8', goal: 'integrity', chairMetabotId: 1, createdBy: 'user',
+    });
+    const event = groupTaskStore.addIntegrityEvent({
+      taskId: task.id,
+      msgPinId: 'pin-correction',
+      authorGlobalmetaid: 'gmid-w',
+      eventType: 'correction',
+      detail: 'corrected the link',
+    });
+    assert.equal(event.eventType, 'correction');
+    assert.equal(groupTaskStore.hasIntegrityEventWithMsgPin(task.id, 'pin-correction'), true);
+    assert.equal(groupTaskStore.listIntegrityEvents(task.id).length, 1);
+    groupTaskStore.addIntegrityEvent({
+      taskId: task.id,
+      msgPinId: 'pin-report',
+      authorGlobalmetaid: 'gmid-w',
+      eventType: 'honest_report',
+      detail: 'honest failure',
+    });
+    assert.equal(groupTaskStore.listIntegrityEvents(task.id).length, 2);
+  } finally {
+    store.close();
+  }
+});

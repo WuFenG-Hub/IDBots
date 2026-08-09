@@ -270,3 +270,13 @@ export function parseWorkingAck(content: string): ParsedWorkingAck | null {
 export function hasStandbyMarker(content: string): boolean {
   return /\[STANDBY\]/i.test(String(content ?? ''));
 }
+
+// ---------------------------------------------------------------------------
+// P0-8: integrity declarations (honest self-correction)
+// ---------------------------------------------------------------------------
+
+/** True when the message publicly declares a correction or honest report. */
+export function isIntegrityDeclaration(content: string): boolean {
+  const text = String(content ?? '');
+  return /更正|修正|诚实|如实|纠正|以…?为准|以此为准|补正|勘误/.test(text);
+}
