@@ -708,3 +708,37 @@ test('P0-5: reworkGroupTask moves review→executing with transition log; guards
     h.cleanup();
   }
 });
+
+test('P0-6: kickoff includes observer expectations when activeMemberNames is smaller than the roster', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-6 observers',
+      goal: 'observer role notes',
+      memberMetabotIds: [2, 3],
+      activeMemberNames: ['Coder Bot'],
+      observerRoles: { 'Designer Bot': '静默观察，待命接手' },
+      createdBy: 'user',
+    });
+    const kickoff = h.calls.send.find((call) => call.opts?.content?.includes('[GROUP TASK]'))?.opts?.content ?? '';
+    assert.match(kickoff, /未派活成员预期/);
+    assert.match(kickoff, /Designer Bot：静默观察，待命接手/);
+    assert.doesNotMatch(kickoff, /Coder Bot：静默观察/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-6: no observer fields → kickoff unchanged (no regression)', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-6 plain', goal: 'no observers', memberMetabotIds: [2, 3], createdBy: 'user',
+    });
+    const kickoff = h.calls.send.find((call) => call.opts?.content?.includes('[GROUP TASK]'))?.opts?.content ?? '';
+    assert.doesNotMatch(kickoff, /未派活成员预期/);
+    assert.match(kickoff, /Members: Coder Bot, Designer Bot/);
+  } finally {
+    h.cleanup();
+  }
+});

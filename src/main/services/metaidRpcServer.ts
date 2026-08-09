@@ -1166,6 +1166,8 @@ export function startMetaidRpcServer(
         member_metabot_ids?: unknown[];
         member_names?: unknown[];
         created_by?: string;
+        observer_roles?: Record<string, unknown>;
+        active_member_names?: unknown[];
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1211,6 +1213,17 @@ export function startMetaidRpcServer(
         // whole roster only when the caller did not name any member — silently
         // overriding a provided member list with the full roster was the bug.
         const autoSelectWorkers = memberMetabotIds.length === 0;
+        // P0-6: observer expectations for listed-but-unassigned members.
+        const observerRoles: Record<string, string> = {};
+        if (parsed.observer_roles && typeof parsed.observer_roles === 'object' && !Array.isArray(parsed.observer_roles)) {
+          for (const [name, value] of Object.entries(parsed.observer_roles)) {
+            const text = String(value ?? '').trim();
+            if (name.trim() && text) observerRoles[name.trim()] = text;
+          }
+        }
+        const activeMemberNames = Array.isArray(parsed.active_member_names)
+          ? parsed.active_member_names.map((raw) => String(raw ?? '').trim()).filter(Boolean)
+          : undefined;
         const task = await createGroupTask({
           title,
           goal,
@@ -1218,6 +1231,8 @@ export function startMetaidRpcServer(
           memberMetabotIds,
           autoSelectWorkers,
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
+          observerRoles: Object.keys(observerRoles).length > 0 ? observerRoles : undefined,
+          activeMemberNames,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));

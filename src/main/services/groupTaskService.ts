@@ -38,6 +38,19 @@ export interface CreateGroupTaskOptions {
   acceptanceCriteria?: string;
   /** Worker metabot ids; chair (the current twin) is added automatically. */
   memberMetabotIds?: number[];
+  /**
+   * P0-6: per-member observer expectation (name → e.g. "静默观察 / 待命接手 / 可退出").
+   * Injected into the kickoff message so listed-but-unassigned members know
+   * their expected role instead of "在列猜谜".
+   */
+  observerRoles?: Record<string, string>;
+  /**
+   * P0-6: names of members who already have assigned work at kickoff. When
+   * provided and smaller than the roster, the remaining members get an
+   * auto-generated observer note (default standby text).
+   */
+  activeMemberNames?: string[];
+
   /** When true, make the entire small local Worker roster available to the Twin chair;
    * the chair's LLM selects the specialist and only its assignment is mentioned. */
   autoSelectWorkers?: boolean;
@@ -248,6 +261,8 @@ function buildKickoffMessage(input: {
   acceptanceCriteria?: string;
   chairName: string;
   memberNames: string[];
+  observerRoles?: Record<string, string>;
+  activeMemberNames?: string[];
 }): string {
   const lines = [
     `[GROUP TASK] ${input.title}`,
@@ -258,8 +273,27 @@ function buildKickoffMessage(input: {
       ? `Members: ${input.memberNames.join(', ')}`
       : 'Members: (chair only)',
   ];
+  // P0-6: observer expectations for listed-but-unassigned members. Only active
+  // when the caller supplied assignment info (activeMemberNames) or explicit
+  // observerRoles — otherwise the kickoff stays unchanged (no regression).
+  const hasActiveList = Array.isArray(input.activeMemberNames) && input.activeMemberNames.length > 0;
+  const hasObserverRoles = Boolean(input.observerRoles && Object.keys(input.observerRoles).length > 0);
+  if (hasActiveList || hasObserverRoles) {
+    const assigned = new Set((input.activeMemberNames ?? []).map((name) => name.trim()).filter(Boolean));
+    const observerLines: string[] = [];
+    for (const name of input.memberNames) {
+      if (assigned.has(name)) continue;
+      if (!hasActiveList && !input.observerRoles?.[name]) continue;
+      const expectation = input.observerRoles?.[name]?.trim() || '静默观察 / 待命接手 / 可退出';
+      observerLines.push(`- ${name}：${expectation}`);
+    }
+    if (observerLines.length > 0) {
+      lines.push('', '未派活成员预期（observer/standby）：', ...observerLines);
+    }
+  }
   return lines.join('\n');
 }
+
 
 /**
  * Create a group task end to end: resolve twin (chair) -> create the on-chain
@@ -378,6 +412,8 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
         acceptanceCriteria: opts.acceptanceCriteria,
         chairName,
         memberNames,
+        observerRoles: opts.observerRoles,
+        activeMemberNames: opts.activeMemberNames,
       }),
       nickName: chairName,
     });
