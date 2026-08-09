@@ -5,6 +5,7 @@
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
@@ -42,7 +43,14 @@ export interface GroupTaskMember {
   /** Set when the member was kicked (M3); active members have null. */
   removedAt?: string | null;
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status?: GroupTaskMemberStatus;
+  /** P0-2: sqlite UTC timestamp of the last status change. */
+  statusChangedAt?: string | null;
+  /** P0-2: epoch seconds of the member's last chain speech (summary/detail). */
+  lastSpeakAt?: number | null;
 }
+
 
 export interface GroupTaskDeliverable {
   id: number;

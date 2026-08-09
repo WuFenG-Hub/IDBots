@@ -637,3 +637,37 @@ test('P0-1: postGroupTaskMessage returns field-level deliverable validation with
     h.cleanup();
   }
 });
+
+test('P0-2: setGroupTaskMemberStatus — self-set, chair-set, unauthorized rejected, invalid status rejected', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-2 status', goal: 'member state machine', memberMetabotIds: [2], createdBy: 'user',
+    });
+    const members = detail.members;
+    const worker = members.find((m) => m.metabotId === 2);
+    assert.equal(worker.status, 'assigned');
+
+    // self-set
+    const selfSet = await groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'working');
+    assert.equal(selfSet.status, 'working');
+
+    // chair-set (actor 1 = twin)
+    const chairSet = await groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'unreachable', { actorMetabotId: 1 });
+    assert.equal(chairSet.status, 'unreachable');
+
+    // unauthorized actor (worker 3 tries to set worker 2)
+    await assert.rejects(
+      groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'working', { actorMetabotId: 3 }),
+      /Only the member itself or the task chair/,
+    );
+
+    // invalid status
+    await assert.rejects(
+      groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'bogus'),
+      /must be one of/,
+    );
+  } finally {
+    h.cleanup();
+  }
+});

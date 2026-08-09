@@ -803,6 +803,7 @@ export class SqliteStore {
     `);
     // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
     this.migrateGroupTaskMembersOpenTeamColumns();
+    this.migrateGroupTaskMembersStatusColumns();
 
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
@@ -1925,6 +1926,34 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-2): member state-machine status columns. status defaults to
+   * 'assigned' at the SQL level; rowToGroupTaskMember upgrades chair rows to
+   * 'working' for legacy rows without a status. Idempotent PRAGMA-guarded.
+   */
+  private migrateGroupTaskMembersStatusColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_members)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('status')) {
+        this.db.run(
+          "ALTER TABLE group_task_members ADD COLUMN status TEXT NOT NULL DEFAULT 'assigned'",
+        );
+        changed = true;
+      }
+      if (!columns.includes('status_changed_at')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN status_changed_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskMembersStatusColumns:', error);
     }
   }
 

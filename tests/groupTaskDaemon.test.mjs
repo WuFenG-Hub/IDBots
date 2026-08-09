@@ -220,6 +220,9 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.disableChairPlanningTurn != null
       ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
       : {}),
+    ...(overrides.memberUnreachableAfterMinutes != null
+      ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
+      : {}),
   });
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
@@ -2049,6 +2052,45 @@ test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
     await h.loop.runTick();
     const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
     assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-2: silent assigned/working members are auto-marked unreachable after the threshold', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    // Anchor the daemon clock to wall time so sqlite created_at baselines
+    // (real datetime('now')) compare sensibly.
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Worker 2 spoke 1 minute ago (within threshold); worker 3 never spoke.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-old-1',
+      senderMetaId: 'metaid-2',
+      senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: 'hello',
+      chainTimestamp: Math.floor((startMs - 60_000) / 1000),
+    });
+
+    // Fresh task: no one is marked yet.
+    await h.loop.runTick();
+    let members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'assigned');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'assigned');
+
+    // Advance past the threshold: both become unreachable.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'unreachable');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'unreachable');
+
+    // Chair member is never auto-marked.
+    assert.equal(members.find((m) => m.metabotId === 1).status, 'working');
   } finally {
     h.cleanup();
   }

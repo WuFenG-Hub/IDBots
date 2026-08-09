@@ -12,6 +12,7 @@ import {
   GroupTaskStore,
   type GroupTask,
   type GroupTaskMember,
+  type GroupTaskMemberStatus,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
   type GroupChatTranscriptMessage,
@@ -438,7 +439,9 @@ export async function getGroupTask(
   // endpoint explicitly requests view='summary' by default.
   const view = opts?.view ?? 'full';
   const members = store.listMembers(id);
-  const speakMap = view === 'summary' && task.groupId
+  // P0-2: lastSpeakAt is computed for BOTH views — the detail/UI member list
+  // shows the member state badge plus when each member last spoke.
+  const speakMap = task.groupId
     ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
   const membersWithSpeakAt: GroupTaskMemberSummary[] = members.map((member) => {
@@ -561,6 +564,52 @@ export async function deleteGroupTaskDeliverable(taskId: number, deliverableId: 
     throw new Error(`Deliverable ${deliverableId} not found in group task ${taskId}`);
   }
   return store.deleteDeliverable(deliverableId);
+}
+
+export const GROUP_TASK_MEMBER_STATUSES: GroupTaskMemberStatus[] = [
+  'assigned',
+  'working',
+  'standby',
+  'done',
+  'unreachable',
+];
+
+/**
+ * P0-2: set a member's state-machine status. A member may set its own status
+ * (assigned/working/standby/done/unreachable); the chair may set any member's
+ * status. Throws for unknown members or unauthorized actors.
+ */
+export async function setGroupTaskMemberStatus(
+  taskId: number,
+  targetMetabotId: number | null,
+  status: GroupTaskMemberStatus,
+  opts?: { actorMetabotId?: number | null; targetGlobalMetaId?: string | null },
+): Promise<GroupTaskMember> {
+  const task = requireTask(taskId);
+  const store = getGroupTaskStore();
+  if (!GROUP_TASK_MEMBER_STATUSES.includes(status)) {
+    throw new Error(`member status must be one of: ${GROUP_TASK_MEMBER_STATUSES.join(', ')}`);
+  }
+  const members = store.listMembers(task.id);
+  const target = targetMetabotId != null
+    ? members.find((member) => member.metabotId === targetMetabotId)
+    : members.find((member) =>
+        (member.globalmetaid ?? '').trim().toLowerCase()
+        === (opts?.targetGlobalMetaId ?? '').trim().toLowerCase(),
+      );
+  if (!target) throw new Error(`Member not found in group task ${task.id}`);
+
+  const actorId = opts?.actorMetabotId ?? targetMetabotId;
+  const chair = members.find((member) => member.role === 'chair');
+  const isSelf = actorId != null && target.metabotId != null && actorId === target.metabotId;
+  const isChair = actorId != null && chair?.metabotId != null && actorId === chair.metabotId;
+  if (!isSelf && !isChair) {
+    throw new Error('Only the member itself or the task chair can set member status');
+  }
+
+  const updated = store.setMemberStatus(task.id, target.metabotId, status, target.globalmetaid);
+  if (!updated) throw new Error(`Member not found in group task ${task.id}`);
+  return updated;
 }
 
 /**

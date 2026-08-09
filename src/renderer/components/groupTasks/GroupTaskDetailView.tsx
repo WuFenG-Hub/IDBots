@@ -11,6 +11,8 @@ import GroupTaskRatingStars from './GroupTaskRatingStars';
 import {
   canAcceptGroupTask,
   formatGroupTaskTime,
+  groupTaskMemberStatusBadgeClass,
+  groupTaskMemberStatusLabel,
   groupTaskStatusBadgeClass,
   isActiveGroupTaskStatus,
   mergeTranscriptMessages,
@@ -422,6 +424,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             </h3>
             <div className="space-y-1.5">
               {detail.members.map((member) => (
+                <>
                 <div key={member.id} className="flex items-center gap-2">
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
                     {member.name ?? (member.metabotId != null
@@ -440,7 +443,23 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       {i18nService.t('groupTasksRemoteBadge')}
                     </span>
                   )}
+                  {member.status && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${groupTaskMemberStatusBadgeClass(member.status)}`}
+                      title={member.statusChangedAt
+                        ? `Status changed ${formatGroupTaskTime(member.statusChangedAt)}`
+                        : groupTaskMemberStatusLabel(member.status)}
+                    >
+                      {groupTaskMemberStatusLabel(member.status)}
+                    </span>
+                  )}
                 </div>
+                {member.lastSpeakAt != null && (
+                  <div className="text-[10px] leading-tight dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 pl-0.5">
+                    last spoke {formatGroupTaskTime(member.lastSpeakAt)}
+                  </div>
+                )}
+                </>
               ))}
             </div>
           </div>

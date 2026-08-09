@@ -85,6 +85,8 @@ const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
 const DEFAULT_REPLY_BUDGET = 40;
 const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
+/** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
+const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -418,6 +420,11 @@ export interface GroupTaskDaemonDeps {
    * kickoff; the daemon never runs the auto planning turn for new tasks.
    */
   disableChairPlanningTurn?: boolean;
+  /**
+   * P0-2: minutes of silence before an assigned/working member is auto-marked
+   * unreachable (default 30).
+   */
+  memberUnreachableAfterMinutes?: number;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -453,6 +460,17 @@ function mapMessageRows(result: ReturnType<Database['exec']>): GroupChatMessageR
   });
 }
 
+/** sqlite datetime('now') strings are UTC 'YYYY-MM-DD HH:MM:SS'. */
+function parseSqliteUtcMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    Number(match[4]), Number(match[5]), Number(match[6]),
+  );
+}
+
 function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
   return {
     id: row.id,
@@ -482,6 +500,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const chairTwinSuppressWindowMs = Math.max(
     0,
     Math.trunc(deps.chairTwinSuppressWindowMs ?? DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS),
+  );
+  const memberUnreachableAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberUnreachableAfterMinutes ?? DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -1675,6 +1697,47 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return { ...message, senderGlobalMetaId: globalMetaId || null, senderSuspect: suspect };
   };
 
+  /**
+   * P0-2: auto-mark silent assigned/working members as unreachable after
+   * memberUnreachableAfterMinutes without any chain speech. Baseline = last
+   * speak time (fallback: member join time); never marks chair members, done
+   * members, or members who already show a non-active status.
+   */
+  const monitorMemberUnreachable = (task: GroupTask, members: GroupTaskMember[]): void => {
+    const thresholdMs = memberUnreachableAfterMinutes * 60_000;
+    const store = deps.getGroupTaskStore();
+    const workers = members.filter(
+      (member) => member.role === 'worker'
+        && (member.status === 'assigned' || member.status === 'working'),
+    );
+    if (workers.length === 0 || !task.groupId) return;
+    const speakMap = store.getMembersLastSpeakAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
+    for (const member of workers) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
+      const lastMs = speakSec != null
+        ? speakSec * 1000
+        : parseSqliteUtcMs(member.createdAt);
+      if (lastMs == null) continue;
+      if (now() - lastMs <= thresholdMs) continue;
+      try {
+        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: member ${member.name ?? member.metabotId} marked ` +
+          `unreachable (no speech for ${memberUnreachableAfterMinutes}+ min) — chair should re-assign or check`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: failed to mark member ${member.metabotId} unreachable: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -1746,6 +1809,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `[GroupTaskDaemon] Task ${task.id}: lastDrivenAt heartbeat failed: ` +
         `${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+
+    // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
+    if (task.status === 'executing') {
+      monitorMemberUnreachable(task, members);
     }
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.

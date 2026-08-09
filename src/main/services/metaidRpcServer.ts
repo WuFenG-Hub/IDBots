@@ -36,10 +36,11 @@ import {
   joinGroupTaskMember,
   closeGroupTask,
   deleteGroupTaskDeliverable,
+  setGroupTaskMemberStatus,
 } from './groupTaskService';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
-import type { GroupTaskStatus } from '../groupTaskStore';
+import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from './feeRateStore';
 import { listenWithRetry } from './httpListenWithRetry';
@@ -85,6 +86,7 @@ const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
+const GROUP_TASK_SET_MEMBER_STATUS_PATH = '/api/idbots/group-task/set-member-status';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
@@ -1570,6 +1572,67 @@ export function startMetaidRpcServer(
         const deleted = await deleteGroupTaskDeliverable(taskId, deliverableId);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, deleted }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_SET_MEMBER_STATUS_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        task_id?: number;
+        metabot_id?: number;
+        globalmetaid?: string;
+        status?: string;
+        actor_metabot_id?: number;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      const status = String(parsed.status ?? '').trim();
+      if (!status) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'status is required' }));
+        return;
+      }
+      const targetMetabotId = Number(parsed.metabot_id);
+      const targetGlobalMetaId = typeof parsed.globalmetaid === 'string' && parsed.globalmetaid.trim()
+        ? parsed.globalmetaid.trim()
+        : undefined;
+      if ((!Number.isInteger(targetMetabotId) || targetMetabotId <= 0) && !targetGlobalMetaId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'metabot_id or globalmetaid is required' }));
+        return;
+      }
+      const actorMetabotIdRaw = Number(parsed.actor_metabot_id);
+      const actorMetabotId = Number.isInteger(actorMetabotIdRaw) && actorMetabotIdRaw > 0
+        ? actorMetabotIdRaw
+        : (Number.isInteger(targetMetabotId) && targetMetabotId > 0 ? targetMetabotId : null);
+      try {
+        const member = await setGroupTaskMemberStatus(
+          taskId,
+          Number.isInteger(targetMetabotId) && targetMetabotId > 0 ? targetMetabotId : null,
+          status as GroupTaskMemberStatus,
+          { actorMetabotId, targetGlobalMetaId },
+        );
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, member }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

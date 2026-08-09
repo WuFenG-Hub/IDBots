@@ -99,3 +99,12 @@ test('shouldStickToBottom: threshold semantics', () => {
   assert.equal(shouldStickToBottom(720, 200, 1000), true, 'within the 80px threshold');
   assert.equal(shouldStickToBottom(100, 200, 1000), false, 'scrolled up');
 });
+
+test('P0-2: member status badge class + label cover all states', async () => {
+  const { groupTaskMemberStatusBadgeClass, groupTaskMemberStatusLabel } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  for (const status of ['assigned', 'working', 'standby', 'done', 'unreachable']) {
+    assert.equal(typeof groupTaskMemberStatusBadgeClass(status), 'string');
+    assert.equal(groupTaskMemberStatusLabel(status), status);
+  }
+  assert.equal(typeof groupTaskMemberStatusBadgeClass('unknown'), 'string');
+});

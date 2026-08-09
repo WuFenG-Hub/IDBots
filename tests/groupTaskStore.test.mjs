@@ -398,3 +398,55 @@ test('buildMetabotDirectory: sanitized roster with profiles, disabled bots inclu
     store.close();
   }
 });
+
+test('P0-2: member state machine — default statuses, setMemberStatus, listMembersWithStatus', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p02', title: 'P0-2', goal: 'member states',
+      chairMetabotId: 1, createdBy: 'user',
+    });
+    const chair = groupTaskStore.addMember({ taskId: task.id, metabotId: 1, role: 'chair' });
+    const worker = groupTaskStore.addMember({ taskId: task.id, metabotId: 2, role: 'worker' });
+
+    // Default statuses: chair working, worker assigned.
+    assert.equal(chair.status, 'working');
+    assert.equal(worker.status, 'assigned');
+
+    // Member can set own status (worker -> working).
+    const updated = groupTaskStore.setMemberStatus(task.id, 2, 'working');
+    assert.equal(updated.status, 'working');
+    assert.ok(updated.statusChangedAt);
+
+    // listMembersWithStatus filters.
+    assert.deepEqual(
+      groupTaskStore.listMembersWithStatus(task.id, ['working']).map((m) => m.metabotId).sort(),
+      [1, 2],
+    );
+
+    // chair can mark unreachable.
+    const unreachable = groupTaskStore.setMemberStatus(task.id, 2, 'unreachable');
+    assert.equal(unreachable.status, 'unreachable');
+
+    // remote member by globalmetaid.
+    const remote = groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote', role: 'worker', displayName: 'Remote Bot' });
+    const remoteUpdated = groupTaskStore.setMemberStatus(task.id, null, 'standby', 'gmid-remote');
+    assert.equal(remoteUpdated.status, 'standby');
+    assert.equal(remote.id, remoteUpdated.id);
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-2: migration adds status columns on existing databases', async () => {
+  const tempDir = makeTempDir();
+  const { store, db } = await openStores(tempDir);
+  try {
+    const cols = getColumns(db, 'group_task_members');
+    assert.ok(cols.includes('status'), 'group_task_members.status should exist');
+    assert.ok(cols.includes('status_changed_at'), 'group_task_members.status_changed_at should exist');
+  } finally {
+    store.close();
+  }
+});

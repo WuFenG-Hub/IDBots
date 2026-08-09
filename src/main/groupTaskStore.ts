@@ -8,6 +8,7 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
@@ -57,6 +58,10 @@ export interface GroupTaskMember {
   removedAt: string | null;
   /** Joined from metabots for display / mention matching (falls back to displayName for remote members). */
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status: GroupTaskMemberStatus;
+  /** P0-2: epoch-seconds (sqlite datetime) of the last status change. */
+  statusChangedAt: string | null;
 }
 
 export interface GroupTaskDeliverable {
@@ -152,6 +157,8 @@ interface GroupTaskMemberRow {
   removed_at: string | null;
   metabot_name: string | null;
   metabot_globalmetaid: string | null;
+  status: string;
+  status_changed_at: string | null;
 }
 
 interface GroupTaskDeliverableRow {
@@ -215,6 +222,11 @@ const LEGAL_TRANSITIONS: Record<GroupTaskStatus, GroupTaskStatus[]> = {
   cancelled: [],
 };
 
+function isGroupTaskMemberStatus(value: string): value is GroupTaskMemberStatus {
+  return value === 'assigned' || value === 'working' || value === 'standby'
+    || value === 'done' || value === 'unreachable';
+}
+
 function isGroupTaskStatus(value: string): value is GroupTaskStatus {
   return value === 'planning' || value === 'executing' || value === 'review'
     || value === 'done' || value === 'cancelled';
@@ -258,6 +270,12 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
     // Local members get the metabots-table name; remote members fall back to
     // the display_name snapshot recorded at invite time.
     name: row.metabot_name ?? row.display_name ?? null,
+    // P0-2: default status — chair starts 'working', workers 'assigned'. Old
+    // rows without a status column default the same way.
+    status: isGroupTaskMemberStatus(row.status)
+      ? row.status
+      : (row.role === 'chair' ? 'working' : 'assigned'),
+    statusChangedAt: row.status_changed_at ?? null,
   };
 }
 
@@ -577,8 +595,8 @@ export class GroupTaskStore {
     if (existing) return rowToGroupTaskMember(existing);
 
     this.db.run(
-      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         input.taskId,
         input.metabotId,
@@ -586,6 +604,7 @@ export class GroupTaskStore {
         input.role,
         input.joinedPinId ?? null,
         input.displayName ?? null,
+        input.role === 'chair' ? 'working' : 'assigned',
       ],
     );
     this.saveDb();
@@ -669,6 +688,50 @@ export class GroupTaskStore {
       [joinedPinId, taskId, metabotId],
     );
     this.saveDb();
+  }
+
+  // --- P0-2: member state machine ---
+
+  /**
+   * Set a member's state-machine status with a change timestamp. Local members
+   * match by metabot_id; remote members (metabotId === null) by globalmetaid.
+   */
+  setMemberStatus(
+    taskId: number,
+    metabotId: number | null,
+    status: GroupTaskMemberStatus,
+    globalmetaid?: string | null,
+  ): GroupTaskMember | undefined {
+    if (metabotId == null) {
+      const gmid = (globalmetaid ?? '').trim();
+      if (!gmid) throw new Error(`setMemberStatus failed for task ${taskId}: remote member requires globalmetaid`);
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL`,
+        [status, taskId, gmid],
+      );
+    } else {
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id = ?`,
+        [status, taskId, metabotId],
+      );
+    }
+    this.saveDb();
+    const updated = this.listMembers(taskId).find((member) =>
+      metabotId == null
+        ? member.globalmetaid?.trim() === (globalmetaid ?? '').trim()
+        : member.metabotId === metabotId,
+    );
+    return updated;
+  }
+
+  /** P0-2: list members whose status is one of the given values. */
+  listMembersWithStatus(taskId: number, statuses: GroupTaskMemberStatus[]): GroupTaskMember[] {
+    const set = new Set(statuses);
+    return this.listMembers(taskId).filter((member) => set.has(member.status));
   }
 
   // --- group_task_deliverables ---
