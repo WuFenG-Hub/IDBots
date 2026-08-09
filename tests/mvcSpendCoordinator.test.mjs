@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const { MvcSpendCoordinator } = await import('../dist-electron/services/mvcSpendCoordinator.js');
+const { MvcSpendCoordinator } = await import('../dist-electron/main/services/mvcSpendCoordinator.js');
 
 test('serializes mvc spend jobs per metabot id', async () => {
   const coordinator = new MvcSpendCoordinator();

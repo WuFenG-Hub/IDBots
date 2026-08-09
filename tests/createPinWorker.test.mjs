@@ -11,7 +11,7 @@ const {
   isRetryableMvcBroadcastError,
   pickUtxo,
   resolveBroadcastTxResult,
-} = await import('../dist-electron/libs/createPinWorker.js');
+} = await import('../dist-electron/main/libs/createPinWorker.js');
 
 test('resolveBroadcastTxResult treats txn-already-known as success using the raw txid', () => {
   const rawTx = new mvc.Transaction().toString();

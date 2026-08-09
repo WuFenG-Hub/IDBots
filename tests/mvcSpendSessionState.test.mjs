@@ -7,7 +7,7 @@ const {
   recordMvcSpentOutpoints,
   replaceMvcPendingFundingUtxos,
   resetMvcSpendSessionStateForTests,
-} = await import('../dist-electron/services/mvcSpendSessionState.js');
+} = await import('../dist-electron/main/services/mvcSpendSessionState.js');
 
 test('mvc spend session tracks excluded outpoints and pending change per metabot', () => {
   resetMvcSpendSessionStateForTests();

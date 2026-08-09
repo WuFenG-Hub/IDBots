@@ -6,7 +6,7 @@ const require = createRequire(import.meta.url);
 
 let mvcSpend;
 try {
-  mvcSpend = require('../dist-electron/libs/mvcSpend.js');
+  mvcSpend = require('../dist-electron/main/libs/mvcSpend.js');
 } catch {
   mvcSpend = null;
 }
