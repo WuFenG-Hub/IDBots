@@ -57,6 +57,11 @@ test('groupTaskStatusBadgeClass: every known status has a class, unknown falls b
   assert.equal(groupTaskStatusBadgeClass('nope'), groupTaskStatusBadgeClass('cancelled'));
 });
 
+test('groupTaskStatusBadgeClass: executing uses the breathing blue badge, distinct from done', () => {
+  assert.equal(groupTaskStatusBadgeClass('executing'), 'group-task-badge-executing');
+  assert.notEqual(groupTaskStatusBadgeClass('executing'), groupTaskStatusBadgeClass('done'));
+});
+
 test('formatGroupTaskTime: sqlite UTC text, ms epoch, seconds epoch, null/garbage', () => {
   // sqlite datetime('now') text is UTC without a marker
   const fromText = formatGroupTaskTime('2026-08-04 10:00:00');

@@ -160,6 +160,37 @@ blockquote {
   color: rgb(var(--color-accent-text));
 }
 
+/* Group task "executing" badge: breathing blue gradient. The gradient
+   background animates between a lighter and a deeper blue so the
+   in-progress state reads as alive, distinct from the green "done" badge. */
+.group-task-badge-executing {
+  background: linear-gradient(135deg, #DBEAFE 0%, #93C5FD 55%, #3B82F6 100%);
+  color: #1E3A8A;
+  animation: group-task-badge-breathe 2.4s ease-in-out infinite;
+}
+
+.dark .group-task-badge-executing {
+  background: linear-gradient(135deg, #1E3A8A 0%, #1D4ED8 55%, #60A5FA 100%);
+  color: #DBEAFE;
+}
+
+@keyframes group-task-badge-breathe {
+  0%, 100% {
+    background-position: 0% 50%;
+    background-size: 100% 100%;
+  }
+  50% {
+    background-position: 100% 50%;
+    background-size: 100% 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .group-task-badge-executing {
+    animation: none;
+  }
+}
+
 body {
   margin: 0;
   min-width: 320px;
