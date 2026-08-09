@@ -56,6 +56,7 @@ import {
   buildCronPromptWithMarker,
   extractCronNonce,
   computeSdkCronFromSpec,
+  deriveScheduleSpecFromCron,
 } from './sdkCronBridge';
 import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
@@ -9383,10 +9384,23 @@ if (!gotTheLock) {
 
   ipcMain.handle('sdkCronMirror:list', async () => {
     try {
-      const mirrors = getSdkCronMirrorStore().listMirrors(false);
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirrors = mirrorStore.listMirrors(false);
       const coworkStoreInstance = getCoworkStore();
       const activeSessionIds = getCoworkRunner().getActiveSessionIds();
-      const enriched = mirrors.map((mirror) => {
+      // 回填：会话采集/迁移来源的镜像没有 scheduleSpec，导致开关/编辑失效。
+      // 从 5 字段 cron 表达式派生 spec 并持久化（幂等，已有 spec 的不动），让所有任务都可编辑/可重建。
+      const backfilled = mirrors.map((mirror) => {
+        if (!mirror.scheduleSpec && mirror.schedule) {
+          const derived = deriveScheduleSpecFromCron(mirror);
+          if (derived) {
+            mirrorStore.setScheduleSpec(mirror.id, derived);
+            return { ...mirror, scheduleSpec: derived };
+          }
+        }
+        return mirror;
+      });
+      const enriched = backfilled.map((mirror) => {
         const session = coworkStoreInstance.getSession(mirror.sessionId);
         return {
           ...mirror,

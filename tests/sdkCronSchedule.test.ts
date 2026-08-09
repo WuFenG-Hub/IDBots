@@ -5,6 +5,7 @@ import {
   formStateToSpec,
   mirrorToFormState,
   defaultSdkCronFormState,
+  formatSdkCronScheduleLabel,
 } from '../src/renderer/components/scheduledTasks/sdkCronSchedule';
 import type { SdkCronMirror, SdkCronScheduleSpec } from '../src/renderer/types/scheduledTask';
 
@@ -153,4 +154,46 @@ test('formStateToSpec round-trips name/prompt/metabotId', () => {
   assert.equal(spec.name, 'my task');
   assert.equal(spec.prompt, 'do thing');
   assert.equal(spec.metabotId, 42);
+});
+
+// ---- formatSdkCronScheduleLabel: regression for「每天 · 0*:7,22,37,52」乱码 ----
+
+test('label: complex minute-list cron shows Cron + raw expression (no garbage 每天)', () => {
+  // 7,22,37,52 * * * * — minute/hour 非单整数，不应套「每天」语义。
+  const mirror = makeMirror({ schedule: '7,22,37,52 * * * *', scheduleSpec: null, humanSchedule: null });
+  const label = formatSdkCronScheduleLabel(mirror);
+  assert.equal(label, 'Cron · 7,22,37,52 * * * *');
+  // 关键回归断言：绝不出现 padStart 产出的 '0*' 或假「每天」。
+  assert.ok(!label.includes('0*'));
+});
+
+test('label: */10 cron (no spec) renders as 每 10 分钟 interval', () => {
+  const mirror = makeMirror({ schedule: '*/10 * * * *', scheduleSpec: null, humanSchedule: null });
+  const label = formatSdkCronScheduleLabel(mirror);
+  assert.equal(label, '每 10 分钟');
+});
+
+test('label: daily cron 0 9 * * * (no spec) renders as 每天 · 09:00', () => {
+  const mirror = makeMirror({ schedule: '0 9 * * *', scheduleSpec: null, humanSchedule: null });
+  const label = formatSdkCronScheduleLabel(mirror);
+  assert.equal(label, '每天 · 09:00');
+});
+
+test('label: humanSchedule takes precedence over spec/raw', () => {
+  const mirror = makeMirror({
+    schedule: '0 9 * * *',
+    scheduleSpec: null,
+    humanSchedule: 'Runs every day at 9am',
+  });
+  assert.equal(formatSdkCronScheduleLabel(mirror), 'Runs every day at 9am');
+});
+
+test('label: spec-driven label for weekly mode', () => {
+  const spec: SdkCronScheduleSpec = {
+    mode: 'weekly', date: '', time: '18:00', weekday: 5, monthDay: 1,
+    intervalValue: 5, intervalUnit: 'minutes', cronExpression: '0 18 * * 5',
+    prompt: 'p', name: 'n', metabotId: null,
+  };
+  const mirror = makeMirror({ scheduleSpec: spec, humanSchedule: null });
+  assert.equal(formatSdkCronScheduleLabel(mirror), '每周 · 周五 18:00');
 });

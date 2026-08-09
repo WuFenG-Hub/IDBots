@@ -69,6 +69,85 @@ export function computeSdkCronFromSpec(spec: SdkCronScheduleSpec): { expression:
   }
 }
 
+const DEFAULT_DERIVED_SPEC = {
+  date: '',
+  time: '09:00',
+  weekday: 1,
+  monthDay: 1,
+  intervalValue: 5,
+  intervalUnit: 'minutes' as const,
+};
+
+function parseNonNegInt(v: string | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+function parsePosInt(v: string | undefined): number | null {
+  if (v == null) return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * 从镜像的 5 字段 cron 表达式「派生」一份可编辑的 schedule_spec（主进程版，与渲染层
+ * sdkCronSchedule.mirrorToFormState 的解析语义一致）。用于 list IPC 回填：会话采集/迁移
+ * 来源的镜像原本没有 spec，开关/编辑因此失效；派生后它们也具备可编辑/可重建的权威源。
+ *
+ * 解析规则（与 taskFormSchedule.parseScheduleToFormState 对齐）：
+ * - `*\/N * * * *`       → interval minutes=N
+ * - `0 *\/N * * *`       → interval hours=N
+ * - `M H * * *`          → daily time=HH:MM
+ * - `M H * * D`          → weekly weekday=D time=HH:MM
+ * - `M H DoM * *`        → monthly monthDay=DoM time=HH:MM
+ * - 其余（含 `7,22,37,52 * * * *` 这类多值/范围）→ cron + 原表达式（不造假语义）
+ *
+ * name/prompt/metabotId 取镜像现有字段；解析失败（非 5 段）返回 null（调用方保持无 spec）。
+ */
+export function deriveScheduleSpecFromCron(mirror: {
+  schedule: string;
+  name: string;
+  prompt: string;
+}): SdkCronScheduleSpec | null {
+  const expression = (mirror?.schedule ?? '').trim();
+  if (!expression) return null;
+  const parts = expression.split(/\s+/).filter(Boolean);
+  if (parts.length !== 5) return null;
+  const [minute, hour, dayOfMonth, , dayOfWeek] = parts;
+
+  // interval: 每分钟 / 每 N 分钟 / 每 N 小时。
+  if (hour === '*' && dayOfMonth === '*' && dayOfWeek === '*') {
+    const minStep = minute.match(/^\*\/(\d+)$/);
+    if (minStep) {
+      const value = parsePosInt(minStep[1]) ?? 1;
+      return { ...DEFAULT_DERIVED_SPEC, mode: 'interval', intervalUnit: 'minutes', intervalValue: value, cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+    }
+  }
+  if (minute === '0' && dayOfMonth === '*' && dayOfWeek === '*') {
+    const hourStep = hour.match(/^\*\/(\d+)$/);
+    if (hourStep) {
+      const value = parsePosInt(hourStep[1]) ?? 1;
+      return { ...DEFAULT_DERIVED_SPEC, mode: 'interval', intervalUnit: 'hours', intervalValue: value, cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+    }
+  }
+
+  const minuteValue = parseNonNegInt(minute);
+  const hourValue = parseNonNegInt(hour);
+  // minute/hour 不是单个整数（如 7,22,37,52 或 9-17）→ 无法还原成具体时刻，归为 cron 原样。
+  if (minuteValue == null || hourValue == null) {
+    return { ...DEFAULT_DERIVED_SPEC, mode: 'cron', cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+  }
+  const time = `${String(hourValue).padStart(2, '0')}:${String(minuteValue).padStart(2, '0')}`;
+
+  if (dayOfWeek !== '*' && dayOfMonth === '*') {
+    return { ...DEFAULT_DERIVED_SPEC, mode: 'weekly', time, weekday: parsePosInt(dayOfWeek) ?? 0, cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+  }
+  if (dayOfMonth !== '*' && dayOfWeek === '*') {
+    return { ...DEFAULT_DERIVED_SPEC, mode: 'monthly', time, monthDay: parsePosInt(dayOfMonth) ?? 1, cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+  }
+  return { ...DEFAULT_DERIVED_SPEC, mode: 'daily', time, cronExpression: expression, name: mirror.name, prompt: mirror.prompt, metabotId: null };
+}
+
 /**
  * 把标记 + prompt 组装成 SDK 侧存储的完整 prompt（标记前置，保证被截断时标记仍保留）。
  * 超过 SDK 上限（1000 字符）时按同规则截断尾部。
