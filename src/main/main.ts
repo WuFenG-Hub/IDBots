@@ -45,9 +45,18 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
-import { SdkCronMirrorStore, parseScheduledTasksFile } from './sdkCronMirrorStore';
+import { SdkCronMirrorStore, SdkCronScheduleSpec, parseScheduledTasksFile } from './sdkCronMirrorStore';
 import { planTaskMigration, extractMigrationTaskId } from './sdkCronMigration';
-import { buildCronDeleteInstruction, buildCronCreateInstruction } from './sdkCronBridge';
+import {
+  buildCronDeleteInstruction,
+  buildCronCreateInstruction,
+  buildCronCreateUiInstruction,
+  buildCronRunNowInstruction,
+  buildCronMarker,
+  buildCronPromptWithMarker,
+  extractCronNonce,
+  computeSdkCronFromSpec,
+} from './sdkCronBridge';
 import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
@@ -5431,6 +5440,78 @@ const reconcileMigrationResults = (): number => {
   return count;
 };
 
+/**
+ * UI 新建/重新启用对账（幂等）：镜像中带 [SDK_CRON:<nonce>] 标记的 cron → 回写完整 schedule_spec，
+ * 并把 nonce↔spec 映射从内存 pending 表取出。重复执行安全：已带 scheduleSpec 的跳过。
+ *
+ * nonce→spec 的映射仅在创建 IPC 调用进程内有效（pendingCronSpecByNonce），对账匹配后即清除，
+ * 避免内存泄漏；SDK 创建会话结束后若仍未匹配（极少见：CronCreate 失败或 Stop hook 未采集到），
+ * 该 nonce 自然过期，不影响后续。
+ */
+const pendingCronSpecByNonce = new Map<string, SdkCronScheduleSpec>();
+
+/**
+ * 启动一个一次性管理会话执行 CronCreate，由会话内 bot 创建 durable cron。
+ * 复用 migrateExecute 的会话拉起模式。对账通过 nonce 标记在 Stop hook / 文件扫描采集时回写 spec。
+ * @returns 创建会话的 sessionId（结果经后续对账写入镜像）。
+ */
+async function launchCronCreateSession(params: {
+  cronExpression: string;
+  prompt: string;
+  recurring: boolean;
+  nonce: string;
+  spec: SdkCronScheduleSpec;
+  title: string;
+}): Promise<string> {
+  const { cronExpression, prompt, recurring, nonce, spec, title } = params;
+  const marker = buildCronMarker(nonce);
+  const promptWithMarker = buildCronPromptWithMarker(marker, prompt);
+  pendingCronSpecByNonce.set(nonce, spec);
+
+  const coworkConfig = getCoworkStore().getConfig();
+  const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+  const instruction = buildCronCreateUiInstruction({ cronExpression, prompt: promptWithMarker, recurring });
+
+  const session = getCoworkStore().createSession(title, cwd, coworkConfig.systemPrompt, 'local', [], spec.metabotId ?? null);
+  const sessionId = session.id;
+  getCoworkStore().updateSession(sessionId, { status: 'running' });
+  getCoworkStore().addMessage(sessionId, { type: 'user', content: instruction });
+  try {
+    await getCoworkRunner().startSession(sessionId, instruction, {
+      skipInitialUserMessage: true,
+      disableMemoryUpdates: true,
+      confirmationMode: 'text',
+    });
+  } catch (error) {
+    console.warn('[SdkCronMirror] Create session failed (partial results still reconciled):', error);
+  }
+  // 创建会话结束后立即尝试对账（Stop hook 通常已采集到新 cron）。
+  reconcileCronCreateResults();
+  return sessionId;
+}
+
+/**
+ * 对账：把镜像中带 [SDK_CRON:<nonce>] 标记、且 pending 表里有对应 spec 的 cron 回写 schedule_spec。
+ * @returns 本次回写 spec 的条数。
+ */
+function reconcileCronCreateResults(): number {
+  if (pendingCronSpecByNonce.size === 0) return 0;
+  const mirrorStore = getSdkCronMirrorStore();
+  const mirrors = mirrorStore.listMirrors(false);
+  let count = 0;
+  for (const mirror of mirrors) {
+    if (mirror.scheduleSpec) continue;
+    const nonce = extractCronNonce(mirror.prompt);
+    if (!nonce) continue;
+    const spec = pendingCronSpecByNonce.get(nonce);
+    if (!spec) continue;
+    mirrorStore.setScheduleSpec(mirror.id, spec);
+    pendingCronSpecByNonce.delete(nonce);
+    count += 1;
+  }
+  return count;
+}
+
 let groupTaskStore: GroupTaskStore | null = null;
 const getGroupTaskStore = () => {
   if (!groupTaskStore) {
@@ -9360,6 +9441,173 @@ if (!gotTheLock) {
       return { success: true, status: 'deletion_requested', injected: false, hint };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to request cron delete' };
+    }
+  });
+
+  /**
+   * UI 新建/编辑：启动一次性管理会话执行 CronCreate(durable=true)，对账后镜像写入 schedule_spec。
+   * 与 migrateExecute 同构。编辑场景传入 replacesId：先经 requestDelete 删旧 cron，再创建新的。
+   */
+  ipcMain.handle('sdkCronMirror:create', async (_event, input: {
+    spec: SdkCronScheduleSpec;
+    /** 编辑时旧 cron id：先删除再创建（cron 变了 id 必然变）。 */
+    replacesId?: string | null;
+  }) => {
+    try {
+      const spec = input?.spec;
+      if (!spec || typeof spec !== 'object') {
+        return { success: false, error: 'spec is required' };
+      }
+      if (!spec.name?.trim() || !spec.prompt?.trim()) {
+        return { success: false, error: 'name and prompt are required' };
+      }
+
+      // 编辑：先删旧 cron（走 requestDelete 同流程：标记 deletion_requested + 注入 CronDelete）。
+      if (input.replacesId) {
+        const oldMirror = getSdkCronMirrorStore().getById(String(input.replacesId));
+        if (oldMirror && oldMirror.status !== 'deleted') {
+          getSdkCronMirrorStore().markDeletionRequested(String(input.replacesId));
+          const steer = getCoworkRunner().trySubmitSteer(
+            oldMirror.sessionId,
+            `host-edit-delete-${input.replacesId}`,
+            buildCronDeleteInstruction({ id: input.replacesId, name: oldMirror.name })
+          );
+          if (steer.accepted) void steer.delivered.catch(() => undefined);
+        }
+      }
+
+      // 用主进程镜像的同一份纯函数计算 cron 表达式（与渲染层 specToSdkCron 等价）。
+      const cron = computeSdkCronFromSpec(spec);
+      if (!cron.expression) {
+        return { success: false, error: '无法从计划生成有效的 cron 表达式，请检查表单输入' };
+      }
+
+      const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = await launchCronCreateSession({
+        cronExpression: cron.expression,
+        prompt: spec.prompt,
+        recurring: cron.recurring,
+        nonce,
+        spec,
+        title: `[定时任务] ${spec.name}`,
+      });
+      return { success: true, sessionId, nonce };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create sdk cron' };
+    }
+  });
+
+  /**
+   * 开关（删→重建）：enable=false 经 requestDelete 同流程删 SDK 侧 cron，镜像置 enabled=0 并保留 spec；
+   * enable=true 用存档 spec 经 CronCreate 重建（新 id），旧镜像标记 deleted。
+   */
+  ipcMain.handle('sdkCronMirror:toggle', async (_event, cronId: string, enabled: boolean) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) return { success: false, error: 'cronId is required' };
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirror = mirrorStore.getById(normalizedId);
+      if (!mirror) return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      if (mirror.status === 'deleted') return { success: true, status: 'deleted' };
+
+      if (!enabled) {
+        // 停用：删 SDK 侧 cron（复用 requestDelete 注入路径），镜像保留 spec + enabled=0。
+        mirrorStore.markDeletionRequested(normalizedId);
+        mirrorStore.setEnabled(normalizedId, false);
+        const steer = getCoworkRunner().trySubmitSteer(
+          mirror.sessionId,
+          `host-toggle-off-${normalizedId}`,
+          buildCronDeleteInstruction({ id: normalizedId, name: mirror.name })
+        );
+        if (steer.accepted) {
+          void steer.delivered.catch(() => undefined);
+          return { success: true, status: 'deletion_requested', injected: true };
+        }
+        const rejectReason = 'reason' in steer ? steer.reason : 'inactive';
+        const hint =
+          rejectReason === 'inactive'
+            ? `已停用（镜像保留），但所属会话已结束、未能自动删除 SDK 侧任务。请在原会话内让助手执行 CronDelete ${normalizedId}。`
+            : `已停用（镜像保留），所属会话当前不可注入（${rejectReason}），请稍后重试或到原会话执行 CronDelete。`;
+        return { success: true, status: 'deletion_requested', injected: false, hint };
+      }
+
+      // 启用：必须有存档 spec 才能重建。
+      if (!mirror.scheduleSpec) {
+        return {
+          success: false,
+          error: '该任务没有可用的调度快照（scheduleSpec 缺失），无法重建。仅支持删除后重新新建。',
+        };
+      }
+      const cron = computeSdkCronFromSpec(mirror.scheduleSpec);
+      if (!cron.expression) {
+        return { success: false, error: '存档的调度快照无法生成有效 cron 表达式' };
+      }
+      // 旧镜像标记 deleted（重建会得到新 id），新 nonce 建立映射。
+      mirrorStore.markDeleted(normalizedId);
+      const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = await launchCronCreateSession({
+        cronExpression: cron.expression,
+        prompt: mirror.scheduleSpec.prompt,
+        recurring: cron.recurring,
+        nonce,
+        spec: mirror.scheduleSpec,
+        title: `[定时任务] ${mirror.scheduleSpec.name || mirror.name}`,
+      });
+      return { success: true, sessionId, nonce, hint: '任务已重新启用，7 天过期计时已重置。' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to toggle sdk cron' };
+    }
+  });
+
+  /**
+   * 立即运行：SDK 无「立即触发 cron」工具 → 当场执行该 cron 的 prompt。
+   * 所属会话活跃且 local 开放 → trySubmitSteer 注入；否则启动一次性管理会话执行。
+   */
+  ipcMain.handle('sdkCronMirror:runNow', async (_event, cronId: string) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) return { success: false, error: 'cronId is required' };
+      const mirror = getSdkCronMirrorStore().getById(normalizedId);
+      if (!mirror) return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      if (mirror.status === 'deleted') return { success: false, error: '该任务已删除' };
+
+      const promptText = mirror.scheduleSpec?.prompt?.trim() || mirror.prompt;
+      const instruction = buildCronRunNowInstruction(promptText);
+
+      const steer = getCoworkRunner().trySubmitSteer(
+        mirror.sessionId,
+        `host-run-now-${normalizedId}`,
+        instruction
+      );
+      if (steer.accepted) {
+        void steer.delivered.catch(() => undefined);
+        return { success: true, injected: true, sessionId: mirror.sessionId };
+      }
+      // 会话不活跃：启动一次性管理会话执行 prompt（不创建 cron）。
+      const coworkConfig = getCoworkStore().getConfig();
+      const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+      const session = getCoworkStore().createSession(
+        `[立即运行] ${mirror.name}`,
+        cwd,
+        coworkConfig.systemPrompt,
+        'local',
+        [],
+        mirror.scheduleSpec?.metabotId ?? null
+      );
+      getCoworkStore().updateSession(session.id, { status: 'running' });
+      getCoworkStore().addMessage(session.id, { type: 'user', content: instruction });
+      try {
+        await getCoworkRunner().startSession(session.id, instruction, {
+          skipInitialUserMessage: true,
+          disableMemoryUpdates: true,
+          confirmationMode: 'text',
+        });
+      } catch (error) {
+        console.warn('[SdkCronMirror] Run-now session failed:', error);
+      }
+      return { success: true, injected: false, sessionId: session.id };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to run sdk cron now' };
     }
   });
 

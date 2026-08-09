@@ -1,4 +1,6 @@
 import type { MigratedCronSpec } from './sdkCronMigration';
+import { SDK_CRON_PROMPT_LIMIT } from './sdkCronMigration';
+import { truncateCronPrompt, type SdkCronScheduleSpec } from './sdkCronMirrorStore';
 
 /**
  * 方案 C 管理桥 / 迁移桥的「指令构建」纯函数（可单测）。
@@ -10,6 +12,71 @@ import type { MigratedCronSpec } from './sdkCronMigration';
  * - 指令必须显式要求 bot 完成后续动作并回报结果，宿主无法读工具返回（只能依赖 Stop hook 的
  *   session_crons 对账），因此指令里对「已不存在」的情况也给出明确行为，保证对账闭环。
  */
+
+/** 通用（非迁移）cron 创建的幂等标记：`[SDK_CRON:<nonce>]`（类比迁移的 [SDK_MIGRATE:<taskId>]）。 */
+export function buildCronMarker(nonce: string): string {
+  return `[SDK_CRON:${nonce}]`;
+}
+
+/** 从 cron prompt 提取通用创建标记；无标记返回 null。 */
+export function extractCronNonce(prompt: string): string | null {
+  const match = /\[SDK_CRON:([^\]]+)\]/.exec(prompt || '');
+  return match ? match[1] : null;
+}
+
+const INTERVAL_UNIT_TO_CRON: Record<SdkCronScheduleSpec['intervalUnit'], (value: number) => string> = {
+  minutes: (value) => `*/${value} * * * *`,
+  hours: (value) => `0 */${value} * * *`,
+  days: (value) => `0 0 */${value} * *`,
+};
+
+/**
+ * spec → 5 字段 cron 表达式 + recurring 标记（主进程镜像；与渲染层 sdkCronSchedule.specToSdkCron 等价）。
+ * @returns expression 为 null 时表示 spec 无法生成合法 cron（调用方应阻止提交）。
+ */
+export function computeSdkCronFromSpec(spec: SdkCronScheduleSpec): { expression: string | null; recurring: boolean } {
+  const [hourStr, minuteStr] = (spec.time || '09:00').split(':').map(Number);
+  const hour = Number.isFinite(hourStr) ? hourStr : 9;
+  const minute = Number.isFinite(minuteStr) ? minuteStr : 0;
+
+  switch (spec.mode) {
+    case 'once': {
+      const dt = new Date(`${spec.date}T${spec.time || '09:00'}`);
+      if (Number.isNaN(dt.getTime())) return { expression: null, recurring: false };
+      return {
+        expression: `${dt.getMinutes()} ${dt.getHours()} ${dt.getDate()} ${dt.getMonth() + 1} *`,
+        recurring: false,
+      };
+    }
+    case 'interval': {
+      const value = Math.max(1, Math.floor(spec.intervalValue || 1));
+      const builder = INTERVAL_UNIT_TO_CRON[spec.intervalUnit] ?? INTERVAL_UNIT_TO_CRON.minutes;
+      return { expression: builder(value), recurring: true };
+    }
+    case 'daily':
+      return { expression: `${minute} ${hour} * * *`, recurring: true };
+    case 'weekly':
+      return { expression: `${minute} ${hour} * * ${spec.weekday}`, recurring: true };
+    case 'monthly':
+      return { expression: `${minute} ${hour} ${spec.monthDay} * *`, recurring: true };
+    case 'cron': {
+      const expr = (spec.cronExpression || '').trim();
+      const parts = expr.split(/\s+/).filter(Boolean);
+      return { expression: parts.length === 5 ? expr : null, recurring: true };
+    }
+    default:
+      return { expression: null, recurring: true };
+  }
+}
+
+/**
+ * 把标记 + prompt 组装成 SDK 侧存储的完整 prompt（标记前置，保证被截断时标记仍保留）。
+ * 超过 SDK 上限（1000 字符）时按同规则截断尾部。
+ */
+export function buildCronPromptWithMarker(marker: string, prompt: string): string {
+  const base = prompt && prompt.trim() ? `${marker}\n${prompt}` : marker;
+  return base.length <= SDK_CRON_PROMPT_LIMIT ? base : truncateCronPrompt(base, SDK_CRON_PROMPT_LIMIT);
+}
 
 /** 管理桥：构建 CronDelete 指令（注入到镜像任务所属会话）。 */
 export function buildCronDeleteInstruction(mirror: { id: string; name: string }): string {
@@ -35,5 +102,42 @@ export function buildCronCreateInstruction(spec: MigratedCronSpec): string {
     '创建成功后回复一行：已创建 <CronCreate 返回的任务 id>',
     '若 CronCreate 报错，回复一行：创建失败 <错误信息>',
     '不要创建第二个任务，不要执行其它工具。',
+  ].join('\n');
+}
+
+/**
+ * 通用创建桥：构建 CronCreate 指令（用于「新建/编辑/重新启用」这类 UI 发起的创建）。
+ * 与迁移桥同结构，但话术为「宿主 UI 新建」、并明确要求 durable=true（跨重启保留）。
+ */
+export function buildCronCreateUiInstruction(params: {
+  cronExpression: string;
+  prompt: string;
+  recurring: boolean;
+}): string {
+  const quotedPrompt = JSON.stringify(params.prompt);
+  return [
+    '[宿主管理桥] 请在本次会话中执行一次 SDK 定时任务创建（这是宿主 UI「新建定时任务」发起的操作，不是普通对话）：',
+    '调用 CronCreate 工具，参数如下（保持原样，不要改写 prompt 与 cron）：',
+    `- cron: ${params.cronExpression}`,
+    `- prompt: ${quotedPrompt}`,
+    `- recurring: ${params.recurring ? 'true' : 'false'}`,
+    '- durable: true',
+    '创建成功后回复一行：已创建 <CronCreate 返回的任务 id>',
+    '若 CronCreate 报错，回复一行：创建失败 <错误信息>',
+    '不要创建第二个任务，不要执行其它工具。',
+  ].join('\n');
+}
+
+/**
+ * 立即运行桥：SDK 没有「立即触发 cron」工具，立即运行 = 让会话内 bot 当场执行该 cron 的 prompt。
+ * 指令把 prompt 原文交给 bot（不带 cron 参数，因为这不是创建/删除，是执行任务本身）。
+ */
+export function buildCronRunNowInstruction(prompt: string): string {
+  return [
+    '[宿主管理桥] 请立即执行以下定时任务内容（这是宿主 UI「立即运行」发起的操作）：',
+    '直接按下面的内容完成任务，不要调用 CronCreate/CronDelete/CronList 等定时任务工具：',
+    '---',
+    prompt,
+    '---',
   ].join('\n');
 }

@@ -237,6 +237,63 @@ class ScheduledTaskService {
     }
   }
 
+  /** 管理桥：UI 新建/编辑 SDK cron → 启动管理会话执行 CronCreate(durable=true)，对账回镜像。 */
+  async createSdkCron(
+    spec: import('../types/scheduledTask').SdkCronScheduleSpec,
+    replacesId?: string | null
+  ): Promise<{ sessionId?: string; nonce?: string } | null> {
+    const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
+    if (!mirrorApi?.create) return null;
+    try {
+      const result = await mirrorApi.create({ spec, replacesId: replacesId ?? null });
+      if (result.success) {
+        // 创建会话结束后对账已尝试一次；刷新让镜像立即可见（可能仍在采集）。
+        await this.loadSdkMirrors();
+        return { sessionId: result.sessionId, nonce: result.nonce };
+      }
+      throw new Error(result.error || 'Failed to create sdk cron');
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      throw err;
+    }
+  }
+
+  /** 管理桥：开关（删→重建）。enable=false 删 SDK 侧 cron + 镜像 enabled=0；enable=true 用 spec 重建。 */
+  async toggleSdkCron(
+    cronId: string,
+    enabled: boolean
+  ): Promise<{ status?: string; injected?: boolean; hint?: string } | null> {
+    const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
+    if (!mirrorApi?.toggle) return null;
+    try {
+      const result = await mirrorApi.toggle(cronId, enabled);
+      if (result.success) {
+        await this.loadSdkMirrors();
+        return { status: result.status, injected: result.injected, hint: result.hint };
+      }
+      throw new Error(result.error || 'Failed to toggle sdk cron');
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      throw err;
+    }
+  }
+
+  /** 管理桥：立即运行——当场执行该 cron 的 prompt（注入活跃会话或启动一次性会话）。 */
+  async runNowSdkCron(cronId: string): Promise<{ injected?: boolean; sessionId?: string } | null> {
+    const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
+    if (!mirrorApi?.runNow) return null;
+    try {
+      const result = await mirrorApi.runNow(cronId);
+      if (result.success) {
+        return { injected: result.injected, sessionId: result.sessionId };
+      }
+      throw new Error(result.error || 'Failed to run sdk cron now');
+    } catch (err: unknown) {
+      store.dispatch(setError(err instanceof Error ? err.message : String(err)));
+      throw err;
+    }
+  }
+
   /** R2：读取迁移计划（只读，展示用）。 */
   async loadMigrationPlan(): Promise<{ migratable: MigrationPlanItem[]; unsupported: MigrationPlanItem[]; sevenDayLimitedCount: number; truncatedCount: number } | null> {
     const api = window.electron?.scheduledTasks;

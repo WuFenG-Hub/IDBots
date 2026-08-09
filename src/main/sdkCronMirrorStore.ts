@@ -15,6 +15,29 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 export type SdkCronMirrorStatus = 'active' | 'deletion_requested' | 'deleted';
 export type SdkCronSource = 'stop_hook' | 'file_scan' | 'migration';
 
+/**
+ * 宿主侧保存的「完整调度快照」——用于停用后重建（开关 = 删→重建）。
+ * 由新建/编辑表单生成，镜像随对账写回。由会话采集/文件扫描补全的镜像此字段为 null
+ * （这类任务没有 UI 可编辑的 spec，开关只能删除不能重建——降级为只读）。
+ */
+export interface SdkCronScheduleSpec {
+  /** 表单调度态：once/interval/daily/weekly/monthly/cron（与旧版 TaskForm 对齐）。 */
+  mode: 'once' | 'interval' | 'daily' | 'weekly' | 'monthly' | 'cron';
+  date: string;
+  time: string;
+  weekday: number;
+  monthDay: number;
+  intervalValue: number;
+  intervalUnit: 'minutes' | 'hours' | 'days';
+  cronExpression: string;
+  /** 用户填写的 prompt（不含标记前缀，纯业务文本）。 */
+  prompt: string;
+  /** 展示名（标题）。 */
+  name: string;
+  /** 归属 MetaBot id（可空）。 */
+  metabotId: number | null;
+}
+
 export interface SdkCronMirror {
   id: string;
   sessionId: string;
@@ -35,6 +58,12 @@ export interface SdkCronMirror {
   lastSeenAt: string;
   createdAt: string;
   updatedAt: string;
+  /** 宿主侧开关状态（停用=镜像保留但 SDK 侧已删除，重建后恢复）。默认 true（既有任务视为启用）。 */
+  enabled: boolean;
+  /** 完整调度快照（有则可重建/可编辑；会话采集的只读镜像为 null）。 */
+  scheduleSpec: SdkCronScheduleSpec | null;
+  /** 停用时间（用于提示「重新启用会重置 7 天计时」）。 */
+  disabledAt: string | null;
 }
 
 export interface SessionCronLike {
@@ -70,6 +99,9 @@ interface MirrorRow {
   last_seen_at: string;
   created_at: string;
   updated_at: string;
+  enabled: number | null;
+  schedule_spec: string | null;
+  disabled_at: string | null;
 }
 
 export const SDK_CRON_MIRROR_TABLE_SQL = `
@@ -88,7 +120,10 @@ export const SDK_CRON_MIRROR_TABLE_SQL = `
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    schedule_spec TEXT,
+    disabled_at TEXT
   );
 `;
 
@@ -116,6 +151,43 @@ export function truncateCronPrompt(prompt: string, limit = 1000): string {
   if (source.length <= limit) return source;
   const clipped = source.slice(0, limit);
   return `${clipped}… [+${source.length - limit} chars]`;
+}
+
+const VALID_MODES = ['once', 'interval', 'daily', 'weekly', 'monthly', 'cron'] as const;
+const VALID_UNITS = ['minutes', 'hours', 'days'] as const;
+
+/**
+ * 解析存储的 schedule_spec JSON。非法/缺失返回 null（这类镜像只读，开关降级为删除）。
+ */
+export function parseScheduleSpec(raw: string | null | undefined): SdkCronScheduleSpec | null {
+  if (!raw || typeof raw !== 'string') return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const r = parsed as Record<string, unknown>;
+  const mode = typeof r.mode === 'string' && (VALID_MODES as readonly string[]).includes(r.mode)
+    ? (r.mode as SdkCronScheduleSpec['mode'])
+    : 'cron';
+  const intervalUnit = typeof r.intervalUnit === 'string' && (VALID_UNITS as readonly string[]).includes(r.intervalUnit)
+    ? (r.intervalUnit as SdkCronScheduleSpec['intervalUnit'])
+    : 'minutes';
+  return {
+    mode,
+    date: typeof r.date === 'string' ? r.date : '',
+    time: typeof r.time === 'string' ? r.time : '09:00',
+    weekday: Number.isInteger(r.weekday) ? (r.weekday as number) : 1,
+    monthDay: Number.isInteger(r.monthDay) ? (r.monthDay as number) : 1,
+    intervalValue: Number.isFinite(r.intervalValue as number) ? (r.intervalValue as number) : 5,
+    intervalUnit,
+    cronExpression: typeof r.cronExpression === 'string' ? r.cronExpression : '',
+    prompt: typeof r.prompt === 'string' ? r.prompt : '',
+    name: typeof r.name === 'string' ? r.name : '',
+    metabotId: typeof r.metabotId === 'number' ? r.metabotId : null,
+  };
 }
 
 export interface ParsedDurableCronTask {
@@ -184,9 +256,37 @@ export class SdkCronMirrorStore {
     try {
       this.db.run(SDK_CRON_MIRROR_TABLE_SQL);
       this.db.run(SDK_CRON_MIRROR_INDEX_SQL);
+      this.ensureToggleColumns();
       this.saveDb();
     } catch (error) {
       console.warn('Failed to ensure sdk_cron_mirror table:', error);
+    }
+  }
+
+  /**
+   * 老库升级：补 enabled / schedule_spec / disabled_at 三列（幂等，重复启动不报错）。
+   * 既有镜像行默认 enabled=1（视为启用），与开关语义上线前的状态一致。
+   */
+  private ensureToggleColumns(): void {
+    try {
+      const columnsResult = this.db.exec('PRAGMA table_info(sdk_cron_mirror);');
+      const columns = columnsResult[0]?.values.map((row) => String(row[1])) ?? [];
+      let shouldSave = false;
+      if (!columns.includes('enabled')) {
+        this.db.run('ALTER TABLE sdk_cron_mirror ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
+        shouldSave = true;
+      }
+      if (!columns.includes('schedule_spec')) {
+        this.db.run('ALTER TABLE sdk_cron_mirror ADD COLUMN schedule_spec TEXT');
+        shouldSave = true;
+      }
+      if (!columns.includes('disabled_at')) {
+        this.db.run('ALTER TABLE sdk_cron_mirror ADD COLUMN disabled_at TEXT');
+        shouldSave = true;
+      }
+      if (shouldSave) this.saveDb();
+    } catch (error) {
+      console.warn('Failed to ensure sdk_cron_mirror toggle columns:', error);
     }
   }
 
@@ -232,6 +332,10 @@ export class SdkCronMirrorStore {
       lastSeenAt: row.last_seen_at,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+      // 老库行经迁移补列后此列为 DEFAULT 1（启用）；显式 0 才视为停用。
+      enabled: row.enabled == null ? true : row.enabled === 1,
+      scheduleSpec: parseScheduleSpec(row.schedule_spec),
+      disabledAt: row.disabled_at ?? null,
     };
   }
 
@@ -392,6 +496,42 @@ export class SdkCronMirrorStore {
     );
     this.saveDb();
     return this.getById(id);
+  }
+
+  /**
+   * 开关：停用把 enabled 置 0 并记录 disabledAt（SDK 侧已删除，镜像保留待重建）；
+   * 启用置 1 并清空 disabledAt（重建后会得到新 id，此处先恢复宿主标记）。
+   */
+  setEnabled(id: string, enabled: boolean): SdkCronMirror | null {
+    const existing = this.getById(id);
+    if (!existing) return null;
+    const now = new Date().toISOString();
+    this.db.run(
+      `UPDATE sdk_cron_mirror SET enabled = ?, disabled_at = ?, updated_at = ? WHERE id = ?`,
+      [enabled ? 1 : 0, enabled ? null : now, now, id]
+    );
+    this.saveDb();
+    return this.getById(id);
+  }
+
+  /** 写入完整调度快照（新建/编辑对账后回写，使后续开关/编辑可重建）。 */
+  setScheduleSpec(id: string, spec: SdkCronScheduleSpec): SdkCronMirror | null {
+    const existing = this.getById(id);
+    if (!existing) return null;
+    this.db.run(
+      `UPDATE sdk_cron_mirror SET schedule_spec = ?, updated_at = ? WHERE id = ?`,
+      [JSON.stringify(spec), new Date().toISOString(), id]
+    );
+    this.saveDb();
+    return this.getById(id);
+  }
+
+  /** 列出已启用的镜像（开关为关的任务 SDK 侧不存在，触发桥与对账应跳过）。 */
+  listEnabled(): SdkCronMirror[] {
+    const rows = this.getAll<MirrorRow>(
+      `SELECT * FROM sdk_cron_mirror WHERE status != 'deleted' AND enabled = 1 ORDER BY last_seen_at DESC`
+    );
+    return rows.map((row) => this.rowToMirror(row));
   }
 
   /** R2：记录镜像 cron ↔ 原 scheduled_tasks.id 的迁移映射。 */
