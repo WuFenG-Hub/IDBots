@@ -3475,6 +3475,16 @@ const startSqliteDaemons = (): void => {
       };
     })(),
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
+    // OpenTeam M2: presence probe for remote-teammate unreachable detection
+    // (idchat online-status API, shared lazy singleton).
+    fetchRemotePresence: async (globalMetaIds) => {
+      const result = await getIdchatPresenceService().fetchOnlineStatus(globalMetaIds);
+      return result.list.map((entry) => ({
+        globalMetaId: entry.globalMetaId,
+        isOnline: entry.isOnline,
+        lastSeenAgoSeconds: entry.lastSeenAgoSeconds,
+      }));
+    },
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({
         metabotId,
