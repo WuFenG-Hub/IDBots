@@ -7,6 +7,7 @@ import type {
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
+import GroupTaskRatingStars from './GroupTaskRatingStars';
 import {
   canAcceptGroupTask,
   formatGroupTaskTime,
@@ -169,12 +170,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
-  const handleConfirmClose = async () => {
+  const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
     setClosing(true);
     setCloseError(null);
     try {
-      const updated = await groupTaskService.closeTask({ taskId, status: confirmAction });
+      const updated = await groupTaskService.closeTask({ taskId, status: confirmAction, rating, ratingComment });
       setDetail(updated);
       setConfirmAction(null);
     } catch (err) {
@@ -314,6 +315,26 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 {i18nService.t('groupTasksClosedState')}
                 {detail.closedAt ? ` · ${formatGroupTaskTime(detail.closedAt)}` : ''}
               </p>
+            )}
+            {detail.status === 'done' && detail.rating != null && (
+              <div className="mt-2 rounded-lg border dark:border-claude-darkBorder/60 border-claude-border/60 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('groupTasksYourRating')}
+                  </span>
+                  <GroupTaskRatingStars value={detail.rating} sizeClass="h-4 w-4" />
+                  {detail.ratedAt && (
+                    <span className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                      {formatGroupTaskTime(detail.ratedAt)}
+                    </span>
+                  )}
+                </div>
+                {detail.ratingComment && (
+                  <p className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary whitespace-pre-wrap">
+                    {detail.ratingComment}
+                  </p>
+                )}
+              </div>
             )}
           </div>
 
@@ -475,14 +496,14 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         </div>
       </div>
 
-      {/* Close confirmation */}
+      {/* Close confirmation (accept = rate + close, cancel = plain confirm) */}
       {confirmAction && (
         <GroupTaskCloseConfirmModal
           action={confirmAction}
           taskTitle={detail.title}
           closing={closing}
           error={closeError}
-          onConfirm={() => void handleConfirmClose()}
+          onConfirm={(rating, ratingComment) => void handleConfirmClose(rating, ratingComment)}
           onCancel={() => {
             setConfirmAction(null);
             setCloseError(null);
