@@ -787,6 +787,20 @@ export class GroupTaskStore {
     return result;
   }
 
+  /**
+   * OpenTeam M3: one sender's non-suspect message count in a group — feeds the
+   * participation stats of collaboration impressions.
+   */
+  countGroupChatMessagesBySender(groupId: string, senderGlobalMetaId: string): number {
+    const row = this.getOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM group_chat_messages
+       WHERE group_id = ? AND LOWER(sender_global_metaid) = LOWER(?)
+         AND (sender_suspect IS NULL OR sender_suspect = 0)`,
+      [groupId, senderGlobalMetaId.trim()],
+    );
+    return Number(row?.n ?? 0);
+  }
+
   /** Round-4: in-place update of a deliverable (correction-first aggregation). */
   updateDeliverableUri(id: number, uri: string | null, kind: string): void {
     this.db.run(

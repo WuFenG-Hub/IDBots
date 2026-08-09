@@ -10,6 +10,7 @@ import {
   type GroupTask,
   type GroupTaskDeliverable,
 } from '../groupTaskStore';
+import { recordDeliverableVerdictImpression } from './openTeamImpressionService';
 
 export interface GroupTaskOrchestrationBridgeDeps {
   groupTaskStore: GroupTaskStore;
@@ -334,6 +335,16 @@ export class GroupTaskOrchestrationBridge {
     for (const deliverable of this.deps.groupTaskStore.listDeliverables(groupTask.id)) {
       if (deliverable.status === 'pending') {
         this.deps.groupTaskStore.updateDeliverableStatus(deliverable.id, 'accepted');
+        // OpenTeam M3: the chair sediments a delivery impression for REMOTE
+        // authors (local authors are covered by the canonical attempt
+        // projection in recordDeliverable plus the dream pipeline).
+        // Best-effort, never throws.
+        recordDeliverableVerdictImpression(
+          groupTask.id,
+          deliverable.authorGlobalmetaid ?? '',
+          'accepted',
+          deliverable.uri,
+        );
       }
     }
     canonical = this.deps.orchestrationStore.getTask(canonical.id)!;

@@ -27,6 +27,10 @@ import {
 } from './groupChatTransport';
 import { getMetaIdDetail } from './metaIdSearchService';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
+import {
+  recordTaskCloseImpressions,
+  recordKickImpression,
+} from './openTeamImpressionService';
 
 export interface CreateGroupTaskOptions {
   title: string;
@@ -658,6 +662,11 @@ export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Prom
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
+
+  // OpenTeam M3: the chair sediments a collaboration impression about a kicked
+  // REMOTE member. Best-effort — the removal above already holds; the recorder
+  // no-ops for local members and never throws.
+  recordKickImpression(taskId, member.globalmetaid ?? '', reason);
   return removed;
 }
 
@@ -689,11 +698,18 @@ export async function closeGroupTask(
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
   }
+  let closed: GroupTask;
   if (orchestrationBridgeGetter) {
     const bridge = orchestrationBridgeGetter();
-    return opts.status === 'done'
+    closed = opts.status === 'done'
       ? bridge.acceptGroupTask(taskId).groupTask
       : bridge.cancelGroupTask(taskId).groupTask;
+  } else {
+    closed = getGroupTaskStore().updateTaskStatus(taskId, opts.status);
   }
-  return getGroupTaskStore().updateTaskStatus(taskId, opts.status);
+  // OpenTeam M3: the chair sediments one participation impression per REMOTE
+  // teammate (recorded for cancelled tasks too). Best-effort: the task is
+  // already closed; the recorder never throws into this flow.
+  recordTaskCloseImpressions(taskId, opts.status, opts.reason);
+  return closed;
 }

@@ -157,6 +157,7 @@ import {
   stopOpenTeamGuestDaemon,
 } from './services/openTeamGuestDaemon';
 import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
+import { setOpenTeamImpressionServiceDepsGetter } from './services/openTeamImpressionService';
 import {
   getRendererMetabotSetting,
   setRendererMetabotSetting,
@@ -3134,6 +3135,13 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
+  // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
+  setOpenTeamImpressionServiceDepsGetter(() => ({
+    groupTaskStore: getGroupTaskStore(),
+    experienceStore: getMetaIDExperienceStore(),
+    impressionStore: getMetaIDImpressionStore(),
+    getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+  }));
   setGroupChatBackfillActiveGroupIdsGetter(() => {
     // Union of group-task groups, active OpenTeam membership groups, and active
     // agent-game session groups so all receive history gap-fill from the same
