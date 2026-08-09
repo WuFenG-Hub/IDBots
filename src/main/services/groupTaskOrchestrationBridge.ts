@@ -9,6 +9,7 @@ import {
   GroupTaskStore,
   type GroupTask,
   type GroupTaskDeliverable,
+  type GroupTaskStatusEventActor,
 } from '../groupTaskStore';
 
 export interface GroupTaskOrchestrationBridgeDeps {
@@ -298,7 +299,47 @@ export class GroupTaskOrchestrationBridge {
     return ignored;
   }
 
-  acceptGroupTask(groupTaskId: number): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
+  /**
+   * P1-5: latest canonical attempt state for one worker of one group task —
+   * the "error/working" half of the member workStatus readout. 'running'
+   * attempt => working; 'failed' attempt (recent) => error. `atMs` is the
+   * attempt start (running) or finish (failed) timestamp.
+   */
+  getWorkerAttemptStatus(
+    groupTaskId: number,
+    workerMetabotId: number,
+  ): { status: 'running' | 'failed' | null; atMs: number | null } {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask?.orchestrationTaskId) return { status: null, atMs: null };
+    const steps = this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId)
+      .filter((step) => step.assigneeMetabotId === workerMetabotId);
+    let latest: { status: 'running' | 'failed'; atMs: number | null } | null = null;
+    let latestQueuedMs = 0;
+    for (const step of steps) {
+      for (const attempt of this.deps.orchestrationStore.listAttempts(step.id)) {
+        const queuedMs = Date.parse(attempt.queuedAt);
+        if (!Number.isFinite(queuedMs) || queuedMs < latestQueuedMs) continue;
+        latestQueuedMs = queuedMs;
+        const atMsOf = (value: string | null): number | null => {
+          const parsed = Date.parse(value ?? '');
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        if (attempt.status === 'running') {
+          latest = { status: 'running', atMs: atMsOf(attempt.startedAt) };
+        } else if (attempt.status === 'failed') {
+          latest = { status: 'failed', atMs: atMsOf(attempt.finishedAt) };
+        } else {
+          latest = null;
+        }
+      }
+    }
+    return latest ?? { status: null, atMs: null };
+  }
+
+  acceptGroupTask(
+    groupTaskId: number,
+    actor?: GroupTaskStatusEventActor,
+  ): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
     let canonical = this.ensureCanonicalTask(groupTask);
@@ -345,11 +386,14 @@ export class GroupTaskOrchestrationBridge {
     }
     const closed = groupTask.status === 'done'
       ? groupTask
-      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'done');
+      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'done', { actor: actor ?? { kind: 'system' } });
     return { groupTask: closed, canonicalTask: canonical };
   }
 
-  cancelGroupTask(groupTaskId: number): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
+  cancelGroupTask(
+    groupTaskId: number,
+    actor?: GroupTaskStatusEventActor,
+  ): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
     const canonical = this.ensureCanonicalTask(groupTask);
@@ -358,7 +402,7 @@ export class GroupTaskOrchestrationBridge {
       : this.deps.orchestrationStore.cancelTaskCascade(canonical.id);
     const cancelledGroup = groupTask.status === 'cancelled'
       ? groupTask
-      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'cancelled');
+      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'cancelled', { actor: actor ?? { kind: 'system' } });
     return { groupTask: cancelledGroup, canonicalTask: cancelledCanonical };
   }
 }

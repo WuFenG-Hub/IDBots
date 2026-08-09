@@ -7,6 +7,7 @@
  * MetabotStore / GroupTaskStore getters once during startup.
  */
 
+import type { CoworkStore } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import {
   GroupTaskStore,
@@ -14,6 +15,8 @@ import {
   type GroupTaskMember,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
+  type GroupTaskStatusEvent,
+  type GroupTaskStatusEventActor,
   type GroupChatTranscriptMessage,
 } from '../groupTaskStore';
 import {
@@ -25,6 +28,14 @@ import {
   waitForGroupIndexed,
 } from './groupChatTransport';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
+import {
+  ensureGroupTaskMemberReady,
+  GROUP_TASK_CONVERSATION_CHANNEL,
+} from './groupTaskSession';
+import {
+  GROUP_TASK_DRIVER_KV_PREFIX,
+  GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
+} from './groupTaskDaemon';
 
 export interface CreateGroupTaskOptions {
   title: string;
@@ -39,7 +50,7 @@ export interface CreateGroupTaskOptions {
 }
 
 export interface GroupTaskDetail extends GroupTask {
-  members: GroupTaskMember[];
+  members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
@@ -51,7 +62,25 @@ export interface GroupTaskDetail extends GroupTask {
   stall: boolean;
   /** Round-4: the stall threshold in minutes (30 by default). */
   stallAfterMinutes: number;
+  /** P1-5: status transition history (newest first). */
+  statusEvents: GroupTaskStatusEvent[];
+  /** P2-8: the daemon instance currently driving this task (kv heartbeat claim). */
+  driver: GroupTaskDriverInfo | null;
 }
+
+/** P2-8: who drives a task right now (multi-window/multi-session annotation). */
+export interface GroupTaskDriverInfo {
+  instanceId: string;
+  atMs: number;
+}
+
+/** P1-4: host-computed member work state (idle/working/error/unknown). */
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+
+/** Minutes a [WORKING] tag stays "working" after its last occurrence. */
+export const GROUP_TASK_WORKING_WINDOW_MINUTES = 20;
+/** Minutes a failed canonical attempt stays "error" after it finished. */
+export const GROUP_TASK_ERROR_WINDOW_MINUTES = 60;
 
 /** Round-4: minutes of host inactivity before a non-terminal task reads as stalled. */
 export const GROUP_TASK_STALL_AFTER_MINUTES = 30;
@@ -113,16 +142,31 @@ export function setGroupTaskServiceOrchestrationBridgeGetter(
   orchestrationBridgeGetter = getter;
 }
 
-/** Minimal kv surface used for the owner-join guard (satisfied by SqliteStore). */
+/** Minimal kv surface used by the owner-join guard and the reopen/ack guards
+ * (satisfied by SqliteStore). `delete` is needed to clear the owner-report
+ * guard on the review -> executing rework hatch. */
 export interface GroupTaskServiceKvStore {
   get<T = unknown>(key: string): T | undefined;
   set<T = unknown>(key: string, value: T): void;
+  delete(key: string): void;
 }
 
 let kvStoreGetter: (() => GroupTaskServiceKvStore) | null = null;
+let coworkStoreGetter: (() => CoworkStore) | null = null;
 
 export function setGroupTaskServiceKvStoreGetter(getter: () => GroupTaskServiceKvStore): void {
   kvStoreGetter = getter;
+}
+
+export function setGroupTaskServiceCoworkStoreGetter(getter: () => CoworkStore): void {
+  coworkStoreGetter = getter;
+}
+
+function getCoworkStore(): CoworkStore {
+  if (!coworkStoreGetter) {
+    throw new Error('groupTaskService not initialized: call setGroupTaskServiceCoworkStoreGetter first');
+  }
+  return coworkStoreGetter();
 }
 
 function getKvStore(): GroupTaskServiceKvStore {
@@ -349,6 +393,22 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    // P1-3: eager worker-session pre-creation with the group context injected
+    // (invite immediate wake-up) — best-effort, never fails the creation.
+    try {
+      ensureGroupTaskMemberReady({
+        coworkStore: getCoworkStore(),
+        groupTaskStore: store,
+        task: store.getTaskById(task.id)!,
+        botId: workerId,
+        botName: worker.name?.trim() || `bot-${workerId}`,
+      });
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Worker session pre-creation failed for member ${workerId} in task ${task.id}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   // The indexer diverts messages from non-members, so the human owner joins every
@@ -412,6 +472,57 @@ export async function listGroupTaskSummaries(
 export interface GroupTaskMemberSummary extends GroupTaskMember {
   /** Round-4 (show summary): epoch seconds of the member's last chain speech. */
   lastSpeakAt: number | null;
+  /** P1-4: epoch seconds of the member's last `[WORKING]` tag message. */
+  lastWorkingAt: number | null;
+  /** P1-4: host-computed work state — the chair can query instead of guessing. */
+  workStatus: GroupTaskMemberWorkStatus;
+}
+
+/**
+ * P1-4: pure workStatus derivation. Priority: a RUNNING canonical attempt, a
+ * fresh `[WORKING]` tag (working window), a recent FAILED attempt (error
+ * window), any speech (idle), otherwise unknown.
+ */
+export function computeGroupTaskMemberWorkStatus(input: {
+  metabotId: number | null;
+  lastSpeakAt: number | null;
+  lastWorkingAt: number | null;
+  attemptStatus: 'running' | 'failed' | null;
+  attemptAtMs: number | null;
+  nowMs?: number;
+}): GroupTaskMemberWorkStatus {
+  const nowMs = input.nowMs ?? Date.now();
+  if (input.attemptStatus === 'running') return 'working';
+  if (
+    input.lastWorkingAt != null
+    && Number.isFinite(input.lastWorkingAt)
+    && nowMs - input.lastWorkingAt <= GROUP_TASK_WORKING_WINDOW_MINUTES * 60_000
+  ) {
+    return 'working';
+  }
+  if (
+    input.attemptStatus === 'failed'
+    && input.attemptAtMs != null
+    && Number.isFinite(input.attemptAtMs)
+    && nowMs - input.attemptAtMs <= GROUP_TASK_ERROR_WINDOW_MINUTES * 60_000
+  ) {
+    return 'error';
+  }
+  if (input.lastSpeakAt != null) return 'idle';
+  return 'unknown';
+}
+
+/** P2-8: read the current driver claim for a task from kv (null when unclaimed). */
+export function readGroupTaskDriver(
+  kv: GroupTaskServiceKvStore,
+  taskId: number,
+): GroupTaskDriverInfo | null {
+  const raw = kv.get<string>(`${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`);
+  if (!raw) return null;
+  const [instanceId, atText] = raw.split('|');
+  const atMs = Number(atText);
+  if (!instanceId || !Number.isFinite(atMs)) return null;
+  return { instanceId, atMs };
 }
 
 export interface GetGroupTaskOptions {
@@ -437,19 +548,44 @@ export async function getGroupTask(
   const speakMap = view === 'summary' && task.groupId
     ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
-  const membersWithSpeakAt: GroupTaskMemberSummary[] = members.map((member) => {
+  const workingMap = view === 'summary' && task.groupId
+    ? store.getMembersWorkingAt(task.groupId!, members.map((m) => m.globalmetaid))
+    : new Map<string, number>();
+  const bridge = orchestrationBridgeGetter?.();
+  const membersWithStatus: GroupTaskMemberSummary[] = members.map((member) => {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
-    return { ...member, lastSpeakAt: gmid ? (speakMap.get(gmid) ?? null) : null };
+    const lastSpeakAt = gmid ? (speakMap.get(gmid) ?? null) : null;
+    const lastWorkingAt = gmid ? (workingMap.get(gmid) ?? null) : null;
+    const attempt: { status: 'running' | 'failed' | null; atMs: number | null } =
+      member.metabotId != null && bridge?.getWorkerAttemptStatus
+        ? bridge.getWorkerAttemptStatus(id, member.metabotId)
+        : { status: null, atMs: null };
+    return {
+      ...member,
+      lastSpeakAt,
+      lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
+      workStatus: computeGroupTaskMemberWorkStatus({
+        metabotId: member.metabotId,
+        lastSpeakAt,
+        lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
+        attemptStatus: attempt.status,
+        attemptAtMs: attempt.atMs,
+      }),
+    };
   });
   return {
     ...task,
-    members: membersWithSpeakAt,
+    members: membersWithStatus,
     deliverables: store.listDeliverables(id),
     messages: task.groupId
       ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
     stall: stall.stall,
     stallAfterMinutes: stall.stallAfterMinutes,
+    // P1-5: status transition history (who/when/from->to).
+    statusEvents: store.listStatusEvents(id),
+    // P2-8: current driving daemon instance (kv heartbeat claim).
+    driver: readGroupTaskDriver(getKvStore(), id),
   };
 }
 
@@ -520,13 +656,29 @@ export async function joinGroupTaskMember(
       ? getMetabotStore().getMetabotById(task.chairMetabotId)?.metaid ?? ''
       : '',
   });
-  return store.addMember({
+  const member = store.addMember({
     taskId,
     metabotId,
     globalmetaid: metabot.globalmetaid ?? null,
     role: 'worker',
     joinedPinId: pinId,
   });
+  // P1-3: eager worker-session pre-creation (invite immediate wake-up).
+  try {
+    ensureGroupTaskMemberReady({
+      coworkStore: getCoworkStore(),
+      groupTaskStore: store,
+      task,
+      botId: metabot.id,
+      botName: metabot.name?.trim() || `bot-${metabot.id}`,
+    });
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Worker session pre-creation failed for bot ${metabot.id} in task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return member;
 }
 
 /**
@@ -546,10 +698,11 @@ export async function deleteGroupTaskDeliverable(taskId: number, deliverableId: 
 /**
  * Close a task via the store state machine (sets closed_at for terminal states).
  * `reason` is accepted for API completeness but not persisted (no column in M1).
+ * `actor` is recorded on the status-transition event (P1-5).
  */
 export async function closeGroupTask(
   taskId: number,
-  opts: { status: 'done' | 'cancelled'; reason?: string },
+  opts: { status: 'done' | 'cancelled'; reason?: string; actor?: GroupTaskStatusEventActor },
 ): Promise<GroupTask> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
@@ -560,8 +713,104 @@ export async function closeGroupTask(
   if (orchestrationBridgeGetter) {
     const bridge = orchestrationBridgeGetter();
     return opts.status === 'done'
-      ? bridge.acceptGroupTask(taskId).groupTask
-      : bridge.cancelGroupTask(taskId).groupTask;
+      ? bridge.acceptGroupTask(taskId, opts.actor).groupTask
+      : bridge.cancelGroupTask(taskId, opts.actor).groupTask;
   }
-  return getGroupTaskStore().updateTaskStatus(taskId, opts.status);
+  return getGroupTaskStore().updateTaskStatus(taskId, opts.status, { actor: opts.actor });
+}
+
+/**
+ * P0-1: pull a REVIEW task back to EXECUTING so the owner/chair can assign
+ * supplementary subtasks (the "Back to work / 返回修改" action, mirroring the
+ * on-chain rework hatch `[STATUS:EXECUTING]`). Legal only from review (the
+ * store state machine enforces it). Also clears the owner-report kv guard so
+ * the NEXT review re-reports to the owner, and syncs the canonical task.
+ */
+export async function reopenGroupTask(
+  taskId: number,
+  opts?: { actor?: GroupTaskStatusEventActor; reason?: string },
+): Promise<GroupTaskDetail> {
+  const store = getGroupTaskStore();
+  const task = requireTask(taskId);
+  if (task.status !== 'review') {
+    throw new Error(
+      `Group task ${taskId} is ${task.status}; only review tasks can be reopened to executing`,
+    );
+  }
+  if (opts?.reason?.trim()) {
+    console.log(`[GroupTask] Reopening task ${taskId} to executing: ${opts.reason.trim()}`);
+  }
+  const updated = store.updateTaskStatus(taskId, 'executing', {
+    actor: opts?.actor ?? { kind: 'owner' },
+  });
+  try {
+    orchestrationBridgeGetter?.().syncStatus(taskId);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Canonical status projection failed after reopen of task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // Rework-hatch parity: the next review must report to the owner again.
+  try {
+    getKvStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${taskId}`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to clear owner-report guard after reopen of task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return getGroupTask(taskId);
+}
+
+/**
+ * P1-4: host-computed member work status (idle/working/error) for the chair —
+ * a dedicated lightweight query (RPC /group-task/member-status) so the chair
+ * checks instead of guessing. Remote members carry only transcript signals.
+ */
+export async function getGroupTaskMemberStatus(
+  taskId: number,
+): Promise<GroupTaskMemberSummary[]> {
+  const detail = await getGroupTask(taskId, { view: 'summary' });
+  return detail.members;
+}
+
+/**
+ * P1-3: join a local bot to the task AND eagerly create its worker session
+ * with the group context injected (invite immediate wake-up — the session
+ * exists within the join call instead of waiting for the first daemon reply).
+ */
+export type GroupTaskInviteSessionStatus = 'created' | 'ready' | 'failed';
+
+/**
+ * P1-3: join a local bot AND report the worker-session status. The eager
+ * session creation itself happens inside joinGroupTaskMember (shared path);
+ * here we diff the conversation mapping before/after the join so the response
+ * can truthfully say created (fresh session) / ready (already existed) /
+ * failed (no mapping after the join).
+ */
+export async function joinGroupTaskMemberWithSession(
+  taskId: number,
+  metabotId: number,
+): Promise<{ member: GroupTaskMember; sessionStatus: GroupTaskInviteSessionStatus }> {
+  const mappingExists = (): boolean => {
+    try {
+      return Boolean(
+        getCoworkStore().getConversationMapping(
+          GROUP_TASK_CONVERSATION_CHANNEL,
+          `group-task:${taskId}`,
+          metabotId,
+        ),
+      );
+    } catch {
+      return false;
+    }
+  };
+  const hadSession = mappingExists();
+  const member = await joinGroupTaskMember(taskId, metabotId);
+  const hasSession = mappingExists();
+  return {
+    member,
+    sessionStatus: hasSession ? (hadSession ? 'ready' : 'created') : 'failed',
+  };
 }

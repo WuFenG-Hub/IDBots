@@ -205,6 +205,13 @@ export interface InviteRemoteBotResult {
   /** The inviteId embedded in the envelope (random pinId-shaped; see header). */
   invitePinId: string;
   status: 'pending';
+  /**
+   * P1-3: worker-session creation status as seen from the INVITER host. Local
+   * invites report created/ready/failed; remote invites are always 'pending' —
+   * the guest's session is created on the INVITEE's host when its ACCEPT
+   * lands (host cooperation; unverifiable from the inviter side).
+   */
+  sessionStatus: 'pending';
 }
 
 /** Random pinId-shaped invite identifier (64 hex + literal 'i0'). */
@@ -316,7 +323,7 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   );
   // Both identity forms: the indexer member list may expose either.
   startInviteWatcher(inviteId, { identities: [invitee, detail.metaId] });
-  return { invitePinId: inviteId, status: 'pending' };
+  return { invitePinId: inviteId, status: 'pending', sessionStatus: 'pending' };
 }
 
 // ---------------------------------------------------------------------------

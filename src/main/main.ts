@@ -139,11 +139,13 @@ import {
   setGroupTaskServiceGroupTaskStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
+  setGroupTaskServiceCoworkStoreGetter,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
   getGroupTask,
   closeGroupTask,
+  reopenGroupTask,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
@@ -3129,6 +3131,7 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
+  setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
   setGroupChatBackfillActiveGroupIdsGetter(() => {
     // Union of group-task groups, active OpenTeam membership groups, and active
     // agent-game session groups so all receive history gap-fill from the same
@@ -3510,6 +3513,11 @@ const startSqliteDaemons = (): void => {
       createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
     }),
     emitLog: (msg) => console.log(msg),
+    // P1-3 (invitee-side immediate wake-up): eagerly create the invited bot's
+    // session with the group context injected as soon as the ACCEPT lands.
+    getCoworkStore,
+    listRecentGroupMessages: (groupId, limit) =>
+      getGroupTaskStore().listGroupChatMessages(groupId, { limit }),
   });
   startOpenTeamGuestDaemon({
     getStore,
@@ -3518,6 +3526,7 @@ const startSqliteDaemons = (): void => {
     performChat: performChatCompletionForOrchestrator,
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
     emitLog: (msg) => console.log(msg),
+    getCoworkStore,
   });
 
   // OpenTeam (M1): inviter-side wiring. The service searches on-chain online
@@ -8923,11 +8932,36 @@ if (!gotTheLock) {
         throw new Error("status must be 'done' or 'cancelled'");
       }
       const task = await withSqliteRecovery('groupTask:close', () =>
-        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+        closeGroupTask(taskId, {
+          status,
+          reason: typeof input?.reason === 'string' ? input.reason : undefined,
+          // The UI close action is the owner's — recorded on the status event.
+          actor: { kind: 'owner' },
+        }));
       broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
       return { success: true, task };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to close group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:reopen', async (_event, input: { taskId?: number; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      // P0-1: review -> executing 补充执行通道 (Back to work). Owner-only UI
+      // action; the chair reopens via the on-chain [STATUS:EXECUTING] tag.
+      const task = await withSqliteRecovery('groupTask:reopen', () =>
+        reopenGroupTask(taskId, {
+          reason: typeof input?.reason === 'string' ? input.reason : undefined,
+          actor: { kind: 'owner' },
+        }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to reopen group task' };
     }
   });
 

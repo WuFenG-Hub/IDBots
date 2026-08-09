@@ -50,9 +50,41 @@ export interface GroupTaskDeliverable {
   createdAt: string | null;
 }
 
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+
+export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Epoch seconds of the member's last chain speech (round-4). */
+  lastSpeakAt?: number | null;
+  /** Epoch ms of the member's last `[WORKING]` tag message (P1-4). */
+  lastWorkingAt?: number | null;
+  /** Host-computed work state (P1-4): idle/working/error/unknown. */
+  workStatus?: GroupTaskMemberWorkStatus;
+}
+
+export interface GroupTaskStatusEvent {
+  id: number;
+  taskId: number;
+  fromStatus: string;
+  toStatus: string;
+  actorKind: 'chair' | 'owner' | 'system';
+  actorGlobalMetaId: string | null;
+  actorName: string | null;
+  /** sqlite datetime('now') text, UTC. */
+  createdAt: string | null;
+}
+
+export interface GroupTaskDriverInfo {
+  instanceId: string;
+  atMs: number;
+}
+
 export interface GroupTaskDetail extends GroupTask {
-  members: GroupTaskMember[];
+  members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** P1-5: status transition history (newest first). */
+  statusEvents?: GroupTaskStatusEvent[];
+  /** P2-8: the daemon instance currently driving this task. */
+  driver?: GroupTaskDriverInfo | null;
 }
 
 export interface GroupTaskSummary extends GroupTask {
