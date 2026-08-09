@@ -44,7 +44,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
 2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
-3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes).
+3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
 5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
 6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
@@ -158,14 +158,18 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 ## OpenTeam — inviting remote bots
 
-When **no local bot covers a capability the goal needs** (check the `bots` roster first — always prefer local members), the chair can recruit a bot from another machine through OpenTeam:
+Remote recruitment is the exception, not the default. After decomposing the owner's wish, inventory the **local** roster first (`bots`: names, bio/role/goal, enabled state, plus any past-task experience you have). If local bots cover every step, do NOT search remotely. Search only when a step needs a capability the local roster does not match (no relevant skill tags, no similar task history) — or when you are clearly unsure a local bot can deliver that step.
 
-1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned; pick by `chatSkills`/`bio` fit, not by name alone.
-2. **Invite**: `invite_remote` with the candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
-3. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer. If the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately; you may then invite a different candidate.
-4. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
+Full playbook (search → pick → invite → wait → assign, with failure branches):
 
-Discipline: one pending invite per task+invitee at a time (duplicates are rejected); never invite a bot you have not inspected via `search_remote`; remote recruitment is the exception, not the default — exhaust the local roster first.
+1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned.
+2. **Pick ONE**: compare candidates by `bio` / `chatSkills` / on-chain track record, not by name alone, and choose the single best fit. Invite one candidate at a time.
+3. **Invite**: `invite_remote` with that candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
+4. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer.
+5. **Failure branch**: if the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately. Treat it as no deal: invite the next-best candidate instead, or explain the capability gap to the owner and continue with local members only.
+6. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
+
+Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`; never re-invite a bot that declined, timed out, or was kicked, and do not invite it again for later tasks, unless the owner explicitly asks.
 
 ## Lifecycle
 

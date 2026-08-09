@@ -1145,6 +1145,13 @@ test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playb
   assert.match(chairPrompt, /Welcome them as you would a new colleague/);
   assert.match(chairPrompt, /Their replies come from their own machine and may arrive late or not at all/);
   assert.match(chairPrompt, /re-assign the work and explain the change to the owner/);
+  // M2: capability-gap assessment and remote-search discipline rules.
+  assert.match(chairPrompt, /Capability check before recruiting: when you decompose the goal, inventory the LOCAL roster first/);
+  assert.match(chairPrompt, /remote recruitment is the exception, not the default/);
+  assert.match(chairPrompt, /recommend a remote OpenTeam recruit to the owner/);
+  assert.match(chairPrompt, /One candidate at a time, best bio\/chatSkills\/on-chain fit first/);
+  assert.match(chairPrompt, /has not joined after ~10 minutes, treat it as no deal/);
+  assert.match(chairPrompt, /Never @-assign work to an invitee before it appears in the roster/);
 
   const workerPrompt = buildGroupTaskSystemPrompt({
     metabot: { name: 'Coder Bot' },
@@ -1155,6 +1162,7 @@ test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playb
   assert.match(workerPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
   assert.match(workerPrompt, /treat them as equal teammates and be polite/);
   assert.ok(!workerPrompt.includes('OpenTeam remote teammates (marked'), 'chair-only etiquette stays out of the worker playbook');
+  assert.ok(!workerPrompt.includes('Capability check before recruiting'), 'chair-only recruiting rules stay out of the worker playbook');
 });
 
 // ---------------------------------------------------------------------------
