@@ -22,6 +22,13 @@ export interface CoworkModelLimits {
   modelId: string;
   contextWindow: number;
   maxOutputTokens: number;
+  /**
+   * Whether the model can consume image content blocks (vision). Unknown /
+   * unlisted models default to `true` so the guard never blocks image input
+   * for a model we simply have not catalogued; only models KNOWN to lack
+   * vision (e.g. the DeepSeek V4 family) are marked false.
+   */
+  supportsVision: boolean;
   source: CoworkModelLimitSource;
 }
 
@@ -29,6 +36,7 @@ type ModelLike = {
   id?: unknown;
   contextWindow?: unknown;
   maxOutputTokens?: unknown;
+  supportsVision?: unknown;
 };
 
 type ProviderLike = {
@@ -44,49 +52,54 @@ type AppConfigLike = {
   providers?: Record<string, ProviderLike> | null;
 };
 
-const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>>> = {
+const KNOWN_MODEL_LIMITS: Record<string, Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>> = {
+  // DeepSeek V4 family has NO vision capability (2026-08-09 diagnosis:
+  // deepseek-v4-pro session ballooned to 60% context from Read image base64
+  // the model could never interpret). Read/View image guards key off this.
   'deepseek-v4-pro': {
     contextWindow: DEEPSEEK_V4_PRO_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS,
+    supportsVision: false,
   },
   'deepseek-v4-flash': {
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
     maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
+    supportsVision: false,
   },
   // 与 src/renderer/config.ts 预设模型保持一致的大上下文模型（2026-07 向 LobsterAI 对齐）
-  'gpt-5.6-sol': { contextWindow: 1_050_000 },
-  'gpt-5.6-terra': { contextWindow: 1_050_000 },
-  'gpt-5.6-luna': { contextWindow: 1_050_000 },
+  'gpt-5.6-sol': { contextWindow: 1_050_000, supportsVision: true },
+  'gpt-5.6-terra': { contextWindow: 1_050_000, supportsVision: true },
+  'gpt-5.6-luna': { contextWindow: 1_050_000, supportsVision: true },
   // Older GPT-5.x presets still offered by the renderer; inherit the same family window.
-  'gpt-5.5': { contextWindow: 1_050_000 },
-  'gpt-5.4': { contextWindow: 1_050_000 },
-  'claude-opus-4-7': { contextWindow: 1_048_576 },
-  'claude-opus-4-6': { contextWindow: 1_048_576 },
-  'claude-sonnet-4-6': { contextWindow: 1_048_576 },
+  'gpt-5.5': { contextWindow: 1_050_000, supportsVision: true },
+  'gpt-5.4': { contextWindow: 1_050_000, supportsVision: true },
+  'claude-opus-4-7': { contextWindow: 1_048_576, supportsVision: true },
+  'claude-opus-4-6': { contextWindow: 1_048_576, supportsVision: true },
+  'claude-sonnet-4-6': { contextWindow: 1_048_576, supportsVision: true },
   // OpenRouter aliases route to the same upstream models.
-  'anthropic/claude-sonnet-4.6': { contextWindow: 1_048_576 },
-  'anthropic/claude-opus-4.7': { contextWindow: 1_048_576 },
-  'openai/gpt-5.5': { contextWindow: 1_050_000 },
-  'google/gemini-3.1-pro-preview': { contextWindow: 2_000_000 },
+  'anthropic/claude-sonnet-4.6': { contextWindow: 1_048_576, supportsVision: true },
+  'anthropic/claude-opus-4.7': { contextWindow: 1_048_576, supportsVision: true },
+  'openai/gpt-5.5': { contextWindow: 1_050_000, supportsVision: true },
+  'google/gemini-3.1-pro-preview': { contextWindow: 2_000_000, supportsVision: true },
   // Gemini 3.x family — 2M context per Google's Gemini 3 spec.
-  'gemini-3.1-pro-preview': { contextWindow: 2_000_000 },
-  'gemini-3-flash-preview': { contextWindow: 2_000_000 },
-  'gemini-3.1-flash-lite': { contextWindow: 2_000_000 },
-  'kimi-k2.6': { contextWindow: 262_144 },
-  'kimi-k2.5': { contextWindow: 262_144 },
-  'glm-5.1': { contextWindow: 202_800 },
-  'glm-5': { contextWindow: 202_800 },
-  'glm-4.7': { contextWindow: 204_800 },
-  'glm-4.7-flash': { contextWindow: 204_800 },
-  'MiniMax-M3': { contextWindow: 1_000_000 },
-  'MiniMax-M2.7': { contextWindow: 204_800 },
-  'MiniMax-M2.5': { contextWindow: 204_800 },
-  'qwen3.6-plus': { contextWindow: 1_000_000 },
-  'qwen3.5-plus': { contextWindow: 1_000_000 },
+  'gemini-3.1-pro-preview': { contextWindow: 2_000_000, supportsVision: true },
+  'gemini-3-flash-preview': { contextWindow: 2_000_000, supportsVision: true },
+  'gemini-3.1-flash-lite': { contextWindow: 2_000_000, supportsVision: true },
+  'kimi-k2.6': { contextWindow: 262_144, supportsVision: true },
+  'kimi-k2.5': { contextWindow: 262_144, supportsVision: true },
+  'glm-5.1': { contextWindow: 202_800, supportsVision: true },
+  'glm-5': { contextWindow: 202_800, supportsVision: true },
+  'glm-4.7': { contextWindow: 204_800, supportsVision: true },
+  'glm-4.7-flash': { contextWindow: 204_800, supportsVision: true },
+  'MiniMax-M3': { contextWindow: 1_000_000, supportsVision: true },
+  'MiniMax-M2.7': { contextWindow: 204_800, supportsVision: true },
+  'MiniMax-M2.5': { contextWindow: 204_800, supportsVision: true },
+  'qwen3.6-plus': { contextWindow: 1_000_000, supportsVision: true },
+  'qwen3.5-plus': { contextWindow: 1_000_000, supportsVision: true },
   // Qwen3 coder / ollama-local preset; Qwen3 family supports up to 1M.
-  'qwen3-coder-next': { contextWindow: 1_000_000 },
-  'mimo-v2.5-pro': { contextWindow: 1_000_000 },
-  'mimo-v2.5': { contextWindow: 1_000_000 },
+  'qwen3-coder-next': { contextWindow: 1_000_000, supportsVision: true },
+  'mimo-v2.5-pro': { contextWindow: 1_000_000, supportsVision: true },
+  'mimo-v2.5': { contextWindow: 1_000_000, supportsVision: true },
 };
 
 function normalizeModelId(value: unknown): string {
@@ -105,10 +118,11 @@ function isModelLike(value: unknown): value is ModelLike {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
-function getModelLimits(model: ModelLike): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>> {
+function getModelLimits(model: ModelLike): Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>> {
   return {
     contextWindow: toPositiveInteger(model.contextWindow),
     maxOutputTokens: toPositiveInteger(model.maxOutputTokens),
+    supportsVision: typeof model.supportsVision === 'boolean' ? model.supportsVision : undefined,
   };
 }
 
@@ -170,15 +184,32 @@ function resolveTargetModelId(appConfig: AppConfigLike, overrideModelId?: string
 function buildLimits(
   modelId: string,
   source: CoworkModelLimitSource,
-  explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>>,
+  explicit?: Partial<Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens' | 'supportsVision'>>,
 ): CoworkModelLimits {
   const known = KNOWN_MODEL_LIMITS[modelId];
   return {
     modelId,
     contextWindow: explicit?.contextWindow ?? known?.contextWindow ?? DEFAULT_COWORK_CONTEXT_WINDOW,
     maxOutputTokens: explicit?.maxOutputTokens ?? known?.maxOutputTokens ?? DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
+    // Safe default: unknown models are treated as vision-capable so the image
+    // guard never blocks a model we simply have not catalogued.
+    supportsVision: explicit?.supportsVision ?? known?.supportsVision ?? true,
     source,
   };
+}
+
+/**
+ * Query whether a model id can consume image content blocks, without needing
+ * a full app config. Mirrors buildLimits' safe default (unknown => true).
+ * Used by the OpenAI-compat proxy to degrade image blocks for non-vision
+ * models when replaying history.
+ */
+export function modelSupportsVision(modelId: string | null | undefined): boolean {
+  const normalized = normalizeModelId(modelId);
+  if (!normalized) {
+    return true;
+  }
+  return KNOWN_MODEL_LIMITS[normalized]?.supportsVision ?? true;
 }
 
 export function resolveCoworkModelLimits(
@@ -196,7 +227,7 @@ export function resolveCoworkModelLimits(
       continue;
     }
     const explicit = getModelLimits(model);
-    if (explicit.contextWindow || explicit.maxOutputTokens) {
+    if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
       return buildLimits(modelId, 'provider-model', explicit);
     }
   }
@@ -204,7 +235,7 @@ export function resolveCoworkModelLimits(
   const availableModel = findModelById(appConfig.model?.availableModels, modelId);
   if (availableModel) {
     const explicit = getModelLimits(availableModel);
-    if (explicit.contextWindow || explicit.maxOutputTokens) {
+    if (explicit.contextWindow || explicit.maxOutputTokens || explicit.supportsVision !== undefined) {
       return buildLimits(modelId, 'available-model', explicit);
     }
   }
