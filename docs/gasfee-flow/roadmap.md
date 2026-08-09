@@ -36,7 +36,9 @@ by `txSize`, recharge orders (mock payment), and usage-statistics APIs.
   estimated bytes; `commit` success deducts actual `txSize`; expiry/failure releases
 - `[ ]` M1.4 Recharge orders + mock payment confirm + pricing table API
 - `[ ]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
-- `[ ]` M1.6 Deployed to testnet/staging, verified end-to-end with IDBots
+- `[ ]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
+  account lookup, manual grants (backend-spec §10)
+- `[ ]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
 
 **Acceptance**: against `backend-spec.md` acceptance criteria; an IDBots client
 can bind, recharge (mock), spend traffic on real on-chain pins, and read usage.

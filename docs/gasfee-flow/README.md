@@ -82,6 +82,13 @@ top up when low. Just like a phone data plan.
    deliver a detailed spec + implementation plan (`backend-spec.md`); the backend
    team implements it. We only review/accept. All our code changes stay in IDBots.
 5. **Scope order**: single ISP (MVC) first; multi-ISP (Doge, etc.) recharge later.
+6. **Backend collaboration mode**: no spec-review cycle. We (requirement owner)
+   finalize the spec + implementation plan and hand it over; the backend team
+   implements; we perform final acceptance against the spec's acceptance
+   criteria. Both sides develop in parallel, then integrate.
+7. **Admin console**: a simple internal web console (pricing plans, fee-rate
+   config, usage dashboard, account management) lives **inside
+   assist-base-service** — all relevant data is there; keep it minimal.
 
 ## 5. Technical Foundation (what already exists)
 
@@ -113,3 +120,4 @@ top up when low. Just like a phone data plan.
 | Date | Event |
 |---|---|
 | 2026-08-09 | Project kickoff. Branch/worktree created. Both codebases explored. Decisions in §4 confirmed. Documentation set created. |
+| 2026-08-09 | Backend spec v1.1: added Admin Console (§10) and dynamic fee rate (§5); confirmed no-review handoff mode and parallel development. |

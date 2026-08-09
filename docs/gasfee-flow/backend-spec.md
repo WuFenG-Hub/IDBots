@@ -2,11 +2,13 @@
 
 > **Deliverable for the assist-base-service team.** IDBots team does not modify
 > that repository. This document is the contract: API surface, data model,
-> sponsor-flow integration, and a suggested implementation plan with acceptance
-> criteria. Target service: `assist-base-service` (Go 1.22 + Gin + GORM/MySQL),
-> deployed behind `https://www.metaso.network/assist-open-api`.
+> sponsor-flow integration, admin console, and a suggested implementation plan
+> with acceptance criteria. IDBots (the requirement owner) performs final
+> acceptance against §9; no spec-review cycle is required from the backend team —
+> build to this document. Target service: `assist-base-service` (Go 1.22 + Gin +
+> GORM/MySQL), deployed behind `https://www.metaso.network/assist-open-api`.
 
-- Version: v1.0 (2026-08-09), for review
+- Version: v1.1 (2026-08-09) — added Admin Console (§10), dynamic fee rate
 - Depends on: existing sponsor v2 protocol (`challenge → pre → commit`),
   `tb_assist_address` quota model, `tb_assist_gas_record.txSize`
 
@@ -24,6 +26,8 @@ are adding a **paid traffic model**:
 - When any bound address uses the sponsor flow, bytes (not the legacy sats
   quota) are reserved at `pre` and deducted at `commit` by actual `txSize`.
 - Users can query balance, ledger, and per-address daily usage.
+- Operators manage pricing, fee rate, and accounts through a simple **internal
+  admin console** (§10).
 
 Non-goals (this spec): real payment gateways (adapter interface only),
 procurement automation (Phase 5), multi-chain traffic (Phase 6).
@@ -73,7 +77,7 @@ Append-only. UNIQUE KEY `(account_id, source_type, source_id)` for idempotency.
 | `amount_bytes` | BIGINT UNSIGNED | signed meaning by direction |
 | `balance_after` | BIGINT UNSIGNED | post-entry balance |
 | `source_type` | VARCHAR(32) | `recharge_order` / `sponsor_order` / `admin_grant` / `promo` |
-| `source_id` | VARCHAR(64) | e.g. recharge order id or sponsor orderId |
+| `source_id` | VARCHAR(64) | e.g. recharge order id, sponsor orderId, or admin idempotency key |
 | `remark` | VARCHAR(255) | |
 
 ### 2.4 `tb_traffic_recharge_order`
@@ -105,6 +109,17 @@ Append-only. UNIQUE KEY `(account_id, source_type, source_id)` for idempotency.
 
 Plans are **records, not formulas**: admins create/archive plans to change
 pricing; client always renders the live table from the API.
+
+### 2.6 `tb_traffic_config`
+
+Tiny key-value table for operator-editable runtime config (fee rate etc.),
+managed via the admin console:
+
+| Column | Type | Notes |
+|---|---|---|
+| `config_key` | VARCHAR(64) UNIQUE | e.g. `mvc.fee_rate` |
+| `config_value` | VARCHAR(255) | |
+| `remark` | VARCHAR(255) | |
 
 ## 3. API Surface
 
@@ -224,9 +239,23 @@ quota fields so the client can pre-flight with one call.
 - All balance mutations follow the existing pattern: row lock (`FOR UPDATE`) in
   transaction, optimistic `version` check, ledger written in same transaction.
 - `max_fee_per_order` still applies in sats; the byte↔sat conversion uses the
-  order's `networkFeeRate` (currently 1).
+  order's `networkFeeRate`.
 
-## 5. Mock Payment Gateway
+## 5. Dynamic Fee Rate
+
+Today `sponsorDefaultFeeRate int64 = 1` (`sponsor_flow.go:36`) is a hardcoded
+constant used by pre-estimation, prepared-tx building, UTXO selection, and
+auto-topup. Make it **operator-configurable**:
+
+- Stored as `mvc.fee_rate` in `tb_traffic_config` (§2.6); seeded with `1`.
+- Read through a small cached config getter (e.g. 30s cache) everywhere the
+  constant is used today. The getter falls back to `1` when the row is missing.
+- Each sponsor order continues to record the rate it used in `networkFeeRate` —
+  historical orders are unaffected by later changes.
+- Editable from the admin console (§10). Validation: integer ≥ 1, sane ceiling
+  (e.g. ≤ 100) with an explicit confirm flag to override.
+
+## 6. Mock Payment Gateway
 
 Define a narrow interface now so Stripe/Alipay drop in later:
 
@@ -242,7 +271,7 @@ type PaymentGateway interface {
 - Webhook handler flow (all gateways): verify → find order by id → idempotent on
   `gateway_txn_id` → mark paid → credit (single transaction) → `200`.
 
-## 6. Config Additions (`conf/init_conf.go` keys)
+## 7. Config Additions (`conf/init_conf.go` keys)
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -251,15 +280,17 @@ type PaymentGateway interface {
 | `traffic.max_reserve_bytes_per_order` | `8388608` (8 MB) | ceiling per sponsor order |
 | `traffic.bind_rate_limit_per_day` | `50` | per account |
 | `traffic.legacy_quota_fallback` | `true` | allow quota path when traffic absent/insufficient (transition) |
+| `admin.enabled` | `false` | serve admin console (`/admin/*`) and admin APIs (`/v1/admin/*`) |
+| `admin.token` | _(empty)_ | bearer token for admin console; console disabled while empty |
 
-## 7. Implementation Plan (suggested)
+## 8. Implementation Plan (suggested)
 
 Ordered steps, each independently testable (service follows existing
 `service/gas_assist_service` layering: controller → service → models):
 
-1. **Migrations & models**: 5 new tables + DAO (`models/`), `pay_source` column
+1. **Migrations & models**: 6 new tables + DAO (`models/`), `pay_source` column
    on `tb_assist_gas_record`. Idempotent `sql/update.sql` additions.
-2. **Account & binding service + controller** (3.1), signature verification
+2. **Account & binding service + controller** (§3.1), signature verification
    reusing `VerifyTextSign`; unit tests for binding edge cases.
 3. **Ledger service**: `grantBytes / reserveBytes / spendBytes / releaseBytes`
    transactional primitives with idempotency keys; unit tests for concurrency
@@ -267,15 +298,19 @@ Ordered steps, each independently testable (service follows existing
 4. **Sponsor integration** (§4): `pre` traffic branch, `commit` deduction,
    compensation release, `address/info` additive field; integration tests
    covering reserve→spend, expire→release, fail→compensate.
-5. **Recharge & pricing** (3.2): plans CRUD (internal admin endpoints or seed
-   data), order create/status, `PaymentGateway` interface + mock.
-6. **Usage APIs** (3.3) with aggregation queries + pagination.
-7. **Ops**: extend `/v1/internal/gas/health` with traffic totals (accounts,
+5. **Recharge & pricing** (§3.2): plans storage, order create/status,
+   `PaymentGateway` interface + mock.
+6. **Usage APIs** (§3.3) with aggregation queries + pagination.
+7. **Dynamic fee rate** (§5): config table, cached getter, replace the
+   hardcoded constant at all use sites.
+8. **Admin console** (§10): admin APIs + embedded static UI.
+9. **Ops**: extend `/v1/internal/gas/health` with traffic totals (accounts,
    bytes sold 24h, bytes spent 24h); Swagger annotations; config wiring.
 
-## 8. Acceptance Criteria
+## 9. Acceptance Criteria
 
-End-to-end, on testnet, driven only through public APIs:
+End-to-end, on testnet, driven only through public APIs (+ admin console for
+setup):
 
 1. Create account → bind two bot addresses → both resolve to one account.
 2. `GET pricing` returns the seeded table (incl. a ¥10→100 MB plan).
@@ -291,14 +326,71 @@ End-to-end, on testnet, driven only through public APIs:
    untouched (existing v2 callers without `trafficAccount` behave exactly as
    before — regression suite passes).
 9. `traffic.enabled=false` → traffic APIs 404, sponsor flow fully legacy.
+10. Admin changes fee rate in console → subsequent sponsor orders use the new
+    rate (visible in `networkFeeRate`); old orders keep theirs.
+11. Plan created in console appears in public `GET /v1/traffic/pricing`;
+    archived plan disappears.
+12. Manual grant from console updates balance and writes an `admin_grant`
+    ledger entry with the given reason; reusing the same idempotency key does
+    not double-grant.
+13. Admin endpoints/UI reject missing or wrong token (401).
 
-## 9. Open Questions for Backend Team
+## 10. Admin Console (Internal Web UI)
+
+Goal: a simple internal web backend for operators — pricing plans, fee-rate
+config, overall usage, account lookup, manual grants. Deliberately minimal:
+internal users only, no polish requirements.
+
+### 10.1 Placement & serving
+
+- Lives **inside assist-base-service** (same process/binary): a hand-written
+  static SPA (vanilla HTML/JS + `fetch`, no framework, no build step) embedded
+  via `go:embed`, served at `GET /admin/*`. Keep it dependency-free so the
+  Docker build stays unchanged.
+- Auth: bearer token from `admin.token` config (reuse the
+  `InternalAuthMiddleware` pattern; IP allowlist optional). The login page just
+  stores the token in `localStorage` and sends `Authorization: Bearer` on every
+  API call. Missing/wrong token → 401.
+
+### 10.2 Admin APIs (`/v1/admin/*`, all behind admin auth)
+
+| Method & path | Purpose | Notes |
+|---|---|---|
+| `GET /v1/admin/traffic/overview` | Dashboard totals | accounts count, bytes granted/spent today/7d/30d, revenue by currency, distinct spending accounts 24h |
+| `GET /v1/admin/traffic/plans` | List pricing plans (incl. archived) | |
+| `POST /v1/admin/traffic/plans` | Create plan | validates unique `plan_id`, positive amounts |
+| `POST /v1/admin/traffic/plans/:planId/archive` | Archive plan | archived plans stop appearing in public pricing |
+| `GET /v1/admin/traffic/fee-rate` | Current fee rate(s) | `{ "mvc.fee_rate": 1 }` + source (db/default) |
+| `PUT /v1/admin/traffic/fee-rate` | Set fee rate | `{ "mvc.fee_rate": 2 }`; validation per §5 |
+| `GET /v1/admin/traffic/accounts?query=` | Search accounts by accountId / identity / bot address | paged |
+| `GET /v1/admin/traffic/accounts/:accountId` | Account detail | balance, totals, bound addresses, recent ledger |
+| `POST /v1/admin/traffic/accounts/:accountId/grants` | Manual grant/adjust | `{ amountBytes (signed), reason, idempotencyKey }` → `admin_grant` ledger entry |
+| `GET /v1/admin/traffic/recharge-orders?status&cursor` | Recharge order list + sums | |
+| `GET /v1/admin/gas/health` | Proxy of existing `/v1/internal/gas/health` | so the console needs no internal-network access |
+
+### 10.3 Pages (4, keep them plain)
+
+1. **Dashboard**: overview cards (bytes sold/spent, revenue, accounts) + gas
+   pool health summary.
+2. **Pricing & Fee Rate**: plans table with create/archive forms; fee-rate
+   editor with current value.
+3. **Accounts**: search → detail (balance, bindings, ledger) → manual grant
+   form.
+4. **Orders**: recharge order list with status filter and revenue sums.
+
+### 10.4 Notes
+
+- All admin mutations write through the same transactional ledger primitives as
+  user-facing flows (§8 step 3).
+- Admin actions are audited via ledger `remark` (`admin_grant` entries carry the
+  reason) — no separate audit table needed for v1.
+
+## 11. Open Questions
 
 1. `authSignature` canonical string format — align with existing v2 challenge
-   message conventions (propose one in review).
+   message conventions (propose one in implementation; document it in Swagger).
 2. Should `balance_bytes` live in Redis for read speed, or is MySQL row read at
    `pre` sufficient given current rate limits? (Recommend MySQL-only initially.)
-3. Admin tooling for plans/grants: reuse internal endpoints or a separate admin
-   console?
+3. ~~Admin tooling for plans/grants~~ — resolved: included as Admin Console, §10.
 4. Timezone convention for `usage/daily` bucketing (recommend UTC, client
    renders local).
