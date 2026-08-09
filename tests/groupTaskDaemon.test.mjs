@@ -695,7 +695,11 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn used');
-    assert.equal(h.chatCalls.length, 0, 'plain completion not called');
+    // P0-2 round-5: the host auto-ACK runs one fast chat call BEFORE the skill
+    // turn (the fake returns 'reply-for-llm-2' without [WORKING], so the
+    // template fallback is posted); the plain completion itself is not called.
+    assert.equal(h.chatCalls.length, 1, 'exactly one chat call (the worker ACK)');
+    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
     assert.deepEqual(h.routingCalls[0].allowChatSkills, ['web-search']);
     assert.equal(h.routingCalls[0].allowAllEnabled, false, 'human sender: no owner privilege');
 
@@ -707,8 +711,16 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     assert.match(h.skillTurnCalls[0].systemPrompt, /available_skills/);
     assert.match(h.skillTurnCalls[0].userMessage, />>> Designer Bot: @Coder Bot/);
 
-    // reply went on-chain; daemon did not double-append an assistant message
-    assert.deepEqual(h.sends.map((s) => [s.metabotId, s.content]), [[2, 'skill-turn-reply']]);
+    // P0-2: the [WORKING] ACK went on-chain FIRST, then the turn reply;
+    // the daemon did not double-append an assistant message for the ACK.
+    assert.equal(h.sends.length, 2, 'ACK + turn reply posted');
+    assert.match(h.sends[0].content, /^\[WORKING\]/, 'first send is the ACK status line');
+    assert.deepEqual(
+      [h.sends[0].metabotId, h.sends[1].metabotId],
+      [2, 2],
+      'both messages posted as the worker bot',
+    );
+    assert.equal(h.sends[1].content, 'skill-turn-reply');
     const messages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
     assert.deepEqual(messages.map((m) => m.type), ['user']);
   } finally {
@@ -921,8 +933,13 @@ test('[NO_REPLY] also applies on the skill-turn path', async () => {
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn ran');
-    assert.equal(h.chatCalls.length, 0, 'plain path untouched');
-    assert.equal(h.sends.length, 0, 'skill-turn [NO_REPLY] suppressed on-chain');
+    // P0-2 round-5: the host auto-ACK (one fast chat call) still posts the
+    // "[WORKING] 已接单" signal even when the turn itself opts out with
+    // [NO_REPLY] — the group must not see a silent worker.
+    assert.equal(h.chatCalls.length, 1, 'one chat call (the worker ACK)');
+    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
+    assert.equal(h.sends.length, 1, 'ACK posted; the [NO_REPLY] turn reply suppressed on-chain');
+    assert.match(h.sends[0].content, /^\[WORKING\]/, 'the only send is the ACK status line');
   } finally {
     h.cleanup();
   }

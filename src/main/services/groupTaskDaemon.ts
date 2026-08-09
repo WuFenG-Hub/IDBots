@@ -10,6 +10,7 @@
  * plain-LLM reply path only (no skill turns).
  */
 
+import { randomUUID } from 'node:crypto';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { CoworkStore, CoworkSession } from '../coworkStore';
@@ -20,10 +21,13 @@ import type {
   GroupTaskDeliverable,
 } from '../groupTaskStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
-import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
+import {
+  ensureGroupTaskSession,
+  GROUP_TASK_CONVERSATION_CHANNEL,
+} from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
 import {
@@ -35,11 +39,38 @@ import {
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 
-const CONVERSATION_CHANNEL = 'metaweb_group_task';
+/** Alias kept for readability; the canonical value lives in groupTaskSession. */
+const CONVERSATION_CHANNEL = GROUP_TASK_CONVERSATION_CHANNEL;
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
+/**
+ * P0-2: worker ACK/progress status tag, e.g.
+ * `[WORKING] 已接单，正在做X，预计N分钟` — the worker-to-group "I am alive and
+ * working" signal. The tag also feeds the member workStatus readout (P1-4).
+ */
+const WORKING_TAG = /\[WORKING\]/i;
+/** P0-2: kv guard so one dispatch produces at most ONE host ACK. */
+const ACK_KV_PREFIX = 'group_task_ack:';
+/**
+ * P2-6: dependency annotation on a dispatch message, e.g.
+ * `[DEPENDS_ON: <64hex pinid>]` — the host holds the worker dispatch until the
+ * referenced upstream deliverable lands (bounded wait, then proceeds).
+ */
+const DEPENDS_ON_TAG = /\[DEPENDS_ON:\s*([^\]]+)\]/i;
+const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
+/**
+ * P2-8: multi-driver mutex — kv heartbeat claim per task
+ * (`group_task_driver:<taskId>` = `<instanceId>|<epochMs>`). Only the most
+ * recently claiming daemon instance drives a task; others yield. Exported so
+ * the service can surface the current driver in the task detail.
+ */
+export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
+/** Default grace: a driver claim this old (or older) is stale — claimable. */
+const DEFAULT_DRIVER_GRACE_MS = 20_000;
+/** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
+const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
 
 /**
  * P1-4 / round-4: lines carrying the [DELIVERABLE] protocol tag — the ONLY
@@ -55,7 +86,12 @@ const CHAIR_PLANNED_KV_PREFIX = 'group_task_chair_planned:';
 const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
 
-const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+/**
+ * Owner-report guard: one private A2A report per task per review-entry. The
+ * rework hatch (review -> executing) clears it so the NEXT review re-reports.
+ * Exported so the reopen service path clears the same guard.
+ */
+export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
@@ -418,6 +454,23 @@ export interface GroupTaskDaemonDeps {
    * kickoff; the daemon never runs the auto planning turn for new tasks.
    */
   disableChairPlanningTurn?: boolean;
+  /**
+   * P0-2 (round 5): host auto-ACK for worker dispatches that will run a skill
+   * turn — posts `[WORKING] 已接单…` BEFORE the (potentially long) turn so the
+   * group never sees a silent worker (Eleven-style 11-min silence). Default ON.
+   */
+  autoAckWorkerDispatch?: boolean;
+  /**
+   * P2-6 (round 5): bounded wait for a `[DEPENDS_ON: <pinid>]` upstream
+   * deliverable before dispatching the worker (default 15 min).
+   */
+  dependencyWaitMaxMs?: number;
+  /**
+   * P2-8 (round 5): multi-driver mutex grace. A driver claim younger than this
+   * window belongs to another daemon instance; this instance yields. Default
+   * DEFAULT_DRIVER_GRACE_MS. 0 disables the mutex entirely.
+   */
+  driverGraceMs?: number;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -483,6 +536,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     0,
     Math.trunc(deps.chairTwinSuppressWindowMs ?? DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS),
   );
+  const autoAckWorkerDispatch = deps.autoAckWorkerDispatch !== false;
+  const dependencyWaitMaxMs = Math.max(
+    1_000,
+    Math.trunc(deps.dependencyWaitMaxMs ?? DEFAULT_DEPENDENCY_WAIT_MAX_MS),
+  );
+  const driverGraceMs = Math.max(0, Math.trunc(deps.driverGraceMs ?? DEFAULT_DRIVER_GRACE_MS));
+  const driverInstanceId = randomUUID();
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
 
@@ -536,6 +596,122 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     pins.push(pinId);
     if (pins.length > 8) pins.shift();
     daemonChairSentPins.set(taskId, pins);
+  };
+
+  /**
+   * P2-8: multi-driver mutex — kv heartbeat claim. Returns true when THIS
+   * daemon instance may drive the task this tick: no claim exists, the claim
+   * is stale (older than the grace window), or the claim is ours. Returns
+   * false when ANOTHER instance claimed within the grace window — the tick
+   * yields entirely (no heartbeat, no planning, no message processing), so
+   * two chair sessions never double-drive the same task.
+   */
+  const claimDriverOrYield = (taskId: number): boolean => {
+    if (driverGraceMs <= 0) return true;
+    const sqlite = deps.getStore();
+    const key = `${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`;
+    const raw = sqlite.get<string>(key);
+    if (!raw) {
+      sqlite.set(key, `${driverInstanceId}|${now()}`);
+      return true;
+    }
+    const [ownerId, atText] = raw.split('|');
+    const atMs = Number(atText) || 0;
+    if (ownerId === driverInstanceId) {
+      sqlite.set(key, `${driverInstanceId}|${now()}`); // refresh our own lease
+      return true;
+    }
+    if (now() - atMs < driverGraceMs) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: another chair session (${ownerId.slice(0, 8)}…) holds the ` +
+        `driver claim (${Math.round((now() - atMs) / 1000)}s old); this instance yields this tick`,
+      );
+      return false;
+    }
+    sqlite.set(key, `${driverInstanceId}|${now()}`); // stale claim -> take over
+    emitLog(
+      `[GroupTaskDaemon] Task ${taskId}: stale driver claim taken over by ${driverInstanceId.slice(0, 8)}…`,
+    );
+    return true;
+  };
+
+  /**
+   * P2-6: [DEPENDS_ON: <token>] gate. Pinid/txid-shaped tokens are enforced
+   * against the task's recorded deliverables (the worker dispatch is held
+   * until the upstream deliverable lands); free-text descriptions are
+   * advisory only — the prompt protocol carries the "wait for upstream
+   * [DELIVERABLE]" wording for those.
+   */
+  const dependencyStatus = (
+    task: GroupTask,
+    message: GroupTaskDaemonMessage,
+  ): { token: string | null; satisfied: boolean } => {
+    const match = DEPENDS_ON_TAG.exec(message.content ?? '');
+    if (!match) return { token: null, satisfied: true };
+    const token = match[1].trim();
+    const pinish = PINID_FORMAT.test(token) || TXID_FORMAT.test(token);
+    if (!pinish) return { token, satisfied: true };
+    const lower = token.toLowerCase();
+    const deliverables = deps.getGroupTaskStore().listDeliverables(task.id);
+    const satisfied = deliverables.some((deliverable) =>
+      (deliverable.msgPinId ?? '').toLowerCase() === lower
+      || (deliverable.uri ?? '').toLowerCase().includes(lower),
+    );
+    return { token, satisfied };
+  };
+
+  /**
+   * P0-2: host auto-ACK — post a `[WORKING] 已接单…` status line BEFORE a
+   * worker's long (skill-turn) dispatch reply, so the group sees the worker
+   * accepted the job instead of a silent gap (the Eleven-style 11-minute
+   * silence case). The ACK text is produced by a fast LLM call; on any
+   * failure a template line is posted instead. kv-guarded per
+   * (task, bot, message) so deferred retries never double-ACK.
+   */
+  const maybeSendWorkerAck = async (
+    task: GroupTask,
+    bot: GroupTaskDaemonBotFull,
+    message: GroupTaskDaemonMessage,
+    baseSystemPrompt: string,
+    llmId: string | undefined,
+    fallbackLlmId: string | null,
+  ): Promise<void> => {
+    if (!autoAckWorkerDispatch) return;
+    const sqlite = deps.getStore();
+    const ackKey = `${ACK_KV_PREFIX}${task.id}:${bot.id}:${message.id}`;
+    if (sqlite.get<string>(ackKey) === '1') return;
+    const objective = (message.content ?? '').trim().slice(0, 120) || 'assigned work';
+    const directive = [
+      '[SYSTEM ACK directive — generated by the host, not a group participant]',
+      'You were just assigned work in the group task. Reply with EXACTLY ONE line that starts with `[WORKING]`, says you have accepted the job, briefly what you are doing and your estimated time, e.g. `[WORKING] 已接单，正在做X，预计N分钟` (reply in the language of the assignment). No other text.',
+      '',
+      `The assignment: ${objective}`,
+    ].join('\n');
+    let ackText = '';
+    try {
+      ackText = (await deps.performChat(baseSystemPrompt, directive, llmId, {
+        fallbackLlmId,
+        thinking: 'disabled',
+      })).trim();
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: worker ACK chat failed for bot ${bot.id}; using template: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!ackText || NO_REPLY_PATTERN.test(ackText) || !WORKING_TAG.test(ackText)) {
+      ackText = `[WORKING] 已接单，正在处理「${objective}」，预计需要一些时间。`;
+    }
+    try {
+      const sent = await deps.postGroupTaskMessage(task.id, bot.id, ackText);
+      sqlite.set(ackKey, '1');
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} ACK posted (pin ${sent.pinId})`);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: worker ACK send failed for bot ${bot.id} (retried on next turn): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   };
 
   /**
@@ -737,44 +913,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     ].join('\n');
   };
 
+  /**
+   * Per-turn session lookup, delegated to the shared helper (groupTaskSession)
+   * so the eager pre-creation path (invite/join) and the daemon always agree
+   * on the SAME mapping (P1-3: one session-creation code path).
+   */
   const ensureTaskSession = (
     coworkStore: CoworkStore,
     task: GroupTask,
     botId: number,
     botName: string,
-  ): CoworkSession => {
-    const externalConversationId = `group-task:${task.id}`;
-    const existing = coworkStore.getConversationMapping(CONVERSATION_CHANNEL, externalConversationId, botId);
-    if (existing) {
-      const session = coworkStore.getSession(existing.coworkSessionId);
-      if (session) return session;
-    }
-    const config = coworkStore.getConfig();
-    const workspaceRoot = resolveSessionWorkingDirectory(
-      (config.workingDirectory ?? '').trim() || process.cwd(),
-      botId,
-    );
-    const session = coworkStore.createSession(
-      `Group Task #${task.id} (${botName})`,
-      workspaceRoot,
-      '',
-      config.executionMode || 'local',
-      [],
-      botId,
-      'group_task',
-      null,
-      null,
-      null,
-    );
-    coworkStore.upsertConversationMapping({
-      channel: CONVERSATION_CHANNEL,
-      externalConversationId,
-      metabotId: botId,
-      coworkSessionId: session.id,
-      metadataJson: JSON.stringify({ taskId: task.id, groupId: task.groupId }),
-    });
-    return session;
-  };
+  ): CoworkSession => ensureGroupTaskSession(coworkStore, task, botId, botName).session;
 
   /**
    * Unambiguous per-turn local time line (mirrors coworkRunner's Local Time
@@ -1010,7 +1159,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       return;
     }
     const sqlite = deps.getStore();
-    const guardKey = `${OWNER_REPORTED_KV_PREFIX}${task.id}`;
+    const guardKey = `${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`;
     if (sqlite.get<string>(guardKey) === '1') return;
 
     const chairMember = members.find((member) => member.role === 'chair');
@@ -1273,7 +1422,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const nextStatus = statusMatch[1].toLowerCase() as 'executing' | 'review';
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
-          const updated = store.updateTaskStatus(task.id, nextStatus);
+          // P1-5: the on-chain status tag is a chair action — record the actor
+          // on the transition event (who moved the task where and when).
+          const updated = store.updateTaskStatus(task.id, nextStatus, {
+            actor: {
+              kind: 'chair',
+              globalMetaId: senderGlobalMetaId,
+              name: chairMember?.name ?? null,
+            },
+          });
           if (beforeStatus && updated.status !== beforeStatus) {
             try {
               deps.orchestrationBridge?.syncStatus(task.id);
@@ -1291,7 +1448,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             });
             if (updated.status === 'executing' && beforeStatus === 'review') {
               // Rework hatch: the next review must report to the owner again.
-              deps.getStore().delete(`${OWNER_REPORTED_KV_PREFIX}${task.id}`);
+              deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {
               // P0-1: failed noise steps (mistaken mentions whose skill routing
@@ -1349,6 +1506,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '(a) Decompose the goal into concrete subtasks.',
       `(b) Assign each subtask to the SINGLE most suitable member BY NAME based on the roster profiles (never assign the same work to everyone).${distributionRule}`,
       '(c) State the sequence/dependencies and @-mention ONLY the members who should act NOW (later steps get assigned when their inputs arrive, e.g. after a [DELIVERABLE]).',
+      '(c2) For a DEPENDENT subtask, tag its assignment with `[DEPENDS_ON: <upstream pinid>]` (or describe the upstream requirement) and explicitly tell the member to wait for the upstream [DELIVERABLE] before starting.',
       '(d) End the message with [STATUS:EXECUTING].',
       '',
       'Full member roster (assign only to these members, by exact name):',
@@ -1496,6 +1654,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
     );
 
+    const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
+    const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
     const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
     let orchestrationAttemptId: string | null = null;
     if (member.role === 'worker' && deps.orchestrationBridge) {
@@ -1522,6 +1682,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         error instanceof Error ? error.message : String(error),
       );
     };
+    // P0-2: host auto-ACK BEFORE the (potentially long) worker turn — a skill
+    // turn can run for many minutes, so the group must already see the
+    // "[WORKING] 已接单" signal instead of a silent gap.
+    if (member.role === 'worker' && canRunSkillTurn) {
+      await maybeSendWorkerAck(task, bot, message, baseSystemPrompt, llmId, fallbackLlmId);
+    }
     coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
 
     let reply = '';
@@ -1548,8 +1714,6 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       reply = (skillTurnResult.replyText ?? '').trim();
       // The runner appends the assistant message to the session itself.
     } else {
-      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       try {
         reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       } catch (error) {
@@ -1677,6 +1841,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const sqlite = deps.getStore();
     const db = sqlite.getDatabase();
 
+    // P2-8: multi-driver mutex — when another daemon instance holds a fresh
+    // driver claim for this task, yield the whole tick (no heartbeat, no
+    // planning, no message processing) so two chair sessions never drive the
+    // same task at the same instant.
+    if (!claimDriverOrYield(task.id)) return;
+
     if (deps.orchestrationBridge) {
       try {
         deps.orchestrationBridge.ensureCanonicalTask(task);
@@ -1774,6 +1944,23 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (isChair && entry.reason !== 'chair_mentioned' && twinChairActive(db, task.id, task.groupId, deferredMessage.pinId, chairGlobalMetaId)) {
           continue; // the Twin already spoke about this message (or in the recent window); drop the auto reply
         }
+        // P2-6: deferred entries still respect the [DEPENDS_ON] gate — keep
+        // waiting while the upstream deliverable is absent (bounded).
+        const deferredDep = dependencyStatus(task, deferredMessage);
+        if (deferredDep.token && !deferredDep.satisfied) {
+          const waitKey = `${DEP_WAIT_KV_PREFIX}${task.id}:${bot.id}:${entry.messageId}`;
+          const startedAt = Number(sqlite.get<number>(waitKey) ?? 0) || now();
+          sqlite.set(waitKey, startedAt);
+          if (now() - startedAt < dependencyWaitMaxMs) {
+            deferReply(entry); // keep waiting for the upstream deliverable
+            continue;
+          }
+          sqlite.delete(waitKey);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: dependency wait for ${deferredDep.token} timed out after ` +
+            `${Math.round(dependencyWaitMaxMs / 60_000)} min; proceeding with the deferred dispatch`,
+          );
+        }
         try {
           await generateAndSendReply(
             task,
@@ -1831,6 +2018,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
         const gatingTask = freshStatus === task.status ? task : { ...task, status: freshStatus };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
+        // P0-1: review-phase silence hint — a chair dispatch to workers during
+        // review is intentionally unanswered (workers are gated silent); log
+        // it so the operator/chair reopens the task instead of assuming the
+        // dispatch failed or the worker is broken.
+        if (freshStatus === 'review') {
+          const silencedWorkers = members.filter((candidate) =>
+            candidate.role === 'worker'
+            && candidate.metabotId != null
+            && botsById.get(candidate.metabotId) != null
+            && isMentioned(message, botsById.get(candidate.metabotId)!),
+          );
+          if (silencedWorkers.length > 0) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: review-phase silence — dispatch to ` +
+              `${silencedWorkers.map((candidate) => candidate.name ?? candidate.metabotId).join(', ')} ` +
+              'ignored (task in REVIEW); reopen with [STATUS:EXECUTING] or the UI Back-to-work action',
+            );
+          }
+        }
         for (const decision of decisions) {
           const member = members.find((candidate) => candidate.metabotId === decision.metabotId);
           const bot = botsById.get(decision.metabotId);
@@ -1881,6 +2087,37 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if ((replyCountByKey.get(key) ?? 0) >= replyBudget) {
             emitLog(`[GroupTaskDaemon] Task ${task.id}: bot ${decision.metabotId} reply budget exhausted; skipping`);
             continue;
+          }
+
+          // P2-6: [DEPENDS_ON: <pinid>] gate — hold the worker dispatch until
+          // the referenced upstream deliverable is recorded on this task
+          // (bounded wait, then the dispatch proceeds anyway).
+          if (member.role === 'worker') {
+            const dep = dependencyStatus(task, message);
+            if (dep.token && !dep.satisfied) {
+              const waitKey = `${DEP_WAIT_KV_PREFIX}${task.id}:${bot.id}:${message.id}`;
+              const startedAt = Number(sqlite.get<number>(waitKey) ?? 0) || now();
+              sqlite.set(waitKey, startedAt);
+              if (now() - startedAt < dependencyWaitMaxMs) {
+                deferReply({
+                  taskId: task.id,
+                  metabotId: decision.metabotId,
+                  messageId: message.id,
+                  reason: decision.reason,
+                  verificationNotes: [],
+                });
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} dispatch waits for upstream deliverable ` +
+                  `${dep.token} (${Math.ceil((dependencyWaitMaxMs - (now() - startedAt)) / 1000)}s left)`,
+                );
+                continue;
+              }
+              sqlite.delete(waitKey);
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: dependency wait for ${dep.token} timed out after ` +
+                `${Math.round(dependencyWaitMaxMs / 60_000)} min; proceeding with the dispatch`,
+              );
+            }
           }
 
           // Verification facts travel with the deliverable that triggered the chair.

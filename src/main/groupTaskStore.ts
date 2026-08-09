@@ -10,6 +10,38 @@ export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'ca
 export type GroupTaskMemberRole = 'chair' | 'worker';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
+/**
+ * Who moved a group task between statuses. 'chair' = the chair bot acted
+ * (on-chain [STATUS:...] tag or its RPC close), 'owner' = the human owner
+ * acted (UI accept/close/back-to-work), 'system' = host-internal transition
+ * without a recorded actor (defaults, migration/backfill paths).
+ */
+export type GroupTaskStatusEventActorKind = 'chair' | 'owner' | 'system';
+
+export interface GroupTaskStatusEventActor {
+  kind: GroupTaskStatusEventActorKind;
+  globalMetaId?: string | null;
+  name?: string | null;
+}
+
+/** One recorded status transition (P1-5: who/when/from/to). */
+export interface GroupTaskStatusEvent {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus;
+  toStatus: GroupTaskStatus;
+  actorKind: GroupTaskStatusEventActorKind;
+  actorGlobalMetaId: string | null;
+  actorName: string | null;
+  /** sqlite datetime('now') text, UTC. */
+  createdAt: string | null;
+}
+
+export interface UpdateGroupTaskStatusOptions {
+  /** Recorded in group_task_status_events; defaults to a 'system' actor. */
+  actor?: GroupTaskStatusEventActor;
+}
+
 export interface GroupTask {
   id: number;
   orchestrationTaskId: string | null;
@@ -156,6 +188,17 @@ interface GroupTaskDeliverableRow {
   created_at: string | null;
 }
 
+interface GroupTaskStatusEventRow {
+  id: number;
+  task_id: number;
+  from_status: string;
+  to_status: string;
+  actor_kind: string;
+  actor_globalmetaid: string | null;
+  actor_name: string | null;
+  created_at: string | null;
+}
+
 interface GroupChatTranscriptRow {
   id: number;
   pin_id: string | null;
@@ -169,6 +212,19 @@ interface GroupChatTranscriptRow {
   msg_index: number | null;
   reply_pin: string | null;
   sender_suspect?: number | null;
+}
+
+function rowToGroupTaskStatusEvent(row: GroupTaskStatusEventRow): GroupTaskStatusEvent {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    fromStatus: isGroupTaskStatus(row.from_status) ? row.from_status : 'planning',
+    toStatus: isGroupTaskStatus(row.to_status) ? row.to_status : 'planning',
+    actorKind: row.actor_kind === 'chair' || row.actor_kind === 'owner' ? row.actor_kind : 'system',
+    actorGlobalMetaId: row.actor_globalmetaid ?? null,
+    actorName: row.actor_name ?? null,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChatTranscriptMessage {
@@ -386,8 +442,15 @@ export class GroupTaskStore {
   /**
    * Transition a task to `nextStatus`, enforcing the state machine.
    * Throws on illegal transitions. Sets closed_at when entering a terminal state.
+   * Every REAL transition (before !== next) is recorded in
+   * group_task_status_events with the given actor (P1-5 status-transition log);
+   * a recording failure never breaks the transition itself.
    */
-  updateTaskStatus(id: number, nextStatus: GroupTaskStatus): GroupTask {
+  updateTaskStatus(
+    id: number,
+    nextStatus: GroupTaskStatus,
+    opts?: UpdateGroupTaskStatusOptions,
+  ): GroupTask {
     const task = this.getTaskById(id);
     if (!task) throw new Error(`Group task ${id} not found`);
     if (task.status === nextStatus) return task;
@@ -397,6 +460,7 @@ export class GroupTaskStore {
         `Illegal group task status transition: ${task.status} -> ${nextStatus} (task ${id})`,
       );
     }
+    const beforeStatus = task.status;
     if (TERMINAL_STATUSES.has(nextStatus)) {
       this.db.run(
         `UPDATE group_tasks SET status = ?, updated_at = datetime('now'), closed_at = datetime('now') WHERE id = ?`,
@@ -411,7 +475,51 @@ export class GroupTaskStore {
     this.saveDb();
     const updated = this.getTaskById(id);
     if (!updated) throw new Error(`Group task ${id} not found after status update`);
+    this.recordStatusEvent(id, beforeStatus, nextStatus, opts?.actor);
     return updated;
+  }
+
+  /** Insert one status-transition event row (best-effort, never throws). */
+  private recordStatusEvent(
+    taskId: number,
+    fromStatus: GroupTaskStatus,
+    toStatus: GroupTaskStatus,
+    actor?: GroupTaskStatusEventActor,
+  ): void {
+    try {
+      this.db.run(
+        `INSERT INTO group_task_status_events (task_id, from_status, to_status, actor_kind, actor_globalmetaid, actor_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          taskId,
+          fromStatus,
+          toStatus,
+          actor?.kind ?? 'system',
+          actor?.globalMetaId?.trim() || null,
+          actor?.name?.trim() || null,
+        ],
+      );
+      this.saveDb();
+    } catch (error) {
+      console.warn(
+        `Failed to record status event for group task ${taskId} (${fromStatus} -> ${toStatus}): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** Status transition history for one task, newest first (P1-5). */
+  listStatusEvents(taskId: number, opts?: { limit?: number }): GroupTaskStatusEvent[] {
+    const limit = Math.max(1, Math.min(200, Math.trunc(opts?.limit ?? 100)));
+    const rows = this.getAll<GroupTaskStatusEventRow>(
+      `SELECT id, task_id, from_status, to_status, actor_kind, actor_globalmetaid, actor_name, created_at
+       FROM group_task_status_events
+       WHERE task_id = ?
+       ORDER BY id DESC
+       LIMIT ?`,
+      [taskId, limit],
+    );
+    return rows.map(rowToGroupTaskStatusEvent);
   }
 
   isTerminalStatus(status: GroupTaskStatus): boolean {
@@ -724,6 +832,40 @@ export class GroupTaskStore {
     for (const row of rows) {
       const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
       if (key) result.set(key, Number(row.last_speak_at));
+    }
+    return result;
+  }
+
+  /**
+   * P0-2 (round 5): last chain timestamp (epoch seconds) per sender GlobalMetaID
+   * of a message carrying the `[WORKING]` status tag — the durable half of the
+   * worker ACK/progress protocol. The service derives the member workStatus
+   * from these timestamps (fresh [WORKING] within the working window => working).
+   */
+  getMembersWorkingAt(
+    groupId: string,
+    globalMetaIds: Array<string | null | undefined>,
+  ): Map<string, number> {
+    const ids = [...new Set(
+      globalMetaIds
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    const result = new Map<string, number>();
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.getAll<{ sender_global_metaid: string; last_working_at: number }>(
+      `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_working_at
+       FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
+         AND content LIKE '%[WORKING]%' ESCAPE '\\'
+         AND chain_timestamp IS NOT NULL
+       GROUP BY sender_global_metaid`,
+      [groupId, ...ids],
+    );
+    for (const row of rows) {
+      const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
+      if (key) result.set(key, Number(row.last_working_at));
     }
     return result;
   }

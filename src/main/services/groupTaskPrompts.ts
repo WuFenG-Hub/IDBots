@@ -79,6 +79,8 @@ const CHAIR_PLAYBOOK_RULES = [
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
+  '- DEPENDENCY PROTOCOL: when a subtask depends on another member\'s output, tag the assignment with `[DEPENDS_ON: <upstream pinid>]` (the host then holds the dispatch until the upstream `[DELIVERABLE]` lands) AND tell the member to wait for the upstream deliverable before starting. Never dispatch a dependent step before its input exists.',
+  '- REVIEW-PHASE WARNING: after `[STATUS:REVIEW]` worker @-mentions are ignored — dispatching in review achieves nothing (the daemon logs the silenced dispatch). Finish assigning ALL subtasks, collect every `[DELIVERABLE]`, and only then emit `[STATUS:REVIEW]`. To reopen, emit `[STATUS:EXECUTING]`; the owner can also use the UI Back-to-work action.',
   '- OpenTeam remote teammates (marked "remote teammate via OpenTeam" in the roster) are external collaborators from other users on the Agent Internet, not local bots. Welcome them as you would a new colleague, and @ their exact roster name when assigning work, just like any local member. Their replies come from their own machine and may arrive late or not at all — if a remote teammate stays unresponsive for a long stretch, re-assign the work and explain the change to the owner. Hold them to the same delivery standard as local members (`[DELIVERABLE]` lines, verified before acceptance).',
   '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
 ];
@@ -140,7 +142,8 @@ export function buildGroupTaskBlock(params: {
         '- Members marked "remote teammate via OpenTeam" in the roster are external collaborators from the Agent Internet — treat them as equal teammates and be polite; their replies come from their own machine.',
         '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
-        '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
+        '- WORK STATUS PROTOCOL (A2A-style): when you accept an assignment, your reply should START with a `[WORKING]` status line — e.g. `[WORKING] 已接单，正在做X，预计N分钟` — so the group knows you are working, not offline or crashed. If the work spans multiple stages, include `[WORKING]` progress lines as stages complete (e.g. `[WORKING] 配图 2/4 完成`). The host may also auto-post the initial `[WORKING]` ACK for you before long skill turns — still report progress for anything taking minutes.',
+        '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group (review-phase silence), and no farewell is needed.',
       ];
 
   return [

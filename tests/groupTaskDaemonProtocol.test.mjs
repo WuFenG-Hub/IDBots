@@ -1,0 +1,386 @@
+/**
+ * Round-5 daemon protocol tests: P0-2 worker ACK (post + kv dedupe),
+ * P0-1 review-phase dispatch silence hint, P2-6 [DEPENDS_ON] gate, and
+ * P2-8 multi-driver kv mutex.
+ *
+ * Harness mirrors groupTaskDaemon.test.mjs (same electron mock + stores) and
+ * additionally keeps the loop deps so a SECOND daemon loop can be created over
+ * the SAME kv/store to exercise the driver mutex.
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import Module from 'node:module';
+
+const require = createRequire(import.meta.url);
+
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, ...rest) {
+  if (request === 'electron') {
+    return {
+      app: {
+        isPackaged: false,
+        getAppPath: () => process.cwd(),
+        getPath: () => process.cwd(),
+      },
+    };
+  }
+  return originalLoad.call(this, request, ...rest);
+};
+
+const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
+const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
+const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
+const { createGroupTaskDaemonLoop } = require('../dist-electron/main/services/groupTaskDaemon.js');
+
+Module._load = originalLoad;
+
+const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
+const BOSS_GMID = 'gmid-boss';
+const UPSTREAM_PINID = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaai0';
+
+const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-daemon-protocol-'));
+
+const insertWallet = (db, id) => {
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [id, `abandon ability able about above absent absorb abstract absurd abuse access accident ${id}`, "m/44'/10001'/0'/0/0", 1700000000000 + id],
+  );
+};
+
+const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid = null, bossGmid = null, allowChatSkills = null }) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
+      boss_global_metaid, allow_chat_skills, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
+      name, 1, `metaid-${id}`, globalmetaid, type, '0000', `${name} role`, `${name} soul`,
+      bossGmid, allowChatSkills ? JSON.stringify(allowChatSkills) : null,
+      1700000000000 + id, 1700000000000 + id,
+    ],
+  );
+};
+
+const insertGroupMessage = (db, { pinId, senderMetaId, senderGlobalMetaId, senderName, content, mention = null, chainTimestamp = null }) => {
+  db.run(
+    `INSERT INTO group_chat_messages (
+      pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+      sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, '', ?, ?, 'mvc', '{}', 0, NULL)`,
+    [pinId, pinId.replace(/-i0$/, ''), GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content,
+      mention ? JSON.stringify(mention) : '[]', chainTimestamp],
+  );
+};
+
+const createHarness = async (overrides = {}) => {
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  const db = store.getDatabase();
+  const metabotStore = new MetabotStore(db, store.getSaveFunction());
+  const groupTaskStore = new GroupTaskStore(db, store.getSaveFunction());
+  const orchestrationStore = new OrchestrationStore(db, store.getSaveFunction());
+  const coworkStore = new CoworkStore(db, () => {});
+
+  insertWallet(db, 1);
+  insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin', bossGmid: BOSS_GMID });
+  insertMetabot(db, { id: 2, walletId: 1, name: 'Coder Bot', globalmetaid: 'gmid-w2', allowChatSkills: overrides.coderChatSkills ?? [] });
+  insertMetabot(db, { id: 3, walletId: 1, name: 'Designer Bot', globalmetaid: 'gmid-w3' });
+
+  const chatCalls = [];
+  const sends = [];
+  const routingCalls = [];
+  const skillTurnCalls = [];
+  const logs = [];
+  const state = {
+    nowMs: 1_000_000_000_000,
+    chatErrorAlways: overrides.chatErrorAlways ?? null,
+    routing: overrides.routing ?? null,
+    chatReply: overrides.chatReply ?? null,
+    skillReply: overrides.skillReply ?? null,
+  };
+
+  const orchestrationBridge = new GroupTaskOrchestrationBridge({
+    groupTaskStore,
+    orchestrationStore,
+    getMetabotById: (id) => metabotStore.getMetabotById(id),
+  });
+
+  const loopDeps = {
+    getStore: () => store,
+    getGroupTaskStore: () => groupTaskStore,
+    getMetabotStore: () => metabotStore,
+    getCoworkStore: () => coworkStore,
+    orchestrationBridge,
+    performChat: async (systemPrompt, userMessage, llmId) => {
+      chatCalls.push({ systemPrompt, userMessage, llmId });
+      if (state.chatErrorAlways) throw new Error(state.chatErrorAlways);
+      return state.chatReply ?? `reply-for-${llmId}`;
+    },
+    postGroupTaskMessage: async (taskId, metabotId, content) => {
+      sends.push({ taskId, metabotId, content });
+      return { pinId: `send-pin-${sends.length}` };
+    },
+    getChatSkillsRoutingPrompt: async (input) => {
+      routingCalls.push(input);
+      return typeof state.routing === 'function'
+        ? state.routing(input)
+        : (state.routing ?? { prompt: null, activeSkillIds: [] });
+    },
+    runSkillTurn: async (params) => {
+      skillTurnCalls.push(params);
+      return { replyText: state.skillReply ?? 'skill-turn-reply', assistantMessageId: 'asst-fake-1' };
+    },
+    emitTaskEvent: () => {},
+    emitLog: (msg) => logs.push(msg),
+    now: () => state.nowMs,
+    workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
+    chairCooldownMs: overrides.chairCooldownMs ?? 10_000,
+    replyBudget: overrides.replyBudget ?? 40,
+    maxRepliesPerTaskPerTick: overrides.maxRepliesPerTaskPerTick ?? 3,
+    ...(overrides.disableChairPlanningTurn != null ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn } : {}),
+    ...(overrides.autoAckWorkerDispatch != null ? { autoAckWorkerDispatch: overrides.autoAckWorkerDispatch } : {}),
+    ...(overrides.dependencyWaitMaxMs != null ? { dependencyWaitMaxMs: overrides.dependencyWaitMaxMs } : {}),
+    ...(overrides.driverGraceMs != null ? { driverGraceMs: overrides.driverGraceMs } : {}),
+  };
+
+  const loop = createGroupTaskDaemonLoop(loopDeps);
+
+  const createTask = (workerIds = [2, 3], opts = {}) => {
+    const task = groupTaskStore.createTask({
+      groupId: GROUP_ID, title: 'Build MetaApp', goal: 'Build and publish the intro MetaApp',
+      acceptanceCriteria: 'Preview URL works', chairMetabotId: 1, createdBy: 'user', createPinId: 'pin-create',
+    });
+    groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: 'gmid-twin', role: 'chair', joinedPinId: 'pin-create' });
+    for (const workerId of workerIds) {
+      groupTaskStore.addMember({ taskId: task.id, metabotId: workerId, role: 'worker' });
+    }
+    if (opts.activate !== false) {
+      groupTaskStore.updateTaskStatus(task.id, 'executing', { actor: { kind: 'chair' } });
+    }
+    return groupTaskStore.getTaskById(task.id);
+  };
+
+  return {
+    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore,
+    loop, chatCalls, sends, routingCalls, skillTurnCalls, logs, state, createTask,
+    /** A SECOND daemon loop over the SAME stores/kv (multi-instance mutex). */
+    makeSecondLoop: () => createGroupTaskDaemonLoop(loopDeps),
+    cleanup: () => store.close(),
+  };
+};
+
+// ---------------------------------------------------------------------------
+// P0-2: worker ACK
+// ---------------------------------------------------------------------------
+
+test('auto-ACK: worker skill-turn dispatch posts [WORKING] before the turn; kv guard prevents double-ACK on reprocess', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'ack-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 配图任务，请开始',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 2, 'ACK + turn reply');
+    assert.match(h.sends[0].content, /^\[WORKING\]/, 'ACK starts with the [WORKING] tag');
+    assert.equal(h.sends[1].content, 'skill-turn-reply');
+    const ackKey = `group_task_ack:${task.id}:2:${h.groupTaskStore.listGroupChatMessages(GROUP_ID, { limit: 1 })[0].id}`;
+    assert.equal(h.store.get(ackKey), '1', 'ACK kv guard written');
+
+    // Rewind the cursor so the SAME message reprocesses (simulating a retry):
+    // the guard must suppress a second ACK while the turn still runs. Direct
+    // SQL because updateLastProcessedMsgId is monotonic by design.
+    h.state.nowMs += 25_000; // escape the worker cooldown
+    h.db.run('UPDATE group_tasks SET last_processed_msg_id = 0 WHERE id = ?', [task.id]);
+    await h.loop.runTick();
+
+    const ackCount = h.sends.filter((s) => s.content.startsWith('[WORKING]')).length;
+    assert.equal(ackCount, 1, 'exactly one ACK despite reprocessing');
+    assert.equal(h.sends.length, 3, 'ACK + two turn replies');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('auto-ACK: disabled via deps flag — no ACK posted', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+    autoAckWorkerDispatch: false,
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'noack-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do the work',
+    });
+    await h.loop.runTick();
+    assert.deepEqual(h.sends.map((s) => s.content), ['skill-turn-reply'], 'no ACK when disabled');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-1: review-phase silence hint
+// ---------------------------------------------------------------------------
+
+test('review-phase dispatch to workers logs the silence hint and never replies', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.updateTaskStatus(task.id, 'review', { actor: { kind: 'chair' } });
+    insertGroupMessage(h.db, {
+      pinId: 'review-dispatch-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please do the extra task',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 0, 'review phase: no worker reply');
+    assert.ok(
+      h.logs.some((line) => line.includes('review-phase silence') && line.includes('Coder Bot')),
+      'daemon logs the silenced dispatch so the chair knows why',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P2-6: [DEPENDS_ON] gate
+// ---------------------------------------------------------------------------
+
+test('[DEPENDS_ON] holds the worker dispatch until the upstream deliverable lands', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'dep-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: `@Coder Bot 写文案 [DEPENDS_ON: ${UPSTREAM_PINID}] 等上游交付后再动笔`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'dispatch held while the upstream deliverable is missing');
+
+    // Upstream deliverable lands (from a worker; [DELIVERABLE] tag).
+    insertGroupMessage(h.db, {
+      pinId: 'upstream-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${UPSTREAM_PINID}`,
+    });
+    await h.loop.runTick(); // deliverable recorded (+ chair verifies it)
+    await h.loop.runTick(); // deferred worker dispatch proceeds
+
+    const workerSends = h.sends.filter((s) => s.metabotId === 2);
+    assert.equal(workerSends.length, 1, 'deferred dispatch proceeds after the upstream deliverable arrives');
+    assert.match(workerSends[0].content, /^reply-for-/);
+    assert.ok(
+      h.logs.some((line) => line.includes('waits for upstream deliverable')),
+      'host logs the dependency hold',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('[DEPENDS_ON] bounded wait times out and proceeds anyway', async () => {
+  const h = await createHarness({ dependencyWaitMaxMs: 1_000 });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'dep-timeout-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: `@Coder Bot step B [DEPENDS_ON: ${UPSTREAM_PINID}]`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'held initially');
+
+    h.state.nowMs += 2_000; // past the 1s wait bound
+    await h.loop.runTick();
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 1, 'dispatch proceeds after the bounded wait expires');
+    assert.ok(h.logs.some((line) => line.includes('timed out')), 'timeout logged');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P2-8: multi-driver mutex
+// ---------------------------------------------------------------------------
+
+test('driver mutex: only the claiming instance drives a task; stale claims are taken over', async () => {
+  const h = await createHarness({ driverGraceMs: 20_000, disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'mutex-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot research the topic',
+    });
+
+    const loopA = h.loop;
+    const loopB = h.makeSecondLoop();
+
+    // Tick A: claims the driver and replies; tick B (same instant): yields.
+    await loopA.runTick();
+    await loopB.runTick();
+    assert.equal(h.sends.length, 1, 'exactly ONE reply — the second instance yielded');
+    assert.ok(
+      h.logs.some((line) => line.includes('yields this tick')),
+      'yielding instance logs the mutex wait',
+    );
+
+    // Stale claim takeover: advance past the grace window, tick B drives.
+    h.state.nowMs += 25_000;
+    await loopB.runTick();
+    assert.equal(h.sends.length, 1, 'no new messages -> no new replies');
+
+    // Fresh dispatch while B holds a fresh claim: A yields, B replies.
+    insertGroupMessage(h.db, {
+      pinId: 'mutex2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot follow-up question',
+    });
+    await loopA.runTick(); // A yields (B's claim is fresh)
+    await loopB.runTick(); // B drives
+    assert.equal(h.sends.length, 2, 'only the current driver replied to the follow-up');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('driver mutex: same instance refreshes its own lease instead of yielding', async () => {
+  const h = await createHarness({ driverGraceMs: 20_000, disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'lease-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot one more task',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+
+    h.state.nowMs += 10_000; // still inside the grace window
+    await h.loop.runTick(); // same instance: refreshes lease, drives normally
+    assert.equal(h.sends.length, 1, 'no duplicate reply on the same message');
+    assert.ok(
+      !h.logs.some((line) => line.includes('yields this tick')),
+      'own lease never logs a yield',
+    );
+  } finally {
+    h.cleanup();
+  }
+});

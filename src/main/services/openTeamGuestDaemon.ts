@@ -19,6 +19,7 @@
  */
 
 import type { SqliteDatabase as Database } from '../sqliteTypes';
+import type { CoworkStore } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import type {
@@ -28,6 +29,7 @@ import type {
 import { normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
+import { ensureOpenTeamGuestSession } from './groupTaskSession';
 
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
@@ -119,6 +121,12 @@ export interface OpenTeamGuestDaemonDeps {
   intervalMs?: number;
   cooldownMs?: number;
   contextMessageCount?: number;
+  /**
+   * P1-3: when wired, guest turns are logged into the eager session created at
+   * invite-accept time (context continuity; the session also carries the
+   * injected group context snapshot).
+   */
+  getCoworkStore?: () => CoworkStore;
 }
 
 export interface OpenTeamGuestDaemonLoop {
@@ -262,6 +270,26 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       content: reply,
       nickName: bot.name?.trim() || `bot-${bot.id}`,
     });
+    // P1-3: log the turn into the guest session (the one eagerly created at
+    // invite-accept time) so the invitee's host has context continuity.
+    if (deps.getCoworkStore) {
+      try {
+        const coworkStore = deps.getCoworkStore();
+        const { session } = ensureOpenTeamGuestSession(
+          coworkStore,
+          bot.id,
+          bot.name?.trim() || `bot-${bot.id}`,
+          { groupId: membership.groupId, taskTitle: membership.taskTitle },
+        );
+        coworkStore.addMessage(session.id, { type: 'user', content: userMessage });
+        coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
+      } catch (error) {
+        emitLog(
+          `[OpenTeamGuestDaemon] Group ${membership.groupId}: session logging failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   };
 
   const processMembership = async (membership: OpenTeamMembership): Promise<void> => {
