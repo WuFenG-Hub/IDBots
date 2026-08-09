@@ -3467,6 +3467,20 @@ export class CoworkRunner extends EventEmitter {
     });
   }
 
+  /**
+   * The MetaBot's llm_id is the provider key the bot was configured with
+   * ('deepseek', 'opencode', ...). Return it as the session's automation
+   * model override so the bot's CoWork traffic actually routes to that
+   * provider — resolveApiConfigForModel resolves the key to a concrete model
+   * (llm_id 'deepseek' maps to the default flash model; other keys are
+   * matched as provider keys and use the provider's model list).
+   *
+   * NOTE: this used to only honor llm_id === 'deepseek' and silently ignore
+   * every other value, so metabots configured for opencode (or any other
+   * provider) still fell back to the global default model — their traffic
+   * never reached the configured provider. Now any non-empty llm_id routes
+   * the session (unknown keys fall back to the global default in the caller).
+   */
   private getSessionAutomationModelOverride(sessionId: string): string | null {
     if (!this.getMetabotById) return null;
     const session = this.store.getSession(sessionId);
@@ -3474,8 +3488,7 @@ export class CoworkRunner extends EventEmitter {
     if (metabotId == null || typeof metabotId !== 'number') return null;
     const metabot = this.getMetabotById(metabotId);
     const llmId = metabot?.llm_id?.trim();
-    if (!llmId) return null;
-    return llmId.toLowerCase() === 'deepseek' ? llmId : null;
+    return llmId || null;
   }
 
   private escapeXmlText(value: string): string {
@@ -4555,10 +4568,23 @@ export class CoworkRunner extends EventEmitter {
     activeSession.contextOverflowRetryAllowed = false;
 
     const automationModelOverride = this.getSessionAutomationModelOverride(sessionId);
-    const apiConfigResolution = automationModelOverride
+    let apiConfigResolution = automationModelOverride
       ? resolveApiConfigForModel(automationModelOverride, 'local')
       : { config: getCurrentApiConfig('local') };
-    const apiConfig = apiConfigResolution.config;
+    let apiConfig = apiConfigResolution.config;
+    if (!apiConfig && automationModelOverride) {
+      // The metabot's llm_id did not resolve (provider disabled/removed, or
+      // the key is not a known provider). Fall back to the global default
+      // config instead of failing the session — the legacy behavior ignored
+      // unknown llm_ids silently, so keep sessions runnable.
+      coworkLog('WARN', 'runClaudeCodeLocal', 'Metabot llm_id did not resolve to an enabled provider; falling back to the default model config', {
+        sessionId,
+        llmId: automationModelOverride,
+        reason: apiConfigResolution.error ?? null,
+      });
+      apiConfigResolution = { config: getCurrentApiConfig('local') };
+      apiConfig = apiConfigResolution.config;
+    }
     if (!apiConfig) {
       this.handleError(sessionId, apiConfigResolution.error ?? 'API configuration not found. Please configure model settings.');
       this.clearPendingPermissions(sessionId);
