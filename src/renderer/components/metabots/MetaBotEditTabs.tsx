@@ -43,6 +43,9 @@ export const normalizeA2AByeCooldownMsOption = (value: unknown): number =>
 export const normalizeA2AAutoReplyEnabledOption = (value: unknown): boolean =>
   value == null ? true : typeof value === 'number' ? value !== 0 : Boolean(value);
 
+// Keep in sync with OPENTEAM_ALLOW_REMOTE_COLLAB_KEY in src/main/services/openTeamGuestService.ts.
+const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
+
 export interface MetaBotEditValues {
   name: string;
   avatar: string;
@@ -202,6 +205,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const [tabErrors, setTabErrors] = useState<Partial<Record<MetaBotEditTabKey, string>>>({});
   const [nameDuplicate, setNameDuplicate] = useState(false);
   const [selectedAllowChatSkillId, setSelectedAllowChatSkillId] = useState('');
+  // The OpenTeam remote-collaboration switch lives in the metabot_settings kv
+  // store (not in the metabot:update column whitelist), so it applies
+  // immediately on toggle instead of joining this tab's dirty/save flow.
+  const [openTeamRemoteCollab, setOpenTeamRemoteCollab] = useState(true);
+  const [openTeamRemoteCollabLoaded, setOpenTeamRemoteCollabLoaded] = useState(false);
+  const [openTeamRemoteCollabSaving, setOpenTeamRemoteCollabSaving] = useState(false);
 
   // Re-initialize when a different bot is loaded into the same mounted editor.
   // Saves only update the baseline (see handleSaveTab), so unsaved edits in
@@ -217,6 +226,27 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     setSelectedAllowChatSkillId('');
     // initialValues is re-created by the parent on every list refresh; key off metabotId only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metabotId]);
+
+  // Load the OpenTeam remote-collab switch for the bot being edited. The kv
+  // default (no record) means "allowed", so a missing/failed read falls back to on.
+  useEffect(() => {
+    let cancelled = false;
+    setOpenTeamRemoteCollab(true);
+    setOpenTeamRemoteCollabLoaded(false);
+    setOpenTeamRemoteCollabSaving(false);
+    window.electron.metabot.getSetting(metabotId, OPENTEAM_ALLOW_REMOTE_COLLAB_KEY)
+      .then((result) => {
+        if (cancelled) return;
+        setOpenTeamRemoteCollab(result.success ? result.value !== '0' : true);
+        setOpenTeamRemoteCollabLoaded(true);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setOpenTeamRemoteCollab(true);
+        setOpenTeamRemoteCollabLoaded(true);
+      });
+    return () => { cancelled = true; };
   }, [metabotId]);
 
   const setTabError = (tab: MetaBotEditTabKey, message: string) => {
@@ -322,6 +352,25 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
     handleChange('allow_chat_skills', removeAllowChatSkill(values.allow_chat_skills, skillId));
   };
 
+  // Immediate-effect toggle: optimistic flip, persisted via metabot:setSetting;
+  // a failed write reverts the switch and surfaces a toast.
+  const handleOpenTeamRemoteCollabToggle = () => {
+    if (!openTeamRemoteCollabLoaded || openTeamRemoteCollabSaving) return;
+    const next = !openTeamRemoteCollab;
+    setOpenTeamRemoteCollab(next);
+    setOpenTeamRemoteCollabSaving(true);
+    const revertWithToast = () => {
+      setOpenTeamRemoteCollab(!next);
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotOpenTeamRemoteCollabSaveFailed') }));
+    };
+    window.electron.metabot.setSetting(metabotId, OPENTEAM_ALLOW_REMOTE_COLLAB_KEY, next ? '1' : '0')
+      .then((result) => {
+        if (!result.success) revertWithToast();
+      })
+      .catch(revertWithToast)
+      .finally(() => setOpenTeamRemoteCollabSaving(false));
+  };
+
   const handleSaveTab = async (tab: MetaBotEditTabKey) => {
     if (savingTab) return;
     if (tab === 'basic') {
@@ -393,6 +442,10 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const isTwin = values.metabot_type === 'twin';
   const twinToggleView = buildMetaBotToggleViewModel({ enabled: isTwin, disabled: isTwin });
   const a2aAutoReplyToggleView = buildMetaBotToggleViewModel({ enabled: values.a2a_auto_reply_enabled, disabled: false });
+  const openTeamRemoteCollabToggleView = buildMetaBotToggleViewModel({
+    enabled: openTeamRemoteCollab,
+    disabled: !openTeamRemoteCollabLoaded || openTeamRemoteCollabSaving,
+  });
   const rowClass = 'grid grid-cols-1 md:grid-cols-[132px_minmax(0,1fr)] gap-2 md:gap-4 items-start';
   const labelClass = 'pt-2 text-sm font-medium dark:text-claude-darkText text-claude-text';
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
@@ -777,6 +830,31 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             </div>
             <p className={hintClass}>
               {i18nService.t('metabotA2aAutoReplyHint')}
+            </p>
+          </div>
+        </div>
+
+        {/* OpenTeam remote collab: immediate-effect kv switch, outside this tab's dirty/save flow. */}
+        <div className={rowClass}>
+          <label id="metabot-openteam-remote-collab-label" className={labelClass}>
+            {i18nService.t('metabotOpenTeamRemoteCollab')}
+          </label>
+          <div className="min-w-0">
+            <div className="flex items-center gap-3 pt-1">
+              <div
+                role="switch"
+                aria-checked={openTeamRemoteCollab}
+                aria-labelledby="metabot-openteam-remote-collab-label"
+                data-slot="metabot-openteam-remote-collab-switch"
+                title={i18nService.t('metabotOpenTeamRemoteCollabHint')}
+                className={openTeamRemoteCollabToggleView.trackClass}
+                onClick={handleOpenTeamRemoteCollabToggle}
+              >
+                <div className={openTeamRemoteCollabToggleView.knobClass} />
+              </div>
+            </div>
+            <p className={hintClass}>
+              {i18nService.t('metabotOpenTeamRemoteCollabHint')}
             </p>
           </div>
         </div>

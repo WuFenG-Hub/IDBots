@@ -206,3 +206,105 @@ test('invites: updateInviteStatus by pinId / by id, decline reason, responded_at
     store.close();
   }
 });
+
+const insertWallet = (db, id) => {
+  db.run(
+    `INSERT INTO metabot_wallets (id, mnemonic, path, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [id, `abandon ability able about above absent absorb abstract absurd abuse access accident ${id}`, "m/44'/10001'/0'/0/0", 1700000000000 + id]
+  );
+};
+
+const insertMetabot = (db, { id, walletId, name, globalmetaid = null }) => {
+  db.run(
+    `INSERT INTO metabots (
+      id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
+      name, enabled, metaid, globalmetaid, metabot_type, created_by, role, soul,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
+      name, 1, `metaid-${id}`, globalmetaid, 'worker', '0000', `${name} role`, `${name} soul`,
+      1700000000000 + id, 1700000000000 + id,
+    ]
+  );
+};
+
+const insertGroupMessage = (db, { pinId, groupId, senderName, content, chainTimestamp }) => {
+  db.run(
+    `INSERT INTO group_chat_messages (
+      pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+      sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+      reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, NULL, '[]', ?, 'mvc', '{}', 0, 1)`,
+    [pinId, pinId, groupId, `metaid-${senderName}`, `gmid-${senderName}`, senderName, content, chainTimestamp],
+  );
+};
+
+test('collab summaries: bot name join, message digest, newest first', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 7, walletId: 1, name: 'Worker Seven', globalmetaid: 'gmid-bot-7' });
+    insertMetabot(db, { id: 8, walletId: 1, name: 'Worker Eight', globalmetaid: 'gmid-bot-8' });
+
+    openTeamStore.upsertActiveMembership({
+      groupId: 'group-ext-1', metabotId: 7, globalmetaid: 'gmid-bot-7',
+      inviterGlobalmetaid: 'gmid-inviter', taskTitle: 'External Task',
+    });
+    openTeamStore.upsertActiveMembership({ groupId: 'group-ext-2', metabotId: 8 });
+    // Bot 9 has no metabots row (deleted bot): botName must be null, row kept.
+    openTeamStore.upsertActiveMembership({ groupId: 'group-ext-1', metabotId: 9 });
+
+    insertGroupMessage(db, {
+      pinId: 'm1', groupId: 'group-ext-1', senderName: 'Host', content: 'hello', chainTimestamp: 1785000001000,
+    });
+    insertGroupMessage(db, {
+      pinId: 'm2', groupId: 'group-ext-1', senderName: 'Worker Seven', content: 'hi', chainTimestamp: 1785000002000,
+    });
+    // A group with no membership must not leak into any digest.
+    insertGroupMessage(db, {
+      pinId: 'm3', groupId: 'group-unrelated', senderName: 'Other', content: 'noise', chainTimestamp: 1785000003000,
+    });
+
+    openTeamStore.markLeft('group-ext-2', 8);
+
+    const summaries = openTeamStore.listCollabSummaries();
+    assert.equal(summaries.length, 3, 'active + left memberships are all listed');
+    assert.deepEqual(
+      summaries.map((s) => [s.groupId, s.metabotId]),
+      [['group-ext-1', 9], ['group-ext-2', 8], ['group-ext-1', 7]],
+      'newest membership first',
+    );
+
+    const [deletedBotRow, leftRow, activeRow] = summaries;
+    assert.equal(deletedBotRow.botName, null);
+    assert.equal(deletedBotRow.status, 'active');
+    assert.equal(deletedBotRow.messageCount, 2, 'digest aggregates by group, not by membership');
+    assert.equal(deletedBotRow.lastMessageAt, 1785000002000);
+
+    assert.equal(leftRow.status, 'left');
+    assert.equal(leftRow.botName, 'Worker Eight');
+    assert.equal(leftRow.messageCount, 0);
+    assert.equal(leftRow.lastMessageAt, null);
+
+    assert.equal(activeRow.botName, 'Worker Seven');
+    assert.equal(activeRow.taskTitle, 'External Task');
+    assert.equal(activeRow.inviterGlobalmetaid, 'gmid-inviter');
+    assert.equal(activeRow.messageCount, 2);
+    assert.equal(activeRow.lastMessageAt, 1785000002000);
+  } finally {
+    store.close();
+  }
+});
+
+test('collab summaries: empty table returns an empty list', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore } = await openStores(tempDir);
+  try {
+    assert.deepEqual(openTeamStore.listCollabSummaries(), []);
+  } finally {
+    store.close();
+  }
+});

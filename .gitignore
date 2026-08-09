@@ -49,6 +49,8 @@ tests/*
 !tests/groupTaskSession.test.mjs
 !tests/groupTaskStatusEvents.test.mjs
 !tests/groupTaskUtils.test.mjs
+!tests/groupTaskKickMember.test.mjs
+!tests/groupTaskKickMemberRpc.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs
@@ -195,3 +197,4 @@ man_base_data_pebble/
 !tests/avatarSource.test.mjs
 
 !tests/sdkCronHostTrigger.test.mjs
+!tests/metabotSettingsService.test.mjs

@@ -147,6 +147,7 @@ import {
   closeGroupTask,
   reopenGroupTask,
   reworkGroupTask,
+  kickGroupTaskMember,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
@@ -159,6 +160,11 @@ import {
   stopOpenTeamGuestDaemon,
 } from './services/openTeamGuestDaemon';
 import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
+import { setOpenTeamImpressionServiceDepsGetter } from './services/openTeamImpressionService';
+import {
+  getRendererMetabotSetting,
+  setRendererMetabotSetting,
+} from './services/metabotSettingsService';
 import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
@@ -3133,6 +3139,13 @@ const startSqliteDaemons = (): void => {
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
+  // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
+  setOpenTeamImpressionServiceDepsGetter(() => ({
+    groupTaskStore: getGroupTaskStore(),
+    experienceStore: getMetaIDExperienceStore(),
+    impressionStore: getMetaIDImpressionStore(),
+    getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+  }));
   setGroupChatBackfillActiveGroupIdsGetter(() => {
     // Union of group-task groups, active OpenTeam membership groups, and active
     // agent-game session groups so all receive history gap-fill from the same
@@ -3490,6 +3503,16 @@ const startSqliteDaemons = (): void => {
       };
     })(),
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
+    // OpenTeam M2: presence probe for remote-teammate unreachable detection
+    // (idchat online-status API, shared lazy singleton).
+    fetchRemotePresence: async (globalMetaIds) => {
+      const result = await getIdchatPresenceService().fetchOnlineStatus(globalMetaIds);
+      return result.list.map((entry) => ({
+        globalMetaId: entry.globalMetaId,
+        isOnline: entry.isOnline,
+        lastSeenAgoSeconds: entry.lastSeenAgoSeconds,
+      }));
+    },
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({
         metabotId,
@@ -3541,6 +3564,30 @@ const startSqliteDaemons = (): void => {
     getOpenTeamMembershipStore,
     performChat: performChatCompletionForOrchestrator,
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    // OpenTeam M3: same chat-skill routing + skill-turn seams as the
+    // group-task daemon, scoped to the guest bot's own allow_chat_skills
+    // (allowAllEnabled stays false inside the daemon — external members are
+    // never the owner).
+    getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
+    runSkillTurn: async (params) => {
+      const roots = skillMgr.getAllSkillRoots();
+      const cwd = roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot();
+      const result = await runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
+        sessionId: params.sessionId,
+        systemPrompt: params.systemPrompt,
+        userMessage: params.userMessage,
+        cwd,
+        activeSkillIds: params.activeSkillIds,
+      });
+      return { ...result, cwd };
+    },
+    // File artifacts upload on-chain as metafiles paid by the GUEST bot's own
+    // wallet — the same metaFileUploadService path private-chat order
+    // delivery uses.
+    uploadDeliverableFile: async ({ metabotId, filePath, contentType }) => {
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
+    },
     emitLog: (msg) => console.log(msg),
     getCoworkStore,
   });
@@ -9047,6 +9094,71 @@ if (!gotTheLock) {
     }
   });
 
+  // OpenTeam M3: owner removes a member (local worker or remote bot) from a task.
+  ipcMain.handle('groupTask:kickMember', async (_event, input: {
+    taskId?: number;
+    metabotId?: number;
+    globalmetaid?: string;
+    reason?: string;
+  }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const metabotId = input?.metabotId != null ? Number(input.metabotId) : undefined;
+      if (metabotId != null && (!Number.isInteger(metabotId) || metabotId <= 0)) {
+        throw new Error('metabotId must be a positive integer');
+      }
+      const globalmetaid = typeof input?.globalmetaid === 'string' ? input.globalmetaid.trim() : '';
+      if (metabotId == null && !globalmetaid) {
+        throw new Error('metabotId or globalmetaid is required');
+      }
+      const member = await withSqliteRecovery('groupTask:kickMember', () =>
+        kickGroupTaskMember({
+          taskId,
+          metabotId,
+          globalmetaid: metabotId == null ? globalmetaid : undefined,
+          reason: typeof input?.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined,
+        }));
+      return { success: true, member };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to remove the member' };
+    }
+  });
+
+  // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
+  // Owner traceability for auto-accepted OpenTeam invites: every external group
+  // task this machine's bots joined (or left), with a message-activity digest.
+  ipcMain.handle('openTeamCollab:list', async () => {
+    try {
+      const items = await withSqliteRecovery('openTeamCollab:list', () =>
+        getOpenTeamMembershipStore().listCollabSummaries());
+      return { success: true, items };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaborations' };
+    }
+  });
+
+  // Read-only transcript for one external group. Content is already decrypted
+  // at insert time; reuse the group-task transcript query as-is.
+  ipcMain.handle('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
+    try {
+      const groupId = String(input?.groupId ?? '').trim();
+      if (!groupId) {
+        throw new Error('groupId is required');
+      }
+      const messages = await withSqliteRecovery('openTeamCollab:listMessages', () =>
+        getGroupTaskStore().listGroupChatMessages(groupId, {
+          beforeId: typeof input?.beforeId === 'number' ? input.beforeId : undefined,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        }));
+      return { success: true, messages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaboration messages' };
+    }
+  });
+
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {
@@ -9583,6 +9695,31 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
   });
+
+  // Per-metabot kv settings (metabot_settings table) are not metabots-table
+  // columns, so they bypass metabot:update; the whitelist lives in
+  // metabotSettingsService and rejects any key the renderer may not touch.
+  ipcMain.handle('metabot:getSetting', async (_event, metabotId: number, key: string) =>
+    withSqliteRecovery('metabot:getSetting', async () => {
+      try {
+        const value = getRendererMetabotSetting(getMetabotStore(), metabotId, key);
+        return { success: true, value };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to get metabot setting' };
+      }
+    }));
+
+  ipcMain.handle('metabot:setSetting', async (_event, metabotId: number, key: string, value: unknown) =>
+    withSqliteRecovery('metabot:setSetting', async () => {
+      try {
+        const stored = setRendererMetabotSetting(getMetabotStore(), metabotId, key, value);
+        return { success: true, value: stored };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to set metabot setting' };
+      }
+    }));
 
   ipcMain.handle('idbots:addMetaBot', async (_event, input: {
     name: string;

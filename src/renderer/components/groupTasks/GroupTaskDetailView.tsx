@@ -8,6 +8,7 @@ import type {
 import GroupTaskMessageItem from './GroupTaskMessageItem';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
+import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
@@ -23,7 +24,7 @@ import {
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -64,6 +65,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [closeError, setCloseError] = useState<string | null>(null);
   const [reopening, setReopening] = useState(false);
   const [reopenError, setReopenError] = useState<string | null>(null);
+  // OpenTeam M3: member removal (kick) — target member + in-flight state.
+  const [kickTarget, setKickTarget] = useState<GroupTaskDetail['members'][number] | null>(null);
+  const [kicking, setKicking] = useState(false);
+  const [kickError, setKickError] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -224,6 +229,25 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  const handleConfirmKick = async () => {
+    if (!kickTarget || !detail) return;
+    setKicking(true);
+    setKickError(null);
+    try {
+      await groupTaskService.kickMember({
+        taskId,
+        metabotId: kickTarget.metabotId ?? undefined,
+        globalmetaid: kickTarget.metabotId == null ? kickTarget.globalmetaid ?? undefined : undefined,
+      });
+      setKickTarget(null);
+      await refreshDetail();
+    } catch (err) {
+      setKickError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setKicking(false);
+    }
+  };
+
   if (loadingDetail) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -251,6 +275,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
   const chairMember = detail.members.find((member) => member.role === 'chair');
+  const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
+    member.name ?? (member.metabotId != null
+      ? `bot-${member.metabotId}`
+      : member.globalmetaid
+        ? `${member.globalmetaid.slice(0, 10)}…`
+        : 'remote bot');
   // Remote members (metabotId == null) joined via OpenTeam; their messages are
   // matched by globalmetaid so the transcript can flag them.
   const remoteMemberGlobalMetaIds = new Set(
@@ -499,13 +529,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             <div className="space-y-1.5">
               {detail.members.map((member) => (
                 <>
-                <div key={member.id} className="flex items-center gap-2">
+                <div key={member.id} className="group flex items-center gap-2">
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
-                    {member.name ?? (member.metabotId != null
-                      ? `bot-${member.metabotId}`
-                      : member.globalmetaid
-                        ? `${member.globalmetaid.slice(0, 10)}…`
-                        : 'remote bot')}
+                    {memberDisplayName(member)}
                   </span>
                   {member.role === 'chair' && (
                     <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-claude-accent/15 text-claude-accent">
@@ -539,6 +565,22 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     >
                       {groupTaskMemberStatusLabel(member.status)}
                     </span>
+                  )}
+                  {/* M3: the owner may remove any non-chair member while the task is active. */}
+                  {!isTerminal && member.role !== 'chair'
+                    && (member.metabotId != null || member.globalmetaid) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setKickError(null);
+                        setKickTarget(member);
+                      }}
+                      title={i18nService.t('groupTasksRemoveMember')}
+                      aria-label={i18nService.t('groupTasksRemoveMember')}
+                      className="ml-auto shrink-0 hidden group-hover:inline-flex h-5 w-5 items-center justify-center rounded dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                    >
+                      <XMarkIcon className="h-3.5 w-3.5" />
+                    </button>
                   )}
                 </div>
                 {member.lastSpeakAt != null && (
@@ -698,6 +740,19 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           onCancel={() => {
             setConfirmAction(null);
             setCloseError(null);
+          }}
+        />
+      )}
+      {/* Member removal confirmation */}
+      {kickTarget && (
+        <GroupTaskKickConfirmModal
+          memberName={memberDisplayName(kickTarget)}
+          kicking={kicking}
+          error={kickError}
+          onConfirm={() => void handleConfirmKick()}
+          onCancel={() => {
+            setKickTarget(null);
+            setKickError(null);
           }}
         />
       )}

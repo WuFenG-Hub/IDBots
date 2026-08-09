@@ -1,4 +1,6 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
+import type { GroupChatTranscriptMessage } from './groupTask';
+import type { OpenTeamCollabSummary } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
   MetaAppGalleryRecord,
@@ -965,8 +967,14 @@ interface IElectronAPI {
     rework: (input: { taskId: number; reason?: string }) => Promise<any>;
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
+  };
+  openTeamCollab: {
+    list: () => Promise<{ success: boolean; items?: OpenTeamCollabSummary[]; error?: string }>;
+    listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
+      Promise<{ success: boolean; messages?: GroupChatTranscriptMessage[]; error?: string }>;
   };
   idbots: {
     getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;
@@ -1195,6 +1203,9 @@ interface IElectronAPI {
     create: (input: MetabotCreateInput) => Promise<{ success: boolean; metabot?: Metabot; error?: string }>;
     update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
+    /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
+    getSetting: (id: number, key: string) => Promise<{ success: boolean; value?: string | null; error?: string }>;
+    setSetting: (id: number, key: string, value: string) => Promise<{ success: boolean; value?: string; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
   };
   dream: {

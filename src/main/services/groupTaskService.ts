@@ -26,6 +26,7 @@ import {
   createGroupChat,
   joinGroupChat,
   joinGroupChatAsIdentity,
+  removeGroupChatMember,
   sendGroupChatMessage,
   sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
@@ -43,6 +44,11 @@ import {
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
 } from './groupTaskDaemon';
+import { getMetaIdDetail } from './metaIdSearchService';
+import {
+  recordTaskCloseImpressions,
+  recordKickImpression,
+} from './openTeamImpressionService';
 
 export interface CreateGroupTaskOptions {
   title: string;
@@ -205,35 +211,44 @@ function getKvStore(): GroupTaskServiceKvStore {
 let createGroupChatFn = createGroupChat;
 let joinGroupChatFn = joinGroupChat;
 let joinGroupChatAsIdentityFn = joinGroupChatAsIdentity;
+let removeGroupChatMemberFn = removeGroupChatMember;
 let sendGroupChatMessageFn = sendGroupChatMessage;
 let sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
 let waitForGroupIndexedFn = waitForGroupIndexed;
+// Indexer lookup seam (OpenTeam M3): resolves a remote member's legacy metaId.
+let getMetaIdDetailFn = getMetaIdDetail;
 
 export interface GroupTaskServiceTransportOverrides {
   createGroupChat?: typeof createGroupChat;
   joinGroupChat?: typeof joinGroupChat;
   joinGroupChatAsIdentity?: typeof joinGroupChatAsIdentity;
+  removeGroupChatMember?: typeof removeGroupChatMember;
   sendGroupChatMessage?: typeof sendGroupChatMessage;
   sendGroupChatMessageAsIdentity?: typeof sendGroupChatMessageAsIdentity;
   waitForGroupIndexed?: typeof waitForGroupIndexed;
+  getMetaIdDetail?: typeof getMetaIdDetail;
 }
 
 export function setGroupTaskServiceTransport(overrides: GroupTaskServiceTransportOverrides): void {
   createGroupChatFn = overrides.createGroupChat ?? createGroupChat;
   joinGroupChatFn = overrides.joinGroupChat ?? joinGroupChat;
   joinGroupChatAsIdentityFn = overrides.joinGroupChatAsIdentity ?? joinGroupChatAsIdentity;
+  removeGroupChatMemberFn = overrides.removeGroupChatMember ?? removeGroupChatMember;
   sendGroupChatMessageFn = overrides.sendGroupChatMessage ?? sendGroupChatMessage;
   sendGroupChatMessageAsIdentityFn = overrides.sendGroupChatMessageAsIdentity ?? sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = overrides.waitForGroupIndexed ?? waitForGroupIndexed;
+  getMetaIdDetailFn = overrides.getMetaIdDetail ?? getMetaIdDetail;
 }
 
 export function resetGroupTaskServiceTransport(): void {
   createGroupChatFn = createGroupChat;
   joinGroupChatFn = joinGroupChat;
   joinGroupChatAsIdentityFn = joinGroupChatAsIdentity;
+  removeGroupChatMemberFn = removeGroupChatMember;
   sendGroupChatMessageFn = sendGroupChatMessage;
   sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = waitForGroupIndexed;
+  getMetaIdDetailFn = getMetaIdDetail;
 }
 
 const OWNER_JOINED_KV_PREFIX = 'group_task_owner_joined:';
@@ -748,6 +763,132 @@ export async function joinGroupTaskMember(
   return member;
 }
 
+export interface KickGroupTaskMemberInput {
+  taskId: number;
+  /** Local member path (metabots row id). */
+  metabotId?: number;
+  /** Remote member path (OpenTeam member rows have metabot_id IS NULL). */
+  globalmetaid?: string;
+  reason?: string;
+}
+
+/**
+ * Resolve the legacy MetaID the /protocols/simplegroupremoveuser body expects
+ * (idchat's removeMember writes the legacy metaId, not the GlobalMetaID).
+ * Local members read it from the metabots row; remote OpenTeam members only
+ * carry a GlobalMetaID locally, so it is resolved through the MetaID search
+ * indexer — falling back to the GlobalMetaID itself when the lookup fails or
+ * returns no metaId (the indexer tolerates the GlobalMetaID form for member
+ * matching; a wrong value only means the on-chain removal is a no-op while the
+ * local kick still holds).
+ */
+async function resolveRemoveMetaid(member: GroupTaskMember): Promise<string> {
+  if (member.metabotId != null) {
+    const metaid = getMetabotStore().getMetabotById(member.metabotId)?.metaid?.trim() ?? '';
+    if (!metaid) {
+      throw new Error(`MetaBot ${member.metabotId} has no on-chain MetaID; sync its identity first`);
+    }
+    return metaid;
+  }
+  const gmid = (member.globalmetaid ?? '').trim();
+  if (!gmid) throw new Error(`Member ${member.id} has neither metabotId nor globalmetaid`);
+  try {
+    const detail = await getMetaIdDetailFn(gmid);
+    const metaid = detail.metaId?.trim() ?? '';
+    if (metaid) return metaid;
+    console.warn(`[GroupTask] MetaID detail for ${gmid} has no metaId; falling back to the GlobalMetaID`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] metaId resolution for ${gmid} failed; falling back to the GlobalMetaID: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return gmid;
+}
+
+/**
+ * Kick a member out of a group task (OpenTeam M3): the chair (twin, the group's
+ * on-chain creator) signs a /protocols/simplegroupremoveuser pin, then the
+ * member row is marked removed and the chair posts a deterministic moderation
+ * notice in the group (no LLM). On-chain failure aborts before any DB write.
+ * Idempotent: an already-removed member is returned without a new pin.
+ */
+export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Promise<GroupTaskMember> {
+  const taskId = Math.trunc(Number(input.taskId));
+  if (!Number.isInteger(taskId) || taskId <= 0) throw new Error('taskId is required');
+  const task = requireRunnableTask(taskId);
+  const store = getGroupTaskStore();
+  const metabotStore = getMetabotStore();
+
+  const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
+  const globalmetaid = input.globalmetaid?.trim() || null;
+  if (metabotId != null && (!Number.isInteger(metabotId) || metabotId <= 0)) {
+    throw new Error('metabotId must be a positive integer');
+  }
+  if (metabotId == null && !globalmetaid) {
+    throw new Error('metabotId or globalmetaid is required');
+  }
+
+  // Look the member up INCLUDING removed rows so a repeated kick is a no-op.
+  const all = store.listMembers(taskId, { includeRemoved: true });
+  const member = metabotId != null
+    ? all.find((candidate) => candidate.metabotId === metabotId)
+    // Remote re-joins create fresh rows; the latest row is the live one.
+    : [...all].reverse().find(
+        (candidate) => candidate.metabotId == null && candidate.globalmetaid === globalmetaid,
+      );
+  if (!member) {
+    const who = metabotId != null ? `MetaBot ${metabotId}` : `globalmetaid ${globalmetaid}`;
+    throw new Error(`${who} is not a member of group task ${taskId}`);
+  }
+  if (member.role === 'chair') {
+    throw new Error('The chair (twin bot) cannot be removed from its own group task');
+  }
+  if (member.removedAt) return member; // idempotent: already kicked
+
+  const chair = metabotStore.getMetabotById(task.chairMetabotId);
+  if (!chair) {
+    throw new Error(`Chair MetaBot ${task.chairMetabotId} not found; cannot sign the removal pin`);
+  }
+
+  const reason = input.reason?.trim() || undefined;
+  const removeMetaid = await resolveRemoveMetaid(member);
+  const { pinId } = await removeGroupChatMemberFn(task.chairMetabotId, task.groupId!, {
+    removeMetaid,
+    reason,
+  });
+  const removed = store.markMemberRemoved({
+    taskId,
+    metabotId: member.metabotId,
+    globalmetaid: member.metabotId == null ? member.globalmetaid : undefined,
+    removePinId: pinId,
+  });
+
+  // Deterministic moderation notice from the chair (English, fixed format).
+  // A failed announcement must not roll back the removal — the pin and the
+  // member row already hold.
+  try {
+    const displayName = member.name?.trim() || removeMetaid;
+    await sendGroupChatMessageFn(task.chairMetabotId, task.groupId!, {
+      content:
+        `Moderation: ${displayName} has been removed from this group task by the owner.` +
+        (reason ? ` Reason: ${reason}` : ''),
+      nickName: chair.name?.trim() || `bot-${task.chairMetabotId}`,
+    });
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Moderation announcement failed for task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  // OpenTeam M3: the chair sediments a collaboration impression about a kicked
+  // REMOTE member. Best-effort — the removal above already holds; the recorder
+  // no-ops for local members and never throws.
+  recordKickImpression(taskId, member.globalmetaid ?? '', reason);
+  return removed;
+}
+
 /**
  * Remove a mistakenly recorded deliverable (P1-4 cleanup hatch: chair can delete
  * placeholder/junk deliverables that were ingested before the parser hardening).
@@ -951,6 +1092,10 @@ export async function closeGroupTask(
   if (closed.status === 'done' && opts.rating != null) {
     return getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
   }
+  // OpenTeam M3: the chair sediments one participation impression per REMOTE
+  // teammate (recorded for cancelled tasks too). Best-effort: the task is
+  // already closed; the recorder never throws into this flow.
+  recordTaskCloseImpressions(taskId, opts.status, opts.reason);
   return closed;
 }
 

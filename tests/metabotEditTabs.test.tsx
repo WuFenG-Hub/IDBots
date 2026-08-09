@@ -99,6 +99,8 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
   const chatPanel = panelMarkup(markup, 'chatSettings');
   assert.match(chatPanel, /data-slot="metabot-a2a-auto-reply-switch"/);
   assert.match(chatPanel, /aria-checked="true"/);
+  // OpenTeam remote-collab switch: immediate-effect kv toggle, not part of EDIT_TAB_FIELDS.
+  assert.match(chatPanel, /data-slot="metabot-openteam-remote-collab-switch"/);
   assert.match(chatPanel, /id="metabot-allow-chat-skills"/);
   assert.match(chatPanel, /id="metabot-a2a-max-turns"/);
   assert.match(chatPanel, /id="metabot-a2a-bye-cooldown"/);

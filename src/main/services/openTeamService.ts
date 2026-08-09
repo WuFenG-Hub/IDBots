@@ -25,7 +25,9 @@
  * wires everything once via setOpenTeamServiceDeps; tests inject mocks the
  * same way. Watchers are module state — stopOpenTeamInviteWatchers cleans up
  * on shutdown/recovery, resumeOpenTeamInviteWatchers re-arms them after a
- * restart from the pending invite rows.
+ * restart from the pending invite rows plus accepted-but-unconfirmed rows
+ * (crash between the ACCEPT landing and the join confirmation) whose remote
+ * member row is still missing.
  */
 
 import { randomBytes } from 'crypto';
@@ -199,6 +201,13 @@ export interface InviteRemoteBotInput {
   inviteeGlobalMetaId: string;
   inviteeName?: string;
   requiredSkills?: string[];
+  /**
+   * Explicit owner-requested override (M3): re-inviting an invitee who was
+   * previously kicked from this task or declined a previous invite is rejected
+   * by default; pass true only when the owner explicitly asked for the
+   * re-invite. Expired invites are not negative history and never block.
+   */
+  allowReinvite?: boolean;
 }
 
 export interface InviteRemoteBotResult {
@@ -222,7 +231,8 @@ function generateOpenTeamInviteId(): string {
 /**
  * Send an [OPENTEAM_INVITE] to a remote online bot and track it as pending.
  * Validation order: runnable task -> valid/non-local invitee -> not a member
- * -> no pending duplicate -> online -> chat pubkey available. Throws with a
+ * -> no pending duplicate -> no blocked re-invite (kicked/declined history,
+ * unless allowReinvite) -> online -> chat pubkey available. Throws with a
  * user-readable message on the first failing check.
  */
 export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<InviteRemoteBotResult> {
@@ -251,6 +261,26 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   }
   if (membershipStore.hasPendingInvite(taskId, invitee)) {
     throw new Error(`a pending invite for ${invitee} already exists on group task ${taskId}`);
+  }
+  if (!input.allowReinvite) {
+    // Re-invite policy (M3): kicked members and declined invitees are not
+    // re-invited unless the owner explicitly asks (allowReinvite). Expired
+    // invites are not negative history and never block.
+    const wasRemoved = store
+      .listMembers(taskId, { includeRemoved: true })
+      .some((m) => m.metabotId == null && m.removedAt && m.globalmetaid === invitee);
+    if (wasRemoved) {
+      throw new Error(
+        `invitee ${invitee} was previously removed from group task ${taskId}; ` +
+        're-invite only when the owner explicitly asks (allowReinvite)',
+      );
+    }
+    if (membershipStore.hasDeclinedInvite(taskId, invitee)) {
+      throw new Error(
+        `invitee ${invitee} previously declined an invite to group task ${taskId}; ` +
+        're-invite only when the owner explicitly asks (allowReinvite)',
+      );
+    }
   }
 
   const presence = await resolved.fetchOnlineStatus([invitee]);
@@ -369,7 +399,9 @@ function startInviteWatcher(invitePinId: string, opts?: { identities?: string[] 
   const resolved = getOpenTeamServiceDeps();
   if (inviteWatchers.has(invitePinId)) return;
   const invite = resolved.getMembershipStore().getInviteByPinId(invitePinId);
-  if (!invite || invite.status !== 'pending') return;
+  // Pending waits for the guest's answer; accepted (restart recovery of a
+  // crash mid-handshake) resumes straight into join confirmation.
+  if (!invite || (invite.status !== 'pending' && invite.status !== 'accepted')) return;
   const now = resolved.now ?? (() => Date.now());
   const timeoutMs = Math.max(1_000, Math.trunc(resolved.joinConfirmTimeoutMs ?? DEFAULT_JOIN_CONFIRM_TIMEOUT_MS));
   const createdMs = parseSqliteUtcMs(invite.createdAt);
@@ -502,15 +534,26 @@ async function notifyOwnerOfExpiredInvite(
 }
 
 /**
- * Restart recovery: re-arm watchers for every still-pending invite row.
- * Returns the number of watchers started. (Accepted-but-unconfirmed invites
- * from a crash mid-handshake are out of M1 scope.)
+ * Restart recovery: re-arm watchers for every still-pending invite row, plus
+ * accepted-but-unconfirmed invites (app quit after the ACCEPT landed but
+ * before the join was confirmed). An accepted invite whose remote member row
+ * already exists is complete — no watcher, no duplicate addMember. Accepted
+ * invites past their original window finalize as expired on the first tick
+ * through the same join_confirm_timeout path as a live watcher.
+ * Returns the number of watchers started.
  */
 export function resumeOpenTeamInviteWatchers(): number {
   const resolved = getOpenTeamServiceDeps();
-  const pending = resolved.getMembershipStore().listPendingInvites();
+  const membershipStore = resolved.getMembershipStore();
+  const groupTaskStore = resolved.getGroupTaskStore();
+  const resumable = [
+    ...membershipStore.listPendingInvites(),
+    ...membershipStore
+      .listAcceptedInvites()
+      .filter((invite) => !groupTaskStore.isMember(invite.taskId, null, invite.inviteeGlobalmetaid)),
+  ];
   let started = 0;
-  for (const invite of pending) {
+  for (const invite of resumable) {
     if (!invite.invitePinId || inviteWatchers.has(invite.invitePinId)) continue;
     startInviteWatcher(invite.invitePinId, { identities: [invite.inviteeGlobalmetaid] });
     if (inviteWatchers.has(invite.invitePinId)) started += 1;

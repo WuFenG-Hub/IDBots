@@ -1961,7 +1961,8 @@ export class SqliteStore {
   /**
    * Migration: OpenTeam remote members — display_name is the inviter-side name
    * snapshot for members without a local metabots row (metabot_id IS NULL);
-   * removed_at marks kicked members (M3) without deleting history.
+   * removed_at marks kicked members (M3) without deleting history, and
+   * remove_pin_id records the on-chain removeuser pin for audit.
    */
   private migrateGroupTaskMembersOpenTeamColumns(): void {
     try {
@@ -1975,6 +1976,11 @@ export class SqliteStore {
       }
       if (!columns.includes('removed_at')) {
         this.db.run('ALTER TABLE group_task_members ADD COLUMN removed_at TEXT');
+        columns = [...columns, 'removed_at'];
+        changed = true;
+      }
+      if (!columns.includes('remove_pin_id')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN remove_pin_id TEXT');
         changed = true;
       }
       if (changed) {

@@ -1,6 +1,6 @@
 ---
 name: metabot-group-task
-description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
+description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/kick/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
 official: true
 ---
 
@@ -31,6 +31,7 @@ Every payload carries an `action`:
 | `member_status` | Member work states (idle/working/error) without the full detail | `POST /api/idbots/group-task/member-status` |
 | `send` | Post one message into the task group | `POST /api/idbots/group-task/send` |
 | `invite` | Add a local bot to an existing task (response includes `sessionStatus`) | `POST /api/idbots/group-task/invite` |
+| `kick` | Remove a member (local or remote) from a task | `POST /api/idbots/group-task/kick-member` |
 | `search_remote` | OpenTeam: search online on-chain bots by keyword/skill | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
@@ -45,7 +46,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
 2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
-3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes).
+3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
 5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
 6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
@@ -122,6 +123,17 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 - Response `members`: each member with `workStatus` (`working` / `error` / `idle` / `unknown`), `lastSpeakAt`, `lastWorkingAt`. `working` = a running canonical attempt or a `[WORKING]` tag in the last 20 min; `error` = a failed attempt in the last 60 min. Query this instead of guessing whether a silent worker is alive.
 
+### `kick`
+
+```json
+{ "action": "kick", "task_id": 1, "globalmetaid": "idq1...", "reason": "off-topic output" }
+```
+
+- `task_id`: required. Identify the member with `globalmetaid` (remote member), `metabot_id`, or `metabot_name` (local member) — exactly one.
+- `reason`: optional, carried in the on-chain removal pin and the group announcement.
+- The chair signs an on-chain `/protocols/simplegroupremoveuser` pin first; the member is only marked removed after that pin succeeds. Kicking an already-removed member is a safe no-op.
+- Response: `{"success":true,"member":{...,"removedAt":"...","removePinId":"..."}}`.
+
 ### `search_remote` (OpenTeam)
 
 ```json
@@ -138,6 +150,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 ```
 
 - `task_id`, `globalmetaid`: required. `name`, `required_skills`: optional (carried in the invite envelope).
+- `allow_reinvite`: optional boolean, default false. Re-inviting a bot that was **kicked from this task** or **declined a previous invite** is rejected by the server; pass `allow_reinvite: true` only when the owner explicitly asked to bring that bot back. Expired (timed-out) invites are not negative history and never block a retry.
 - Response: `{"success":true,"invitePinId":"...","status":"pending","sessionStatus":"pending"}` — the invite is **sent**, not yet joined (see the OpenTeam section below). `sessionStatus` is always `pending` for remote invites: the guest's worker session is created on ITS OWN host when the ACCEPT lands, which the inviter cannot see. Local `invite` responses carry the real created/ready/failed status.
 
 ### `close`
@@ -172,14 +185,29 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 ## OpenTeam — inviting remote bots
 
-When **no local bot covers a capability the goal needs** (check the `bots` roster first — always prefer local members), the chair can recruit a bot from another machine through OpenTeam:
+Remote recruitment is the exception, not the default. After decomposing the owner's wish, inventory the **local** roster first (`bots`: names, bio/role/goal, enabled state, plus any past-task experience you have). If local bots cover every step, do NOT search remotely. Search only when a step needs a capability the local roster does not match (no relevant skill tags, no similar task history) — or when you are clearly unsure a local bot can deliver that step.
 
-1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned; pick by `chatSkills`/`bio` fit, not by name alone.
-2. **Invite**: `invite_remote` with the candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
-3. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer. If a joined member stays silent for a long stretch, query `member_status` instead of guessing: `working` means it is mid-task, `idle` means it likely did not see the dispatch (re-assign). If the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately; you may then invite a different candidate.
-4. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
+Full playbook (search → pick → invite → wait → assign, with failure branches):
 
-Discipline: one pending invite per task+invitee at a time (duplicates are rejected); never invite a bot you have not inspected via `search_remote`; remote recruitment is the exception, not the default — exhaust the local roster first.
+1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned.
+2. **Pick ONE**: compare candidates by `bio` / `chatSkills` / on-chain track record, not by name alone, and choose the single best fit. Invite one candidate at a time.
+3. **Invite**: `invite_remote` with that candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
+4. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer.
+5. **Failure branch**: if the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately. Treat it as no deal: invite the next-best candidate instead, or explain the capability gap to the owner and continue with local members only.
+6. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
+
+Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`. A bot that declined or was kicked is blocked from re-invite by the server (declined invite history and removed member rows are checked): do not retry it for this or later tasks unless the owner explicitly asks — only then re-invite with `allow_reinvite: true`. An expired (timed-out) invite is not a negative record: re-inviting that bot, or moving on to the next-best candidate, is the normal flow.
+
+## Owner-directed moderation (kicking a member)
+
+When the **owner** tells you to remove someone from a group task — e.g. "把 X 踢出群任务", "remove translator-bot from task 3", "X 别干了" — that is a moderation directive, not a discussion. Act on it promptly and politely:
+
+1. **Confirm the target**: `show` the task and match the owner's wording to one member (remote members show `metabotId: null` — use their `globalmetaid`; local workers take `metabot_name`). If the owner means you (the chair), refuse: the chair cannot be kicked from its own task.
+2. **Execute**: run `kick` with the task id and the member identity, passing the owner's reason when given. The server signs the on-chain removal pin with your (the chair's) wallet, marks the member removed, and posts a fixed moderation notice in the group automatically — do NOT post a second announcement yourself.
+3. **Report back**: tell the owner briefly who was removed and why. If the kick failed (task closed, not a member, chain error), relay the error verbatim instead of pretending it worked.
+4. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks — for a remote member the server enforces this and rejects the invite unless you pass `allow_reinvite: true`; a kicked local worker re-joins through `invite` (its member row is revived in place).
+
+This works from any conversation where this skill is available — the cowork session and A2A private chats alike (private-chat skill routing applies: the skill must be in the bot's chat-skill allowlist for the kick directive to reach you there).
 
 ## Lifecycle
 

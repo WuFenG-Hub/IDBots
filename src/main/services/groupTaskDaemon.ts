@@ -118,6 +118,17 @@ const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
 const DEFAULT_CHAIR_COOLDOWN_MS = 10_000;
 /**
+ * OpenTeam M2: an offline remote teammate (metabotId == null) whose latest
+ * group message is older than this window counts as "unreachable" — injected
+ * into the chair's turn context and reported to the owner once per streak.
+ */
+const DEFAULT_REMOTE_UNREACHABLE_AFTER_MS = 10 * 60_000;
+/**
+ * OpenTeam M2: presence probes cost an API call — at most one probe per task
+ * per this interval (in-memory throttle; failed probes also throttle).
+ */
+const DEFAULT_REMOTE_PRESENCE_THROTTLE_MS = 60_000;
+/**
  * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
  * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
  * floor-control / owner-message). Covers scenarios the exact reply-pin match
@@ -452,6 +463,22 @@ export type GroupTaskDaemonResolveGlobalMetaIdFn = (
  */
 export type GroupTaskDaemonProbeUrlFn = (url: string) => Promise<number | null>;
 
+/**
+ * OpenTeam M2: online-presence probe for remote teammates (wired to
+ * IdchatPresenceService.fetchOnlineStatus in main.ts). One entry per queried
+ * GlobalMetaID; a peer with no entry (or isOnline=false) counts as offline.
+ */
+export interface GroupTaskRemotePresenceEntry {
+  globalMetaId: string;
+  isOnline: boolean;
+  /** Seconds since the peer was last seen online (0/negative = unknown). */
+  lastSeenAgoSeconds: number;
+}
+
+export type GroupTaskDaemonFetchRemotePresenceFn = (
+  globalMetaIds: string[],
+) => Promise<GroupTaskRemotePresenceEntry[]>;
+
 export interface GroupTaskDaemonDeps {
   getStore: () => GroupTaskDaemonSqliteStoreLike;
   getGroupTaskStore: () => GroupTaskStore;
@@ -468,6 +495,15 @@ export interface GroupTaskDaemonDeps {
   readPinSecondaryForVerification?: GroupTaskDaemonReadPinFn;
   resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
   probeUrl?: GroupTaskDaemonProbeUrlFn;
+  /**
+   * OpenTeam M2: presence probe for remote-teammate unreachable detection.
+   * Unwired = the feature stays off (no prompt injection, no owner alert).
+   */
+  fetchRemotePresence?: GroupTaskDaemonFetchRemotePresenceFn;
+  /** Silence window (ms) after which an offline remote teammate is unreachable. */
+  remoteUnreachableAfterMs?: number;
+  /** Per-task minimum interval (ms) between presence probes. */
+  remotePresenceThrottleMs?: number;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
@@ -616,6 +652,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     60_000,
     Math.trunc(deps.verificationRetryMs ?? DEFAULT_VERIFICATION_RETRY_MS),
   );
+  const remoteUnreachableAfterMs = Math.max(
+    1_000,
+    Math.trunc(deps.remoteUnreachableAfterMs ?? DEFAULT_REMOTE_UNREACHABLE_AFTER_MS),
+  );
+  const remotePresenceThrottleMs = Math.max(
+    1_000,
+    Math.trunc(deps.remotePresenceThrottleMs ?? DEFAULT_REMOTE_PRESENCE_THROTTLE_MS),
+  );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
 
@@ -670,6 +714,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (pins.length > 8) pins.shift();
     daemonChairSentPins.set(taskId, pins);
   };
+
+  // ---------------------------------------------------------------------
+  // OpenTeam M2: remote-teammate unreachable detection (in-memory only).
+  // ---------------------------------------------------------------------
+
+  interface RemoteUnreachableInfo {
+    globalMetaId: string;
+    name: string;
+    /** Seconds since the peer was last seen online; null = unknown. */
+    offlineSeconds: number | null;
+    /** Seconds since its latest group message; null = never posted here. */
+    silentSeconds: number | null;
+  }
+
+  interface RemotePresenceSnapshot {
+    queriedAt: number;
+    unreachable: RemoteUnreachableInfo[];
+  }
+
+  /** Latest presence evaluation per task; refreshed at most once per throttle window. */
+  const remotePresenceByTask = new Map<number, RemotePresenceSnapshot>();
+  /** `${taskId}:${globalMetaId}` keys already owner-notified for the CURRENT unreachable streak. */
+  const remoteUnreachableNotified = new Set<string>();
 
   /**
    * P2-8: multi-driver mutex — kv heartbeat claim. Returns true when THIS
@@ -912,6 +979,175 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       [groupId, limit],
     ));
     return rows.reverse();
+  };
+
+  /**
+   * OpenTeam M2: chain timestamp (seconds) of the sender's latest message in
+   * this group; null when the peer never posted (or rows lack timestamps).
+   */
+  const queryLastSenderMessageChainSec = (
+    db: Database,
+    groupId: string,
+    senderGlobalMetaId: string,
+  ): number | null => {
+    const result = db.exec(
+      `SELECT MAX(chain_timestamp) FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid = ?`,
+      [groupId, senderGlobalMetaId],
+    );
+    const value = result[0]?.values?.[0]?.[0];
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  };
+
+  const toMinutesText = (seconds: number): string => `${Math.max(1, Math.round(seconds / 60))} min`;
+
+  const formatRemoteUnreachableFacts = (info: RemoteUnreachableInfo): string => {
+    const offlineText = info.offlineSeconds != null
+      ? `offline for ~${toMinutesText(info.offlineSeconds)}`
+      : 'offline (last-seen unknown)';
+    const silentText = info.silentSeconds != null
+      ? `no message for ${toMinutesText(info.silentSeconds)}`
+      : 'no message in this task yet';
+    return `${offlineText}, ${silentText}`;
+  };
+
+  /**
+   * OpenTeam M2: neutral fact block for the chair turn (roster-adjacent). The
+   * wording states host-observed facts only — the playbook rules on remote
+   * no-shows already tell the chair how to react, so the block just points
+   * back at them. Purely real-time: when the teammate is reachable again the
+   * next evaluation returns an empty list and the hint disappears.
+   */
+  const buildRemoteStatusBlock = (infos: RemoteUnreachableInfo[]): string => {
+    if (infos.length === 0) return '';
+    return [
+      '[Remote teammate status — host-observed facts]',
+      ...infos.map(
+        (info) => `- ${info.name} (remote teammate) is currently unreachable: ${formatRemoteUnreachableFacts(info)}.`,
+      ),
+      'Apply your playbook rules for unresponsive remote teammates (re-assign the work and/or explain the change to the owner) as you judge fit.',
+    ].join('\n');
+  };
+
+  /**
+   * OpenTeam M2: evaluate remote teammates (metabotId == null, globalmetaid
+   * set) of one ACTIVE task and return the currently-unreachable ones.
+   * "Unreachable" = presence says offline AND no group message within
+   * remoteUnreachableAfterMs. Probes are throttled to one per task per
+   * remotePresenceThrottleMs; between probes the cached snapshot is reused so
+   * the chair hint stays stable. A failed probe silently keeps the previous
+   * snapshot (first failure => empty). Side effect: the FIRST evaluation that
+   * finds a teammate unreachable sends one private owner brief via
+   * sendOwnerPrivateReport; the flag resets when the teammate is reachable
+   * again or the task leaves the active set (pruned in runTick).
+   */
+  const evaluateRemoteTeammates = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    ownerGlobalMetaId: string,
+  ): Promise<RemoteUnreachableInfo[]> => {
+    if (!task.groupId) return [];
+    const remoteMembers = members.filter(
+      (member) => member.metabotId == null && Boolean(member.globalmetaid?.trim()),
+    );
+    if (remoteMembers.length === 0) {
+      remotePresenceByTask.delete(task.id);
+      return [];
+    }
+    if (!deps.fetchRemotePresence) return [];
+
+    const cached = remotePresenceByTask.get(task.id);
+    if (cached && now() - cached.queriedAt < remotePresenceThrottleMs) {
+      return cached.unreachable;
+    }
+
+    let entries: GroupTaskRemotePresenceEntry[];
+    try {
+      entries = await deps.fetchRemotePresence(
+        remoteMembers.map((member) => member.globalmetaid!.trim()),
+      );
+    } catch (error) {
+      // Silent skip: keep the previous snapshot, throttle the next attempt.
+      remotePresenceByTask.set(task.id, {
+        queriedAt: now(),
+        unreachable: cached?.unreachable ?? [],
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: remote presence probe failed; keeping previous snapshot: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return cached?.unreachable ?? [];
+    }
+
+    const db = deps.getStore().getDatabase();
+    const nowSec = Math.floor(now() / 1000);
+    const unreachable: RemoteUnreachableInfo[] = [];
+    for (const member of remoteMembers) {
+      const globalMetaId = member.globalmetaid!.trim();
+      const entry = entries.find(
+        (candidate) => candidate.globalMetaId.trim().toLowerCase() === globalMetaId.toLowerCase(),
+      );
+      if (entry?.isOnline) continue; // reachable — no hint, notification flag resets below
+      const lastMessageSec = queryLastSenderMessageChainSec(db, task.groupId, globalMetaId);
+      const silentSeconds = lastMessageSec != null ? Math.max(0, nowSec - lastMessageSec) : null;
+      if (silentSeconds != null && silentSeconds * 1000 < remoteUnreachableAfterMs) {
+        continue; // offline but recently active in the group — not unreachable
+      }
+      const lastSeenAgoSeconds = Number(entry?.lastSeenAgoSeconds);
+      unreachable.push({
+        globalMetaId,
+        name: member.name ?? `remote-${globalMetaId.slice(0, 10) || 'unknown'}`,
+        offlineSeconds: Number.isFinite(lastSeenAgoSeconds) && lastSeenAgoSeconds > 0
+          ? lastSeenAgoSeconds
+          : null,
+        silentSeconds,
+      });
+    }
+    remotePresenceByTask.set(task.id, { queriedAt: now(), unreachable });
+
+    // Owner brief: exactly once per (task, member) unreachable streak.
+    const reachableAgain = remoteMembers.filter(
+      (member) => !unreachable.some(
+        (info) => info.globalMetaId.toLowerCase() === member.globalmetaid!.trim().toLowerCase(),
+      ),
+    );
+    for (const member of reachableAgain) {
+      remoteUnreachableNotified.delete(`${task.id}:${member.globalmetaid!.trim().toLowerCase()}`);
+    }
+    if (unreachable.length > 0 && deps.sendOwnerPrivateReport) {
+      const chairMember = members.find((member) => member.role === 'chair');
+      const chairBot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+      for (const info of unreachable) {
+        const notifyKey = `${task.id}:${info.globalMetaId.toLowerCase()}`;
+        if (remoteUnreachableNotified.has(notifyKey)) continue;
+        if (!chairBot || !ownerGlobalMetaId) break; // cannot address the owner; retry next probe
+        try {
+          await deps.sendOwnerPrivateReport({
+            taskId: task.id,
+            metabotId: chairBot.id,
+            ownerGlobalMetaId,
+            text:
+              `[OpenTeam] Group task #${task.id} "${task.title}": remote teammate "${info.name}" ` +
+              `appears unreachable (${formatRemoteUnreachableFacts(info)}). I have this fact in my ` +
+              'context and will re-assign their part if the silence continues.',
+          });
+          remoteUnreachableNotified.add(notifyKey);
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: owner notified that remote teammate ${info.name} is unreachable`,
+          );
+        } catch (error) {
+          // Not marked as notified — the next probe retries (throttled).
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: unreachable-owner-brief failed for ${info.name}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
+    return unreachable;
   };
 
   const recordGroupTaskMessageForLocalMembers = (
@@ -1677,6 +1913,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     members: GroupTaskMember[],
     botsById: Map<number, GroupTaskDaemonBotFull>,
     promptMembers: DaemonPromptMember[],
+    remoteStatusBlock: string,
   ): Promise<void> => {
     const sqlite = deps.getStore();
     const plannedKey = `${CHAIR_PLANNED_KV_PREFIX}${task.id}`;
@@ -1708,8 +1945,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const ownerGlobalMetaId = (bot.boss_global_metaid ?? '').trim();
       const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
       const systemPrompt = systemPromptParts.systemPrompt;
-      // Volatile context (time + experience/cognition) rides the user turn.
-      const directive = [systemPromptParts.volatileContext, buildPlanningDirective(db, task, promptMembers)]
+      // Volatile context (time + experience/cognition + remote-teammate facts)
+      // rides the user turn.
+      const directive = [systemPromptParts.volatileContext, remoteStatusBlock, buildPlanningDirective(db, task, promptMembers)]
         .filter(Boolean)
         .join('\n\n');
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
@@ -1778,6 +2016,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     chairGlobalMetaId: string,
     ownerGlobalMetaId: string,
     verificationNotes: string[],
+    remoteStatusBlock: string,
   ): Promise<void> => {
     const db = deps.getStore().getDatabase();
     const coworkStore = deps.getCoworkStore();
@@ -1791,6 +2030,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (verificationNotes.length > 0) {
       // Host deliverable-verification facts accompany the chair's context.
       userMessage = `${userMessage}\n${verificationNotes.join('\n')}`;
+    }
+    if (member.role === 'chair' && remoteStatusBlock) {
+      // OpenTeam M2: host-observed unreachable facts accompany the chair only.
+      userMessage = `${userMessage}\n\n${remoteStatusBlock}`;
     }
 
     // Skill routing (mirrors privateChatDaemon): when the bot has chat skills enabled
@@ -2386,6 +2629,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       chairMemberId != null ? botsById.get(chairMemberId)?.boss_global_metaid ?? '' : ''
     ).trim();
 
+    // OpenTeam M2: remote-teammate unreachable evaluation (throttled presence
+    // probe + group-message silence window). The resulting fact block rides
+    // every chair turn this tick; empty when everyone is reachable/unwired.
+    let remoteStatusBlock = '';
+    try {
+      remoteStatusBlock = buildRemoteStatusBlock(
+        await evaluateRemoteTeammates(task, members, botsById, ownerGlobalMetaId),
+      );
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: remote teammate evaluation failed (tick continues): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
     // Round-4: per-tick heartbeat — lastDrivenAt (epoch seconds) is the host's
     // last drive timestamp, the primary input for the show stall signal.
     try {
@@ -2410,7 +2668,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {
-      await maybeRunChairPlanningTurn(task, members, botsById, promptMembers);
+      await maybeRunChairPlanningTurn(task, members, botsById, promptMembers, remoteStatusBlock);
     }
 
     // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
@@ -2465,6 +2723,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             chairGlobalMetaId,
             ownerGlobalMetaId,
             entry.verificationNotes,
+            remoteStatusBlock,
           );
           lastReplyAtByKey.set(key, now());
           replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
@@ -2627,6 +2886,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             chairGlobalMetaId,
             ownerGlobalMetaId,
             notesForDecision,
+            remoteStatusBlock,
           );
           lastReplyAtByKey.set(key, now());
           replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
@@ -2674,6 +2934,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const activeTasks = store
       .listTasks()
       .filter((task) => task.status === 'planning' || task.status === 'executing' || task.status === 'review');
+    // OpenTeam M2: tasks that left the active set (done/cancelled) drop their
+    // presence snapshot and owner-notification flags, so a reactivated task
+    // re-evaluates and re-notifies from scratch.
+    const activeTaskIds = new Set(activeTasks.map((task) => task.id));
+    for (const taskId of [...remotePresenceByTask.keys()]) {
+      if (!activeTaskIds.has(taskId)) remotePresenceByTask.delete(taskId);
+    }
+    for (const key of [...remoteUnreachableNotified]) {
+      if (!activeTaskIds.has(Number(key.slice(0, key.indexOf(':'))))) {
+        remoteUnreachableNotified.delete(key);
+      }
+    }
     for (const task of activeTasks) {
       try {
         await processTask(task);

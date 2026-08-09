@@ -37,6 +37,19 @@ export interface OpenTeamInvite {
   respondedAt: string | null;
 }
 
+/**
+ * Owner-facing traceability row (openTeamCollab:list): one membership plus the
+ * local bot's display name and a group_chat_messages activity digest.
+ */
+export interface OpenTeamCollabSummary extends OpenTeamMembership {
+  /** metabots.name for metabotId; null when the bot row is gone. */
+  botName: string | null;
+  /** Total locally indexed group_chat_messages rows for the group. */
+  messageCount: number;
+  /** chain_timestamp of the newest indexed message; null when none. */
+  lastMessageAt: number | null;
+}
+
 export interface UpsertOpenTeamMembershipInput {
   groupId: string;
   metabotId: number;
@@ -230,6 +243,38 @@ export class OpenTeamMembershipStore {
     return rows.map(rowToOpenTeamMembership);
   }
 
+  /**
+   * All memberships (active + left), newest first, enriched with the local
+   * bot's name and a group_chat_messages digest. Backs the owner-facing
+   * "External collaborations" view: an auto-accepted invite must still be
+   * visible to the machine owner.
+   */
+  listCollabSummaries(): OpenTeamCollabSummary[] {
+    const rows = this.getAll<OpenTeamMembershipRow & {
+      bot_name: string | null;
+      message_count: number;
+      last_message_at: number | null;
+    }>(
+      `SELECT m.*, mb.name AS bot_name,
+         (SELECT COUNT(*) FROM group_chat_messages g WHERE g.group_id = m.group_id) AS message_count,
+         (SELECT MAX(g.chain_timestamp) FROM group_chat_messages g WHERE g.group_id = m.group_id) AS last_message_at
+       FROM openteam_memberships m
+       LEFT JOIN metabots mb ON mb.id = m.metabot_id
+       ORDER BY m.id DESC`,
+    );
+    return rows.map((row) => {
+      const lastMessageAt = Number(row.last_message_at);
+      return {
+        ...rowToOpenTeamMembership(row),
+        botName: row.bot_name ?? null,
+        messageCount: Number(row.message_count) || 0,
+        lastMessageAt: row.last_message_at != null && Number.isFinite(lastMessageAt)
+          ? lastMessageAt
+          : null,
+      };
+    });
+  }
+
   /** group_id of every active membership (group-chat backfill targets). */
   listActiveGroupIds(): string[] {
     const rows = this.getAll<{ group_id: string }>(
@@ -361,6 +406,13 @@ export class OpenTeamMembershipStore {
     return rows.map(rowToOpenTeamInvite);
   }
 
+  listAcceptedInvites(): OpenTeamInvite[] {
+    const rows = this.getAll<OpenTeamInviteRow>(
+      `SELECT * FROM openteam_invites WHERE status = 'accepted' ORDER BY id ASC`,
+    );
+    return rows.map(rowToOpenTeamInvite);
+  }
+
   getInviteByPinId(invitePinId: string): OpenTeamInvite | null {
     const row = this.getOne<OpenTeamInviteRow>(
       'SELECT * FROM openteam_invites WHERE invite_pin_id = ?',
@@ -374,6 +426,21 @@ export class OpenTeamMembershipStore {
     const row = this.getOne<{ found: number }>(
       `SELECT 1 AS found FROM openteam_invites
        WHERE task_id = ? AND invitee_globalmetaid = ? AND status = 'pending' LIMIT 1`,
+      [taskId, inviteeGlobalmetaid],
+    );
+    return Boolean(row);
+  }
+
+  /**
+   * Negative-history check (M3 re-invite policy): a declined invite blocks
+   * re-inviting the same invitee unless the caller explicitly allows it.
+   * Expired invites are not negative history (retrying the next candidate is
+   * the normal flow) and stay out of this check.
+   */
+  hasDeclinedInvite(taskId: number, inviteeGlobalmetaid: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      `SELECT 1 AS found FROM openteam_invites
+       WHERE task_id = ? AND invitee_globalmetaid = ? AND status = 'declined' LIMIT 1`,
       [taskId, inviteeGlobalmetaid],
     );
     return Boolean(row);

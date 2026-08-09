@@ -673,6 +673,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:listMessages', input),
     sendUserMessage: (input: { taskId: number; content: string }) =>
       ipcRenderer.invoke('groupTask:sendUserMessage', input),
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:kickMember', input),
     onStatusChanged: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:statusChanged', handler);
@@ -683,6 +685,11 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('groupTask:ownerReportDelivery', handler);
       return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
     },
+  },
+  openTeamCollab: {
+    list: () => ipcRenderer.invoke('openTeamCollab:list'),
+    listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
+      ipcRenderer.invoke('openTeamCollab:listMessages', input),
   },
   idbots: {
     getMetaBots: () => ipcRenderer.invoke('idbots:getMetaBots'),
@@ -843,6 +850,9 @@ contextBridge.exposeInMainWorld('electron', {
       homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
+    /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
+    getSetting: (id: number, key: string) => ipcRenderer.invoke('metabot:getSetting', id, key),
+    setSetting: (id: number, key: string, value: string) => ipcRenderer.invoke('metabot:setSetting', id, key, value),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
   },

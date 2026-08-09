@@ -156,6 +156,22 @@ class GroupTaskService {
     return task;
   }
 
+  /** Throws on failure so the caller (modal) can show the API error inline. */
+  async kickMember(input: {
+    taskId: number;
+    metabotId?: number;
+    globalmetaid?: string;
+    reason?: string;
+  }): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.kickMember(input);
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to remove the member');
+    }
+  }
+
   async listMessages(
     taskId: number,
     opts?: { beforeId?: number; limit?: number },
