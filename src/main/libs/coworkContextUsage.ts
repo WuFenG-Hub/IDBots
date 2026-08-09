@@ -16,6 +16,8 @@ export interface CoworkUsageStats {
   totalCostUsd?: number;
   /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, or none. */
   source: 'deepseek' | 'anthropic' | 'other' | 'none';
+  /** Latest estimated thinking-token count from SDK thinking_tokens events (observability only, not billed). */
+  thinkingTokensEstimate?: number;
   /**
    * Cumulative per-model token usage from the SDK's modelUsage breakdown,
    * including subagent/side-job traffic the top-level counters miss.

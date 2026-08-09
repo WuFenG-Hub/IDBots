@@ -982,6 +982,12 @@ const hasRenderableAssistantContent = (turn: ConversationTurn): boolean => (
   getVisibleAssistantItems(turn.assistantItems).length > 0
 );
 
+const formatCompactTokens = (value: number): string => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+};
+
 const getToolResultLineCount = (result: string): number => {
   if (!result) return 0;
   return result.split('\n').length;
@@ -2026,17 +2032,77 @@ const AssistantTurnBlock: React.FC<{
   const [processExpanded, setProcessExpanded] = useState(false);
 
   const renderSystemMessage = (message: CoworkMessage) => {
+    const meta = message.metadata ?? {};
+
+    // Structured SDK event messages (previously silently dropped events are
+    // now surfaced here: notification / informational / compact_boundary /
+    // permission_denied / rate_limit_event / conversation_reset).
+    let sdkIcon: string | null = null;
+    let sdkTint = 'dark:text-claude-darkTextSecondary text-claude-textSecondary';
+    let sdkContent = '';
+
+    if (meta.sdkNotification && typeof meta.sdkNotification === 'object') {
+      sdkIcon = '🔔';
+      sdkContent = message.content;
+    } else if (meta.sdkInformational && typeof meta.sdkInformational === 'object') {
+      const info = meta.sdkInformational as Record<string, unknown>;
+      sdkIcon = info.level === 'warning' ? '⚠️' : 'ℹ️';
+      if (info.level === 'warning') sdkTint = 'text-amber-600 dark:text-amber-400';
+      sdkContent = message.content;
+    } else if (meta.sdkCompactBoundary && typeof meta.sdkCompactBoundary === 'object') {
+      const boundary = meta.sdkCompactBoundary as Record<string, unknown>;
+      sdkIcon = '🧹';
+      const triggerLabel = boundary.trigger === 'manual'
+        ? i18nService.t('coworkSdkCompactBoundaryManual')
+        : i18nService.t('coworkSdkCompactBoundaryAuto');
+      const pre = typeof boundary.preTokens === 'number' ? formatCompactTokens(boundary.preTokens) : null;
+      const post = typeof boundary.postTokens === 'number' ? formatCompactTokens(boundary.postTokens) : null;
+      let text = i18nService.t('coworkSdkCompactBoundary');
+      if (pre !== null && post !== null) {
+        text += ` (${triggerLabel}, ${pre} → ${post})`;
+      } else {
+        text += ` (${triggerLabel})`;
+      }
+      sdkContent = text;
+    } else if (meta.sdkPermissionDenied && typeof meta.sdkPermissionDenied === 'object') {
+      const denied = meta.sdkPermissionDenied as Record<string, unknown>;
+      sdkIcon = '🚫';
+      sdkTint = 'text-red-600 dark:text-red-400';
+      const tool = typeof denied.toolName === 'string' ? denied.toolName : null;
+      sdkContent = message.content || (
+        tool
+          ? `${i18nService.t('coworkSdkPermissionDenied')}: ${tool}`
+          : i18nService.t('coworkSdkPermissionDenied')
+      );
+    } else if (meta.sdkRateLimit && typeof meta.sdkRateLimit === 'object') {
+      const limit = meta.sdkRateLimit as Record<string, unknown>;
+      sdkIcon = '⚠️';
+      sdkTint = 'text-amber-600 dark:text-amber-400';
+      const label = limit.status === 'rejected'
+        ? i18nService.t('coworkSdkRateLimitRejected')
+        : i18nService.t('coworkSdkRateLimitWarning');
+      const util = typeof limit.utilization === 'number' ? ` (${Math.round(limit.utilization * 100)}%)` : '';
+      sdkContent = `${label}${util}`;
+    } else if (meta.sdkConversationReset === true) {
+      sdkIcon = '🔄';
+      sdkContent = i18nService.t('coworkSdkConversationReset');
+    }
+
     const rawContent = hasText(message.content)
       ? message.content
-      : (typeof message.metadata?.error === 'string' ? message.metadata.error : '');
+      : (sdkContent || (typeof message.metadata?.error === 'string' ? message.metadata.error : ''));
     const content = mapDisplayText ? mapDisplayText(rawContent) : rawContent;
-    if (!content.trim()) return null;
+    if (!content.trim() && !sdkIcon) return null;
 
     return (
       <div className="rounded-lg border dark:border-claude-darkBorder/70 border-claude-border/70 dark:bg-claude-darkBg/40 bg-claude-bg/60 px-3 py-2">
         <div className="flex items-start gap-2">
-          <InformationCircleIcon className="h-4 w-4 mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0" />
-          <div className="text-xs whitespace-pre-wrap dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {sdkIcon ? (
+            <span className="text-sm mt-0.5 flex-shrink-0 leading-none">{sdkIcon}</span>
+          ) : (
+            <InformationCircleIcon className="h-4 w-4 mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0" />
+          )}
+          <div className={`text-xs whitespace-pre-wrap break-words leading-5 ${sdkTint}`}>
             {content}
           </div>
         </div>

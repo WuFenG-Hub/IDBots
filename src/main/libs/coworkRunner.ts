@@ -1210,6 +1210,8 @@ export class CoworkRunner extends EventEmitter {
    * chip can be read after the turn completes via getSessionUsageStats.
    */
   private usageStatsBySessionId: Map<string, NonNullable<ActiveSession['usageStats']>> = new Map();
+  /** Latest estimated thinking-token count from SDK thinking_tokens events. */
+  private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
@@ -1561,13 +1563,21 @@ export class CoworkRunner extends EventEmitter {
     // In-memory map first (covers the active run and the post-turn window when
     // the session was cleaned up by removeActiveSession).
     const inMemory = this.usageStatsBySessionId.get(sessionId);
-    if (inMemory) return inMemory;
+    const thinkingTokensEstimate = this.thinkingTokensBySessionId.get(sessionId);
+    if (inMemory) {
+      return thinkingTokensEstimate !== undefined
+        ? { ...inMemory, thinkingTokensEstimate }
+        : inMemory;
+    }
     // Fall back to the persisted row so the chip shows historical usage after
     // an app restart (the in-memory map is gone).
     try {
       const persisted = this.store.getSessionUsageStats(sessionId);
       if (persisted) {
-        return persisted as unknown as CoworkUsageStats;
+        const stats = persisted as unknown as CoworkUsageStats;
+        return thinkingTokensEstimate !== undefined
+          ? { ...stats, thinkingTokensEstimate }
+          : stats;
       }
     } catch (error) {
       coworkLog('WARN', 'getSessionUsageStats', 'Failed to read persisted usage stats', {
@@ -7239,6 +7249,34 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
+    // claude.ai plan rate-limit windows (direct Anthropic accounts only).
+    // Surface only actionable states (warning/rejected) as a system message.
+    if (eventType === 'rate_limit_event') {
+      const info = payload.rate_limit_info && typeof payload.rate_limit_info === 'object'
+        ? payload.rate_limit_info as Record<string, unknown>
+        : null;
+      const status = typeof info?.status === 'string' ? info.status : null;
+      const utilization = Number.isFinite(info?.utilization) ? Number(info.utilization) : null;
+      if (status === 'allowed_warning' || status === 'rejected') {
+        this.addSystemMessage(sessionId, '', {
+          sdkRateLimit: {
+            status,
+            utilization: utilization !== null ? Math.round(utilization * 1000) / 1000 : null,
+            rateLimitType: typeof info?.rateLimitType === 'string' ? info.rateLimitType : null,
+          },
+        });
+      }
+      coworkLog('DEBUG', 'handleClaudeEvent', 'SDK rate_limit_event', { sessionId, status, utilization });
+      return;
+    }
+
+    // Conversation was reset (e.g. after overflow recovery). Inform the user.
+    if (eventType === 'conversation_reset') {
+      this.addSystemMessage(sessionId, '', { sdkConversationReset: true });
+      coworkLog('INFO', 'handleClaudeEvent', 'SDK conversation_reset', { sessionId });
+      return;
+    }
+
     if (eventType === 'system') {
       const subtype = String(payload.subtype ?? '');
       if (subtype === 'init' && typeof payload.session_id === 'string') {
@@ -7310,6 +7348,98 @@ export class CoworkRunner extends EventEmitter {
           sessionId,
           originalModel,
         });
+        return;
+      }
+
+      // --- SDK UX/observability events (previously silently dropped) ---
+
+      // Generic CLI notification: surface the text as a system message and
+      // keep priority/key in metadata so the renderer can style it.
+      if (subtype === 'notification') {
+        const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+        const key = typeof payload.key === 'string' ? payload.key : null;
+        const priority = typeof payload.priority === 'string' ? payload.priority : null;
+        if (text) {
+          this.addSystemMessage(sessionId, text, { sdkNotification: { key, priority } });
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK notification', { sessionId, key, priority, text });
+        return;
+      }
+
+      // Informational messages carry a render level (info/notice/suggestion/
+      // warning). Surface as a system message with the level in metadata.
+      if (subtype === 'informational') {
+        const content = typeof payload.content === 'string' ? payload.content.trim() : '';
+        const level = typeof payload.level === 'string' ? payload.level : null;
+        if (content) {
+          this.addSystemMessage(sessionId, content, { sdkInformational: { level } });
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK informational', { sessionId, level, content });
+        return;
+      }
+
+      // Context compaction happened: show a structured system message so the
+      // user knows why earlier context is gone (and roughly by how much).
+      if (subtype === 'compact_boundary') {
+        const meta = payload.compact_metadata && typeof payload.compact_metadata === 'object'
+          ? payload.compact_metadata as Record<string, unknown>
+          : null;
+        const trigger = typeof meta?.trigger === 'string' ? meta.trigger : null;
+        const preTokens = Number.isFinite(meta?.pre_tokens) ? Number(meta.pre_tokens) : null;
+        const postTokens = Number.isFinite(meta?.post_tokens) ? Number(meta.post_tokens) : null;
+        const durationMs = Number.isFinite(meta?.duration_ms) ? Number(meta.duration_ms) : null;
+        this.addSystemMessage(sessionId, '', {
+          sdkCompactBoundary: { trigger, preTokens, postTokens, durationMs },
+        });
+        coworkLog('INFO', 'handleClaudeEvent', 'SDK compact_boundary', { sessionId, trigger, preTokens, postTokens, durationMs });
+        return;
+      }
+
+      // A tool call was denied (top-level or inside a subagent): surface the
+      // human-readable reason instead of keeping it invisible.
+      if (subtype === 'permission_denied') {
+        const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : null;
+        const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+        const reason = typeof payload.decision_reason === 'string' ? payload.decision_reason : null;
+        const reasonType = typeof payload.decision_reason_type === 'string' ? payload.decision_reason_type : null;
+        const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : null;
+        this.addSystemMessage(
+          sessionId,
+          message || `Tool "${toolName ?? 'unknown'}" was denied.`,
+          { sdkPermissionDenied: { toolName, reason, reasonType, agentId } }
+        );
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK permission_denied', { sessionId, toolName, agentId, reasonType, reason });
+        return;
+      }
+
+      // Estimated thinking-token usage (claude.ai-style accounting). Not a
+      // billed number for IDBots' proxy providers, but useful observability;
+      // the latest estimate is merged into the session usage chip.
+      if (subtype === 'thinking_tokens') {
+        const estimated = Number.isFinite(payload.estimated_tokens) ? Number(payload.estimated_tokens) : null;
+        const delta = Number.isFinite(payload.estimated_tokens_delta) ? Number(payload.estimated_tokens_delta) : null;
+        if (estimated !== null) {
+          this.thinkingTokensBySessionId.set(sessionId, estimated);
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK thinking_tokens', { sessionId, estimated, delta });
+        return;
+      }
+
+      // Session state transitions are informational for us: IDBots already
+      // infers running/idle from the message stream and permission flow, so
+      // only log them (no UI, avoids conflicting status writes).
+      if (subtype === 'session_state_changed') {
+        const state = typeof payload.state === 'string' ? payload.state : null;
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK session_state_changed', { sessionId, state });
+        return;
+      }
+
+      // File checkpoint persistence events only matter if IDBots adopts
+      // fileCheckpointingEnabled/rewindFiles (deferred). Log for diagnostics.
+      if (subtype === 'files_persisted') {
+        const count = Array.isArray(payload.files) ? payload.files.length : 0;
+        const failed = Array.isArray(payload.failed) ? payload.failed.length : 0;
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK files_persisted (checkpointing not adopted)', { sessionId, count, failed });
         return;
       }
 
@@ -8340,18 +8470,21 @@ export class CoworkRunner extends EventEmitter {
     this.emit('message', sessionId, message);
   }
 
-  private addSystemMessage(sessionId: string, content: string): void {
+  private addSystemMessage(sessionId: string, content: string, metadata?: Record<string, unknown>): void {
     const session = this.store.getSession(sessionId);
     const lastMessage = session?.messages[session.messages.length - 1];
+    const metadataJson = metadata ? JSON.stringify(metadata) : null;
     if (
       lastMessage?.type === 'system'
       && lastMessage.content.trim() === content.trim()
+      && (metadataJson === null || JSON.stringify(lastMessage.metadata ?? {}) === metadataJson)
     ) {
       return;
     }
     const message = this.store.addMessage(sessionId, {
       type: 'system',
       content,
+      ...(metadata ? { metadata } : {}),
     });
     this.emit('message', sessionId, message);
   }

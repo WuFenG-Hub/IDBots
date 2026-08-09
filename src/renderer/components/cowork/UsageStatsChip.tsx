@@ -203,6 +203,12 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
+            {typeof usageStats.thinkingTokensEstimate === 'number' && usageStats.thinkingTokensEstimate > 0 && (
+              <div className="flex justify-between">
+                <span>{i18nService.t('coworkUsageThinking')}</span>
+                <span className="font-mono">{formatTokens(usageStats.thinkingTokensEstimate)}</span>
+              </div>
+            )}
           </div>
           {(() => {
             // Cache-hit rates, three meanings:

@@ -15,6 +15,10 @@ SDK and adds the todo/task panel (`6903d28a`) to the completed list.
 
 ## 1. Confirmed gaps — SDK has it, IDBots UI does not
 
+> **Status (2026-08-09): implemented** — see the living roadmap §1c. The user-facing
+> events below are now surfaced; `session_state_changed`/`files_persisted` are handled
+> as explicit log-only, and the purely diagnostic ones remain intentionally ignored.
+
 ### 1.1 Events the SDK emits but the runner drops silently
 
 `coworkRunner.handleClaudeEvent` only handles system subtypes
