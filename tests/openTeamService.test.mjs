@@ -421,7 +421,12 @@ test('inviteRemoteBot: re-inviting a declined invitee is rejected unless allowRe
       inviteeGlobalmetaid: REMOTE_GMID,
       invitePinId: `${'d'.repeat(64)}i0`,
     });
-    h.membershipStore.updateInviteStatus({ invitePinId: declined.invitePinId }, 'declined', 'not interested');
+    // Owner-intent decline (the persisted shape is `<reason>: <detail>`).
+    h.membershipStore.updateInviteStatus(
+      { invitePinId: declined.invitePinId },
+      'declined',
+      'remote_collab_disabled: remote collaboration is disabled by the bot owner',
+    );
 
     await assert.rejects(
       () => inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID }),
@@ -436,6 +441,35 @@ test('inviteRemoteBot: re-inviting a declined invitee is rejected unless allowRe
     });
     assert.equal(result.status, 'pending');
     assert.equal(h.calls.send.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: transient/technical declines are not negative history and never block', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    // rate_limited / group_verify_failed / invite_expired say nothing about
+    // the guest owner's willingness — a later invite must go through.
+    for (const [index, reason] of [
+      'rate_limited: too many invites from this inviter or for this group; retry later',
+      'group_verify_failed: could not verify the invited group on-chain',
+      'invite_expired: the invite has expired',
+    ].entries()) {
+      const declined = h.membershipStore.createInvite({
+        taskId: h.task.id,
+        groupId: GROUP_ID,
+        inviteeGlobalmetaid: REMOTE_GMID,
+        invitePinId: `${'c'.repeat(63)}${index}i0`,
+      });
+      h.membershipStore.updateInviteStatus({ invitePinId: declined.invitePinId }, 'declined', reason);
+
+      const result = await inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID });
+      assert.equal(result.status, 'pending', `transient decline "${reason}" does not block the re-invite`);
+      // Consume the fresh pending row so the next loop iteration is unblocked.
+      h.membershipStore.updateInviteStatus({ invitePinId: result.invitePinId }, 'expired', 'invite_response_timeout');
+    }
+    assert.equal(h.calls.send.length, 3);
   } finally {
     h.cleanup();
   }
@@ -985,9 +1019,10 @@ test('watcher: an explicit re-invite after a kick still completes its handshake'
     joined: true,
   });
   try {
-    // Earlier membership kicked. removed_at is backdated so the removed row
-    // clearly PREDATES the re-invite below (datetime columns have second
-    // precision; a same-second kick+re-invite would be ambiguous).
+    // Earlier membership kicked. removed_at and the invite's created_at are
+    // both millisecond-precision, so even a same-second kick + re-invite
+    // (exactly what this test does) keeps the removed row PREDATING the
+    // re-invite instead of freezing it.
     h.groupTaskStore.addMember({
       taskId: h.task.id,
       metabotId: null,
@@ -1000,11 +1035,10 @@ test('watcher: an explicit re-invite after a kick still completes its handshake'
       globalmetaid: REMOTE_GMID,
       removePinId: 'pin-remove-remote',
     });
-    h.db.run(
-      `UPDATE group_task_members SET removed_at = datetime('now', '-5 seconds')
-       WHERE task_id = ? AND globalmetaid = ?`,
-      [h.task.id, REMOTE_GMID],
-    );
+    // Keep the kick strictly BEFORE the re-invite at millisecond granularity
+    // (a same-ms tie would be an artifact, not a real ordering); both still
+    // land inside the same wall-clock second — the case the fix targets.
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     // Owner explicitly asked for the re-invite: the old removed row must not
     // block the new invite's join confirmation.

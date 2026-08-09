@@ -762,8 +762,10 @@ test('skill: a mentioned file outside the session workspace is dropped, never up
 
 // ---------------------------------------------------------------------------
 // P1-2 membership self-check fallback: every membershipCheckIntervalMs the
-// daemon re-verifies on-chain that the bot is still a group member; absence
-// marks the membership left (the KICK simplemsg may never arrive).
+// daemon re-verifies on-chain that the bot is still a group member. Two guards
+// keep indexer lag from killing a healthy membership: a fresh (re-)activation
+// is not probed for membershipSelfCheckGraceMs, and only 2 consecutive absence
+// reads mark the membership left.
 // ---------------------------------------------------------------------------
 
 const membershipCheckHarness = async (overrides = {}) => {
@@ -777,6 +779,7 @@ const membershipCheckHarness = async (overrides = {}) => {
     deps: {
       now: () => state.nowMs,
       membershipCheckIntervalMs: overrides.intervalMs ?? 5 * 60_000,
+      membershipSelfCheckGraceMs: overrides.graceMs ?? 15 * 60_000,
       fetchGroupMembers: async (groupId) => {
         fetchMembersCalls.push(groupId);
         if (overrides.fetchThrows) throw new Error('indexer down');
@@ -797,6 +800,18 @@ const joinAsGuest = (membershipStore) => {
   });
 };
 
+const formatSqliteUtc = (ms) => new Date(ms).toISOString().slice(0, 19).replace('T', ' ');
+
+// The upsert stamps activated_at with the real wall clock; the self-check grace
+// is judged against the daemon's (fake) clock, so tests place the activation
+// explicitly on that timeline.
+const placeActivationAt = (db, ms) => {
+  db.run(
+    'UPDATE openteam_memberships SET activated_at = ? WHERE group_id = ? AND metabot_id = 7',
+    [formatSqliteUtc(ms), GROUP_ID],
+  );
+};
+
 const insertMention = (db, pinChar) => {
   insertGroupMessage(db, {
     pinId: `${pinChar.repeat(64)}i0`,
@@ -811,9 +826,10 @@ test('self-check: bot still on the member list — membership stays active, ment
   const h = await membershipCheckHarness({ members: ['gmid-someone-else', GUEST_GMID] });
   try {
     joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs - 20 * 60_000); // past the 15-min grace
     insertMention(h.db, 'a');
     await h.loop.runTick();
-    assert.equal(h.fetchMembersCalls.length, 1, 'self-check ran on the first tick');
+    assert.equal(h.fetchMembersCalls.length, 1, 'grace elapsed: self-check runs on the first tick');
     assert.equal(h.calls.send.length, 1, 'mention answered');
     assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
   } finally {
@@ -825,6 +841,7 @@ test('self-check: the legacy metaid form also counts as still-a-member', async (
   const h = await membershipCheckHarness({ members: ['metaid-7'] });
   try {
     joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs - 20 * 60_000);
     await h.loop.runTick();
     assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
   } finally {
@@ -832,23 +849,101 @@ test('self-check: the legacy metaid form also counts as still-a-member', async (
   }
 });
 
-test('self-check: bot absent from the member list — membership marked left, consumption stops', async () => {
-  const h = await membershipCheckHarness({ members: ['gmid-someone-else'] });
+test('self-check: activation grace — a fresh membership is not probed at all', async () => {
+  const h = await membershipCheckHarness({ members: ['gmid-someone-else'], intervalMs: 60_000 });
   try {
     joinAsGuest(h.membershipStore);
+    // Activated 5 min ago on the daemon's clock — inside the 15-min grace. The
+    // indexer may not list the join pin yet; probing now could mark left.
+    placeActivationAt(h.db, h.state.nowMs - 5 * 60_000);
+    insertMention(h.db, 'e');
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 0, 'no probe during the activation grace');
+    assert.equal(h.calls.send.length, 1, 'mentions are still answered during the grace');
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
+
+    // Once the grace has elapsed the probe runs normally.
+    h.state.nowMs += 11 * 60_000; // now 16 min past activation
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 1, 'probe runs once the grace has elapsed');
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active', 'first absence only recorded');
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: grace window is injectable (0 disables it)', async () => {
+  const h = await membershipCheckHarness({ members: [GUEST_GMID], graceMs: 0 });
+  try {
+    joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs); // just activated on the daemon's clock
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 1, 'grace 0: the probe runs immediately');
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: a single absence never marks left; two consecutive absences do', async () => {
+  const h = await membershipCheckHarness({ members: ['gmid-someone-else'], intervalMs: 60_000 });
+  try {
+    joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs - 20 * 60_000);
     insertMention(h.db, 'b');
     await h.loop.runTick();
-    assert.equal(h.calls.send.length, 0, 'no reply after the kick is detected');
+    assert.equal(h.fetchMembersCalls.length, 1);
+    assert.equal(
+      h.membershipStore.getMembership(GROUP_ID, 7).status, 'active',
+      'one absence read can be indexer lag — membership untouched',
+    );
+    assert.equal(h.calls.send.length, 1, 'consumption continues until the absence is confirmed');
+
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 2);
     assert.equal(
       h.membershipStore.getMembership(GROUP_ID, 7).status, 'left',
-      'absence from the on-chain member list marks the membership left',
+      'the second consecutive absence confirms the kick',
     );
 
     // Later mentions are not consumed at all (active-membership list no longer includes it).
     insertMention(h.db, 'c');
     await h.loop.runTick();
-    assert.equal(h.calls.send.length, 0);
-    assert.equal(h.calls.chat.length, 0);
+    assert.equal(h.calls.send.length, 1);
+    assert.equal(h.calls.chat.length, 1);
+  } finally {
+    h.store.close();
+  }
+});
+
+test('self-check: the absence streak resets when the bot reappears on the member list', async () => {
+  const h = await membershipCheckHarness({ members: ['gmid-someone-else'], intervalMs: 60_000 });
+  try {
+    joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs - 20 * 60_000);
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 1, 'absence 1 recorded');
+
+    // The next probe sees the bot again (the earlier miss was indexer lag).
+    h.state.members = [GUEST_GMID];
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 2);
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active');
+
+    // A later absence starts the streak from zero — it must NOT mark left on
+    // the first miss (which it would if the earlier absence had stuck).
+    h.state.members = ['gmid-someone-else'];
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.fetchMembersCalls.length, 3);
+    assert.equal(
+      h.membershipStore.getMembership(GROUP_ID, 7).status, 'active',
+      'streak reset: a fresh single absence does not mark left',
+    );
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'left', 'confirmed streak marks left');
   } finally {
     h.store.close();
   }
@@ -859,6 +954,7 @@ test('self-check: indexer failure silently skips the round (membership untouched
     const h = await membershipCheckHarness(failure);
     try {
       joinAsGuest(h.membershipStore);
+      placeActivationAt(h.db, h.state.nowMs - 20 * 60_000);
       insertMention(h.db, 'd');
       await h.loop.runTick();
       assert.equal(h.membershipStore.getMembership(GROUP_ID, 7).status, 'active', 'failed check never marks left');
@@ -873,6 +969,7 @@ test('self-check: throttled per membership interval', async () => {
   const h = await membershipCheckHarness({ members: [GUEST_GMID], intervalMs: 60_000 });
   try {
     joinAsGuest(h.membershipStore);
+    placeActivationAt(h.db, h.state.nowMs - 20 * 60_000);
     await h.loop.runTick();
     await h.loop.runTick();
     assert.equal(h.fetchMembersCalls.length, 1, 'second tick inside the interval skips the probe');

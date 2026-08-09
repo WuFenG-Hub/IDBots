@@ -28,7 +28,7 @@ test('openteam tables are created on open', async () => {
   const { store, db } = await openStores(tempDir);
   try {
     const membershipCols = getColumns(db, 'openteam_memberships');
-    for (const col of ['id', 'group_id', 'metabot_id', 'globalmetaid', 'inviter_globalmetaid', 'task_title', 'invite_pin_id', 'joined_pin_id', 'status', 'created_at']) {
+    for (const col of ['id', 'group_id', 'metabot_id', 'globalmetaid', 'inviter_globalmetaid', 'task_title', 'invite_pin_id', 'joined_pin_id', 'status', 'created_at', 'activated_at']) {
       assert.ok(membershipCols.includes(col), `openteam_memberships.${col} should exist`);
     }
     const inviteCols = getColumns(db, 'openteam_invites');
@@ -63,6 +63,7 @@ test('memberships: upsert inserts, re-upsert refreshes the same row', async () =
     assert.equal(created.invitePinId, 'pin-invite-1');
     assert.equal(created.joinedPinId, 'pin-join-1');
     assert.ok(created.createdAt);
+    assert.ok(created.activatedAt, 'activation timestamp stamped on insert');
 
     // Re-upsert on the UNIQUE(group_id, metabot_id) pair: same row, refreshed fields.
     const refreshed = openTeamStore.upsertActiveMembership({
@@ -130,6 +131,37 @@ test('memberships: list/get/listActiveGroupIds and markLeft lifecycle', async ()
   }
 });
 
+test('memberships: a reviving upsert restamps activated_at (self-check grace anchor)', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore, db } = await openStores(tempDir);
+  try {
+    const created = openTeamStore.upsertActiveMembership({ groupId: 'group-ext-1', metabotId: 7 });
+    assert.ok(created.activatedAt);
+    assert.ok(created.activatedAt >= created.createdAt, 'activation starts at row creation');
+    openTeamStore.markLeft('group-ext-1', 7);
+
+    // Simulate an old activation: the revival below must NOT inherit it (the
+    // guest self-check grace runs from THIS activation, not the first one).
+    db.run(
+      `UPDATE openteam_memberships SET activated_at = '2020-01-01 00:00:00'
+       WHERE group_id = 'group-ext-1' AND metabot_id = 7`,
+    );
+    const before = Date.now();
+    const revived = openTeamStore.upsertActiveMembership({ groupId: 'group-ext-1', metabotId: 7 });
+    assert.equal(revived.id, created.id, 'same row revived in place');
+    assert.equal(revived.status, 'active');
+    assert.ok(revived.activatedAt && revived.activatedAt !== '2020-01-01 00:00:00');
+    const revivedMs = Date.parse(`${revived.activatedAt.replace(' ', 'T')}Z`);
+    assert.ok(
+      Number.isFinite(revivedMs) && revivedMs >= before - 5_000,
+      `activated_at restamped to the revival moment, got ${revived.activatedAt}`,
+    );
+    assert.equal(revived.createdAt, created.createdAt, 'created_at is not restamped by a revival');
+  } finally {
+    store.close();
+  }
+});
+
 test('invites: create / pending listing / dedupe check', async () => {
   const tempDir = makeTempDir();
   const { store, openTeamStore } = await openStores(tempDir);
@@ -153,6 +185,11 @@ test('invites: create / pending listing / dedupe check', async () => {
     assert.equal(invite.declineReason, null);
     assert.equal(invite.respondedAt, null);
     assert.ok(invite.createdAt);
+    // created_at is stored at millisecond precision (anchors the kick-vs-invite
+    // ordering where a same-second kick + re-invite must stay unambiguous).
+    assert.match(invite.createdAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
+    const createdMs = Date.parse(`${invite.createdAt.replace(' ', 'T')}Z`);
+    assert.ok(Number.isFinite(createdMs) && Math.abs(Date.now() - createdMs) < 5_000, 'created_at parses back to now');
     // invitee_metaid defaults to null when omitted.
     assert.equal(
       openTeamStore.createInvite({ taskId: 42, groupId: 'group-task-42', inviteeGlobalmetaid: 'gmid-invitee-9' }).inviteeMetaid,
@@ -216,6 +253,14 @@ test('invites: updateInviteStatus by pinId / by id, decline reason, responded_at
     assert.equal(acceptedRow?.id, accepted.id);
     assert.equal(acceptedRow?.status, 'accepted');
     assert.ok(acceptedRow?.respondedAt, 'responded_at stamped on transition');
+    // responded_at is millisecond-precision (it anchors the join-confirmation
+    // budget; a seconds-precision read-back would truncate up to ~1s off it).
+    assert.match(acceptedRow.respondedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$/);
+    const respondedMs = Date.parse(`${acceptedRow.respondedAt.replace(' ', 'T')}Z`);
+    assert.ok(
+      Number.isFinite(respondedMs) && Math.abs(Date.now() - respondedMs) < 5_000,
+      'responded_at round-trips at millisecond precision',
+    );
     assert.ok(!openTeamStore.hasPendingInvite(42, 'gmid-invitee-1'));
 
     // Decline via id, with a reason.
@@ -235,6 +280,49 @@ test('invites: updateInviteStatus by pinId / by id, decline reason, responded_at
     assert.equal(openTeamStore.listPendingInvites().length, 0);
     assert.equal(openTeamStore.updateInviteStatus({ invitePinId: 'pin-nope' }, 'accepted'), null);
     assert.equal(openTeamStore.updateInviteStatus({}, 'accepted'), null);
+  } finally {
+    store.close();
+  }
+});
+
+test('invites: hasDeclinedInvite counts only owner-intent decline reasons', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore } = await openStores(tempDir);
+  try {
+    let seq = 0;
+    const declineWith = (invitee, reason) => {
+      seq += 1;
+      openTeamStore.createInvite({
+        taskId: 42, groupId: 'group-task-42', inviteeGlobalmetaid: invitee, invitePinId: `pin-decline-${seq}`,
+      });
+      openTeamStore.updateInviteStatus({ invitePinId: `pin-decline-${seq}` }, 'declined', reason);
+    };
+
+    // Owner intent (kill switch / remote-collab switch off): negative history.
+    declineWith('gmid-owner-intent-1', 'remote_collab_disabled');
+    // The persisted shape is `<reason>: <detail>` — the prefix must match too.
+    declineWith('gmid-owner-intent-2', 'bot_disabled: the invited MetaBot is disabled');
+    assert.equal(openTeamStore.hasDeclinedInvite(42, 'gmid-owner-intent-1'), true);
+    assert.equal(openTeamStore.hasDeclinedInvite(42, 'gmid-owner-intent-2'), true);
+    assert.equal(openTeamStore.hasDeclinedInvite(43, 'gmid-owner-intent-1'), false, 'scoped per task');
+
+    // Transient / technical declines never block a re-invite.
+    for (const [index, reason] of [
+      'rate_limited: too many invites from this inviter or for this group; retry later',
+      'group_verify_failed: could not verify the invited group on-chain',
+      'invite_expired',
+      'target_mismatch: invite target does not match this bot',
+      'join_failed: insufficient SPACE',
+      'not interested', // free text from a foreign client — not an intent enum
+      null, // no reason recorded
+    ].entries()) {
+      declineWith(`gmid-transient-${index}`, reason);
+      assert.equal(
+        openTeamStore.hasDeclinedInvite(42, `gmid-transient-${index}`),
+        false,
+        `transient decline "${reason}" must not count as negative history`,
+      );
+    }
   } finally {
     store.close();
   }

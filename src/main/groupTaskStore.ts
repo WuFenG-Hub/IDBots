@@ -704,7 +704,7 @@ export class GroupTaskStore {
     if (row.removed_at) return rowToGroupTaskMember(row);
 
     this.db.run(
-      `UPDATE group_task_members SET removed_at = datetime('now'), remove_pin_id = ?
+      `UPDATE group_task_members SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now'), remove_pin_id = ?
        WHERE id = ? AND removed_at IS NULL`,
       [input.removePinId ?? null, row.id],
     );
@@ -722,7 +722,9 @@ export class GroupTaskStore {
    * after that moment count — this distinguishes "the membership this invite
    * created was later kicked" (freeze the invite; never revive) from "an
    * older membership was kicked before this invite existed" (an explicit
-   * re-invite must still be able to complete its handshake).
+   * re-invite must still be able to complete its handshake). The threshold is
+   * rendered at millisecond precision (removed_at is stored with %f) so a
+   * same-second kick + re-invite stays ordered correctly.
    */
   hasRemovedMember(taskId: number, globalmetaid: string, notBeforeMs?: number): boolean {
     const gmid = normalizeMemberGlobalMetaId(globalmetaid);
@@ -731,7 +733,7 @@ export class GroupTaskStore {
       ? this.getOne<{ found: number }>(
           `SELECT 1 AS found FROM group_task_members
            WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL
-             AND removed_at >= datetime(? / 1000, 'unixepoch') LIMIT 1`,
+             AND removed_at >= strftime('%Y-%m-%d %H:%M:%f', ? / 1000.0, 'unixepoch') LIMIT 1`,
           [taskId, gmid, Math.trunc(notBeforeMs)],
         )
       : this.getOne<{ found: number }>(

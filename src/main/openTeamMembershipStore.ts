@@ -9,6 +9,15 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 export type OpenTeamMembershipStatus = 'active' | 'left';
 export type OpenTeamInviteStatus = 'pending' | 'accepted' | 'declined' | 'expired';
 
+/**
+ * Guest decline reasons that express the owner's intent not to collaborate
+ * (bot kill switch off / remote-collab switch off). These are the only
+ * declines hasDeclinedInvite treats as negative history; every other reason
+ * the guest emits is transient or technical. Persisted rows carry
+ * `<reason>: <detail>`, so callers match the reason as a prefix.
+ */
+export const OPENTEAM_OWNER_INTENT_DECLINE_REASONS = ['bot_disabled', 'remote_collab_disabled'] as const;
+
 export interface OpenTeamMembership {
   id: number;
   groupId: string;
@@ -20,6 +29,12 @@ export interface OpenTeamMembership {
   joinedPinId: string | null;
   status: OpenTeamMembershipStatus;
   createdAt: string | null;
+  /**
+   * This activation's start (refreshed by every upsertActiveMembership,
+   * including a left->active revival). The guest self-check grace runs from
+   * here, not from created_at.
+   */
+  activatedAt: string | null;
   /** Guest-daemon cursor: group_chat_messages.id up to which this bot processed. */
   lastProcessedMsgId: number;
 }
@@ -83,6 +98,7 @@ interface OpenTeamMembershipRow {
   joined_pin_id: string | null;
   status: string;
   created_at: string | null;
+  activated_at: string | null;
   last_processed_msg_id: number | null;
 }
 
@@ -112,6 +128,7 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
     joinedPinId: row.joined_pin_id ?? null,
     status: row.status === 'left' ? 'left' : 'active',
     createdAt: row.created_at ?? null,
+    activatedAt: row.activated_at ?? null,
     lastProcessedMsgId: Number(row.last_processed_msg_id) || 0,
   };
 }
@@ -186,6 +203,9 @@ export class OpenTeamMembershipStore {
    * Record (or refresh) an active membership for one of this machine's bots in
    * an external OpenTeam group. UNIQUE(group_id, metabot_id) conflicts flip the
    * row back to active and refresh the invite snapshot (re-invite after left).
+   * Every call — insert or revival — restamps activated_at, so the guest
+   * self-check grace always runs from THIS activation (created_at survives a
+   * revival and cannot serve as the grace anchor).
    */
   upsertActiveMembership(input: UpsertOpenTeamMembershipInput): OpenTeamMembership {
     const existing = this.getOne<OpenTeamMembershipRow>(
@@ -200,7 +220,8 @@ export class OpenTeamMembershipStore {
            inviter_globalmetaid = COALESCE(?, inviter_globalmetaid),
            task_title = COALESCE(?, task_title),
            invite_pin_id = COALESCE(?, invite_pin_id),
-           joined_pin_id = COALESCE(?, joined_pin_id)
+           joined_pin_id = COALESCE(?, joined_pin_id),
+           activated_at = datetime('now')
          WHERE group_id = ? AND metabot_id = ?`,
         [
           input.globalmetaid ?? null,
@@ -220,8 +241,8 @@ export class OpenTeamMembershipStore {
     this.db.run(
       `INSERT INTO openteam_memberships (
         group_id, metabot_id, globalmetaid, inviter_globalmetaid, task_title,
-        invite_pin_id, joined_pin_id, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+        invite_pin_id, joined_pin_id, status, activated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', datetime('now'))`,
       [
         input.groupId,
         input.metabotId,
@@ -363,10 +384,13 @@ export class OpenTeamMembershipStore {
   // --- openteam_invites ---
 
   createInvite(input: CreateOpenTeamInviteInput): OpenTeamInvite {
+    // created_at is restamped explicitly at millisecond precision: it anchors
+    // the pending window and the kick-vs-invite ordering (hasRemovedMember),
+    // where a same-second kick + re-invite must stay unambiguous.
     this.db.run(
       `INSERT INTO openteam_invites (
-        task_id, group_id, invitee_globalmetaid, invitee_metaid, invitee_name, invite_pin_id, status
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+        task_id, group_id, invitee_globalmetaid, invitee_metaid, invitee_name, invite_pin_id, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', strftime('%Y-%m-%d %H:%M:%f','now'))`,
       [
         input.taskId,
         input.groupId,
@@ -389,6 +413,8 @@ export class OpenTeamMembershipStore {
   /**
    * Transition an invite out of pending, stamping responded_at. Identified by
    * id or invite_pin_id (the inviteId carried by OpenTeam envelopes).
+   * responded_at is millisecond-precision: it anchors the join-confirmation
+   * budget, and a seconds-precision read-back would truncate up to ~1s off it.
    */
   updateInviteStatus(
     identity: { id?: number; invitePinId?: string },
@@ -409,7 +435,7 @@ export class OpenTeamMembershipStore {
     if (!existing) return null;
     this.db.run(
       `UPDATE openteam_invites
-       SET status = ?, decline_reason = ?, responded_at = datetime('now')
+       SET status = ?, decline_reason = ?, responded_at = strftime('%Y-%m-%d %H:%M:%f','now')
        WHERE id = ?`,
       [status, declineReason ?? null, existing.id],
     );
@@ -455,15 +481,31 @@ export class OpenTeamMembershipStore {
 
   /**
    * Negative-history check (M3 re-invite policy): a declined invite blocks
-   * re-inviting the same invitee unless the caller explicitly allows it.
-   * Expired invites are not negative history (retrying the next candidate is
-   * the normal flow) and stay out of this check.
+   * re-inviting the same invitee unless the caller explicitly allows it —
+   * but only when the decline expresses the guest OWNER's intent. The stored
+   * decline_reason is `<reason>: <detail>`, so matching is exact or prefix
+   * (`reason:*`). Transient/technical declines (rate_limited,
+   * group_verify_failed, invite_expired, target_mismatch, sender_mismatch,
+   * already_member, invalid_group, inviter_not_chair, join_failed,
+   * membership_record_failed, ...) say nothing about the owner's willingness
+   * and must not permanently freeze re-invites. Expired invites are not
+   * negative history either (retrying the next candidate is the normal flow)
+   * and stay out of this check.
    */
   hasDeclinedInvite(taskId: number, inviteeGlobalmetaid: string): boolean {
+    // GLOB (not LIKE): reasons contain '_' which is a LIKE wildcard.
+    const ownerIntentClause = OPENTEAM_OWNER_INTENT_DECLINE_REASONS
+      .map(() => 'decline_reason = ? OR decline_reason GLOB ?')
+      .join(' OR ');
     const row = this.getOne<{ found: number }>(
       `SELECT 1 AS found FROM openteam_invites
-       WHERE task_id = ? AND invitee_globalmetaid = ? AND status = 'declined' LIMIT 1`,
-      [taskId, inviteeGlobalmetaid],
+       WHERE task_id = ? AND invitee_globalmetaid = ? AND status = 'declined'
+         AND (${ownerIntentClause}) LIMIT 1`,
+      [
+        taskId,
+        inviteeGlobalmetaid,
+        ...OPENTEAM_OWNER_INTENT_DECLINE_REASONS.flatMap((reason) => [reason, `${reason}:*`]),
+      ],
     );
     return Boolean(row);
   }

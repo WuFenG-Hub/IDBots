@@ -233,7 +233,9 @@ export interface InviteRemoteBotInput {
   requiredSkills?: string[];
   /**
    * Explicit owner-requested override (M3): re-inviting an invitee who was
-   * previously kicked from this task or declined a previous invite is rejected
+   * previously kicked from this task or declined a previous invite out of
+   * owner intent (bot/remote-collab switched off — transient/technical
+   * declines like rate_limited or group_verify_failed never block) is rejected
    * by default; pass true only when the owner explicitly asked for the
    * re-invite. Expired invites are not negative history and never block.
    */
@@ -286,9 +288,10 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     throw new Error(`a pending invite for ${invitee} already exists on group task ${taskId}`);
   }
   if (!input.allowReinvite) {
-    // Re-invite policy (M3): kicked members and declined invitees are not
-    // re-invited unless the owner explicitly asks (allowReinvite). Expired
-    // invites are not negative history and never block.
+    // Re-invite policy (M3): kicked members and invitees who declined out of
+    // owner intent are not re-invited unless the owner explicitly asks
+    // (allowReinvite). Expired invites and transient/technical declines are
+    // not negative history and never block.
     if (store.hasRemovedMember(taskId, invitee)) {
       throw new Error(
         `invitee ${invitee} was previously removed from group task ${taskId}; ` +
@@ -416,7 +419,7 @@ interface InviteWatcherState {
 
 const inviteWatchers = new Map<string, InviteWatcherState>();
 
-/** sqlite datetime('now') is UTC 'YYYY-MM-DD HH:MM:SS'. */
+/** sqlite UTC text: 'YYYY-MM-DD HH:MM:SS' (datetime('now')) or with '.SSS' (strftime %f). */
 function parseSqliteUtcMs(value: string | null): number {
   if (!value) return Number.NaN;
   const parsed = Date.parse(`${value.trim().replace(' ', 'T')}Z`);
