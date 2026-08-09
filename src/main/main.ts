@@ -2556,7 +2556,7 @@ let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
 /** R1：各会话最后已知的 SDK cron 全量信息（会话结束对账 + 宿主触发状态推进依据），由 Stop hook 采集维护。 */
-let sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
+const sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
 let sdkCronMirrorScanInterval: ReturnType<typeof setInterval> | null = null;
 let sdkCronHostTriggerLogStore: SdkCronHostTriggerLogStore | null = null;
 let sdkCronHostTriggerBridge: SdkCronHostTriggerBridge | null = null;
@@ -7537,6 +7537,45 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:stopTask', async (_event, payload: {
+    sessionId: string;
+    taskId: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:stopTask', async () => {
+      try {
+        const { sessionId, taskId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!taskId || !taskId.trim()) throw new Error('Task id is required');
+        return await getCoworkRunner().stopSubagentTask(sessionId, taskId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to stop task',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:backgroundTask', async (_event, payload: {
+    sessionId: string;
+    toolUseId?: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:backgroundTask', async () => {
+      try {
+        const { sessionId, toolUseId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        return await getCoworkRunner().backgroundSubagentTask(sessionId, toolUseId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to background task',
         };
       }
     });

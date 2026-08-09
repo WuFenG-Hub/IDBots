@@ -13,9 +13,23 @@ import CoworkPromptInput from './CoworkPromptInput';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
 import SubagentPanel from './SubagentPanel';
+import TodoPanel from './TodoPanel';
 import UsageStatsChip from './UsageStatsChip';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
+import {
+  getTodoListSummaryText,
+  isTaskCreateToolName,
+  isTaskListToolName,
+  isTaskUpdateToolName,
+  isTodoWriteToolName,
+  parseLegacyTaskListItems,
+  parseTaskCreateItem,
+  parseTaskUpdatePatch,
+  parseTodoWriteItems,
+  type TodoListItem,
+  type TodoStatus,
+} from './coworkTodoList';
 import MarkdownContent from '../MarkdownContent';
 import LocalFileLink from '../ui/LocalFileLink';
 import {
@@ -390,125 +404,12 @@ const RefundStatusCard: React.FC<{
 };
 
 
-type TodoStatus = 'completed' | 'in_progress' | 'pending' | 'unknown';
-
-type ParsedTodoItem = {
-  primaryText: string;
-  secondaryText: string | null;
-  status: TodoStatus;
-};
-
-const normalizeToolName = (value: string): string => value.toLowerCase().replace(/[\s_]+/g, '');
-
-const isTodoWriteToolName = (toolName: string | undefined): boolean => {
-  if (!toolName) return false;
-  return normalizeToolName(toolName) === 'todowrite';
-};
-
-// SDK 0.3.142+ headless/SDK sessions emit TaskCreate/TaskUpdate/TaskGet/TaskList
-// in place of TodoWrite. TaskCreate and TaskUpdate carry task arrays that map
-// cleanly onto the existing checkbox-list rendering; TaskGet/TaskList return
-// text results and fall through to the generic renderer.
-const isTaskListToolName = (toolName: string | undefined): boolean => {
-  if (!toolName) return false;
-  const normalized = normalizeToolName(toolName);
-  return normalized === 'taskcreate' || normalized === 'taskupdate';
-};
-
-const toTrimmedString = (value: unknown): string | null => (
-  typeof value === 'string' && value.trim() ? value.trim() : null
-);
-
-const normalizeTodoStatus = (value: unknown): TodoStatus => {
-  const normalized = typeof value === 'string'
-    ? value.trim().toLowerCase().replace(/-/g, '_')
-    : '';
-
-  if (normalized === 'completed') return 'completed';
-  if (normalized === 'in_progress' || normalized === 'running') return 'in_progress';
-  if (normalized === 'pending' || normalized === 'todo') return 'pending';
-  return 'unknown';
-};
-
-const parseTodoWriteItems = (input: unknown): ParsedTodoItem[] | null => {
-  if (!input || typeof input !== 'object') return null;
-  const record = input as Record<string, unknown>;
-  if (!Array.isArray(record.todos)) return null;
-
-  const parsedItems = record.todos
-    .map((rawTodo) => {
-      if (!rawTodo || typeof rawTodo !== 'object') {
-        return null;
-      }
-
-      const todo = rawTodo as Record<string, unknown>;
-      const activeForm = toTrimmedString(todo.activeForm);
-      const content = toTrimmedString(todo.content);
-      const primaryText = activeForm ?? content ?? i18nService.t('coworkTodoUntitled');
-      const secondaryText = content && content !== primaryText ? content : null;
-
-      return {
-        primaryText,
-        secondaryText,
-        status: normalizeTodoStatus(todo.status),
-      } satisfies ParsedTodoItem;
-    })
-    .filter((item): item is ParsedTodoItem => item !== null);
-
-  return parsedItems.length > 0 ? parsedItems : null;
-};
-
-const getTodoWriteSummary = (items: ParsedTodoItem[]): string => {
-  const completedCount = items.filter((item) => item.status === 'completed').length;
-  const inProgressCount = items.filter((item) => item.status === 'in_progress').length;
-  const pendingCount = items.length - completedCount - inProgressCount;
-
-  const summary = [
-    `${items.length} ${i18nService.t('coworkTodoItems')}`,
-    `${completedCount} ${i18nService.t('coworkTodoCompleted')}`,
-    `${inProgressCount} ${i18nService.t('coworkTodoInProgress')}`,
-    `${pendingCount} ${i18nService.t('coworkTodoPending')}`,
-  ];
-
-  const activeItem = items.find((item) => item.status === 'in_progress');
-  if (activeItem) {
-    summary.push(activeItem.primaryText);
-  }
-
-  return summary.join(' · ');
-};
-
-// Task-family tools (TaskCreate/TaskUpdate) store tasks under a `tasks` array.
-// Each task carries content/activeForm/status the same way TodoWrite items do,
-// so we reuse ParsedTodoItem and the shared summary formatter.
-const parseTaskListItems = (input: unknown): ParsedTodoItem[] | null => {
-  if (!input || typeof input !== 'object') return null;
-  const record = input as Record<string, unknown>;
-  const rawTasks = Array.isArray(record.tasks) ? record.tasks : null;
-  if (!rawTasks) return null;
-
-  const parsedItems = rawTasks
-    .map((rawTask) => {
-      if (!rawTask || typeof rawTask !== 'object') {
-        return null;
-      }
-
-      const task = rawTask as Record<string, unknown>;
-      const activeForm = toTrimmedString(task.activeForm);
-      const content = toTrimmedString(task.content);
-      const primaryText = activeForm ?? content ?? i18nService.t('coworkTodoUntitled');
-      const secondaryText = content && content !== primaryText ? content : null;
-
-      return {
-        primaryText,
-        secondaryText,
-        status: normalizeTodoStatus(task.status),
-      } satisfies ParsedTodoItem;
-    })
-    .filter((item): item is ParsedTodoItem => item !== null);
-
-  return parsedItems.length > 0 ? parsedItems : null;
-};
+const getTodoLabels = () => ({
+  items: i18nService.t('coworkTodoItems'),
+  completed: i18nService.t('coworkTodoCompleted'),
+  inProgress: i18nService.t('coworkTodoInProgress'),
+  pending: i18nService.t('coworkTodoPending'),
+});
 
 const getToolInputSummary = (
   toolName: string | undefined,
@@ -518,12 +419,22 @@ const getToolInputSummary = (
   const input = toolInput as Record<string, unknown>;
   if (isTodoWriteToolName(toolName)) {
     const items = parseTodoWriteItems(input);
-    return items ? getTodoWriteSummary(items) : null;
+    return items ? getTodoListSummaryText(items, getTodoLabels()) : null;
+  }
+
+  if (isTaskCreateToolName(toolName)) {
+    const item = parseTaskCreateItem(input);
+    return item ? item.primaryText : null;
+  }
+
+  if (isTaskUpdateToolName(toolName)) {
+    const patch = parseTaskUpdatePatch(input);
+    return patch ? (patch.primaryText ?? patch.id) : null;
   }
 
   if (isTaskListToolName(toolName)) {
-    const items = parseTaskListItems(input);
-    return items ? getTodoWriteSummary(items) : null;
+    const items = parseLegacyTaskListItems(input);
+    return items ? getTodoListSummaryText(items, getTodoLabels()) : null;
   }
 
   switch (toolName) {
@@ -1071,12 +982,18 @@ const hasRenderableAssistantContent = (turn: ConversationTurn): boolean => (
   getVisibleAssistantItems(turn.assistantItems).length > 0
 );
 
+const formatCompactTokens = (value: number): string => {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(value);
+};
+
 const getToolResultLineCount = (result: string): number => {
   if (!result) return 0;
   return result.split('\n').length;
 };
 
-const TodoWriteInputView: React.FC<{ items: ParsedTodoItem[] }> = ({ items }) => {
+const TodoWriteInputView: React.FC<{ items: TodoListItem[] }> = ({ items }) => {
   const getStatusCheckboxClass = (status: TodoStatus): string => {
     switch (status) {
       case 'completed':
@@ -1092,9 +1009,9 @@ const TodoWriteInputView: React.FC<{ items: ParsedTodoItem[] }> = ({ items }) =>
 
   return (
     <div className="space-y-2">
-      {items.map((item, index) => (
+      {items.map((item) => (
         <div
-          key={`todo-item-${index}`}
+          key={item.key}
           className="flex items-start gap-2"
         >
           <span className={`mt-0.5 h-4 w-4 rounded-[4px] border flex-shrink-0 inline-flex items-center justify-center ${getStatusCheckboxClass(item.status)}`}>
@@ -1108,6 +1025,11 @@ const TodoWriteInputView: React.FC<{ items: ParsedTodoItem[] }> = ({ items }) =>
             }`}>
               {item.primaryText}
             </div>
+            {item.secondaryText && (
+              <div className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 whitespace-pre-wrap break-words leading-5 mt-0.5">
+                {item.secondaryText}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -1220,8 +1142,22 @@ const ToolCallGroup: React.FC<{
   const toolInput = toolUse.metadata?.toolInput;
   const isTodoWriteTool = isTodoWriteToolName(toolName);
   const todoItems = isTodoWriteTool ? parseTodoWriteItems(toolInput) : null;
-  const isTaskListTool = isTaskListToolName(toolName);
-  const taskItems = isTaskListTool ? parseTaskListItems(toolInput) : null;
+  const isTaskCreateTool = isTaskCreateToolName(toolName);
+  const taskCreateItem = isTaskCreateTool ? parseTaskCreateItem(toolInput) : null;
+  const isTaskUpdateTool = isTaskUpdateToolName(toolName);
+  const taskUpdatePatch = isTaskUpdateTool ? parseTaskUpdatePatch(toolInput) : null;
+  const taskUpdateItem: TodoListItem | null = taskUpdatePatch ? {
+    key: `update-${taskUpdatePatch.id}`,
+    id: taskUpdatePatch.id,
+    toolUseId: null,
+    primaryText: taskUpdatePatch.primaryText ?? taskUpdatePatch.id ?? '',
+    secondaryText: taskUpdatePatch.secondaryText ?? null,
+    status: taskUpdatePatch.status ?? 'unknown',
+    owner: taskUpdatePatch.owner ?? null,
+    source: 'taskupdate',
+  } : null;
+  const isLegacyTaskListTool = isTaskListToolName(toolName) && !isTaskCreateTool && !isTaskUpdateTool;
+  const taskItems = isLegacyTaskListTool ? parseLegacyTaskListItems(toolInput) : null;
   const mapText = mapDisplayText ?? ((value: string) => value);
   const toolInputDisplayRaw = formatToolInput(toolName, toolInput);
   const toolInputDisplay = toolInputDisplayRaw ? mapText(toolInputDisplayRaw) : null;
@@ -1270,7 +1206,7 @@ const ToolCallGroup: React.FC<{
               </code>
             )}
           </div>
-          {toolResult && resultLineCount > 0 && !isTodoWriteTool && !isTaskListTool && (
+          {toolResult && resultLineCount > 0 && !isTodoWriteTool && !isTaskCreateTool && !isTaskUpdateTool && !isLegacyTaskListTool && (
             <div className="text-xs dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 mt-0.5">
               {resultLineCount} {resultLineCount === 1 ? 'line' : 'lines'} of output
             </div>
@@ -1318,7 +1254,11 @@ const ToolCallGroup: React.FC<{
             </div>
           ) : isTodoWriteTool && todoItems ? (
             <TodoWriteInputView items={todoItems} />
-          ) : isTaskListTool && taskItems ? (
+          ) : isTaskCreateTool && taskCreateItem ? (
+            <TodoWriteInputView items={[taskCreateItem]} />
+          ) : isTaskUpdateTool && taskUpdateItem ? (
+            <TodoWriteInputView items={[taskUpdateItem]} />
+          ) : isLegacyTaskListTool && taskItems ? (
             <TodoWriteInputView items={taskItems} />
           ) : (
             // Standard display for other tools with input/output labels
@@ -2092,17 +2032,77 @@ const AssistantTurnBlock: React.FC<{
   const [processExpanded, setProcessExpanded] = useState(false);
 
   const renderSystemMessage = (message: CoworkMessage) => {
+    const meta = message.metadata ?? {};
+
+    // Structured SDK event messages (previously silently dropped events are
+    // now surfaced here: notification / informational / compact_boundary /
+    // permission_denied / rate_limit_event / conversation_reset).
+    let sdkIcon: string | null = null;
+    let sdkTint = 'dark:text-claude-darkTextSecondary text-claude-textSecondary';
+    let sdkContent = '';
+
+    if (meta.sdkNotification && typeof meta.sdkNotification === 'object') {
+      sdkIcon = '🔔';
+      sdkContent = message.content;
+    } else if (meta.sdkInformational && typeof meta.sdkInformational === 'object') {
+      const info = meta.sdkInformational as Record<string, unknown>;
+      sdkIcon = info.level === 'warning' ? '⚠️' : 'ℹ️';
+      if (info.level === 'warning') sdkTint = 'text-amber-600 dark:text-amber-400';
+      sdkContent = message.content;
+    } else if (meta.sdkCompactBoundary && typeof meta.sdkCompactBoundary === 'object') {
+      const boundary = meta.sdkCompactBoundary as Record<string, unknown>;
+      sdkIcon = '🧹';
+      const triggerLabel = boundary.trigger === 'manual'
+        ? i18nService.t('coworkSdkCompactBoundaryManual')
+        : i18nService.t('coworkSdkCompactBoundaryAuto');
+      const pre = typeof boundary.preTokens === 'number' ? formatCompactTokens(boundary.preTokens) : null;
+      const post = typeof boundary.postTokens === 'number' ? formatCompactTokens(boundary.postTokens) : null;
+      let text = i18nService.t('coworkSdkCompactBoundary');
+      if (pre !== null && post !== null) {
+        text += ` (${triggerLabel}, ${pre} → ${post})`;
+      } else {
+        text += ` (${triggerLabel})`;
+      }
+      sdkContent = text;
+    } else if (meta.sdkPermissionDenied && typeof meta.sdkPermissionDenied === 'object') {
+      const denied = meta.sdkPermissionDenied as Record<string, unknown>;
+      sdkIcon = '🚫';
+      sdkTint = 'text-red-600 dark:text-red-400';
+      const tool = typeof denied.toolName === 'string' ? denied.toolName : null;
+      sdkContent = message.content || (
+        tool
+          ? `${i18nService.t('coworkSdkPermissionDenied')}: ${tool}`
+          : i18nService.t('coworkSdkPermissionDenied')
+      );
+    } else if (meta.sdkRateLimit && typeof meta.sdkRateLimit === 'object') {
+      const limit = meta.sdkRateLimit as Record<string, unknown>;
+      sdkIcon = '⚠️';
+      sdkTint = 'text-amber-600 dark:text-amber-400';
+      const label = limit.status === 'rejected'
+        ? i18nService.t('coworkSdkRateLimitRejected')
+        : i18nService.t('coworkSdkRateLimitWarning');
+      const util = typeof limit.utilization === 'number' ? ` (${Math.round(limit.utilization * 100)}%)` : '';
+      sdkContent = `${label}${util}`;
+    } else if (meta.sdkConversationReset === true) {
+      sdkIcon = '🔄';
+      sdkContent = i18nService.t('coworkSdkConversationReset');
+    }
+
     const rawContent = hasText(message.content)
       ? message.content
-      : (typeof message.metadata?.error === 'string' ? message.metadata.error : '');
+      : (sdkContent || (typeof message.metadata?.error === 'string' ? message.metadata.error : ''));
     const content = mapDisplayText ? mapDisplayText(rawContent) : rawContent;
-    if (!content.trim()) return null;
+    if (!content.trim() && !sdkIcon) return null;
 
     return (
       <div className="rounded-lg border dark:border-claude-darkBorder/70 border-claude-border/70 dark:bg-claude-darkBg/40 bg-claude-bg/60 px-3 py-2">
         <div className="flex items-start gap-2">
-          <InformationCircleIcon className="h-4 w-4 mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0" />
-          <div className="text-xs whitespace-pre-wrap dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {sdkIcon ? (
+            <span className="text-sm mt-0.5 flex-shrink-0 leading-none">{sdkIcon}</span>
+          ) : (
+            <InformationCircleIcon className="h-4 w-4 mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0" />
+          )}
+          <div className={`text-xs whitespace-pre-wrap break-words leading-5 ${sdkTint}`}>
             {content}
           </div>
         </div>
@@ -3626,7 +3626,11 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   modelId={currentModelId}
                 />
               )}
-              <SubagentPanel sessionId={currentSession.id} />
+              <SubagentPanel
+                sessionId={currentSession.id}
+                disableControls={resolvedExecutionMode === 'sandbox'}
+              />
+              <TodoPanel messages={currentSession.messages} />
               <EffortSelector
                 sessionId={currentSession.id}
                 currentEffort={effortOverride}

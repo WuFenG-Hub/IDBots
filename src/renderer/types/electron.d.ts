@@ -767,6 +767,8 @@ interface IElectronAPI {
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) => Promise<{ success: boolean; error?: string }>;
+    stopTask: (sessionId: string, taskId: string) => Promise<{ success: boolean; error?: string }>;
+    backgroundTask: (sessionId: string, toolUseId?: string) => Promise<{ success: boolean; backgrounded?: boolean; error?: string }>;
     setEffort: (sessionId: string, effort: string | null) => Promise<{ success: boolean; error?: string }>;
     forkSession: (sessionId: string, messageId: string, title?: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     rewindSession: (sessionId: string, messageId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;

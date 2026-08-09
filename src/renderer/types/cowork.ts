@@ -108,6 +108,8 @@ export interface CoworkUsageStats {
   upstreamBaseURL?: string;
   /** Number of LLM turns accumulated (for cache-miss attribution). */
   turnCount?: number;
+  /** Latest estimated thinking-token count from SDK thinking_tokens events (observability only, not billed). */
+  thinkingTokensEstimate?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */

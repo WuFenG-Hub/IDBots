@@ -382,6 +382,40 @@ class CoworkService {
     return false;
   }
 
+  /**
+   * Stops a running subagent/background task via the live SDK Query control.
+   * Returns true when the stop request was accepted (the SDK emits a
+   * task_notification with status 'stopped' afterwards).
+   */
+  async stopTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.stopTask) {
+      return { success: false, error: 'stopTask API not available' };
+    }
+    try {
+      return await cowork.stopTask(sessionId, taskId);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Backgrounds a running foreground task via the live SDK Query control.
+   * Pass toolUseId to target one task; omit it to background all foreground
+   * tasks. Returns true when the request was accepted.
+   */
+  async backgroundTask(sessionId: string, toolUseId?: string): Promise<{ success: boolean; backgrounded?: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.backgroundTask) {
+      return { success: false, error: 'backgroundTask API not available' };
+    }
+    try {
+      return await cowork.backgroundTask(sessionId, toolUseId);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   async setEffort(sessionId: string, effort: string | null): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork?.setEffort) {
