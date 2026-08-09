@@ -3538,8 +3538,33 @@ const startSqliteDaemons = (): void => {
     getStore,
     getMetabotStore,
     getOpenTeamMembershipStore,
+    getCoworkStore,
     performChat: performChatCompletionForOrchestrator,
     sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    // OpenTeam M3: same chat-skill routing + skill-turn seams as the
+    // group-task daemon, scoped to the guest bot's own allow_chat_skills
+    // (allowAllEnabled stays false inside the daemon — external members are
+    // never the owner).
+    getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
+    runSkillTurn: async (params) => {
+      const roots = skillMgr.getAllSkillRoots();
+      const cwd = roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot();
+      const result = await runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
+        sessionId: params.sessionId,
+        systemPrompt: params.systemPrompt,
+        userMessage: params.userMessage,
+        cwd,
+        activeSkillIds: params.activeSkillIds,
+      });
+      return { ...result, cwd };
+    },
+    // File artifacts upload on-chain as metafiles paid by the GUEST bot's own
+    // wallet — the same metaFileUploadService path private-chat order
+    // delivery uses.
+    uploadDeliverableFile: async ({ metabotId, filePath, contentType }) => {
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
+    },
     emitLog: (msg) => console.log(msg),
   });
 

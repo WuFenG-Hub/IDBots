@@ -26,10 +26,13 @@ Module._load = function patchedLoad(request, ...rest) {
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { OpenTeamMembershipStore } = require('../dist-electron/main/openTeamMembershipStore.js');
+const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const {
   decideOpenTeamGuestResponse,
   createOpenTeamGuestDaemonLoop,
 } = require('../dist-electron/main/services/openTeamGuestDaemon.js');
+// Inviter-side parser: proves the guest's delivery lines ingest cleanly.
+const { parseDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
 
 Module._load = originalLoad;
 
@@ -117,7 +120,7 @@ const insertWallet = (db, id) => {
   );
 };
 
-const insertMetabot = (db, { id, walletId, name, globalmetaid = null }) => {
+const insertMetabot = (db, { id, walletId, name, globalmetaid = null, allowChatSkills = [] }) => {
   db.run(
     `INSERT INTO metabots (
       id, wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key,
@@ -127,7 +130,7 @@ const insertMetabot = (db, { id, walletId, name, globalmetaid = null }) => {
     [
       id, walletId, `mvc-${id}`, `btc-${id}`, `doge-${id}`, `public-${id}`, `chat-public-${id}`,
       name, 1, `metaid-${id}`, globalmetaid, 'worker', '0000', `${name} role`, `${name} soul`,
-      null, null, '[]', null, null, 1700000000000 + id, 1700000000000 + id,
+      null, null, JSON.stringify(allowChatSkills), null, null, 1700000000000 + id, 1700000000000 + id,
     ]
   );
 };
@@ -150,9 +153,16 @@ const createHarness = async (overrides = {}) => {
   const db = store.getDatabase();
   const metabotStore = new MetabotStore(db, store.getSaveFunction());
   const membershipStore = new OpenTeamMembershipStore(db, store.getSaveFunction());
+  const coworkStore = new CoworkStore(db, () => {});
 
   insertWallet(db, 7);
-  insertMetabot(db, { id: 7, walletId: 7, name: 'Guest Bot', globalmetaid: GUEST_GMID });
+  insertMetabot(db, {
+    id: 7,
+    walletId: 7,
+    name: 'Guest Bot',
+    globalmetaid: GUEST_GMID,
+    allowChatSkills: overrides.allowChatSkills ?? [],
+  });
 
   const calls = { chat: [], send: [] };
   const performChat = async (systemPrompt, userMessage, llmId, options) => {
@@ -164,6 +174,11 @@ const createHarness = async (overrides = {}) => {
     return { pinId: 'sent-pin-1' };
   };
 
+  // deps may be a function receiving the harness stores (skill seams need the
+  // coworkStore created here).
+  const extraDeps = typeof overrides.deps === 'function'
+    ? overrides.deps({ coworkStore })
+    : overrides.deps;
   const loop = createOpenTeamGuestDaemonLoop({
     getStore: () => store,
     getMetabotStore: () => metabotStore,
@@ -173,9 +188,9 @@ const createHarness = async (overrides = {}) => {
     emitLog: () => {},
     now: () => 1_800_000_000_000,
     cooldownMs: 0,
-    ...overrides.deps,
+    ...extraDeps,
   });
-  return { store, db, metabotStore, membershipStore, loop, calls };
+  return { store, db, metabotStore, membershipStore, coworkStore, loop, calls };
 };
 
 const messageIdOf = (db, pinId) => {
@@ -304,6 +319,270 @@ test('store: catchUpCursorToLatest fast-forwards past existing history', async (
       membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
       messageIdOf(db, `${'6'.repeat(64)}i0`),
     );
+  } finally {
+    store.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M3: chat-skill turns + metafile file delivery
+// ---------------------------------------------------------------------------
+
+const SKILL_PINID = `${'ef'.repeat(32)}i0`;
+
+/**
+ * Skill-enabled harness: real CoworkStore, mocked routing/skill-turn/upload
+ * seams. runSkillTurn reports artifactDir as its cwd so the delivery step
+ * resolves/scans files there.
+ */
+const createSkillHarness = async (overrides = {}) => {
+  const artifactDir = makeTempDir();
+  const skillCalls = { routing: [], skillTurn: [], upload: [] };
+  const state = {
+    routing: overrides.routing ?? { prompt: 'SKILL ROUTING PROMPT', activeSkillIds: ['skill-doc'] },
+    routingError: overrides.routingError ?? null,
+    skillReply: overrides.skillReply ?? 'Draft ready.',
+    skillError: overrides.skillError ?? null,
+    uploadError: overrides.uploadError ?? null,
+    uploadPinId: overrides.uploadPinId ?? SKILL_PINID,
+  };
+  const harness = await createHarness({
+    replyText: overrides.replyText,
+    allowChatSkills: overrides.allowChatSkills ?? ['skill-doc'],
+    deps: ({ coworkStore }) => ({
+      getCoworkStore: () => coworkStore,
+      getChatSkillsRoutingPrompt: async (input) => {
+        skillCalls.routing.push(input);
+        if (state.routingError) throw new Error(state.routingError);
+        return typeof state.routing === 'function' ? state.routing(input) : state.routing;
+      },
+      runSkillTurn: async (params) => {
+        skillCalls.skillTurn.push(params);
+        if (state.skillError) throw new Error(state.skillError);
+        return {
+          replyText: typeof state.skillReply === 'function' ? state.skillReply() : state.skillReply,
+          assistantMessageId: 'asst-skill-1',
+          cwd: artifactDir,
+        };
+      },
+      uploadDeliverableFile: async (input) => {
+        skillCalls.upload.push(input);
+        if (state.uploadError) throw new Error(state.uploadError);
+        return { pinId: state.uploadPinId };
+      },
+      ...(overrides.realNow ? { now: () => Date.now() } : {}),
+    }),
+  });
+  return { ...harness, artifactDir, skillCalls };
+};
+
+const joinAndMention = (db, membershipStore, pinId) => {
+  membershipStore.upsertActiveMembership({
+    groupId: GROUP_ID,
+    metabotId: 7,
+    globalmetaid: GUEST_GMID,
+    inviterGlobalmetaid: 'gmid-inviter',
+    taskTitle: 'External Task',
+  });
+  insertGroupMessage(db, {
+    pinId,
+    senderMetaId: 'metaid-other',
+    senderGlobalMetaId: OTHER_GMID,
+    senderName: 'Other Bot',
+    content: '@Guest Bot please produce the report',
+  });
+};
+
+test('skill: routing hit runs the skill turn (scoped to own allow_chat_skills), not plain chat', async () => {
+  const { store, db, membershipStore, coworkStore, loop, calls, skillCalls } = await createSkillHarness();
+  try {
+    joinAndMention(db, membershipStore, `${'a'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(skillCalls.routing.length, 1);
+    // External group members are never the owner: only the bot's own
+    // configured allow_chat_skills, allowAllEnabled stays false.
+    assert.deepEqual(skillCalls.routing[0], { allowChatSkills: ['skill-doc'], allowAllEnabled: false });
+
+    assert.equal(skillCalls.skillTurn.length, 1);
+    assert.deepEqual(skillCalls.skillTurn[0].activeSkillIds, ['skill-doc']);
+    assert.match(skillCalls.skillTurn[0].systemPrompt, /SKILL ROUTING PROMPT/);
+    assert.match(skillCalls.skillTurn[0].systemPrompt, /invited/i);
+    assert.match(skillCalls.skillTurn[0].systemPrompt, /absolute local path/);
+    assert.match(skillCalls.skillTurn[0].userMessage, />>> Other Bot: @Guest Bot please produce the report <<</);
+
+    // Plain completion path NOT used; the skill reply is what goes on-chain.
+    assert.equal(calls.chat.length, 0);
+    assert.equal(calls.send.length, 1);
+    assert.equal(calls.send[0][2].content, 'Draft ready.');
+
+    // The skill turn ran inside a per-group guest cowork session bound to bot 7.
+    const session = coworkStore.getSession(skillCalls.skillTurn[0].sessionId);
+    assert.ok(session);
+    assert.equal(session.metabotId, 7);
+    assert.equal(session.sessionType, 'group_task');
+    assert.ok(session.messages.some((m) => m.type === 'user' && m.content.includes('>>> Other Bot')));
+
+    // No file artifacts in the reply -> no upload attempted.
+    assert.equal(skillCalls.upload.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: a mentioned file artifact uploads and delivers one [DELIVERABLE] metafile line', async () => {
+  let reportPath = '';
+  const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
+    // Evaluated at turn time; the file is written below before runTick.
+    skillReply: () => `Report is ready.\n${reportPath}`,
+  });
+  try {
+    reportPath = path.join(artifactDir, 'report.pdf');
+    fs.writeFileSync(reportPath, 'pdf-bytes');
+    joinAndMention(db, membershipStore, `${'b'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(calls.chat.length, 0);
+    assert.equal(skillCalls.upload.length, 1);
+    assert.equal(skillCalls.upload[0].metabotId, 7);
+    assert.equal(skillCalls.upload[0].filePath, reportPath);
+    assert.equal(skillCalls.upload[0].contentType, 'application/pdf');
+
+    assert.equal(calls.send.length, 1);
+    const content = calls.send[0][2].content;
+    assert.match(content, /Report is ready\./);
+    const expectedLine = `[DELIVERABLE] metafile: metafile://${SKILL_PINID}.pdf`;
+    assert.ok(
+      content.split('\n').includes(expectedLine),
+      `expected its own deliverable line, got:\n${content}`,
+    );
+
+    // The inviter-side parser must ingest the line as one valid metafile deliverable.
+    const parsed = parseDeliverableLines(content);
+    assert.equal(parsed.length, 1);
+    assert.deepEqual(parsed[0], {
+      kind: 'metafile',
+      uri: `metafile://${SKILL_PINID}.pdf`,
+      valid: true,
+      note: null,
+    });
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: an unmentioned file in the skill cwd is found by the turn-window scan', async () => {
+  const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
+    skillReply: 'Here is the image you asked for.',
+    realNow: true,
+  });
+  try {
+    const imagePath = path.join(artifactDir, 'chart.png');
+    fs.writeFileSync(imagePath, 'png-bytes');
+    joinAndMention(db, membershipStore, `${'c'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(skillCalls.upload.length, 1);
+    assert.equal(skillCalls.upload[0].filePath, imagePath);
+    assert.match(
+      calls.send[0][2].content,
+      new RegExp(`\\[DELIVERABLE\\] metafile: metafile://${SKILL_PINID}\\.png`),
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: no routing hit falls back to the plain completion path', async () => {
+  const { store, db, membershipStore, loop, calls, skillCalls } = await createSkillHarness({
+    routing: { prompt: null, activeSkillIds: [] },
+  });
+  try {
+    joinAndMention(db, membershipStore, `${'d'.repeat(64)}i0`);
+    await loop.runTick();
+    assert.equal(skillCalls.routing.length, 1);
+    assert.equal(skillCalls.skillTurn.length, 0);
+    assert.equal(skillCalls.upload.length, 0);
+    assert.equal(calls.chat.length, 1);
+    assert.equal(calls.send.length, 1);
+    assert.equal(calls.send[0][2].content, 'On it — results soon.');
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: a throwing skill turn degrades to a plain text reply', async () => {
+  const { store, db, membershipStore, loop, calls, skillCalls } = await createSkillHarness({
+    skillError: 'runner exploded',
+  });
+  try {
+    joinAndMention(db, membershipStore, `${'e'.repeat(64)}i0`);
+    await loop.runTick();
+    assert.equal(skillCalls.skillTurn.length, 1);
+    assert.equal(calls.chat.length, 1);
+    assert.equal(calls.send.length, 1);
+    assert.equal(calls.send[0][2].content, 'On it — results soon.');
+    // Cursor advanced past the triggering message despite the skill failure.
+    const membership = membershipStore.getMembership(GROUP_ID, 7);
+    assert.equal(membership.lastProcessedMsgId, messageIdOf(db, `${'e'.repeat(64)}i0`));
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: a routing failure also degrades to the plain completion path', async () => {
+  const { store, db, membershipStore, loop, calls, skillCalls } = await createSkillHarness({
+    routingError: 'skill manager unavailable',
+  });
+  try {
+    joinAndMention(db, membershipStore, `${'f'.repeat(64)}i0`);
+    await loop.runTick();
+    assert.equal(skillCalls.skillTurn.length, 0);
+    assert.equal(calls.chat.length, 1);
+    assert.equal(calls.send.length, 1);
+    assert.equal(calls.send[0][2].content, 'On it — results soon.');
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: an upload failure keeps the text reply and adds NO fake [DELIVERABLE] tag', async () => {
+  let reportPath = '';
+  const { store, db, membershipStore, loop, calls, skillCalls, artifactDir } = await createSkillHarness({
+    skillReply: () => `Report is ready.\n${reportPath}`,
+    uploadError: 'insufficient SPACE',
+  });
+  try {
+    reportPath = path.join(artifactDir, 'report.pdf');
+    fs.writeFileSync(reportPath, 'pdf-bytes');
+    joinAndMention(db, membershipStore, `${'0'.repeat(64)}i0`);
+    await loop.runTick();
+
+    assert.equal(skillCalls.upload.length, 1);
+    assert.equal(calls.send.length, 1);
+    const content = calls.send[0][2].content;
+    assert.match(content, /Report is ready\./);
+    assert.match(content, /On-chain upload failed for: report\.pdf/);
+    assert.ok(!content.includes('[DELIVERABLE]'), 'no deliverable tag may be emitted for a failed upload');
+    assert.deepEqual(parseDeliverableLines(content), []);
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: [NO_REPLY] from a skill turn suppresses the send and never uploads', async () => {
+  const { store, db, membershipStore, loop, calls, skillCalls } = await createSkillHarness({
+    skillReply: '[NO_REPLY]',
+  });
+  try {
+    joinAndMention(db, membershipStore, `${'9'.repeat(64)}i0`);
+    await loop.runTick();
+    assert.equal(skillCalls.skillTurn.length, 1);
+    assert.equal(skillCalls.upload.length, 0);
+    assert.equal(calls.chat.length, 0);
+    assert.equal(calls.send.length, 0);
+    const membership = membershipStore.getMembership(GROUP_ID, 7);
+    assert.equal(membership.lastProcessedMsgId, messageIdOf(db, `${'9'.repeat(64)}i0`));
   } finally {
     store.close();
   }
