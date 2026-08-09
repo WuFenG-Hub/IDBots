@@ -492,7 +492,7 @@ export async function runMvcCreatePinWorkerWithSessionRecovery(params: {
   }
 }
 
-function resolveCreatePinNetwork(network?: CreatePinNetwork | string): CreatePinNetwork {
+export function resolveCreatePinNetwork(network?: CreatePinNetwork | string): CreatePinNetwork {
   return (
     (network != null && String(network).trim() !== '')
       ? String(network).toLowerCase().trim()
