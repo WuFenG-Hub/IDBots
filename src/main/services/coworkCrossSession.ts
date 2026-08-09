@@ -88,6 +88,7 @@ export interface CoworkCrossSessionStore {
   getSession(sessionId: string): CoworkSession | null;
   getSessionMetadata(sessionId: string): CoworkStoreSessionMetadata | null;
   getSessionLatestMessage(sessionId: string): CoworkMessage | null;
+  getSessionLatestVisibleMessage(sessionId: string): CoworkMessage | null;
   addMessage(sessionId: string, message: Omit<CoworkMessage, 'id' | 'timestamp'>): CoworkMessage;
 }
 
@@ -149,6 +150,23 @@ function toMessage(message: CoworkMessage): CoworkCrossSessionMessage {
   };
 }
 
+/**
+ * GT#12 N3: thinking drafts (metadata.isThinking=true) and unfinished
+ * streaming placeholders (metadata.isStreaming=true) must never surface as
+ * formal replies through session-history outputs. Storage stays untouched —
+ * this filter lives on the external output layer only (the same layer the
+ * IM push and UI rendering already filter on).
+ */
+function isExternallyVisibleMessage(message: CoworkMessage): boolean {
+  if (message.metadata?.isThinking === true) {
+    return false;
+  }
+  if (message.metadata?.isStreaming === true) {
+    return false;
+  }
+  return true;
+}
+
 export class CoworkCrossSessionService {
   constructor(private readonly store: CoworkCrossSessionStore) {}
 
@@ -161,7 +179,7 @@ export class CoworkCrossSessionService {
     return {
       ok: true,
       session: toSessionMetadata(resolved.session),
-      messages: resolved.session.messages.map(toMessage),
+      messages: resolved.session.messages.filter(isExternallyVisibleMessage).map(toMessage),
     };
   }
 
@@ -171,7 +189,7 @@ export class CoworkCrossSessionService {
       return resolved;
     }
 
-    const latestMessage = this.store.getSessionLatestMessage(resolved.sessionId);
+    const latestMessage = this.store.getSessionLatestVisibleMessage(resolved.sessionId);
     return {
       ok: true,
       session: toSessionMetadata(resolved.session),

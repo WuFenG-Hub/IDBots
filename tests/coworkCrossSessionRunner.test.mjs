@@ -76,6 +76,13 @@ class FakeCoworkStore {
     return session?.messages.at(-1) ?? null;
   }
 
+  // GT#12 N3: readLatest now queries the latest EXTERNALLY VISIBLE message
+  // (skipping isThinking/isStreaming drafts). This fake's messages are all
+  // visible, so it matches getSessionLatestMessage.
+  getSessionLatestVisibleMessage(id) {
+    return this.getSessionLatestMessage(id);
+  }
+
   addMessage(id, message) {
     const session = this.getSession(id);
     if (!session) {

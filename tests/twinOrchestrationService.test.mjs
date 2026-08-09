@@ -33,6 +33,7 @@ function makeCrossSessionHarness() {
     getSession: (id) => sessions.get(id) ?? null,
     getSessionMetadata: (id) => sessions.get(id) ?? null,
     getSessionLatestMessage: () => null,
+    getSessionLatestVisibleMessage: () => null,
     addMessage: (sessionId, message) => {
       const full = { id: 'm-' + (inserted.length + 1), timestamp: 1700000000000, ...message };
       inserted.push({ targetSessionId: sessionId, message: full });
