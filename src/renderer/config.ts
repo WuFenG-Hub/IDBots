@@ -27,6 +27,13 @@ export interface AppConfig {
   model: {
     availableModels: ConfiguredModel[];
     defaultModel: string;
+    /**
+     * Provider key ('deepseek', 'opencode', ...) recorded when the user
+     * picks a model in the UI, so identical model ids offered by multiple
+     * enabled providers resolve to the user's chosen provider instead of the
+     * first one in config order.
+     */
+    defaultProvider?: string;
   };
   // 多模型提供商配置
   providers?: {

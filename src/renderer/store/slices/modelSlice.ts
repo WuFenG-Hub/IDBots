@@ -4,7 +4,9 @@ import { defaultConfig, type ModelOptions } from '../../config';
 export interface Model {
   id: string;
   name: string;
-  provider?: string; // 模型所属的提供商
+  provider?: string; // 模型所属的提供商（显示名）
+  /** 原始 provider key（'deepseek'/'opencode'/...），用于记录默认 provider 选择。 */
+  providerKey?: string;
   supportsImage?: boolean;
   options?: ModelOptions;
 }
@@ -20,6 +22,7 @@ function buildInitialModels(): Model[] {
             id: model.id,
             name: model.name,
             provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+            providerKey: providerName,
             supportsImage: model.supportsImage ?? false,
             options: model.options,
           });
@@ -39,8 +42,11 @@ interface ModelState {
 }
 
 const initialState: ModelState = {
-  // 使用 config 中的默认模型
-  selectedModel: availableModels.find(model => model.id === defaultConfig.model.defaultModel) || availableModels[0],
+  // 使用 config 中的默认模型；同 id 模型多家提供时优先 defaultProvider 指向的那家
+  selectedModel: availableModels.find(
+    model => model.id === defaultConfig.model.defaultModel
+      && model.providerKey === defaultConfig.model.defaultProvider
+  ) || availableModels.find(model => model.id === defaultConfig.model.defaultModel) || availableModels[0],
   availableModels: availableModels,
 };
 
@@ -55,9 +61,13 @@ const modelSlice = createSlice({
       state.availableModels = action.payload;
       // 更新导出的 availableModels
       availableModels = action.payload;
-      // 同步选中模型信息，确保名称与最新配置一致
+      // 同步选中模型信息，确保名称与最新配置一致；同 id 模型多家提供时
+      // 优先保持当前 providerKey 指向的那家，避免刷新后跳到别家。
       if (action.payload.length > 0) {
-        const matchedModel = action.payload.find(m => m.id === state.selectedModel.id);
+        const matchedModel = state.selectedModel.providerKey
+          ? action.payload.find(m => m.id === state.selectedModel.id && m.providerKey === state.selectedModel.providerKey)
+            ?? action.payload.find(m => m.id === state.selectedModel.id)
+          : action.payload.find(m => m.id === state.selectedModel.id);
         if (matchedModel) {
           state.selectedModel = matchedModel;
         } else {
