@@ -379,6 +379,11 @@ export interface SdkCronHostTriggerDeps {
   getSession: (id: string) => { metabotId?: number | null } | null;
   /** 该 cwd 下是否有 running 会话（有则视为 SDK 活跃，整体跳过）。 */
   isSessionRunningInCwd: (cwd: string) => boolean;
+  /**
+   * 查询镜像侧开关状态：停用（enabled=0，用户关了开关）的任务即使仍残留在 durable
+   * 文件中（SDK 侧删除未及时生效）也不得触发——第二道闸。
+   */
+  isCronEnabled?: (cronId: string) => boolean;
   /** 复用旧 Scheduler 拉起逻辑：createSession + addMessage + startSession，返回会话 id。 */
   launchSession: (spec: HostTriggerLaunchSpec) => Promise<string>;
   /** 一次性/过期任务从文件移除后，同步把镜像标记 deleted（对账立即一致）。 */
@@ -412,6 +417,7 @@ export class SdkCronHostTriggerBridge {
   constructor(deps: SdkCronHostTriggerDeps) {
     this.deps = {
       markMirrorDeleted: () => undefined,
+      isCronEnabled: () => true,
       now: () => Date.now(),
       readFile: (p) => fs.readFileSync(p, 'utf8'),
       writeFile: (p, c) => {
@@ -483,6 +489,13 @@ export class SdkCronHostTriggerBridge {
       let changed = false;
       for (const task of tasks) {
         const state = this.deps.logStore.getState(task.id);
+
+        // 开关已关（用户停用）：即使 SDK 侧删除未及时生效（文件里还有），宿主也不得触发。
+        // 这是「开关 = 删→重建」语义在宿主侧的强制闸，保证停用立刻不再执行。
+        if (!this.deps.isCronEnabled(task.id)) {
+          report.skippedFiles.push({ file, reason: `cron ${task.id} disabled by host toggle` });
+          continue;
+        }
 
         // 7 天过期（recurring）：SDK 到期自动删除；无会话代为清理时宿主按同规则移除。
         if (task.recurring && isSevenDayExpired(task.createdAtMs, now)) {

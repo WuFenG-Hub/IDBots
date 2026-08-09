@@ -277,3 +277,49 @@ test('setScheduleSpec persists spec JSON and round-trips via getById', async () 
     cleanup();
   }
 });
+
+test('reconcileSession/reconcileDurableFile skip disabled (enabled=0) rows', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const { SdkCronMirrorStore } = getMirrorStoreModule();
+  try {
+    const store = new SdkCronMirrorStore(db, () => {});
+    // 停用行：SDK 侧已删，镜像保留 spec 待重建——不应被对账成 deleted。
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    store.setEnabled('c1', false);
+    // 启用行：文件里没了 → 应被对账成 deleted。
+    store.upsert({ id: 'c2', schedule: '0 5 * * *', recurring: true, prompt: 'p', durable: true }, 'sess-a', 'file_scan');
+
+    // durable 文件对账：文件里只有 c2 不存在 → c2 deleted；c1 停用跳过。
+    const result = store.reconcileDurableFile('sess-a', [{ id: 'c1' }]);
+    assert.equal(result.deleted, 1);
+    assert.equal(store.getById('c1').status, 'active');
+    assert.equal(store.getById('c1').enabled, false);
+    assert.equal(store.getById('c2').status, 'deleted');
+
+    // 会话对账：c1 不在 activeIds 且停用 → 跳过。
+    store.setEnabled('c1', true);
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    store.setEnabled('c1', false);
+    const changed = store.reconcileSession('sess-a', []);
+    assert.equal(changed, 0);
+    assert.equal(store.getById('c1').status, 'active');
+  } finally {
+    cleanup();
+  }
+});
+
+test('upsert self-heals deletion_requested back to active (SDK cron still alive)', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const { SdkCronMirrorStore } = getMirrorStoreModule();
+  try {
+    const store = new SdkCronMirrorStore(db, () => {});
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    store.markDeletionRequested('c1');
+    assert.equal(store.getById('c1').status, 'deletion_requested');
+    // 文件扫描/Stop hook 再次看到该 cron = SDK 侧还活着 → 自愈回 active。
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'file_scan');
+    assert.equal(store.getById('c1').status, 'active');
+  } finally {
+    cleanup();
+  }
+});
