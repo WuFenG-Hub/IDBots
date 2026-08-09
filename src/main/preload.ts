@@ -352,6 +352,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    requestManualCompaction: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:compact', sessionId),
     stopTask: (sessionId: string, taskId: string) =>
       ipcRenderer.invoke('cowork:session:stopTask', { sessionId, taskId }),
     backgroundTask: (sessionId: string, toolUseId?: string) =>

@@ -352,6 +352,24 @@ class CoworkService {
     }
   }
 
+  /**
+   * Queues a manual compaction for the next local-mode turn (Phase 3). The
+   * runner validates that the session is idle and has history; on success the
+   * next submitted message continues from a compacted summary.
+   */
+  async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.requestManualCompaction) {
+      console.error('requestManualCompaction API not available');
+      return { success: false, error: 'Manual compaction API not available' };
+    }
+    const result = await cowork.requestManualCompaction(sessionId);
+    if (!result) {
+      return { success: false, error: 'Unknown error while requesting manual compaction' };
+    }
+    return result;
+  }
+
   async stopSession(sessionId: string): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;

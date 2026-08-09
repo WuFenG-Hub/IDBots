@@ -7520,6 +7520,17 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('cowork:session:compact', async (_event, sessionId: string) => {
+    try {
+      return await getCoworkRunner().requestManualCompaction(sessionId);
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to compact session',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
     sessionId: string;
     permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';

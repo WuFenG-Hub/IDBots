@@ -915,6 +915,14 @@ interface ActiveSession {
    */
   pendingCacheBreakReason?: string | null;
   /**
+   * Set by requestManualCompaction() while the session is idle. The next
+   * local-mode turn resets the SDK session and sends a synthetic compacted
+   * prompt instead of resuming (same path as automatic tier-2 compaction).
+   * In-memory only: if the app restarts before the next message, the user
+   * simply clicks the button again.
+   */
+  pendingManualCompact: boolean;
+  /**
    * SHA-256 (8 hex chars) of the effective system prompt sent on the previous
    * turn. A change without a known reset event means silent drift — recorded
    * as 'system_prompt_drift' and logged as a regression alarm.
@@ -4156,6 +4164,7 @@ export class CoworkRunner extends EventEmitter {
       localPendingSteerIds: [],
       localDeliveredSteerIds: new Set(),
       localTurnState: 'starting',
+      pendingManualCompact: false,
       turnSettled,
       resolveTurnSettled,
       turnSettlementResolved: false,
@@ -4344,6 +4353,51 @@ export class CoworkRunner extends EventEmitter {
     }
     this.store.updateSession(sessionId, { permissionMode: mode });
     coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Queues a user-initiated manual compaction for the next local-mode turn.
+   *
+   * The SDK session is reset and the next submitted message is sent with a
+   * synthetic compacted prompt (the same path the automatic tier-2 compaction
+   * uses), so the user keeps chatting seamlessly from a summarized history.
+   *
+   * Guards: the session must be active, in local mode, idle (no turn running),
+   * with actual conversation history, and no compaction already queued.
+   */
+  async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) {
+      return { success: false, error: 'Session is not active. Send a message first, then try again.' };
+    }
+    if (activeSession.executionMode !== 'local') {
+      return { success: false, error: 'Manual compaction is only available in local mode.' };
+    }
+    if (activeSession.localTurnState !== 'none') {
+      return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+    }
+    if (activeSession.pendingManualCompact) {
+      return { success: false, error: 'Manual compaction is already queued for the next message.' };
+    }
+    const session = this.store.getSession(sessionId);
+    const messages = session?.messages ?? [];
+    const hasCompressibleHistory = messages.some(
+      (message) => message.type === 'user' || message.type === 'assistant' || message.type === 'tool_use' || message.type === 'tool_result'
+    );
+    if (!hasCompressibleHistory) {
+      return { success: false, error: 'No conversation history to compact yet.' };
+    }
+
+    activeSession.pendingManualCompact = true;
+    this.addSystemMessage(
+      sessionId,
+      '已请求手动压缩历史：下一条消息将自动从压缩后的上下文继续。'
+    );
+    coworkLog('INFO', 'requestManualCompaction', 'Manual compaction queued for next turn', {
+      sessionId,
+      messageCount: messages.length,
+    });
+    return { success: true };
   }
 
   /**
@@ -4890,6 +4944,34 @@ export class CoworkRunner extends EventEmitter {
 
     let effectivePrompt = prompt;
     const sessionSnapshotForBudget = this.store.getSession(sessionId);
+    // User-initiated manual compaction (Phase 3): the button queues this flag
+    // while the session is idle; the next turn resets the SDK session and
+    // folds the conversation into a synthetic compacted prompt (same path as
+    // the automatic tier-2 compaction). Consumed once; retries never re-run it.
+    if (activeSession.pendingManualCompact && !isRetry) {
+      activeSession.pendingManualCompact = false;
+      resetCoworkSnipHeadTokens(sessionId);
+      const compacted = buildCoworkCompactedPrompt({
+        messages: sessionSnapshotForBudget?.messages ?? [],
+        currentPrompt: prompt,
+        modelLimits,
+      });
+      effectivePrompt = compacted.prompt;
+      this.store.updateSession(sessionId, { claudeSessionId: null });
+      activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'manual_compact';
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Manual compaction requested; starting compacted SDK session instead of resume', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        compactedEstimatedTokens: compacted.estimatedTokens,
+        compactedRecentMessages: compacted.recentMessages,
+        compactedSummarizedMessages: compacted.summarizedMessages,
+      });
+      this.addSystemMessage(
+        sessionId,
+        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
+      );
+    }
     if (activeSession.claudeSessionId && !isRetry) {
       const budget = getCoworkContextBudget({
         messages: sessionSnapshotForBudget?.messages ?? [],
