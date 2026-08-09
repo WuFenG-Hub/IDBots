@@ -351,7 +351,7 @@ export type GroupTaskDaemonSendOwnerReportFn = (params: {
 /** Narrow memory read (owner scope, created status) for the A2A experience block. */
 export type GroupTaskDaemonListUserMemoriesFn = (
   metabotId: number,
-  input: { usageClass: 'self_identity' | 'value_boundary'; limit: number },
+  input: { usageClass: 'self_identity' | 'value_boundary' | 'work_review'; limit: number },
 ) => Array<{ text: string }>;
 
 /** Recent dream summaries for the A2A experience block. */
@@ -803,10 +803,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     try {
       const identityEntry = deps.listUserMemories?.(bot.id, { usageClass: 'self_identity', limit: 1 })?.[0];
       const valueBoundaries = deps.listUserMemories?.(bot.id, { usageClass: 'value_boundary', limit: 5 }) ?? [];
+      // Past work reviews (dream-written, aligned with the owner's acceptance
+      // ratings) — the recall path that keeps prior group-task feedback in play.
+      const workReviews = deps.listUserMemories?.(bot.id, { usageClass: 'work_review', limit: 5 }) ?? [];
       const summaries = deps.listDailySummaries?.(bot.id, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
       const block = buildExperiencePromptBlocksXml({
         identityText: identityEntry?.text ?? null,
         valueBoundaries,
+        workReviews,
         summaries,
       }).trim();
       if (!block) return '';
