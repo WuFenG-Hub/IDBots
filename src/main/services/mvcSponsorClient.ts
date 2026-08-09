@@ -221,7 +221,10 @@ function unwrapEnvelope(body: unknown, stage: SponsorStage): Record<string, unkn
     pickText(record, 'message', 'msg', 'error') || `Sponsor service returned code ${normalizeText(record.code) || 'unknown'}.`,
     {
       data: record.data,
-      reason: normalizeErrorCodeReason(record.code),
+      // Backend sends TRAFFIC_INSUFFICIENT as data.errorCode (envelope code stays
+      // numeric 1) — same pattern as SPONSOR_BROADCAST_PENDING.
+      reason: normalizeErrorCodeReason(record.code)
+        ?? normalizeErrorCodeReason(readObject(record.data)?.errorCode),
       retryable: normalizeBoolean(readObject(record.data)?.retryable) === true,
     },
   );
@@ -261,7 +264,8 @@ async function requestJson(
           {
             status: response.status,
             data: record?.data,
-            reason: normalizeErrorCodeReason(record?.code),
+            reason: normalizeErrorCodeReason(record?.code)
+              ?? normalizeErrorCodeReason(record ? readObject(record.data)?.errorCode : undefined),
             retryable: isRetryableHttpStatus(response.status),
           },
         );

@@ -35,6 +35,7 @@ import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 import { runMvcSponsorCreatePin, type CreatePinFeeAssistMetadata } from './mvcSponsorCreatePin';
+import { resolveSponsorTrafficAccount } from './trafficAccountService';
 import type { MvcSponsorTrafficAccount } from './mvcSponsorClient';
 import {
   getTrafficFallbackPolicy,
@@ -821,6 +822,14 @@ export async function createPin(
             runBroadcastWorker,
             recordSpentOutpoints: (outpoints) => recordMvcSpentOutpoints(metabot_id, outpoints),
             replacePendingFundingUtxos: (utxo) => replaceMvcPendingFundingUtxos(metabot_id, utxo),
+            // Traffic-account billing (Phase D): resolves to undefined and keeps
+            // the legacy quota path whenever the feature is off or unbound.
+            resolveTrafficAccount: ({ challengeId }) => resolveSponsorTrafficAccount({
+              botAddress: sponsorMvcAddress,
+              challengeId,
+              botMnemonic: mnemonic,
+              botWalletPath: walletPath,
+            }),
           },
         );
       },

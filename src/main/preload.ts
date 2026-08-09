@@ -570,6 +570,19 @@ contextBridge.exposeInMainWorld('electron', {
     select: (chain: string, tierTitle: string) => ipcRenderer.invoke('feeRates:select', chain, tierTitle) as Promise<{ success: boolean }>,
     refresh: () => ipcRenderer.invoke('feeRates:refresh') as Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>,
   },
+  traffic: {
+    ensureAccount: () => ipcRenderer.invoke('traffic:ensureAccount'),
+    getAccount: () => ipcRenderer.invoke('traffic:getAccount'),
+    getBalance: (input?: { forceRefresh?: boolean }) => ipcRenderer.invoke('traffic:getBalance', input ?? {}),
+    getLedger: (input?: { cursor?: number; limit?: number; direction?: number }) =>
+      ipcRenderer.invoke('traffic:getLedger', input ?? {}),
+    getDailyUsage: (input?: { from?: number; to?: number; botAddress?: string }) =>
+      ipcRenderer.invoke('traffic:getDailyUsage', input ?? {}),
+    getUsageSummary: () => ipcRenderer.invoke('traffic:getUsageSummary'),
+    bindAllBots: () => ipcRenderer.invoke('traffic:bindAllBots'),
+    getLocalJournal: (input?: { limit?: number; botAddress?: string }) =>
+      ipcRenderer.invoke('traffic:getLocalJournal', input ?? {}),
+  },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getSystemLocale: () => ipcRenderer.invoke('app:getSystemLocale'),

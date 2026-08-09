@@ -106,6 +106,7 @@ import {
   getTokenTransferChain,
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
+import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -11793,6 +11794,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     buildTokenTransferPreview: buildTokenTransferPreviewService,
     executeTokenTransfer: executeTokenTransferService,
   });
+
+  // Traffic-ized gas fee (Phase D): account/binding/balance/usage APIs plus the
+  // local spend journal. The service stays inert (self-pay defaults) until
+  // traffic.mode is switched on in settings.
+  initTrafficAccountService({
+    getStore,
+    getMetabotStore,
+    getUserIdentityStore,
+  });
+  registerTrafficAccountIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {

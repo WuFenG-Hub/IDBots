@@ -22,6 +22,7 @@ import {
   type MvcSponsorTrafficAccount,
   type MvcSponsorV2Client,
 } from './mvcSponsorClient';
+import { recordLocalTrafficSpend } from './trafficAccountService';
 import type {
   MvcSponsorFeeAssistMetadata,
   MvcSponsorFeeAssistReason,
@@ -93,6 +94,13 @@ export interface MvcSponsorCreatePinDeps {
   runBroadcastWorker: () => Promise<CreatePinWorkerSuccess>;
   recordSpentOutpoints: (outpoints: string[]) => void;
   replacePendingFundingUtxos: (utxo: MvcCachedFundingUtxo | null) => void;
+  /**
+   * Optional trafficAccount resolver invoked between challenge and pre
+   * (wired to trafficAccountService in production). When it returns
+   * undefined — or is not provided — the pre goes out without a
+   * trafficAccount and stays on the legacy quota path.
+   */
+  resolveTrafficAccount?: (ctx: { challengeId: string }) => Promise<MvcSponsorTrafficAccount | undefined>;
 }
 
 function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistReason): MvcSponsorFeeAssistReason {
@@ -252,6 +260,9 @@ export async function runMvcSponsorCreatePin(
     message: challenge.message,
   });
 
+  const trafficAccount = input.trafficAccount
+    ?? await deps.resolveTrafficAccount?.({ challengeId: challenge.challengeId });
+
   let pre: SponsorPreResult;
   try {
     pre = await sponsorClient.preSponsor({
@@ -260,7 +271,7 @@ export async function runMvcSponsorCreatePin(
       challengeId: challenge.challengeId,
       publicKey: challengeSignature.publicKey,
       signature: challengeSignature.signature,
-      trafficAccount: input.trafficAccount,
+      trafficAccount,
     });
   } catch (error) {
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
@@ -330,6 +341,16 @@ export async function runMvcSponsorCreatePin(
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
   deps.recordSpentOutpoints(draftSpentOutpoints);
+  // Local spend journal + balance-cache deduction (best-effort, never throws).
+  recordLocalTrafficSpend({
+    txId: commit.txId,
+    botAddress: input.mvcAddress,
+    orderId: pre.orderId,
+    txSize: commit.txSize,
+    sponsoredMinerFee,
+    savedFee: sponsoredMinerFee,
+    billedBy: trafficAccount ? 'traffic' : 'quota',
+  });
   const changeUtxo: MvcCachedFundingUtxo | null = draft.changeOutput
     ? {
       txId: commit.txId,

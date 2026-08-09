@@ -38,6 +38,7 @@ import {
   type MvcSponsorDraft,
   type SponsorMvcUtxo,
 } from './mvcSponsorClient';
+import { recordLocalTrafficSpend, resolveSponsorTrafficAccount } from './trafficAccountService';
 
 export {
   createMvcSponsorV2Client,
@@ -364,6 +365,15 @@ export async function uploadMvcSponsorDirectFile(
     message: challenge.message,
   });
 
+  // Traffic-account billing (Phase D): undefined keeps the legacy quota path
+  // (feature off, no account, unbound bot, or backend 404).
+  const trafficAccount = await resolveSponsorTrafficAccount({
+    botAddress: input.mvcAddress,
+    challengeId: challenge.challengeId,
+    botMnemonic: input.mnemonic,
+    botWalletPath: input.walletPath,
+  });
+
   let pre: {
     preparedTxHex: string;
     orderId: string;
@@ -379,6 +389,7 @@ export async function uploadMvcSponsorDirectFile(
       challengeId: challenge.challengeId,
       publicKey: challengeSignature.publicKey,
       signature: challengeSignature.signature,
+      trafficAccount,
     });
   } catch (error) {
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
@@ -456,6 +467,16 @@ export async function uploadMvcSponsorDirectFile(
   }
 
   const sponsoredMinerFee = commit.minerFee ?? pre.minerFee;
+  // Local spend journal + balance-cache deduction (best-effort, never throws).
+  recordLocalTrafficSpend({
+    txId: commit.txId,
+    botAddress: input.mvcAddress,
+    orderId: pre.orderId,
+    txSize: commit.txSize,
+    sponsoredMinerFee,
+    savedFee: sponsoredMinerFee,
+    billedBy: trafficAccount ? 'traffic' : 'quota',
+  });
   let quotaAfter: MvcSponsorAddressInfo | undefined;
   try {
     quotaAfter = await sponsorClient.getAddressInfo({ address: input.mvcAddress });

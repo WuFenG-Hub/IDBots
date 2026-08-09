@@ -351,6 +351,24 @@ test('preSponsor maps TRAFFIC_INSUFFICIENT to insufficient_traffic', async () =>
     assert.equal(error.status, 400);
     return true;
   });
+
+  // Backend production shape (docs/traffic-deployment.md §5.8): numeric envelope
+  // code + data.errorCode carries TRAFFIC_INSUFFICIENT.
+  const byDataErrorCode = createMvcSponsorV2Client({
+    baseUrl: 'https://sponsor.test',
+    fetchImpl: createFetchStub([
+      ['/v2/assist/gas/mvc/pre', {
+        code: 1,
+        msg: 'traffic insufficient: account idq1abc needs 500 bytes',
+        data: { errorCode: 'TRAFFIC_INSUFFICIENT', accountId: 'idq1abc', estimatedBytes: 500, retryable: false },
+      }],
+    ]),
+  });
+  await assert.rejects(byDataErrorCode.preSponsor(payload), (error) => {
+    assert.equal(error.reason, 'insufficient_traffic');
+    assert.equal(error.stage, 'pre');
+    return true;
+  });
 });
 
 test('preSponsor does not retry HTTP 500 (pre must stay single-shot)', async () => {
