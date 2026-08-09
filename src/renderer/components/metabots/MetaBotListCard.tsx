@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { ArrowPathIcon, CpuChipIcon, DocumentDuplicateIcon, MoonIcon, TrashIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type { Metabot } from '../../types/metabot';
+import TwinBadge from './TwinBadge';
 import MetaBotBackupMnemonicModal from './MetaBotBackupMnemonicModal';
 import MetaBotTransferModal from './MetaBotTransferModal';
 import MetaBotWalletAssetsModal, {
@@ -258,14 +259,7 @@ const MetaBotListCard: React.FC<MetaBotListCardProps> = ({
                 <span className="text-base font-medium dark:text-claude-darkText text-claude-text truncate">
                   {metabot.name}
                 </span>
-                {metabot.metabot_type === 'twin' && (
-                  <span
-                    data-slot="metabot-twin-badge"
-                    className="inline-flex shrink-0 items-center rounded-full bg-claude-accent/15 dark:bg-claude-accent/20 px-1.5 py-0.5 text-[10px] font-semibold leading-3 text-claude-accent"
-                  >
-                    {i18nService.t('metabotTwinBadge')}
-                  </span>
-                )}
+                {metabot.metabot_type === 'twin' && <TwinBadge />}
               </div>
               <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate block">
                 {metabot.role || '—'}
