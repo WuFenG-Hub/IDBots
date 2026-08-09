@@ -690,6 +690,52 @@ export async function reworkGroupTask(
   return updated;
 }
 
+export interface GroupTaskExport extends GroupTaskDetail {
+  /** Full transcript (up to exportMessageLimit, default 2000), oldest first. */
+  fullMessages: GroupChatTranscriptMessage[];
+  /** P0-7: per-day digest of the message flow (date → count + first/last). */
+  dailySummaries: Array<{ date: string; count: number; firstAt: number | null; lastAt: number | null }>;
+  exportedAt: string;
+}
+
+/**
+ * P0-7: structured archive export — index + full message bodies + daily
+ * summaries. Used for review/acceptance and episode preservation.
+ */
+export async function exportGroupTask(
+  taskId: number,
+  opts?: { messageLimit?: number },
+): Promise<GroupTaskExport> {
+  const store = getGroupTaskStore();
+  const task = requireTask(taskId);
+  const detail = await getGroupTask(taskId, { view: 'full' });
+  const limit = Math.max(1, Math.min(5000, Math.trunc(opts?.messageLimit ?? 2000)));
+  const messages = task.groupId
+    ? store.listGroupChatMessages(task.groupId, { limit })
+    : [];
+
+  const byDay = new Map<string, { count: number; firstAt: number | null; lastAt: number | null }>();
+  for (const message of messages) {
+    if (message.chainTimestamp == null) continue;
+    const date = new Date(message.chainTimestamp * 1000).toISOString().slice(0, 10);
+    const entry = byDay.get(date) ?? { count: 0, firstAt: null, lastAt: null };
+    entry.count += 1;
+    entry.firstAt = entry.firstAt == null ? message.chainTimestamp : Math.min(entry.firstAt, message.chainTimestamp);
+    entry.lastAt = entry.lastAt == null ? message.chainTimestamp : Math.max(entry.lastAt, message.chainTimestamp);
+    byDay.set(date, entry);
+  }
+  const dailySummaries = [...byDay.entries()]
+    .map(([date, entry]) => ({ date, ...entry }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  return {
+    ...detail,
+    fullMessages: messages,
+    dailySummaries,
+    exportedAt: new Date().toISOString(),
+  };
+}
+
 /**
  * Close a task via the store state machine (sets closed_at for terminal states).
  * `reason` is accepted for API completeness but not persisted (no column in M1).

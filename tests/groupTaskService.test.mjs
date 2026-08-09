@@ -742,3 +742,28 @@ test('P0-6: no observer fields → kickoff unchanged (no regression)', async () 
     h.cleanup();
   }
 });
+
+test('P0-7: exportGroupTask returns full message bodies + daily summaries', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-7 export', goal: 'archive', memberMetabotIds: [2], createdBy: 'user',
+    });
+    h.db.run(
+      `INSERT INTO group_chat_messages (
+        pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+        sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+        reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+      ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, NULL, '[]', ?, 'mvc', '{}', 0, NULL)`,
+      ['pin-exp-1', 'tx-exp-1', detail.groupId, 'metaid-2', 'gmid-w2', 'Coder Bot', 'deliverable body here', 1700000000],
+    );
+    const exported = await groupTaskService.exportGroupTask(detail.id);
+    assert.equal(exported.fullMessages.length, 1);
+    assert.equal(exported.fullMessages[0].content, 'deliverable body here');
+    assert.ok(exported.dailySummaries.length >= 1);
+    assert.equal(exported.dailySummaries[0].count, 1);
+    assert.ok(exported.exportedAt);
+  } finally {
+    h.cleanup();
+  }
+});
