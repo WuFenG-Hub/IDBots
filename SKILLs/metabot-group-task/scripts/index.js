@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'kick'|'close'|'search_remote'|'invite_remote', ... }
+ * Payload: { action: 'create'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -21,6 +21,7 @@ const ACTION_PATHS = {
   create: '/api/idbots/group-task/create',
   list: '/api/idbots/group-task/list',
   show: '/api/idbots/group-task/show',
+  member_status: '/api/idbots/group-task/member-status',
   send: '/api/idbots/group-task/send',
   invite: '/api/idbots/group-task/invite',
   kick: '/api/idbots/group-task/kick-member',
@@ -114,6 +115,12 @@ async function main() {
       // Round-4: view=summary (default) keeps the output small; view=full returns everything.
       const view = String(params.view ?? '').trim();
       body.view = view === 'full' ? 'full' : 'summary';
+      break;
+    }
+    case 'member_status': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for member_status');
+      body = { task_id: taskId };
       break;
     }
     case 'send': {
