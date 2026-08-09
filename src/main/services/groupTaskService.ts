@@ -24,6 +24,10 @@ import {
   sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
 } from './groupChatTransport';
+import {
+  validateDeliverableLines,
+  type DeliverableValidation,
+} from './groupTaskDeliverableParser';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 
 export interface CreateGroupTaskOptions {
@@ -472,7 +476,7 @@ export async function postGroupTaskMessage(
   metabotId: number,
   content: string,
   opts?: PostGroupTaskMessageOptions,
-): Promise<{ pinId: string }> {
+): Promise<{ pinId: string; deliverableValidation: DeliverableValidation }> {
   const task = requireRunnableTask(taskId);
   const store = getGroupTaskStore();
   if (!store.isMember(taskId, metabotId)) {
@@ -482,13 +486,17 @@ export async function postGroupTaskMessage(
   if (!text) throw new Error('content is required');
   const metabot = getMetabotStore().getMetabotById(metabotId);
   const nickName = metabot?.name?.trim() || `bot-${metabotId}`;
-  return sendGroupChatMessageFn(metabotId, task.groupId!, {
+  // P0-1: field-level [DELIVERABLE] validation — surfaced to the caller but
+  // never blocks the chain write (warn-and-deliver; the chair decides).
+  const deliverableValidation = validateDeliverableLines(text);
+  const sent = await sendGroupChatMessageFn(metabotId, task.groupId!, {
     content: text,
     nickName,
     contentType: opts?.contentType,
     replyPin: opts?.replyPin,
     mention: opts?.mention,
   });
+  return { ...sent, deliverableValidation };
 }
 
 /**
@@ -500,16 +508,18 @@ export async function postGroupTaskMessageAsOwner(
   taskId: number,
   content: string,
   opts?: { replyPin?: string; mention?: string[] },
-): Promise<{ pinId: string }> {
+): Promise<{ pinId: string; deliverableValidation: DeliverableValidation }> {
   const task = requireRunnableTask(taskId);
   const text = content?.trim();
   if (!text) throw new Error('content is required');
   await ensureOwnerJoinedGroup(task.groupId!);
-  return sendGroupChatMessageAsIdentityFn(task.groupId!, {
+  const deliverableValidation = validateDeliverableLines(text);
+  const sent = await sendGroupChatMessageAsIdentityFn(task.groupId!, {
     content: text,
     replyPin: opts?.replyPin,
     mention: opts?.mention,
   });
+  return { ...sent, deliverableValidation };
 }
 
 /** Add a local bot to an existing task: on-chain join first, then the member row. */

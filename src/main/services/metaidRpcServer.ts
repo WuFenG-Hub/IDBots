@@ -1356,8 +1356,10 @@ export function startMetaidRpcServer(
           replyPin: typeof parsed.reply_pin === 'string' && parsed.reply_pin.trim() ? parsed.reply_pin.trim() : undefined,
           mention,
         });
+        // P0-1: warn-and-deliver — validation issues are returned to the caller
+        // but never block the chain write.
         res.writeHead(200);
-        res.end(JSON.stringify({ success: true, pinId: result.pinId }));
+        res.end(JSON.stringify({ success: true, pinId: result.pinId, deliverableValidation: result.deliverableValidation }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

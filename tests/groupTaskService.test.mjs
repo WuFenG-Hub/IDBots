@@ -615,3 +615,25 @@ test('C-2: getGroupTaskChairMetabotId resolves the task chair; throws for unknow
   assert.equal(groupTaskService.getGroupTaskChairMetabotId(task.id), 1);
   assert.throws(() => groupTaskService.getGroupTaskChairMetabotId(9999), /not found/);
 });
+
+test('P0-1: postGroupTaskMessage returns field-level deliverable validation without blocking', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-1 validation', goal: 'verify warn-and-deliver', memberMetabotIds: [2], createdBy: 'user',
+    });
+    h.calls.send.length = 0;
+    const result = await postGroupTaskMessage(
+      detail.id,
+      2,
+      '**[DELIVERABLE] buzz: metaapp://5345dcdcd40ca628113de5ed18087df16667021d5246437d4f927e4c17c72525i0**',
+    );
+    // chain write succeeded (warn-and-deliver)
+    assert.equal(result.pinId, 'msg-pin-1');
+    assert.ok(result.deliverableValidation);
+    assert.equal(result.deliverableValidation.errors.length, 0);
+    assert.ok(result.deliverableValidation.warnings.length >= 1);
+  } finally {
+    h.cleanup();
+  }
+});
