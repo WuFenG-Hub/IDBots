@@ -2,6 +2,10 @@ import type { CoworkMessage } from '../coworkStore';
 import type { CoworkModelLimits } from './coworkModelLimits';
 
 export const COWORK_CONTEXT_SOFT_THRESHOLD_RATIO = 0.82;
+// When the SDK owns proactive compaction (coworkSdkAutoCompact), IDBots' own
+// tier-1/tier-2 compaction stays as a safety net near the real ceiling so the
+// two mechanisms do not double-compact at the same threshold.
+export const COWORK_CONTEXT_SAFETY_NET_RATIO = 0.95;
 const MESSAGE_FRAME_TOKEN_OVERHEAD = 4;
 
 type CoworkContextMessage = Pick<CoworkMessage, 'type' | 'content' | 'metadata'>;

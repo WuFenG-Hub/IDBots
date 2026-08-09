@@ -83,6 +83,7 @@ tests/*
 !tests/coworkTodoList.test.ts
 !tests/coworkTaskControl.test.mjs
 !tests/coworkSdkEvents.test.mjs
+!tests/coworkSdkAutoCompact.test.mjs
 !tests/localFileLinkIntegration.test.mjs
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs

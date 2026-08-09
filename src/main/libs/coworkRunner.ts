@@ -26,10 +26,11 @@ import {
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
-import { getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
+import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
+import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
   getCoworkOpenAICompatProxyStatus,
@@ -4797,6 +4798,27 @@ export class CoworkRunner extends EventEmitter {
     envVars.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
     // So the SDK's forked process uses the correct Electron exe on Windows (avoids process.execPath returning e.g. lDBots.exe)
     envVars.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+
+    // Enable the SDK/CLI built-in auto-compact for non-Claude models with
+    // known context windows (DeepSeek V4 1M, Qwen, GLM, ...). The native CLI
+    // falls back to a 200K window for unknown models and skips its auto-compact
+    // gate when no window override is configured, which is why sessions used to
+    // grow until the provider rejected them. CLAUDE_CODE_MAX_CONTEXT_TOKENS is
+    // only honored by the CLI for non-claude-* model ids. The SDK then owns
+    // proactive (segmented/reactive) compaction in-session; IDBots' own tier
+    // compaction demotes to a safety net (see getCoworkContextBudget below).
+    const sdkAutoCompactEnv = buildCoworkSdkAutoCompactEnv(modelLimits);
+    if (sdkAutoCompactEnv) {
+      Object.assign(envVars, sdkAutoCompactEnv.env);
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Enabled SDK built-in auto-compact', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        contextWindow: modelLimits.contextWindow,
+        maxOutputTokens: modelLimits.maxOutputTokens,
+        limitSource: modelLimits.source,
+        autoCompactWindow: sdkAutoCompactEnv.autoCompactWindow,
+      });
+    }
     const skillEnvOverrides = await this.getSkillSessionEnvOverrides?.(sessionId);
     if (skillEnvOverrides && Object.keys(skillEnvOverrides).length > 0) {
       Object.assign(envVars, skillEnvOverrides);
@@ -4843,6 +4865,10 @@ export class CoworkRunner extends EventEmitter {
         currentPrompt: prompt,
         systemPrompt,
         modelLimits,
+        // When the SDK owns proactive compaction, IDBots' tier-1/tier-2
+        // compaction stays as a safety net near the real ceiling so the two
+        // mechanisms don't double-compact at the same threshold.
+        ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
       });
 
       if (budget.shouldCompact) {
