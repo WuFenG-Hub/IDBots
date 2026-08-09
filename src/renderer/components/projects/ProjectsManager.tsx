@@ -230,11 +230,11 @@ const ProjectsManager: React.FC = () => {
       {/* Delete confirmation modal */}
       {pendingDelete && (
         <div
-          className="modal-backdrop"
+          className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop"
           onClick={handleCancelDelete}
         >
           <div
-            className="modal-content w-full max-w-sm mx-4 p-5"
+            className="modal-content w-full max-w-sm mx-4 p-5 rounded-2xl dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="text-lg font-semibold dark:text-claude-darkText text-claude-text">

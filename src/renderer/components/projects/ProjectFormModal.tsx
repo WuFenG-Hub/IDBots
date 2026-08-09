@@ -144,19 +144,24 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
   const inputClass = 'w-full px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text dark:placeholder-claude-darkTextSecondary placeholder-claude-textSecondary border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent';
   const labelClass = 'text-xs font-semibold tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary';
   const hintClass = 'text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary';
+  const ghostButtonClass = 'px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors';
 
   return (
     <div
-      className="modal-backdrop"
+      className="fixed inset-0 z-50 flex items-center justify-center modal-backdrop"
       onClick={onClose}
     >
       <div
-        className="modal-content w-full max-w-lg mx-4 p-6 max-h-[80vh] overflow-y-auto"
+        className="modal-content w-full max-w-lg mx-4 rounded-2xl dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border shadow-2xl max-h-[82vh] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between mb-5">
-          <div className="text-lg font-semibold dark:text-claude-darkText text-claude-text">
-            {isEdit ? i18nService.t('editProject') : i18nService.t('addProject')}
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b dark:border-claude-darkBorder border-claude-border">
+          <div className="flex items-center gap-2">
+            <BriefcaseIcon className="h-5 w-5 text-claude-accent" />
+            <div className="text-base font-semibold dark:text-claude-darkText text-claude-text">
+              {isEdit ? i18nService.t('editProject') : i18nService.t('addProject')}
+            </div>
           </div>
           <button
             type="button"
@@ -167,31 +172,29 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
           </button>
         </div>
 
-        <div className="space-y-4">
-          {/* Name */}
-          <div className="space-y-1.5">
-            <label className={labelClass}>{i18nService.t('projectName')}</label>
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className={inputClass}
-              autoFocus
-            />
-          </div>
-
-          {/* Icon */}
-          <div className="space-y-1.5">
-            <label className={labelClass}>{i18nService.t('projectIcon')}</label>
-            <div className="flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl dark:bg-claude-darkSurface bg-claude-surface border dark:border-claude-darkBorder border-claude-border overflow-hidden flex-shrink-0 flex items-center justify-center">
-                {icon ? (
-                  <img src={icon} alt="" className="w-full h-full object-cover" />
-                ) : (
-                  <BriefcaseIcon className="h-6 w-6 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
-                )}
-              </div>
+        <div className="px-6 py-5 space-y-5">
+          {/* Name + Icon */}
+          <div className="flex items-start gap-4">
+            <div className="space-y-1.5 flex-1 min-w-0">
+              <label className={labelClass}>{i18nService.t('projectName')}</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className={inputClass}
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5 flex-shrink-0">
+              <label className={labelClass}>{i18nService.t('projectIcon')}</label>
               <div className="flex items-center gap-2">
+                <div className="w-10 h-10 rounded-xl dark:bg-claude-darkBg bg-claude-bg border dark:border-claude-darkBorder border-claude-border overflow-hidden flex-shrink-0 flex items-center justify-center">
+                  {icon ? (
+                    <img src={icon} alt="" className="w-full h-full object-cover" />
+                  ) : (
+                    <BriefcaseIcon className="h-5 w-5 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+                  )}
+                </div>
                 <input
                   ref={iconInputRef}
                   type="file"
@@ -202,7 +205,7 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                 <button
                   type="button"
                   onClick={() => iconInputRef.current?.click()}
-                  className="px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                  className={ghostButtonClass}
                 >
                   {i18nService.t('browse')}
                 </button>
@@ -210,7 +213,7 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setIcon('')}
-                    className="px-3 py-1.5 text-xs rounded-lg text-red-500 dark:text-red-400 hover:underline transition-colors"
+                    className="text-xs text-red-500 dark:text-red-400 hover:underline transition-colors"
                   >
                     {i18nService.t('clear')}
                   </button>
@@ -226,7 +229,7 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
               value={guidelines}
               onChange={(e) => setGuidelines(e.target.value)}
               placeholder={i18nService.t('projectGuidelinesPlaceholder')}
-              rows={5}
+              rows={4}
               className={inputClass + ' resize-none'}
             />
           </div>
@@ -239,12 +242,13 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                 type="text"
                 value={sourceDir}
                 readOnly
+                placeholder="—"
                 className={inputClass + ' opacity-60 cursor-not-allowed'}
               />
               <button
                 type="button"
                 onClick={handleBrowseSourceDir}
-                className="px-3 py-2 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors flex-shrink-0"
+                className={ghostButtonClass + ' flex-shrink-0'}
               >
                 {i18nService.t('browse')}
               </button>
@@ -252,7 +256,7 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setSourceDir('')}
-                  className="px-3 py-2 text-xs rounded-lg text-red-500 dark:text-red-400 hover:underline transition-colors flex-shrink-0"
+                  className="text-xs text-red-500 dark:text-red-400 hover:underline transition-colors flex-shrink-0"
                 >
                   {i18nService.t('clear')}
                 </button>
@@ -264,68 +268,76 @@ const ProjectFormModal: React.FC<ProjectFormModalProps> = ({
           {/* Resources */}
           <div className="space-y-1.5">
             <label className={labelClass}>{i18nService.t('projectResources')}</label>
-            {resources.map((resource, index) => (
-              <div key={resource.path} className="flex items-center gap-2">
-                <div
-                  className="flex-1 min-w-0 px-2 py-1.5 text-xs rounded-lg dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border truncate"
-                  title={resource.path}
-                >
-                  {resource.path}
+            <div className="rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg p-2.5 space-y-2">
+              {resources.length === 0 && (
+                <p className="text-[11px] px-1 py-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('projectResourcesEmpty')}
+                </p>
+              )}
+              {resources.map((resource, index) => (
+                <div key={resource.path} className="flex items-center gap-2">
+                  <div
+                    className="flex-1 min-w-0 px-2 py-1.5 text-xs rounded-lg dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border truncate"
+                    title={resource.path}
+                  >
+                    {resource.path}
+                  </div>
+                  <input
+                    type="text"
+                    value={resource.note || ''}
+                    onChange={(e) => handleUpdateResourceNote(index, e.target.value)}
+                    placeholder={i18nService.t('projectResourceNotePlaceholder')}
+                    className="w-36 px-2 py-1.5 text-xs rounded-lg dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text dark:placeholder-claude-darkTextSecondary placeholder-claude-textSecondary border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-1 focus:ring-claude-accent"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveResource(index)}
+                    className="p-1 text-claude-textSecondary dark:text-claude-darkTextSecondary hover:text-red-500 dark:hover:text-red-400 transition-colors flex-shrink-0"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
                 </div>
-                <input
-                  type="text"
-                  value={resource.note || ''}
-                  onChange={(e) => handleUpdateResourceNote(index, e.target.value)}
-                  placeholder={i18nService.t('projectResourceNotePlaceholder')}
-                  className="w-40 px-2 py-1.5 text-xs rounded-lg dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text dark:placeholder-claude-darkTextSecondary placeholder-claude-textSecondary border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-1 focus:ring-claude-accent"
-                />
+              ))}
+              <div className="flex items-center gap-2 pt-0.5">
                 <button
                   type="button"
-                  onClick={() => handleRemoveResource(index)}
-                  className="p-1 text-claude-textSecondary dark:text-claude-darkTextSecondary hover:text-red-500 dark:hover:text-red-400 transition-colors flex-shrink-0"
+                  onClick={handleAddDirectory}
+                  className={ghostButtonClass}
                 >
-                  <XMarkIcon className="h-4 w-4" />
+                  + {i18nService.t('addDirectory')}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddFile}
+                  className={ghostButtonClass}
+                >
+                  + {i18nService.t('addFile')}
                 </button>
               </div>
-            ))}
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleAddDirectory}
-                className="px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                + {i18nService.t('addDirectory')}
-              </button>
-              <button
-                type="button"
-                onClick={handleAddFile}
-                className="px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-              >
-                + {i18nService.t('addFile')}
-              </button>
             </div>
           </div>
 
           {error && (
             <div className="text-xs text-red-500">{error}</div>
           )}
+        </div>
 
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-1.5 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
-            >
-              {i18nService.t('cancel')}
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              className="btn-idchat-primary-filled px-3 py-1.5 text-xs"
-            >
-              {i18nService.t('save')}
-            </button>
-          </div>
+        {/* Footer */}
+        <div className="flex items-center justify-end gap-2 px-6 py-4 border-t dark:border-claude-darkBorder border-claude-border">
+          <button
+            type="button"
+            onClick={onClose}
+            className={ghostButtonClass}
+          >
+            {i18nService.t('cancel')}
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            className="btn-idchat-primary-filled px-4 py-1.5 text-xs"
+          >
+            {i18nService.t('save')}
+          </button>
         </div>
       </div>
     </div>
