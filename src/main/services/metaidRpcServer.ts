@@ -43,6 +43,7 @@ import {
   reworkGroupTask,
   exportGroupTask,
 } from './groupTaskService';
+import { gateChairDrivingSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
@@ -1329,6 +1330,7 @@ export function startMetaidRpcServer(
         content?: string;
         reply_pin?: string;
         mention?: unknown[];
+        driver_id?: string;
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1374,6 +1376,38 @@ export function startMetaidRpcServer(
             // fully supported and takes precedence.
             metabotId = getGroupTaskChairMetabotId(taskId);
           }
+        }
+        // F2 (GT#11): session-level driving mutex. A CHAIR-identity send
+        // (plan / dispatch / status switch) participates in the driver claim:
+        // it is rejected with a readable error while another session (e.g. the
+        // daemon auto-driver) holds a FRESH claim — otherwise the same logical
+        // step could be driven twice (duplicate publish, contradictory
+        // instructions). On success the claim is taken by this manual session,
+        // so the daemon yields its ticks while the manual session drives.
+        // Worker / owner sends are never driving and always pass.
+        try {
+          const chairMetabotId = getGroupTaskChairMetabotId(taskId);
+          const gateResult = gateChairDrivingSend({
+            kv: getStore(),
+            taskId,
+            senderMetabotId: metabotId,
+            chairMetabotId,
+            driverId: typeof parsed.driver_id === 'string' ? parsed.driver_id.trim() : undefined,
+            graceMs: DEFAULT_DRIVER_GRACE_MS,
+            nowMs: Date.now(),
+          });
+          if ('error' in gateResult) {
+            res.writeHead(409);
+            res.end(JSON.stringify({
+              success: false,
+              error: gateResult.error,
+              retryAfterMs: gateResult.retryAfterMs,
+              driver: gateResult.driverId,
+            }));
+            return;
+          }
+        } catch {
+          // Unknown task etc.: let the underlying post fail with its own error.
         }
         const mention = Array.isArray(parsed.mention)
           ? parsed.mention.map((m) => String(m ?? '').trim()).filter(Boolean)

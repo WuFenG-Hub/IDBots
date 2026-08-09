@@ -71,7 +71,7 @@ const DEP_WAIT_KV_PREFIX = 'group_task_dep_wait:';
  */
 export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
 /** Default grace: a driver claim this old (or older) is stale — claimable. */
-const DEFAULT_DRIVER_GRACE_MS = 20_000;
+export const DEFAULT_DRIVER_GRACE_MS = 20_000;
 /** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
 const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
 
@@ -396,6 +396,116 @@ export function buildRosterSignature(members: Array<{
     })
     .sort()
     .join(';');
+}
+
+/** Minimal kv surface needed by the driver-claim helpers. */
+export interface GroupTaskDriverKv {
+  get<T = unknown>(key: string): T | undefined;
+  set<T = unknown>(key: string, value: T): void;
+  delete(key: string): void;
+}
+
+/** Outcome of tryAcquireGroupTaskDriver. */
+export interface AcquireGroupTaskDriverResult {
+  ok: boolean;
+  /** Claim holder identity when rejected (null when acquired). */
+  driverId: string | null;
+  /** Claim age in ms when rejected. */
+  claimAgeMs: number;
+  /** ms to wait before retrying (grace minus claim age). */
+  retryAfterMs: number;
+}
+
+/**
+ * F2 (GT#11): shared driver-claim acquisition used by BOTH the daemon tick
+ * (claimDriverOrYield) and the manual RPC send path. Semantics (heartbeat
+ * claim, kv `group_task_driver:<taskId>` = `<claimId>|<epochMs>`):
+ * - no claim -> acquire;
+ * - own claim -> ok (refreshOwn=false keeps the claim age-based so the daemon
+ *   holds it only while it actually drives; refreshOwn=true extends it);
+ * - foreign claim younger than the grace window -> rejected (mutual exclusion);
+ * - stale foreign claim -> take over.
+ * Pure + exported for unit tests.
+ */
+export function tryAcquireGroupTaskDriver(
+  kv: GroupTaskDriverKv,
+  taskId: number,
+  claimId: string,
+  graceMs: number,
+  nowMs: number,
+  refreshOwn = true,
+): AcquireGroupTaskDriverResult {
+  const key = `${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`;
+  const raw = kv.get<string>(key);
+  if (!raw) {
+    kv.set(key, `${claimId}|${nowMs}`);
+    return { ok: true, driverId: null, claimAgeMs: 0, retryAfterMs: 0 };
+  }
+  const [ownerId, atText] = raw.split('|');
+  const atMs = Number(atText) || 0;
+  if (ownerId === claimId) {
+    if (refreshOwn) {
+      kv.set(key, `${claimId}|${nowMs}`); // refresh our own lease
+    }
+    return { ok: true, driverId: null, claimAgeMs: 0, retryAfterMs: 0 };
+  }
+  const ageMs = nowMs - atMs;
+  if (ageMs < graceMs) {
+    return { ok: false, driverId: ownerId, claimAgeMs: Math.max(0, ageMs), retryAfterMs: Math.max(0, graceMs - ageMs) };
+  }
+  kv.set(key, `${claimId}|${nowMs}`); // stale claim -> take over
+  return { ok: true, driverId: null, claimAgeMs: 0, retryAfterMs: 0 };
+}
+
+/** Input of gateChairDrivingSend. */
+export interface GateChairDrivingSendInput {
+  kv: GroupTaskDriverKv;
+  taskId: number;
+  /** Resolved sender metabot id of the outgoing message. */
+  senderMetabotId: number;
+  /** Chair metabot id of the task (driving sends are chair-identity sends). */
+  chairMetabotId: number;
+  /**
+   * Optional per-session driver identity supplied by the caller (e.g. the
+   * Twin session id). Sessions that pass the same id refresh each other's
+   * claim; sessions with DIFFERENT ids are mutually exclusive. Defaults to
+   * `rpc:<chairMetabotId>` when omitted.
+   */
+  driverId?: string;
+  graceMs: number;
+  nowMs: number;
+}
+
+/**
+ * F2 (GT#11): session-level driving mutex for the manual send path. Worker /
+ * owner messages are never driving and always pass. A CHAIR-identity message
+ * (plan / dispatch / status switch) participates in the driver claim: it is
+ * rejected with a readable error while another session holds a fresh claim
+ * (e.g. the daemon auto-driver is mid-turn), and it takes the claim otherwise
+ * (the daemon then yields its ticks while the manual claim stays fresh).
+ * Pure + exported for unit tests.
+ */
+export function gateChairDrivingSend(input: GateChairDrivingSendInput):
+  { ok: true } | { ok: false; error: string; retryAfterMs: number; driverId: string } {
+  if (input.senderMetabotId !== input.chairMetabotId) {
+    return { ok: true };
+  }
+  const claimId = (input.driverId ?? '').trim() || `rpc:${input.chairMetabotId}`;
+  const result = tryAcquireGroupTaskDriver(input.kv, input.taskId, claimId, input.graceMs, input.nowMs);
+  if (!result.ok) {
+    const holder = result.driverId ?? 'unknown';
+    return {
+      ok: false,
+      driverId: holder,
+      retryAfterMs: result.retryAfterMs,
+      error:
+        `Task ${input.taskId} is being driven by another session (${holder.slice(0, 12)}…) — ` +
+        `the driver claim is ${Math.round(result.claimAgeMs / 1000)}s old; retry in ` +
+        `${Math.ceil(result.retryAfterMs / 1000)}s or wait for the active driver to yield ` +
+        `(same-session sends pass driver_id to keep driving)`,
+    };
+  }
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -799,34 +909,48 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * false when ANOTHER instance claimed within the grace window — the tick
    * yields entirely (no heartbeat, no planning, no message processing), so
    * two chair sessions never double-drive the same task.
+   *
+   * F2 (GT#11): the daemon does NOT refresh its own claim at tick top anymore
+   * — the claim stays fresh only while the daemon ACTUALLY drives (see
+   * refreshDriverClaim after each post). A fresh foreign claim therefore means
+   * "another session is driving RIGHT NOW", which is exactly what the manual
+   * RPC send gate needs to reject duplicate driving.
    */
   const claimDriverOrYield = (taskId: number): boolean => {
     if (driverGraceMs <= 0) return true;
-    const sqlite = deps.getStore();
-    const key = `${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`;
-    const raw = sqlite.get<string>(key);
-    if (!raw) {
-      sqlite.set(key, `${driverInstanceId}|${now()}`);
-      return true;
-    }
-    const [ownerId, atText] = raw.split('|');
-    const atMs = Number(atText) || 0;
-    if (ownerId === driverInstanceId) {
-      sqlite.set(key, `${driverInstanceId}|${now()}`); // refresh our own lease
-      return true;
-    }
-    if (now() - atMs < driverGraceMs) {
-      emitLog(
-        `[GroupTaskDaemon] Task ${taskId}: another chair session (${ownerId.slice(0, 8)}…) holds the ` +
-        `driver claim (${Math.round((now() - atMs) / 1000)}s old); this instance yields this tick`,
-      );
-      return false;
-    }
-    sqlite.set(key, `${driverInstanceId}|${now()}`); // stale claim -> take over
+    const result = tryAcquireGroupTaskDriver(deps.getStore(), taskId, driverInstanceId, driverGraceMs, now(), false);
+    if (result.ok) return true;
     emitLog(
-      `[GroupTaskDaemon] Task ${taskId}: stale driver claim taken over by ${driverInstanceId.slice(0, 8)}…`,
+      `[GroupTaskDaemon] Task ${taskId}: another chair session (${(result.driverId ?? 'unknown').slice(0, 8)}…) ` +
+      `holds the driver claim (${Math.round(result.claimAgeMs / 1000)}s old); this instance yields this tick`,
     );
-    return true;
+    return false;
+  };
+
+  /**
+   * F2 (GT#11): refresh our driver claim AFTER an actual drive (a group
+   * message post). The claim then ages out during idle ticks, letting a
+   * manual chair session take the floor the moment the auto driver goes
+   * quiet — and vice versa the daemon yields while a manual claim is fresh.
+   */
+  const refreshDriverClaim = (taskId: number): void => {
+    if (driverGraceMs <= 0) return;
+    deps.getStore().set(`${GROUP_TASK_DRIVER_KV_PREFIX}${taskId}`, `${driverInstanceId}|${now()}`);
+  };
+
+  /**
+   * F2 (GT#11): single choke point for every daemon group-message post —
+   * refreshes the driver claim on success so the claim freshness mirrors
+   * actual driving activity.
+   */
+  const postGroupMessage = async (
+    taskId: number,
+    metabotId: number,
+    content: string,
+  ): Promise<{ pinId: string }> => {
+    const result = await deps.postGroupTaskMessage(taskId, metabotId, content);
+    refreshDriverClaim(taskId);
+    return result;
   };
 
   /**
@@ -897,7 +1021,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       ackText = `[WORKING] 已接单，正在处理「${objective}」，预计需要一些时间。`;
     }
     try {
-      const sent = await deps.postGroupTaskMessage(task.id, bot.id, ackText);
+      const sent = await postGroupMessage(task.id, bot.id, ackText);
       sqlite.set(ackKey, '1');
       emitLog(`[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} ACK posted (pin ${sent.pinId})`);
     } catch (error) {
@@ -2102,7 +2226,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
-      const posted = await deps.postGroupTaskMessage(task.id, bot.id, reply);
+      const posted = await postGroupMessage(task.id, bot.id, reply);
       // P2-7 r2: the daemon's own kickoff must not count as "Twin activity".
       rememberDaemonChairPin(task.id, posted.pinId);
       sqlite.set(plannedKey, '1');
@@ -2274,7 +2398,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     let sent: { pinId: string };
     try {
-      sent = await deps.postGroupTaskMessage(task.id, bot.id, reply);
+      sent = await postGroupMessage(task.id, bot.id, reply);
     } catch (error) {
       failCanonicalAttempt(error);
       emitLog(
@@ -2522,7 +2646,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `${Math.round(ackTimeoutMs / 60_000)} min. Check whether the assignment ` +
         `was received; do not auto-fail.`;
       try {
-        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        await postGroupMessage(task.id, chair.metabotId, text);
         sqlite.set(remindedKey, '1');
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: reminded chair that ${member.name ?? member.metabotId} has not ACKed`,
@@ -2664,7 +2788,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet. ` +
         `Check status; do not auto-fail.`;
       try {
-        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        await postGroupMessage(task.id, chair.metabotId, text);
         sqlite.set(remindedKey, '1');
         emitLog(
           `[GroupTaskDaemon] Task ${task.id}: reminded chair+worker ${member.name ?? member.metabotId} about missed delivery deadline`,

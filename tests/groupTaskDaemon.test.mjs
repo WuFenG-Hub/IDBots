@@ -2764,3 +2764,89 @@ test('F1: planning proceeds after the absolute cap even if the roster never sett
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// F2 (GT#11): session-level driving mutex (pure helpers)
+// ---------------------------------------------------------------------------
+
+test('F2: tryAcquireGroupTaskDriver — acquire / own-refresh / foreign-reject / stale-takeover', () => {
+  const { tryAcquireGroupTaskDriver } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  const acquired = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 1_000);
+  assert.equal(acquired.ok, true, 'no claim -> acquire');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000');
+
+  const ownNoRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 2_000, false);
+  assert.equal(ownNoRefresh.ok, true, 'own claim with refreshOwn=false still passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000', 'refreshOwn=false keeps the claim age-based');
+
+  const ownRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 3_000, true);
+  assert.equal(ownRefresh.ok, true, 'own claim with refreshOwn=true passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|3000', 'refreshOwn=true extends the lease');
+
+  const foreign = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 4_000);
+  assert.equal(foreign.ok, false, 'foreign fresh claim -> rejected');
+  assert.equal(foreign.driverId, 'rpc:1');
+  assert.equal(foreign.claimAgeMs, 1_000);
+  assert.equal(foreign.retryAfterMs, 19_000);
+
+  const stale = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 30_000);
+  assert.equal(stale.ok, true, 'stale claim -> takeover');
+  assert.equal(store.get('group_task_driver:7'), 'daemon-uuid|30000');
+});
+
+test('F2: gateChairDrivingSend — worker sends pass; chair sends are mutually exclusive per session', () => {
+  const { gateChairDrivingSend } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  // Worker sends are never driving.
+  assert.deepEqual(
+    gateChairDrivingSend({ kv: store, taskId: 7, senderMetabotId: 2, chairMetabotId: 1, graceMs: 20_000, nowMs: 1_000 }),
+    { ok: true },
+  );
+
+  // First chair send acquires the claim under its session id.
+  const first = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 1_000,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(store.get('group_task_driver:7'), 'session-a|1000');
+
+  // A DIFFERENT session is rejected with a readable error + retry hint.
+  const second = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-b', graceMs: 20_000, nowMs: 2_000,
+  });
+  assert.equal(second.ok, false, 'second session rejected while the first drives');
+  assert.match(second.error, /being driven by another session/);
+  assert.match(second.error, /retry in 19s/);
+  assert.equal(second.retryAfterMs, 19_000);
+  assert.equal(second.driverId, 'session-a');
+
+  // The SAME session id keeps driving (refreshes instead of rejection).
+  const same = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 5_000,
+  });
+  assert.equal(same.ok, true, 'same driver_id refreshes instead of being rejected');
+  assert.equal(store.get('group_task_driver:7'), 'session-a|5000');
+
+  // Omitted driver_id defaults to rpc:<chairMetabotId>.
+  const byDefault = gateChairDrivingSend({
+    kv: store, taskId: 8, senderMetabotId: 1, chairMetabotId: 1, graceMs: 20_000, nowMs: 9_000,
+  });
+  assert.equal(byDefault.ok, true);
+  assert.equal(store.get('group_task_driver:8'), 'rpc:1|9000');
+});
