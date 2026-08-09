@@ -226,6 +226,15 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.disableChairPlanningTurn != null
       ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
       : {}),
+    // F1 (GT#11): legacy tests add all members before the first tick, so the
+    // roster-settle gate is off by default here; dedicated F1 tests override
+    // settle/cap explicitly to exercise the mid-create race protection.
+    ...(overrides.chairPlanRosterSettleMs != null
+      ? { chairPlanRosterSettleMs: overrides.chairPlanRosterSettleMs }
+      : { chairPlanRosterSettleMs: 0 }),
+    ...(overrides.chairPlanRosterCapMs != null
+      ? { chairPlanRosterCapMs: overrides.chairPlanRosterCapMs }
+      : { chairPlanRosterCapMs: 0 }),
     ...(overrides.memberUnreachableAfterMinutes != null
       ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
       : {}),
@@ -2662,6 +2671,95 @@ test('C-1: multi-worker plan posts immediately without warning', async () => {
     assert.equal(h.sends.length, 1);
     assert.doesNotMatch(h.sends[0].content, /Host warning/);
     assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F1 (GT#11): the planning turn must not fire against a half-formed roster
+// ---------------------------------------------------------------------------
+
+test('F1: buildRosterSignature — stable roster => stable signature; any member change => new signature', () => {
+  const { buildRosterSignature } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const rosterA = [
+    { role: 'chair', name: 'Twin Bot', globalmetaid: 'gmid-twin', metabotId: 1 },
+    { role: 'worker', name: 'Coder Bot', globalmetaid: 'gmid-w2', metabotId: 2 },
+    { role: 'worker', name: 'Designer Bot', globalmetaid: 'gmid-w3', metabotId: 3 },
+  ];
+  const rosterAShuffled = [rosterA[2], rosterA[0], rosterA[1]];
+  assert.equal(buildRosterSignature(rosterA), buildRosterSignature(rosterAShuffled), 'order-independent');
+  const rosterMinusDesigner = rosterA.filter((m) => m.metabotId !== 3);
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterMinusDesigner), 'member removal changes the sig');
+  const rosterWithReviewer = [...rosterA, { role: 'worker', name: 'Reviewer Bot', globalmetaid: 'gmid-w4', metabotId: 4 }];
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterWithReviewer), 'member add changes the sig');
+  const rosterRoleChanged = rosterA.map((m) => (m.metabotId === 3 ? { ...m, role: 'chair' } : m));
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterRoleChanged), 'role change changes the sig');
+  const rosterRemote = [
+    { role: 'worker', name: null, displayName: 'Alicia Remote', globalmetaid: 'gmid-remote', metabotId: null },
+  ];
+  assert.notEqual(buildRosterSignature([]), buildRosterSignature(rosterRemote), 'remote member shows up in the sig');
+});
+
+test('F1: chair planning waits for the roster to settle — mid-create ticks never misplan', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 20_000,
+    chairPlanRosterCapMs: 600_000,
+  });
+  try {
+    // Simulate createGroupTask mid-flight: task row + chair + ONE worker.
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 1: roster still forming — no planning');
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined, 'planned flag not set while waiting');
+
+    // More workers join as creation proceeds.
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 4, role: 'worker' });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 2: roster changed again — still deferred');
+
+    // Roster now stable, but inside the settle window.
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 3: roster stable but not yet settled');
+
+    // Time passes the settle window: planning fires with the FULL roster.
+    h.state.nowMs += 25_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'tick 4: planning fires once the roster settled');
+    assert.match(h.chatCalls[0].userMessage, /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members/, 'directive sees 2+ workers');
+    assert.match(h.chatCalls[0].userMessage, /Coder Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.match(h.chatCalls[0].userMessage, /Designer Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('F1: planning proceeds after the absolute cap even if the roster never settles', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 60_000,
+    chairPlanRosterCapMs: 90_000,
+  });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick(); // roster sig recorded (chair + Coder)
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    await h.loop.runTick(); // sig changed; re-recorded, still deferred
+    // Pin the task creation to (harness now - 2h): the cap must override the
+    // settle gate once the task is old enough.
+    h.db.run(
+      `UPDATE group_tasks SET created_at = strftime('%Y-%m-%d %H:%M:%S', 1000000000 - 7200, 'unixepoch') WHERE id = ?`,
+      [task.id],
+    );
+    h.state.nowMs += 95_000; // past the 90s cap from creation
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'cap overrides the settle gate');
+    assert.equal(h.sends.length, 1, 'plan posted despite an unsettled roster');
   } finally {
     h.cleanup();
   }

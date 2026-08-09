@@ -88,6 +88,22 @@ const deliverableTagLines = (content: string): string[] =>
 const CHAIR_PLANNED_KV_PREFIX = 'group_task_chair_planned:';
 const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
+/** F1 (GT#11): settle-gate kv — last observed roster signature for a task. */
+const CHAIR_PLAN_ROSTER_KV_PREFIX = 'group_task_chair_plan_roster:';
+/**
+ * F1 (GT#11): the chair planning turn must not fire while the roster is still
+ * forming (createGroupTask persists the task row + chair member first, then
+ * joins each worker with network-bound calls; a 5s daemon tick can otherwise
+ * plan against a truncated roster and permanently misplan the task). Default:
+ * wait until the roster is unchanged for this long.
+ */
+const DEFAULT_CHAIR_PLAN_ROSTER_SETTLE_MS = 20_000;
+/**
+ * F1 (GT#11): absolute cap — planning proceeds once the task is older than
+ * this, even if the roster keeps changing (join failures/retries), so a task
+ * can never sit in 'planning' forever behind the settle gate.
+ */
+const DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS = 10 * 60_000;
 
 /**
  * Owner-report guard: one private A2A report per task per review-entry. The
@@ -356,6 +372,32 @@ export function checkPlanningCoverage(reply: string, workerNames: string[]): Pla
   return { ok, mentionedWorkers: mentioned, unmentionedWorkers: unmentioned };
 }
 
+/**
+ * F1 (GT#11): deterministic signature of the ACTIVE member roster as seen by
+ * the chair planning turn. Any member add / remove / role change produces a
+ * new signature, so the planning-turn settle gate can detect a roster that is
+ * still forming mid-create (the task row + chair member are persisted first,
+ * then each worker joins with network-bound calls). Pure + exported for unit
+ * tests.
+ */
+export function buildRosterSignature(members: Array<{
+  role: string;
+  name?: string | null;
+  displayName?: string | null;
+  globalmetaid?: string | null;
+  metabotId?: number | null;
+}>): string {
+  return members
+    .map((member) => {
+      const name = (member.name ?? member.displayName ?? '').trim();
+      const gmid = (member.globalmetaid ?? '').trim();
+      const id = member.metabotId ?? '';
+      return `${member.role}|${name}|${gmid}|${id}`;
+    })
+    .sort()
+    .join(';');
+}
+
 // ---------------------------------------------------------------------------
 // Daemon loop
 // ---------------------------------------------------------------------------
@@ -531,6 +573,18 @@ export interface GroupTaskDaemonDeps {
    * kickoff; the daemon never runs the auto planning turn for new tasks.
    */
   disableChairPlanningTurn?: boolean;
+  /**
+   * F1 (GT#11): how long (ms) the member roster must stay unchanged before the
+   * chair planning turn may fire for a new task. Guards against planning
+   * mid-create with a half-formed roster. 0 disables the settle gate.
+   * Default DEFAULT_CHAIR_PLAN_ROSTER_SETTLE_MS.
+   */
+  chairPlanRosterSettleMs?: number;
+  /**
+   * F1 (GT#11): absolute cap (ms from task creation) — planning proceeds even
+   * if the roster never settles. Default DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS.
+   */
+  chairPlanRosterCapMs?: number;
   /**
    * P0-2 (round 5): host auto-ACK for worker dispatches that will run a skill
    * turn — posts `[WORKING] 已接单…` BEFORE the (potentially long) turn so the
@@ -1911,6 +1965,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '(c) State the sequence/dependencies and @-mention ONLY the members who should act NOW (later steps get assigned when their inputs arrive, e.g. after a [DELIVERABLE]).',
       '(c2) For a DEPENDENT subtask, tag its assignment with `[DEPENDS_ON: <upstream pinid>]` (or describe the upstream requirement) and explicitly tell the member to wait for the upstream [DELIVERABLE] before starting.',
       '(d) End the message with [STATUS:EXECUTING].',
+      '(e) The chair NEVER executes task work — no assembly, no publishing, no writing deliverables; assign execution subtasks to WORKERS and keep the chair to coordination, verification and reporting.',
+      '(f) Match each subtask to capability: use the roster profiles (bio/role/goal). NEVER assign a step to a member whose profile obviously mismatches it (e.g. do not assign assembly or publishing to a designer-only profile). If no roster member fits a step, state the gap in the plan instead of misassigning it.',
       '',
       'Full member roster (assign only to these members, by exact name):',
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
@@ -1948,6 +2004,46 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `[GroupTaskDaemon] Task ${task.id}: chair planning turn disabled (disableChairPlanningTurn); Twin leads the kickoff`,
       );
       return;
+    }
+    // F1 (GT#11): never plan against a roster that is still forming. The task
+    // row + chair member are persisted first, then each worker joins with
+    // network-bound calls — a 5s tick can otherwise fire the planning turn
+    // MID-create and permanently misplan the task with a truncated roster
+    // ("single worker" misjudgement, wrong role assignments, planned-key set
+    // so the task never re-plans). Wait until the member roster is unchanged
+    // for settleMs; an absolute cap from creation guarantees the task can
+    // never sit in 'planning' behind the gate (e.g. a join that never lands).
+    const settleMs = Math.max(0, Math.trunc(deps.chairPlanRosterSettleMs ?? DEFAULT_CHAIR_PLAN_ROSTER_SETTLE_MS));
+    const capMs = Math.max(0, Math.trunc(deps.chairPlanRosterCapMs ?? DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS));
+    if (settleMs > 0 || capMs > 0) {
+      const rosterKey = `${CHAIR_PLAN_ROSTER_KV_PREFIX}${task.id}`;
+      const sig = buildRosterSignature(members);
+      let entry: { sig: string; since: number } | null = null;
+      try {
+        const raw = sqlite.get<string>(rosterKey);
+        if (raw) entry = JSON.parse(raw) as { sig: string; since: number };
+      } catch {
+        entry = null;
+      }
+      if (!entry || entry.sig !== sig) {
+        sqlite.set(rosterKey, JSON.stringify({ sig, since: now() }));
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: chair planning deferred — roster still forming ` +
+          `(${members.filter((member) => member.role === 'worker').length} worker(s) of ${members.length} member(s))`,
+        );
+        return;
+      }
+      const sinceMs = now() - entry.since;
+      const createdMs = parseSqliteUtcMs(task.createdAt);
+      const ageMs = createdMs != null ? now() - createdMs : Number.POSITIVE_INFINITY;
+      if (sinceMs < settleMs && ageMs < capMs) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: chair planning deferred — waiting for the roster to settle ` +
+          `(${Math.max(0, Math.ceil((settleMs - sinceMs) / 1000))}s left)`,
+        );
+        return;
+      }
+      sqlite.delete(rosterKey);
     }
     const attemptsKey = `${CHAIR_PLAN_ATTEMPTS_KV_PREFIX}${task.id}`;
     const attempts = Number(sqlite.get<number>(attemptsKey) ?? 0) || 0;
