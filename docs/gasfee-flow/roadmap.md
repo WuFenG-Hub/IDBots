@@ -74,7 +74,7 @@ traffic balance, and per-bot/day usage views.
 
 **Milestones**:
 
-- `[ ]` M3.1 Traffic account service client (ensure account, bind bots, balance/usage)
+- `[x]` M3.1 Traffic account service client (ensure account, bind bots, balance/usage)
 - `[ ]` M3.2 Settings "Traffic" tab: pricing table + recharge flow (mock pay)
 - `[ ]` M3.3 Traffic center: balance, ledger, per-bot daily usage
 - `[ ]` M3.4 Traffic/self-pay toggle UI; low-balance & insufficient-traffic UX
