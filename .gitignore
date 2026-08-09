@@ -30,6 +30,7 @@ docs/*
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
 !docs/deepseek-optimization.md
+!docs/group-task-orchestration-improvements-2026-08-09.md
 tests/*
 !tests/runtimeDependencyContract.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs
