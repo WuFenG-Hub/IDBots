@@ -168,6 +168,7 @@ const createHarness = async (overrides = {}) => {
     },
     waitForMemberJoined: async (groupId, identities, opts) => {
       calls.wait.push({ groupId, identities, opts });
+      if (overrides.waitError) throw new Error(overrides.waitError);
       return joined;
     },
     sendEncryptedSimplemsg: async (input) => {
@@ -613,19 +614,62 @@ test('watcher: accepted but never joins -> expired join_confirm_timeout + owner 
 test('watcher: no response before the window closes -> expired invite_response_timeout', async () => {
   const h = await createHarness({
     presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } },
-    joinConfirmTimeoutMs: 300,
   });
   try {
     const { invitePinId } = await inviteRemoteBot({
       taskId: h.task.id,
       inviteeGlobalMetaId: REMOTE_GMID,
     });
+    // The pending window is created_at + envelope TTL (600s) + propagation
+    // margin (300s): backdate past the whole window so the next poll expires.
+    h.db.run(
+      `UPDATE openteam_invites SET created_at = datetime('now', '-20 minutes') WHERE invite_pin_id = ?`,
+      [invitePinId],
+    );
     await waitFor(() => h.membershipStore.getInviteByPinId(invitePinId)?.status === 'expired');
     const invite = h.membershipStore.getInviteByPinId(invitePinId);
     assert.equal(invite.declineReason, 'invite_response_timeout');
     assert.equal(h.calls.wait.length, 0, 'join confirmation never ran');
     await waitFor(() => h.calls.ownerReport.length > 0);
     assert.equal(h.calls.ownerReport.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('watcher: a legitimate ACCEPT landing inside the propagation margin is still processed', async () => {
+  const h = await createHarness({
+    presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } },
+    joined: true,
+  });
+  try {
+    const { invitePinId } = await inviteRemoteBot({
+      taskId: h.task.id,
+      inviteeGlobalMetaId: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+    });
+    // The guest accepted just before the envelope expiry (T+600s) and the
+    // ACCEPT needed time to cross the indexer + private-message layers: the
+    // invite row is now 610s old — past the envelope TTL but well inside the
+    // TTL + propagation margin pending window.
+    h.db.run(
+      `UPDATE openteam_invites SET created_at = datetime('now', '-610 seconds') WHERE invite_pin_id = ?`,
+      [invitePinId],
+    );
+    // Several polls pass: the watcher must NOT expire the invite underneath
+    // the in-flight ACCEPT (the pre-fix behavior dropped it here).
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(
+      h.membershipStore.getInviteByPinId(invitePinId)?.status,
+      'pending',
+      'still pending inside the propagation margin',
+    );
+
+    h.membershipStore.updateInviteStatus({ invitePinId }, 'accepted');
+    await waitFor(() => h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID));
+    const invite = h.membershipStore.getInviteByPinId(invitePinId);
+    assert.equal(invite.status, 'accepted', 'the late ACCEPT completed the handshake');
+    assert.equal(h.calls.ownerReport.length, 0, 'no owner alert on success');
   } finally {
     h.cleanup();
   }
@@ -712,7 +756,7 @@ test('resume: accepted + no member row + inside the window -> join confirmed, me
   }
 });
 
-test('resume: accepted + no member row + past the window -> expired join_confirm_timeout', async () => {
+test('resume: accepted + no member row + never joins -> expired join_confirm_timeout', async () => {
   const h = await createHarness({ joined: false });
   try {
     const invite = h.membershipStore.createInvite({
@@ -723,14 +767,16 @@ test('resume: accepted + no member row + past the window -> expired join_confirm
       invitePinId: `${'3'.repeat(64)}i0`,
     });
     h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
-    // Backdate created_at so the original 10-minute window has already closed.
+    // Ancient created_at no longer shortens the join-confirmation budget: it
+    // runs from responded_at (the ACCEPT landing), so this watcher still gets
+    // its full (harness: 400ms) confirmation window before expiring.
     h.db.run(
       `UPDATE openteam_invites SET created_at = datetime('now', '-1 hour') WHERE invite_pin_id = ?`,
       [invite.invitePinId],
     );
 
     const started = resumeOpenTeamInviteWatchers();
-    assert.equal(started, 1, 'expired-window invite still gets a watcher to finalize it');
+    assert.equal(started, 1, 'accepted-but-unconfirmed invite gets a watcher');
 
     await waitFor(() => h.membershipStore.getInviteByPinId(invite.invitePinId)?.status === 'expired');
     const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
@@ -740,6 +786,239 @@ test('resume: accepted + no member row + past the window -> expired join_confirm
     await waitFor(() => h.calls.ownerReport.length > 0);
     assert.equal(h.calls.ownerReport.length, 1, 'same owner heads-up as a live watcher timeout');
     assert.match(h.calls.ownerReport[0].text, /never appeared/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('watcher: the join-confirmation budget runs from responded_at, not created_at', async () => {
+  const h = await createHarness({ joined: false, joinConfirmTimeoutMs: 400 });
+  try {
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'5'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+    // created_at is an hour old: anchoring the budget there (the pre-fix
+    // behavior) would expire the invite immediately, even though the ACCEPT
+    // has just landed and deserves a full confirmation window.
+    h.db.run(
+      `UPDATE openteam_invites SET created_at = datetime('now', '-1 hour') WHERE invite_pin_id = ?`,
+      [invite.invitePinId],
+    );
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1);
+    await waitFor(() => h.calls.wait.length > 0);
+    assert.ok(
+      h.calls.wait[0].opts.timeoutMs >= 300,
+      `confirmation window runs from responded_at (~400ms), got ${h.calls.wait[0].opts.timeoutMs}ms`,
+    );
+    // Only after that fresh budget elapses unconfirmed does the invite expire.
+    await waitFor(() => h.membershipStore.getInviteByPinId(invite.invitePinId)?.status === 'expired');
+    assert.equal(h.membershipStore.getInviteByPinId(invite.invitePinId)?.declineReason, 'join_confirm_timeout');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('watcher: a failing step past the deadline finalizes the invite instead of retrying forever', async () => {
+  const h = await createHarness({
+    joined: false,
+    joinConfirmTimeoutMs: 400,
+    waitError: 'indexer unreachable',
+  });
+  try {
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'6'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1);
+
+    // Every step throws; the watcher retries while inside the budget, then
+    // finalizes through the normal expire path once the deadline has passed.
+    await waitFor(() => h.membershipStore.getInviteByPinId(invite.invitePinId)?.status === 'expired');
+    const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
+    assert.equal(after.declineReason, 'join_confirm_timeout');
+    assert.ok(h.calls.wait.length >= 2, 'the failing step was retried before the deadline');
+    await waitFor(() => h.calls.ownerReport.length > 0);
+    assert.equal(h.calls.ownerReport.length, 1);
+    assert.match(h.calls.ownerReport[0].text, /never appeared/);
+
+    // The watcher stopped: no further join-confirmation attempts.
+    const waitCalls = h.calls.wait.length;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(h.calls.wait.length, waitCalls, 'no infinite retry loop after finalization');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resume: watcher polls both persisted identity forms (globalMetaId + legacy metaId)', async () => {
+  const h = await createHarness({ joined: true });
+  try {
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeMetaid: REMOTE_METAID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'7'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1);
+    await waitFor(() => h.calls.wait.length > 0);
+    assert.ok(h.calls.wait[0].identities.includes(REMOTE_GMID));
+    assert.ok(
+      h.calls.wait[0].identities.includes(REMOTE_METAID),
+      'the persisted legacy metaId form survives the restart',
+    );
+    await waitFor(() => h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resume: a kicked invitee is not revived — no watcher, no expiry, no owner alert', async () => {
+  const h = await createHarness({ joined: true });
+  try {
+    // Full handshake completed, then the member was kicked (invite row stays
+    // accepted as history; the member row is marked removed).
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'8'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+    });
+    h.groupTaskStore.markMemberRemoved({
+      taskId: h.task.id,
+      globalmetaid: REMOTE_GMID,
+      removePinId: 'pin-remove-remote',
+    });
+    assert.ok(!h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID), 'kicked member is inactive');
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 0, 'the kicked invitee invite freezes as accepted history');
+
+    // Give any (unexpectedly started) watcher several polls to misbehave.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(h.calls.wait.length, 0, 'no join confirmation for a kicked invitee');
+    assert.equal(h.calls.ownerReport.length, 0, 'no misleading timeout alert');
+    const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
+    assert.equal(after.status, 'accepted', 'invite row untouched (history), not expired');
+    assert.equal(
+      h.groupTaskStore.listMembers(h.task.id).filter((m) => m.globalmetaid === REMOTE_GMID).length,
+      0,
+      'the kick is not silently undone',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('watcher: a kick landing after resume but before the first tick stops the watcher quietly', async () => {
+  const h = await createHarness({ joined: true });
+  try {
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'9'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+    // Resume arms the watcher while the roster looks clean...
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1);
+    // ...then the owner kicks the member before the watcher's first tick runs
+    // (both calls are synchronous; the tick fires on the next macrotask).
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+    });
+    h.groupTaskStore.markMemberRemoved({
+      taskId: h.task.id,
+      globalmetaid: REMOTE_GMID,
+      removePinId: 'pin-remove-remote',
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(h.calls.wait.length, 0, 'the watcher never polls the indexer for a kicked invitee');
+    assert.equal(h.calls.ownerReport.length, 0, 'no misleading owner alert');
+    assert.equal(
+      h.membershipStore.getInviteByPinId(invite.invitePinId)?.status,
+      'accepted',
+      'invite stays accepted (history), the kick stays authoritative',
+    );
+    assert.equal(h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID), false, 'not revived');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('watcher: an explicit re-invite after a kick still completes its handshake', async () => {
+  const h = await createHarness({
+    presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } },
+    joined: true,
+  });
+  try {
+    // Earlier membership kicked. removed_at is backdated so the removed row
+    // clearly PREDATES the re-invite below (datetime columns have second
+    // precision; a same-second kick+re-invite would be ambiguous).
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+    });
+    h.groupTaskStore.markMemberRemoved({
+      taskId: h.task.id,
+      globalmetaid: REMOTE_GMID,
+      removePinId: 'pin-remove-remote',
+    });
+    h.db.run(
+      `UPDATE group_task_members SET removed_at = datetime('now', '-5 seconds')
+       WHERE task_id = ? AND globalmetaid = ?`,
+      [h.task.id, REMOTE_GMID],
+    );
+
+    // Owner explicitly asked for the re-invite: the old removed row must not
+    // block the new invite's join confirmation.
+    const { invitePinId } = await inviteRemoteBot({
+      taskId: h.task.id,
+      inviteeGlobalMetaId: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      allowReinvite: true,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId }, 'accepted');
+    await waitFor(() => h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID));
+    const invite = h.membershipStore.getInviteByPinId(invitePinId);
+    assert.equal(invite.status, 'accepted');
+    assert.equal(h.calls.ownerReport.length, 0);
   } finally {
     h.cleanup();
   }

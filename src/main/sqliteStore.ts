@@ -831,9 +831,12 @@ export class SqliteStore {
           CHECK(status IN ('pending','accepted','declined','expired')),
         decline_reason TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        responded_at TEXT
+        responded_at TEXT,
+        invitee_metaid TEXT
       );
     `);
+    // Migration: add invitee_metaid to openteam_invites (legacy identity form for watchers).
+    this.migrateOpenTeamInvitesMetaIdColumn();
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
         ON group_chat_messages(group_id, id);
@@ -1927,6 +1930,24 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
+    }
+  }
+
+  /**
+   * Migration: legacy metaId identity form on openteam_invites (OpenTeam
+   * join-confirmation watchers). PRAGMA-guarded and idempotent; existing rows
+   * keep NULL (their watchers fall back to the GlobalMetaID form only).
+   */
+  private migrateOpenTeamInvitesMetaIdColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('invitee_metaid')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN invitee_metaid TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesMetaIdColumn:', error);
     }
   }
 

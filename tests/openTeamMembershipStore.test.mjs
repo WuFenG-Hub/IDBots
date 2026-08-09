@@ -32,7 +32,7 @@ test('openteam tables are created on open', async () => {
       assert.ok(membershipCols.includes(col), `openteam_memberships.${col} should exist`);
     }
     const inviteCols = getColumns(db, 'openteam_invites');
-    for (const col of ['id', 'task_id', 'group_id', 'invitee_globalmetaid', 'invitee_name', 'invite_pin_id', 'status', 'decline_reason', 'created_at', 'responded_at']) {
+    for (const col of ['id', 'task_id', 'group_id', 'invitee_globalmetaid', 'invitee_metaid', 'invitee_name', 'invite_pin_id', 'status', 'decline_reason', 'created_at', 'responded_at']) {
       assert.ok(inviteCols.includes(col), `openteam_invites.${col} should exist`);
     }
   } finally {
@@ -138,6 +138,7 @@ test('invites: create / pending listing / dedupe check', async () => {
       taskId: 42,
       groupId: 'group-task-42',
       inviteeGlobalmetaid: 'gmid-invitee-1',
+      inviteeMetaid: 'metaid-invitee-1',
       inviteeName: 'Invitee One',
       invitePinId: 'pin-invite-1',
     });
@@ -146,13 +147,19 @@ test('invites: create / pending listing / dedupe check', async () => {
     assert.equal(invite.taskId, 42);
     assert.equal(invite.groupId, 'group-task-42');
     assert.equal(invite.inviteeGlobalmetaid, 'gmid-invitee-1');
+    assert.equal(invite.inviteeMetaid, 'metaid-invitee-1', 'legacy identity form persisted for restart watchers');
     assert.equal(invite.inviteeName, 'Invitee One');
     assert.equal(invite.invitePinId, 'pin-invite-1');
     assert.equal(invite.declineReason, null);
     assert.equal(invite.respondedAt, null);
     assert.ok(invite.createdAt);
+    // invitee_metaid defaults to null when omitted.
+    assert.equal(
+      openTeamStore.createInvite({ taskId: 42, groupId: 'group-task-42', inviteeGlobalmetaid: 'gmid-invitee-9' }).inviteeMetaid,
+      null,
+    );
 
-    assert.equal(openTeamStore.listPendingInvites().length, 1);
+    assert.equal(openTeamStore.listPendingInvites().length, 2);
     assert.ok(openTeamStore.hasPendingInvite(42, 'gmid-invitee-1'));
     assert.ok(!openTeamStore.hasPendingInvite(42, 'gmid-invitee-2'));
     assert.ok(!openTeamStore.hasPendingInvite(43, 'gmid-invitee-1'));
@@ -161,6 +168,32 @@ test('invites: create / pending listing / dedupe check', async () => {
     assert.equal(openTeamStore.getInviteByPinId('pin-nope'), null);
   } finally {
     store.close();
+  }
+});
+
+test('invites: invitee_metaid migration is idempotent on reopen', async () => {
+  const tempDir = makeTempDir();
+  const first = await openStores(tempDir);
+  try {
+    first.openTeamStore.createInvite({
+      taskId: 1, groupId: 'group-task-1', inviteeGlobalmetaid: 'gmid-invitee-1', invitePinId: 'pin-invite-1',
+    });
+  } finally {
+    first.store.close();
+  }
+  // Re-opening the same database re-runs the migration guard without error and
+  // keeps the pre-existing rows readable (invitee_metaid NULL for old rows).
+  const second = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(second.db, 'openteam_invites').includes('invitee_metaid'));
+    const old = second.openTeamStore.getInviteByPinId('pin-invite-1');
+    assert.equal(old?.inviteeMetaid, null);
+    const fresh = second.openTeamStore.createInvite({
+      taskId: 1, groupId: 'group-task-1', inviteeGlobalmetaid: 'gmid-invitee-2', inviteeMetaid: 'metaid-invitee-2',
+    });
+    assert.equal(fresh.inviteeMetaid, 'metaid-invitee-2');
+  } finally {
+    second.store.close();
   }
 });
 

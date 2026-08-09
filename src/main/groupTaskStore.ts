@@ -491,17 +491,6 @@ export class GroupTaskStore {
   }
 
   /**
-   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
-   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
-   * retried (bounded) and never silently skipped.
-   */
-  lastProcessedMsgId: number;
-  /**
-   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
-   * for the stall signal). null when the daemon has never driven the task.
-   */
-  lastDrivenAt: number | null;
-  /**
    * Round-4 attribution: persist the GlobalMetaID resolved from the message's
    * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
    * chain signature is the ONLY identity source; sender_name is never used
@@ -715,6 +704,32 @@ export class GroupTaskStore {
       throw new Error(`markMemberRemoved failed for task ${input.taskId}: member ${row.id} not removed`);
     }
     return rowToGroupTaskMember(updated);
+  }
+
+  /**
+   * OpenTeam (M3/R2): true when this task has a REMOVED remote member row for
+   * the GlobalMetaID. With `notBeforeMs` (epoch ms), only rows kicked at or
+   * after that moment count — this distinguishes "the membership this invite
+   * created was later kicked" (freeze the invite; never revive) from "an
+   * older membership was kicked before this invite existed" (an explicit
+   * re-invite must still be able to complete its handshake).
+   */
+  hasRemovedMember(taskId: number, globalmetaid: string, notBeforeMs?: number): boolean {
+    const gmid = (globalmetaid ?? '').trim();
+    if (!gmid) return false;
+    const row = notBeforeMs != null && Number.isFinite(notBeforeMs)
+      ? this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL
+             AND removed_at >= datetime(? / 1000, 'unixepoch') LIMIT 1`,
+          [taskId, gmid, Math.trunc(notBeforeMs)],
+        )
+      : this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL LIMIT 1`,
+          [taskId, gmid],
+        );
+    return Boolean(row);
   }
 
   // --- group_task_deliverables ---

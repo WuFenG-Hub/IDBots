@@ -27,7 +27,13 @@
  * on shutdown/recovery, resumeOpenTeamInviteWatchers re-arms them after a
  * restart from the pending invite rows plus accepted-but-unconfirmed rows
  * (crash between the ACCEPT landing and the join confirmation) whose remote
- * member row is still missing.
+ * member row is still missing and whose invitee was not kicked afterwards.
+ *
+ * Watcher windows are two independent budgets, both derived from the persisted
+ * row so a restart keeps them: pending waits created_at + envelope TTL +
+ * propagation margin (a legitimate ACCEPT sent near the envelope expiry still
+ * lands on a pending row); the join confirmation after an ACCEPT gets a full
+ * fresh budget from responded_at instead of the invite window's leftover.
  */
 
 import { randomBytes } from 'crypto';
@@ -51,6 +57,10 @@ const DEFAULT_CANDIDATE_LIMIT = 10;
 const MAX_CANDIDATE_LIMIT = 50;
 const GOAL_SUMMARY_MAX_CHARS = 200;
 const DEFAULT_INVITE_TTL_SECONDS = 600; // envelope expiresAt = now + 10 min
+// The guest may legally accept until expiresAt (+60s clock-skew tolerance on
+// its side) and the ACCEPT then crosses the indexer + private-message layers,
+// so the pending window outlives the envelope TTL by this margin.
+const DEFAULT_INVITE_PROPAGATION_MARGIN_MS = 5 * 60_000;
 const DEFAULT_JOIN_CONFIRM_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_WATCHER_POLL_MS = 2_000;
 
@@ -82,6 +92,8 @@ export interface OpenTeamServiceDeps {
   emitLog?: (message: string) => void;
   now?: () => number;
   inviteTtlSeconds?: number;
+  /** Grace past the envelope TTL during which a legitimate ACCEPT still lands (default 5 min). */
+  invitePropagationMarginMs?: number;
   joinConfirmTimeoutMs?: number;
   watcherPollMs?: number;
 }
@@ -111,6 +123,24 @@ function clampInt(value: unknown, fallback: number, min: number, max: number): n
   const num = Math.trunc(Number(value));
   if (!Number.isFinite(num) || num <= 0) return fallback;
   return Math.max(min, Math.min(max, num));
+}
+
+/** Envelope TTL in seconds (floor 60 so a misconfigured TTL cannot dead-letter invites). */
+function resolveInviteTtlSeconds(resolved: OpenTeamServiceDeps): number {
+  return Math.max(60, Math.trunc(resolved.inviteTtlSeconds ?? DEFAULT_INVITE_TTL_SECONDS));
+}
+
+/**
+ * Pending window = envelope TTL + propagation margin: an ACCEPT sent just
+ * before the envelope expired is still legitimate and must find the invite
+ * row pending when it lands, not expired.
+ */
+function resolvePendingWindowMs(resolved: OpenTeamServiceDeps): number {
+  const marginMs = Math.max(
+    0,
+    Math.trunc(resolved.invitePropagationMarginMs ?? DEFAULT_INVITE_PROPAGATION_MARGIN_MS),
+  );
+  return resolveInviteTtlSeconds(resolved) * 1000 + marginMs;
 }
 
 /** Normalized GlobalMetaIDs of every local MetaBot (excluded from remote flows). */
@@ -259,10 +289,7 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     // Re-invite policy (M3): kicked members and declined invitees are not
     // re-invited unless the owner explicitly asks (allowReinvite). Expired
     // invites are not negative history and never block.
-    const wasRemoved = store
-      .listMembers(taskId, { includeRemoved: true })
-      .some((m) => m.metabotId == null && m.removedAt && m.globalmetaid === invitee);
-    if (wasRemoved) {
+    if (store.hasRemovedMember(taskId, invitee)) {
       throw new Error(
         `invitee ${invitee} was previously removed from group task ${taskId}; ` +
         're-invite only when the owner explicitly asks (allowReinvite)',
@@ -305,7 +332,7 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   }
 
   const inviteId = generateOpenTeamInviteId();
-  const inviteTtlSeconds = Math.max(60, Math.trunc(resolved.inviteTtlSeconds ?? DEFAULT_INVITE_TTL_SECONDS));
+  const inviteTtlSeconds = resolveInviteTtlSeconds(resolved);
   const requiredSkills = (input.requiredSkills ?? [])
     .map((skill) => String(skill ?? '').trim())
     .filter((skill) => skill.length > 0);
@@ -334,6 +361,9 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     taskId,
     groupId: task.groupId!,
     inviteeGlobalmetaid: invitee,
+    // Persist the legacy metaId form too: a watcher re-armed after a restart
+    // polls the indexer with both identity forms.
+    inviteeMetaid: detail.metaId?.trim() || null,
     inviteeName: inviteeName || null,
     invitePinId: inviteId,
   });
@@ -372,7 +402,13 @@ interface InviteWatcherState {
   invitePinId: string;
   /** Extra acceptable identity forms (e.g. the legacy metaId from the detail lookup). */
   identities: string[];
-  /** Counts from the invite row's created_at so a restart keeps the original window. */
+  /**
+   * Cached deadline of the current phase, recomputed from the invite row on
+   * every successful step (pending: created_at + TTL + propagation margin;
+   * accepted: responded_at + join-confirm budget). The catch branch uses the
+   * cached value to finalize a watcher whose step keeps failing instead of
+   * retrying forever.
+   */
   deadline: number;
   timer: ReturnType<typeof setTimeout> | null;
   stopped: boolean;
@@ -411,9 +447,8 @@ function startInviteWatcher(invitePinId: string, opts?: { identities?: string[] 
   // crash mid-handshake) resumes straight into join confirmation.
   if (!invite || (invite.status !== 'pending' && invite.status !== 'accepted')) return;
   const now = resolved.now ?? (() => Date.now());
-  const timeoutMs = Math.max(1_000, Math.trunc(resolved.joinConfirmTimeoutMs ?? DEFAULT_JOIN_CONFIRM_TIMEOUT_MS));
   const createdMs = parseSqliteUtcMs(invite.createdAt);
-  const deadline = Number.isFinite(createdMs) ? createdMs + timeoutMs : now() + timeoutMs;
+  const deadline = (Number.isFinite(createdMs) ? createdMs : now()) + resolvePendingWindowMs(resolved);
   const watcher: InviteWatcherState = {
     invitePinId,
     identities: (opts?.identities ?? [])
@@ -447,11 +482,44 @@ async function runWatcherStep(watcher: InviteWatcherState): Promise<void> {
       stopInviteWatcher(watcher);
       return;
     }
-    const remaining = watcher.deadline - now();
+    const createdMs = parseSqliteUtcMs(invite.createdAt);
     if (invite.status === 'accepted') {
+      // A kick AFTER this invite was issued removed the membership the invite
+      // created (R2): the invite freezes as accepted history — never re-add a
+      // self-rejoining kicked bot, never expire with a misleading owner alert.
+      // A removed row PREDATING the invite belongs to an earlier membership
+      // and does not block an explicit re-invite from confirming.
+      if (resolved.getGroupTaskStore().hasRemovedMember(invite.taskId, invite.inviteeGlobalmetaid, createdMs)) {
+        emitLog(
+          `[OpenTeam] Invite ${watcher.invitePinId}: ${invite.inviteeName || invite.inviteeGlobalmetaid} ` +
+          `was removed from task ${invite.taskId} after accepting; watcher stopped, invite left accepted`,
+        );
+        stopInviteWatcher(watcher);
+        return;
+      }
+      // The join-confirmation budget is independent of the invite window: it
+      // starts when the ACCEPT landed (responded_at), so a late-but-legitimate
+      // answer still gets the full confirmation window instead of the leftover.
+      const respondedMs = parseSqliteUtcMs(invite.respondedAt);
+      const anchorMs = Number.isFinite(respondedMs)
+        ? respondedMs
+        : Number.isFinite(createdMs) ? createdMs : now();
+      const deadline = anchorMs + Math.max(
+        1_000,
+        Math.trunc(resolved.joinConfirmTimeoutMs ?? DEFAULT_JOIN_CONFIRM_TIMEOUT_MS),
+      );
+      watcher.deadline = deadline;
+      const remaining = deadline - now();
+      // Both identity forms: the indexer member list may expose either (the
+      // persisted invitee_metaid covers watchers re-armed after a restart).
+      const identities = [...new Set(
+        [invite.inviteeGlobalmetaid, invite.inviteeMetaid, ...watcher.identities]
+          .map((value) => (value ?? '').trim())
+          .filter((value) => value.length > 0),
+      )];
       const joined = await resolved.waitForMemberJoined(
         invite.groupId,
-        [invite.inviteeGlobalmetaid, ...watcher.identities],
+        identities,
         { timeoutMs: Math.max(remaining, pollMs), intervalMs: pollMs },
       );
       if (watcher.stopped) return;
@@ -476,18 +544,57 @@ async function runWatcherStep(watcher: InviteWatcherState): Promise<void> {
       expireWatchedInvite(watcher, invite, 'join_confirm_timeout');
       return;
     }
-    // Still pending: the guest never answered before the invite window closed.
+    // Still pending: the window is created_at + envelope TTL + propagation
+    // margin, so a legitimate ACCEPT sent just before the envelope expired
+    // still finds the row pending when it lands.
+    const deadline = (Number.isFinite(createdMs) ? createdMs : now()) + resolvePendingWindowMs(resolved);
+    watcher.deadline = deadline;
+    const remaining = deadline - now();
     if (remaining <= 0) {
       expireWatchedInvite(watcher, invite, 'invite_response_timeout');
       return;
     }
     scheduleWatcherStep(watcher, Math.min(pollMs, remaining));
   } catch (error) {
+    // Past the cached deadline a failing step finalizes the invite instead of
+    // retrying forever (a persistently broken DB must not spin the watcher).
+    if (now() >= watcher.deadline) {
+      finalizeExpiredWatcher(resolved, watcher);
+      return;
+    }
     emitLog(
       `[OpenTeam] Invite watcher ${watcher.invitePinId} tick failed (retrying): ${errorMessage(error)}`,
     );
     scheduleWatcherStep(watcher, pollMs);
   }
+}
+
+/**
+ * Error-branch finalization: the watcher is past its cached deadline and the
+ * step keeps throwing. Re-read the row best-effort (the failure may have been
+ * transient) and run the normal expire path; when the row is unreadable or
+ * already final, just stop the watcher — a leftover pending/accepted row is
+ * re-armed and finalized by resumeOpenTeamInviteWatchers on the next start.
+ */
+function finalizeExpiredWatcher(resolved: OpenTeamServiceDeps, watcher: InviteWatcherState): void {
+  const emitLog = resolved.emitLog ?? (() => undefined);
+  try {
+    const invite = resolved.getMembershipStore().getInviteByPinId(watcher.invitePinId);
+    if (invite && invite.status !== 'declined' && invite.status !== 'expired') {
+      expireWatchedInvite(
+        watcher,
+        invite,
+        invite.status === 'accepted' ? 'join_confirm_timeout' : 'invite_response_timeout',
+      );
+      return;
+    }
+  } catch (error) {
+    emitLog(
+      `[OpenTeam] Invite watcher ${watcher.invitePinId} is past its deadline but the invite row ` +
+      `is unreadable; watcher stopped, finalization deferred to the next resume: ${errorMessage(error)}`,
+    );
+  }
+  stopInviteWatcher(watcher);
 }
 
 function expireWatchedInvite(
@@ -545,8 +652,11 @@ async function notifyOwnerOfExpiredInvite(
  * Restart recovery: re-arm watchers for every still-pending invite row, plus
  * accepted-but-unconfirmed invites (app quit after the ACCEPT landed but
  * before the join was confirmed). An accepted invite whose remote member row
- * already exists is complete — no watcher, no duplicate addMember. Accepted
- * invites past their original window finalize as expired on the first tick
+ * already exists is complete — no watcher, no duplicate addMember. An accepted
+ * invite whose invitee was KICKED after the invite was issued stays frozen as
+ * accepted history — re-arming would either silently un-kick a self-rejoining
+ * bot or expire the invite with a misleading owner alert. Accepted invites
+ * past their join-confirmation budget finalize as expired on the first tick
  * through the same join_confirm_timeout path as a live watcher.
  * Returns the number of watchers started.
  */
@@ -558,12 +668,19 @@ export function resumeOpenTeamInviteWatchers(): number {
     ...membershipStore.listPendingInvites(),
     ...membershipStore
       .listAcceptedInvites()
-      .filter((invite) => !groupTaskStore.isMember(invite.taskId, null, invite.inviteeGlobalmetaid)),
+      .filter((invite) => !groupTaskStore.isMember(invite.taskId, null, invite.inviteeGlobalmetaid))
+      .filter((invite) => !groupTaskStore.hasRemovedMember(
+        invite.taskId,
+        invite.inviteeGlobalmetaid,
+        parseSqliteUtcMs(invite.createdAt),
+      )),
   ];
   let started = 0;
   for (const invite of resumable) {
     if (!invite.invitePinId || inviteWatchers.has(invite.invitePinId)) continue;
-    startInviteWatcher(invite.invitePinId, { identities: [invite.inviteeGlobalmetaid] });
+    // Identity forms come from the persisted row (invitee_globalmetaid plus
+    // the invitee_metaid column), so a restarted watcher polls both.
+    startInviteWatcher(invite.invitePinId);
     if (inviteWatchers.has(invite.invitePinId)) started += 1;
   }
   return started;

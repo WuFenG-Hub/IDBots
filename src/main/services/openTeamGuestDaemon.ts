@@ -8,7 +8,11 @@
  * groupChatMentionUtils) but deliberately leaner: no chair/worker protocol, no
  * orchestration, no session channel. Loop prevention comes from the per-
  * membership cursor (openteam_memberships.last_processed_msg_id, monotonic),
- * the self-message skip, and a per-membership reply cooldown. A reply starting
+ * the self-message skip, and a per-membership reply cooldown. The cursor only
+ * advances past messages that were actually processed: a cooldown-blocked
+ * mention is re-evaluated on a later tick (answered once the cooldown has
+ * elapsed), and a send/generation failure is retried next tick — bounded, so
+ * the same message is abandoned after 3 consecutive failures. A reply starting
  * with [NO_REPLY] is suppressed (not sent on-chain), same escape hatch as the
  * group-task daemon.
  *
@@ -50,6 +54,8 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_COOLDOWN_MS = 20_000;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
+/** Bounded retry: consecutive failures on one message before the cursor gives up and advances past it. */
+const MAX_CONSECUTIVE_MESSAGE_FAILURES = 3;
 
 /** Cowork conversation-mapping channel for the guest's per-group skill sessions. */
 const CONVERSATION_CHANNEL = 'openteam_guest';
@@ -236,6 +242,8 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
   // Loop prevention state (in-memory, per loop instance; the durable half is
   // the membership cursor in openteam_memberships).
   const lastReplyAtByMembership = new Map<number, number>();
+  /** Consecutive send/generation failure streak per membership (bounded retry). */
+  const consecutiveFailuresByMembership = new Map<number, { messageId: number; count: number }>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -534,6 +542,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     const rows = queryNewMessages(db, membership.groupId, membership.lastProcessedMsgId);
     for (const row of rows) {
       const message = toDaemonMessage(row);
+      let advanceCursor = false;
       try {
         const decision = decideOpenTeamGuestResponse({
           message,
@@ -542,29 +551,67 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
           now: now(),
           cooldownMs,
         });
+        if (!decision.respond && decision.reason === 'cooldown') {
+          // Cooldown is transient: keep the cursor BEFORE this message so the
+          // next tick re-evaluates it once the cooldown has elapsed instead of
+          // dropping a legitimate mention forever. Later messages wait to keep
+          // processing order.
+          break;
+        }
         if (decision.respond) {
           await generateAndSendGuestReply(membership, bot, message);
           lastReplyAtByMembership.set(membership.id, now());
         }
+        consecutiveFailuresByMembership.delete(membership.id);
+        advanceCursor = true;
       } catch (error) {
-        // One bad message must never stall the cursor or the tick.
-        emitLog(
-          `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      } finally {
-        membershipStore.updateLastProcessedMsgId(
-          membership.groupId,
-          membership.metabotId,
-          message.id,
-        );
+        // A send/generation failure must not silently drop the mention: hold
+        // the cursor and retry on the next tick, giving up after a bounded run
+        // of consecutive failures on the SAME message so one poisonous message
+        // cannot stall the membership forever.
+        const previous = consecutiveFailuresByMembership.get(membership.id);
+        const failures = previous?.messageId === message.id ? previous.count + 1 : 1;
+        if (failures >= MAX_CONSECUTIVE_MESSAGE_FAILURES) {
+          consecutiveFailuresByMembership.delete(membership.id);
+          advanceCursor = true;
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed ` +
+            `${failures} times in a row; giving up on it (cursor advances): ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        } else {
+          consecutiveFailuresByMembership.set(membership.id, { messageId: message.id, count: failures });
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed ` +
+            `(retry ${failures}/${MAX_CONSECUTIVE_MESSAGE_FAILURES} next tick): ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
+      if (!advanceCursor) break;
+      membershipStore.updateLastProcessedMsgId(
+        membership.groupId,
+        membership.metabotId,
+        message.id,
+      );
     }
   };
 
   const runTick = async (): Promise<void> => {
     const membershipStore = deps.getOpenTeamMembershipStore();
-    for (const membership of membershipStore.listActiveMemberships()) {
+    const activeMemberships = membershipStore.listActiveMemberships();
+    // Drop in-memory loop-prevention state of memberships that are no longer
+    // active (kick / owner opt-out): the maps are keyed by membership id and
+    // would otherwise grow monotonically — and a later re-join must not
+    // inherit a stale cooldown or failure streak.
+    const activeIds = new Set(activeMemberships.map((membership) => membership.id));
+    for (const id of [...lastReplyAtByMembership.keys()]) {
+      if (!activeIds.has(id)) lastReplyAtByMembership.delete(id);
+    }
+    for (const id of [...consecutiveFailuresByMembership.keys()]) {
+      if (!activeIds.has(id)) consecutiveFailuresByMembership.delete(id);
+    }
+    for (const membership of activeMemberships) {
       try {
         await processMembership(membership);
       } catch (error) {

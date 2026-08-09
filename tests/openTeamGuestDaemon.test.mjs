@@ -324,6 +324,153 @@ test('store: catchUpCursorToLatest fast-forwards past existing history', async (
   }
 });
 
+test('loop: a cooldown-blocked mention holds the cursor and is answered once the cooldown elapses', async () => {
+  let currentNow = 1_800_000_000_000;
+  const { store, db, membershipStore, loop, calls } = await createHarness({
+    deps: { now: () => currentNow, cooldownMs: 20_000 },
+  });
+  try {
+    membershipStore.upsertActiveMembership({ groupId: GROUP_ID, metabotId: 7, globalmetaid: GUEST_GMID });
+    insertGroupMessage(db, {
+      pinId: `${'1'.repeat(63)}ai0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot first question',
+    });
+    await loop.runTick();
+    assert.equal(calls.send.length, 1, 'first mention answered');
+    const firstId = messageIdOf(db, `${'1'.repeat(63)}ai0`);
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId, firstId);
+
+    // 5s later a second mention lands inside the 20s cooldown window.
+    currentNow += 5_000;
+    insertGroupMessage(db, {
+      pinId: `${'2'.repeat(63)}bi0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot second question',
+    });
+    await loop.runTick();
+    assert.equal(calls.send.length, 1, 'cooldown suppresses the reply');
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
+      firstId,
+      'cursor held BEFORE the cooldown-blocked message (not silently dropped)',
+    );
+    // Still held on the next tick while the cooldown keeps running.
+    currentNow += 5_000;
+    await loop.runTick();
+    assert.equal(calls.send.length, 1);
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId, firstId);
+
+    // Once the cooldown has elapsed the held mention is re-evaluated and answered.
+    currentNow += 15_000;
+    await loop.runTick();
+    assert.equal(calls.send.length, 2, 'the held mention is answered after the cooldown');
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
+      messageIdOf(db, `${'2'.repeat(63)}bi0`),
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test('loop: a failing reply holds the cursor, retries, and gives up after 3 consecutive failures', async () => {
+  const logs = [];
+  let chatCalls = 0;
+  const { store, db, membershipStore, loop } = await createHarness({
+    deps: {
+      performChat: async () => {
+        chatCalls += 1;
+        throw new Error('LLM down');
+      },
+      emitLog: (line) => logs.push(String(line)),
+    },
+  });
+  try {
+    membershipStore.upsertActiveMembership({ groupId: GROUP_ID, metabotId: 7, globalmetaid: GUEST_GMID });
+    const pinId = `${'3'.repeat(63)}ci0`;
+    insertGroupMessage(db, {
+      pinId,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot are you there?',
+    });
+
+    await loop.runTick(); // failure 1
+    assert.equal(chatCalls, 1);
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
+      0,
+      'cursor held for a retry (failure is not silently dropped)',
+    );
+    await loop.runTick(); // failure 2
+    assert.equal(chatCalls, 2);
+    assert.equal(membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId, 0);
+
+    await loop.runTick(); // failure 3 -> bounded retry gives up
+    assert.equal(chatCalls, 3);
+    assert.equal(
+      membershipStore.getMembership(GROUP_ID, 7).lastProcessedMsgId,
+      messageIdOf(db, pinId),
+      'cursor advances once the bounded retries are exhausted',
+    );
+    assert.ok(
+      logs.some((line) => line.includes('giving up')),
+      `expected a give-up log, got: ${JSON.stringify(logs)}`,
+    );
+
+    await loop.runTick(); // the abandoned message is not retried anymore
+    assert.equal(chatCalls, 3);
+  } finally {
+    store.close();
+  }
+});
+
+test('loop: leaving the group drops the in-memory cooldown state (a re-join answers immediately)', async () => {
+  let currentNow = 1_800_000_000_000;
+  const { store, db, membershipStore, loop, calls } = await createHarness({
+    deps: { now: () => currentNow, cooldownMs: 20_000 },
+  });
+  try {
+    membershipStore.upsertActiveMembership({ groupId: GROUP_ID, metabotId: 7, globalmetaid: GUEST_GMID });
+    insertGroupMessage(db, {
+      pinId: `${'4'.repeat(63)}di0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot question one',
+    });
+    await loop.runTick();
+    assert.equal(calls.send.length, 1);
+
+    // The bot leaves (kick / owner opt-out); one tick observes the membership
+    // as inactive and drops its loop-prevention state.
+    membershipStore.markLeft(GROUP_ID, 7);
+    await loop.runTick();
+
+    // A re-invite reactivates the same membership row within the OLD cooldown
+    // window: the reply must not be blocked by the stale lastReplyAt entry.
+    membershipStore.upsertActiveMembership({ groupId: GROUP_ID, metabotId: 7, globalmetaid: GUEST_GMID });
+    currentNow += 5_000;
+    insertGroupMessage(db, {
+      pinId: `${'5'.repeat(63)}ei0`,
+      senderMetaId: 'metaid-other',
+      senderGlobalMetaId: OTHER_GMID,
+      senderName: 'Other Bot',
+      content: '@Guest Bot question two',
+    });
+    await loop.runTick();
+    assert.equal(calls.send.length, 2, 're-join starts with a clean cooldown state');
+  } finally {
+    store.close();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // M3: chat-skill turns + metafile file delivery
 // ---------------------------------------------------------------------------

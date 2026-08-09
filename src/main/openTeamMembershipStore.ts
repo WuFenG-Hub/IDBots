@@ -29,6 +29,8 @@ export interface OpenTeamInvite {
   taskId: number;
   groupId: string;
   inviteeGlobalmetaid: string;
+  /** Legacy metaId identity form (join watchers poll the indexer with both). */
+  inviteeMetaid: string | null;
   inviteeName: string | null;
   invitePinId: string | null;
   status: OpenTeamInviteStatus;
@@ -64,6 +66,8 @@ export interface CreateOpenTeamInviteInput {
   taskId: number;
   groupId: string;
   inviteeGlobalmetaid: string;
+  /** Legacy metaId identity form, persisted so restarted watchers keep it. */
+  inviteeMetaid?: string | null;
   inviteeName?: string | null;
   invitePinId?: string | null;
 }
@@ -87,6 +91,7 @@ interface OpenTeamInviteRow {
   task_id: number;
   group_id: string;
   invitee_globalmetaid: string;
+  invitee_metaid: string | null;
   invitee_name: string | null;
   invite_pin_id: string | null;
   status: string;
@@ -118,6 +123,7 @@ function rowToOpenTeamInvite(row: OpenTeamInviteRow): OpenTeamInvite {
     taskId: row.task_id,
     groupId: row.group_id,
     inviteeGlobalmetaid: row.invitee_globalmetaid,
+    inviteeMetaid: row.invitee_metaid ?? null,
     inviteeName: row.invitee_name ?? null,
     invitePinId: row.invite_pin_id ?? null,
     status: status === 'accepted' || status === 'declined' || status === 'expired' ? status : 'pending',
@@ -344,12 +350,13 @@ export class OpenTeamMembershipStore {
   createInvite(input: CreateOpenTeamInviteInput): OpenTeamInvite {
     this.db.run(
       `INSERT INTO openteam_invites (
-        task_id, group_id, invitee_globalmetaid, invitee_name, invite_pin_id, status
-      ) VALUES (?, ?, ?, ?, ?, 'pending')`,
+        task_id, group_id, invitee_globalmetaid, invitee_metaid, invitee_name, invite_pin_id, status
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
       [
         input.taskId,
         input.groupId,
         input.inviteeGlobalmetaid,
+        input.inviteeMetaid ?? null,
         input.inviteeName ?? null,
         input.invitePinId ?? null,
       ],

@@ -256,6 +256,48 @@ test('local member regression: addMember idempotent, isMember, name from metabot
 });
 
 
+test('hasRemovedMember: removed-row check with the optional not-before cutoff', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    const task = createTask(groupTaskStore);
+    groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote-1', role: 'worker', displayName: 'Remote Bot One',
+    });
+    // An ACTIVE member row is not a removed row.
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), false);
+
+    groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: 'gmid-remote-1', removePinId: 'pin-rm' });
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), true);
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-2'), false, 'other invitees unaffected');
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, ''), false, 'blank id never matches');
+    assert.equal(groupTaskStore.hasRemovedMember(999, 'gmid-remote-1'), false, 'other tasks unaffected');
+
+    // notBeforeMs cutoff: the kick counts only at/after the given moment.
+    assert.equal(
+      groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now() - 60_000),
+      true,
+      'kick after the cutoff counts',
+    );
+    assert.equal(
+      groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now() + 60_000),
+      false,
+      'kick before the cutoff belongs to an earlier membership',
+    );
+    // A backdated removed row (kick clearly before a later invite) fails the cutoff.
+    db.run(
+      `UPDATE group_task_members SET removed_at = datetime('now', '-10 seconds')
+       WHERE task_id = ? AND globalmetaid = ?`,
+      [task.id, 'gmid-remote-1'],
+    );
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), true, 'blanket check ignores timing');
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now()), false);
+  } finally {
+    store.close();
+  }
+});
+
+
 test('local member re-join after kick: addMember revives the removed row in place (M3)', async () => {
   const tempDir = makeTempDir();
   const { store, groupTaskStore, db } = await openStores(tempDir);
