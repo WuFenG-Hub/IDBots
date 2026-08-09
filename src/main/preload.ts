@@ -669,6 +669,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:listMessages', input),
     sendUserMessage: (input: { taskId: number; content: string }) =>
       ipcRenderer.invoke('groupTask:sendUserMessage', input),
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:kickMember', input),
     onStatusChanged: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:statusChanged', handler);

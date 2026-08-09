@@ -44,6 +44,8 @@ tests/*
 !tests/groupTaskDaemon.test.mjs
 !tests/groupTaskDeliverableParser.test.mjs
 !tests/groupTaskUtils.test.mjs
+!tests/groupTaskKickMember.test.mjs
+!tests/groupTaskKickMemberRpc.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs

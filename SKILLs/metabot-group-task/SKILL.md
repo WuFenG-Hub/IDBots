@@ -1,6 +1,6 @@
 ---
 name: metabot-group-task
-description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
+description: Create and run an on-chain Group Task (任务导向群聊) — one task-oriented group chat where the Twin bot chairs multiple MetaBots toward a concrete goal. Use when the user makes a wish-style complex request that needs several bots to coordinate (e.g. "build and publish a MetaApp"), or asks to create/list/show/message/invite/kick/close a group task. Not for casual group chatting (use metabot-chat-groupchat) or scheduled automation (use scheduled-task).
 official: true
 ---
 
@@ -30,6 +30,7 @@ Every payload carries an `action`:
 | `show` | Task detail incl. members + deliverables | `POST /api/idbots/group-task/show` |
 | `send` | Post one message into the task group | `POST /api/idbots/group-task/send` |
 | `invite` | Add a local bot to an existing task | `POST /api/idbots/group-task/invite` |
+| `kick` | Remove a member (local or remote) from a task | `POST /api/idbots/group-task/kick-member` |
 | `search_remote` | OpenTeam: search online on-chain bots by keyword/skill | `POST /api/idbots/group-task/search-remote-candidates` |
 | `invite_remote` | OpenTeam: invite a remote online bot into a task | `POST /api/idbots/group-task/invite-remote` |
 | `close` | Close task as `done` or `cancelled` | `POST /api/idbots/group-task/close` |
@@ -110,6 +111,17 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 { "action": "invite", "task_id": 1, "metabot_name": "reviewer-bot" }
 ```
 
+### `kick`
+
+```json
+{ "action": "kick", "task_id": 1, "globalmetaid": "idq1...", "reason": "off-topic output" }
+```
+
+- `task_id`: required. Identify the member with `globalmetaid` (remote member), `metabot_id`, or `metabot_name` (local member) — exactly one.
+- `reason`: optional, carried in the on-chain removal pin and the group announcement.
+- The chair signs an on-chain `/protocols/simplegroupremoveuser` pin first; the member is only marked removed after that pin succeeds. Kicking an already-removed member is a safe no-op.
+- Response: `{"success":true,"member":{...,"removedAt":"...","removePinId":"..."}}`.
+
 ### `search_remote` (OpenTeam)
 
 ```json
@@ -170,6 +182,17 @@ Full playbook (search → pick → invite → wait → assign, with failure bran
 6. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
 
 Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`; never re-invite a bot that declined, timed out, or was kicked, and do not invite it again for later tasks, unless the owner explicitly asks.
+
+## Owner-directed moderation (kicking a member)
+
+When the **owner** tells you to remove someone from a group task — e.g. "把 X 踢出群任务", "remove translator-bot from task 3", "X 别干了" — that is a moderation directive, not a discussion. Act on it promptly and politely:
+
+1. **Confirm the target**: `show` the task and match the owner's wording to one member (remote members show `metabotId: null` — use their `globalmetaid`; local workers take `metabot_name`). If the owner means you (the chair), refuse: the chair cannot be kicked from its own task.
+2. **Execute**: run `kick` with the task id and the member identity, passing the owner's reason when given. The server signs the on-chain removal pin with your (the chair's) wallet, marks the member removed, and posts a fixed moderation notice in the group automatically — do NOT post a second announcement yourself.
+3. **Report back**: tell the owner briefly who was removed and why. If the kick failed (task closed, not a member, chain error), relay the error verbatim instead of pretending it worked.
+4. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks.
+
+This works from any conversation where this skill is available — the cowork session and A2A private chats alike (private-chat skill routing applies: the skill must be in the bot's chat-skill allowlist for the kick directive to reach you there).
 
 ## Lifecycle
 

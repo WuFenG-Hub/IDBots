@@ -1905,6 +1905,43 @@ test('round-4 attribution: unresolvable legacy metaid → SUSPECT, silent', asyn
   }
 });
 
+test('M3 kick: messages from a removed member turn SUSPECT — no replies, no deliverables', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+
+    // Pre-kick: a member deliverable is ingested and the chair verifies it.
+    insertGroupMessage(h.db, {
+      pinId: 'pre-kick-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'pre-kick deliverable recorded');
+    assert.equal(h.sends.length, 1, 'pre-kick deliverable triggers the chair');
+
+    // M3: the owner kicks the member (removeuser pin landed; row marked).
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2, removePinId: 'pin-remove-2' });
+
+    // The kicked member's daemon (or an indexer that has not enforced the
+    // removal yet) keeps posting — the host must stay silent and ingest nothing.
+    insertGroupMessage(h.db, {
+      pinId: 'post-kick-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `@Twin Bot still here\n[DELIVERABLE] metaapp: metaapp://${REAL_PINID_2}`,
+    });
+    await h.loop.runTick();
+    const suspect = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['post-kick-i0'],
+    )[0].values[0][0];
+    assert.equal(suspect, 1, 'post-kick message flagged SUSPECT (sender no longer a member)');
+    assert.equal(h.sends.length, 1, 'no replies after the kick');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'no deliverables after the kick');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('round-4 correction-first: a 更正 message supersedes the matched deliverable in place', async () => {
   const h = await createHarness();
   try {

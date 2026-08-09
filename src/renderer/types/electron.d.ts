@@ -965,6 +965,7 @@ interface IElectronAPI {
     close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) => Promise<any>;
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
   };

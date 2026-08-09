@@ -49,6 +49,8 @@ export interface GroupTaskMember {
   displayName: string | null;
   /** Set when the member was kicked (M3); active members have NULL. */
   removedAt: string | null;
+  /** On-chain /protocols/simplegroupremoveuser pin that removed the member (M3). */
+  removePinId: string | null;
   /** Joined from metabots for display / mention matching (falls back to displayName for remote members). */
   name: string | null;
 }
@@ -105,6 +107,16 @@ export interface AddGroupTaskMemberInput {
   displayName?: string | null;
 }
 
+export interface MarkGroupTaskMemberRemovedInput {
+  taskId: number;
+  /** Local member path (metabots row id). */
+  metabotId?: number | null;
+  /** Remote member path (metabot_id IS NULL rows). */
+  globalmetaid?: string | null;
+  /** The on-chain removeuser pin id, recorded for audit. */
+  removePinId?: string | null;
+}
+
 export interface AddGroupTaskDeliverableInput {
   taskId: number;
   msgPinId?: string | null;
@@ -141,6 +153,7 @@ interface GroupTaskMemberRow {
   created_at: string | null;
   display_name: string | null;
   removed_at: string | null;
+  remove_pin_id: string | null;
   metabot_name: string | null;
   metabot_globalmetaid: string | null;
 }
@@ -243,6 +256,7 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
     createdAt: row.created_at ?? null,
     displayName: row.display_name ?? null,
     removedAt: row.removed_at ?? null,
+    removePinId: row.remove_pin_id ?? null,
     // Local members get the metabots-table name; remote members fall back to
     // the display_name snapshot recorded at invite time.
     name: row.metabot_name ?? row.display_name ?? null,
@@ -582,8 +596,9 @@ export class GroupTaskStore {
   }
 
   /**
-   * Membership check. Local members match on metabot_id; remote members
-   * (metabotId === null) match on globalmetaid among active rows.
+   * Membership check among ACTIVE rows (removed members fail the check). Local
+   * members match on metabot_id; remote members (metabotId === null) match on
+   * globalmetaid.
    */
   isMember(taskId: number, metabotId: number | null, globalmetaid?: string | null): boolean {
     if (metabotId == null) {
@@ -597,7 +612,8 @@ export class GroupTaskStore {
       return Boolean(row);
     }
     const row = this.getOne<{ found: number }>(
-      'SELECT 1 AS found FROM group_task_members WHERE task_id = ? AND metabot_id = ? LIMIT 1',
+      `SELECT 1 AS found FROM group_task_members
+       WHERE task_id = ? AND metabot_id = ? AND removed_at IS NULL LIMIT 1`,
       [taskId, metabotId],
     );
     return Boolean(row);
@@ -631,6 +647,49 @@ export class GroupTaskStore {
       [joinedPinId, taskId, metabotId],
     );
     this.saveDb();
+  }
+
+  /**
+   * Mark a member as kicked (M3): sets removed_at (+ the removeuser pin id for
+   * audit) without deleting the row, so history/deliverables stay intact.
+   * Local members match on metabot_id (UNIQUE guarantees one row); remote
+   * members match the ACTIVE row by globalmetaid. Idempotent: an
+   * already-removed member is returned as-is; a never-member throws.
+   */
+  markMemberRemoved(input: MarkGroupTaskMemberRemovedInput): GroupTaskMember {
+    const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
+    const gmid = (input.globalmetaid ?? '').trim();
+    if (metabotId == null && !gmid) {
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: metabotId or globalmetaid is required`);
+    }
+
+    const row = metabotId != null
+      ? this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, metabotId],
+        )
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ?
+           ORDER BY m.id DESC LIMIT 1`,
+          [input.taskId, gmid],
+        );
+    if (!row) {
+      const who = metabotId != null ? `metabot ${metabotId}` : `globalmetaid ${gmid}`;
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: ${who} is not a member`);
+    }
+    if (row.removed_at) return rowToGroupTaskMember(row);
+
+    this.db.run(
+      `UPDATE group_task_members SET removed_at = datetime('now'), remove_pin_id = ?
+       WHERE id = ? AND removed_at IS NULL`,
+      [input.removePinId ?? null, row.id],
+    );
+    this.saveDb();
+    const updated = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [row.id]);
+    if (!updated || !updated.removed_at) {
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: member ${row.id} not removed`);
+    }
+    return rowToGroupTaskMember(updated);
   }
 
   // --- group_task_deliverables ---

@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'close'|'search_remote'|'invite_remote', ... }
+ * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'kick'|'close'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -23,6 +23,7 @@ const ACTION_PATHS = {
   show: '/api/idbots/group-task/show',
   send: '/api/idbots/group-task/send',
   invite: '/api/idbots/group-task/invite',
+  kick: '/api/idbots/group-task/kick-member',
   close: '/api/idbots/group-task/close',
   'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
   search_remote: '/api/idbots/group-task/search-remote-candidates',
@@ -141,6 +142,25 @@ async function main() {
       } else {
         fail('metabot_id or metabot_name is required for invite');
       }
+      break;
+    }
+    case 'kick': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for kick');
+      body = { task_id: taskId };
+      const globalmetaid = String(params.globalmetaid ?? '').trim();
+      const metabotName = String(params.metabot_name ?? '').trim();
+      if (globalmetaid) {
+        body.globalmetaid = globalmetaid;
+      } else if (typeof params.metabot_id === 'number' && params.metabot_id > 0) {
+        body.metabot_id = params.metabot_id;
+      } else if (metabotName) {
+        body.metabot_name = metabotName;
+      } else {
+        fail('globalmetaid, metabot_id or metabot_name is required for kick');
+      }
+      const reason = String(params.reason ?? '').trim();
+      if (reason) body.reason = reason;
       break;
     }
     case 'search_remote': {

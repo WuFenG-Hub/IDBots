@@ -33,6 +33,7 @@ import {
   getGroupTask,
   postGroupTaskMessage,
   joinGroupTaskMember,
+  kickGroupTaskMember,
   closeGroupTask,
   deleteGroupTaskDeliverable,
 } from './groupTaskService';
@@ -82,6 +83,7 @@ const GROUP_TASK_LIST_PATH = '/api/idbots/group-task/list';
 const GROUP_TASK_SHOW_PATH = '/api/idbots/group-task/show';
 const GROUP_TASK_SEND_PATH = '/api/idbots/group-task/send';
 const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
+const GROUP_TASK_KICK_MEMBER_PATH = '/api/idbots/group-task/kick-member';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
@@ -1403,6 +1405,68 @@ export function startMetaidRpcServer(
       }
       try {
         const member = await joinGroupTaskMember(taskId, metabotId);
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, member }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_KICK_MEMBER_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: { task_id?: number; metabot_id?: number; metabot_name?: string; globalmetaid?: string; reason?: string };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      // Local member: metabot_id (or metabot_name); remote member: globalmetaid.
+      let metabotId: number | undefined;
+      const globalmetaid = typeof parsed.globalmetaid === 'string' ? parsed.globalmetaid.trim() : '';
+      if (parsed.metabot_id !== undefined && parsed.metabot_id !== null) {
+        const parsedId = Number(parsed.metabot_id);
+        if (!Number.isInteger(parsedId) || parsedId <= 0) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: 'metabot_id must be a positive integer' }));
+          return;
+        }
+        metabotId = parsedId;
+      } else if (!globalmetaid) {
+        const name = typeof parsed.metabot_name === 'string' ? parsed.metabot_name.trim() : '';
+        if (!name) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: 'metabot_id, metabot_name or globalmetaid is required' }));
+          return;
+        }
+        const resolved = resolveMetabotIdByName(getMetabotStore(), name);
+        if (resolved == null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: `MetaBot not found: ${name}` }));
+          return;
+        }
+        metabotId = resolved;
+      }
+      try {
+        const member = await kickGroupTaskMember({
+          taskId,
+          metabotId,
+          globalmetaid: metabotId == null ? globalmetaid : undefined,
+          reason: typeof parsed.reason === 'string' && parsed.reason.trim() ? parsed.reason.trim() : undefined,
+        });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, member }));
       } catch (err) {

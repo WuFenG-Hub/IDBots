@@ -144,6 +144,7 @@ import {
   listGroupTaskSummaries,
   getGroupTask,
   closeGroupTask,
+  kickGroupTaskMember,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
@@ -8984,8 +8985,40 @@ if (!gotTheLock) {
     }
   });
 
-  // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
+  // OpenTeam M3: owner removes a member (local worker or remote bot) from a task.
+  ipcMain.handle('groupTask:kickMember', async (_event, input: {
+    taskId?: number;
+    metabotId?: number;
+    globalmetaid?: string;
+    reason?: string;
+  }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const metabotId = input?.metabotId != null ? Number(input.metabotId) : undefined;
+      if (metabotId != null && (!Number.isInteger(metabotId) || metabotId <= 0)) {
+        throw new Error('metabotId must be a positive integer');
+      }
+      const globalmetaid = typeof input?.globalmetaid === 'string' ? input.globalmetaid.trim() : '';
+      if (metabotId == null && !globalmetaid) {
+        throw new Error('metabotId or globalmetaid is required');
+      }
+      const member = await withSqliteRecovery('groupTask:kickMember', () =>
+        kickGroupTaskMember({
+          taskId,
+          metabotId,
+          globalmetaid: metabotId == null ? globalmetaid : undefined,
+          reason: typeof input?.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined,
+        }));
+      return { success: true, member };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to remove the member' };
+    }
+  });
 
+  // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
   // Owner traceability for auto-accepted OpenTeam invites: every external group
   // task this machine's bots joined (or left), with a message-activity digest.
   ipcMain.handle('openTeamCollab:list', async () => {

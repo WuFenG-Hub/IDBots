@@ -1453,6 +1453,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksOwnerReportFailed: 'Twin Bot 验收报告发送失败：{error}',
     groupTasksOwnerReportDisplayFailed: '验收报告已上链，但无法显示在 A2A 对话中：{error}',
     groupTasksOwnerReportUnknownError: '未知错误',
+    groupTasksRemoveMember: '移除成员',
+    groupTasksRemovingMember: '移除中…',
+    groupTasksRemoveMemberConfirm: '确认将 {name} 移出该群任务吗？主持 Bot 会在链上签署移除 Pin 并在群内公告。',
 
     // OpenTeam external collaborations (invitee-side traceability)
     openTeamCollabSectionTitle: '外部协作（OpenTeam）',
@@ -3129,6 +3132,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksOwnerReportFailed: 'Twin Bot could not send the review report: {error}',
     groupTasksOwnerReportDisplayFailed: 'The review report was sent on-chain but could not be shown in A2A: {error}',
     groupTasksOwnerReportUnknownError: 'Unknown error',
+    groupTasksRemoveMember: 'Remove member',
+    groupTasksRemovingMember: 'Removing…',
+    groupTasksRemoveMemberConfirm: 'Remove {name} from this group task? The chair bot signs an on-chain removal pin and announces it in the group.',
 
     // OpenTeam external collaborations (invitee-side traceability)
     openTeamCollabSectionTitle: 'External collaborations (OpenTeam)',

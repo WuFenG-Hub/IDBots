@@ -1,7 +1,8 @@
 /**
- * Group chat transport service: on-chain pin writes (create/join/send) for MetaWeb
- * group chats, plus an indexer-readiness poll. Consolidates logic that previously
- * existed only as an inline arrow function in main.ts and inside skill scripts.
+ * Group chat transport service: on-chain pin writes (create/join/send/remove) for
+ * MetaWeb group chats, plus an indexer-readiness poll. Consolidates logic that
+ * previously existed only as an inline arrow function in main.ts and inside skill
+ * scripts.
  *
  * Payload references:
  * - Create body mirrors idchat production createChannel (idchat/src/utils/talk.ts:724-741).
@@ -22,6 +23,12 @@ export interface CreateGroupChatOptions {
 
 export interface JoinGroupChatOptions {
   referrer?: string;
+}
+
+export interface RemoveGroupChatMemberOptions {
+  /** Legacy MetaID of the member being removed (not the GlobalMetaID). */
+  removeMetaid: string;
+  reason?: string;
 }
 
 export interface SendGroupChatMessageOptions {
@@ -161,6 +168,35 @@ export async function joinGroupChat(
     operation: 'create',
     path: '/protocols/simplegroupjoin',
     contentType: 'application/json',
+    payload: JSON.stringify(body),
+  });
+  return { pinId: result.pinId };
+}
+
+/**
+ * Remove a member from a group on-chain (/protocols/simplegroupremoveuser).
+ * Only the group creator's signature is honored by the indexer, so callers must
+ * pass the chair (group creator) metabot id. `removeMetaid` is the kicked
+ * member's legacy MetaID (idchat removeMember convention); body mirrors the
+ * SimpleGroupRemoveUser protocol doc
+ * (SKILLs/metabot-omni-caster/references/03-group-management.md).
+ */
+export async function removeGroupChatMember(
+  metabotId: number,
+  groupId: string,
+  opts: RemoveGroupChatMemberOptions
+): Promise<{ pinId: string }> {
+  const body = {
+    removeMetaid: opts.removeMetaid,
+    groupId,
+    reason: opts.reason?.trim() ?? '',
+    timestamp: Math.floor(Date.now() / 1000), // idchat uses seconds
+  };
+  const result = await createPin(getMetabotStore(), metabotId, {
+    operation: 'create',
+    path: '/protocols/simplegroupremoveuser',
+    contentType: 'application/json',
+    encryption: '0',
     payload: JSON.stringify(body),
   });
   return { pinId: result.pinId };
