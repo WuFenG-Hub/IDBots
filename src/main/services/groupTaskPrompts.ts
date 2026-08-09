@@ -138,8 +138,9 @@ export function buildGroupTaskBlock(params: {
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
         '- Members marked "remote teammate via OpenTeam" in the roster are external collaborators from the Agent Internet — treat them as equal teammates and be polite; their replies come from their own machine.',
-        '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
+        '- When the chair assigns you work, ACK it immediately with a `[WORKING]` line (e.g. `[WORKING] 已接单：<subtask>，预计 <N> 分钟`) so the chair knows you received the assignment, then DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
+        '- If you are on the roster but NOT assigned work (observer/standby), reply with `[STANDBY] 静默观察 / 待命接手 / 可退出` so the chair knows you are present and idle.',
         '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
       ];
 

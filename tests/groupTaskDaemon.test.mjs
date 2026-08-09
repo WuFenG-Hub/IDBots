@@ -223,6 +223,9 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.memberUnreachableAfterMinutes != null
       ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
       : {}),
+    ...(overrides.ackTimeoutMs != null
+      ? { ackTimeoutMs: overrides.ackTimeoutMs }
+      : {}),
   });
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
@@ -2076,10 +2079,11 @@ test('P0-2: silent assigned/working members are auto-marked unreachable after th
       chainTimestamp: Math.floor((startMs - 60_000) / 1000),
     });
 
-    // Fresh task: no one is marked yet.
+    // Fresh task: worker 2 spoke (implicit ACK → working); worker 3 is still
+    // within threshold → assigned (not yet unreachable).
     await h.loop.runTick();
     let members = h.groupTaskStore.listMembers(task.id);
-    assert.equal(members.find((m) => m.metabotId === 2).status, 'assigned');
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
     assert.equal(members.find((m) => m.metabotId === 3).status, 'assigned');
 
     // Advance past the threshold: both become unreachable.
@@ -2091,6 +2095,114 @@ test('P0-2: silent assigned/working members are auto-marked unreachable after th
 
     // Chair member is never auto-marked.
     assert.equal(members.find((m) => m.metabotId === 1).status, 'working');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] ACK + chair reminders
+// ---------------------------------------------------------------------------
+
+test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it and marks working', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2') != null, true);
+
+    // Worker 2 ACKs with [WORKING] and an estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：build metaapp，预计 5 分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working');
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'expected delivery deadline recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fails', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+
+    // Before timeout: no reminder.
+    h.state.nowMs = startMs + 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2).status, 'assigned');
+
+    // Past timeout: one reminder as the chair.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0].content, /@chair/);
+    assert.match(h.sends[0].content, /has not sent a \[WORKING\] ACK/);
+
+    // A later tick does not re-remind.
+    h.state.nowMs = startMs + 400_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2 and worker 3.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot and @Designer Bot please work',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_ack_pending:1:2'));
+    assert.ok(h.store.get('group_task_ack_pending:1:3'));
+
+    // Worker 3 posts [STANDBY] → standby; worker 2 posts ordinary speech → working (implicit ACK).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-standby-1', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[STANDBY] 静默观察 / 待命接手 / 可退出',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-implicit-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it, will deliver soon',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'standby');
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
   } finally {
     h.cleanup();
   }

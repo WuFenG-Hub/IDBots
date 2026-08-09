@@ -274,3 +274,22 @@ test('P0-1: plain text deliverable + valid sibling → no errors, no false posit
   assert.equal(result.warnings.length, 0);
   assert.equal(result.candidates.length, 2);
 });
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] ACK / [STANDBY] marker parsing
+// ---------------------------------------------------------------------------
+
+test('P0-3: parseWorkingAck extracts subtask + estimated minutes; no tag → null', () => {
+  const { parseWorkingAck, hasStandbyMarker } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const ack = parseWorkingAck('[WORKING] 已接单：build metaapp，预计 15 分钟');
+  assert.equal(ack.acknowledged, true);
+  assert.match(ack.taskDescription, /build metaapp/);
+  assert.equal(ack.estimatedMinutes, 15);
+
+  const english = parseWorkingAck('[WORKING] accepted: task X, ~10 min');
+  assert.equal(english.estimatedMinutes, 10);
+
+  assert.equal(parseWorkingAck('no marker here'), null);
+  assert.equal(hasStandbyMarker('[STANDBY] 静默观察'), true);
+  assert.equal(hasStandbyMarker('nothing'), false);
+});

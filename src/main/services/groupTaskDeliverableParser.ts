@@ -235,3 +235,38 @@ export function validateDeliverableLines(content: string): DeliverableValidation
   });
   return { candidates, errors, warnings };
 }
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] / [STANDBY] protocol markers
+// ---------------------------------------------------------------------------
+
+export interface ParsedWorkingAck {
+  acknowledged: boolean;
+  /** Text after the [WORKING] tag (subtask label), trimmed/capped. */
+  taskDescription: string | null;
+  /** Estimated minutes parsed from e.g. "预计 15 分钟" / "15 min". */
+  estimatedMinutes: number | null;
+}
+
+/**
+ * Parse a [WORKING] ACK line: `[WORKING] 已接单：<subtask>，预计 <N> 分钟`.
+ * Returns null when the message carries no [WORKING] tag.
+ */
+export function parseWorkingAck(content: string): ParsedWorkingAck | null {
+  const text = String(content ?? '');
+  const match = /\[WORKING\]/i.exec(text);
+  if (!match) return null;
+  const rest = text.slice(match.index + match[0].length);
+  const minutesMatch = /\b(\d{1,3})\s*(?:分钟|min(?:ute)?s?)/i.exec(rest);
+  const description = rest.replace(/^[：:\s-]+/, '').trim().slice(0, 120);
+  return {
+    acknowledged: true,
+    taskDescription: description || null,
+    estimatedMinutes: minutesMatch ? Number(minutesMatch[1]) : null,
+  };
+}
+
+/** True when the message carries the [STANDBY] protocol marker. */
+export function hasStandbyMarker(content: string): boolean {
+  return /\[STANDBY\]/i.test(String(content ?? ''));
+}

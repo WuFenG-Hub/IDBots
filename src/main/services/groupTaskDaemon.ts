@@ -32,6 +32,8 @@ import {
 } from '../libs/experiencePromptBlocks';
 import {
   parseDeliverableLines,
+  parseWorkingAck,
+  hasStandbyMarker,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 
@@ -56,6 +58,9 @@ const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
 const MAX_CHAIR_PLAN_ATTEMPTS = 3;
 
 const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
+const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
+const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
@@ -87,6 +92,8 @@ const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
 const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
+/** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
+const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -425,6 +432,8 @@ export interface GroupTaskDaemonDeps {
    * unreachable (default 30).
    */
   memberUnreachableAfterMinutes?: number;
+  /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
+  ackTimeoutMs?: number;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -504,6 +513,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const memberUnreachableAfterMinutes = Math.max(
     1,
     Math.trunc(deps.memberUnreachableAfterMinutes ?? DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES),
+  );
+  const ackTimeoutMs = Math.max(
+    30_000,
+    Math.trunc(deps.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -1738,6 +1751,135 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * P0-3: per-message protocol markers:
+   * - chair message that @mentions a worker = an ASSIGNMENT → record a pending
+   *   [WORKING] ACK expectation for that worker (kv, timestamped).
+   * - worker [WORKING] ACK → status working, clears the pending ACK, records
+   *   the estimated delivery deadline for P0-4.
+   * - worker [STANDBY] → status standby.
+   * - any other worker speech clears the pending ACK (implicit ACK) and marks
+   *   the member working (silence is never assumed).
+   */
+  const handleMemberProtocolMarkers = (
+    task: GroupTask,
+    message: GroupTaskDaemonMessage,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): void => {
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const senderGmid = (message.senderGlobalMetaId ?? '').trim().toLowerCase();
+    if (!senderGmid || message.senderSuspect) return;
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    const isChairMessage = Boolean(chairGmid && senderGmid === chairGmid);
+    if (isChairMessage) {
+      for (const member of members) {
+        if (member.role !== 'worker' || member.metabotId == null) continue;
+        const bot = botsById.get(member.metabotId);
+        if (!bot || !isMentioned(message, bot)) continue;
+        const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+        const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+        if (sqlite.get<string>(pendingKey) == null && sqlite.get<string>(remindedKey) !== '1') {
+          sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: assignment to ${member.name ?? member.metabotId} (message #${message.id}); waiting for [WORKING] ACK`,
+          );
+        }
+      }
+      return;
+    }
+
+    const member = members.find(
+      (candidate) => (candidate.globalmetaid ?? '').trim().toLowerCase() === senderGmid,
+    );
+    if (!member || member.role !== 'worker' || member.metabotId == null) return;
+
+    const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+    const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+    const ack = parseWorkingAck(message.content);
+    if (ack) {
+      store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+      if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
+      if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+      if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
+        sqlite.set(
+          `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+          JSON.stringify({
+            dueAt: now() + ack.estimatedMinutes * 60_000,
+            ackedAt: now(),
+            taskDescription: ack.taskDescription,
+          }),
+        );
+      }
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
+        (ack.estimatedMinutes != null ? ` (est. ${ack.estimatedMinutes} min)` : ''),
+      );
+      return;
+    }
+    if (hasStandbyMarker(message.content)) {
+      store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
+      return;
+    }
+    // Implicit ACK: any worker speech counts as engaged.
+    if (member.status === 'assigned') {
+      store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+    }
+    if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
+    if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+  };
+
+  /**
+   * P0-3: chair reminder when an assignment got no [WORKING] ACK within
+   * ackTimeoutMs (default 3 min). Fires ONCE per pending assignment; never
+   * auto-fails the worker.
+   */
+  const monitorAcksAndReminders = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+  ): Promise<void> => {
+    if (task.status !== 'planning' && task.status !== 'executing') return;
+    const sqlite = deps.getStore();
+    const chair = members.find((member) => member.role === 'chair');
+    if (!chair?.metabotId) return;
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+      const raw = sqlite.get<string>(pendingKey);
+      if (!raw) continue;
+      let entry: { assignedAt: number; messageId: number };
+      try {
+        entry = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!entry || typeof entry.assignedAt !== 'number') continue;
+      if (now() - entry.assignedAt < ackTimeoutMs) continue;
+      const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(remindedKey) === '1') continue;
+      const text =
+        `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned ` +
+        `(message #${entry.messageId}) but has not sent a [WORKING] ACK within ` +
+        `${Math.round(ackTimeoutMs / 60_000)} min. Check whether the assignment ` +
+        `was received; do not auto-fail.`;
+      try {
+        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        sqlite.set(remindedKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: reminded chair that ${member.name ?? member.metabotId} has not ACKed`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ACK reminder post failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -1815,6 +1957,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (task.status === 'executing') {
       monitorMemberUnreachable(task, members);
     }
+
+    // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
+    await monitorAcksAndReminders(task, members);
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {
@@ -1897,6 +2042,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       try {
         recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
+        // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
+        handleMemberProtocolMarkers(task, message, members, botsById);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
         // the tick-start snapshot.
