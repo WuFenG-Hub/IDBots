@@ -2555,7 +2555,7 @@ let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
 /** R1：各会话最后已知的 SDK cron 全量信息（会话结束对账 + 宿主触发状态推进依据），由 Stop hook 采集维护。 */
-let sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
+const sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
 let sdkCronMirrorScanInterval: ReturnType<typeof setInterval> | null = null;
 let sdkCronHostTriggerLogStore: SdkCronHostTriggerLogStore | null = null;
 let sdkCronHostTriggerBridge: SdkCronHostTriggerBridge | null = null;
