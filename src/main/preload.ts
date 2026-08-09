@@ -642,6 +642,11 @@ contextBridge.exposeInMainWorld('electron', {
     sdkCronMirror: {
       list: () => ipcRenderer.invoke('sdkCronMirror:list'),
       requestDelete: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:requestDelete', cronId),
+      create: (input: { spec: any; replacesId?: string | null }) =>
+        ipcRenderer.invoke('sdkCronMirror:create', input),
+      toggle: (cronId: string, enabled: boolean) =>
+        ipcRenderer.invoke('sdkCronMirror:toggle', cronId, enabled),
+      runNow: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:runNow', cronId),
     },
     migratePlan: () => ipcRenderer.invoke('scheduledTask:migratePlan'),
     migrateExecute: () => ipcRenderer.invoke('scheduledTask:migrateExecute'),

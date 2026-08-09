@@ -950,6 +950,9 @@ interface IElectronAPI {
     sdkCronMirror: {
       list: () => Promise<any>;
       requestDelete: (cronId: string) => Promise<any>;
+      create: (input: { spec: any; replacesId?: string | null }) => Promise<any>;
+      toggle: (cronId: string, enabled: boolean) => Promise<any>;
+      runNow: (cronId: string) => Promise<any>;
     };
     migratePlan: () => Promise<any>;
     migrateExecute: () => Promise<any>;
