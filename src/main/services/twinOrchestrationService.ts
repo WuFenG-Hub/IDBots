@@ -15,15 +15,13 @@ import {
   type OrchestrationTask,
   type OrchestrationStep,
 } from '../orchestrationStore';
-import {
-  CoworkCrossSessionService,
-  type CoworkCrossSessionInsertResult,
-} from './coworkCrossSession';
+import type { CoworkCrossSessionInsertResult } from './coworkCrossSession';
 import type { Metabot } from '../types/metabot';
 
 /**
- * Round-4 r6: cross-session notify seam — defaults to CoworkCrossSessionService
- * over the cowork store; tests inject a recording implementation.
+ * Round-4 r6: cross-session notify seam. Defaults to the host CoworkRunner's
+ * insertCrossSessionMessageAndQueue (insert + queue-to-continue); tests
+ * inject a recording implementation.
  */
 export type TwinOrchestrationInsertCrossSessionMessageFn = (input: {
   sourceSessionId: string;
@@ -72,8 +70,13 @@ export interface TwinOrchestrationServiceDeps {
   getWorkerWorkspace(metabotId: number): string;
   runWorkerTurn?: (params: RunOrchestratorSkillTurnParams) => Promise<string>;
   /**
-   * Round-4 r6: worker-completion notification to the Twin. Defaults to
-   * CoworkCrossSessionService over the cowork store; tests inject a recording
+   * Round-4 r6: worker-completion notification to the Twin. Defaults to the
+   * host CoworkRunner's insertCrossSessionMessageAndQueue seam — the same
+   * path the MCP idbots_session_insert_user_message tool takes — so the
+   * inserted ORCH-NOTIFY message also queues the target Twin session to
+   * continue (activate). The activation itself lives in the host process
+   * (CoworkRunner's cross-session continuation drain → continueSession);
+   * this service only calls into it. Tests inject a recording
    * implementation. Returns the insert result (never throws).
    */
   insertCrossSessionUserMessage?: TwinOrchestrationInsertCrossSessionMessageFn;
@@ -126,7 +129,16 @@ export class TwinOrchestrationService {
   constructor(private readonly deps: TwinOrchestrationServiceDeps) {
     this.runWorkerTurn = deps.runWorkerTurn ?? ((params) => runOrchestratorSkillTurn(deps.coworkRunner, deps.coworkStore, params));
     this.insertCrossSession = deps.insertCrossSessionUserMessage
-      ?? ((input) => new CoworkCrossSessionService(deps.coworkStore).insertUserMessage(input));
+      // P1-5b: the default path goes through the host CoworkRunner's
+      // insertCrossSessionMessageAndQueue — the same seam the MCP
+      // idbots_session_insert_user_message tool uses — so the ORCH-NOTIFY
+      // insert also queues the target Twin session to continue (drained via
+      // continueSession once the target is not mid-turn). A bare
+      // CoworkCrossSessionService.insertUserMessage (the old default) only
+      // wrote the message into the store and never woke the Twin session up.
+      // We return only the insert half; the queue outcome is best-effort and
+      // intentionally does not affect the idempotency guard semantics.
+      ?? ((input) => deps.coworkRunner.insertCrossSessionMessageAndQueue(input).insert);
   }
 
   /**

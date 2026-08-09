@@ -54,7 +54,10 @@ import { isPathWithin, resolveElectronExecutablePath } from './runtimePaths';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
-import { CoworkCrossSessionService } from '../services/coworkCrossSession';
+import {
+  CoworkCrossSessionService,
+  type CoworkCrossSessionInsertResult,
+} from '../services/coworkCrossSession';
 import {
   buildTwinLocalImpressionBlock,
   buildTwinLocalRosterBlock,
@@ -978,6 +981,23 @@ type CrossSessionContinuationQueueResult =
       reason: 'TARGET_SESSION_STOPPED';
       error: string;
     };
+
+/**
+ * Result of the host cross-session insert-and-queue path
+ * (insertCrossSessionMessageAndQueue): the insert result plus the
+ * best-effort queue-to-continue outcome. The insert and the queue are
+ * decoupled — runQueued:false with a reason (e.g. TARGET_SESSION_STOPPED)
+ * still means the message was inserted; on insert failure there is no queue
+ * attempt at all.
+ */
+export interface CoworkCrossSessionInsertAndQueueResult {
+  insert: CoworkCrossSessionInsertResult;
+  runQueued: boolean;
+  queueDepth?: number;
+  warning?: string;
+  reason?: string;
+  error?: string;
+}
 
 type AttachmentEntry = {
   lineIndex: number;
@@ -1909,12 +1929,13 @@ export class CoworkRunner extends EventEmitter {
     const targetSessionId = typeof args.targetSessionId === 'string'
       ? args.targetSessionId
       : String(args.sessionId ?? '');
-    const result = this.getCrossSessionService().insertUserMessage({
+    const combined = this.insertCrossSessionMessageAndQueue({
       sourceSessionId,
       targetSessionId,
       message: typeof args.message === 'string' ? args.message : '',
     });
 
+    const result = combined.insert;
     if (!result.ok) {
       return {
         success: false,
@@ -1922,38 +1943,17 @@ export class CoworkRunner extends EventEmitter {
       };
     }
 
-    const emittedMessage: CoworkMessage = {
-      ...result.message,
-      metadata: result.message.metadata ?? undefined,
+    return {
+      success: true,
+      text: this.formatCrossSessionToolOutput({
+        ...result,
+        runQueued: combined.runQueued,
+        ...(combined.queueDepth !== undefined ? { queueDepth: combined.queueDepth } : {}),
+        ...(combined.warning ? { warning: combined.warning } : {}),
+        ...(combined.reason ? { reason: combined.reason } : {}),
+        ...(combined.error ? { error: combined.error } : {}),
+      }),
     };
-    this.emit('message', result.targetSessionId, emittedMessage);
-
-    try {
-      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
-      return {
-        success: true,
-        text: this.formatCrossSessionToolOutput({
-          ...result,
-          ...queueResult,
-        }),
-      };
-    } catch (error) {
-      if (error instanceof TwinWorkerDirectoryAuthorizationError) {
-        return {
-          success: false,
-          text: JSON.stringify({ ok: false, code: error.code, error: error.message }),
-        };
-      }
-      return {
-        success: true,
-        text: this.formatCrossSessionToolOutput({
-          ...result,
-          runQueued: false,
-          warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      };
-    }
   }
 
   /**
@@ -3894,6 +3894,54 @@ export class CoworkRunner extends EventEmitter {
       runQueued: true,
       queueDepth: queue.length,
     };
+  }
+
+  /**
+   * Host cross-session insert + queue-to-continue, the single shared seam for
+   * the MCP idbots_session_insert_user_message tool and internal consumers
+   * such as TwinOrchestrationService's ORCH-NOTIFY terminal-state notification:
+   * insert the message into the target session, emit it to session listeners
+   * (UI), then queue a continuation run on the target session — the drain loop
+   * resumes it via continueSession(skipUserMessage) once the target is not
+   * mid-turn, which is exactly the "queue that session to continue" behavior
+   * of the MCP channel.
+   *
+   * Insert and queue are decoupled: an unqueueable target (stopped session,
+   * queue acceptance failure) still keeps the inserted message and reports
+   * runQueued:false with the reason, mirroring the MCP tool's partial-success
+   * contract. Consumers that only care about the insert result use `.insert`.
+   */
+  insertCrossSessionMessageAndQueue(input: {
+    sourceSessionId: string;
+    targetSessionId: string;
+    message: string;
+  }): CoworkCrossSessionInsertAndQueueResult {
+    const result = this.getCrossSessionService().insertUserMessage(input);
+    if (!result.ok) {
+      // Insert failure (missing session, A2A target, …): nothing to queue.
+      return { insert: result, runQueued: false };
+    }
+
+    const emittedMessage: CoworkMessage = {
+      ...result.message,
+      metadata: result.message.metadata ?? undefined,
+    };
+    this.emit('message', result.targetSessionId, emittedMessage);
+
+    try {
+      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
+      return { insert: result, ...queueResult };
+    } catch (error) {
+      if (error instanceof TwinWorkerDirectoryAuthorizationError) {
+        return { insert: result, runQueued: false, error: error.message };
+      }
+      return {
+        insert: result,
+        runQueued: false,
+        warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   async startSession(
