@@ -51,7 +51,7 @@ official: true
 | runtime | 否 | 默认 `browser` |
 | indexFile | 否 | 默认 `index.html` |
 | tags | 否 | 默认 `[]` |
-| metadata | 否 | 默认空字符串 |
+| metadata | 否 | 缺失/为空时自动补 `{"title":...,"appName":...}` 默认值，不允许空字符串上链 |
 | disabled | 否 | 默认 `false` |
 
 `contentHash` 不询问用户手填：当 `content` 来自本地目录或 ZIP 时，脚本自动计算最终 content ZIP 文件的 SHA256；当 `content` 是已有 `metafile://` 时，可沿用用户提供的 `contentHash`，否则为空。
@@ -119,12 +119,16 @@ node "$SKILLS_ROOT/metabot-post-metaapp/scripts/index.js" \
   "indexFile": "index.html",
   "code": "metafile://source-zip-pinid.zip",
   "contentHash": "sha256_hex_of_content_zip",
-  "metadata": "",
+  "metadata": "{\"title\":\"应用标题\",\"appName\":\"应用名称\"}",
   "tags": [],
   "disabled": false,
   "codeType": "application/zip"
 }
 ```
+
+## 打包排除（非运行时文件）
+
+目录打包时自动排除非运行时文件（发布规范）：`README*`、`*.md`、`*.log`、`.zip`，以及预览截图命名（`preview.*`、`*.screenshot.*`、`screenshot*`、`snapshot*`）。规则只按文件名/扩展名匹配，不影响合法运行时资源（如 `assets/icon.png`、`favicon.png`）。发布前脚本会输出打包清单（文件数、总大小、文件列表）与 metadata 值，供核验后再发布。
 
 ## AI 行为约束
 

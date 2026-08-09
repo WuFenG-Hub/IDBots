@@ -237,3 +237,59 @@ test('P0-1b: ignoreFailedSteps demotes noise steps to completed with an ignored 
     h.sqliteStore.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// F6 (GT#11): close path — no-step close succeeds; unfinished steps produce a
+// detailed, actionable error instead of the bare "unfinished canonical steps"
+// ---------------------------------------------------------------------------
+
+test('F6: owner acceptance closes a task with no canonical steps (nothing unfinished)', async () => {
+  const h = await makeHarness();
+  try {
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    const accepted = h.bridge.acceptGroupTask(h.groupTask.id);
+    assert.equal(accepted.groupTask.status, 'done');
+    assert.equal(accepted.canonicalTask.status, 'completed');
+  } finally {
+    h.sqliteStore.close();
+  }
+});
+
+test('F6: close error names every unfinished step with its status and the remedy', async () => {
+  const h = await makeHarness();
+  try {
+    const started = h.bridge.beginWorkerAttempt({
+      groupTaskId: h.groupTask.id,
+      workerMetabotId: 2,
+      objective: 'Build the MetaApp',
+      sourceMessageKey: 'f6-running-i0',
+    });
+    h.bridge.markWorkerAttemptRunning(started.attempt.id, 'group-worker-session');
+    assert.equal(h.orchestrationStore.getStep(started.step.id).status, 'running');
+
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'executing');
+    h.bridge.syncStatus(h.groupTask.id);
+    h.groupTaskStore.updateTaskStatus(h.groupTask.id, 'review');
+    h.bridge.syncStatus(h.groupTask.id);
+
+    assert.throws(
+      () => h.bridge.acceptGroupTask(h.groupTask.id),
+      (error) => {
+        assert.match(error.message, /1 unfinished canonical step/);
+        assert.match(error.message, /"Worker assignment: Builder Bot" \[running\] assignee=bot-2/);
+        assert.match(error.message, /re-dispatch/);
+        assert.match(error.message, /noise steps never block/);
+        return true;
+      },
+    );
+    // Nothing closed: the group task stays in review, the step stays running.
+    assert.equal(h.groupTaskStore.getTaskById(h.groupTask.id).status, 'review');
+    assert.equal(h.orchestrationStore.getStep(started.step.id).status, 'running');
+  } finally {
+    h.sqliteStore.close();
+  }
+});

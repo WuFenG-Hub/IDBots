@@ -61,7 +61,26 @@ const EXCLUDE_DIRS = new Set([
   '.next',
 ]);
 const EXCLUDE_FILE_NAMES = new Set(['.DS_Store']);
-const EXCLUDE_EXTENSIONS = new Set(['.zip', '.log']);
+/**
+ * F3 (GT#11): non-runtime file extensions dropped from packaged ZIPs —
+ * documentation (.md) and archives/logs (.zip, .log). Runtime assets with
+ * other extensions (png/jpg/svg/js/css/html/json...) are never affected.
+ */
+const EXCLUDE_EXTENSIONS = new Set(['.zip', '.log', '.md']);
+/**
+ * F3 (GT#11): basename patterns for preview/doc junk — full-page preview
+ * screenshots (preview.*, *.screenshot.*, screenshot*, snapshot*) and
+ * README* docs. Matched against the FILE basename only, so legitimate runtime
+ * assets keep their place regardless of folder (assets/icon.png stays; a
+ * preview.png at any depth is dropped).
+ */
+const EXCLUDE_FILE_PATTERNS = [
+  /^README/i,
+  /^preview\./i,
+  /\.screenshot\./i,
+  /^screenshot/i,
+  /^snapshot/i,
+];
 
 function writeStderr(message) {
   process.stderr.write(`${message}\n`);
@@ -323,6 +342,7 @@ function shouldExclude(filePath, root) {
   if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
     const ext = path.extname(filePath).toLowerCase();
     if (EXCLUDE_EXTENSIONS.has(ext)) return true;
+    if (EXCLUDE_FILE_PATTERNS.some((pattern) => pattern.test(base))) return true;
   }
   return false;
 }
@@ -354,7 +374,24 @@ function createZipArchive(srcRoot, zipPath) {
   }
   const zipBuffer = buildZip(entries);
   fs.writeFileSync(output, zipBuffer);
-  return { zipPath: output, size: zipBuffer.length, fileCount: entries.length };
+  return {
+    zipPath: output,
+    size: zipBuffer.length,
+    fileCount: entries.length,
+    entries: entries.map((entry) => ({ name: entry.name, size: entry.data.length })),
+  };
+}
+
+/**
+ * F3 (GT#11): print the packaging manifest (file count, total size, per-file
+ * list) BEFORE the ZIP is uploaded, so the chair can verify the archive holds
+ * only runtime files.
+ */
+function logPackageManifest(result, role) {
+  writeStderr(`[Package manifest] ${role}: ${result.fileCount} files, ${result.size} bytes total`);
+  for (const entry of result.entries) {
+    writeStderr(`  ${entry.name} (${entry.size} B)`);
+  }
 }
 
 function sanitizeFileName(name) {
@@ -372,6 +409,7 @@ function packageDirectory(directory, role) {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-metaapp-'));
   const zipPath = path.join(tempDir, `${sanitizeFileName(path.basename(resolved) || role)}.zip`);
   const result = createZipArchive(resolved, zipPath);
+  logPackageManifest(result, role);
   writeStderr(`Packaged ${role}: ${result.zipPath} (${result.fileCount} files, ${result.size} bytes)`);
   return result;
 }
@@ -465,9 +503,9 @@ function normalizeDisabled(value) {
   return normalized === 'true' || normalized === '1' || normalized === 'yes';
 }
 
-function normalizeMetadata(value) {
-  if (value === undefined || value === null) return '';
-  if (typeof value === 'string') return value;
+function normalizeMetadata(value, fallback = '') {
+  if (typeof value === 'string') return value.trim() ? value : fallback;
+  if (value === undefined || value === null) return fallback;
   return JSON.stringify(value);
 }
 
@@ -498,6 +536,16 @@ async function prepareMetaApp(request, metabotId, network) {
     ? sha256File(contentResource.localFile)
     : cleanString(request.contentHash);
 
+  // F3 (GT#11): metadata must never go on-chain as an empty string — when
+  // missing/empty we default it to {title, appName} with a visible notice.
+  const rawMetadata = request.metadata;
+  let metadata = normalizeMetadata(rawMetadata);
+  if (!metadata) {
+    metadata = JSON.stringify({ title, appName });
+    writeStderr(`[MetaApp metadata] metadata missing/empty — defaulted to ${metadata}`);
+  }
+  writeStderr(`[MetaApp manifest] title=${title} appName=${appName} version=${cleanString(request.version, 'v1.0.0')} metadata=${metadata}`);
+
   const payload = {
     title,
     appName,
@@ -513,7 +561,7 @@ async function prepareMetaApp(request, metabotId, network) {
     indexFile: cleanString(request.indexFile, 'index.html'),
     code: codeResource.uri,
     contentHash,
-    metadata: normalizeMetadata(request.metadata),
+    metadata,
     tags: normalizeTags(request.tags),
     disabled: normalizeDisabled(request.disabled),
     codeType: codeResource.uri ? ZIP_CONTENT_TYPE : cleanString(request.codeType, ZIP_CONTENT_TYPE),
@@ -539,6 +587,12 @@ async function publishPrepared(prepared, metabotId, network) {
   }
   if (!cleanString(payload.content) && !cleanString(payload.code)) {
     throw new Error('content and code cannot both be empty');
+  }
+  // F3 (GT#11): an empty-string metadata must never reach the chain. The
+  // prepare step already fills a default; a hand-edited prepared file that
+  // bypasses it is rejected here with a clear remedy.
+  if (!cleanString(payload.metadata)) {
+    throw new Error('metadata must not be empty — re-run --prepare-request so the script fills a default ({title, appName})');
   }
 
   writeStderr(`Publishing MetaApp to ${METAAPP_PROTOCOL_PATH}: ${cleanString(payload.title)} ${cleanString(payload.version)}`);

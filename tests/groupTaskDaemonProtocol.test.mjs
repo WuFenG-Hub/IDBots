@@ -37,7 +37,7 @@ const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
-const { createGroupTaskDaemonLoop } = require('../dist-electron/main/services/groupTaskDaemon.js');
+const { createGroupTaskDaemonLoop, gateChairDrivingSend } = require('../dist-electron/main/services/groupTaskDaemon.js');
 
 Module._load = originalLoad;
 
@@ -380,6 +380,87 @@ test('driver mutex: same instance refreshes its own lease instead of yielding', 
       !h.logs.some((line) => line.includes('yields this tick')),
       'own lease never logs a yield',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F2 (GT#11): manual chair sends participate in the driver claim
+// ---------------------------------------------------------------------------
+
+test('F2: manual chair driving send is rejected while the daemon claim is fresh, then takes the floor', async () => {
+  const h = await createHarness({ driverGraceMs: 20_000, disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'f2-drive-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot research the topic',
+    });
+    await h.loop.runTick(); // daemon drives -> its claim is fresh
+    assert.equal(h.sends.length, 1);
+    const rawClaim = h.store.get(`group_task_driver:${task.id}`);
+    assert.ok(rawClaim, 'daemon holds a driver claim after driving');
+    const [daemonDriverId] = rawClaim.split('|');
+
+    // A manual chair session attempts a driving send while the claim is fresh.
+    const rejected = gateChairDrivingSend({
+      kv: h.store, taskId: task.id, senderMetabotId: 1, chairMetabotId: 1,
+      driverId: 'manual-session-1', graceMs: 20_000, nowMs: h.state.nowMs + 5_000,
+    });
+    assert.equal(rejected.ok, false, 'manual driving send rejected while the daemon drives');
+    assert.match(rejected.error, /being driven by another session/);
+    assert.match(rejected.error, /retry in \d+s/);
+    assert.equal(rejected.driverId, daemonDriverId);
+    assert.ok(rejected.retryAfterMs > 0);
+
+    // Grace expired -> the manual session takes the floor.
+    const acquired = gateChairDrivingSend({
+      kv: h.store, taskId: task.id, senderMetabotId: 1, chairMetabotId: 1,
+      driverId: 'manual-session-1', graceMs: 20_000, nowMs: h.state.nowMs + 25_000,
+    });
+    assert.equal(acquired.ok, true, 'stale daemon claim -> manual session takes over');
+    assert.equal(
+      h.store.get(`group_task_driver:${task.id}`),
+      `manual-session-1|${h.state.nowMs + 25_000}`,
+    );
+
+    // The daemon yields its tick while the manual claim stays fresh.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'f2-yield-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot follow-up research',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'daemon does not double-drive while the manual session drives');
+    assert.ok(h.logs.some((line) => line.includes('yields this tick')), 'daemon logs the mutex yield');
+
+    // Manual claim stale -> the daemon resumes driving.
+    h.state.nowMs += 40_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'daemon resumes driving after the manual claim expires');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('F2: worker sends always pass the driving gate (no mutex for non-chair)', async () => {
+  const h = await createHarness({ driverGraceMs: 20_000, disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'f2-worker-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot research the topic',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'daemon drives');
+
+    // A worker ACK must never be blocked by the driver claim.
+    const workerGate = gateChairDrivingSend({
+      kv: h.store, taskId: task.id, senderMetabotId: 2, chairMetabotId: 1,
+      driverId: 'worker-session', graceMs: 20_000, nowMs: h.state.nowMs + 3_000,
+    });
+    assert.deepEqual(workerGate, { ok: true }, 'worker send passes the gate');
   } finally {
     h.cleanup();
   }

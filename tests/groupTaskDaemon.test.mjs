@@ -226,6 +226,15 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.disableChairPlanningTurn != null
       ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
       : {}),
+    // F1 (GT#11): legacy tests add all members before the first tick, so the
+    // roster-settle gate is off by default here; dedicated F1 tests override
+    // settle/cap explicitly to exercise the mid-create race protection.
+    ...(overrides.chairPlanRosterSettleMs != null
+      ? { chairPlanRosterSettleMs: overrides.chairPlanRosterSettleMs }
+      : { chairPlanRosterSettleMs: 0 }),
+    ...(overrides.chairPlanRosterCapMs != null
+      ? { chairPlanRosterCapMs: overrides.chairPlanRosterCapMs }
+      : { chairPlanRosterCapMs: 0 }),
     ...(overrides.memberUnreachableAfterMinutes != null
       ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
       : {}),
@@ -2662,6 +2671,223 @@ test('C-1: multi-worker plan posts immediately without warning', async () => {
     assert.equal(h.sends.length, 1);
     assert.doesNotMatch(h.sends[0].content, /Host warning/);
     assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F1 (GT#11): the planning turn must not fire against a half-formed roster
+// ---------------------------------------------------------------------------
+
+test('F1: buildRosterSignature — stable roster => stable signature; any member change => new signature', () => {
+  const { buildRosterSignature } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const rosterA = [
+    { role: 'chair', name: 'Twin Bot', globalmetaid: 'gmid-twin', metabotId: 1 },
+    { role: 'worker', name: 'Coder Bot', globalmetaid: 'gmid-w2', metabotId: 2 },
+    { role: 'worker', name: 'Designer Bot', globalmetaid: 'gmid-w3', metabotId: 3 },
+  ];
+  const rosterAShuffled = [rosterA[2], rosterA[0], rosterA[1]];
+  assert.equal(buildRosterSignature(rosterA), buildRosterSignature(rosterAShuffled), 'order-independent');
+  const rosterMinusDesigner = rosterA.filter((m) => m.metabotId !== 3);
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterMinusDesigner), 'member removal changes the sig');
+  const rosterWithReviewer = [...rosterA, { role: 'worker', name: 'Reviewer Bot', globalmetaid: 'gmid-w4', metabotId: 4 }];
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterWithReviewer), 'member add changes the sig');
+  const rosterRoleChanged = rosterA.map((m) => (m.metabotId === 3 ? { ...m, role: 'chair' } : m));
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterRoleChanged), 'role change changes the sig');
+  const rosterRemote = [
+    { role: 'worker', name: null, displayName: 'Alicia Remote', globalmetaid: 'gmid-remote', metabotId: null },
+  ];
+  assert.notEqual(buildRosterSignature([]), buildRosterSignature(rosterRemote), 'remote member shows up in the sig');
+});
+
+test('F1: chair planning waits for the roster to settle — mid-create ticks never misplan', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 20_000,
+    chairPlanRosterCapMs: 600_000,
+  });
+  try {
+    // Simulate createGroupTask mid-flight: task row + chair + ONE worker.
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 1: roster still forming — no planning');
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined, 'planned flag not set while waiting');
+
+    // More workers join as creation proceeds.
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 4, role: 'worker' });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 2: roster changed again — still deferred');
+
+    // Roster now stable, but inside the settle window.
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 3: roster stable but not yet settled');
+
+    // Time passes the settle window: planning fires with the FULL roster.
+    h.state.nowMs += 25_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'tick 4: planning fires once the roster settled');
+    assert.match(h.chatCalls[0].userMessage, /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members/, 'directive sees 2+ workers');
+    assert.match(h.chatCalls[0].userMessage, /Coder Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.match(h.chatCalls[0].userMessage, /Designer Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('F1: planning proceeds after the absolute cap even if the roster never settles', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 60_000,
+    chairPlanRosterCapMs: 90_000,
+  });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick(); // roster sig recorded (chair + Coder)
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    await h.loop.runTick(); // sig changed; re-recorded, still deferred
+    // Pin the task creation to (harness now - 2h): the cap must override the
+    // settle gate once the task is old enough.
+    h.db.run(
+      `UPDATE group_tasks SET created_at = strftime('%Y-%m-%d %H:%M:%S', 1000000000 - 7200, 'unixepoch') WHERE id = ?`,
+      [task.id],
+    );
+    h.state.nowMs += 95_000; // past the 90s cap from creation
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'cap overrides the settle gate');
+    assert.equal(h.sends.length, 1, 'plan posted despite an unsettled roster');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F2 (GT#11): session-level driving mutex (pure helpers)
+// ---------------------------------------------------------------------------
+
+test('F2: tryAcquireGroupTaskDriver — acquire / own-refresh / foreign-reject / stale-takeover', () => {
+  const { tryAcquireGroupTaskDriver } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  const acquired = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 1_000);
+  assert.equal(acquired.ok, true, 'no claim -> acquire');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000');
+
+  const ownNoRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 2_000, false);
+  assert.equal(ownNoRefresh.ok, true, 'own claim with refreshOwn=false still passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000', 'refreshOwn=false keeps the claim age-based');
+
+  const ownRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 3_000, true);
+  assert.equal(ownRefresh.ok, true, 'own claim with refreshOwn=true passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|3000', 'refreshOwn=true extends the lease');
+
+  const foreign = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 4_000);
+  assert.equal(foreign.ok, false, 'foreign fresh claim -> rejected');
+  assert.equal(foreign.driverId, 'rpc:1');
+  assert.equal(foreign.claimAgeMs, 1_000);
+  assert.equal(foreign.retryAfterMs, 19_000);
+
+  const stale = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 30_000);
+  assert.equal(stale.ok, true, 'stale claim -> takeover');
+  assert.equal(store.get('group_task_driver:7'), 'daemon-uuid|30000');
+});
+
+test('F2: gateChairDrivingSend — worker sends pass; chair sends are mutually exclusive per session', () => {
+  const { gateChairDrivingSend } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  // Worker sends are never driving.
+  assert.deepEqual(
+    gateChairDrivingSend({ kv: store, taskId: 7, senderMetabotId: 2, chairMetabotId: 1, graceMs: 20_000, nowMs: 1_000 }),
+    { ok: true },
+  );
+
+  // First chair send acquires the claim under its session id.
+  const first = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 1_000,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(store.get('group_task_driver:7'), 'session-a|1000');
+
+  // A DIFFERENT session is rejected with a readable error + retry hint.
+  const second = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-b', graceMs: 20_000, nowMs: 2_000,
+  });
+  assert.equal(second.ok, false, 'second session rejected while the first drives');
+  assert.match(second.error, /being driven by another session/);
+  assert.match(second.error, /retry in 19s/);
+  assert.equal(second.retryAfterMs, 19_000);
+  assert.equal(second.driverId, 'session-a');
+
+  // The SAME session id keeps driving (refreshes instead of rejection).
+  const same = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 5_000,
+  });
+  assert.equal(same.ok, true, 'same driver_id refreshes instead of being rejected');
+  assert.equal(store.get('group_task_driver:7'), 'session-a|5000');
+
+  // Omitted driver_id defaults to rpc:<chairMetabotId>.
+  const byDefault = gateChairDrivingSend({
+    kv: store, taskId: 8, senderMetabotId: 1, chairMetabotId: 1, graceMs: 20_000, nowMs: 9_000,
+  });
+  assert.equal(byDefault.ok, true);
+  assert.equal(store.get('group_task_driver:8'), 'rpc:1|9000');
+});
+
+// ---------------------------------------------------------------------------
+// F6 (GT#11): [STATUS:REVIEW] parsing chain — the P2-7 Twin-activity
+// suppression window must never swallow the chair's status switch
+// ---------------------------------------------------------------------------
+
+test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is still parsed', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]); // executing
+
+    // The Twin speaks proactively inside the 60s suppression window — any
+    // daemon chair AUTO reply is suppressed from this point on.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-twin-active-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，这个任务我来主导。', chainTimestamp: 1_000_000_000,
+    });
+    // A worker deliverable arrives — the auto-verify reply would be suppressed.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-dlv-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+      chainTimestamp: 1_000_000_005,
+    });
+    // The chair flips the task to REVIEW while the window is still active.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部交付已核验', chainTimestamp: 1_000_000_010,
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'review',
+      'chair status switch is parsed and applied despite the suppression window',
+    );
+    assert.equal(h.sends.length, 0, 'chair auto replies are still suppressed inside the window');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
   } finally {
     h.cleanup();
   }

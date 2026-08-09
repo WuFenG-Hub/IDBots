@@ -191,7 +191,7 @@ test('publish-prepared writes confirmed payload to the MetaApp protocol path', a
     indexFile: 'index.html',
     code: '',
     contentHash: 'abc',
-    metadata: '',
+    metadata: '{"appName":"confirmed-app"}',
     tags: [],
     disabled: false,
     codeType: 'application/zip',
@@ -210,4 +210,151 @@ test('publish-prepared writes confirmed payload to the MetaApp protocol path', a
   assert.equal(output.success, true);
   assert.equal(output.pinId, 'metaapp-pin-i0');
   assert.equal(output.txid, 'metaapp-tx');
+});
+
+test('publish-prepared rejects an empty-string metadata with a clear remedy', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'idbots-post-metaapp-empty-meta-'));
+  const preparedFile = path.join(tempDir, 'prepared.json');
+  const payload = {
+    title: 'Empty Meta',
+    appName: 'empty-meta',
+    prompt: '',
+    icon: '',
+    coverImg: '',
+    introImgs: [],
+    intro: 'ready',
+    runtime: 'browser',
+    version: '1.0.0',
+    contentType: 'application/zip',
+    content: 'metafile://contenti0',
+    indexFile: 'index.html',
+    code: '',
+    contentHash: 'abc',
+    metadata: '',
+    tags: [],
+    disabled: false,
+    codeType: 'application/zip',
+  };
+  await writeFile(preparedFile, JSON.stringify({ path: '/protocols/metaapp', payload }, null, 2), 'utf8');
+
+  const result = await runPostMetaApp(['--publish-prepared', preparedFile], rpc.url);
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /metadata must not be empty/);
+  assert.match(result.stderr, /--prepare-request/);
+  assert.equal(rpc.publishes.length, 0, 'nothing is published with an empty metadata');
+});
+
+// ---------------------------------------------------------------------------
+// F3 (GT#11): non-runtime files are excluded from packaged ZIPs, metadata is
+// defaulted when missing, and a packaging manifest is printed before upload.
+// ---------------------------------------------------------------------------
+
+/** List the entry names of a ZIP buffer by parsing the central directory. */
+function listZipEntryNames(buffer) {
+  let eocdStart = buffer.length - 22;
+  while (eocdStart > 0 && buffer.readUInt32LE(eocdStart) !== 0x06054b50) eocdStart -= 1;
+  assert.equal(buffer.readUInt32LE(eocdStart), 0x06054b50, 'EOCD signature found');
+  const cdCount = buffer.readUInt16LE(eocdStart + 10);
+  const cdOffset = buffer.readUInt32LE(eocdStart + 16);
+  const names = [];
+  let pos = cdOffset;
+  for (let i = 0; i < cdCount; i += 1) {
+    const nameLen = buffer.readUInt16LE(pos + 28);
+    const extraLen = buffer.readUInt16LE(pos + 30);
+    const commentLen = buffer.readUInt16LE(pos + 32);
+    names.push(buffer.subarray(pos + 46, pos + 46 + nameLen).toString('utf8'));
+    pos += 46 + nameLen + extraLen + commentLen;
+  }
+  return names;
+}
+
+test('F3: prepare excludes preview screenshots/README/markdown from the packaged ZIP and defaults metadata', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'idbots-post-metaapp-f3-'));
+  const runtimeDir = path.join(tempDir, 'runtime');
+  await mkdir(path.join(runtimeDir, 'assets'), { recursive: true });
+  await mkdir(path.join(runtimeDir, 'docs'), { recursive: true });
+  await writeFile(path.join(runtimeDir, 'index.html'), '<h1>Runtime</h1>', 'utf8');
+  await writeFile(path.join(runtimeDir, 'assets', 'app.js'), 'console.log(1);', 'utf8');
+  // Legit runtime png icon — must NOT be excluded.
+  await writeFile(path.join(runtimeDir, 'assets', 'icon.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  // Non-runtime junk — must be excluded.
+  await writeFile(path.join(runtimeDir, 'preview.png'), Buffer.alloc(64), 'utf8');
+  await writeFile(path.join(runtimeDir, 'fullpage.screenshot.png'), Buffer.alloc(64), 'utf8');
+  await writeFile(path.join(runtimeDir, 'snapshot-1.png'), Buffer.alloc(64), 'utf8');
+  await writeFile(path.join(runtimeDir, 'README.md'), '# readme', 'utf8');
+  await writeFile(path.join(runtimeDir, 'docs', 'notes.md'), 'notes', 'utf8');
+  await writeFile(path.join(runtimeDir, 'app.log'), 'log', 'utf8');
+
+  const requestFile = path.join(tempDir, 'request.json');
+  const outputFile = path.join(tempDir, 'prepared.json');
+  await writeFile(requestFile, JSON.stringify({
+    title: 'Filtered App',
+    appName: 'filtered-app',
+    intro: 'exclusion test',
+    version: '1.0.0',
+    content: runtimeDir,
+    code: '',
+  }, null, 2), 'utf8');
+
+  const result = await runPostMetaApp(['--prepare-request', requestFile, '--output', outputFile], rpc.url);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(rpc.uploads.length, 1, 'only the runtime ZIP is uploaded (code empty)');
+
+  // The actual uploaded artifact contains only runtime files.
+  const zipBuffer = await readFile(rpc.uploads[0].file_path);
+  const names = listZipEntryNames(zipBuffer).sort();
+  assert.deepEqual(names, ['assets/app.js', 'assets/icon.png', 'index.html']);
+
+  // The packaging manifest is printed BEFORE upload with the file list.
+  assert.match(result.stderr, /\[Package manifest\] content: 3 files, \d+ bytes total/);
+  assert.match(result.stderr, /  index\.html \(\d+ B\)/);
+  assert.match(result.stderr, /  assets\/app\.js \(\d+ B\)/);
+  assert.match(result.stderr, /  assets\/icon\.png \(\d+ B\)/);
+  assert.doesNotMatch(result.stderr, /preview\.png/);
+  assert.doesNotMatch(result.stderr, /README/);
+  assert.doesNotMatch(result.stderr, /notes\.md/);
+
+  // metadata missing -> defaulted to {title, appName} with a visible notice.
+  assert.match(result.stderr, /\[MetaApp metadata\] metadata missing\/empty — defaulted to \{"title":"Filtered App","appName":"filtered-app"\}/);
+  const output = JSON.parse(await readFile(outputFile, 'utf8'));
+  assert.equal(output.payload.metadata, '{"title":"Filtered App","appName":"filtered-app"}');
+  assert.equal(output.payload.content, 'metafile://upload-1i0.zip');
+  assert.match(output.payload.contentHash, /^[a-f0-9]{64}$/);
+});
+
+test('F3: explicit metadata object is preserved (no defaulting)', async (t) => {
+  const rpc = await createRpcServer();
+  t.after(() => rpc.close());
+
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'idbots-post-metaapp-meta-'));
+  const runtimeDir = path.join(tempDir, 'runtime');
+  await mkdir(runtimeDir);
+  await writeFile(path.join(runtimeDir, 'index.html'), '<h1>M</h1>', 'utf8');
+  const requestFile = path.join(tempDir, 'request.json');
+  const outputFile = path.join(tempDir, 'prepared.json');
+  await writeFile(requestFile, JSON.stringify({
+    title: 'Meta App',
+    appName: 'meta-app',
+    intro: 'explicit metadata',
+    version: '1.0.0',
+    content: runtimeDir,
+    code: '',
+    metadata: { author: 'builder', env: 'test' },
+  }, null, 2), 'utf8');
+
+  const result = await runPostMetaApp(['--prepare-request', requestFile, '--output', outputFile], rpc.url);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /defaulted/);
+  const output = JSON.parse(await readFile(outputFile, 'utf8'));
+  assert.equal(output.payload.metadata, '{"author":"builder","env":"test"}');
+  assert.equal(output.payload.content, 'metafile://upload-1i0.zip');
 });

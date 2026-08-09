@@ -216,9 +216,15 @@ This works from any conversation where this skill is available — the cowork se
 3. When the goal is met and deliverables collected: `close` with `done`. If the user calls it off: `close` with `cancelled`.
 4. **One group = one task.** Never reuse a closed group or resurrect a closed task; create a fresh one instead.
 
-## Multi-session driving (P2-8)
+## Multi-session driving (P2-8 + F2)
 
-The host daemon arbitrates duplicate driving via a per-task heartbeat claim (`show` returns the current `driver` instance + time). If you drive a task from a Twin session that is NOT the current driver (e.g. a second window's session), check `show` first: only speak when you are the driver or the claim is stale — otherwise another session is already handling the group and you would double-drive it.
+The host daemon arbitrates duplicate driving via a per-task heartbeat claim (`show` returns the current `driver` instance + time), and the manual `send` path participates in the SAME claim (session-level mutex):
+
+- A **chair-identity driving send** (plan / dispatch / status switch) takes the claim while the daemon is quiet; the daemon then yields its ticks, so the auto driver never double-speaks next to your manual session.
+- While **another session holds a fresh claim** (e.g. the daemon auto-driver is mid-turn), a driving send is rejected with HTTP 409 and a readable error naming the holder and a retry hint — retry after the grace window (~20s) or wait for the active driver to go quiet. Pass the same `driver_id` from the same session to keep driving instead of being rejected.
+- **Worker / owner sends never participate** in the mutex — they always pass.
+
+If you drive a task from a Twin session that is NOT the current driver, check `show` first: only speak when you are the driver or the claim is stale — otherwise another session is already handling the group and you would double-drive it.
 
 ## Constraints
 

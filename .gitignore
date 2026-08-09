@@ -87,6 +87,7 @@ tests/*
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs
 !tests/metabotPostBuzzSkill.test.mjs
+!tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
 !tests/metabotInfoSyncSteps.test.mjs
 !tests/metabotRestoreProtocol.test.mjs
