@@ -32,6 +32,7 @@ const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services
 const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
+  advanceHandledCursor,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 
@@ -465,7 +466,20 @@ test('cursor advances on no-reply messages and on per-message failure', async ()
     assert.equal(h.sends.length, 1, 'only the second message produced a send');
     assert.match(h.sends[0].content, /reply-for-llm-2/);
     const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
-    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
+    // C3 fix: the later success must NOT skip over the failed message — the
+    // cursor stays behind it so it can be retried.
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId,
+      'failed message holds the cursor (no skip-over by later success)');
+
+    // Next tick (after the worker cooldown set by B's success): the failed
+    // message is retried and succeeds; the cursor then advances contiguously
+    // past both messages.
+    h.state.nowMs += 21_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 3, 'failed message retried on the next tick');
+    assert.equal(h.sends.length, 2, 'retried message now produces a send');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId,
+      'cursor advances past both once contiguous');
   } finally {
     h.cleanup();
   }
@@ -2052,4 +2066,41 @@ test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
   } finally {
     h.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// C3: cursor watermark (advanceHandledCursor)
+// ---------------------------------------------------------------------------
+
+test('advanceHandledCursor: advances across contiguous handled ids and unmarks them', () => {
+  const handled = new Set([6, 7, 8]);
+  const unmarked = [];
+  const next = advanceHandledCursor(
+    5,
+    (id) => handled.has(id),
+    (id) => { handled.delete(id); unmarked.push(id); },
+  );
+  assert.equal(next, 8);
+  assert.deepEqual(unmarked, [6, 7, 8]);
+  assert.equal(handled.size, 0);
+});
+
+test('advanceHandledCursor: stops at a gap so an earlier failed message is not skipped', () => {
+  const handled = new Set([6, 8]); // 7 is missing (failed, unhandled)
+  const unmarked = [];
+  const next = advanceHandledCursor(
+    5,
+    (id) => handled.has(id),
+    (id) => { handled.delete(id); unmarked.push(id); },
+  );
+  assert.equal(next, 6);
+  assert.deepEqual(unmarked, [6]);
+  assert.deepEqual([...handled], [8]);
+});
+
+test('advanceHandledCursor: no handled ids leaves the cursor unchanged', () => {
+  const unmarked = [];
+  const next = advanceHandledCursor(5, () => false, (id) => unmarked.push(id));
+  assert.equal(next, 5);
+  assert.deepEqual(unmarked, []);
 });

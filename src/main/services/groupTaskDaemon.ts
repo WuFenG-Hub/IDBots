@@ -57,8 +57,34 @@ const MAX_CHAIR_PLAN_ATTEMPTS = 3;
 
 const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
+/** Round-4: per-message handled watermark flag (see advanceHandledCursor). */
+const MSG_HANDLED_PREFIX = 'group_task_msg_handled:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
+
+/**
+ * Round-4 cursor watermark: advance the last-processed cursor ONLY across
+ * contiguous handled message ids. When an earlier message failed, a later
+ * success must not skip over it (that previously let the daemon's own
+ * auto-replies advance the cursor past failed messages, which were then never
+ * retried and never counted to the drop threshold). `isHandled` must return
+ * true for ids already processed or dropped; `unmark` is called for each
+ * id the cursor passes so the flags do not accumulate.
+ */
+export function advanceHandledCursor(
+  oldCursor: number,
+  isHandled: (msgId: number) => boolean,
+  unmark: (msgId: number) => void,
+): number {
+  let cursor = oldCursor;
+  let next = cursor + 1;
+  while (isHandled(next)) {
+    cursor = next;
+    unmark(next);
+    next += 1;
+  }
+  return cursor;
+}
 
 /** Deliverable verification: strict formats (lowercase hex only). */
 const PINID_FORMAT = /^[0-9a-f]{64}i0$/;
@@ -1803,9 +1829,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // P2-7: at most ONE chair auto response (deliverable / floor control / owner
     // message) per tick, so the daemon never double-speaks alongside the Twin.
     let chairAutoRepliesThisTick = 0;
+    // Round-4 cursor watermark: advances only across contiguous handled ids.
+    let watermarkCursor = task.lastProcessedMsgId;
 
     const memberGmids = memberGlobalMetaIdSet(members);
     for (const row of rows) {
+      // Round-4 handled watermark: a message already processed (or dropped)
+      // in an earlier tick is skipped — the cursor advances contiguously, so
+      // failed messages may re-appear after the cursor and get their retries.
+      if (sqlite.get(`${MSG_HANDLED_PREFIX}${task.id}:${row.id}`) != null) continue;
       // Round-4 attribution first: resolve the chain-signature GlobalMetaID
       // (persisted once) and mark SUSPECT when the sender is neither a task
       // member nor the owner. Everything downstream (deliverable collection,
@@ -1831,6 +1863,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
         const gatingTask = freshStatus === task.status ? task : { ...task, status: freshStatus };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
+        // B1: collect the accepted decisions first (gating checks are cheap and
+        // must run against the tick snapshot), then dispatch all turns in
+        // parallel. One worker's long turn or failure must not delay or abort
+        // the other workers of the same message.
+        const acceptedReplies: Array<{
+          member: GroupTaskMember;
+          bot: GroupTaskDaemonBotFull;
+          isChair: boolean;
+          key: string;
+          reason: string;
+          notes: string[];
+        }> = [];
         for (const decision of decisions) {
           const member = members.find((candidate) => candidate.metabotId === decision.metabotId);
           const bot = botsById.get(decision.metabotId);
@@ -1884,27 +1928,69 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           }
 
           // Verification facts travel with the deliverable that triggered the chair.
-          const notesForDecision = decision.reason === 'chair_deliverable' ? verificationNotes : [];
-          await generateAndSendReply(
-            task,
+          acceptedReplies.push({
             member,
             bot,
-            message,
-            promptMembers,
-            chairGlobalMetaId,
-            ownerGlobalMetaId,
-            notesForDecision,
-          );
-          lastReplyAtByKey.set(key, now());
-          replyCountByKey.set(key, (replyCountByKey.get(key) ?? 0) + 1);
+            isChair,
+            key,
+            reason: decision.reason,
+            notes: decision.reason === 'chair_deliverable' ? verificationNotes : [],
+          });
+          // Per-tick caps count DISPATCHED turns (parallel dispatch means the
+          // completion order no longer decides the cap).
           if (!isChair) {
             workerRepliesThisTick += 1;
           } else if (decision.reason !== 'chair_mentioned') {
             chairAutoRepliesThisTick += 1;
           }
         }
-        // Round-4: cursor advances only on SUCCESSFUL processing.
-        store.updateLastProcessedMsgId(task.id, message.id);
+        // B1: dispatch all accepted turns in parallel — one worker's long turn
+        // or failure must not delay or abort the others. After every turn has
+        // settled, a worker failure rethrows so the message-level retry
+        // bookkeeping below still runs (cursor held, retry counter bumped);
+        // already-succeeded workers are naturally skipped on the retry by
+        // their cooldown.
+        const settledReplies = await Promise.allSettled(acceptedReplies.map(async (entry) => {
+          try {
+            await generateAndSendReply(
+              task,
+              entry.member,
+              entry.bot,
+              message,
+              promptMembers,
+              chairGlobalMetaId,
+              ownerGlobalMetaId,
+              entry.notes,
+            );
+          } catch (error) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: reply failed for bot ${entry.bot.id}: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+            throw error;
+          }
+          lastReplyAtByKey.set(entry.key, now());
+          replyCountByKey.set(entry.key, (replyCountByKey.get(entry.key) ?? 0) + 1);
+        }));
+        const rejectedReply = settledReplies.find((result) => result.status === 'rejected');
+        if (rejectedReply) {
+          throw rejectedReply.reason;
+        }
+        // Round-4: mark handled, then advance the cursor watermark across
+        // contiguous handled ids. A later success never skips over an earlier
+        // failed message (C3: the daemon's own auto-replies used to advance the
+        // cursor past failed messages, which were then never retried and never
+        // counted to the drop threshold).
+        sqlite.set(`${MSG_HANDLED_PREFIX}${task.id}:${message.id}`, '1');
+        const advancedCursor = advanceHandledCursor(
+          watermarkCursor,
+          (msgId) => sqlite.get(`${MSG_HANDLED_PREFIX}${task.id}:${msgId}`) != null,
+          (msgId) => sqlite.delete(`${MSG_HANDLED_PREFIX}${task.id}:${msgId}`),
+        );
+        if (advancedCursor !== watermarkCursor) {
+          watermarkCursor = advancedCursor;
+          store.updateLastProcessedMsgId(task.id, watermarkCursor);
+        }
         const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
         if (sqlite.get<number>(retryKey) != null) {
           sqlite.delete(retryKey); // recovered after earlier failures
@@ -1926,10 +2012,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
         if (failures >= MSG_RETRY_MAX_FAILURES) {
           sqlite.delete(retryKey);
-          store.updateLastProcessedMsgId(task.id, message.id);
+          // Mark dropped as handled so the retry loop stops, then advance the
+          // watermark contiguously (never over an unrelated failed message).
+          sqlite.set(`${MSG_HANDLED_PREFIX}${task.id}:${message.id}`, '1');
+          const advancedDropCursor = advanceHandledCursor(
+            watermarkCursor,
+            (msgId) => sqlite.get(`${MSG_HANDLED_PREFIX}${task.id}:${msgId}`) != null,
+            (msgId) => sqlite.delete(`${MSG_HANDLED_PREFIX}${task.id}:${msgId}`),
+          );
+          if (advancedDropCursor !== watermarkCursor) {
+            watermarkCursor = advancedDropCursor;
+            store.updateLastProcessedMsgId(task.id, watermarkCursor);
+          }
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${message.id} dropped after ` +
-            `${failures} consecutive failures (cursor advanced past it)`,
+            `${failures} consecutive failures (marked handled)`,
           );
         }
       }
