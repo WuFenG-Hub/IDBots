@@ -768,11 +768,15 @@ export class SqliteStore {
         create_pin_id TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
-        closed_at TEXT
+        closed_at TEXT,
+        rating INTEGER,
+        rating_comment TEXT,
+        rated_at TEXT
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
+    this.migrateGroupTasksRatingColumns();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1980,6 +1984,38 @@ export class SqliteStore {
       this.save();
     } catch (e) {
       console.warn('migrateGroupTasksLastDrivenAt:', e);
+    }
+  }
+
+  /**
+   * Migration: owner acceptance rating on group_tasks — rating (1-5 integer,
+   * validated in code), rating_comment (optional free text), rated_at. No-op
+   * once present; existing tasks keep NULL (unrated history stays unrated).
+   */
+  private migrateGroupTasksRatingColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('rating')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rating INTEGER');
+        columns = [...columns, 'rating'];
+        changed = true;
+      }
+      if (!columns.includes('rating_comment')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rating_comment TEXT');
+        columns = [...columns, 'rating_comment'];
+        changed = true;
+      }
+      if (!columns.includes('rated_at')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rated_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (e) {
+      console.warn('migrateGroupTasksRatingColumns:', e);
     }
   }
 
