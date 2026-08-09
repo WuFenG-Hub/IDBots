@@ -406,6 +406,13 @@ export class OpenTeamMembershipStore {
     return rows.map(rowToOpenTeamInvite);
   }
 
+  listAcceptedInvites(): OpenTeamInvite[] {
+    const rows = this.getAll<OpenTeamInviteRow>(
+      `SELECT * FROM openteam_invites WHERE status = 'accepted' ORDER BY id ASC`,
+    );
+    return rows.map(rowToOpenTeamInvite);
+  }
+
   getInviteByPinId(invitePinId: string): OpenTeamInvite | null {
     const row = this.getOne<OpenTeamInviteRow>(
       'SELECT * FROM openteam_invites WHERE invite_pin_id = ?',

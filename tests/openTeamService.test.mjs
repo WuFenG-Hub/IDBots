@@ -543,3 +543,112 @@ test('resumeOpenTeamInviteWatchers re-arms pending invites after a restart', asy
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Restart recovery of accepted-but-unconfirmed invites (crash mid-handshake)
+// ---------------------------------------------------------------------------
+
+test('resume: accepted + no member row + inside the window -> join confirmed, member recorded', async () => {
+  const h = await createHarness({ joined: true });
+  try {
+    // ACCEPT landed before the "restart"; the join confirmation never ran.
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'2'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1, 'accepted-but-unconfirmed invite gets a watcher');
+
+    await waitFor(() => h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID));
+    const member = h.groupTaskStore
+      .listMembers(h.task.id)
+      .find((m) => m.metabotId == null && m.globalmetaid === REMOTE_GMID);
+    assert.ok(member);
+    assert.equal(member.role, 'worker');
+    assert.equal(member.displayName, 'Remote Bot');
+    assert.equal(h.calls.wait.length, 1);
+    assert.ok(h.calls.wait[0].identities.includes(REMOTE_GMID));
+
+    const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
+    assert.equal(after.status, 'accepted', 'accepted is the final completed state');
+    assert.equal(h.calls.ownerReport.length, 0, 'no owner alert on success');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resume: accepted + no member row + past the window -> expired join_confirm_timeout', async () => {
+  const h = await createHarness({ joined: false });
+  try {
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'3'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+    // Backdate created_at so the original 10-minute window has already closed.
+    h.db.run(
+      `UPDATE openteam_invites SET created_at = datetime('now', '-1 hour') WHERE invite_pin_id = ?`,
+      [invite.invitePinId],
+    );
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 1, 'expired-window invite still gets a watcher to finalize it');
+
+    await waitFor(() => h.membershipStore.getInviteByPinId(invite.invitePinId)?.status === 'expired');
+    const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
+    assert.equal(after.declineReason, 'join_confirm_timeout');
+    assert.equal(h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID), false);
+
+    await waitFor(() => h.calls.ownerReport.length > 0);
+    assert.equal(h.calls.ownerReport.length, 1, 'same owner heads-up as a live watcher timeout');
+    assert.match(h.calls.ownerReport[0].text, /never appeared/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('resume: accepted + member row already present -> no watcher, no duplicate action', async () => {
+  const h = await createHarness();
+  try {
+    // The join completed before the "restart": member row already recorded.
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+    });
+    const invite = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      inviteeName: 'Remote Bot',
+      invitePinId: `${'4'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: invite.invitePinId }, 'accepted');
+
+    const started = resumeOpenTeamInviteWatchers();
+    assert.equal(started, 0, 'completed invites are not re-armed');
+
+    // Give any (unexpectedly started) watcher several polls to act.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(h.calls.wait.length, 0, 'no join confirmation re-run');
+    assert.equal(h.calls.ownerReport.length, 0, 'no owner alert');
+    const members = h.groupTaskStore
+      .listMembers(h.task.id)
+      .filter((m) => m.metabotId == null && m.globalmetaid === REMOTE_GMID);
+    assert.equal(members.length, 1, 'still exactly one remote member row');
+    const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
+    assert.equal(after.status, 'accepted', 'invite row untouched');
+  } finally {
+    h.cleanup();
+  }
+});
