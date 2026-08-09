@@ -125,3 +125,60 @@ test('computeSdkCronFromSpec maps each schedule mode to the right cron expressio
   const bad = computeSdkCronFromSpec({ ...base, mode: 'cron', date: '', time: '09:00', weekday: 1, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '0 9 * *' });
   assert.equal(bad.expression, null);
 });
+
+// ---- deriveScheduleSpecFromCron: backfill spec from raw cron (enables toggle/edit) ----
+
+test('deriveScheduleSpecFromCron: daily cron -> mode daily with time', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  const spec = deriveScheduleSpecFromCron({ schedule: '30 9 * * *', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'daily');
+  assert.equal(spec.time, '09:30');
+  assert.equal(spec.cronExpression, '30 9 * * *');
+  assert.equal(spec.name, 'n');
+  assert.equal(spec.prompt, 'p');
+});
+
+test('deriveScheduleSpecFromCron: */N minutes -> interval minutes', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  const spec = deriveScheduleSpecFromCron({ schedule: '*/15 * * * *', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'interval');
+  assert.equal(spec.intervalUnit, 'minutes');
+  assert.equal(spec.intervalValue, 15);
+});
+
+test('deriveScheduleSpecFromCron: weekly cron -> mode weekly with weekday', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  const spec = deriveScheduleSpecFromCron({ schedule: '0 18 * * 5', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'weekly');
+  assert.equal(spec.weekday, 5);
+  assert.equal(spec.time, '18:00');
+});
+
+test('deriveScheduleSpecFromCron: monthly cron -> mode monthly with monthDay', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  const spec = deriveScheduleSpecFromCron({ schedule: '15 0 20 * *', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'monthly');
+  assert.equal(spec.monthDay, 20);
+  assert.equal(spec.time, '00:15');
+});
+
+test('deriveScheduleSpecFromCron: complex minute-list cron -> mode cron + raw expression (no fake semantic)', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  // 7,22,37,52 每小时跑——分钟非单整数，不能还原成具体时刻，归为 cron 原样。
+  const spec = deriveScheduleSpecFromCron({ schedule: '7,22,37,52 * * * *', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'cron');
+  assert.equal(spec.cronExpression, '7,22,37,52 * * * *');
+});
+
+test('deriveScheduleSpecFromCron: hour range cron -> mode cron (cannot reduce to single time)', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  const spec = deriveScheduleSpecFromCron({ schedule: '*/15 9-17 * * 1-5', name: 'n', prompt: 'p' });
+  assert.equal(spec.mode, 'cron');
+  assert.equal(spec.cronExpression, '*/15 9-17 * * 1-5');
+});
+
+test('deriveScheduleSpecFromCron: non-5-field expression -> null (cannot derive)', () => {
+  const { deriveScheduleSpecFromCron } = getBridgeModule();
+  assert.equal(deriveScheduleSpecFromCron({ schedule: '0 9 * *', name: 'n', prompt: 'p' }), null);
+  assert.equal(deriveScheduleSpecFromCron({ schedule: '', name: 'n', prompt: 'p' }), null);
+});

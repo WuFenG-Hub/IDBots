@@ -131,55 +131,52 @@ function intervalLabel(value: number, unit: IntervalUnit): string {
 
 /**
  * 镜像 → 人类可读调度标签。完全对标旧版 TaskList.formatScheduleLabel 的语义。
- * 有 spec 时直接用 spec（最准）；无 spec 回退解析 mirror.schedule / humanSchedule。
+ * 有 spec 时直接用 spec（最准，正常情况 list IPC 已回填派生 spec）；
+ * 无 spec 时统一走 mirrorToFormState 解析（已正确分类），不再自己重算裸字段——
+ * 那会因 hour='*' / 多值分钟（如 7,22,37,52）产出「每天 · 0*:7,22,37,52」乱码。
  */
 export function formatSdkCronScheduleLabel(mirror: SdkCronMirror): string {
-  const spec = mirror.scheduleSpec;
-  if (spec) {
-    if (spec.mode === 'interval') return intervalLabel(spec.intervalValue, spec.intervalUnit);
-    if (spec.mode === 'once') {
-      const dtStr = spec.date ? `${spec.date}T${spec.time || '09:00'}` : '';
-      if (dtStr) {
-        const date = new Date(dtStr);
-        if (!Number.isNaN(date.getTime())) {
-          return `${i18nService.t('scheduledTasksFormScheduleModeOnce')} · ${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-        }
-      }
-      return i18nService.t('scheduledTasksFormScheduleModeOnce');
-    }
-    if (spec.mode === 'daily') {
-      return `${i18nService.t('scheduledTasksFormScheduleModeDaily')} · ${spec.time || '09:00'}`;
-    }
-    if (spec.mode === 'weekly') {
-      return `${i18nService.t('scheduledTasksFormScheduleModeWeekly')} · ${i18nService.t(WEEKDAY_KEYS[spec.weekday] ?? 'scheduledTasksFormWeekSun')} ${spec.time || '09:00'}`;
-    }
-    if (spec.mode === 'monthly') {
-      return `${i18nService.t('scheduledTasksFormScheduleModeMonthly')} · ${spec.monthDay}${i18nService.t('scheduledTasksFormMonthDaySuffix')} ${spec.time || '09:00'}`;
-    }
-    if (spec.mode === 'cron') {
-      return spec.cronExpression || i18nService.t('scheduledTasksFormScheduleModeCron');
-    }
-  }
-
-  // 无 spec 回退：先用 SDK 自带的 humanSchedule，再尝试解析裸表达式。
+  // SDK 自带的 humanSchedule 最准（若 SDK 提供），优先于一切。
   if (mirror.humanSchedule) return mirror.humanSchedule;
-  const parsed = parseScheduleToFormState({ type: 'cron', expression: mirror.schedule });
-  if (parsed.mode === 'interval') return intervalLabel(parsed.intervalValue, parsed.intervalUnit);
 
-  const parts = mirror.schedule.trim().split(/\s+/);
-  if (parts.length >= 5) {
-    const [min, hour, dom, , dow] = parts;
-    const timeStr = `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
-    if (dow !== '*' && dom === '*') {
-      const dayNum = parseInt(dow) || 0;
-      return `${i18nService.t('scheduledTasksFormScheduleModeWeekly')} · ${i18nService.t(WEEKDAY_KEYS[dayNum] ?? 'scheduledTasksFormWeekSun')} ${timeStr}`;
+  const spec = mirror.scheduleSpec;
+  const form = spec
+    ? {
+        mode: spec.mode,
+        date: spec.date,
+        time: spec.time,
+        weekday: spec.weekday,
+        monthDay: spec.monthDay,
+        intervalValue: spec.intervalValue,
+        intervalUnit: spec.intervalUnit,
+        cronExpression: spec.cronExpression,
+      }
+    : mirrorToFormState(mirror);
+
+  if (form.mode === 'interval') return intervalLabel(form.intervalValue, form.intervalUnit);
+  if (form.mode === 'once') {
+    const dtStr = form.date ? `${form.date}T${form.time || '09:00'}` : '';
+    if (dtStr) {
+      const date = new Date(dtStr);
+      if (!Number.isNaN(date.getTime())) {
+        return `${i18nService.t('scheduledTasksFormScheduleModeOnce')} · ${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      }
     }
-    if (dom !== '*' && dow === '*') {
-      return `${i18nService.t('scheduledTasksFormScheduleModeMonthly')} · ${dom}${i18nService.t('scheduledTasksFormMonthDaySuffix')} ${timeStr}`;
-    }
-    return `${i18nService.t('scheduledTasksFormScheduleModeDaily')} · ${timeStr}`;
+    return i18nService.t('scheduledTasksFormScheduleModeOnce');
   }
-  return mirror.schedule || '';
+  if (form.mode === 'daily') {
+    return `${i18nService.t('scheduledTasksFormScheduleModeDaily')} · ${form.time || '09:00'}`;
+  }
+  if (form.mode === 'weekly') {
+    return `${i18nService.t('scheduledTasksFormScheduleModeWeekly')} · ${i18nService.t(WEEKDAY_KEYS[form.weekday] ?? 'scheduledTasksFormWeekSun')} ${form.time || '09:00'}`;
+  }
+  if (form.mode === 'monthly') {
+    return `${i18nService.t('scheduledTasksFormScheduleModeMonthly')} · ${form.monthDay}${i18nService.t('scheduledTasksFormMonthDaySuffix')} ${form.time || '09:00'}`;
+  }
+  // cron（含无法还原成具体语义的复杂表达式，如 7,22,37,52 * * * *）：显示「Cron · 原表达式」，清晰不造假。
+  const cronLabel = i18nService.t('scheduledTasksFormScheduleModeCron');
+  const expr = form.cronExpression || mirror.schedule || '';
+  return expr ? `${cronLabel} · ${expr}` : cronLabel;
 }
 
 /** 默认表单状态（新建时），与旧版 TaskForm 默认值对齐（once / 09:00）。 */
