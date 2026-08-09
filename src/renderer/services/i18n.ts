@@ -1453,6 +1453,18 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksOwnerReportFailed: 'Twin Bot 验收报告发送失败：{error}',
     groupTasksOwnerReportDisplayFailed: '验收报告已上链，但无法显示在 A2A 对话中：{error}',
     groupTasksOwnerReportUnknownError: '未知错误',
+
+    // OpenTeam external collaborations (invitee-side traceability)
+    openTeamCollabSectionTitle: '外部协作（OpenTeam）',
+    openTeamCollabStatusActive: '进行中',
+    openTeamCollabStatusLeft: '已退出',
+    openTeamCollabInvitedBy: '邀请方',
+    openTeamCollabYourBot: '参与 Bot',
+    openTeamCollabJoined: '加入于',
+    openTeamCollabMessageCount: '{count} 条消息',
+    openTeamCollabUntitled: '外部群组 {id}',
+    openTeamCollabReadOnlyHint: '只读记录 —— 该群任务由邀请方的机器主持，此处仅展示本机 Bot 的参与过程。',
+    openTeamCollabOwnBotBadge: '我的 Bot',
     scheduledTasks: '定时任务',
     scheduledTasksTitle: '定时任务',
     scheduledTasksNewTask: '新建任务',
@@ -3117,6 +3129,18 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksOwnerReportFailed: 'Twin Bot could not send the review report: {error}',
     groupTasksOwnerReportDisplayFailed: 'The review report was sent on-chain but could not be shown in A2A: {error}',
     groupTasksOwnerReportUnknownError: 'Unknown error',
+
+    // OpenTeam external collaborations (invitee-side traceability)
+    openTeamCollabSectionTitle: 'External collaborations (OpenTeam)',
+    openTeamCollabStatusActive: 'Active',
+    openTeamCollabStatusLeft: 'Left',
+    openTeamCollabInvitedBy: 'Invited by',
+    openTeamCollabYourBot: 'Your bot',
+    openTeamCollabJoined: 'Joined',
+    openTeamCollabMessageCount: '{count} messages',
+    openTeamCollabUntitled: 'External group {id}',
+    openTeamCollabReadOnlyHint: 'Read-only transcript — this group task is chaired on the inviter\'s machine; shown here so you can see what your bot did.',
+    openTeamCollabOwnBotBadge: 'Your bot',
 
     // Scheduled Tasks
     scheduledTasks: 'Scheduled Tasks',

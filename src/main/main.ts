@@ -8984,6 +8984,39 @@ if (!gotTheLock) {
     }
   });
 
+  // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
+
+  // Owner traceability for auto-accepted OpenTeam invites: every external group
+  // task this machine's bots joined (or left), with a message-activity digest.
+  ipcMain.handle('openTeamCollab:list', async () => {
+    try {
+      const items = await withSqliteRecovery('openTeamCollab:list', () =>
+        getOpenTeamMembershipStore().listCollabSummaries());
+      return { success: true, items };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaborations' };
+    }
+  });
+
+  // Read-only transcript for one external group. Content is already decrypted
+  // at insert time; reuse the group-task transcript query as-is.
+  ipcMain.handle('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
+    try {
+      const groupId = String(input?.groupId ?? '').trim();
+      if (!groupId) {
+        throw new Error('groupId is required');
+      }
+      const messages = await withSqliteRecovery('openTeamCollab:listMessages', () =>
+        getGroupTaskStore().listGroupChatMessages(groupId, {
+          beforeId: typeof input?.beforeId === 'number' ? input.beforeId : undefined,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        }));
+      return { success: true, messages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaboration messages' };
+    }
+  });
+
   // ==================== Scheduled Task IPC Handlers ====================
 
   ipcMain.handle('scheduledTask:list', async () => {

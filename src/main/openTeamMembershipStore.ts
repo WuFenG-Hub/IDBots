@@ -37,6 +37,19 @@ export interface OpenTeamInvite {
   respondedAt: string | null;
 }
 
+/**
+ * Owner-facing traceability row (openTeamCollab:list): one membership plus the
+ * local bot's display name and a group_chat_messages activity digest.
+ */
+export interface OpenTeamCollabSummary extends OpenTeamMembership {
+  /** metabots.name for metabotId; null when the bot row is gone. */
+  botName: string | null;
+  /** Total locally indexed group_chat_messages rows for the group. */
+  messageCount: number;
+  /** chain_timestamp of the newest indexed message; null when none. */
+  lastMessageAt: number | null;
+}
+
 export interface UpsertOpenTeamMembershipInput {
   groupId: string;
   metabotId: number;
@@ -228,6 +241,38 @@ export class OpenTeamMembershipStore {
       `SELECT * FROM openteam_memberships WHERE status = 'active' ORDER BY id ASC`,
     );
     return rows.map(rowToOpenTeamMembership);
+  }
+
+  /**
+   * All memberships (active + left), newest first, enriched with the local
+   * bot's name and a group_chat_messages digest. Backs the owner-facing
+   * "External collaborations" view: an auto-accepted invite must still be
+   * visible to the machine owner.
+   */
+  listCollabSummaries(): OpenTeamCollabSummary[] {
+    const rows = this.getAll<OpenTeamMembershipRow & {
+      bot_name: string | null;
+      message_count: number;
+      last_message_at: number | null;
+    }>(
+      `SELECT m.*, mb.name AS bot_name,
+         (SELECT COUNT(*) FROM group_chat_messages g WHERE g.group_id = m.group_id) AS message_count,
+         (SELECT MAX(g.chain_timestamp) FROM group_chat_messages g WHERE g.group_id = m.group_id) AS last_message_at
+       FROM openteam_memberships m
+       LEFT JOIN metabots mb ON mb.id = m.metabot_id
+       ORDER BY m.id DESC`,
+    );
+    return rows.map((row) => {
+      const lastMessageAt = Number(row.last_message_at);
+      return {
+        ...rowToOpenTeamMembership(row),
+        botName: row.bot_name ?? null,
+        messageCount: Number(row.message_count) || 0,
+        lastMessageAt: row.last_message_at != null && Number.isFinite(lastMessageAt)
+          ? lastMessageAt
+          : null,
+      };
+    });
   }
 
   /** group_id of every active membership (group-chat backfill targets). */

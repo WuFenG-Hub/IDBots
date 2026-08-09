@@ -680,6 +680,11 @@ contextBridge.exposeInMainWorld('electron', {
       return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
     },
   },
+  openTeamCollab: {
+    list: () => ipcRenderer.invoke('openTeamCollab:list'),
+    listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
+      ipcRenderer.invoke('openTeamCollab:listMessages', input),
+  },
   idbots: {
     getMetaBots: () => ipcRenderer.invoke('idbots:getMetaBots'),
     getOfficialSkillsStatus: () => ipcRenderer.invoke('idbots:getOfficialSkillsStatus'),
