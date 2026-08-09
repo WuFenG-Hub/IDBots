@@ -23,7 +23,13 @@
  */
 
 import { signMvcAddressMessage, type MvcSponsorTrafficAccount } from './mvcSponsorClient';
-import { getTrafficPinMode, type TrafficSettingsReader } from './trafficSettings';
+import {
+  getTrafficPinMode,
+  getTrafficSettings,
+  setTrafficSettings,
+  type TrafficSettingsReader,
+  type TrafficSettingsSnapshot,
+} from './trafficSettings';
 import type { SqliteStore } from '../sqliteStore';
 import type { MetabotStore } from '../metabotStore';
 import type { UserIdentityStore } from '../userIdentityStore';
@@ -48,7 +54,8 @@ export type TrafficApiStage =
   | 'balance'
   | 'ledger'
   | 'usage'
-  | 'pricing';
+  | 'pricing'
+  | 'recharge';
 
 export class TrafficApiError extends Error {
   readonly code: string;
@@ -233,6 +240,14 @@ function buildTrafficBindMessage(botAddress: string, accountId: string, timestam
 
 function buildTrafficPreMessage(accountId: string, challengeId: string): string {
   return `traffic-pre:${accountId}:${challengeId}`;
+}
+
+function buildTrafficRechargeMessage(accountId: string, planId: string, timestamp: number): string {
+  return `traffic-recharge:${accountId}:${planId}:${timestamp}`;
+}
+
+function buildTrafficRechargeConfirmMessage(orderId: string, gatewayTxnId: string, timestamp: number): string {
+  return `traffic-recharge-confirm:${orderId}:${gatewayTxnId}:${timestamp}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +663,175 @@ export async function getTrafficUsageSummary(): Promise<TrafficUsageSummary> {
 }
 
 // ---------------------------------------------------------------------------
+// Pricing + recharge (mock payment for development; real gateways in Phase 4)
+// ---------------------------------------------------------------------------
+
+export interface TrafficPricingPlan {
+  planId: string;
+  chain: string;
+  payCurrency: string;
+  payAmount: number;
+  trafficBytes: number;
+  status: number;
+  remark: string;
+}
+
+/** Recharge order status values delivered by the backend (int64 in JSON). */
+export const TRAFFIC_RECHARGE_STATUS = {
+  CREATED: 1,
+  PAID: 2,
+  CREDITED: 3,
+  CLOSED: 4,
+} as const;
+
+export interface TrafficRechargeOrder {
+  orderId: string;
+  payAmount: number;
+  payCurrency: string;
+  trafficBytes: number;
+  gatewayParams: unknown;
+}
+
+export interface TrafficRechargeOrderStatus {
+  orderId: string;
+  status: number;
+  paidAt?: number;
+  creditedAt?: number;
+}
+
+/** Public rate table; no identity signature required. */
+export async function getTrafficPricing(): Promise<TrafficPricingPlan[]> {
+  const data = await trafficRequestJson({
+    stage: 'pricing',
+    method: 'GET',
+    path: '/v1/traffic/pricing',
+  });
+  const rows = Array.isArray(data) ? data : [];
+  return rows.flatMap((item) => {
+    const row = readObject(item);
+    if (!row) return [];
+    const planId = pickText(row, 'planId', 'plan_id');
+    if (!planId) return [];
+    return [{
+      planId,
+      chain: pickText(row, 'chain'),
+      payCurrency: pickText(row, 'payCurrency', 'pay_currency'),
+      payAmount: toNumber(row.payAmount ?? row.pay_amount),
+      trafficBytes: toNumber(row.trafficBytes ?? row.traffic_bytes),
+      status: toNumber(row.status),
+      remark: pickText(row, 'remark'),
+    }];
+  });
+}
+
+/**
+ * Create a recharge order for the local identity's account. The gateway is
+ * hardcoded to 'mock' for the development rollout; Phase 4 swaps in real
+ * payment gateways (Stripe/Alipay) behind this same call site.
+ */
+export async function createRechargeOrder(planId: string): Promise<TrafficRechargeOrder> {
+  const normalizedPlanId = normalizeText(planId);
+  if (!normalizedPlanId) {
+    throw new TrafficApiError({ stage: 'recharge', message: 'planId is required' });
+  }
+  const identity = requireIdentity();
+  const account = await requireAccount();
+  const timestamp = nowSeconds();
+  const message = buildTrafficRechargeMessage(account.accountId, normalizedPlanId, timestamp);
+  const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
+  const data = await trafficRequestJson({
+    stage: 'recharge',
+    method: 'POST',
+    path: '/v1/traffic/recharge/orders',
+    body: { planId: normalizedPlanId, gateway: 'mock' },
+    identity: { address: identity.mvcAddress, timestamp, signature },
+  });
+  const record = data as Record<string, unknown>;
+  const orderId = pickText(record, 'orderId', 'order_id');
+  if (!orderId) {
+    throw new TrafficApiError({ stage: 'recharge', message: 'Traffic recharge order response is missing orderId.' });
+  }
+  return {
+    orderId,
+    payAmount: toNumber(record.payAmount ?? record.pay_amount),
+    payCurrency: pickText(record, 'payCurrency', 'pay_currency'),
+    trafficBytes: toNumber(record.trafficBytes ?? record.traffic_bytes),
+    gatewayParams: record.gatewayParams ?? record.gateway_params ?? null,
+  };
+}
+
+function normalizeRechargeOrderStatus(data: Record<string, unknown>): TrafficRechargeOrderStatus {
+  const orderId = pickText(data, 'orderId', 'order_id');
+  if (!orderId) {
+    throw new TrafficApiError({ stage: 'recharge', message: 'Traffic recharge order status response is missing orderId.' });
+  }
+  const result: TrafficRechargeOrderStatus = {
+    orderId,
+    status: toNumber(data.status),
+  };
+  const paidAt = toNumber(data.paidAt ?? data.paid_at);
+  const creditedAt = toNumber(data.creditedAt ?? data.credited_at);
+  if (paidAt > 0) result.paidAt = paidAt;
+  if (creditedAt > 0) result.creditedAt = creditedAt;
+  return result;
+}
+
+/** Poll the recharge order status (created/paid/credited/closed). */
+export async function getRechargeOrder(orderId: string): Promise<TrafficRechargeOrderStatus> {
+  const normalizedOrderId = normalizeText(orderId);
+  if (!normalizedOrderId) {
+    throw new TrafficApiError({ stage: 'recharge', message: 'orderId is required' });
+  }
+  const data = await trafficRequestJson({
+    stage: 'recharge',
+    method: 'GET',
+    path: `/v1/traffic/recharge/orders/${encodeURIComponent(normalizedOrderId)}`,
+  });
+  return normalizeRechargeOrderStatus(data as Record<string, unknown>);
+}
+
+/**
+ * Dev/staging only: simulate gateway success for a mock recharge order
+ * (backend gates this on traffic.mock_payment_enabled). On credit the local
+ * balance cache is invalidated so the next read refetches.
+ */
+export async function mockConfirmRechargeOrder(orderId: string): Promise<TrafficRechargeOrderStatus> {
+  const normalizedOrderId = normalizeText(orderId);
+  if (!normalizedOrderId) {
+    throw new TrafficApiError({ stage: 'recharge', message: 'orderId is required' });
+  }
+  const identity = requireIdentity();
+  const gatewayTxnId = `mock-${normalizedOrderId}`;
+  const timestamp = nowSeconds();
+  const message = buildTrafficRechargeConfirmMessage(normalizedOrderId, gatewayTxnId, timestamp);
+  const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
+  const data = await trafficRequestJson({
+    stage: 'recharge',
+    method: 'POST',
+    path: `/v1/traffic/recharge/orders/${encodeURIComponent(normalizedOrderId)}/mock-confirm`,
+    body: { gatewayTxnId },
+    identity: { address: identity.mvcAddress, timestamp, signature },
+  });
+  const status = normalizeRechargeOrderStatus(data as Record<string, unknown>);
+  if (status.status === TRAFFIC_RECHARGE_STATUS.CREDITED) {
+    balanceCache = null;
+  }
+  return status;
+}
+
+/** Renderer-facing traffic settings (mode + fallback policy). */
+export function getTrafficSettingsSnapshot(): TrafficSettingsSnapshot {
+  return getTrafficSettings(getKvStore());
+}
+
+export function setTrafficSettingsSnapshot(input: {
+  mode?: unknown;
+  fallbackPolicy?: unknown;
+}): TrafficSettingsSnapshot {
+  return setTrafficSettings(getKvStore(), input);
+}
+
+// ---------------------------------------------------------------------------
 // Local spend journal (SQLite) + balance cache deduction
 // ---------------------------------------------------------------------------
 
@@ -874,6 +1058,48 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
   ipcMain.handle('traffic:getLocalJournal', async (_event, input: { limit?: number; botAddress?: string }) => {
     try {
       return { success: true, entries: listLocalTrafficJournal(input ?? {}) };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:getPricing', async () => {
+    try {
+      return { success: true, plans: await getTrafficPricing() };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:createRechargeOrder', async (_event, input: { planId?: string }) => {
+    try {
+      return { success: true, order: await createRechargeOrder(String(input?.planId ?? '')) };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:getRechargeOrder', async (_event, input: { orderId?: string }) => {
+    try {
+      return { success: true, order: await getRechargeOrder(String(input?.orderId ?? '')) };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:mockConfirmRechargeOrder', async (_event, input: { orderId?: string }) => {
+    try {
+      return { success: true, order: await mockConfirmRechargeOrder(String(input?.orderId ?? '')) };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:getSettings', async () => {
+    try {
+      return { success: true, settings: getTrafficSettingsSnapshot() };
+    } catch (error) {
+      return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown }) => {
+    try {
+      return { success: true, settings: setTrafficSettingsSnapshot(input ?? {}) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
     }

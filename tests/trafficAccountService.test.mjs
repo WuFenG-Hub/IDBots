@@ -12,14 +12,20 @@ const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const {
   TrafficApiError,
   bindAllLocalBots,
+  createRechargeOrder,
   ensureTrafficAccount,
   getLocalTrafficAccount,
+  getRechargeOrder,
   getTrafficBalance,
+  getTrafficPricing,
+  getTrafficSettingsSnapshot,
   initTrafficAccountService,
   listLocalTrafficJournal,
+  mockConfirmRechargeOrder,
   recordLocalTrafficSpend,
   resetTrafficAccountServiceForTests,
   resolveSponsorTrafficAccount,
+  setTrafficSettingsSnapshot,
 } = await import('../dist-electron/main/services/trafficAccountService.js');
 const { runMvcSponsorCreatePin } = await import('../dist-electron/main/services/mvcSponsorCreatePin.js');
 const { assembleMvcPinTransaction } = await import('../dist-electron/main/libs/createPinWorker.js');
@@ -515,4 +521,120 @@ test('sponsored createPin omits trafficAccount when the traffic API is 404 (lega
   const journal = listLocalTrafficJournal();
   assert.equal(journal.length, 1);
   assert.equal(journal[0].billedBy, 'quota');
+});
+
+test('getTrafficPricing normalizes the public rate table', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/pricing', [
+      { planId: 'cny_10_100mb', chain: 'mvc', payCurrency: 'CNY', payAmount: 10, trafficBytes: 100000000, status: 1, remark: 'seed' },
+      { plan_id: 'cny_20_250mb', chain: 'mvc', pay_currency: 'CNY', pay_amount: 20, traffic_bytes: 250000000 },
+    ]],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  const plans = await getTrafficPricing();
+  assert.equal(plans.length, 2);
+  assert.deepEqual(plans[0], {
+    planId: 'cny_10_100mb',
+    chain: 'mvc',
+    payCurrency: 'CNY',
+    payAmount: 10,
+    trafficBytes: 100000000,
+    status: 1,
+    remark: 'seed',
+  });
+  assert.equal(plans[1].planId, 'cny_20_250mb');
+  assert.equal(plans[1].trafficBytes, 250000000);
+});
+
+test('createRechargeOrder signs traffic-recharge and parses the order', async () => {
+  let captured = null;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/recharge/orders', (init) => {
+      captured = { headers: init.headers, body: JSON.parse(init.body) };
+      return {
+        orderId: 'recharge-order-1',
+        payAmount: 10,
+        payCurrency: 'CNY',
+        trafficBytes: 100000000,
+        gatewayParams: { mockToken: 'recharge-order-1' },
+      };
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  const order = await createRechargeOrder('cny_10_100mb');
+  assert.equal(order.orderId, 'recharge-order-1');
+  assert.equal(order.trafficBytes, 100000000);
+  assert.deepEqual(order.gatewayParams, { mockToken: 'recharge-order-1' });
+
+  assert.ok(captured);
+  assert.deepEqual(captured.body, { planId: 'cny_10_100mb', gateway: 'mock' });
+  const timestamp = Number(captured.headers['X-Timestamp']);
+  assert.ok(
+    verifyMessage(
+      IDENTITY_ADDRESS,
+      `traffic-recharge:${SERVER_ACCOUNT_ID}:cny_10_100mb:${timestamp}`,
+      captured.headers['X-Signature'],
+    ),
+  );
+});
+
+test('mockConfirmRechargeOrder signs traffic-recharge-confirm and invalidates the balance cache', async () => {
+  const confirmCalls = [];
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/recharge/orders/', (init) => {
+      if (String(init.method) === 'POST' && init.body) {
+        confirmCalls.push({ headers: init.headers, body: JSON.parse(init.body), url: '' });
+        return { orderId: 'recharge-order-1', status: 3, paidAt: 1, creditedAt: 2 };
+      }
+      return { orderId: 'recharge-order-1', status: 1 };
+    }],
+    ['/v1/traffic/accounts', (init) => (
+      String(init.method) === 'GET' ? accountPayload({ balanceBytes: 101000000 }) : accountPayload()
+    )],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  // Prime the cache via ensure (balance 1000), then credit and confirm the next
+  // balance read refetches from the backend.
+  await ensureTrafficAccount();
+  const status = await mockConfirmRechargeOrder('recharge-order-1');
+  assert.equal(status.status, 3);
+  assert.equal(status.creditedAt, 2);
+
+  assert.equal(confirmCalls.length, 1);
+  const confirmBody = confirmCalls[0].body;
+  assert.deepEqual(confirmBody, { gatewayTxnId: 'mock-recharge-order-1' });
+  const confirmTs = Number(confirmCalls[0].headers['X-Timestamp']);
+  assert.ok(
+    verifyMessage(
+      IDENTITY_ADDRESS,
+      `traffic-recharge-confirm:recharge-order-1:mock-recharge-order-1:${confirmTs}`,
+      confirmCalls[0].headers['X-Signature'],
+    ),
+  );
+
+  const balance = await getTrafficBalance();
+  assert.equal(balance.balanceBytes, 101000000);
+
+  const polled = await getRechargeOrder('recharge-order-1');
+  assert.equal(polled.orderId, 'recharge-order-1');
+  assert.equal(polled.status, 1);
+});
+
+test('traffic settings snapshot round-trips through the kv store', async () => {
+  const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
+
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay' });
+  setTrafficSettingsSnapshot({ mode: 'traffic' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay' });
+  setTrafficSettingsSnapshot({ fallbackPolicy: 'strict' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'strict' });
+  assert.equal(store.get('traffic.mode'), 'traffic');
+  assert.equal(store.get('traffic.fallbackPolicy'), 'strict');
+  // Garbage input normalizes back to the safe default.
+  setTrafficSettingsSnapshot({ mode: 'garbage' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'strict' });
 });

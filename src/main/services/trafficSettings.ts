@@ -45,3 +45,45 @@ export function getTrafficFallbackPolicy(
 ): TrafficFallbackPolicy {
   return normalizeTrafficFallbackPolicy(readTrafficSetting(reader, TRAFFIC_FALLBACK_POLICY_KEY));
 }
+
+/** Settings snapshot for the renderer toggle UI. */
+export interface TrafficSettingsSnapshot {
+  mode: TrafficPinMode;
+  fallbackPolicy: TrafficFallbackPolicy;
+}
+
+export function getTrafficSettings(
+  reader: TrafficSettingsReader | null | undefined,
+): TrafficSettingsSnapshot {
+  return {
+    mode: getTrafficPinMode(reader),
+    fallbackPolicy: getTrafficFallbackPolicy(reader),
+  };
+}
+
+/** Minimal kv writer shape shared by SqliteStore and test doubles. */
+export type TrafficSettingsStore = TrafficSettingsReader & { set(key: string, value: unknown): void };
+
+/**
+ * Persist traffic settings (partial update). Values are normalized on write;
+ * omitted fields keep their current value. Returns the resulting snapshot.
+ */
+export function setTrafficSettings(
+  store: TrafficSettingsStore | null | undefined,
+  input: { mode?: unknown; fallbackPolicy?: unknown },
+): TrafficSettingsSnapshot {
+  const current = getTrafficSettings(store);
+  const nextMode = input.mode === undefined ? current.mode : normalizeTrafficPinMode(input.mode);
+  const nextFallbackPolicy = input.fallbackPolicy === undefined
+    ? current.fallbackPolicy
+    : normalizeTrafficFallbackPolicy(input.fallbackPolicy);
+  if (store) {
+    try {
+      if (input.mode !== undefined) store.set(TRAFFIC_MODE_KEY, nextMode);
+      if (input.fallbackPolicy !== undefined) store.set(TRAFFIC_FALLBACK_POLICY_KEY, nextFallbackPolicy);
+    } catch {
+      // persistence loss is non-fatal; the returned snapshot still reflects intent
+    }
+  }
+  return { mode: nextMode, fallbackPolicy: nextFallbackPolicy };
+}

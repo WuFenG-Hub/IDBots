@@ -582,6 +582,12 @@ contextBridge.exposeInMainWorld('electron', {
     bindAllBots: () => ipcRenderer.invoke('traffic:bindAllBots'),
     getLocalJournal: (input?: { limit?: number; botAddress?: string }) =>
       ipcRenderer.invoke('traffic:getLocalJournal', input ?? {}),
+    getPricing: () => ipcRenderer.invoke('traffic:getPricing'),
+    createRechargeOrder: (input: { planId: string }) => ipcRenderer.invoke('traffic:createRechargeOrder', input),
+    getRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:getRechargeOrder', input),
+    mockConfirmRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:mockConfirmRechargeOrder', input),
+    getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
+    setSettings: (input: { mode?: string; fallbackPolicy?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
   },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
