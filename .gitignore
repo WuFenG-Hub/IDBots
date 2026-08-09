@@ -175,6 +175,7 @@ man_base_data_pebble/
 !tests/skillTurnTimeoutRecovery.test.mjs
 !tests/groupTaskOrchestrationBridge.test.mjs
 !tests/dreamService.test.mjs
+!tests/groupTaskRating.test.mjs
 !tests/experiencePromptBlocks.test.mjs
 !tests/dreamStoreSearch.test.mjs
 !tests/experiencePromptInjection.test.mjs

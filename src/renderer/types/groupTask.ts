@@ -22,6 +22,11 @@ export interface GroupTask {
   createdAt: string | null;
   updatedAt: string | null;
   closedAt: string | null;
+  /** Owner acceptance rating (1-5 stars); null for unrated tasks. */
+  rating: number | null;
+  /** Optional free-text review from the owner alongside the star rating. */
+  ratingComment: string | null;
+  ratedAt: string | null;
 }
 
 export interface GroupTaskMember {

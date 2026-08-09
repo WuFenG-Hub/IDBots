@@ -52,3 +52,42 @@ test('summariesToActivity retains fragment provenance and day-level counters', (
   assert.equal(activity.taskRuns.length, 1);
   assert.equal(activity.orderCount, 3);
 });
+
+test('chunkDreamActivity and summariesToActivity carry group task evaluations', () => {
+  const groupTasks = [{
+    taskId: 1, title: '海报设计', goal: 'G', memberRole: 'worker', rating: 4, ratingComment: null,
+  }];
+
+  // no sessions at all: the tasks-only chunk still carries the evaluations
+  const empty = chunkDreamActivity({ sessions: [], taskRuns: [], orderCount: 0, groupTasks }, 500);
+  assert.equal(empty.length, 1);
+  assert.equal(empty[0].groupTasks.length, 1);
+
+  // with sessions: chunk 0 carries them, later chunks do not
+  const huge = '甲'.repeat(1800);
+  const withSessions = chunkDreamActivity({
+    sessions: [{
+      sessionId: 's1', title: '长会话', sessionType: 'standard', peerName: null, isOrder: false,
+      messages: [
+        { type: 'user', content: huge, createdAt: 1 },
+        { type: 'assistant', content: huge, createdAt: 2 },
+      ],
+    }],
+    taskRuns: [],
+    orderCount: 0,
+    groupTasks,
+  }, 500);
+  assert.ok(withSessions.length > 1);
+  assert.equal(withSessions[0].groupTasks.length, 1, 'chunk 0 carries the evaluations');
+  assert.ok(withSessions.slice(1).every((chunk) => chunk.groupTasks.length === 0));
+
+  // synthesis path: evaluations survive into the day-level prompt activity
+  const synthesis = summariesToActivity([], [], 0, groupTasks);
+  assert.equal(synthesis.groupTasks.length, 1);
+  assert.equal(summariesToActivity([], [], 0).groupTasks.length, 0, 'default stays empty');
+
+  // legacy activities without the field do not break chunking/estimation
+  const legacy = { sessions: [], taskRuns: [], orderCount: 0 };
+  assert.equal(chunkDreamActivity(legacy, 500).length, 0);
+  assert.ok(estimateDreamActivityTokens(legacy) >= 0);
+});

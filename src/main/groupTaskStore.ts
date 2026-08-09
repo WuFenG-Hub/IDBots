@@ -35,6 +35,12 @@ export interface GroupTask {
   createdAt: string | null;
   updatedAt: string | null;
   closedAt: string | null;
+  /** Owner acceptance rating (1-5 stars), recorded when the task is accepted. */
+  rating: number | null;
+  /** Optional free-text review from the owner alongside the star rating. */
+  ratingComment: string | null;
+  /** datetime('now') of the rating; null for unrated tasks. */
+  ratedAt: string | null;
 }
 
 export interface GroupTaskMember {
@@ -129,6 +135,9 @@ interface GroupTaskRow {
   created_at: string | null;
   updated_at: string | null;
   closed_at: string | null;
+  rating: number | null;
+  rating_comment: string | null;
+  rated_at: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -228,6 +237,9 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     closedAt: row.closed_at ?? null,
+    rating: row.rating ?? null,
+    ratingComment: row.rating_comment ?? null,
+    ratedAt: row.rated_at ?? null,
   };
 }
 
@@ -416,6 +428,32 @@ export class GroupTaskStore {
 
   isTerminalStatus(status: GroupTaskStatus): boolean {
     return TERMINAL_STATUSES.has(status);
+  }
+
+  /**
+   * Record the owner's acceptance rating (1-5 stars + optional comment).
+   * The star rating is mandatory for acceptance and validated here (the DB has
+   * no CHECK because the column was added via ALTER TABLE on existing DBs).
+   * Idempotent: re-rating a task overwrites the previous rating.
+   */
+  updateTaskRating(id: number, rating: number, comment?: string | null): GroupTask {
+    const task = this.getTaskById(id);
+    if (!task) throw new Error(`Group task ${id} not found`);
+    const value = Math.trunc(rating);
+    if (!Number.isFinite(value) || value < 1 || value > 5) {
+      throw new Error(`Group task rating must be an integer between 1 and 5 (got ${rating})`);
+    }
+    const text = (comment ?? '').trim();
+    this.db.run(
+      `UPDATE group_tasks
+       SET rating = ?, rating_comment = ?, rated_at = datetime('now'), updated_at = datetime('now')
+       WHERE id = ?`,
+      [value, text || null, id],
+    );
+    this.saveDb();
+    const updated = this.getTaskById(id);
+    if (!updated) throw new Error(`Group task ${id} not found after rating update`);
+    return updated;
   }
 
   /** Advance the daemon cursor (monotonic: never moves backwards). */

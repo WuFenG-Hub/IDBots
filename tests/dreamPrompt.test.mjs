@@ -11,6 +11,7 @@ let buildDreamPrompt;
 let getDayBoundsMs;
 let DREAM_RETRY_BASE_DELAY_MS;
 let DREAM_RETRY_MAX_DELAY_MS;
+let DREAM_VERSION;
 try {
   ({
     computeDreamStaggerMinute,
@@ -23,6 +24,7 @@ try {
     getDayBoundsMs,
     DREAM_RETRY_BASE_DELAY_MS,
     DREAM_RETRY_MAX_DELAY_MS,
+    DREAM_VERSION,
   } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 } catch {
   ({
@@ -36,6 +38,7 @@ try {
     getDayBoundsMs,
     DREAM_RETRY_BASE_DELAY_MS,
     DREAM_RETRY_MAX_DELAY_MS,
+    DREAM_VERSION,
   } = await import('../dist-electron/libs/dreamPrompt.js'));
 }
 
@@ -119,7 +122,7 @@ test('computeDueDreamDates: a completed run that started mid-day is not final an
 
   // Once re-dreamed after the day ended, the date is final.
   const settled = new Map([
-    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 4 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: DREAM_VERSION }],
   ]);
   const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
   assert.equal(next.dueDates.includes('2026-08-03'), false);
@@ -319,4 +322,79 @@ test('buildDreamPrompt truncates oversized activity within budget', () => {
   assert.ok(user.includes('会话0'), 'first session present');
   assert.ok(user.includes('会话29'), 'last session present');
   assert.ok(user.includes('当天共有 30 段会话'), 'inventory counts all sessions');
+});
+
+test('buildDreamPrompt buckets group task sessions separately and renders acceptance evaluations', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [
+        {
+          sessionId: 'gt1',
+          title: '海报设计群任务',
+          sessionType: 'group_task',
+          peerName: null,
+          isOrder: false,
+          messages: [{ type: 'assistant', content: '我先出三版方案', createdAt: 1 }],
+        },
+        {
+          sessionId: 'h1',
+          title: '日常闲聊',
+          sessionType: 'standard',
+          peerName: null,
+          isOrder: false,
+          messages: [{ type: 'user', content: '你好', createdAt: 2 }],
+        },
+      ],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [{
+        taskId: 1,
+        title: '海报设计',
+        goal: '做一张发布会海报',
+        memberRole: 'worker',
+        rating: 5,
+        ratingComment: '设计很好,下次继续保持',
+      }],
+    },
+  });
+
+  assert.ok(user.includes('## 群任务协作'), 'group task sessions get their own bucket');
+  assert.ok(user.includes('海报设计群任务'));
+  assert.ok(user.includes('## 与人类用户的对话'), 'human bucket still renders for standard sessions');
+  const humanSection = user.split('## 与人类用户的对话')[1]?.split('##')[0] ?? '';
+  assert.ok(!humanSection.includes('海报设计群任务'), 'group task session must not land in the human bucket');
+
+  assert.ok(user.includes('## 群任务验收评价'), 'acceptance evaluation section renders');
+  assert.ok(user.includes('★★★★★(5/5)'), 'star rendering of the rating');
+  assert.ok(user.includes('设计很好,下次继续保持'), 'owner comment present');
+  assert.ok(user.includes('执行(worker)'), 'bot role in the task present');
+  assert.ok(user.includes('群任务验收评价 1 项'), 'inventory counts evaluations');
+  assert.ok(user.includes('"group_tasks"'), 'output contract carries the group_tasks section key');
+  assert.ok(user.includes('高分(4-5 星)'), 'rating-alignment guidance present');
+});
+
+test('buildDreamPrompt renders unrated (automation-closed) group tasks without stars', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [{
+        taskId: 2,
+        title: '数据整理',
+        goal: '整理表',
+        memberRole: 'chair',
+        rating: null,
+        ratingComment: null,
+      }],
+    },
+  });
+  assert.ok(user.includes('## 群任务验收评价'));
+  assert.ok(user.includes('未评分'), 'unrated tasks are marked as such');
+  assert.ok(!user.includes('★'), 'no fabricated stars');
+  assert.ok(user.includes('主持(chair)'));
 });

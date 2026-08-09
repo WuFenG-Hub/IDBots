@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 let buildSelfIdentityBlock;
 let buildValueBoundariesBlock;
+let buildWorkReviewsBlock;
 let buildRecentDailySummariesBlock;
 let buildExperiencePromptBlocksXml;
 let resolveExperienceRecallQuery;
@@ -13,6 +14,7 @@ try {
   ({
     buildSelfIdentityBlock,
     buildValueBoundariesBlock,
+    buildWorkReviewsBlock,
     buildRecentDailySummariesBlock,
     buildExperiencePromptBlocksXml,
     resolveExperienceRecallQuery,
@@ -24,6 +26,7 @@ try {
   ({
     buildSelfIdentityBlock,
     buildValueBoundariesBlock,
+    buildWorkReviewsBlock,
     buildRecentDailySummariesBlock,
     buildExperiencePromptBlocksXml,
     resolveExperienceRecallQuery,
@@ -106,6 +109,30 @@ test('buildExperiencePromptBlocksXml joins non-empty blocks', () => {
   assert.ok(!identityOnly.includes('<value_boundaries>'));
 
   assert.equal(buildExperiencePromptBlocksXml({ summaries: [] }), '');
+});
+
+test('buildWorkReviewsBlock renders past reviews and joins the composed xml', () => {
+  const block = buildWorkReviewsBlock([
+    { text: '工作:海报设计;对象:Boss;评价:warming;依据:5 星好评,设计风格被点名表扬' },
+    { text: '  ' },
+    { text: '工作:数据整理;对象:Boss;评价:cooling;依据:2 星,跑题了' },
+  ]);
+  assert.ok(block.includes('<work_reviews>'));
+  assert.equal((block.match(/<review>/g) || []).length, 2, 'blank entries skipped');
+  assert.ok(block.includes('5 星好评'));
+  assert.ok(block.includes('acceptance ratings'), 'review block names the human rating signal');
+  assert.ok(block.includes('rated highly'), 'reuse guidance present');
+
+  const capped = buildWorkReviewsBlock(Array.from({ length: 8 }, (_, i) => ({ text: `复盘${i}` })), 3);
+  assert.equal((capped.match(/<review>/g) || []).length, 3);
+  assert.equal(buildWorkReviewsBlock([]), '');
+
+  const xml = buildExperiencePromptBlocksXml({
+    summaries: [],
+    workReviews: [{ text: '工作:海报设计;对象:Boss;评价:warming;依据:5 星' }],
+  });
+  assert.ok(xml.includes('<work_reviews>'));
+  assert.ok(xml.includes('工作:海报设计'));
 });
 
 test('resolveExperienceRecallQuery: bare call is warm, keyword goes cold, dates pass through', () => {

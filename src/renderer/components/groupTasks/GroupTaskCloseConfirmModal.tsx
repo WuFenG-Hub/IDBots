@@ -1,13 +1,15 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { ExclamationTriangleIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
+import GroupTaskRatingStars from './GroupTaskRatingStars';
 
 interface GroupTaskCloseConfirmModalProps {
   action: 'done' | 'cancelled';
   taskTitle: string;
   closing: boolean;
   error?: string | null;
-  onConfirm: () => void;
+  /** Accepting ('done') passes the owner's star rating + optional review. */
+  onConfirm: (rating?: number, ratingComment?: string) => void;
   onCancel: () => void;
 }
 
@@ -22,6 +24,17 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
   const isDone = action === 'done';
   const titleKey = isDone ? 'groupTasksAcceptClose' : 'groupTasksCancelTask';
   const confirmKey = isDone ? 'groupTasksAcceptCloseConfirm' : 'groupTasksCancelTaskConfirm';
+  const [rating, setRating] = useState<number | null>(null);
+  const [ratingComment, setRatingComment] = useState('');
+
+  const handleConfirm = () => {
+    if (isDone) {
+      if (rating == null) return;
+      onConfirm(rating, ratingComment.trim() || undefined);
+    } else {
+      onConfirm();
+    }
+  };
 
   return (
     <div
@@ -33,7 +46,9 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
 
       {/* Modal */}
       <div
-        className="relative w-80 rounded-xl shadow-2xl dark:bg-claude-darkSurface bg-white border dark:border-claude-darkBorder border-claude-border p-5"
+        className={`relative rounded-xl shadow-2xl dark:bg-claude-darkSurface bg-white border dark:border-claude-darkBorder border-claude-border p-5 ${
+          isDone ? 'w-96' : 'w-80'
+        }`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-col items-center text-center">
@@ -52,8 +67,41 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
           <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary mb-5">
             {i18nService.t(confirmKey).replace('{title}', taskTitle)}
           </p>
+          {isDone && (
+            <div className="w-full mb-5">
+              <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-3">
+                {i18nService.t('groupTasksRatingHint')}
+              </p>
+              <div className="mb-1 text-left">
+                <span className="text-xs font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('groupTasksRatingLabel')}
+                </span>
+              </div>
+              <div className="flex justify-center mb-4">
+                <GroupTaskRatingStars value={rating} onChange={setRating} />
+              </div>
+              <div className="mb-1 text-left">
+                <span className="text-xs font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('groupTasksRatingCommentLabel')}
+                </span>
+              </div>
+              <textarea
+                value={ratingComment}
+                onChange={(e) => setRatingComment(e.target.value)}
+                rows={3}
+                disabled={closing}
+                className="w-full rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-white px-3 py-2 text-sm text-left dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent/50 resize-none"
+                placeholder={i18nService.t('groupTasksRatingCommentPlaceholder')}
+              />
+            </div>
+          )}
           {error && (
             <p className="text-xs text-red-500 mb-4 w-full text-left">{error}</p>
+          )}
+          {isDone && rating == null && !error && (
+            <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 mb-4 w-full text-left">
+              {i18nService.t('groupTasksRatingRequired')}
+            </p>
           )}
           <div className="flex items-center gap-3 w-full">
             <button
@@ -66,8 +114,8 @@ const GroupTaskCloseConfirmModal: React.FC<GroupTaskCloseConfirmModalProps> = ({
             </button>
             <button
               type="button"
-              onClick={onConfirm}
-              disabled={closing}
+              onClick={handleConfirm}
+              disabled={closing || (isDone && rating == null)}
               className={`flex-1 px-4 py-2 text-sm rounded-lg text-white transition-colors disabled:opacity-50 ${
                 isDone ? 'bg-emerald-500 hover:bg-emerald-600' : 'bg-red-500 hover:bg-red-600'
               }`}

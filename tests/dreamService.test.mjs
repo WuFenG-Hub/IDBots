@@ -31,6 +31,7 @@ function loadDreamServiceModule() {
 }
 
 const { DreamService } = loadDreamServiceModule();
+const { DREAM_VERSION } = require('../dist-electron/main/libs/dreamPrompt.js');
 
 const DAY = '2026-07-30';
 const DAY_START = new Date(2026, 6, 30).getTime();
@@ -294,7 +295,7 @@ test('re-dreaming the same date replaces the day batch and updates identity in p
     const run = dreamStore.getRun(5, DAY);
     assert.equal(run.status, 'completed');
     assert.equal(run.attemptCount, 2);
-    assert.equal(run.dreamVersion, 4, 'run records the current algorithm version');
+    assert.equal(run.dreamVersion, DREAM_VERSION, 'run records the current algorithm version');
   } finally {
     cleanup();
   }
@@ -443,7 +444,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 1, 'at most one repair per bot per night');
     assert.ok(calls[0].includes(DAY), 'newest stale date repairs first');
-    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, 4, 'repaired date now records the current version');
+    assert.equal(dreamStore.getRun(5, DAY).dreamVersion, DREAM_VERSION, 'repaired date now records the current version');
     assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 0, 'older stale date waits');
     const identities = coworkStore.listUserMemories({
       metabotId: 5, scopeKind: 'owner', scopeKey: 'owner:self', usageClass: 'self_identity', status: 'all',
@@ -457,7 +458,7 @@ test('nightly tick repairs stale-version dates one per night, never touching ide
     await service.tick();
     assert.equal(calls.length, 2, 'next night repairs the remaining stale date');
     assert.ok(calls[1].includes('2026-07-29'));
-    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, 4);
+    assert.equal(dreamStore.getRun(5, '2026-07-29').dreamVersion, DREAM_VERSION);
 
     now = new Date(2026, 7, 3, 3, 0);
     await service.tick();

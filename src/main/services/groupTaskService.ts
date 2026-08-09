@@ -546,10 +546,12 @@ export async function deleteGroupTaskDeliverable(taskId: number, deliverableId: 
 /**
  * Close a task via the store state machine (sets closed_at for terminal states).
  * `reason` is accepted for API completeness but not persisted (no column in M1).
+ * When closing as 'done', the owner's acceptance rating (1-5 + optional
+ * comment) is persisted alongside; automated callers (RPC) may omit it.
  */
 export async function closeGroupTask(
   taskId: number,
-  opts: { status: 'done' | 'cancelled'; reason?: string },
+  opts: { status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string },
 ): Promise<GroupTask> {
   if (opts.status !== 'done' && opts.status !== 'cancelled') {
     throw new Error(`closeGroupTask status must be 'done' or 'cancelled'`);
@@ -557,11 +559,17 @@ export async function closeGroupTask(
   if (opts.reason?.trim()) {
     console.log(`[GroupTask] Closing task ${taskId} as ${opts.status}: ${opts.reason.trim()}`);
   }
-  if (orchestrationBridgeGetter) {
-    const bridge = orchestrationBridgeGetter();
-    return opts.status === 'done'
-      ? bridge.acceptGroupTask(taskId).groupTask
-      : bridge.cancelGroupTask(taskId).groupTask;
+  const closed = await (() => {
+    if (orchestrationBridgeGetter) {
+      const bridge = orchestrationBridgeGetter();
+      return opts.status === 'done'
+        ? bridge.acceptGroupTask(taskId).groupTask
+        : bridge.cancelGroupTask(taskId).groupTask;
+    }
+    return getGroupTaskStore().updateTaskStatus(taskId, opts.status);
+  })();
+  if (closed.status === 'done' && opts.rating != null) {
+    return getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
   }
-  return getGroupTaskStore().updateTaskStatus(taskId, opts.status);
+  return closed;
 }
