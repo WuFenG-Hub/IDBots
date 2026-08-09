@@ -414,3 +414,131 @@ test('service: non-timeout worker failure still marks attempt/step/task failed a
     sqliteStore.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Regression: reasoning-only "[reasoning unavailable]" must never become a handoff
+// ---------------------------------------------------------------------------
+
+test('bridge: a session ending with a reasoning-only [reasoning unavailable] turn yields an empty reply (no fake handoff)', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, session } = makeBridgeFixtures('session-thinking-only');
+  runner.startSession = async (sessionId) => {
+    // Worker emits progress text, runs a tool, then ends with reasoning-only.
+    session.messages.push({ id: 'assistant-progress', type: 'assistant', content: 'python 不可用，直接用 Edit 打补丁调试副本：', timestamp: Date.now() });
+    session.messages.push({ id: 'tool-read', type: 'tool_use', content: 'Using tool: Read', timestamp: Date.now() });
+    session.messages.push({ id: 'tool-read-result', type: 'tool_result', content: 'file content', timestamp: Date.now() });
+    session.messages.push({ id: 'assistant-think-1', type: 'assistant', content: '[reasoning unavailable]', metadata: { isThinking: true }, timestamp: Date.now() });
+    session.messages.push({ id: 'assistant-think-2', type: 'assistant', content: '[reasoning unavailable]', metadata: { isThinking: true }, timestamp: Date.now() });
+    queueMicrotask(() => runner.emit('complete', sessionId));
+  };
+
+  const resultPromise = runOrchestratorSkillTurn(runner, store, {
+    systemPrompt: 'system',
+    userMessage: 'fix F2',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 300,
+  });
+
+  await Promise.resolve();
+  t.mock.timers.tick(100); // before the watchdog
+  assert.equal(await resultPromise, '');
+});
+
+test('bridge: a real final text after tool activity and a thinking block is still extracted', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, session } = makeBridgeFixtures('session-real-final');
+  runner.startSession = async (sessionId) => {
+    session.messages.push({ id: 'assistant-progress', type: 'assistant', content: 'checking the code…', timestamp: Date.now() });
+    session.messages.push({ id: 'tool-read', type: 'tool_use', content: 'Using tool: Read', timestamp: Date.now() });
+    session.messages.push({ id: 'tool-read-result', type: 'tool_result', content: 'file content', timestamp: Date.now() });
+    session.messages.push({ id: 'assistant-think', type: 'assistant', content: '[reasoning unavailable]', metadata: { isThinking: true }, timestamp: Date.now() });
+    session.messages.push({ id: 'assistant-final', type: 'assistant', content: 'Final handoff: tests green', timestamp: Date.now() });
+    queueMicrotask(() => runner.emit('complete', sessionId));
+  };
+
+  const resultPromise = runOrchestratorSkillTurn(runner, store, {
+    systemPrompt: 'system',
+    userMessage: 'fix F2',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 300,
+  });
+
+  await Promise.resolve();
+  t.mock.timers.tick(100);
+  assert.equal(await resultPromise, 'Final handoff: tests green');
+});
+
+test('bridge: a late completion that only contains [reasoning unavailable] is reported as empty, not a fake handoff', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { runner, store, session } = makeBridgeFixtures('session-late-thinking-only');
+  const lateCompletions = [];
+
+  const resultPromise = runOrchestratorSkillTurn(runner, store, {
+    systemPrompt: 'system',
+    userMessage: 'build the page',
+    cwd: '/tmp/idbots-wt',
+    skillTurnTimeoutMs: 300,
+    onLateCompletion: (late) => { lateCompletions.push(late); },
+  });
+
+  await Promise.resolve();
+  t.mock.timers.tick(300);
+  await assert.rejects(resultPromise, (error) => {
+    assert.equal(error.name, 'SkillTurnTimeoutError');
+    return true;
+  });
+
+  session.messages.push({ id: 'assistant-think', type: 'assistant', content: '[reasoning unavailable]', metadata: { isThinking: true }, timestamp: Date.now() });
+  runner.emit('complete', 'session-late-thinking-only');
+  assert.deepEqual(lateCompletions, [{ sessionId: 'session-late-thinking-only', replyText: '' }]);
+});
+
+test('service: a [reasoning unavailable] handoff fails the attempt with WORKER_EMPTY_HANDOFF instead of falsely completing', async () => {
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    params.onSessionCreated('worker-session-placeholder');
+    return '[reasoning unavailable]';
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Placeholder handoff',
+      idempotencyKey: 'placeholder-handoff-1',
+    });
+    await waitFor(() => {
+      assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'failed');
+      assert.equal(orchestrationStore.getStep(result.step.id).status, 'failed');
+      assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed');
+    });
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).error, 'WORKER_EMPTY_HANDOFF');
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).result, null);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('service: a late [reasoning unavailable] completion settles to WORKER_EMPTY_HANDOFF, not completed', async () => {
+  let capturedParams;
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    capturedParams = params;
+    params.onSessionCreated('worker-session-late-placeholder');
+    throw new SkillTurnTimeoutError('worker-session-late-placeholder', 300_000);
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Late placeholder handoff',
+      idempotencyKey: 'late-placeholder-1',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'timed_out'));
+
+    await capturedParams.onLateCompletion({ sessionId: 'worker-session-late-placeholder', replyText: '[reasoning unavailable]' });
+    await waitFor(() => {
+      assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'failed');
+      assert.equal(orchestrationStore.getStep(result.step.id).status, 'failed');
+      assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed');
+    });
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).error, 'WORKER_EMPTY_HANDOFF');
+  } finally {
+    sqliteStore.close();
+  }
+});
