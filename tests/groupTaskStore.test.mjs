@@ -450,3 +450,25 @@ test('P0-2: migration adds status columns on existing databases', async () => {
     store.close();
   }
 });
+
+test('P0-4: deliverable verification column + updateDeliverableVerification', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(db, 'group_task_deliverables').includes('verification'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p04', title: 'P0-4', goal: 'verify', chairMetabotId: 1, createdBy: 'user',
+    });
+    const deliverable = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      kind: 'metaapp',
+      uri: 'metaapp://ab'.repeat(32) + 'i0',
+      authorGlobalmetaid: 'gmid-x',
+    });
+    groupTaskStore.updateDeliverableVerification(deliverable.id, JSON.stringify({ verified: true }));
+    const updated = groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(updated.verification, JSON.stringify({ verified: true }));
+  } finally {
+    store.close();
+  }
+});

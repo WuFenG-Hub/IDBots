@@ -3439,6 +3439,21 @@ const startSqliteDaemons = (): void => {
         return message.includes('404') ? 'not_found' : 'unavailable';
       }
     },
+    // P0-4: secondary indexer (metafile-indexer) so deliverable pinids are
+    // verified against MULTIPLE index sources; a 404 on one source with a hit
+    // on another is reported as indexer lag, never a hard failure.
+    readPinSecondaryForVerification: async (pinId) => {
+      try {
+        const response = await fetch(
+          `https://file.metaid.io/metafile-indexer/api/v1/pins/${encodeURIComponent(pinId)}`,
+          { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8_000) },
+        );
+        if (response.ok) return 'found';
+        return response.status === 404 ? 'not_found' : 'unavailable';
+      } catch {
+        return 'unavailable';
+      }
+    },
     // Round-4 attribution: resolve a chain-signature legacy metaid to its
     // GlobalMetaID (manapi /api/info/metaid/{metaid}). Process-lifetime cache;
     // resolved values are also persisted onto the message rows, so restarts do

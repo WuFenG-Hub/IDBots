@@ -61,6 +61,8 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (multi-source outcomes). */
+  verification?: string | null;
 }
 
 export interface GroupTaskDetail extends GroupTask {

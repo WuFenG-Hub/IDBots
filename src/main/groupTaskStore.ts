@@ -73,6 +73,8 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (sources + outcomes) for a deliverable. */
+  verification: string | null;
 }
 
 /** One transcript row for the Group Task chat view (content already decrypted). */
@@ -170,6 +172,7 @@ interface GroupTaskDeliverableRow {
   uri: string | null;
   status: string;
   created_at: string | null;
+  verification: string | null;
 }
 
 interface GroupChatTranscriptRow {
@@ -290,6 +293,7 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     uri: row.uri ?? null,
     status: status === 'accepted' || status === 'rejected' ? status : 'pending',
     createdAt: row.created_at ?? null,
+    verification: row.verification ?? null,
   };
 }
 
@@ -840,6 +844,15 @@ export class GroupTaskStore {
 
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
+    this.saveDb();
+  }
+
+  /** P0-4: persist the multi-source verification report for a deliverable. */
+  updateDeliverableVerification(id: number, verification: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET verification = ? WHERE id = ?',
+      [verification, id],
+    );
     this.saveDb();
   }
 

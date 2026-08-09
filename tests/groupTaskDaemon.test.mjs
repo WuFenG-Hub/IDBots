@@ -208,6 +208,12 @@ const createHarness = async (overrides = {}) => {
       ? { resolveGlobalMetaId: overrides.resolveGlobalMetaId }
       : {}),
     ...(overrides.probeUrl ? { probeUrl: overrides.probeUrl } : { probeUrl: async () => null }),
+    ...(overrides.readPinSecondaryForVerification
+      ? { readPinSecondaryForVerification: overrides.readPinSecondaryForVerification }
+      : {}),
+    ...(overrides.verificationRetryMs != null
+      ? { verificationRetryMs: overrides.verificationRetryMs }
+      : {}),
     emitLog: overrides.emitLog ?? (() => {}),
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
@@ -2203,6 +2209,103 @@ test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit
     assert.equal(members.find((m) => m.metabotId === 3).status, 'standby');
     assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
     assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-4: deliverable verification + deadline reminders
+// ---------------------------------------------------------------------------
+
+test('P0-4: pinid deliverable gets multi-source verification persisted (found+found → verified)', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_1] = 'found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    assert.ok(deliverable, 'deliverable recorded');
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, true);
+    assert.equal(report.sources.length, 2);
+    assert.deepEqual(report.sources.map((s) => s.outcome).sort(), ['found', 'found']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: indexer lag (man not_found, secondary found) persists pending-sync, not a hard failure', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_2] = 'not_found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_2}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, false);
+    assert.equal(report.sources.some((s) => s.outcome === 'not_found'), true);
+    assert.equal(report.sources.some((s) => s.outcome === 'found'), true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: missed delivery deadline posts ONE reminder; delivered members are skipped', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Chair assigns worker 2; worker ACKs with a 5-minute estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：deliver，预计 5 分钟',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
+    h.sends.length = 0;
+
+    // Before deadline: no reminder.
+    h.state.nowMs = startMs + 3 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+
+    // Past deadline: one reminder.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    const reminders = h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content));
+    assert.equal(reminders.length, 1);
+    assert.match(reminders[0].content, /@chair/);
+
+    // No repeat.
+    h.state.nowMs = startMs + 12 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content)).length, 1);
   } finally {
     h.cleanup();
   }

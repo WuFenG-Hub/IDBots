@@ -804,6 +804,7 @@ export class SqliteStore {
     // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
     this.migrateGroupTaskMembersOpenTeamColumns();
     this.migrateGroupTaskMembersStatusColumns();
+    this.migrateGroupTaskDeliverablesVerification();
 
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
@@ -1954,6 +1955,23 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskMembersStatusColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-4): deliverable verification report column (JSON text).
+   * Idempotent PRAGMA-guarded; existing rows stay NULL (unverified).
+   */
+  private migrateGroupTaskDeliverablesVerification(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_deliverables)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('verification')) {
+        this.db.run('ALTER TABLE group_task_deliverables ADD COLUMN verification TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesVerification:', error);
     }
   }
 

@@ -61,6 +61,7 @@ const OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
+const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
@@ -94,6 +95,8 @@ const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
 /** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
 const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
+/** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
+const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -398,6 +401,8 @@ export interface GroupTaskDaemonDeps {
   runSkillTurn?: GroupTaskDaemonRunSkillTurnFn;
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
   readPinForVerification?: GroupTaskDaemonReadPinFn;
+  /** P0-4: secondary indexer (metafile-indexer) for multi-source pin verification. */
+  readPinSecondaryForVerification?: GroupTaskDaemonReadPinFn;
   resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
   probeUrl?: GroupTaskDaemonProbeUrlFn;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
@@ -434,6 +439,8 @@ export interface GroupTaskDaemonDeps {
   memberUnreachableAfterMinutes?: number;
   /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
   ackTimeoutMs?: number;
+  /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
+  verificationRetryMs?: number;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -517,6 +524,10 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const ackTimeoutMs = Math.max(
     30_000,
     Math.trunc(deps.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS),
+  );
+  const verificationRetryMs = Math.max(
+    60_000,
+    Math.trunc(deps.verificationRetryMs ?? DEFAULT_VERIFICATION_RETRY_MS),
   );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
@@ -1236,6 +1247,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const superseded = findSupersededDeliverable(task.id, message.senderGlobalMetaId, candidate);
           if (superseded) {
             store.updateDeliverableUri(superseded.id, candidate.uri, candidate.kind);
+            // P0-4: corrected deliverable is re-verified on the next monitor pass.
+            store.updateDeliverableVerification(superseded.id, '{}');
             verificationNotes.push(
               `✓ 更正优先：交付物 #${superseded.id}（${superseded.kind ?? 'text'}）已就地更新为 ${candidate.uri}`,
             );
@@ -1275,6 +1288,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        // P0-4: persist multi-source on-chain verification for pinid deliverables.
+        if (candidate.kind === 'metaapp' || candidate.kind === 'metafile' || candidate.kind === 'pinid') {
+          const pinid = pinidFromDeliverable(candidate.uri);
+          if (pinid) {
+            try {
+              const report = await verifyPinSources(pinid);
+              store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+              const lagging = report.sources.some((entry) => entry.outcome === 'not_found')
+                && report.sources.some((entry) => entry.outcome === 'found');
+              if (!report.verified) {
+                verificationNotes.push(
+                  lagging
+                    ? `… Host verification: pinid ${pinid.slice(0, 10)}… 未同步（索引延迟，多源不一致），将自动重试`
+                    : `⚠ Host verification: pinid ${pinid.slice(0, 10)}… not found on-chain`,
+                );
+              }
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} verification failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        }
         if (deps.orchestrationBridge) {
           try {
             deps.orchestrationBridge.recordDeliverable({
@@ -1880,6 +1917,148 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /**
+   * P0-4: multi-source on-chain existence check. MAN (local sqlite + manapi)
+   * is always queried via deps.readPinForVerification; the metafile-indexer
+   * is queried when deps.readPinSecondaryForVerification is wired. A 404 from
+   * ONE source with success from another is treated as indexer lag ("待同步"),
+   * never as a hard failure.
+   */
+  const verifyPinSources = async (pinId: string): Promise<{
+    sources: Array<{ source: string; outcome: 'found' | 'not_found' | 'unavailable' }>;
+    verified: boolean;
+    checkedAt: number;
+  }> => {
+    const sources: Array<{ source: string; outcome: 'found' | 'not_found' | 'unavailable' }> = [];
+    const primary = deps.readPinForVerification;
+    if (primary) {
+      try {
+        sources.push({ source: 'man', outcome: await primary(pinId) });
+      } catch {
+        sources.push({ source: 'man', outcome: 'unavailable' });
+      }
+    }
+    if (deps.readPinSecondaryForVerification) {
+      try {
+        sources.push({
+          source: 'metafile-indexer',
+          outcome: await deps.readPinSecondaryForVerification(pinId),
+        });
+      } catch {
+        sources.push({ source: 'metafile-indexer', outcome: 'unavailable' });
+      }
+    }
+    const found = sources.some((entry) => entry.outcome === 'found');
+    const notFound = sources.some((entry) => entry.outcome === 'not_found');
+    // verified only when at least one source found it AND no source hard-404s.
+    const verified = found && !notFound;
+    return { sources, verified, checkedAt: now() };
+  };
+
+  /** P0-4: extract the first 64-hex+i0 pinid from a deliverable uri. */
+  const pinidFromDeliverable = (uri: string | null): string | null => {
+    const match = (uri ?? '').match(/[0-9a-f]{64}i0/i);
+    return match ? match[0].toLowerCase() : null;
+  };
+
+  /**
+   * P0-4: periodic re-verification for deliverables that are NOT verified yet
+   * (indexer lag / 40400). Re-checks every verificationRetryMinutes (default
+   * 10) per deliverable until verified.
+   */
+  const monitorDeliverableVerification = async (task: GroupTask): Promise<void> => {
+    const store = deps.getGroupTaskStore();
+    const deliverables = store.listDeliverables(task.id);
+    const nowMs = now();
+    for (const deliverable of deliverables) {
+      if (deliverable.status === 'rejected') continue;
+      const pinid = pinidFromDeliverable(deliverable.uri);
+      if (!pinid) continue;
+      let report: { verified?: boolean; checkedAt?: number } = {};
+      try {
+        if (deliverable.verification) report = JSON.parse(deliverable.verification);
+      } catch {
+        // corrupt/missing → re-verify
+      }
+      if (report.verified === true) continue;
+      const checkedAt = typeof report.checkedAt === 'number' ? report.checkedAt : 0;
+      if (nowMs - checkedAt < verificationRetryMs) continue;
+      try {
+        const fresh = await verifyPinSources(pinid);
+        store.updateDeliverableVerification(deliverable.id, JSON.stringify(fresh));
+        const lagging = fresh.sources.some((entry) => entry.outcome === 'not_found')
+          && fresh.sources.some((entry) => entry.outcome === 'found');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} ${pinid.slice(0, 10)}… ` +
+          `${fresh.verified ? 'verified on-chain' : (lagging ? 'awaiting indexer sync' : 'not found')}`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} re-verification failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
+  /**
+   * P0-4: delivery deadline reminders. When a worker's [WORKING] ACK carried an
+   * estimated duration and the deadline passes without ANY deliverable from
+   * that member, post ONE reminder addressed to both chair and worker.
+   */
+  const monitorDeliveryDeadlines = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+  ): Promise<void> => {
+    if (task.status !== 'executing') return;
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const nowMs = now();
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+      if (!raw) continue;
+      let entry: { dueAt: number };
+      try {
+        entry = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!entry || typeof entry.dueAt !== 'number' || nowMs < entry.dueAt) continue;
+      const remindedKey = `${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(remindedKey) === '1') continue;
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const hasDeliverable = store.listDeliverables(task.id).some(
+        (deliverable) =>
+          Boolean(gmid)
+          && (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmid
+          && deliverable.status !== 'rejected',
+      );
+      if (hasDeliverable) {
+        sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+        continue;
+      }
+      const chair = members.find((candidate) => candidate.role === 'chair');
+      if (!chair?.metabotId) continue;
+      const text =
+        `@chair ⚠ @${member.name ?? `bot-${member.metabotId}`} estimated delivery ` +
+        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet. ` +
+        `Check status; do not auto-fail.`;
+      try {
+        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        sqlite.set(remindedKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: reminded chair+worker ${member.name ?? member.metabotId} about missed delivery deadline`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder post failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -1960,6 +2139,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
     await monitorAcksAndReminders(task, members);
+    // P0-4: re-verify lagging deliverables + missed delivery deadlines.
+    await monitorDeliverableVerification(task);
+    await monitorDeliveryDeadlines(task, members);
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {

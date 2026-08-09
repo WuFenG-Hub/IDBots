@@ -113,3 +113,39 @@ export function groupTaskMemberStatusLabel(status) {
     default: return 'assigned';
   }
 }
+
+/**
+ * P0-4: summarize a deliverable's stored verification report (JSON string).
+ * Returns one of 'verified' | 'pending-sync' | 'unverified' | 'unknown'.
+ */
+export function deliverableVerificationState(verification) {
+  if (!verification) return 'unknown';
+  let report;
+  try {
+    report = typeof verification === 'string' ? JSON.parse(verification) : verification;
+  } catch {
+    return 'unknown';
+  }
+  const sources = Array.isArray(report?.sources) ? report.sources : [];
+  if (report?.verified === true) return 'verified';
+  if (sources.some((entry) => entry?.outcome === 'not_found')
+    && sources.some((entry) => entry?.outcome === 'found')) {
+    return 'pending-sync';
+  }
+  if (sources.some((entry) => entry?.outcome === 'not_found')) return 'unverified';
+  return 'unverified';
+}
+
+/** Tailwind classes for the verification badge. */
+export function deliverableVerificationBadgeClass(state) {
+  switch (state) {
+    case 'verified':
+      return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
+    case 'pending-sync':
+      return 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
+    case 'unverified':
+      return 'bg-red-500/15 text-red-600 dark:text-red-400';
+    default:
+      return 'bg-gray-500/15 text-gray-600 dark:text-gray-400';
+  }
+}

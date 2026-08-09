@@ -10,6 +10,8 @@ import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import {
   canAcceptGroupTask,
+  deliverableVerificationBadgeClass,
+  deliverableVerificationState,
   formatGroupTaskTime,
   groupTaskMemberStatusBadgeClass,
   groupTaskMemberStatusLabel,
@@ -487,6 +489,18 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       <span className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                         {deliverable.status}
                       </span>
+                      {(() => {
+                        const state = deliverableVerificationState(deliverable.verification);
+                        if (state === 'unknown') return null;
+                        return (
+                          <span
+                            className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${deliverableVerificationBadgeClass(state)}`}
+                            title={deliverable.verification ?? ''}
+                          >
+                            {state === 'verified' ? 'on-chain ✓' : state === 'pending-sync' ? 'pending sync' : 'unverified'}
+                          </span>
+                        );
+                      })()}
                     </div>
                     {deliverable.uri && (
                       /^https?:\/\//i.test(deliverable.uri) ? (

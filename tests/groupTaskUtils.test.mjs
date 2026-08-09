@@ -108,3 +108,19 @@ test('P0-2: member status badge class + label cover all states', async () => {
   }
   assert.equal(typeof groupTaskMemberStatusBadgeClass('unknown'), 'string');
 });
+
+test('P0-4: deliverableVerificationState maps stored reports', async () => {
+  const { deliverableVerificationState, deliverableVerificationBadgeClass } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(deliverableVerificationState(null), 'unknown');
+  assert.equal(deliverableVerificationState('garbage'), 'unknown');
+  assert.equal(deliverableVerificationState(JSON.stringify({ verified: true, sources: [{ outcome: 'found' }] })), 'verified');
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }, { outcome: 'found' }] })),
+    'pending-sync',
+  );
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }] })),
+    'unverified',
+  );
+  assert.equal(typeof deliverableVerificationBadgeClass('verified'), 'string');
+});
