@@ -185,7 +185,7 @@ Current v2 flow stays byte-compatible for existing callers; traffic support is
 ```jsonc
 {
   "address": "...",      // unchanged: first-input owner (the bot)
-  "rawTx": "...",        // unchanged: unsigned user draft
+  "txHex": "...",        // unchanged: unsigned user draft (existing v2 field name — keep it)
   "trafficAccount": {    // NEW, optional
     "accountId": "<globalMetaId>",
     "authSignature": "...",   // identity key signs "traffic-pre:<accountId>:<challengeId>"

@@ -133,7 +133,7 @@ IDBots createPin(payload)
   traffic mode ON:
     1. build unsigned tx draft locally (worker "draft mode") → estimatedBytes
     2. GET /v2/assist/gas/mvc/challenge (existing)
-    3. POST /v2/assist/gas/mvc/pre { address, rawTx, accountAuth }
+    3. POST /v2/assist/gas/mvc/pre { address, txHex, trafficAccount }
         backend: resolve address → TrafficAccount → reserve estimatedBytes
         (insufficient → 4xx; client falls back per toggle policy)
     4. sign user inputs locally
