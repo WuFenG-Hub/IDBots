@@ -1,4 +1,5 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
+import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
 import type { OpenTeamCollabSummary } from './openTeamCollab';
 import type {
@@ -1279,6 +1280,13 @@ interface IElectronAPI {
     update: (id: string, data: Partial<McpServerFormData>) => Promise<{ success: boolean; servers?: McpServerConfig[]; error?: string }>;
     delete: (id: string) => Promise<{ success: boolean; servers?: McpServerConfig[]; error?: string }>;
     setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; servers?: McpServerConfig[]; error?: string }>;
+  };
+  projects: {
+    list: () => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    create: (data: ProjectFormData) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    update: (id: string, data: Partial<ProjectFormData>) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    delete: (id: string) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
   };
   p2p: {
     getStatus: () => Promise<ElectronP2PStatus>;

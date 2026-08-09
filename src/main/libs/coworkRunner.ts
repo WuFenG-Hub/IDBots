@@ -79,6 +79,10 @@ import {
   type MetaIdSearchControl,
 } from './metaIdSearchAgentTools';
 import {
+  buildProjectsAgentTools,
+  type ProjectsControl,
+} from './projectsAgentTools';
+import {
   buildSocialRecallAgentTools,
   type SocialRecallControl,
 } from './socialRecallAgentTools';
@@ -200,6 +204,7 @@ const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
 const READ_ONLY_TOOL_NAMES = new Set([
   'read', 'view', 'ls', 'glob', 'grep', 'list',
   'todowrite', 'taskget', 'tasklist',
+  'project_query',  // local Projects metadata lookup; no side effects
   'websearch', 'webfetch',  // informational only; network policy handled separately
 ]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
@@ -1139,6 +1144,13 @@ export interface CoworkRunnerOptions {
    */
   metaIdSearch?: MetaIdSearchControl;
   /**
+   * When set, every cowork session gets the project_query tool backed by the
+   * local Projects store (Settings > Projects), and a `## Local Projects`
+   * section is injected into the composed system prompt. Disabled projects are
+   * soft-frozen: listed as frozen and never revealed by the tool.
+   */
+  projects?: ProjectsControl;
+  /**
    * When set, every cowork session gets on-chain social post search tools
    * (search_social_posts + social_post_detail + social_post_comments) backed
    * by the metaso-p2p Social Recall API (so.metaid.io/api/social/*). Browser
@@ -1175,6 +1187,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
+  private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
@@ -1219,6 +1232,7 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
+    this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.sdkCronMirror = options?.sdkCronMirror;
     this.localTurnStallTimeoutMs = Math.max(
@@ -3331,6 +3345,37 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Build the `## Local Projects` prompt section listing configured projects.
+   * Defensive: returns null when no ProjectsControl is wired, the store is
+   * empty, or listing fails. Disabled projects are named as frozen so the bot
+   * knows not to touch them; paths stay behind the project_query tool.
+   */
+  private buildProjectsPrompt(): string | null {
+    if (!this.projects) return null;
+    try {
+      const projects = this.projects.list();
+      if (!projects.length) return null;
+      const enabled = projects.filter((project) => project.enabled);
+      const disabled = projects.filter((project) => !project.enabled);
+      const lines = [
+        '## Local Projects',
+        `This machine has ${projects.length} configured project(s). When the user mentions a project by name, call the \`project_query\` tool with the name to fetch its guidelines, source directory and resource paths BEFORE working on it. Treat each project's guidelines as binding instructions for any work on that project.`,
+        '<available_projects>',
+        ...enabled.map((project) => `<project><name>${this.escapeXmlText(project.name)}</name></project>`),
+        '</available_projects>',
+      ];
+      if (disabled.length) {
+        lines.push(
+          `Frozen (disabled) projects — do NOT read, modify or write anything under their paths: ${disabled.map((project) => this.escapeXmlText(project.name)).join(', ')}`
+        );
+      }
+      return lines.join('\n');
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Build MetaBot persona block for system prompt using structured XML.
    * Returns empty string if session has no metabot_id or MetaBot not found (silent fallback).
    * Scoped to current session to avoid persona cross-contamination between MetaBots.
@@ -3534,11 +3579,13 @@ export class CoworkRunner extends EventEmitter {
   ): string {
     const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
     const memoryStrategyPrompt = this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy);
+    const projectsPrompt = this.buildProjectsPrompt();
     const trimmedBasePrompt = baseSystemPrompt?.trim();
     const sections = [
       personaBlock,
       safetyPrompt,
       memoryStrategyPrompt,
+      projectsPrompt,
       trimmedBasePrompt,
       // R4 防护（追加在末尾，避免破坏 DeepSeek 前缀缓存的首段）：
       // SDK 定时任务触发（cron prompt）与用户消息在同一会话队列竞争（8/8 事故根因，
@@ -5607,6 +5654,13 @@ export class CoworkRunner extends EventEmitter {
             metaIdSearch: this.metaIdSearch,
             openBestMatchInBrowser: isBrowserSession,
           })
+        );
+      }
+      // Local Projects query is registered for every cowork surface so any
+      // MetaBot can resolve a project name to its guidelines and paths.
+      if (this.projects) {
+        memoryTools.push(
+          ...buildProjectsAgentTools({ tool, control: this.projects })
         );
       }
       // On-chain social post search (MetaSo social recall) is registered for

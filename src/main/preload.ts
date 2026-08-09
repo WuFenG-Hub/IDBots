@@ -46,6 +46,13 @@ contextBridge.exposeInMainWorld('electron', {
     delete: (id: string) => ipcRenderer.invoke('mcp:delete', id),
     setEnabled: (options: { id: string; enabled: boolean }) => ipcRenderer.invoke('mcp:setEnabled', options),
   },
+  projects: {
+    list: () => ipcRenderer.invoke('projects:list'),
+    create: (data: any) => ipcRenderer.invoke('projects:create', data),
+    update: (id: string, data: any) => ipcRenderer.invoke('projects:update', id, data),
+    delete: (id: string) => ipcRenderer.invoke('projects:delete', id),
+    setEnabled: (options: { id: string; enabled: boolean }) => ipcRenderer.invoke('projects:setEnabled', options),
+  },
   metaapps: {
     list: () => ipcRenderer.invoke('metaapps:list'),
     listCommunity: (input?: { cursor?: string; size?: number }) => ipcRenderer.invoke('metaapps:listCommunity', input),
