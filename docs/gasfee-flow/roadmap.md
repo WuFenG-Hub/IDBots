@@ -30,15 +30,17 @@ by `txSize`, recharge orders (mock payment), and usage-statistics APIs.
 
 **Milestones**:
 
-- `[ ]` M1.1 Spec reviewed & accepted by backend team (we deliver `backend-spec.md`)
-- `[ ]` M1.2 Traffic account + address binding + ledger implemented
-- `[ ]` M1.3 Sponsor flow integration: `pre` resolves traffic account, reserve by
+- `[x]` M1.1 Spec reviewed & accepted by backend team (we deliver `backend-spec.md`)
+- `[x]` M1.2 Traffic account + address binding + ledger implemented
+- `[x]` M1.3 Sponsor flow integration: `pre` resolves traffic account, reserve by
   estimated bytes; `commit` success deducts actual `txSize`; expiry/failure releases
-- `[ ]` M1.4 Recharge orders + mock payment confirm + pricing table API
-- `[ ]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
-- `[ ]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
+- `[x]` M1.4 Recharge orders + mock payment confirm + pricing table API
+- `[x]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
+- `[x]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
   account lookup, manual grants (backend-spec §10)
-- `[ ]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
+- `[~]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
+  (code review passed 2026-08-09; 2 must-fix items returned to backend; 10/13
+  acceptance criteria need the integration env)
 
 **Acceptance**: against `backend-spec.md` acceptance criteria; an IDBots client
 can bind, recharge (mock), spend traffic on real on-chain pins, and read usage.
