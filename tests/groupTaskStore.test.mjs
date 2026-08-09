@@ -472,3 +472,32 @@ test('P0-4: deliverable verification column + updateDeliverableVerification', as
     store.close();
   }
 });
+
+test('P0-5: transition log table + updateTaskStatusWithLog records who/from/to/reason', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    const cols = getColumns(db, 'group_task_transitions');
+    assert.ok(cols.includes('task_id') && cols.includes('from_status') && cols.includes('to_status'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p05', title: 'P0-5', goal: 'transitions', chairMetabotId: 1, createdBy: 'user',
+    });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'executing', { actor: 'metabot:1', reason: 'kickoff' });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'review', { actor: 'Twin Bot', reason: '[STATUS:REVIEW] tag' });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'executing', { actor: 'Twin Bot', reason: 'rework requested' });
+
+    const transitions = groupTaskStore.listTaskTransitions(task.id);
+    assert.equal(transitions.length, 3);
+    assert.deepEqual(
+      transitions.map((t) => [t.fromStatus, t.toStatus, t.actor]),
+      [
+        ['planning', 'executing', 'metabot:1'],
+        ['executing', 'review', 'Twin Bot'],
+        ['review', 'executing', 'Twin Bot'],
+      ],
+    );
+    assert.equal(transitions[2].reason, 'rework requested');
+  } finally {
+    store.close();
+  }
+});

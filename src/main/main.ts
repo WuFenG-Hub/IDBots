@@ -144,6 +144,7 @@ import {
   listGroupTaskSummaries,
   getGroupTask,
   closeGroupTask,
+  reworkGroupTask,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
@@ -8953,6 +8954,21 @@ if (!gotTheLock) {
       return { success: true, task };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to close group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:rework', async (_event, input: { taskId?: number; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:rework', () =>
+        reworkGroupTask(taskId, { reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to rework group task' };
     }
   });
 

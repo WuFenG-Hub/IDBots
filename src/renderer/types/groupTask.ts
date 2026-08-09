@@ -52,6 +52,16 @@ export interface GroupTaskMember {
 }
 
 
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
+}
+
 export interface GroupTaskDeliverable {
   id: number;
   taskId: number;
@@ -68,6 +78,8 @@ export interface GroupTaskDeliverable {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMember[];
   deliverables: GroupTaskDeliverable[];
+  /** P0-5: state-transition audit log. */
+  transitions?: GroupTaskTransition[];
 }
 
 export interface GroupTaskSummary extends GroupTask {

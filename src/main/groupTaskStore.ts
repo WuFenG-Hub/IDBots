@@ -125,6 +125,24 @@ export interface AddGroupTaskDeliverableInput {
   kind?: string | null;
   uri?: string | null;
 }
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
+}
+
+export interface AddGroupTaskTransitionInput {
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor?: string | null;
+  reason?: string | null;
+}
+
 
 interface GroupTaskRow {
   id: number;
@@ -173,6 +191,16 @@ interface GroupTaskDeliverableRow {
   status: string;
   created_at: string | null;
   verification: string | null;
+}
+
+interface GroupTaskTransitionRow {
+  id: number;
+  task_id: number;
+  from_status: string | null;
+  to_status: string;
+  actor: string | null;
+  reason: string | null;
+  created_at: string | null;
 }
 
 interface GroupChatTranscriptRow {
@@ -279,6 +307,20 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
       ? row.status
       : (row.role === 'chair' ? 'working' : 'assigned'),
     statusChangedAt: row.status_changed_at ?? null,
+  };
+}
+
+function rowToGroupTaskTransition(row: GroupTaskTransitionRow): GroupTaskTransition {
+  const from = row.from_status;
+  const to = row.to_status;
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    fromStatus: from && isGroupTaskStatus(from) ? from : null,
+    toStatus: isGroupTaskStatus(to) ? to : 'planning',
+    actor: row.actor ?? null,
+    reason: row.reason ?? null,
+    createdAt: row.created_at ?? null,
   };
 }
 
@@ -736,6 +778,58 @@ export class GroupTaskStore {
   listMembersWithStatus(taskId: number, statuses: GroupTaskMemberStatus[]): GroupTaskMember[] {
     const set = new Set(statuses);
     return this.listMembers(taskId).filter((member) => set.has(member.status));
+  }
+
+  /** P0-5: update a task's status with an optional transition-log entry (actor/reason). */
+  updateTaskStatusWithLog(
+    id: number,
+    nextStatus: GroupTaskStatus,
+    meta?: { actor?: string | null; reason?: string | null },
+  ): GroupTask {
+    const before = this.getTaskById(id);
+    const updated = this.updateTaskStatus(id, nextStatus);
+    if (before && before.status !== updated.status) {
+      this.addTaskTransition({
+        taskId: id,
+        fromStatus: before.status,
+        toStatus: updated.status,
+        actor: meta?.actor ?? null,
+        reason: meta?.reason ?? null,
+      });
+    }
+    return updated;
+  }
+
+  /** P0-5: append a state-transition log row. */
+  addTaskTransition(input: AddGroupTaskTransitionInput): GroupTaskTransition {
+    this.db.run(
+      `INSERT INTO group_task_transitions (task_id, from_status, to_status, actor, reason)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.fromStatus ?? null,
+        input.toStatus,
+        input.actor ?? null,
+        input.reason ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addTaskTransition failed: row ${id} not found after insert`);
+    return rowToGroupTaskTransition(row);
+  }
+
+  /** P0-5: full transition history for one task, oldest first. */
+  listTaskTransitions(taskId: number): GroupTaskTransition[] {
+    const rows = this.getAll<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskTransition);
   }
 
   // --- group_task_deliverables ---

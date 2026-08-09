@@ -777,6 +777,22 @@ export class SqliteStore {
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
+    // P0-5: state-transition audit log (who/from/to/reason + timestamp).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_transitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        actor TEXT,
+        reason TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_transitions_task
+        ON group_task_transitions(task_id, id);
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

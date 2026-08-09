@@ -13,6 +13,7 @@ import {
   type GroupTask,
   type GroupTaskMember,
   type GroupTaskMemberStatus,
+  type GroupTaskTransition,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
   type GroupChatTranscriptMessage,
@@ -46,6 +47,8 @@ export interface CreateGroupTaskOptions {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMember[];
   deliverables: GroupTaskDeliverable[];
+  /** P0-5: state-transition audit log (who/from/to/reason). */
+  transitions: GroupTaskTransition[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
   /**
@@ -452,6 +455,7 @@ export async function getGroupTask(
     ...task,
     members: membersWithSpeakAt,
     deliverables: store.listDeliverables(id),
+    transitions: store.listTaskTransitions(id),
     messages: task.groupId
       ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
@@ -609,6 +613,44 @@ export async function setGroupTaskMemberStatus(
 
   const updated = store.setMemberStatus(task.id, target.metabotId, status, target.globalmetaid);
   if (!updated) throw new Error(`Member not found in group task ${task.id}`);
+  return updated;
+}
+
+/**
+ * P0-5: rework hatch — move a REVIEW task back to EXECUTING so the chair can
+ * assign supplementary work before acceptance. Only the task chair may call it
+ * (actorMetabotId matches the chair, or is omitted and defaults to the chair).
+ * Every transition is recorded in the transition log (C-建议2).
+ */
+export async function reworkGroupTask(
+  taskId: number,
+  opts: { reason?: string; actorMetabotId?: number | null; actorName?: string | null },
+): Promise<GroupTask> {
+  const task = requireTask(taskId);
+  const store = getGroupTaskStore();
+  if (task.status !== 'review') {
+    throw new Error(`Group task ${taskId} is ${task.status}; rework is only available from review`);
+  }
+  const actorId = opts.actorMetabotId ?? null;
+  if (actorId != null && actorId !== task.chairMetabotId) {
+    throw new Error('Only the task chair can rework a group task');
+  }
+  const actor = opts.actorName?.trim()
+    || (actorId != null ? `metabot:${actorId}` : `metabot:${task.chairMetabotId}`);
+  const updated = store.updateTaskStatusWithLog(taskId, 'executing', {
+    actor,
+    reason: opts.reason?.trim() || null,
+  });
+  if (orchestrationBridgeGetter) {
+    try {
+      orchestrationBridgeGetter().syncStatus(taskId);
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Rework status projection failed for task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   return updated;
 }
 

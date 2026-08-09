@@ -671,3 +671,40 @@ test('P0-2: setGroupTaskMemberStatus — self-set, chair-set, unauthorized rejec
     h.cleanup();
   }
 });
+
+test('P0-5: reworkGroupTask moves review→executing with transition log; guards status + actor', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-5 rework', goal: 'rework hatch', memberMetabotIds: [2], createdBy: 'user',
+    });
+    // not in review yet
+    await assert.rejects(
+      groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'early' }),
+      /rework is only available from review/,
+    );
+    // move to executing then review (simulate chair STATUS tags through the store with log)
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'executing', { actor: 'Twin Bot', reason: '[STATUS:EXECUTING] tag' });
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'review', { actor: 'Twin Bot', reason: '[STATUS:REVIEW] tag' });
+
+    // non-chair rejected
+    await assert.rejects(
+      groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 2, reason: 'hijack' }),
+      /Only the task chair/,
+    );
+
+    // chair rework succeeds + logs
+    const updated = await groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'owner asked for fixes' });
+    assert.equal(updated.status, 'executing');
+    const transitions = h.groupTaskStore.listTaskTransitions(detail.id);
+    const rework = transitions.find((t) => t.fromStatus === 'review' && t.toStatus === 'executing');
+    assert.ok(rework, 'review→executing transition logged');
+    assert.equal(rework.reason, 'owner asked for fixes');
+
+    // show carries the transition log
+    const shown = await getGroupTask(detail.id, { view: 'summary' });
+    assert.ok(shown.transitions.length >= 2);
+  } finally {
+    h.cleanup();
+  }
+});

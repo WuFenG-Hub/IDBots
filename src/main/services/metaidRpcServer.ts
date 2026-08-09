@@ -37,6 +37,7 @@ import {
   closeGroupTask,
   deleteGroupTaskDeliverable,
   setGroupTaskMemberStatus,
+  reworkGroupTask,
 } from './groupTaskService';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
@@ -87,6 +88,7 @@ const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
 const GROUP_TASK_SET_MEMBER_STATUS_PATH = '/api/idbots/group-task/set-member-status';
+const GROUP_TASK_REWORK_PATH = '/api/idbots/group-task/rework';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
@@ -1633,6 +1635,61 @@ export function startMetaidRpcServer(
         );
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, member }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_REWORK_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        task_id?: number;
+        reason?: string;
+        actor_metabot_id?: number;
+        actor_metabot_name?: string;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      let actorMetabotId: number | null = null;
+      let actorName: string | null = null;
+      const rawActorId = Number(parsed.actor_metabot_id);
+      if (Number.isInteger(rawActorId) && rawActorId > 0) {
+        actorMetabotId = rawActorId;
+      } else if (typeof parsed.actor_metabot_name === 'string' && parsed.actor_metabot_name.trim()) {
+        actorName = parsed.actor_metabot_name.trim();
+        const resolved = resolveMetabotIdByName(getMetabotStore(), actorName);
+        if (resolved == null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: `MetaBot not found: ${actorName}` }));
+          return;
+        }
+        actorMetabotId = resolved;
+      }
+      try {
+        const task = await reworkGroupTask(taskId, {
+          reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+          actorMetabotId,
+          actorName,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, task }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

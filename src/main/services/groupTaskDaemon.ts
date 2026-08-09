@@ -1349,7 +1349,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const nextStatus = statusMatch[1].toLowerCase() as 'executing' | 'review';
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
-          const updated = store.updateTaskStatus(task.id, nextStatus);
+          // P0-5: status tags also write the transition audit log (actor =
+          // chair metabot id, reason = the STATUS tag).
+          const chairName = (chairMember?.name ?? members.find((m) => m.role === 'chair')?.name ?? 'chair').trim();
+          const updated = store.updateTaskStatusWithLog(task.id, nextStatus, {
+            actor: chairName || `metabot:${chairMember?.metabotId ?? 'chair'}`,
+            reason: `[STATUS:${statusMatch[1].toUpperCase()}] tag`,
+          });
           if (beforeStatus && updated.status !== beforeStatus) {
             try {
               deps.orchestrationBridge?.syncStatus(task.id);
