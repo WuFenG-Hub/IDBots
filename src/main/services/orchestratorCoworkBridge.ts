@@ -78,6 +78,21 @@ export interface RunExistingSessionSkillTurnParams {
   activeSkillIds?: string[];
   disableRemoteServicesPrompt?: boolean;
   onSkillExecutionStart?: () => Promise<void> | void;
+  /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
+  skillTurnTimeoutMs?: number;
+  /**
+   * How long (ms) the bridge keeps watching the session after the watchdog
+   * fires so a still-running worker session can deliver a late result.
+   * Defaults to 12h. Only matters when recovery callbacks are provided and the
+   * session outlives the watchdog.
+   */
+  lateCompletionTimeoutMs?: number;
+  /** Called when the session completes after the watchdog fired (late result). */
+  onLateCompletion?: (late: { sessionId: string; replyText: string }) => void | Promise<void>;
+  /** Called when the session errors or is stopped after the watchdog fired. */
+  onLateTermination?: (late: { sessionId: string; reason: 'error' | 'stopped'; message?: string }) => void | Promise<void>;
+  /** Called when the recovery window expires without any terminal session event. */
+  onRecoveryExpired?: (late: { sessionId: string }) => void | Promise<void>;
 }
 
 export interface RunExistingSessionSkillTurnResult {
@@ -323,8 +338,14 @@ export function runOrchestratorSkillTurn(
 
 /**
  * Run one skill turn inside an existing session. This is used by ordinary
- * private chat so tool_use/tool_result/assistant output stays in the current
- * A2A window instead of opening a separate "[Orchestrator] skill-turn" session.
+ * private chat and by the group-task daemon so tool_use/tool_result/assistant
+ * output stays in the current session window instead of opening a separate
+ * "[Orchestrator] skill-turn" session.
+ *
+ * When recovery callbacks are provided (group-task path), the watchdog no
+ * longer marks the session 'error' on timeout: the caller's promise rejects
+ * with SkillTurnTimeoutError but the session keeps running and a late
+ * completion is delivered via onLateCompletion.
  */
 export function runSkillTurnInExistingSession(
   runner: CoworkRunner,
@@ -345,15 +366,31 @@ export function runSkillTurnInExistingSession(
     return Promise.reject(new Error(`Skill turn session ${sessionId} not found`));
   }
 
+  // Messages already present when the turn starts. The final reply is
+  // assembled from assistant content blocks appended during THIS turn only, so
+  // multi-block streamed replies keep their full body instead of truncating
+  // to the last block (group-task deliveries lost their [DELIVERABLE] prefix
+  // before this fix).
+  const turnStartIndex = (store.getSession(sessionId)?.messages ?? []).length;
+  const skillTurnTimeoutMs = params.skillTurnTimeoutMs ?? SKILL_TURN_TIMEOUT_MS;
+  const lateCompletionTimeoutMs = params.lateCompletionTimeoutMs ?? SKILL_TURN_RECOVERY_WINDOW_MS;
+  const hasRecovery = Boolean(
+    params.onLateCompletion || params.onLateTermination || params.onRecoveryExpired,
+  );
+
   return new Promise<RunExistingSessionSkillTurnResult>((resolve, reject) => {
     let settled = false;
+    let recoveryActive = false;
+    let recoveryWindowTimer: ReturnType<typeof setTimeout> | null = null;
     let skillExecutionStartPromise: Promise<void> | null = null;
     const cleanup = () => {
       runner.off('complete', onComplete);
       runner.off('error', onError);
       runner.off('message', onMessage);
       runner.off('stopped', onStopped);
+      runner.off('stopped', onRecoveryStopped);
       if (timeoutId != null) clearTimeout(timeoutId);
+      if (recoveryWindowTimer != null) clearTimeout(recoveryWindowTimer);
     };
 
     const finish = (result: RunExistingSessionSkillTurnResult) => {
@@ -414,12 +451,28 @@ export function runSkillTurnInExistingSession(
       triggerSkillExecutionStart();
     };
 
-    const onComplete = (sid: string) => {
-      if (sid !== sessionId) return;
-      const sessionWithMessages = store.getSession(sessionId);
-      const messages = sessionWithMessages?.messages ?? [];
-      let lastAssistantContent = '';
+    /**
+     * Assemble the turn's final reply from every non-thinking assistant content
+     * block appended since the turn started. Before this fix only the LAST
+     * assistant message was returned, so a multi-block streamed reply lost its
+     * body except for the final fragment (group messages arrived truncated).
+     */
+    const assembleTurnReply = (): { replyText: string; assistantMessageId: string | null } => {
+      const messages = store.getSession(sessionId)?.messages ?? [];
+      const blocks: string[] = [];
       let lastAssistantMessageId: string | null = null;
+      for (let i = turnStartIndex; i < messages.length; i++) {
+        const message = messages[i];
+        if (message.type !== 'assistant' || !message.content) continue;
+        if (message.metadata?.isThinking === true) continue;
+        if (message.metadata?.privateChatSkillWaitNotice === true) continue;
+        blocks.push(String(message.content));
+        lastAssistantMessageId = message.id;
+      }
+      if (blocks.length > 0) {
+        return { replyText: blocks.join('\n\n').trim(), assistantMessageId: lastAssistantMessageId };
+      }
+      // Fallback (no in-turn content observed): last assistant message.
       for (let i = messages.length - 1; i >= 0; i--) {
         if (
           messages[i].type === 'assistant'
@@ -427,31 +480,116 @@ export function runSkillTurnInExistingSession(
           && messages[i].metadata?.privateChatSkillWaitNotice !== true
           && messages[i].metadata?.isThinking !== true
         ) {
-          lastAssistantContent = String(messages[i].content).trim();
-          lastAssistantMessageId = messages[i].id;
-          break;
+          return {
+            replyText: String(messages[i].content).trim(),
+            assistantMessageId: messages[i].id,
+          };
         }
       }
-      finishAfterSkillStartNotice({
-        replyText: lastAssistantContent || '',
-        assistantMessageId: lastAssistantMessageId,
-      });
+      return { replyText: '', assistantMessageId: null };
+    };
+
+    const reportLateCompletion = (replyText: string) => {
+      cleanup();
+      if (!params.onLateCompletion) return;
+      const report = () => params.onLateCompletion!({ sessionId, replyText });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Late skill-turn completion callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Late skill-turn completion callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const reportLateTermination = (reason: 'error' | 'stopped', message?: string) => {
+      cleanup();
+      if (!params.onLateTermination) return;
+      const report = () => params.onLateTermination!({ sessionId, reason, message });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Late skill-turn termination callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Late skill-turn termination callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const reportRecoveryExpired = () => {
+      cleanup();
+      if (!params.onRecoveryExpired) return;
+      const report = () => params.onRecoveryExpired!({ sessionId });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Skill-turn recovery expiry callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Skill-turn recovery expiry callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const onRecoveryStopped = (sid: string) => {
+      if (sid !== sessionId || !recoveryActive) return;
+      reportLateTermination('stopped');
+    };
+
+    const enterRecovery = () => {
+      recoveryActive = true;
+      // Keep listening for a late 'complete'/'error' — the worker session is
+      // still alive inside CoworkRunner and its eventual result is recoverable.
+      runner.on('stopped', onRecoveryStopped);
+      recoveryWindowTimer = setTimeout(() => {
+        recoveryWindowTimer = null;
+        reportRecoveryExpired();
+      }, lateCompletionTimeoutMs);
+    };
+
+    const onComplete = (sid: string) => {
+      if (sid !== sessionId) return;
+      const { replyText, assistantMessageId } = assembleTurnReply();
+      if (recoveryActive) {
+        // Watchdog already fired: the session finished late. Hand the result to
+        // the recovery callback so the deliverable is not lost.
+        reportLateCompletion(replyText);
+        return;
+      }
+      finishAfterSkillStartNotice({ replyText, assistantMessageId });
     };
 
     const onError = (sid: string, errorMessage: string) => {
       if (sid !== sessionId) return;
+      if (recoveryActive) {
+        reportLateTermination('error', errorMessage);
+        return;
+      }
       fail(errorMessage);
     };
 
     const onStopped = (sid: string) => {
       if (sid !== sessionId) return;
+      if (recoveryActive) {
+        reportLateTermination('stopped');
+        return;
+      }
       cancelWithoutSessionError('Private chat skill turn stopped before assistant output so queued A2A guidance can be applied');
     };
 
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
-      fail(`Skill turn timed out after ${SKILL_TURN_TIMEOUT_MS / 1000}s`);
-    }, SKILL_TURN_TIMEOUT_MS);
+      if (settled) return;
+      if (hasRecovery) {
+        // The caller's promise gives up at the watchdog, but the session itself
+        // is NOT stopped and keeps running. Park the turn in recovery mode
+        // instead of failing the session: a late completion must still be able
+        // to deliver its result (see onLateCompletion). This replaces the old
+        // behavior that marked the session 'error' and lost late deliveries.
+        settled = true;
+        enterRecovery();
+        reject(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+        return;
+      }
+      fail(`Skill turn timed out after ${skillTurnTimeoutMs / 1000}s`);
+    }, skillTurnTimeoutMs);
 
     runner.on('complete', onComplete);
     runner.on('error', onError);

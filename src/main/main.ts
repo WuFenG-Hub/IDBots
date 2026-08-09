@@ -3425,6 +3425,10 @@ const startSqliteDaemons = (): void => {
         userMessage: params.userMessage,
         cwd,
         activeSkillIds: params.activeSkillIds,
+        skillTurnTimeoutMs: params.skillTurnTimeoutMs,
+        onLateCompletion: params.onLateCompletion,
+        onLateTermination: params.onLateTermination,
+        onRecoveryExpired: params.onRecoveryExpired,
       });
     },
     emitTaskEvent: (payload) => {

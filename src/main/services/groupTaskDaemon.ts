@@ -26,6 +26,7 @@ import { isMentioned } from './groupChatMentionUtils';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
+import { SkillTurnTimeoutError } from './orchestratorCoworkBridge';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -74,6 +75,17 @@ const GROUP_COGNITION_BLOCK_MAX_CHARS = 3000;
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_WORKER_COOLDOWN_MS = 20_000;
 const DEFAULT_CHAIR_COOLDOWN_MS = 10_000;
+/**
+ * Group-task skill turns are deep multi-step research sessions that routinely
+ * exceed the 300s private-chat watchdog (observed 5-11 min turns). Default
+ * group-turn watchdog is 15 minutes; deps.groupSkillTurnTimeoutMs can override.
+ */
+const DEFAULT_GROUP_SKILL_TURN_TIMEOUT_MS = 900_000;
+/**
+ * After the group-turn watchdog fires, wait up to this long for the still
+ * running worker session to deliver its late result before failing the turn.
+ */
+const DEFAULT_GROUP_SKILL_TURN_LATE_CAP_MS = 10 * 60 * 1000;
 /**
  * P2-7 (round 2): window (ms) in which ANY chair-bot message posted by the
  * Twin side suppresses daemon-driven chair AUTO replies (deliverable /
@@ -309,6 +321,10 @@ export type GroupTaskDaemonRunSkillTurnFn = (params: {
   systemPrompt: string;
   userMessage: string;
   activeSkillIds: string[];
+  skillTurnTimeoutMs?: number;
+  onLateCompletion?: (late: { sessionId: string; replyText: string }) => void | Promise<void>;
+  onLateTermination?: (late: { sessionId: string; reason: 'error' | 'stopped'; message?: string }) => void | Promise<void>;
+  onRecoveryExpired?: (late: { sessionId: string }) => void | Promise<void>;
 }) => Promise<{ replyText: string; assistantMessageId?: string | null }>;
 
 export type GroupTaskDaemonTaskEvent =
@@ -387,6 +403,10 @@ export interface GroupTaskDaemonDeps {
   postGroupTaskMessage: GroupTaskDaemonSendFn;
   getChatSkillsRoutingPrompt?: GroupTaskDaemonSkillRoutingFn;
   runSkillTurn?: GroupTaskDaemonRunSkillTurnFn;
+  /** Watchdog override for group skill turns (ms). Defaults to 15 min. */
+  groupSkillTurnTimeoutMs?: number;
+  /** Cap for waiting a late result after the group-turn watchdog fires (ms). Defaults to 10 min. */
+  groupSkillTurnLateCapMs?: number;
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
   readPinForVerification?: GroupTaskDaemonReadPinFn;
   resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
@@ -1534,18 +1554,48 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         'After using Read/Bash to run a skill, reply concisely in the group. Do not paste full skill logs.',
       ].join('\n');
       let skillTurnResult;
+      const groupSkillTurnTimeoutMs = deps.groupSkillTurnTimeoutMs ?? DEFAULT_GROUP_SKILL_TURN_TIMEOUT_MS;
+      const lateCapMs = deps.groupSkillTurnLateCapMs ?? DEFAULT_GROUP_SKILL_TURN_LATE_CAP_MS;
+      let resolveLate: ((replyText: string) => void) | null = null;
+      const lateReply = new Promise<string>((resolve) => {
+        resolveLate = resolve;
+      });
+      let turnTimedOut = false;
       try {
         skillTurnResult = await deps.runSkillTurn!({
           sessionId: session.id,
           systemPrompt: skillSystemPrompt,
           userMessage,
           activeSkillIds: routing.activeSkillIds,
+          skillTurnTimeoutMs: groupSkillTurnTimeoutMs,
+          onLateCompletion: (late) => resolveLate?.(late.replyText),
+          onLateTermination: () => resolveLate?.(''),
+          onRecoveryExpired: () => resolveLate?.(''),
         });
+        reply = (skillTurnResult.replyText ?? '').trim();
       } catch (error) {
-        failCanonicalAttempt(error);
-        throw error;
+        if (error instanceof SkillTurnTimeoutError) {
+          // The worker session is still running: wait (bounded) for its late
+          // result instead of failing the message and re-pushing the prompt on
+          // the next retry (which duplicated prompts into the same session).
+          turnTimedOut = true;
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: bot ${bot.id} turn exceeded ` +
+            `${groupSkillTurnTimeoutMs / 1000}s; awaiting late completion (cap ${lateCapMs / 1000}s)`,
+          );
+          reply = (await Promise.race([
+            lateReply,
+            new Promise<string>((resolve) => setTimeout(() => resolve(''), lateCapMs)),
+          ])).trim();
+        } else {
+          failCanonicalAttempt(error);
+          throw error;
+        }
       }
-      reply = (skillTurnResult.replyText ?? '').trim();
+      if (!reply && turnTimedOut) {
+        failCanonicalAttempt('SKILL_TURN_TIMEOUT_NO_LATE_REPLY');
+        return;
+      }
       // The runner appends the assistant message to the session itself.
     } else {
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;

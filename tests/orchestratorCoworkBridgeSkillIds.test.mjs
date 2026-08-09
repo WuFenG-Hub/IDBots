@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   runOrchestratorSkillTurn,
   runSkillTurnInExistingSession,
-} = require('../dist-electron/services/orchestratorCoworkBridge.js');
+} = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 
 test('runOrchestratorSkillTurn persists active skill ids and disables remote services prompt', async () => {
   const runner = new EventEmitter();
