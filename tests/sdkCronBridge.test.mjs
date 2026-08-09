@@ -58,3 +58,70 @@ test('buildCronCreateInstruction escapes prompt quotes for JSON-safe passing', (
   // JSON.stringify 形式:双引号包裹 + 转义
   assert.ok(instruction.includes('"含 \\"引号\\" 与 \\\\ 反斜杠"'));
 });
+
+test('buildCronCreateUiInstruction embeds cron/prompt/recurring and forces durable', () => {
+  const { buildCronCreateUiInstruction } = getBridgeModule();
+  const instruction = buildCronCreateUiInstruction({
+    cronExpression: '*/15 * * * *',
+    prompt: '[SDK_CRON:abc123]\n每 15 分钟巡检',
+    recurring: true,
+  });
+  assert.ok(instruction.includes('*/15 * * * *'));
+  assert.ok(instruction.includes('[SDK_CRON:abc123]'));
+  assert.ok(instruction.includes('每 15 分钟巡检'));
+  assert.ok(instruction.includes('recurring: true'));
+  assert.ok(instruction.includes('durable: true'));
+  // 区分于迁移桥：话术为「新建定时任务」
+  assert.ok(instruction.includes('新建定时任务'));
+});
+
+test('buildCronRunNowInstruction wraps the prompt as an immediate execution request', () => {
+  const { buildCronRunNowInstruction } = getBridgeModule();
+  const instruction = buildCronRunNowInstruction('检查收件箱并总结未读邮件');
+  assert.ok(instruction.includes('立即执行'));
+  assert.ok(instruction.includes('检查收件箱并总结未读邮件'));
+  // 不应触发创建/删除 cron 工具
+  assert.ok(instruction.includes('不要调用 CronCreate'));
+});
+
+test('buildCronMarker / extractCronNonce round-trip and survive truncation', () => {
+  const { buildCronMarker, extractCronNonce, buildCronPromptWithMarker } = getBridgeModule();
+  const marker = buildCronMarker('nonce-xyz');
+  assert.equal(marker, '[SDK_CRON:nonce-xyz]');
+  assert.equal(extractCronNonce(marker), 'nonce-xyz');
+  assert.equal(extractCronNonce('no marker here'), null);
+
+  // 标记前置：即使 prompt 超长被截断，标记仍保留在前部。
+  const longPrompt = buildCronPromptWithMarker(marker, 'x'.repeat(2000));
+  assert.ok(longPrompt.startsWith('[SDK_CRON:nonce-xyz]'));
+  assert.equal(extractCronNonce(longPrompt), 'nonce-xyz');
+});
+
+test('computeSdkCronFromSpec maps each schedule mode to the right cron expression', () => {
+  const { computeSdkCronFromSpec } = getBridgeModule();
+  const base = { name: 'n', prompt: 'p', metabotId: null };
+
+  // daily 09:30 -> 30 9 * * * (recurring)
+  const daily = computeSdkCronFromSpec({ ...base, mode: 'daily', date: '', time: '09:30', weekday: 1, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '' });
+  assert.deepEqual(daily, { expression: '30 9 * * *', recurring: true });
+
+  // weekly Friday 18:00 -> 0 18 * * 5
+  const weekly = computeSdkCronFromSpec({ ...base, mode: 'weekly', date: '', time: '18:00', weekday: 5, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '' });
+  assert.deepEqual(weekly, { expression: '0 18 * * 5', recurring: true });
+
+  // interval 30 min -> */30 * * * *
+  const interval = computeSdkCronFromSpec({ ...base, mode: 'interval', date: '', time: '09:00', weekday: 1, monthDay: 1, intervalValue: 30, intervalUnit: 'minutes', cronExpression: '' });
+  assert.deepEqual(interval, { expression: '*/30 * * * *', recurring: true });
+
+  // once 2026-12-25 10:00 -> 0 10 25 12 * (one-shot, recurring=false)
+  const once = computeSdkCronFromSpec({ ...base, mode: 'once', date: '2026-12-25', time: '10:00', weekday: 1, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '' });
+  assert.deepEqual(once, { expression: '0 10 25 12 *', recurring: false });
+
+  // cron passthrough
+  const cron = computeSdkCronFromSpec({ ...base, mode: 'cron', date: '', time: '09:00', weekday: 1, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '0 9 * * 1-5' });
+  assert.deepEqual(cron, { expression: '0 9 * * 1-5', recurring: true });
+
+  // malformed cron -> null
+  const bad = computeSdkCronFromSpec({ ...base, mode: 'cron', date: '', time: '09:00', weekday: 1, monthDay: 1, intervalValue: 5, intervalUnit: 'minutes', cronExpression: '0 9 * *' });
+  assert.equal(bad.expression, null);
+});

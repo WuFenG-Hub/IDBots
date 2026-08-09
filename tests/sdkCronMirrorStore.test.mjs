@@ -201,3 +201,79 @@ test('mirror table and migration columns coexist in the same sqlite', async () =
     cleanup();
   }
 });
+
+test('ensureToggleColumns adds enabled/schedule_spec/disabled_at idempotently', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const { SdkCronMirrorStore } = getMirrorStoreModule();
+  try {
+    const store = new SdkCronMirrorStore(db, () => {});
+    const columns = getColumns(db, 'sdk_cron_mirror');
+    assert.ok(columns.includes('enabled'));
+    assert.ok(columns.includes('schedule_spec'));
+    assert.ok(columns.includes('disabled_at'));
+    // 重新构造 store（模拟重启）不应报错，列仍存在。
+    const store2 = new SdkCronMirrorStore(db, () => {});
+    store2.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    assert.equal(store2.getById('c1').enabled, true);
+    assert.equal(store2.getById('c1').scheduleSpec, null);
+    assert.equal(store2.getById('c1').disabledAt, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('setEnabled toggles enabled flag + disabledAt; listEnabled filters disabled', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const { SdkCronMirrorStore } = getMirrorStoreModule();
+  try {
+    const store = new SdkCronMirrorStore(db, () => {});
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    store.upsert({ id: 'c2', schedule: '0 5 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+
+    // 停用 c1
+    const disabled = store.setEnabled('c1', false);
+    assert.equal(disabled.enabled, false);
+    assert.ok(disabled.disabledAt);
+
+    // listEnabled 只返回启用的（c2）
+    const enabled = store.listEnabled();
+    assert.equal(enabled.length, 1);
+    assert.equal(enabled[0].id, 'c2');
+
+    // 重新启用 c1：disabledAt 清空
+    const reenabled = store.setEnabled('c1', true);
+    assert.equal(reenabled.enabled, true);
+    assert.equal(reenabled.disabledAt, null);
+    assert.equal(store.listEnabled().length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test('setScheduleSpec persists spec JSON and round-trips via getById', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  const { SdkCronMirrorStore } = getMirrorStoreModule();
+  try {
+    const store = new SdkCronMirrorStore(db, () => {});
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p' }, 'sess-a', 'stop_hook');
+    const spec = {
+      mode: 'weekly', date: '', time: '08:00', weekday: 5, monthDay: 1,
+      intervalValue: 5, intervalUnit: 'minutes', cronExpression: '',
+      prompt: 'weekly report', name: '周五报告', metabotId: 7,
+    };
+    const updated = store.setScheduleSpec('c1', spec);
+    assert.deepEqual(updated.scheduleSpec, spec);
+
+    // spec 在重新读取后保持一致。
+    const reloaded = store.getById('c1');
+    assert.equal(reloaded.scheduleSpec.mode, 'weekly');
+    assert.equal(reloaded.scheduleSpec.name, '周五报告');
+    assert.equal(reloaded.scheduleSpec.metabotId, 7);
+
+    // upsert（重新采集）不覆盖已存的 spec。
+    store.upsert({ id: 'c1', schedule: '0 4 * * *', recurring: true, prompt: 'p updated' }, 'sess-a', 'file_scan');
+    assert.equal(store.getById('c1').scheduleSpec.name, '周五报告');
+  } finally {
+    cleanup();
+  }
+});
