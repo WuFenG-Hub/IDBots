@@ -106,6 +106,24 @@ export type ScheduledTaskViewMode = 'list' | 'create' | 'edit' | 'detail';
 
 // ==================== SDK 定时任务镜像（方案 C R1/R2） ====================
 
+/**
+ * 宿主侧保存的「完整调度快照」——用于停用后重建（开关 = 删→重建）。
+ * 由新建/编辑表单生成；会话采集/文件扫描补全的镜像此字段为 null（只读，不可开关/编辑）。
+ */
+export interface SdkCronScheduleSpec {
+  mode: 'once' | 'interval' | 'daily' | 'weekly' | 'monthly' | 'cron';
+  date: string;
+  time: string;
+  weekday: number;
+  monthDay: number;
+  intervalValue: number;
+  intervalUnit: 'minutes' | 'hours' | 'days';
+  cronExpression: string;
+  prompt: string;
+  name: string;
+  metabotId: number | null;
+}
+
 /** SDK cron 在宿主侧的展示镜像（只展示不调度）。 */
 export interface SdkCronMirror {
   id: string;
@@ -130,6 +148,12 @@ export interface SdkCronMirror {
   /** IPC 增强字段：所属会话标题/是否活跃。 */
   sessionTitle?: string | null;
   sessionActive?: boolean;
+  /** 宿主侧开关状态（停用=镜像保留但 SDK 侧已删除，重建后恢复）。默认 true。 */
+  enabled: boolean;
+  /** 完整调度快照（有则可重建/可编辑；会话采集的只读镜像为 null）。 */
+  scheduleSpec: SdkCronScheduleSpec | null;
+  /** 停用时间（用于提示「重新启用会重置 7 天计时」）。 */
+  disabledAt: string | null;
 }
 
 /** R2 迁移计划项（IPC scheduledTask:migratePlan 返回）。 */
