@@ -10,6 +10,8 @@ import TaskDetail from './TaskDetail';
 import AllRunsHistory from './AllRunsHistory';
 import DeleteConfirmModal from './DeleteConfirmModal';
 import SdkCronMirrorList from './SdkCronMirrorList';
+import SdkCronTaskForm from './SdkCronTaskForm';
+import type { SdkCronMirror } from '../../types/scheduledTask';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -38,6 +40,9 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
   const selectedTask = selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) ?? null : null;
   const [activeTab, setActiveTab] = useState<TabType>('tasks');
   const [deleteTaskInfo, setDeleteTaskInfo] = useState<{ id: string; name: string } | null>(null);
+  // SDK 定时任务的列表/新建/编辑子视图（独立于旧任务 viewMode）。
+  const [sdkView, setSdkView] = useState<'list' | 'create' | 'edit'>('list');
+  const [editingMirror, setEditingMirror] = useState<SdkCronMirror | null>(null);
 
   const handleRequestDelete = useCallback((taskId: string, taskName: string) => {
     setDeleteTaskInfo({ id: taskId, name: taskName });
@@ -73,11 +78,31 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
     if (tab === 'tasks') {
       dispatch(selectTask(null));
       dispatch(setViewMode('list'));
+    } else if (tab === 'sdk') {
+      // 切到 SDK tab 时回到列表态（退出新建/编辑子视图）。
+      setSdkView('list');
+      setEditingMirror(null);
     }
   };
 
-  // Show tabs only in list view (not in create/edit/detail sub-views)
-  const showTabs = viewMode === 'list' && !selectedTaskId;
+  const handleSdkEdit = (m: SdkCronMirror) => {
+    setEditingMirror(m);
+    setSdkView('edit');
+  };
+
+  const handleSdkBackToList = () => {
+    setSdkView('list');
+    setEditingMirror(null);
+  };
+
+  // Show tabs only in list view (not in create/edit/detail sub-views, including sdk sub-views).
+  const showTabs =
+    viewMode === 'list' &&
+    !selectedTaskId &&
+    !(activeTab === 'sdk' && (sdkView === 'create' || sdkView === 'edit'));
+
+  // 任意子视图（旧任务 detail/edit/create，或 SDK 新建/编辑）都显示返回按钮。
+  const showBackButton = !showTabs;
 
   return (
     <div className="flex flex-col h-full">
@@ -103,9 +128,12 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
               {updateBadge}
             </div>
           )}
-          {viewMode !== 'list' && (
+          {showBackButton && (
             <button
-              onClick={handleBackToList}
+              onClick={() => {
+                if (activeTab === 'sdk') handleSdkBackToList();
+                else handleBackToList();
+              }}
               className="non-draggable p-2 rounded-lg dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary transition-colors"
               aria-label={i18nService.t('back')}
             >
@@ -146,7 +174,7 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
                   : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:dark:text-claude-darkText hover:text-claude-text'
               }`}
             >
-              定时任务
+              {i18nService.t('scheduledTasksSdkTitle')}
               {activeTab === 'sdk' && (
                 <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-brand rounded-t" />
               )}
@@ -175,6 +203,18 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
               {i18nService.t('scheduledTasksNewTask')}
             </button>
           )}
+          {activeTab === 'sdk' && (
+            <button
+              type="button"
+              onClick={() => {
+                setEditingMirror(null);
+                setSdkView('create');
+              }}
+              className="btn-idchat-primary-filled px-3 py-1 text-sm font-medium"
+            >
+              {i18nService.t('scheduledTasksNewTask')}
+            </button>
+          )}
         </div>
       )}
 
@@ -183,7 +223,14 @@ const ScheduledTasksView: React.FC<ScheduledTasksViewProps> = ({
         {showTabs && activeTab === 'history' ? (
           <AllRunsHistory />
         ) : showTabs && activeTab === 'sdk' ? (
-          <SdkCronMirrorList />
+          <SdkCronMirrorList onEdit={handleSdkEdit} />
+        ) : activeTab === 'sdk' && (sdkView === 'create' || sdkView === 'edit') ? (
+          <SdkCronTaskForm
+            mode={sdkView === 'edit' ? 'edit' : 'create'}
+            mirror={sdkView === 'edit' ? editingMirror ?? undefined : undefined}
+            onCancel={handleSdkBackToList}
+            onSaved={handleSdkBackToList}
+          />
         ) : (
           <>
             {viewMode === 'list' && <TaskList onRequestDelete={handleRequestDelete} />}

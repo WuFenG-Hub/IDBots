@@ -1,16 +1,24 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { scheduledTaskService } from '../../services/scheduledTask';
+import { i18nService } from '../../services/i18n';
 import type { SdkCronMirror } from '../../types/scheduledTask';
-import { ClockIcon, TrashIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { EllipsisVerticalIcon, ClockIcon } from '@heroicons/react/24/outline';
 import DeleteConfirmModal from './DeleteConfirmModal';
+import { formatSdkCronScheduleLabel } from './sdkCronSchedule';
 
 /**
- * R1 展示层：SDK cron 宿主侧镜像列表（方案 C）。
- * - 只读镜像（宿主不参与调度，避免双触发）；数据源 = Stop hook 采集 + durable 文件扫描。
- * - 删除/停用走管理桥：所属会话活跃时注入指令由 bot 执行 CronDelete；否则提示用户到会话内操作。
- * - R2 入口：老 scheduledTaskStore 任务一键迁移（执行前确认；幂等）。
+ * 新版「定时任务」tab：基于 SDK 底层 cron 能力，UI/语义/能力对标旧版「旧任务」tab。
+ *
+ * 与旧版 TaskList 对齐的点：
+ * - 列：标题（+ 徽标）｜计划于（人类可读语义）｜状态（开关 toggle）｜更多菜单（立即运行/编辑/删除）
+ * - 开关 = 删→重建：停用经桥 CronDelete + 镜像 enabled=0（保留 spec）；启用用 spec 重建
+ * - 更多菜单三项：立即运行 / 编辑 / 删除
+ *
+ * 与旧版的差异（符合 SDK 实际）：
+ * - 只读镜像（无 scheduleSpec，即会话采集/迁移来源）不可开关/编辑，仅可删除——降级保护
+ * - 任务 7 天后自动过期（SDK 限制），列表顶部统一提示
  */
 const SEVEN_DAY_MARKER = '[SDK_7DAY_LIMITED]';
 
@@ -26,7 +34,12 @@ interface MigrationPlanInfo {
   hasMigratable: boolean;
 }
 
-const SdkCronMirrorList: React.FC = () => {
+interface SdkCronMirrorListProps {
+  /** 进入编辑表单（由父视图控制 viewMode）。 */
+  onEdit?: (mirror: SdkCronMirror) => void;
+}
+
+const SdkCronMirrorList: React.FC<SdkCronMirrorListProps> = ({ onEdit }) => {
   const mirrors = useSelector((state: RootState) => state.scheduledTask.sdkMirrors);
   const loading = useSelector((state: RootState) => state.scheduledTask.sdkMirrorsLoading);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -65,7 +78,7 @@ const SdkCronMirrorList: React.FC = () => {
     } finally {
       setDeletingId(null);
     }
-  }, [deleteTarget]);
+  }, [deleteTarget, showToast]);
 
   const handlePlanMigration = async () => {
     if (migrating) return;
@@ -115,7 +128,7 @@ const SdkCronMirrorList: React.FC = () => {
       {/* 工具行：说明 + 迁移入口 */}
       <div className="flex items-center justify-between gap-3 px-4 py-2 border-b dark:border-claude-darkBorder/50 border-claude-border/50">
         <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
-          SDK 定时任务镜像（只展示，不参与本机调度）
+          {i18nService.t('scheduledTasksSdkHint')}
         </p>
         <button
           type="button"
@@ -142,7 +155,7 @@ const SdkCronMirrorList: React.FC = () => {
         </div>
       )}
 
-      {/* R4 提示 */}
+      {/* 会话内任务提示 */}
       {sessionOnlyCount > 0 && (
         <div className="mx-4 mt-2 px-3 py-2 rounded-md text-xs dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50 dark:text-claude-darkTextSecondary text-claude-textSecondary">
           ⚠️ 会话内任务在宿主进程退出后失效，且 7 天自动过期；高频周期任务可能抢占用户消息，建议低频 + 持久（durable）。
@@ -153,95 +166,44 @@ const SdkCronMirrorList: React.FC = () => {
       <div className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="flex items-center justify-center py-16 text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            加载中…
+            {i18nService.t('loading')}
           </div>
         ) : activeMirrors.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 px-6">
             <ClockIcon className="h-12 w-12 dark:text-claude-darkTextSecondary/40 text-claude-textSecondary/40 mb-4" />
             <p className="text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
-              暂无 SDK 定时任务
+              {i18nService.t('scheduledTasksEmptyState')}
             </p>
             <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70 text-center">
-              会话内使用 CronCreate 创建的任务会显示在这里；durable 任务跨重启保留
+              {i18nService.t('scheduledTasksSdkEmptyHint')}
             </p>
           </div>
         ) : (
           <div>
-            {/* 列头 */}
-            <div className="grid grid-cols-[1fr_120px_90px_150px_1fr_64px] items-center gap-3 px-4 py-2 border-b dark:border-claude-darkBorder/50 border-claude-border/50">
-              {['名称', '表达式', '类型', '所属会话', '来源', ''].map((col) => (
-                <div key={col} className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
-                  {col}
-                </div>
-              ))}
+            {/* 列头（对标旧版 TaskList） */}
+            <div className="grid grid-cols-[1fr_1fr_80px_40px] items-center gap-3 px-4 py-2 border-b dark:border-claude-darkBorder/50 border-claude-border/50">
+              <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('scheduledTasksListColTitle')}
+              </div>
+              <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('scheduledTasksListColSchedule')}
+              </div>
+              <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('scheduledTasksListColStatus')}
+              </div>
+              <div className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary text-center">
+                {i18nService.t('scheduledTasksListColMore')}
+              </div>
             </div>
             {activeMirrors.map((mirror) => (
-              <div
+              <SdkCronMirrorListItem
                 key={mirror.id}
-                className="grid grid-cols-[1fr_120px_90px_150px_1fr_64px] items-center gap-3 px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 hover:bg-claude-surfaceHover/50 dark:hover:bg-claude-darkSurfaceHover/50 transition-colors"
-              >
-                {/* 名称 + 徽标 */}
-                <div className="min-w-0">
-                  <div className="text-sm dark:text-claude-darkText text-claude-text truncate">{mirror.name}</div>
-                  <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                    {mirror.durable && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        durable
-                      </span>
-                    )}
-                    {hasSevenDayMark(mirror.prompt) && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded dark:bg-amber-900/40 bg-amber-100 dark:text-amber-300 text-amber-700">
-                        7 天有效
-                      </span>
-                    )}
-                    {mirror.migratedTaskId && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded dark:bg-emerald-900/40 bg-emerald-100 dark:text-emerald-300 text-emerald-700">
-                        已迁移
-                      </span>
-                    )}
-                    {mirror.status === 'deletion_requested' && (
-                      <span className="text-[10px] px-1.5 py-0.5 rounded dark:bg-orange-900/40 bg-orange-100 dark:text-orange-300 text-orange-700">
-                        删除中
-                      </span>
-                    )}
-                  </div>
-                </div>
-                {/* 表达式 */}
-                <div className="text-xs font-mono dark:text-claude-darkTextSecondary text-claude-textSecondary truncate" title={mirror.humanSchedule ?? mirror.schedule}>
-                  {mirror.schedule}
-                </div>
-                {/* 类型 */}
-                <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  {mirror.recurring ? '周期' : '一次性'}
-                </div>
-                {/* 所属会话 */}
-                <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate" title={mirror.sessionId}>
-                  {mirror.sessionTitle ?? mirror.sessionId}
-                  {mirror.sessionActive && (
-                    <span className="ml-1 text-emerald-500">●</span>
-                  )}
-                </div>
-                {/* 来源 */}
-                <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
-                  {mirror.source === 'migration' ? '迁移' : mirror.source === 'file_scan' ? '文件扫描' : '会话采集'}
-                </div>
-                {/* 删除 */}
-                <div className="flex justify-center">
-                  <button
-                    type="button"
-                    onClick={() => void handleRequestDelete(mirror)}
-                    disabled={mirror.status !== 'active' || deletingId !== null}
-                    className="p-1.5 rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 hover:bg-red-500/10 transition-colors disabled:opacity-40"
-                    title="删除（经管理桥由会话内 bot 执行 CronDelete）"
-                  >
-                    {deletingId === mirror.id ? (
-                      <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <TrashIcon className="w-4 h-4" />
-                    )}
-                  </button>
-                </div>
-              </div>
+                mirror={mirror}
+                deletingId={deletingId}
+                onEdit={onEdit}
+                onRequestDelete={handleRequestDelete}
+                showToast={showToast}
+              />
             ))}
           </div>
         )}
@@ -255,6 +217,207 @@ const SdkCronMirrorList: React.FC = () => {
           onCancel={() => setDeleteTarget(null)}
         />
       )}
+    </div>
+  );
+};
+
+interface SdkCronMirrorListItemProps {
+  mirror: SdkCronMirror;
+  deletingId: string | null;
+  onEdit?: (mirror: SdkCronMirror) => void;
+  onRequestDelete: (mirror: SdkCronMirror) => void;
+  showToast: (msg: string) => void;
+}
+
+const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
+  mirror,
+  deletingId,
+  onEdit,
+  onRequestDelete,
+  showToast,
+}) => {
+  const [showMenu, setShowMenu] = useState(false);
+  const [toggling, setToggling] = useState(false);
+  const [running, setRunning] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // 只读镜像（无 scheduleSpec）不可开关/编辑，仅可删除——降级保护。
+  const readOnly = !mirror.scheduleSpec;
+  // 删除中 / 已停用 时开关不可点。
+  const toggleDisabled = readOnly || mirror.status !== 'active' || toggling;
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false);
+      }
+    };
+    if (showMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMenu]);
+
+  const handleToggle = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (toggleDisabled) {
+      if (readOnly) {
+        showToast(i18nService.t('scheduledTasksSdkToggleReadOnly'));
+      }
+      return;
+    }
+    const nextEnabled = !mirror.enabled;
+    // 启用 = 重建，会重置 7 天计时 + 任务 id 变化，需明确确认。
+    if (nextEnabled) {
+      const ok = window.confirm(i18nService.t('scheduledTasksSdkToggleWarnReenable'));
+      if (!ok) return;
+    }
+    setToggling(true);
+    try {
+      const result = await scheduledTaskService.toggleSdkCron(mirror.id, nextEnabled);
+      if (result?.hint) showToast(result.hint);
+    } catch (error) {
+      showToast(`开关失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  const handleRunNow = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    setRunning(true);
+    try {
+      await scheduledTaskService.runNowSdkCron(mirror.id);
+      showToast(i18nService.t('scheduledTasksSdkRunNowStarted'));
+    } catch (error) {
+      showToast(`立即运行失败: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleEdit = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    if (readOnly) {
+      showToast(i18nService.t('scheduledTasksSdkToggleReadOnly'));
+      return;
+    }
+    onEdit?.(mirror);
+  };
+
+  const handleDelete = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowMenu(false);
+    onRequestDelete(mirror);
+  };
+
+  return (
+    <div
+      className="grid grid-cols-[1fr_1fr_80px_40px] items-center gap-3 px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 hover:bg-claude-surfaceHover/50 dark:hover:bg-claude-darkSurfaceHover/50 transition-colors"
+    >
+      {/* 标题 + 徽标 */}
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`text-sm truncate ${mirror.enabled ? 'dark:text-claude-darkText text-claude-text' : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'}`}>
+          {mirror.name}
+        </span>
+        {mirror.durable && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            durable
+          </span>
+        )}
+        {hasSevenDayMark(mirror.prompt) && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-amber-900/40 bg-amber-100 dark:text-amber-300 text-amber-700">
+            7 天有效
+          </span>
+        )}
+        {mirror.migratedTaskId && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-emerald-900/40 bg-emerald-100 dark:text-emerald-300 text-emerald-700">
+            已迁移
+          </span>
+        )}
+        {mirror.status === 'deletion_requested' && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-orange-900/40 bg-orange-100 dark:text-orange-300 text-orange-700">
+            删除中
+          </span>
+        )}
+      </div>
+
+      {/* 计划于（人类可读语义） */}
+      <div className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary truncate" title={mirror.humanSchedule ?? mirror.schedule}>
+        {formatSdkCronScheduleLabel(mirror)}
+      </div>
+
+      {/* 状态：开关 toggle（对标旧版 TaskList 样式） */}
+      <div className="flex items-center gap-1.5">
+        {running && (
+          <span className="inline-flex items-center text-xs text-blue-500">
+            <svg className="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+              <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="4" strokeLinecap="round" className="opacity-75" />
+            </svg>
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={handleToggle}
+          disabled={toggleDisabled}
+          title={readOnly ? i18nService.t('scheduledTasksSdkToggleReadOnly') : undefined}
+          className={`relative shrink-0 w-7 h-4 rounded-full transition-colors disabled:opacity-40 ${
+            mirror.enabled
+              ? 'bg-claude-accent'
+              : 'dark:bg-claude-darkSurfaceHover bg-claude-border'
+          }`}
+        >
+          <span
+            className={`absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform shadow-sm ${
+              mirror.enabled ? 'translate-x-3' : 'translate-x-0'
+            }`}
+          />
+        </button>
+      </div>
+
+      {/* 更多菜单：立即运行 / 编辑 / 删除（对标旧版三项） */}
+      <div className="flex justify-center">
+        <div className="relative" ref={menuRef}>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setShowMenu(!showMenu); }}
+            className="p-1.5 rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+          >
+            <EllipsisVerticalIcon className="w-5 h-5" />
+          </button>
+          {showMenu && (
+            <div className="absolute right-0 top-full mt-1 w-32 rounded-lg shadow-lg dark:bg-claude-darkSurface bg-white border dark:border-claude-darkBorder border-claude-border z-50 py-1">
+              <button
+                type="button"
+                onClick={handleRunNow}
+                disabled={running || mirror.status !== 'active'}
+                className="w-full text-left px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
+              >
+                {i18nService.t('scheduledTasksRun')}
+              </button>
+              <button
+                type="button"
+                onClick={handleEdit}
+                disabled={readOnly}
+                className="w-full text-left px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
+              >
+                {i18nService.t('scheduledTasksEdit')}
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={mirror.status !== 'active' || deletingId !== null}
+                className="w-full text-left px-3 py-1.5 text-sm text-red-500 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
+              >
+                {i18nService.t('scheduledTasksDelete')}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 };

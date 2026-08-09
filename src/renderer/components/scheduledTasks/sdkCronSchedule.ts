@@ -12,8 +12,8 @@ import {
  *
  * 与旧版 TaskForm/taskFormSchedule 的区别：SDK 底层只认 5 字段 cron 表达式（recurring=true）
  * 或一次性 cron（recurring=false，到点触发一次即删）。因此：
- * - interval mode → 映射为 `*/N * * * *`（分钟）/`0 */N * * *`（小时）/`0 0 */N * *`（天）；
- * - once mode → 一次性 cron（M H DoM Month *，recurring=false）；
+ * - interval mode → 映射为 星号/N 分钟 / 每 N 小时 / 每 N 天 的 cron 表达式；
+ * - once mode → 一次性 cron（M H DoM Month 星，recurring=false）；
  * - daily/weekly/monthly/cron mode → 与旧版完全一致。
  *
  * 语义标签与旧版 TaskList.formatScheduleLabel 对齐（不重复/每天 HH:MM/每周X HH:MM/每月N日/每 N 分钟）。
