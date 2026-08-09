@@ -1,4 +1,4 @@
-import type { DreamDayActivity, DreamSessionActivity } from '../dreamStore';
+import type { DreamDayActivity, DreamGroupTaskEvaluation, DreamSessionActivity } from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
 import type { DreamActivityChunk } from './dreamFragments';
@@ -25,7 +25,7 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  */
-export const DREAM_VERSION = 4;
+export const DREAM_VERSION = 5;
 /** Default activity input budget for a day-level prompt, measured in tokens. */
 export const DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET = 48_000;
 export const SELF_IDENTITY_MIN_CHARS = 200;
@@ -34,7 +34,7 @@ export const MAX_IMPORTANT_MEMORIES = 5;
 export const MAX_VALUE_LESSONS = 3;
 export const MAX_IMPRESSION_UPDATES = 20;
 
-const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks'] as const;
+const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
 
 /**
@@ -261,6 +261,24 @@ export function getDayBoundsMs(dateStr: string): { startMs: number; endMs: numbe
   return { startMs: start.getTime(), endMs: end.getTime() };
 }
 
+/**
+ * Render one accepted group task for the day-level dream prompt: the owner's
+ * 1-5 star rating + free-text review are the ground truth the bot's
+ * work_review must align with (high score → keep the practice, low → adjust).
+ */
+function formatGroupTaskEvaluation(task: DreamGroupTaskEvaluation): string {
+  const stars = task.rating != null
+    ? `${'★'.repeat(task.rating)}${'☆'.repeat(Math.max(0, 5 - task.rating))}(${task.rating}/5)`
+    : '(未评分,任务经自动化流程关闭)';
+  return [
+    `【任务:${truncateText(task.title, 80)}】`,
+    `目标:${truncateText(task.goal, 200)}`,
+    `我在任务中的角色:${task.memberRole === 'chair' ? '主持(chair)' : '执行(worker)'}`,
+    `人类验收评分:${stars}`,
+    task.ratingComment ? `人类具体评价:${truncateText(task.ratingComment, 400)}` : '人类具体评价:(未填写)',
+  ].join('\n');
+}
+
 export function buildDreamPrompt(input: {
   botName: string;
   role?: string | null;
@@ -285,6 +303,7 @@ export function buildDreamPrompt(input: {
 
   const humanSessions: string[] = [];
   const a2aSessions: string[] = [];
+  const groupTaskSessions: string[] = [];
   const orderSessions: string[] = [];
   const fragmentSessions: string[] = [];
 
@@ -301,7 +320,13 @@ export function buildDreamPrompt(input: {
     if (!body) continue;
     const bucket = sourceMode === 'fragment_summaries'
       ? fragmentSessions
-      : session.isOrder ? orderSessions : session.sessionType === 'a2a' ? a2aSessions : humanSessions;
+      : session.isOrder
+        ? orderSessions
+        : session.sessionType === 'a2a'
+          ? a2aSessions
+          : session.sessionType === 'group_task'
+            ? groupTaskSessions
+            : humanSessions;
     entries.push({ bucket, header, body });
   }
 
@@ -325,12 +350,18 @@ export function buildDreamPrompt(input: {
   if (fragmentSessions.length > 0) sections.push(`## 分块证据摘要\n${fragmentSessions.join('\n\n')}`);
   if (humanSessions.length > 0) sections.push(`## 与人类用户的对话\n${humanSessions.join('\n\n')}`);
   if (a2aSessions.length > 0) sections.push(`## 与其他 Bot 的对话\n${a2aSessions.join('\n\n')}`);
+  if (groupTaskSessions.length > 0) sections.push(`## 群任务协作\n${groupTaskSessions.join('\n\n')}`);
   if (orderSessions.length > 0) sections.push(`## 服务订单\n${orderSessions.join('\n\n')}`);
   if (input.activity.taskRuns.length > 0) {
     const taskLines = input.activity.taskRuns
       .map((run) => `- ${truncateText(run.taskName, 80)}(结果:${run.status})`)
       .join('\n');
     sections.push(`## 定时任务\n${taskLines}`);
+  }
+  const groupTaskEvaluations = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
+  if (groupTaskEvaluations.length > 0) {
+    const evaluationLines = groupTaskEvaluations.map(formatGroupTaskEvaluation).join('\n\n');
+    sections.push(`## 群任务验收评价(人类对任务结果的打分与评价,work_reviews 必须逐条对齐复盘)\n${evaluationLines}`);
   }
 
   if (sourceMode !== 'fragment' && input.impressionSubjects && input.impressionSubjects.length > 0) {
@@ -366,7 +397,8 @@ export function buildDreamPrompt(input: {
   const sessionTitles = input.activity.sessions.map((session) => `「${truncateText(session.title, 40)}」`).join('、');
   const inventory =
     `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
-    `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次。` +
+    `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次;` +
+    `群任务验收评价 ${(input.activity.groupTasks ?? []).length} 项。` +
     (sourceMode === 'fragment_summaries'
       ? '以下内容是从当天真实记录中分块提炼出的证据摘要,请综合摘要而不是臆造未展示的原文细节。'
       : '以下内容按 token 预算做了均衡摘录,被截断或从略的会话以其标题为准,不要臆造未展示的细节。');
@@ -406,7 +438,8 @@ export function buildDreamPrompt(input: {
     '    "human": "与人类用户互动的一句话概述(没有则省略该键)",',
     '    "a2a": "与其他 Bot 互动的一句话概述(没有则省略该键)",',
     '    "orders": "服务订单的一句话概述(没有则省略该键)",',
-    '    "tasks": "定时任务的一句话概述(没有则省略该键)"',
+    '    "tasks": "定时任务的一句话概述(没有则省略该键)",',
+    '    "group_tasks": "群任务协作与验收评价的一句话概述(没有则省略该键)"',
     '  },',
     '  "work_reviews": [',
     '    {',
@@ -438,6 +471,7 @@ export function buildDreamPrompt(input: {
     `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字、控制在 600 字以内。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
+    '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
     '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 
@@ -469,6 +503,7 @@ export function buildDreamFragmentPrompt(input: {
         : [],
       taskRuns: input.chunk.taskRuns,
       orderCount: input.chunk.orderCount,
+      groupTasks: input.chunk.groupTasks ?? [],
     },
     activityTokenBudget: Math.max(256, input.chunk.estimatedInputTokens + 256),
     sourceMode: 'fragment',

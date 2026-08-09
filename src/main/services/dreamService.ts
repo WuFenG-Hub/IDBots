@@ -518,7 +518,7 @@ export class DreamService {
       ));
     }
 
-    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount);
+    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount, activity.groupTasks);
     const prompt = buildDreamPrompt({
       botName: metabot.name,
       role: metabot.role,
@@ -556,7 +556,7 @@ export class DreamService {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
-      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && impressionSubjects.length === 0) {
+      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && activity.groupTasks.length === 0 && impressionSubjects.length === 0) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         return;
@@ -669,6 +669,7 @@ export class DreamService {
         orderSessionCount: activity.sessions.filter((session) => session.isOrder).length,
         orderCount: activity.orderCount,
         taskRunCount: activity.taskRuns.length,
+        groupTaskEvaluationCount: activity.groupTasks.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
         activityCharCount: activity.sessions.reduce(
           (sum, session) => sum + session.messages.reduce((sessionSum, message) => sessionSum + message.content.length, 0),

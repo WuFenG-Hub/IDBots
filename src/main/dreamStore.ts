@@ -97,11 +97,28 @@ export interface DreamTaskRunActivity {
   sessionId: string | null;
 }
 
+/**
+ * One group task the bot participated in that reached owner acceptance — the
+ * human's star rating + review are the alignment signal for the dream review.
+ */
+export interface DreamGroupTaskEvaluation {
+  taskId: number;
+  title: string;
+  goal: string;
+  /** This bot's role in the task ('chair' | 'worker'). */
+  memberRole: string;
+  /** 1-5 stars; null when the task was closed without a rating (automation). */
+  rating: number | null;
+  ratingComment: string | null;
+}
+
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
   /** service_orders rows created that day (raw order count, not sessions). */
   orderCount: number;
+  /** Group tasks accepted/rated that day where this bot was a member. */
+  groupTasks: DreamGroupTaskEvaluation[];
 }
 
 interface DreamRunRow {
@@ -778,6 +795,37 @@ export class DreamStore {
       [metabotId, dayStartMs, dayEndMs]
     );
 
-    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0 };
+    // Group tasks accepted that day where this bot was a member — the owner's
+    // star rating + review feed the dream's work-review alignment. Day
+    // attribution uses rated_at, falling back to closed_at for unrated
+    // (automation-closed) tasks; both are UTC datetime('now') strings.
+    const dayStartSec = Math.floor(dayStartMs / 1000);
+    const dayEndSec = Math.floor(dayEndMs / 1000);
+    const groupTasks = this.getAll<{
+      id: number;
+      title: string;
+      goal: string;
+      role: string;
+      rating: number | null;
+      rating_comment: string | null;
+    }>(`
+      SELECT t.id, t.title, t.goal, m.role, t.rating, t.rating_comment
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.status = 'done'
+        AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) >= ?
+        AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) < ?
+      ORDER BY t.id ASC
+    `, [metabotId, dayStartSec, dayEndSec]).map((row) => ({
+      taskId: row.id,
+      title: row.title,
+      goal: row.goal,
+      memberRole: row.role === 'chair' ? 'chair' : 'worker',
+      rating: row.rating ?? null,
+      ratingComment: row.rating_comment ?? null,
+    }));
+
+    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0, groupTasks };
   }
 }
