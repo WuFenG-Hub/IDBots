@@ -18,6 +18,7 @@ import { getMvcSpendCoordinator } from './mvcSpendCoordinator';
 import {
   clearMvcExcludedOutpoints,
   getMvcSpendSessionSnapshot,
+  normalizeMvcCachedFundingUtxo,
   recordMvcSpentOutpoints,
   replaceMvcPendingFundingUtxos,
   type MvcCachedFundingUtxo,
@@ -33,10 +34,19 @@ import { buildMetabotInfoPayloads, buildMetabotHomepagePayload, type MetabotInfo
 import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
+import { runMvcSponsorCreatePin, type CreatePinFeeAssistMetadata } from './mvcSponsorCreatePin';
+import type { MvcSponsorTrafficAccount } from './mvcSponsorClient';
+import {
+  getTrafficFallbackPolicy,
+  getTrafficPinMode,
+  type TrafficSettingsReader,
+} from './trafficSettings';
 
 const MANAPI_BASE = 'https://manapi.metaid.io';
 
 const METAID_RPC_LOG = 'metaid-rpc.log';
+
+const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
 
 function appendMetaidLog(level: string, message: string, details?: object): void {
   try {
@@ -75,13 +85,44 @@ export interface MetaidDataPayload {
 /** Supported network for createPin. Default 'mvc' for backward compatibility. */
 export type CreatePinNetwork = 'mvc' | 'doge' | 'btc' | 'opcat';
 
+export interface CreatePinWorkerDraftResult {
+  unsignedTxHex: string;
+  /** Upper-bound size estimate including one reserved sponsor input. */
+  estimatedTxSize: number;
+  feeRate: number;
+  userInputs: MvcCachedFundingUtxo[];
+  changeOutput: { outputIndex: number; satoshis: number } | null;
+}
+
 export interface CreatePinWorkerSuccess {
   txids: string[];
   pinId: string;
   totalCost: number;
   spentOutpoints?: string[];
   changeUtxo?: MvcCachedFundingUtxo | null;
+  /** Present only when the worker ran in draft mode (MVC sponsor flow). */
+  draft?: CreatePinWorkerDraftResult;
 }
+
+export interface CreatePinOptions {
+  feeRate?: number;
+  network?: CreatePinNetwork | string;
+  /** Worker mode: 'broadcast' (default) or 'draft' (MVC sponsor flow, internal use). */
+  mode?: 'broadcast' | 'draft';
+  /** Per-call override of the global traffic.mode setting; MVC only. */
+  sponsorMode?: 'traffic' | 'selfpay';
+  /** Per-call override of the global traffic.fallbackPolicy setting; MVC only. */
+  sponsorFallbackPolicy?: 'selfpay' | 'strict';
+  /** Custom sponsor service base URL (defaults to the production assist-open-api). */
+  sponsorBaseUrl?: string;
+  /** fetch implementation override for the sponsor protocol (mainly tests). */
+  sponsorFetchImpl?: typeof fetch;
+  /** Reserved pass-through for traffic-account billing (backend not yet live). */
+  sponsorTrafficAccount?: MvcSponsorTrafficAccount;
+}
+
+/** createPin result: the worker fields plus optional fee-assist diagnostics. */
+export type CreatePinResult = CreatePinWorkerSuccess & { feeAssist?: CreatePinFeeAssistMetadata };
 
 interface CreatePinWorkerOutput {
   stdout: string;
@@ -157,9 +198,48 @@ function parseJsonLineFromWorkerOutput(output: string): Record<string, unknown> 
   return null;
 }
 
+function readWorkerRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function parseCreatePinWorkerResult(output: CreatePinWorkerOutput): CreatePinWorkerSuccess {
   const result = parseJsonLineFromWorkerOutput(output.stdout)
     ?? parseJsonLineFromWorkerOutput(output.stderr);
+  if (result?.success === true && result.mode === 'draft' && typeof result.unsignedTxHex === 'string' && result.unsignedTxHex) {
+    const userInputs = Array.isArray(result.userInputs)
+      ? result.userInputs
+        .map((item) => normalizeMvcCachedFundingUtxo(item))
+        .filter((item): item is MvcCachedFundingUtxo => item !== null)
+      : [];
+    const changeOutputRecord = readWorkerRecord(result.changeOutput);
+    const changeOutputIndex = Number(changeOutputRecord?.outputIndex);
+    const changeOutputSatoshis = Number(changeOutputRecord?.satoshis);
+    const changeOutput = changeOutputRecord
+      && Number.isInteger(changeOutputIndex)
+      && changeOutputIndex >= 0
+      && Number.isFinite(changeOutputSatoshis)
+      && changeOutputSatoshis >= 600
+      ? { outputIndex: changeOutputIndex, satoshis: changeOutputSatoshis }
+      : null;
+    return {
+      txids: [],
+      pinId: '',
+      totalCost: 0,
+      spentOutpoints: Array.isArray(result.spentOutpoints)
+        ? result.spentOutpoints.filter((item): item is string => typeof item === 'string')
+        : undefined,
+      changeUtxo: null,
+      draft: {
+        unsignedTxHex: result.unsignedTxHex,
+        estimatedTxSize: Number.isFinite(Number(result.estimatedTxSize)) ? Number(result.estimatedTxSize) : 0,
+        feeRate: Number.isFinite(Number(result.feeRate)) ? Number(result.feeRate) : 0,
+        userInputs,
+        changeOutput,
+      },
+    };
+  }
   if (result?.success === true && Array.isArray(result.txids)) {
     const txids = result.txids.map((item) => String(item || '').trim()).filter(Boolean);
     if (txids.length > 0) {
@@ -420,11 +500,20 @@ function resolveCreatePinNetwork(network?: CreatePinNetwork | string): CreatePin
   ) as CreatePinNetwork;
 }
 
+/** Global kv reader for traffic settings; unset outside the app runtime => safe defaults. */
+function getMetaidCoreKvReader(): TrafficSettingsReader | null {
+  try {
+    return storeGetter?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export interface SpawnCreatePinWorkerParams {
   mnemonic: string;
   walletPath: string;
   metaidData: MetaidDataPayload;
-  options?: { feeRate?: number; network?: CreatePinNetwork | string };
+  options?: CreatePinOptions;
   sessionSnapshot?: MvcCreatePinSessionSnapshot;
 }
 
@@ -479,10 +568,10 @@ export async function spawnCreatePinWorker(params: SpawnCreatePinWorkerParams): 
     Buffer.isBuffer(metaidData.payload) ? 'base64' : (metaidData.encoding ?? 'utf-8');
 
   const network = resolveCreatePinNetwork(options?.network);
-  const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
   const payloadStr = JSON.stringify({
     feeRate: options?.feeRate ?? FALLBACK_FEE_RATES[network] ?? 1,
     network,
+    ...(options?.mode === 'draft' ? { mode: 'draft' } : {}),
     metaidData: {
       ...metaidData,
       payload: serializedPayload,
@@ -578,13 +667,15 @@ export async function createPinForIdentity(params: {
 /**
  * Create Pin for a MetaBot: spawn skill worker with mnemonic, returns txids.
  * @param options.network - Target network: 'mvc' (default), 'doge', 'btc', 'opcat'. Omit or empty defaults to 'mvc'.
+ * @param options.sponsorMode - MVC only: 'traffic' runs the sponsor-paid flow (draft -> pre -> sign -> commit),
+ *   'selfpay' (default) keeps the regular self-paid broadcast. Falls back per traffic.fallbackPolicy.
  */
 export async function createPin(
   metabotStore: MetabotStore,
   metabot_id: number,
   metaidData: MetaidDataPayload,
-  options?: { feeRate?: number; network?: CreatePinNetwork | string }
-): Promise<{ txids: string[]; pinId: string; totalCost: number }> {
+  options?: CreatePinOptions
+): Promise<CreatePinResult> {
   const wallet = metabotStore.getMetabotWalletByMetabotId(metabot_id);
   if (!wallet) {
     throw new Error(`MetaBot ${metabot_id} has no wallet`);
@@ -604,83 +695,134 @@ export async function createPin(
       operation: metaidData.operation,
       path: metaidData.path || '',
     });
-    return getMvcSpendCoordinator().runMvcSpendJob({
+    return getMvcSpendCoordinator().runMvcSpendJob<CreatePinResult>({
       metabotId: metabot_id,
       action: `createPin:${metaidData.path || metaidData.operation}`,
       execute: async () => {
-        try {
-          const workerSessionResult = await runMvcCreatePinWorkerWithSessionRecovery({
-            metabotStore,
-            metabotId: metabot_id,
-            requestFreshFunding: async () => {
-              const metabot = metabotStore.getMetabotById(metabot_id);
-              const mvcAddress = String(metabot?.mvc_address || '').trim();
-              if (!mvcAddress) {
-                return false;
-              }
-              appendMetaidLog('INFO', 'Requesting fresh MVC funding after stale createPin inputs', {
-                metabot_id,
-                mvcAddress,
-                operation: metaidData.operation,
-                path: metaidData.path || '',
-              });
-              const subsidy = await requestMvcGasSubsidy({
-                mvcAddress,
-                mnemonic,
-                path: wallet.path || "m/44'/10001'/0'/0/0",
-              });
-              if (!subsidy.success) {
-                appendMetaidLog('WARN', 'Fresh MVC funding request after stale createPin inputs failed', {
-                  metabot_id,
-                  mvcAddress,
-                  error: subsidy.error || 'MVC gas subsidy request failed',
-                });
-                return false;
-              }
-              appendMetaidLog('INFO', 'Fresh MVC funding request after stale createPin inputs succeeded', {
-                metabot_id,
-                mvcAddress,
-              });
-              return true;
-            },
-            runWorkerForSession: (sessionSnapshot) =>
-              spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options, sessionSnapshot }),
-          });
-          const result = workerSessionResult.workerResult;
-          if (workerSessionResult.retriedAfterStaleFunding) {
-            appendMetaidLog('INFO', 'Retried MVC createPin worker with recovered funding after stale provider state', {
-              metabot_id,
-              operation: metaidData.operation,
-              path: metaidData.path || '',
-              success: true,
-              requestedFreshFundingAfterStale: workerSessionResult.requestedFreshFundingAfterStale,
-            });
+        const requestFreshFunding = async () => {
+          const metabot = metabotStore.getMetabotById(metabot_id);
+          const mvcAddress = String(metabot?.mvc_address || '').trim();
+          if (!mvcAddress) {
+            return false;
           }
-          recordMvcSpentOutpoints(metabot_id, result.spentOutpoints);
-          replaceMvcPendingFundingUtxos(metabot_id, result.changeUtxo);
-          appendMetaidLog('INFO', 'Governed MVC createPin job completed', {
+          appendMetaidLog('INFO', 'Requesting fresh MVC funding after stale createPin inputs', {
             metabot_id,
-            txid: result.txids[0],
-            pinId: result.pinId,
-            spentOutpoints: result.spentOutpoints ?? [],
-          });
-          return result;
-        } catch (error) {
-          const message = getErrorMessage(error);
-          if (isMvcInsufficientBalanceMessage(message) || isTerminalMvcStaleFundingMessage(message)) {
-            clearMvcExcludedOutpoints(metabot_id);
-          } else {
-            recordMvcSpentOutpoints(metabot_id, getMvcWorkerStaleOutpoints(error));
-          }
-          appendMetaidLog('ERROR', 'Governed MVC createPin job failed', {
-            metabot_id,
-            error: message,
+            mvcAddress,
             operation: metaidData.operation,
             path: metaidData.path || '',
-            staleOutpoints: getMvcWorkerStaleOutpoints(error) ?? [],
           });
-          throw error;
+          const subsidy = await requestMvcGasSubsidy({
+            mvcAddress,
+            mnemonic,
+            path: wallet.path || "m/44'/10001'/0'/0/0",
+          });
+          if (!subsidy.success) {
+            appendMetaidLog('WARN', 'Fresh MVC funding request after stale createPin inputs failed', {
+              metabot_id,
+              mvcAddress,
+              error: subsidy.error || 'MVC gas subsidy request failed',
+            });
+            return false;
+          }
+          appendMetaidLog('INFO', 'Fresh MVC funding request after stale createPin inputs succeeded', {
+            metabot_id,
+            mvcAddress,
+          });
+          return true;
+        };
+        const runBroadcastWorker = async (): Promise<CreatePinWorkerSuccess> => {
+          try {
+            const workerSessionResult = await runMvcCreatePinWorkerWithSessionRecovery({
+              metabotStore,
+              metabotId: metabot_id,
+              requestFreshFunding,
+              runWorkerForSession: (sessionSnapshot) =>
+                spawnCreatePinWorker({ mnemonic, walletPath, metaidData, options, sessionSnapshot }),
+            });
+            const result = workerSessionResult.workerResult;
+            if (workerSessionResult.retriedAfterStaleFunding) {
+              appendMetaidLog('INFO', 'Retried MVC createPin worker with recovered funding after stale provider state', {
+                metabot_id,
+                operation: metaidData.operation,
+                path: metaidData.path || '',
+                success: true,
+                requestedFreshFundingAfterStale: workerSessionResult.requestedFreshFundingAfterStale,
+              });
+            }
+            recordMvcSpentOutpoints(metabot_id, result.spentOutpoints);
+            replaceMvcPendingFundingUtxos(metabot_id, result.changeUtxo);
+            appendMetaidLog('INFO', 'Governed MVC createPin job completed', {
+              metabot_id,
+              txid: result.txids[0],
+              pinId: result.pinId,
+              spentOutpoints: result.spentOutpoints ?? [],
+            });
+            return result;
+          } catch (error) {
+            const message = getErrorMessage(error);
+            if (isMvcInsufficientBalanceMessage(message) || isTerminalMvcStaleFundingMessage(message)) {
+              clearMvcExcludedOutpoints(metabot_id);
+            } else {
+              recordMvcSpentOutpoints(metabot_id, getMvcWorkerStaleOutpoints(error));
+            }
+            appendMetaidLog('ERROR', 'Governed MVC createPin job failed', {
+              metabot_id,
+              error: message,
+              operation: metaidData.operation,
+              path: metaidData.path || '',
+              staleOutpoints: getMvcWorkerStaleOutpoints(error) ?? [],
+            });
+            throw error;
+          }
+        };
+
+        const sponsorMode = options?.sponsorMode ?? getTrafficPinMode(getMetaidCoreKvReader());
+        if (sponsorMode !== 'traffic') {
+          return runBroadcastWorker();
         }
+
+        const sponsorMetabot = metabotStore.getMetabotById(metabot_id);
+        const sponsorMvcAddress = String(sponsorMetabot?.mvc_address || '').trim();
+        appendMetaidLog('INFO', 'Attempting sponsored MVC createPin (traffic mode)', {
+          metabot_id,
+          mvcAddress: sponsorMvcAddress,
+          operation: metaidData.operation,
+          path: metaidData.path || '',
+        });
+        return runMvcSponsorCreatePin(
+          {
+            metabotId: metabot_id,
+            mnemonic,
+            walletPath,
+            mvcAddress: sponsorMvcAddress,
+            feeRate: options?.feeRate ?? FALLBACK_FEE_RATES.mvc,
+            fallbackPolicy: options?.sponsorFallbackPolicy ?? getTrafficFallbackPolicy(getMetaidCoreKvReader()),
+            baseUrl: options?.sponsorBaseUrl,
+            fetchImpl: options?.sponsorFetchImpl,
+            trafficAccount: options?.sponsorTrafficAccount,
+          },
+          {
+            runDraftWorker: async () => {
+              const workerSessionResult = await runMvcCreatePinWorkerWithSessionRecovery({
+                metabotStore,
+                metabotId: metabot_id,
+                requestFreshFunding,
+                runWorkerForSession: (sessionSnapshot) =>
+                  spawnCreatePinWorker({
+                    mnemonic,
+                    walletPath,
+                    metaidData,
+                    options: { ...options, mode: 'draft' },
+                    sessionSnapshot,
+                  }),
+              });
+              return workerSessionResult.workerResult;
+            },
+            runBroadcastWorker,
+            recordSpentOutpoints: (outpoints) => recordMvcSpentOutpoints(metabot_id, outpoints),
+            replacePendingFundingUtxos: (utxo) => replaceMvcPendingFundingUtxos(metabot_id, utxo),
+          },
+        );
       },
     });
   }

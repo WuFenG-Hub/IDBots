@@ -121,3 +121,4 @@ top up when low. Just like a phone data plan.
 |---|---|
 | 2026-08-09 | Project kickoff. Branch/worktree created. Both codebases explored. Decisions in §4 confirmed. Documentation set created. |
 | 2026-08-09 | Backend spec v1.1: added Admin Console (§10) and dynamic fee rate (§5); confirmed no-review handoff mode and parallel development. |
+| 2026-08-09 | Spec handed to assist-base-service team; backend development started. Phase A merged to main. Phase B done on branch: createPinWorker draft mode + createPin sponsor branch (traffic mode, selfpay/strict fallback, feeAssist metadata) + trafficSettings; 12 new tests green; 3 pre-existing main failures confirmed unrelated. |

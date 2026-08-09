@@ -136,6 +136,11 @@ interface RpcPayload {
   preferredFundingUtxos?: SpendableMvcUtxo[];
   /** Target network: 'mvc' (default), 'doge', 'btc'. Omit or empty defaults to 'mvc'. */
   network?: string;
+  /**
+   * 'broadcast' (default) signs and broadcasts; 'draft' (MVC only) builds the
+   * unsigned transaction for the sponsor pre call and returns it instead.
+   */
+  mode?: 'broadcast' | 'draft';
   metaidData: {
     operation: string;
     path?: string;
@@ -279,6 +284,78 @@ function getEstimatedTxSizeWithoutInputs(opReturnScriptSize: number): number {
  */
 const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
 
+export interface AssembledMvcPinTransaction {
+  txComposer: TxComposer;
+  picked: SpendableMvcUtxo[];
+  totalOutput: number;
+}
+
+/**
+ * Assemble an MVC pin transaction (pin output + OP_RETURN + funding inputs +
+ * change). Shared by the broadcast path (deductMinerFeeFromChange=true, miner
+ * fee taken out of the change) and the sponsor draft path (false: the sponsor
+ * pays the fee, so the full input remainder goes back as change and unlocking
+ * scripts stay empty — the same contract as the file-upload sponsor draft).
+ */
+export function assembleMvcPinTransaction(input: {
+  addressObj: mvc.Address;
+  opReturnParts: (string | Buffer)[];
+  usableUtxos: SpendableMvcUtxo[];
+  feeRate: number;
+  estimatedTxSizeWithoutInputs: number;
+  excludedOutpoints: ReadonlySet<string>;
+  preferredOutpoints: ReadonlySet<string>;
+  deductMinerFeeFromChange: boolean;
+}): AssembledMvcPinTransaction {
+  const txComposer = new TxComposer();
+  txComposer.appendP2PKHOutput({
+    address: input.addressObj,
+    satoshis: 1,
+  });
+  txComposer.appendOpReturnOutput(input.opReturnParts);
+
+  const totalOutput = txComposer.tx.outputs.reduce((acc, o) => acc + o.satoshis, 0);
+  const picked = pickUtxo(
+    input.usableUtxos,
+    totalOutput,
+    input.deductMinerFeeFromChange ? input.feeRate : 0,
+    input.estimatedTxSizeWithoutInputs,
+    input.excludedOutpoints,
+    input.preferredOutpoints,
+  );
+  for (const utxo of picked) {
+    txComposer.appendP2PKHInput({
+      address: input.addressObj,
+      txId: utxo.txId,
+      outputIndex: utxo.outputIndex,
+      satoshis: utxo.satoshis,
+    });
+  }
+  if (input.deductMinerFeeFromChange) {
+    txComposer.appendChangeOutput(input.addressObj, input.feeRate);
+  } else {
+    const changeAmount = picked.reduce((sum, utxo) => sum + utxo.satoshis, 0) - totalOutput;
+    if (changeAmount > 0) {
+      txComposer.appendP2PKHOutput({ address: input.addressObj, satoshis: changeAmount });
+    }
+  }
+  return { txComposer, picked, totalOutput };
+}
+
+/** Change output descriptor of a draft tx (txid unknown until broadcast/commit). */
+function getMvcPinDraftChangeOutput(tx: mvc.Transaction): { outputIndex: number; satoshis: number } | null {
+  if (!Array.isArray(tx.outputs) || tx.outputs.length <= 1) {
+    return null;
+  }
+  const changeIndex = tx.outputs.length - 1;
+  const changeOutput: any = tx.outputs[changeIndex];
+  const satoshis = Number(changeOutput?.satoshis);
+  if (!Number.isFinite(satoshis) || satoshis < 600) {
+    return null;
+  }
+  return { outputIndex: changeIndex, satoshis };
+}
+
 function isInsufficientFeeError(message: string): boolean {
   const m = message.toLowerCase();
   return (
@@ -394,6 +471,7 @@ async function main(): Promise<void> {
   const opReturnParts = buildMvcOpReturn(metaidData);
   const opReturnScriptSize = getOpReturnScriptSize(opReturnParts);
   const estimatedTxSizeWithoutInputs = getEstimatedTxSizeWithoutInputs(opReturnScriptSize);
+  const isDraftMode = payload.mode === 'draft';
   let lastError: unknown = null;
   const excludedOutpoints = normalizeOutpointList(payload.excludeOutpoints);
   const preferredFundingUtxos = normalizePreferredFundingUtxos(payload.preferredFundingUtxos, address);
@@ -439,38 +517,51 @@ async function main(): Promise<void> {
         }
       }
 
-      const txComposer = new TxComposer();
-      txComposer.appendP2PKHOutput({
-        address: addressObj,
-        satoshis: 1,
-      });
-      txComposer.appendOpReturnOutput(opReturnParts);
-
-      const tx = txComposer.tx;
-      const totalOutput = tx.outputs.reduce((acc, o) => acc + o.satoshis, 0);
-      const picked = pickUtxo(
+      const assembled = assembleMvcPinTransaction({
+        addressObj,
+        opReturnParts,
         usableUtxos,
-        totalOutput,
         feeRate,
         estimatedTxSizeWithoutInputs,
         excludedOutpoints,
         preferredOutpoints,
-      );
+        deductMinerFeeFromChange: !isDraftMode,
+      });
+      const txComposer = assembled.txComposer;
+      const picked = assembled.picked;
+      const tx = txComposer.tx;
       pickedForAttempt = picked;
       logStep('Picked MVC pin funding inputs', {
         attempt,
         pickedOutpoints: picked.map((utxo) => getUtxoOutpointKey(utxo)),
       });
 
-      for (const utxo of picked) {
-        txComposer.appendP2PKHInput({
-          address: addressObj,
-          txId: utxo.txId,
-          outputIndex: utxo.outputIndex,
-          satoshis: utxo.satoshis,
+      if (isDraftMode) {
+        // Sponsor draft: user inputs stay unsigned and the change is not
+        // deducted; the sponsor appends its own fee-paying input at pre.
+        // estimatedTxSize reserves one extra sponsor input.
+        const unsignedTxHex = txComposer.getRawHex();
+        const spentOutpoints = picked.map((utxo) => getUtxoOutpointKey(utxo));
+        const changeOutput = getMvcPinDraftChangeOutput(tx);
+        const estimatedTxSize = estimatedTxSizeWithoutInputs + (picked.length + 1) * P2PKH_INPUT_SIZE;
+        logStep('Built unsigned MVC pin draft transaction', {
+          attempt,
+          estimatedTxSize,
+          spentOutpoints,
+          changeOutput,
         });
+        console.log(JSON.stringify({
+          success: true,
+          mode: 'draft',
+          unsignedTxHex,
+          estimatedTxSize,
+          feeRate,
+          spentOutpoints,
+          userInputs: picked,
+          changeOutput,
+        }));
+        return;
       }
-      txComposer.appendChangeOutput(addressObj, feeRate);
 
       for (let inputIndex = 0; inputIndex < tx.inputs.length; inputIndex++) {
         txComposer.unlockP2PKHInput(privateKey, inputIndex);

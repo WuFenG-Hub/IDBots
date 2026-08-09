@@ -53,11 +53,11 @@ fallback. Fee-rate injection unified.
 
 **Milestones**:
 
-- `[ ]` M2.1 Reusable sponsor protocol client extracted (challenge/pre/sign/commit)
-- `[ ]` M2.2 `createPinWorker` supports "build unsigned draft" mode
-- `[ ]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
+- `[x]` M2.1 Reusable sponsor protocol client extracted (challenge/pre/sign/commit)
+- `[x]` M2.2 `createPinWorker` supports "build unsigned draft" mode
+- `[x]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
 - `[ ]` M2.4 Fee rate explicitly threaded through all createPin call sites
-- `[ ]` M2.5 Tests: sponsor path for chat pins; fallback matrix
+- `[x]` M2.5 Tests: sponsor path for chat pins; fallback matrix
 
 **Acceptance**: with traffic mode on and a funded pool, a bot can chat/buzz/upload
 with zero wallet balance; with traffic exhausted it cleanly falls back or errors

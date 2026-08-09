@@ -781,6 +781,15 @@ export function estimateDraftMinerFee(input: { unsignedTxHex: string; userInputT
   return Math.max(0, input.userInputTotal - outputTotal);
 }
 
+/**
+ * Commit proof message signed by the user key for commitSponsor:
+ * `assist-sponsor-commit:<orderId>:<signedTxHash>`.
+ */
+export function getMvcSponsorCommitMessage(input: { orderId: string; signedTxHex: string }): string {
+  const signedTxHash = new mvc.Transaction(input.signedTxHex).id;
+  return `assist-sponsor-commit:${input.orderId}:${signedTxHash}`;
+}
+
 export async function signMvcPreparedUserInputs(input: {
   mnemonic: string;
   walletPath: string;
