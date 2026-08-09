@@ -1052,6 +1052,20 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const remoteMembers = members.filter(
       (member) => member.metabotId == null && Boolean(member.globalmetaid?.trim()),
     );
+    // A kicked member leaves the active remote set while the task itself stays
+    // active: its owner-notified key would otherwise linger forever and
+    // suppress a fresh notification when a re-invited teammate goes silent
+    // again. Prune stale keys for this task on every evaluation round.
+    const activeRemoteGmids = new Set(
+      remoteMembers.map((member) => member.globalmetaid!.trim().toLowerCase()),
+    );
+    for (const key of [...remoteUnreachableNotified]) {
+      const separator = key.indexOf(':');
+      if (Number(key.slice(0, separator)) !== task.id) continue;
+      if (!activeRemoteGmids.has(key.slice(separator + 1))) {
+        remoteUnreachableNotified.delete(key);
+      }
+    }
     if (remoteMembers.length === 0) {
       remotePresenceByTask.delete(task.id);
       return [];
@@ -1086,6 +1100,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const unreachable: RemoteUnreachableInfo[] = [];
     for (const member of remoteMembers) {
       const globalMetaId = member.globalmetaid!.trim();
+      // Join grace: a teammate whose membership row is younger than the
+      // unreachable window has not had a fair chance to speak yet — never
+      // flag them unreachable (and never notify the owner) this early.
+      const joinedMs = parseSqliteUtcMs(member.createdAt);
+      if (Number.isFinite(joinedMs) && now() - joinedMs < remoteUnreachableAfterMs) {
+        continue;
+      }
       const entry = entries.find(
         (candidate) => candidate.globalMetaId.trim().toLowerCase() === globalMetaId.toLowerCase(),
       );
@@ -2195,6 +2216,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    *   once (so every consumer — daemon, experience ledger, show — agrees);
    * - a message whose GlobalMetaID is neither a task member nor the owner is
    *   marked SUSPECT (persisted); senderName is NEVER used for attribution.
+   * R2P1-4: a resolver THROW is transient and propagates into the caller's
+   * bounded retry path — only a definitive null/empty resolution marks SUSPECT.
    */
   const memberGlobalMetaIdSet = (members: GroupTaskMember[]): Set<string> => {
     const set = new Set<string>();
@@ -2213,24 +2236,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     let globalMetaId = (message.senderGlobalMetaId ?? '').trim();
     const legacy = (message.senderMetaId ?? '').trim();
     if (!globalMetaId && legacy && deps.resolveGlobalMetaId) {
-      try {
-        const resolved = (await deps.resolveGlobalMetaId(legacy))?.trim();
-        if (resolved) {
-          globalMetaId = resolved;
-          try {
-            deps.getGroupTaskStore().updateMessageSenderGlobalMetaId(message.id, resolved);
-          } catch (error) {
-            emitLog(
-              `[GroupTaskDaemon] Message ${message.id}: resolved GlobalMetaID persist failed: ` +
-              `${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
+      // A resolver THROW (network/indexer outage) is transient, not a
+      // definitive "unresolvable": it propagates so the message rides the
+      // bounded MSG_RETRY path instead of being permanently stamped SUSPECT
+      // with the cursor advanced past it. Only a clean null/empty resolution
+      // below marks SUSPECT.
+      const resolved = (await deps.resolveGlobalMetaId(legacy))?.trim();
+      if (resolved) {
+        globalMetaId = resolved;
+        try {
+          deps.getGroupTaskStore().updateMessageSenderGlobalMetaId(message.id, resolved);
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Message ${message.id}: resolved GlobalMetaID persist failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-      } catch (error) {
-        emitLog(
-          `[GroupTaskDaemon] Message ${message.id}: legacy metaid resolution failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
       }
     }
     const normalized = globalMetaId.toLowerCase();
@@ -2674,6 +2695,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // P0-3c: compensate replies deferred by a cap/cooldown in an earlier tick.
     // Deferred entries get priority over brand-new messages so a skipped worker
     // still gets its chance (the message cursor already advanced past it).
+    const memberGmids = memberGlobalMetaIdSet(members);
+    const ownerGmidKey = ownerGlobalMetaId.toLowerCase();
     const deferredForTask = deferredReplies.filter((entry) => entry.taskId === task.id);
     if (deferredForTask.length > 0) {
       deferredReplies = deferredReplies.filter((entry) => entry.taskId !== task.id);
@@ -2684,6 +2707,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const row = queryMessageById(db, task.groupId, entry.messageId);
         if (!row) continue; // message purged; drop the deferred entry
         const deferredMessage = toDaemonMessage(row);
+        // Re-validate the sender before speaking on their message: it may have
+        // been flagged SUSPECT, or the sender kicked out of the task, after
+        // the reply was deferred (M3 kick loop closure).
+        const deferredSenderGmid = (deferredMessage.senderGlobalMetaId ?? '').trim().toLowerCase();
+        if (
+          deferredMessage.senderSuspect
+          || !deferredSenderGmid
+          || (deferredSenderGmid !== ownerGmidKey && !memberGmids.has(deferredSenderGmid))
+        ) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: deferred reply for message ${entry.messageId} dropped; ` +
+            'the sender is suspect or no longer an active member',
+          );
+          continue;
+        }
         const key = keyOf(task.id, entry.metabotId);
         const isChair = member.role === 'chair';
         const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
@@ -2744,25 +2782,27 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // message) per tick, so the daemon never double-speaks alongside the Twin.
     let chairAutoRepliesThisTick = 0;
 
-    const memberGmids = memberGlobalMetaIdSet(members);
     for (const row of rows) {
-      // Round-4 attribution first: resolve the chain-signature GlobalMetaID
-      // (persisted once) and mark SUSPECT when the sender is neither a task
-      // member nor the owner. Everything downstream (deliverable collection,
-      // gating, replies, experience capture) consumes the enriched message.
-      const message = await enrichMessageAttribution(
-        toDaemonMessage(row),
-        memberGmids,
-        ownerGlobalMetaId,
-      );
-      if (message.senderSuspect) {
-        emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: message ${message.id} from non-member sender ` +
-          `(globalMetaId=${message.senderGlobalMetaId ?? 'unresolved'}, name=${message.senderName}) ` +
-          'marked SUSPECT — no deliverables recorded, no replies triggered',
-        );
-      }
       try {
+        // Round-4 attribution first: resolve the chain-signature GlobalMetaID
+        // (persisted once) and mark SUSPECT when the sender is neither a task
+        // member nor the owner. Everything downstream (deliverable collection,
+        // gating, replies, experience capture) consumes the enriched message.
+        // Inside the try on purpose (R2P1-4): a resolver THROW is transient and
+        // rides the bounded retry path below instead of sticking a SUSPECT
+        // stamp on the message and advancing the cursor past it.
+        const message = await enrichMessageAttribution(
+          toDaemonMessage(row),
+          memberGmids,
+          ownerGlobalMetaId,
+        );
+        if (message.senderSuspect) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: message ${message.id} from non-member sender ` +
+            `(globalMetaId=${message.senderGlobalMetaId ?? 'unresolved'}, name=${message.senderName}) ` +
+            'marked SUSPECT — no deliverables recorded, no replies triggered',
+          );
+        }
         recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
         // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
@@ -2909,22 +2949,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // kv failure counter) so a transient error never loses the message,
         // while a permanently broken message is dropped after
         // MSG_RETRY_MAX_FAILURES so it cannot stall the pipeline forever.
-        const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${message.id}`;
+        // (row.id: the enriched message variable is scoped to the try block.)
+        const retryKey = `${MSG_RETRY_PREFIX}${task.id}:${row.id}`;
         const failures = (Number(sqlite.get<number>(retryKey) ?? 0) || 0) + 1;
         sqlite.set(retryKey, failures);
         emitLog(
-          `[GroupTaskDaemon] Task ${task.id}: message ${message.id} failed ` +
+          `[GroupTaskDaemon] Task ${task.id}: message ${row.id} failed ` +
           `(attempt ${failures}/${MSG_RETRY_MAX_FAILURES}): ` +
           `${error instanceof Error ? error.message : String(error)}`,
         );
         if (failures >= MSG_RETRY_MAX_FAILURES) {
           sqlite.delete(retryKey);
-          store.updateLastProcessedMsgId(task.id, message.id);
+          store.updateLastProcessedMsgId(task.id, row.id);
           emitLog(
-            `[GroupTaskDaemon] Task ${task.id}: message ${message.id} dropped after ` +
+            `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
             `${failures} consecutive failures (cursor advanced past it)`,
           );
+          // The poison message is out of the way: later messages may proceed.
+          continue;
         }
+        // Fail-stop (R2P1-4 review): later messages must wait behind the
+        // failed one — otherwise their success would advance the cursor past
+        // it and silently strand the pending retry forever.
+        break;
       }
     }
   };

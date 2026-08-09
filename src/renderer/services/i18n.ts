@@ -1498,6 +1498,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksRemoveMember: '移除成员',
     groupTasksRemovingMember: '移除中…',
     groupTasksRemoveMemberConfirm: '确认将 {name} 移出该群任务吗？主持 Bot 会在链上签署移除 Pin 并在群内公告。',
+    groupTasksKickChainConfirmPending: '已在本地移除并公告 — 链上成员列表尚未确认，索引器可能仍在同步。',
 
     // OpenTeam external collaborations (invitee-side traceability)
     openTeamCollabSectionTitle: '外部协作（OpenTeam）',
@@ -3226,6 +3227,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     groupTasksRemoveMember: 'Remove member',
     groupTasksRemovingMember: 'Removing…',
     groupTasksRemoveMemberConfirm: 'Remove {name} from this group task? The chair bot signs an on-chain removal pin and announces it in the group.',
+    groupTasksKickChainConfirmPending: 'Removed locally and announced — the on-chain member list has not confirmed the removal yet; the indexer may still be catching up.',
 
     // OpenTeam external collaborations (invitee-side traceability)
     openTeamCollabSectionTitle: 'External collaborations (OpenTeam)',

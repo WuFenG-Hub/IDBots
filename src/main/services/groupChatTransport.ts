@@ -303,16 +303,72 @@ function isIndexedGroupInfo(json: unknown, groupId: string): boolean {
   return Object.keys(record).length > 0;
 }
 
-async function fetchGroupInfoOnce(endpointBase: string, groupId: string): Promise<boolean> {
+/** Group creator identity extracted from a group-info record (idchat GroupRoomInfo shape). */
+export interface GroupInfoDetails {
+  groupId: string;
+  createUserMetaId: string;
+  createUserGlobalMetaId: string;
+}
+
+export type FetchGroupInfoResult =
+  | { status: 'found'; info: GroupInfoDetails }
+  | { status: 'not_found' }
+  | { status: 'error' };
+
+/**
+ * Single-endpoint group-info query (injectable via the module fetchFn seam).
+ * 'found' carries the group record's creator identity fields; 'not_found'
+ * means the indexer answered but has no such group; 'error' means the
+ * endpoint itself failed (network/HTTP/JSON). Never throws.
+ */
+async function fetchGroupInfoOnce(
+  endpointBase: string,
+  groupId: string,
+  timeoutMs: number
+): Promise<FetchGroupInfoResult> {
   const url = `${endpointBase}/chat-api/group-chat/group-info?groupId=${encodeURIComponent(groupId)}`;
+  let json: unknown;
   try {
-    const response = await fetch(url);
-    if (!response.ok) return false;
-    const json: unknown = await response.json();
-    return isIndexedGroupInfo(json, groupId);
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) return { status: 'error' };
+    json = await response.json();
   } catch {
-    return false;
+    return { status: 'error' };
   }
+  if (!isIndexedGroupInfo(json, groupId)) return { status: 'not_found' };
+  const data = (json as { data: Record<string, unknown> }).data;
+  return {
+    status: 'found',
+    info: {
+      groupId:
+        typeof data.groupId === 'string' && data.groupId.trim() ? data.groupId.trim() : groupId,
+      createUserMetaId:
+        typeof data.createUserMetaId === 'string' ? data.createUserMetaId.trim() : '',
+      createUserGlobalMetaId:
+        typeof data.createUserGlobalMetaId === 'string' ? data.createUserGlobalMetaId.trim() : '',
+    },
+  };
+}
+
+/**
+ * Group-info lookup across both indexer endpoints: the first 'found' wins; a
+ * definitive 'not_found' from a healthy endpoint is reported when no endpoint
+ * found the group; 'error' only when every endpoint failed. Used by the
+ * OpenTeam guest flow to verify an invited group really exists and to check
+ * the inviter against the group's creator. Never throws.
+ */
+export async function fetchGroupInfo(
+  groupId: string,
+  opts?: { timeoutMs?: number }
+): Promise<FetchGroupInfoResult> {
+  const timeoutMs = Math.max(1_000, opts?.timeoutMs ?? MEMBER_LIST_TIMEOUT_MS);
+  let sawNotFound = false;
+  for (const endpoint of GROUP_INFO_ENDPOINTS) {
+    const result = await fetchGroupInfoOnce(endpoint, groupId, timeoutMs);
+    if (result.status === 'found') return result;
+    if (result.status === 'not_found') sawNotFound = true;
+  }
+  return sawNotFound ? { status: 'not_found' } : { status: 'error' };
 }
 
 /**
@@ -327,7 +383,8 @@ export async function waitForGroupIndexed(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     for (const endpoint of GROUP_INFO_ENDPOINTS) {
-      if (await fetchGroupInfoOnce(endpoint, groupId)) return true;
+      const result = await fetchGroupInfoOnce(endpoint, groupId, MEMBER_LIST_TIMEOUT_MS);
+      if (result.status === 'found') return true;
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;

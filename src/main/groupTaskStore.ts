@@ -5,6 +5,16 @@
  */
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+
+/**
+ * Canonical GlobalMetaID form when the value parses (trim + lowercase), else
+ * the trimmed original so legacy non-canonical rows stay comparable. Applied
+ * at every globalmetaid entry point, same normalization as the invite path.
+ */
+function normalizeMemberGlobalMetaId(value: unknown): string {
+  return normalizeRawGlobalMetaId(value) ?? (typeof value === 'string' ? value.trim() : '');
+}
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
@@ -737,17 +747,6 @@ export class GroupTaskStore {
   }
 
   /**
-   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
-   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
-   * retried (bounded) and never silently skipped.
-   */
-  lastProcessedMsgId: number;
-  /**
-   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
-   * for the stall signal). null when the daemon has never driven the task.
-   */
-  lastDrivenAt: number | null;
-  /**
    * Round-4 attribution: persist the GlobalMetaID resolved from the message's
    * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
    * chain signature is the ONLY identity source; sender_name is never used
@@ -787,7 +786,7 @@ export class GroupTaskStore {
    */
   addMember(input: AddGroupTaskMemberInput): GroupTaskMember {
     const isRemote = input.metabotId == null;
-    const remoteGlobalmetaid = isRemote ? (input.globalmetaid ?? '').trim() : '';
+    const remoteGlobalmetaid = isRemote ? normalizeMemberGlobalMetaId(input.globalmetaid) : '';
     if (isRemote && !remoteGlobalmetaid) {
       throw new Error(`addMember failed for task ${input.taskId}: remote member requires globalmetaid`);
     }
@@ -829,7 +828,7 @@ export class GroupTaskStore {
       [
         input.taskId,
         input.metabotId,
-        isRemote ? remoteGlobalmetaid : input.globalmetaid ?? null,
+        isRemote ? remoteGlobalmetaid : normalizeMemberGlobalMetaId(input.globalmetaid) || null,
         input.role,
         input.joinedPinId ?? null,
         input.displayName ?? null,
@@ -874,7 +873,7 @@ export class GroupTaskStore {
    */
   isMember(taskId: number, metabotId: number | null, globalmetaid?: string | null): boolean {
     if (metabotId == null) {
-      const gmid = (globalmetaid ?? '').trim();
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
       if (!gmid) return false;
       const row = this.getOne<{ found: number }>(
         `SELECT 1 AS found FROM group_task_members
@@ -902,7 +901,7 @@ export class GroupTaskStore {
     globalmetaid?: string | null,
   ): void {
     if (metabotId == null) {
-      const gmid = (globalmetaid ?? '').trim();
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
       if (!gmid) {
         throw new Error(`updateMemberJoinedPinId failed for task ${taskId}: remote member requires globalmetaid`);
       }
@@ -1073,7 +1072,7 @@ export class GroupTaskStore {
    */
   markMemberRemoved(input: MarkGroupTaskMemberRemovedInput): GroupTaskMember {
     const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
-    const gmid = (input.globalmetaid ?? '').trim();
+    const gmid = normalizeMemberGlobalMetaId(input.globalmetaid);
     if (metabotId == null && !gmid) {
       throw new Error(`markMemberRemoved failed for task ${input.taskId}: metabotId or globalmetaid is required`);
     }
@@ -1095,7 +1094,7 @@ export class GroupTaskStore {
     if (row.removed_at) return rowToGroupTaskMember(row);
 
     this.db.run(
-      `UPDATE group_task_members SET removed_at = datetime('now'), remove_pin_id = ?
+      `UPDATE group_task_members SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now'), remove_pin_id = ?
        WHERE id = ? AND removed_at IS NULL`,
       [input.removePinId ?? null, row.id],
     );
@@ -1105,6 +1104,34 @@ export class GroupTaskStore {
       throw new Error(`markMemberRemoved failed for task ${input.taskId}: member ${row.id} not removed`);
     }
     return rowToGroupTaskMember(updated);
+  }
+
+  /**
+   * OpenTeam (M3/R2): true when this task has a REMOVED remote member row for
+   * the GlobalMetaID. With `notBeforeMs` (epoch ms), only rows kicked at or
+   * after that moment count — this distinguishes "the membership this invite
+   * created was later kicked" (freeze the invite; never revive) from "an
+   * older membership was kicked before this invite existed" (an explicit
+   * re-invite must still be able to complete its handshake). The threshold is
+   * rendered at millisecond precision (removed_at is stored with %f) so a
+   * same-second kick + re-invite stays ordered correctly.
+   */
+  hasRemovedMember(taskId: number, globalmetaid: string, notBeforeMs?: number): boolean {
+    const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+    if (!gmid) return false;
+    const row = notBeforeMs != null && Number.isFinite(notBeforeMs)
+      ? this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL
+             AND removed_at >= strftime('%Y-%m-%d %H:%M:%f', ? / 1000.0, 'unixepoch') LIMIT 1`,
+          [taskId, gmid, Math.trunc(notBeforeMs)],
+        )
+      : this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL LIMIT 1`,
+          [taskId, gmid],
+        );
+    return Boolean(row);
   }
 
   // --- group_task_deliverables ---

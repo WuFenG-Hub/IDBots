@@ -71,27 +71,37 @@ interface OpenTeamCollabsSectionProps {
   onOpenCollab: (collab: OpenTeamCollabSummary) => void;
 }
 
+/** Poll cadence for the collab list (new invites/kicks surface without a reload). */
+export const OPEN_TEAM_COLLAB_POLL_INTERVAL_MS = 15_000;
+
 /**
  * "External collaborations (OpenTeam)" block under the Group Tasks list: every
  * external group task this machine's bots auto-joined (or left). Hidden when
  * there is nothing to show — the block is pure traceability, not an entry point.
- * Loaded on mount, matching GroupTasksView's own refresh strategy.
+ * Loaded on mount and re-polled every OPEN_TEAM_COLLAB_POLL_INTERVAL_MS so new
+ * collaborations and kick/leave transitions surface without revisiting the view;
+ * the interval is cleared on unmount.
  */
 const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenCollab }) => {
   const [items, setItems] = useState<OpenTeamCollabSummary[]>([]);
 
   useEffect(() => {
     let cancelled = false;
-    openTeamCollabService
-      .list()
-      .then((list) => {
-        if (!cancelled) setItems(list);
-      })
-      .catch(() => {
-        // Traceability data must never break the Group Tasks view.
-      });
+    const load = () => {
+      openTeamCollabService
+        .list()
+        .then((list) => {
+          if (!cancelled) setItems(list);
+        })
+        .catch(() => {
+          // Traceability data must never break the Group Tasks view.
+        });
+    };
+    load();
+    const timer = setInterval(load, OPEN_TEAM_COLLAB_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
+      clearInterval(timer);
     };
   }, []);
 

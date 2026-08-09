@@ -48,6 +48,7 @@ import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { parseOpenTeamEnvelope } from './openTeamProtocols';
 import {
   handleIncomingOpenTeamInvite,
+  handleIncomingOpenTeamKick,
   handleIncomingOpenTeamResponse,
 } from './openTeamGuestService';
 import {
@@ -2677,6 +2678,103 @@ async function resolvePeerChatPubkey(
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// OpenTeam protocol interception (invite/accept/decline envelopes)
+// ---------------------------------------------------------------------------
+
+/** Injectable seams for interceptOpenTeamEnvelope (tests stub the handlers/schedule). */
+export interface PrivateChatOpenTeamInterceptionDeps {
+  handleInvite: typeof handleIncomingOpenTeamInvite;
+  handleResponse: typeof handleIncomingOpenTeamResponse;
+  handleKick: typeof handleIncomingOpenTeamKick;
+  /** Async handoff used to keep the handling off the processOne call stack. */
+  schedule: (task: () => void) => void;
+}
+
+const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
+  handleInvite: (input) => handleIncomingOpenTeamInvite(input),
+  handleResponse: (envelope, options) => handleIncomingOpenTeamResponse(envelope, options),
+  handleKick: (input) => handleIncomingOpenTeamKick(input),
+  schedule: (task) => setImmediate(task),
+};
+
+/**
+ * OpenTeam protocol interception for processOne. Runs right after the row's
+ * plaintext is resolved and BEFORE the enabled/wallet/chat-pubkey gates, so a
+ * disabled bot still answers an invite with DECLINE instead of leaving the
+ * inviter to wait out the whole invite TTL.
+ *
+ * Returns true when the plaintext carried an OpenTeam envelope — the caller
+ * must then markProcessed and return immediately (the envelope never reaches
+ * the LLM reply path). The actual handling (on-chain join + ACCEPT/DECLINE
+ * pins, invite state transitions) is dispatched fire-and-forget via the
+ * detached-work tracker: it never stalls the private-chat pipeline, and since
+ * the row is marked processed first, an async failure can never cause the
+ * same message to be handled twice. Without from_chat_pubkey no reply is
+ * possible, so reply-bound envelopes (invite/accept/decline) are only consumed
+ * (true) without dispatching; the one-way KICK notification needs no reply and
+ * is still dispatched.
+ */
+export function interceptOpenTeamEnvelope(params: {
+  plaintext: string;
+  metabot: Metabot;
+  /** Actual sender of the simplemsg row (from_global_metaid/from_metaid). */
+  fromGlobalMetaId: string;
+  fromChatPubkey: string;
+  messageId: number;
+  emitLog: (msg: string) => void;
+  onWasmBoundsError?: () => void;
+  deps?: PrivateChatOpenTeamInterceptionDeps;
+}): boolean {
+  const envelope = parseOpenTeamEnvelope(params.plaintext);
+  if (!envelope) return false;
+  const emitLog = params.emitLog;
+  if (!params.fromChatPubkey && envelope.kind !== 'kick') {
+    emitLog(
+      `[OpenTeam] Message ${params.messageId}: envelope has no from_chat_pubkey; ` +
+      'cannot reply, skipping without dispatch.',
+    );
+    return true;
+  }
+  const handlers = params.deps ?? defaultOpenTeamInterceptionDeps;
+  const work = new Promise<void>((resolve) => {
+    handlers.schedule(() => resolve());
+  }).then(async () => {
+    if (envelope.kind === 'invite') {
+      await handlers.handleInvite({
+        metabot: params.metabot,
+        invite: envelope.invite,
+        senderGlobalMetaId: params.fromGlobalMetaId,
+        replyContext: {
+          peerGlobalMetaId: params.fromGlobalMetaId,
+          peerChatPubkey: params.fromChatPubkey,
+          invitePinId: envelope.invite.inviteId,
+        },
+      });
+    } else if (envelope.kind === 'kick') {
+      handlers.handleKick({
+        metabot: params.metabot,
+        kick: envelope.kick,
+        senderGlobalMetaId: params.fromGlobalMetaId,
+      });
+    } else {
+      handlers.handleResponse(envelope, { senderGlobalMetaId: params.fromGlobalMetaId });
+    }
+  }).catch((error) => {
+    if (isSqliteWasmBoundsError(error)) {
+      void stopPrivateChatDaemon();
+      params.onWasmBoundsError?.();
+      return;
+    }
+    emitLog(
+      `[OpenTeam] Envelope handling failed for message ${params.messageId}: ` +
+      `${error instanceof Error ? error.message : error}`,
+    );
+  });
+  trackPrivateChatDetachedWork(work);
+  return true;
+}
+
 async function processOne(
   row: PrivateChatMessageRow,
   db: Database,
@@ -2819,125 +2917,135 @@ async function processOne(
       return;
     }
 
+    const wallet = metabotStore.getMetabotWalletByMetabotId(metabot.id);
+    const fromChatPubkey = (row.from_chat_pubkey ?? '').trim();
+    const fromGlobalMetaId = (row.from_global_metaid || row.from_metaid || '').trim();
+
+    // Resolve the plaintext whenever the crypto material is available. The
+    // OpenTeam interception below runs BEFORE the enabled/wallet/chat-pubkey
+    // gates so a disabled bot can still DECLINE an invite (otherwise the
+    // inviter waits out the whole invite TTL). Rows that cannot be decrypted
+    // keep the original skip behavior via the gates re-checked afterward.
+    let plaintext = '';
+    let sharedSecretForReply = '';
+    if (wallet?.mnemonic?.trim() && fromChatPubkey) {
+      let privateKeyBuffer: Buffer;
+      try {
+        privateKeyBuffer = await getPrivateKeyBufferForEcdh(wallet.mnemonic, wallet.path ?? "m/44'/10001'/0'/0/0");
+      } catch (e) {
+        rethrowSqliteWasmBoundsError(e);
+        emitLog(`[PrivateChat] Skip message ${row.id}: getPrivateKeyBufferForEcdh failed: ${e instanceof Error ? e.message : e}`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+
+      let sharedSecretSha256: string;
+      let sharedSecretRaw: string;
+      try {
+        sharedSecretSha256 = computeEcdhSharedSecretSha256(privateKeyBuffer, fromChatPubkey);
+        sharedSecretRaw = computeEcdhSharedSecret(privateKeyBuffer, fromChatPubkey);
+      } catch (e) {
+        rethrowSqliteWasmBoundsError(e);
+        emitLog(`[PrivateChat] Skip message ${row.id}: invalid peer public key (${fromChatPubkey.slice(0, 16)}…): ${e instanceof Error ? e.message : e}`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      emitLog(
+        `[PrivateChat] ECDH ready: from_chat_pubkey(first/last16)=${fromChatPubkey.slice(0, 16)}...${fromChatPubkey.slice(-16)} sha256Secret(first/last16)=${sharedSecretSha256.slice(0, 16)}...${sharedSecretSha256.slice(-16)}`
+      );
+
+      const contentInDb = (row.content ?? '').trim();
+      const contentInRawData = getCipherTextFromRawData(
+        typeof row.raw_data === 'string' ? row.raw_data : null
+      );
+      const cipherText = contentInRawData || contentInDb;
+      if (!cipherText && !contentInDb) {
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+
+      const shouldDecrypt =
+        !!contentInRawData || looksLikeEncryptedPrivateContent(contentInDb);
+      plaintext = contentInDb;
+      sharedSecretForReply = sharedSecretSha256;
+      if (shouldDecrypt) {
+        const plainBySha256 = tryDecryptWithSecret(cipherText, sharedSecretSha256);
+        if (plainBySha256 != null) {
+          plaintext = plainBySha256;
+          sharedSecretForReply = sharedSecretSha256;
+        } else {
+          const plainByRaw = tryDecryptWithSecret(cipherText, sharedSecretRaw);
+          if (plainByRaw != null) {
+            plaintext = plainByRaw;
+            sharedSecretForReply = sharedSecretRaw;
+            emitLog('[PrivateChat] Decrypt fallback: using raw shared secret for legacy payload.');
+          } else {
+            emitLog(
+              `[PrivateChat] Skip message ${row.id}: decrypt failed for both sha256/raw shared secret`
+            );
+            markProcessed(db, row.id, saveDb);
+            return;
+          }
+        }
+      }
+      if (!plaintext.trim()) {
+        emitLog(`[PrivateChat] Skip message ${row.id}: plaintext empty after decode`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+    } else {
+      // Without the wallet or the peer chat pubkey the ciphertext is
+      // unreadable; only a row already stored as plaintext can still be
+      // inspected for an OpenTeam envelope below.
+      const contentInDb = (row.content ?? '').trim();
+      const contentInRawData = getCipherTextFromRawData(
+        typeof row.raw_data === 'string' ? row.raw_data : null
+      );
+      if (!contentInRawData && contentInDb && !looksLikeEncryptedPrivateContent(contentInDb)) {
+        plaintext = contentInDb;
+      }
+    }
+
+    // OpenTeam protocol envelopes (invite/accept/decline/kick) are handled by the
+    // OpenTeam guest/inviter flows and must never reach the LLM reply path —
+    // same interception pattern as the MetaSwarm handshake and [ORDER]
+    // protocols. `metabot` here is the local RECIPIENT bot of this message, so
+    // invite handling always runs in the invitee's context. markProcessed runs
+    // FIRST: the actual handling continues fire-and-forget (join + ACCEPT are
+    // two chain pins and must not stall the private-chat pipeline), and an
+    // async failure must never cause this row to be handled twice.
+    if (plaintext.trim() && interceptOpenTeamEnvelope({
+      plaintext,
+      metabot,
+      fromGlobalMetaId,
+      fromChatPubkey,
+      messageId: row.id,
+      emitLog,
+      onWasmBoundsError,
+    })) {
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
+
     if (metabot.enabled === false) {
       emitLog(`[PrivateChat] Skip message ${row.id}: MetaBot ${metabot.name} is disabled.`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    const wallet = metabotStore.getMetabotWalletByMetabotId(metabot.id);
     if (!wallet?.mnemonic?.trim()) {
       emitLog(`[PrivateChat] Skip message ${row.id}: MetaBot ${metabot.name} has no wallet`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    const fromChatPubkey = (row.from_chat_pubkey ?? '').trim();
     if (!fromChatPubkey) {
       emitLog(`[PrivateChat] Skip message ${row.id}: no from_chat_pubkey`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    let privateKeyBuffer: Buffer;
-    try {
-      privateKeyBuffer = await getPrivateKeyBufferForEcdh(wallet.mnemonic, wallet.path ?? "m/44'/10001'/0'/0/0");
-    } catch (e) {
-      rethrowSqliteWasmBoundsError(e);
-      emitLog(`[PrivateChat] Skip message ${row.id}: getPrivateKeyBufferForEcdh failed: ${e instanceof Error ? e.message : e}`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    let sharedSecretSha256: string;
-    let sharedSecretRaw: string;
-    try {
-      sharedSecretSha256 = computeEcdhSharedSecretSha256(privateKeyBuffer, fromChatPubkey);
-      sharedSecretRaw = computeEcdhSharedSecret(privateKeyBuffer, fromChatPubkey);
-    } catch (e) {
-      rethrowSqliteWasmBoundsError(e);
-      emitLog(`[PrivateChat] Skip message ${row.id}: invalid peer public key (${fromChatPubkey.slice(0, 16)}…): ${e instanceof Error ? e.message : e}`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-    emitLog(
-      `[PrivateChat] ECDH ready: from_chat_pubkey(first/last16)=${fromChatPubkey.slice(0, 16)}...${fromChatPubkey.slice(-16)} sha256Secret(first/last16)=${sharedSecretSha256.slice(0, 16)}...${sharedSecretSha256.slice(-16)}`
-    );
-
-    const contentInDb = (row.content ?? '').trim();
-    const contentInRawData = getCipherTextFromRawData(
-      typeof row.raw_data === 'string' ? row.raw_data : null
-    );
-    const cipherText = contentInRawData || contentInDb;
-    if (!cipherText && !contentInDb) {
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    const shouldDecrypt =
-      !!contentInRawData || looksLikeEncryptedPrivateContent(contentInDb);
-    let plaintext = contentInDb;
-    let sharedSecretForReply = sharedSecretSha256;
-    if (shouldDecrypt) {
-      const plainBySha256 = tryDecryptWithSecret(cipherText, sharedSecretSha256);
-      if (plainBySha256 != null) {
-        plaintext = plainBySha256;
-        sharedSecretForReply = sharedSecretSha256;
-      } else {
-        const plainByRaw = tryDecryptWithSecret(cipherText, sharedSecretRaw);
-        if (plainByRaw != null) {
-          plaintext = plainByRaw;
-          sharedSecretForReply = sharedSecretRaw;
-          emitLog('[PrivateChat] Decrypt fallback: using raw shared secret for legacy payload.');
-        } else {
-          emitLog(
-            `[PrivateChat] Skip message ${row.id}: decrypt failed for both sha256/raw shared secret`
-          );
-          markProcessed(db, row.id, saveDb);
-          return;
-        }
-      }
-    }
-    if (!plaintext.trim()) {
-      emitLog(`[PrivateChat] Skip message ${row.id}: plaintext empty after decode`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
     const handshakeWord = normalizeHandshakeWord(plaintext.trim());
-    const fromGlobalMetaId = (row.from_global_metaid || row.from_metaid || '').trim();
-
-    // OpenTeam protocol envelopes (invite/accept/decline) are handled by the
-    // OpenTeam guest/inviter flows and must never reach the LLM reply path —
-    // same interception pattern as the MetaSwarm handshake and [ORDER]
-    // protocols. `metabot` here is the local RECIPIENT bot of this message, so
-    // invite handling always runs in the invitee's context.
-    const openTeamEnvelope = parseOpenTeamEnvelope(plaintext);
-    if (openTeamEnvelope) {
-      try {
-        if (openTeamEnvelope.kind === 'invite') {
-          await handleIncomingOpenTeamInvite({
-            metabot,
-            invite: openTeamEnvelope.invite,
-            replyContext: {
-              peerGlobalMetaId: fromGlobalMetaId,
-              peerChatPubkey: fromChatPubkey,
-              invitePinId: openTeamEnvelope.invite.inviteId,
-            },
-          });
-        } else {
-          handleIncomingOpenTeamResponse(openTeamEnvelope);
-        }
-      } catch (error) {
-        rethrowSqliteWasmBoundsError(error);
-        emitLog(
-          `[OpenTeam] Envelope handling failed for message ${row.id}: ${error instanceof Error ? error.message : error}`
-        );
-      }
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
     const createSimpleMsgPin = async (payload: string) => createPinWithMvcSubsidyRetry({
       metabot,
       wallet,

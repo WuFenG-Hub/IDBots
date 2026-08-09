@@ -69,6 +69,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [kickTarget, setKickTarget] = useState<GroupTaskDetail['members'][number] | null>(null);
   const [kicking, setKicking] = useState(false);
   const [kickError, setKickError] = useState<string | null>(null);
+  // Optional kick reason (removeuser pin + [OPENTEAM_KICK] notification).
+  const [kickReason, setKickReason] = useState('');
+  // R2P1-2: surfaces when the kick held locally but the on-chain member list
+  // has not confirmed the removal within the poll budget.
+  const [kickChainConfirmPending, setKickChainConfirmPending] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
@@ -234,12 +239,18 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setKicking(true);
     setKickError(null);
     try {
-      await groupTaskService.kickMember({
+      const reason = kickReason.trim();
+      const kicked = await groupTaskService.kickMember({
         taskId,
         metabotId: kickTarget.metabotId ?? undefined,
         globalmetaid: kickTarget.metabotId == null ? kickTarget.globalmetaid ?? undefined : undefined,
+        reason: reason || undefined,
       });
       setKickTarget(null);
+      setKickReason('');
+      // R2P1-2: the local removal + announcement already hold; only warn that
+      // the on-chain member list has not confirmed the removal yet.
+      setKickChainConfirmPending(kicked.chainRemovalConfirmed === false);
       await refreshDetail();
     } catch (err) {
       setKickError(err instanceof Error ? err.message : String(err));
@@ -749,12 +760,23 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           memberName={memberDisplayName(kickTarget)}
           kicking={kicking}
           error={kickError}
+          reason={kickReason}
+          onReasonChange={setKickReason}
           onConfirm={() => void handleConfirmKick()}
           onCancel={() => {
             setKickTarget(null);
             setKickError(null);
+            setKickReason('');
           }}
         />
+      )}
+      {kickChainConfirmPending && !kickTarget && (
+        <div
+          className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-amber-500 text-white text-sm px-4 py-2 shadow-lg cursor-pointer"
+          onClick={() => setKickChainConfirmPending(false)}
+        >
+          {i18nService.t('groupTasksKickChainConfirmPending')}
+        </div>
       )}
       {closeError && !confirmAction && (
         <div className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-red-500 text-white text-sm px-4 py-2 shadow-lg">

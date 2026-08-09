@@ -1,14 +1,24 @@
 /**
  * OpenTeam guest daemon (M1): watches group_chat_messages for every active
  * openteam_memberships row and lets the invited bot answer when @-mentioned,
- * exactly like a local group-task worker would.
+ * exactly like a local group-task worker would. M3/P1-2 adds a periodic
+ * on-chain membership self-check (default 5 min) that marks the membership
+ * left when this bot has disappeared from the group member list — the fallback
+ * for the chair's one-way [OPENTEAM_KICK] simplemsg. Two guards keep indexer
+ * lag from killing a healthy membership: a fresh (re-)activation skips the
+ * check for a grace window (default 15 min, anchored at activated_at), and
+ * only 2 consecutive absence reads mark the membership left.
  *
  * Modeled on groupTaskDaemon's structure (5s tick, single-tick re-entry guard,
  * module-level start/stop singleton, same mention gating via
  * groupChatMentionUtils) but deliberately leaner: no chair/worker protocol, no
  * orchestration, no session channel. Loop prevention comes from the per-
  * membership cursor (openteam_memberships.last_processed_msg_id, monotonic),
- * the self-message skip, and a per-membership reply cooldown. A reply starting
+ * the self-message skip, and a per-membership reply cooldown. The cursor only
+ * advances past messages that were actually processed: a cooldown-blocked
+ * mention is re-evaluated on a later tick (answered once the cooldown has
+ * elapsed), and a send/generation failure is retried next tick — bounded, so
+ * the same message is abandoned after 3 consecutive failures. A reply starting
  * with [NO_REPLY] is suppressed (not sent on-chain), same escape hatch as the
  * group-task daemon.
  *
@@ -51,6 +61,26 @@ const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 const DEFAULT_INTERVAL_MS = 5_000;
 const DEFAULT_COOLDOWN_MS = 20_000;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
+/** Bounded retry: consecutive failures on one message before the cursor gives up and advances past it. */
+const MAX_CONSECUTIVE_MESSAGE_FAILURES = 3;
+/**
+ * P1-2 self-check fallback: how often each active membership re-verifies on-chain
+ * that this bot is still a group member (the KICK simplemsg may never arrive).
+ */
+const DEFAULT_MEMBERSHIP_CHECK_INTERVAL_MS = 5 * 60_000;
+/**
+ * Activation grace: a fresh (re-)activation skips the self-check for this long.
+ * The indexer takes minutes to absorb the join pin into the member list (the
+ * inviter-side join-confirmation budget is 10 min for the same reason), so an
+ * early absence read would mark a brand-new membership left by mistake.
+ */
+const DEFAULT_MEMBERSHIP_SELF_CHECK_GRACE_MS = 15 * 60_000;
+/**
+ * Confirmed-absence threshold: a single missing member-list read can be
+ * indexer lag; only this many CONSECUTIVE absence results mark the membership
+ * left.
+ */
+const MEMBERSHIP_SELF_CHECK_ABSENCE_THRESHOLD = 2;
 
 /** Cowork conversation-mapping channel for the guest's per-group skill sessions. */
 const CONVERSATION_CHANNEL = 'openteam_guest';
@@ -172,6 +202,19 @@ export interface OpenTeamGuestDaemonDeps {
   runSkillTurn?: OpenTeamGuestRunSkillTurnFn;
   /** M3 file delivery; unwired = skill turns run but files are not uploaded/delivered. */
   uploadDeliverableFile?: OpenTeamGuestUploadFileFn;
+  /**
+   * P1-2 self-check fallback: group member-list read (wired to
+   * groupChatTransport.fetchGroupMembers in main.ts). Unwired = the periodic
+   * on-chain membership self-check stays off.
+   */
+  fetchGroupMembers?: (groupId: string) => Promise<string[] | null>;
+  /** Self-check cadence per membership (default 5 min). */
+  membershipCheckIntervalMs?: number;
+  /**
+   * Post-activation grace during which the self-check is skipped entirely
+   * (default 15 min; covers the indexer lag in absorbing the join pin).
+   */
+  membershipSelfCheckGraceMs?: number;
   /** Cap on metafile deliverables appended per turn (default DEFAULT_MAX_DELIVERABLE_FILES). */
   maxDeliverableFilesPerTurn?: number;
   emitLog?: (message: string) => void;
@@ -232,16 +275,37 @@ function toDaemonMessage(row: GroupChatMessageRow): OpenTeamGuestDaemonMessage {
   };
 }
 
+/** sqlite UTC text ('YYYY-MM-DD HH:MM:SS', optionally with .SSS) -> epoch ms. */
+const parseSqliteUtcMs = (value: string | null): number => {
+  if (!value) return Number.NaN;
+  const parsed = Date.parse(`${value.trim().replace(' ', 'T')}Z`);
+  return Number.isFinite(parsed) ? parsed : Number.NaN;
+};
+
 export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): OpenTeamGuestDaemonLoop {
   const intervalMs = Math.max(1_000, Math.trunc(deps.intervalMs ?? DEFAULT_INTERVAL_MS));
   const cooldownMs = Math.max(0, Math.trunc(deps.cooldownMs ?? DEFAULT_COOLDOWN_MS));
   const contextMessageCount = Math.max(1, Math.trunc(deps.contextMessageCount ?? DEFAULT_CONTEXT_MESSAGE_COUNT));
+  const membershipCheckIntervalMs = Math.max(
+    1_000,
+    Math.trunc(deps.membershipCheckIntervalMs ?? DEFAULT_MEMBERSHIP_CHECK_INTERVAL_MS),
+  );
+  const membershipSelfCheckGraceMs = Math.max(
+    0,
+    Math.trunc(deps.membershipSelfCheckGraceMs ?? DEFAULT_MEMBERSHIP_SELF_CHECK_GRACE_MS),
+  );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
 
   // Loop prevention state (in-memory, per loop instance; the durable half is
   // the membership cursor in openteam_memberships).
   const lastReplyAtByMembership = new Map<number, number>();
+  /** Consecutive send/generation failure streak per membership (bounded retry). */
+  const consecutiveFailuresByMembership = new Map<number, { messageId: number; count: number }>();
+  /** P1-2 self-check: last on-chain membership verification per membership. */
+  const membershipCheckedAtByMembership = new Map<number, number>();
+  /** P1-2 self-check: consecutive absence streak per membership (confirmed kick). */
+  const membershipAbsenceStreakByMembership = new Map<number, number>();
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let ticking = false;
@@ -369,6 +433,10 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     const files = collectGuestDeliverableFiles({
       texts: [input.reply],
       cwd: input.cwd,
+      // The allowlist root IS the guest session workspace (the daemon wiring
+      // runs the skill turn there): anything outside is dropped + logged.
+      allowedRoot: input.cwd,
+      emitLog,
       turnStartedAt: input.turnStartedAt,
       turnCompletedAt: input.turnCompletedAt,
       maxFiles: maxDeliverableFilesPerTurn,
@@ -545,6 +613,72 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     }
   };
 
+  /**
+   * P1-2 self-check fallback: the chair's [OPENTEAM_KICK] simplemsg may never
+   * arrive (offline, indexer lag), so every membershipCheckIntervalMs each
+   * active membership re-verifies on-chain that this bot is still a member of
+   * the group. Two guards keep an indexer-lag false absence from killing a
+   * healthy membership: (1) a fresh (re-)activation is not checked at all for
+   * membershipSelfCheckGraceMs (anchored at activated_at, which the upsert
+   * restamps on revival — created_at would survive a re-invite); (2) only
+   * MEMBERSHIP_SELF_CHECK_ABSENCE_THRESHOLD consecutive absence reads mark the
+   * membership left. Marking left stops the daemon consuming the group, stops
+   * backfill pulling it, shows Left in the collab view, and lets a re-invite
+   * land cleanly. A failed lookup silently skips the round.
+   * Returns true when the membership was just marked left.
+   */
+  const runMembershipSelfCheck = async (
+    membership: OpenTeamMembership,
+    bot: Metabot,
+  ): Promise<boolean> => {
+    if (!deps.fetchGroupMembers) return false;
+    // Activation grace: the indexer takes minutes to list a fresh join.
+    const activatedMs = parseSqliteUtcMs(membership.activatedAt);
+    if (Number.isFinite(activatedMs) && now() - activatedMs < membershipSelfCheckGraceMs) return false;
+    const lastCheckedAt = membershipCheckedAtByMembership.get(membership.id) ?? 0;
+    if (now() - lastCheckedAt < membershipCheckIntervalMs) return false;
+    membershipCheckedAtByMembership.set(membership.id, now());
+    let members: string[] | null = null;
+    try {
+      members = await deps.fetchGroupMembers(membership.groupId);
+    } catch (error) {
+      members = null;
+      emitLog(
+        `[OpenTeamGuestDaemon] Group ${membership.groupId}: membership self-check failed; ` +
+        `skipping this round: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!members) return false; // indexer unreachable — try again next interval
+    const identities = new Set(
+      [bot.globalmetaid, bot.metaid, membership.globalmetaid]
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (identities.size === 0) return false;
+    if (members.some((member) => identities.has(member.trim().toLowerCase()))) {
+      membershipAbsenceStreakByMembership.delete(membership.id);
+      return false;
+    }
+    // One absence read can be indexer lag; only a confirmed streak marks left.
+    const absenceStreak = (membershipAbsenceStreakByMembership.get(membership.id) ?? 0) + 1;
+    if (absenceStreak < MEMBERSHIP_SELF_CHECK_ABSENCE_THRESHOLD) {
+      membershipAbsenceStreakByMembership.set(membership.id, absenceStreak);
+      emitLog(
+        `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} missing from the on-chain ` +
+        `member list (absence ${absenceStreak}/${MEMBERSHIP_SELF_CHECK_ABSENCE_THRESHOLD}); ` +
+        'confirming on the next round before marking left',
+      );
+      return false;
+    }
+    membershipAbsenceStreakByMembership.delete(membership.id);
+    deps.getOpenTeamMembershipStore().markLeft(membership.groupId, membership.metabotId);
+    emitLog(
+      `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} is no longer an on-chain ` +
+      'member; membership marked left (kick self-check)',
+    );
+    return true;
+  };
+
   const processMembership = async (membership: OpenTeamMembership): Promise<void> => {
     const metabotStore = deps.getMetabotStore();
     const membershipStore = deps.getOpenTeamMembershipStore();
@@ -553,9 +687,13 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     if (!bot.globalmetaid?.trim()) return;
     const db = deps.getStore().getDatabase();
 
+    // Kick self-check before consuming new messages (P1-2 fallback path).
+    if (await runMembershipSelfCheck(membership, bot)) return;
+
     const rows = queryNewMessages(db, membership.groupId, membership.lastProcessedMsgId);
     for (const row of rows) {
       const message = toDaemonMessage(row);
+      let advanceCursor = false;
       try {
         const decision = decideOpenTeamGuestResponse({
           message,
@@ -564,29 +702,73 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
           now: now(),
           cooldownMs,
         });
+        if (!decision.respond && decision.reason === 'cooldown') {
+          // Cooldown is transient: keep the cursor BEFORE this message so the
+          // next tick re-evaluates it once the cooldown has elapsed instead of
+          // dropping a legitimate mention forever. Later messages wait to keep
+          // processing order.
+          break;
+        }
         if (decision.respond) {
           await generateAndSendGuestReply(membership, bot, message);
           lastReplyAtByMembership.set(membership.id, now());
         }
+        consecutiveFailuresByMembership.delete(membership.id);
+        advanceCursor = true;
       } catch (error) {
-        // One bad message must never stall the cursor or the tick.
-        emitLog(
-          `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed: ` +
-          `${error instanceof Error ? error.message : String(error)}`,
-        );
-      } finally {
-        membershipStore.updateLastProcessedMsgId(
-          membership.groupId,
-          membership.metabotId,
-          message.id,
-        );
+        // A send/generation failure must not silently drop the mention: hold
+        // the cursor and retry on the next tick, giving up after a bounded run
+        // of consecutive failures on the SAME message so one poisonous message
+        // cannot stall the membership forever.
+        const previous = consecutiveFailuresByMembership.get(membership.id);
+        const failures = previous?.messageId === message.id ? previous.count + 1 : 1;
+        if (failures >= MAX_CONSECUTIVE_MESSAGE_FAILURES) {
+          consecutiveFailuresByMembership.delete(membership.id);
+          advanceCursor = true;
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed ` +
+            `${failures} times in a row; giving up on it (cursor advances): ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        } else {
+          consecutiveFailuresByMembership.set(membership.id, { messageId: message.id, count: failures });
+          emitLog(
+            `[OpenTeamGuestDaemon] Group ${membership.groupId}: message ${message.id} failed ` +
+            `(retry ${failures}/${MAX_CONSECUTIVE_MESSAGE_FAILURES} next tick): ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
       }
+      if (!advanceCursor) break;
+      membershipStore.updateLastProcessedMsgId(
+        membership.groupId,
+        membership.metabotId,
+        message.id,
+      );
     }
   };
 
   const runTick = async (): Promise<void> => {
     const membershipStore = deps.getOpenTeamMembershipStore();
-    for (const membership of membershipStore.listActiveMemberships()) {
+    const activeMemberships = membershipStore.listActiveMemberships();
+    // Drop in-memory loop-prevention state of memberships that are no longer
+    // active (kick / owner opt-out): the maps are keyed by membership id and
+    // would otherwise grow monotonically — and a later re-join must not
+    // inherit a stale cooldown or failure streak.
+    const activeIds = new Set(activeMemberships.map((membership) => membership.id));
+    for (const id of [...lastReplyAtByMembership.keys()]) {
+      if (!activeIds.has(id)) lastReplyAtByMembership.delete(id);
+    }
+    for (const id of [...consecutiveFailuresByMembership.keys()]) {
+      if (!activeIds.has(id)) consecutiveFailuresByMembership.delete(id);
+    }
+    for (const id of [...membershipCheckedAtByMembership.keys()]) {
+      if (!activeIds.has(id)) membershipCheckedAtByMembership.delete(id);
+    }
+    for (const id of [...membershipAbsenceStreakByMembership.keys()]) {
+      if (!activeIds.has(id)) membershipAbsenceStreakByMembership.delete(id);
+    }
+    for (const membership of activeMemberships) {
       try {
         await processMembership(membership);
       } catch (error) {

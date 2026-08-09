@@ -52,6 +52,7 @@ const replyContext = () => ({
 /**
  * Mock deps factory: metabot settings, existing membership, join/send behavior
  * are all controllable; every side effect is recorded in `calls`.
+ * fetchGroupInfo defaults to a verified group whose creator is the inviter.
  */
 const makeDeps = (options = {}) => {
   const calls = {
@@ -61,10 +62,16 @@ const makeDeps = (options = {}) => {
     catchUp: [],
     getInviteByPinId: [],
     updateInviteStatus: [],
+    groupInfo: [],
   };
   const settings = options.settings ?? {};
   const membership = options.membership ?? null;
   const inviteRow = options.inviteRow ?? null;
+  const groupInfo = options.groupInfo ?? {
+    status: 'found',
+    createUserMetaId: '',
+    createUserGlobalMetaId: 'gmid-inviter',
+  };
   const deps = {
     getMetabotStore: () => ({
       getMetabotSetting: (metabotId, key) => settings[key] ?? null,
@@ -98,6 +105,11 @@ const makeDeps = (options = {}) => {
       calls.send.push(input);
       if (options.sendError) throw new Error(options.sendError);
       return { txids: ['tx-reply'], pinId: REPLY_PIN_ID };
+    },
+    fetchGroupInfo: async (groupId) => {
+      calls.groupInfo.push(groupId);
+      if (options.groupInfoError) throw new Error(options.groupInfoError);
+      return groupInfo;
     },
     emitLog: () => {},
     now: () => NOW_MS,
@@ -321,4 +333,354 @@ test('already-resolved invite is not transitioned again', () => {
   });
   assert.equal(result.matched, true);
   assert.equal(calls.updateInviteStatus.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Invite hardening: sender match, dedup, rate limit, clock skew, group verify
+// ---------------------------------------------------------------------------
+
+const INVITE_ID_2 = `${'e'.repeat(64)}i0`;
+const INVITE_ID_3 = `${'f'.repeat(64)}i0`;
+const INVITE_ID_4 = `${'0'.repeat(64)}i0`;
+
+test('declines when the actual sender differs from the envelope inviter (sender_mismatch)', async () => {
+  const { deps, calls } = makeDeps();
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+    senderGlobalMetaId: 'gmid-attacker',
+  });
+  assert.equal(result.action, 'declined');
+  assert.equal(result.reason, 'sender_mismatch');
+  assert.equal(calls.join.length, 0);
+  assert.equal(calls.groupInfo.length, 0, 'no network lookup for a forged sender');
+  assert.equal(calls.send.length, 1);
+  const envelope = parseOpenTeamEnvelope(calls.send[0].plaintext);
+  assert.equal(envelope.kind, 'decline');
+  assert.match(envelope.reason, /sender_mismatch/);
+});
+
+test('a sender matching the inviter (case-normalized) proceeds', async () => {
+  const { deps, calls } = makeDeps();
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+    senderGlobalMetaId: 'GMID-INVITER',
+  });
+  assert.equal(result.action, 'accepted');
+  assert.equal(calls.join.length, 1);
+});
+
+test('duplicate inviteId redelivery is skipped silently (idempotent)', async () => {
+  const { deps, calls } = makeDeps();
+  const first = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(first.action, 'accepted');
+  const second = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(second.action, 'skipped');
+  assert.equal(second.reason, 'duplicate_invite');
+  assert.equal(second.replyPinId, null);
+  assert.equal(calls.join.length, 1, 'no second join');
+  assert.equal(calls.send.length, 1, 'no second reply');
+});
+
+test('redelivery of an invite whose membership row carries invite_pin_id is skipped silently', async () => {
+  const { deps, calls } = makeDeps({ membership: { status: 'active', invitePinId: INVITE_ID } });
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(result.action, 'skipped');
+  assert.equal(result.reason, 'duplicate_invite');
+  assert.equal(calls.join.length, 0);
+  assert.equal(calls.send.length, 0);
+});
+
+test('rate limit: the 4th invite from the same inviter within the window is declined', async () => {
+  const { deps, calls } = makeDeps();
+  // Distinct groupIds isolate the per-inviter dimension (the per-group cap
+  // would otherwise trip at the same count).
+  const groupIds = [
+    GROUP_ID,
+    `${'1'.repeat(64)}i0`,
+    `${'2'.repeat(64)}i0`,
+    `${'3'.repeat(64)}i0`,
+  ];
+  for (const [index, inviteId] of [INVITE_ID, INVITE_ID_2, INVITE_ID_3].entries()) {
+    const result = await handleOpenTeamInvite(deps, {
+      metabot: makeMetabot(),
+      invite: makeInvite({ inviteId, groupId: groupIds[index] }),
+      replyContext: { ...replyContext(), invitePinId: inviteId },
+    });
+    assert.equal(result.action, 'accepted');
+  }
+  const fourth = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite({ inviteId: INVITE_ID_4, groupId: groupIds[3] }),
+    replyContext: { ...replyContext(), invitePinId: INVITE_ID_4 },
+  });
+  assert.equal(fourth.action, 'declined');
+  assert.equal(fourth.reason, 'rate_limited');
+  assert.equal(calls.join.length, 3, 'the rate-limited invite never pays a join pin');
+  assert.equal(calls.groupInfo.length, 3, 'the rate-limited invite never hits the indexer');
+});
+
+test('rate limit: the 4th invite for the same group is declined even from another inviter', async () => {
+  const { deps, calls } = makeDeps({
+    groupInfo: { status: 'found', createUserMetaId: '', createUserGlobalMetaId: 'gmid-chair' },
+  });
+  const inviters = ['gmid-inviter-a', 'gmid-inviter-b', 'gmid-inviter-c'];
+  const inviteIds = [INVITE_ID, INVITE_ID_2, INVITE_ID_3];
+  for (const [index, inviter] of inviters.entries()) {
+    const result = await handleOpenTeamInvite(deps, {
+      metabot: makeMetabot(),
+      invite: makeInvite({
+        inviteId: inviteIds[index],
+        inviterGlobalMetaId: inviter,
+        chairGlobalMetaId: 'gmid-chair',
+      }),
+      replyContext: { ...replyContext(), invitePinId: inviteIds[index], peerGlobalMetaId: inviter },
+    });
+    assert.equal(result.action, 'accepted');
+  }
+  const fourth = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite({
+      inviteId: INVITE_ID_4,
+      inviterGlobalMetaId: 'gmid-inviter-d',
+      chairGlobalMetaId: 'gmid-chair',
+    }),
+    replyContext: { ...replyContext(), invitePinId: INVITE_ID_4, peerGlobalMetaId: 'gmid-inviter-d' },
+  });
+  assert.equal(fourth.action, 'declined');
+  assert.equal(fourth.reason, 'rate_limited');
+  assert.equal(calls.join.length, 3);
+});
+
+test('expiry skew: an invite 30s past expiresAt is still accepted', async () => {
+  const { deps, calls } = makeDeps();
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite({ expiresAt: Math.floor(NOW_MS / 1000) - 30 }),
+    replyContext: replyContext(),
+  });
+  assert.equal(result.action, 'accepted');
+  assert.equal(calls.join.length, 1);
+});
+
+test('declines invalid_group when the group does not exist on-chain', async () => {
+  const { deps, calls } = makeDeps({ groupInfo: { status: 'not_found' } });
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(result.action, 'declined');
+  assert.equal(result.reason, 'invalid_group');
+  assert.equal(calls.join.length, 0);
+  assert.equal(calls.send.length, 1);
+  const envelope = parseOpenTeamEnvelope(calls.send[0].plaintext);
+  assert.match(envelope.reason, /invalid_group/);
+});
+
+test('declines inviter_not_chair when the inviter is not the group creator', async () => {
+  const { deps, calls } = makeDeps({
+    groupInfo: { status: 'found', createUserMetaId: 'metaid-creator', createUserGlobalMetaId: 'gmid-creator' },
+  });
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(result.action, 'declined');
+  assert.equal(result.reason, 'inviter_not_chair');
+  assert.equal(calls.join.length, 0);
+  assert.equal(calls.upsert.length, 0);
+});
+
+test('a chairGlobalMetaId matching the group creator is enough (double-form match)', async () => {
+  const { deps, calls } = makeDeps({
+    groupInfo: { status: 'found', createUserMetaId: '', createUserGlobalMetaId: 'gmid-chair' },
+  });
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite({ inviterGlobalMetaId: 'gmid-delegate', chairGlobalMetaId: 'gmid-chair' }),
+    replyContext: { ...replyContext(), peerGlobalMetaId: 'gmid-delegate' },
+  });
+  assert.equal(result.action, 'accepted');
+  assert.equal(calls.join.length, 1);
+});
+
+test('declines group_verify_failed when the indexer lookup errors (fail-closed)', async () => {
+  for (const options of [
+    { groupInfo: { status: 'error' } },
+    { groupInfoError: 'network down' },
+  ]) {
+    const { deps, calls } = makeDeps(options);
+    const result = await handleOpenTeamInvite(deps, {
+      metabot: makeMetabot(),
+      invite: makeInvite(),
+      replyContext: replyContext(),
+    });
+    assert.equal(result.action, 'declined');
+    assert.equal(result.reason, 'group_verify_failed');
+    assert.equal(calls.join.length, 0);
+    assert.equal(calls.send.length, 1);
+  }
+});
+
+test('group verification runs before the paid join', async () => {
+  const { deps, calls } = makeDeps();
+  const result = await handleOpenTeamInvite(deps, {
+    metabot: makeMetabot(),
+    invite: makeInvite(),
+    replyContext: replyContext(),
+  });
+  assert.equal(result.action, 'accepted');
+  assert.deepEqual(calls.groupInfo, [GROUP_ID]);
+  assert.equal(calls.join.length, 1);
+});
+
+test('accept/decline from a sender that is not the invitee is ignored', () => {
+  const { deps, calls } = makeDeps({ inviteRow: PENDING_INVITE_ROW });
+  const result = handleOpenTeamResponse(
+    deps,
+    { kind: 'accept', inviteId: INVITE_ID, joinedPinId: JOINED_PIN_ID },
+    { senderGlobalMetaId: 'gmid-attacker' },
+  );
+  assert.equal(result.matched, true);
+  assert.equal(calls.updateInviteStatus.length, 0, 'forged ACCEPT must not transition the invite');
+});
+
+test('accept from the actual invitee transitions the invite (normalized compare)', () => {
+  const { deps, calls } = makeDeps({ inviteRow: PENDING_INVITE_ROW });
+  const result = handleOpenTeamResponse(
+    deps,
+    { kind: 'accept', inviteId: INVITE_ID, joinedPinId: JOINED_PIN_ID },
+    { senderGlobalMetaId: 'GMID-GUEST' },
+  );
+  assert.equal(result.matched, true);
+  assert.deepEqual(calls.updateInviteStatus, [[{ invitePinId: INVITE_ID }, 'accepted', null]]);
+});
+
+// ---------------------------------------------------------------------------
+// KICK handler (M3): the chair's one-way kick notification marks the local
+// membership left; forged kicks (sender != recorded inviter) are ignored.
+// ---------------------------------------------------------------------------
+
+const { handleOpenTeamKick } = require('../dist-electron/main/services/openTeamGuestService.js');
+
+const makeKickDeps = (options = {}) => {
+  const calls = { markLeft: [] };
+  const membership = options.membership === undefined
+    ? {
+        id: 3,
+        groupId: GROUP_ID,
+        metabotId: 7,
+        globalmetaid: 'gmid-guest',
+        inviterGlobalmetaid: 'gmid-inviter',
+        taskTitle: 'External Task',
+        status: 'active',
+      }
+    : options.membership;
+  const deps = {
+    getMetabotStore: () => ({}),
+    getMembershipStore: () => ({
+      getMembership: () => membership,
+      markLeft: (groupId, metabotId) => {
+        calls.markLeft.push([groupId, metabotId]);
+        return true;
+      },
+    }),
+    emitLog: () => {},
+  };
+  return { deps, calls };
+};
+
+const kickPayload = (overrides = {}) => ({
+  v: 1,
+  groupId: GROUP_ID,
+  taskTitle: 'External Task',
+  reason: 'off-topic output',
+  ...overrides,
+});
+
+test('kick from the recorded inviter marks the membership left', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(result, { action: 'marked_left', reason: '' });
+  assert.deepEqual(calls.markLeft, [[GROUP_ID, 7]]);
+});
+
+test('kick sender check normalizes case (inviter match still marks left)', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'GMID-INVITER',
+  });
+  assert.equal(result.action, 'marked_left');
+  assert.equal(calls.markLeft.length, 1);
+});
+
+test('kick from a sender that is not the recorded inviter is ignored', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-attacker',
+  });
+  assert.deepEqual(result, { action: 'ignored', reason: 'sender_not_inviter' });
+  assert.equal(calls.markLeft.length, 0, 'forged KICK must not flip the membership');
+});
+
+test('kick without a sender identity is ignored', () => {
+  const { deps, calls } = makeKickDeps();
+  const result = handleOpenTeamKick(deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: undefined,
+  });
+  assert.equal(result.action, 'ignored');
+  assert.equal(result.reason, 'sender_not_inviter');
+  assert.equal(calls.markLeft.length, 0);
+});
+
+test('kick for an unknown group or an already-left membership is a no-op', () => {
+  const unknown = makeKickDeps({ membership: null });
+  const r1 = handleOpenTeamKick(unknown.deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(r1, { action: 'ignored', reason: 'no_membership' });
+  assert.equal(unknown.calls.markLeft.length, 0);
+
+  const left = makeKickDeps({
+    membership: {
+      id: 3, groupId: GROUP_ID, metabotId: 7, globalmetaid: 'gmid-guest',
+      inviterGlobalmetaid: 'gmid-inviter', taskTitle: 'External Task', status: 'left',
+    },
+  });
+  const r2 = handleOpenTeamKick(left.deps, {
+    metabot: makeMetabot(),
+    kick: kickPayload(),
+    senderGlobalMetaId: 'gmid-inviter',
+  });
+  assert.deepEqual(r2, { action: 'ignored', reason: 'already_left' });
+  assert.equal(left.calls.markLeft.length, 0);
 });

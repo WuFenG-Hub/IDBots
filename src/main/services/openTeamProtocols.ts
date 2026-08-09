@@ -9,6 +9,12 @@
  *       expiresAt }
  *   [OPENTEAM_ACCEPT:inviteId] {JSON}   // { joinedPinId }
  *   [OPENTEAM_DECLINE:inviteId] reason  // plain-text reason
+ *   [OPENTEAM_KICK] {JSON}              // { v:1, groupId, taskTitle, reason }
+ *
+ * The KICK envelope is the chair's one-way kick notification (M3): the kicked
+ * guest marks its membership left so it stops consuming the group without
+ * waiting for the periodic on-chain membership self-check. It carries no
+ * inviteId and expects no reply.
  *
  * inviteId is the pinId of the invite pin (`<txid>i0`, hex + literal `i0`), so
  * it is always safe to embed in the bracket-tag `:param` position. All parsers
@@ -18,6 +24,7 @@
 export const OPENTEAM_INVITE_TAG = 'OPENTEAM_INVITE';
 export const OPENTEAM_ACCEPT_TAG = 'OPENTEAM_ACCEPT';
 export const OPENTEAM_DECLINE_TAG = 'OPENTEAM_DECLINE';
+export const OPENTEAM_KICK_TAG = 'OPENTEAM_KICK';
 
 /** pinId shape: 64 hex chars + literal `i0` (case-insensitive on parse). */
 const OPENTEAM_PINID_RE = /^[0-9a-f]{64}i0$/i;
@@ -58,10 +65,23 @@ export interface OpenTeamInviteEnvelope {
   invite: OpenTeamInvitePayload;
 }
 
+export interface OpenTeamKickPayload {
+  v: 1;
+  groupId: string;
+  taskTitle: string;
+  reason: string;
+}
+
+export interface OpenTeamKickEnvelope {
+  kind: 'kick';
+  kick: OpenTeamKickPayload;
+}
+
 export type OpenTeamEnvelope =
   | OpenTeamInviteEnvelope
   | OpenTeamAcceptEnvelope
-  | OpenTeamDeclineEnvelope;
+  | OpenTeamDeclineEnvelope
+  | OpenTeamKickEnvelope;
 
 /** Lowercase-normalized pinId, or '' when the value is not a valid pinId. */
 function normalizeOpenTeamPinId(value: unknown): string {
@@ -96,6 +116,32 @@ export function buildOpenTeamAcceptMessage(inviteId: string, joinedPinId: string
 export function buildOpenTeamDeclineMessage(inviteId: string, reason: string): string {
   const text = asTrimmedString(reason);
   return `[${OPENTEAM_DECLINE_TAG}:${normalizeOpenTeamPinId(inviteId)}]${text ? ` ${text}` : ''}`;
+}
+
+export function buildOpenTeamKickMessage(payload: OpenTeamKickPayload): string {
+  return `[${OPENTEAM_KICK_TAG}] ${JSON.stringify(payload ?? {})}`;
+}
+
+/** Parse and validate the kick JSON body; null on any malformed field. */
+function parseOpenTeamKickPayload(jsonText: string): OpenTeamKickPayload | null {
+  if (!jsonText) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const record = parsed as Record<string, unknown>;
+  if (record.v !== 1) return null;
+  const groupId = asTrimmedString(record.groupId);
+  if (!groupId) return null;
+  return {
+    v: 1,
+    groupId,
+    taskTitle: asTrimmedString(record.taskTitle),
+    reason: asTrimmedString(record.reason),
+  };
 }
 
 /** Parse and validate the invite JSON body; null on any malformed field. */
@@ -133,7 +179,7 @@ function parseOpenTeamInvitePayload(jsonText: string): OpenTeamInvitePayload | n
 }
 
 /**
- * Parse any of the three OpenTeam envelopes. Returns a discriminated union on
+ * Parse any of the four OpenTeam envelopes. Returns a discriminated union on
  * success, null for non-OpenTeam or malformed input. Never throws.
  */
 export function parseOpenTeamEnvelope(plaintext: string): OpenTeamEnvelope | null {
@@ -164,6 +210,10 @@ export function parseOpenTeamEnvelope(plaintext: string): OpenTeamEnvelope | nul
   if (tag === OPENTEAM_DECLINE_TAG) {
     if (!tagInviteId) return null;
     return { kind: 'decline', inviteId: tagInviteId, reason: rest };
+  }
+  if (tag === OPENTEAM_KICK_TAG) {
+    const kick = parseOpenTeamKickPayload(rest);
+    return kick ? { kind: 'kick', kick } : null;
   }
   return null;
 }

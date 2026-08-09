@@ -889,11 +889,14 @@ export class SqliteStore {
         status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','left')),
         created_at TEXT DEFAULT (datetime('now')),
         last_processed_msg_id INTEGER NOT NULL DEFAULT 0,
+        activated_at TEXT,
         UNIQUE(group_id, metabot_id)
       );
     `);
     // Migration: add last_processed_msg_id to openteam_memberships (guest daemon cursor).
     this.migrateOpenTeamMembershipsCursorColumn();
+    // Migration: add activated_at to openteam_memberships (guest self-check grace anchor).
+    this.migrateOpenTeamMembershipsActivatedColumn();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -906,9 +909,12 @@ export class SqliteStore {
           CHECK(status IN ('pending','accepted','declined','expired')),
         decline_reason TEXT,
         created_at TEXT DEFAULT (datetime('now')),
-        responded_at TEXT
+        responded_at TEXT,
+        invitee_metaid TEXT
       );
     `);
+    // Migration: add invitee_metaid to openteam_invites (legacy identity form for watchers).
+    this.migrateOpenTeamInvitesMetaIdColumn();
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
         ON group_chat_messages(group_id, id);
@@ -2051,6 +2057,24 @@ export class SqliteStore {
   }
 
   /**
+   * Migration: legacy metaId identity form on openteam_invites (OpenTeam
+   * join-confirmation watchers). PRAGMA-guarded and idempotent; existing rows
+   * keep NULL (their watchers fall back to the GlobalMetaID form only).
+   */
+  private migrateOpenTeamInvitesMetaIdColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('invitee_metaid')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN invitee_metaid TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesMetaIdColumn:', error);
+    }
+  }
+
+  /**
    * Migration: guest-daemon message cursor on openteam_memberships (OpenTeam
    * M1). PRAGMA-guarded and idempotent, same pattern as the other column
    * migrations; existing rows start at 0 (process from the group history the
@@ -2068,6 +2092,27 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamMembershipsCursorColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: activation timestamp on openteam_memberships (guest self-check
+   * grace anchor). created_at cannot serve here because upsertActiveMembership
+   * reviving an old row does not refresh it. PRAGMA-guarded and idempotent;
+   * existing rows are backfilled from created_at (they were activated when the
+   * row was created), so an upgrade does not grant a fresh grace window.
+   */
+  private migrateOpenTeamMembershipsActivatedColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('activated_at')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN activated_at TEXT');
+        this.db.run('UPDATE openteam_memberships SET activated_at = created_at WHERE activated_at IS NULL');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsActivatedColumn:', error);
     }
   }
 

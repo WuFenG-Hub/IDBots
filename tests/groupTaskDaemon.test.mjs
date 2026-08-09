@@ -446,8 +446,9 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
   }
 });
 
-test('cursor advances on no-reply messages and on per-message failure', async () => {
-  const h = await createHarness();
+test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
+  // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
+  const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
     const task = h.createTask([2]);
 
@@ -461,7 +462,9 @@ test('cursor advances on no-reply messages and on per-message failure', async ()
     const selfId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['self-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId);
 
-    // first message blows up the LLM, second succeeds: cursor still advances past both
+    // First message blows up the LLM (one-shot error), second would succeed:
+    // fail-stop — the later message waits BEHIND the failed one so its success
+    // can never advance the cursor past the pending retry.
     h.state.chatError = 'llm exploded';
     insertGroupMessage(h.db, {
       pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
@@ -473,9 +476,20 @@ test('cursor advances on no-reply messages and on per-message failure', async ()
     });
     await h.loop.runTick();
 
-    assert.equal(h.chatCalls.length, 2, 'both messages attempted the LLM');
-    assert.equal(h.sends.length, 1, 'only the second message produced a send');
-    assert.match(h.sends[0].content, /reply-for-llm-2/);
+    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the batch stops at the failure');
+    assert.equal(h.sends.length, 0, 'nothing sent while the first message fails');
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId,
+      'cursor held before the failing message (no leapfrog by the later clean message)',
+    );
+
+    // Next tick: the failed message recovers (one-shot error spent) and both
+    // flow in order.
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 3, 'failed message retried, then the queued one');
+    assert.equal(h.sends.length, 2);
+    assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
     const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
@@ -2123,6 +2137,201 @@ test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
     await h.loop.runTick();
     const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
     assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R2P1-4: a resolver THROW is transient (retry path), only a definitive null
+// resolution marks SUSPECT.
+// ---------------------------------------------------------------------------
+
+test('R2P1-4: resolver throw rides the bounded retry path — no SUSPECT, cursor held, recovered on retry', async () => {
+  let resolverCalls = 0;
+  const h = await createHarness({
+    resolveGlobalMetaId: async (legacy) => {
+      resolverCalls += 1;
+      if (resolverCalls === 1) throw new Error('manapi temporarily unreachable');
+      return legacy === 'metaid-2' ? 'gmid-w2' : null;
+    },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    insertGroupMessage(h.db, {
+      pinId: 'transient-resolve-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Designer Bot hi',
+    });
+    const msgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['transient-resolve-i0'],
+    )[0].values[0][0];
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor held while the resolver is failing');
+    assert.equal(h.sends.length, 0, 'no reply from an unattributed message');
+    const afterThrow = h.db.exec(
+      'SELECT sender_suspect, sender_global_metaid FROM group_chat_messages WHERE pin_id = ?',
+      ['transient-resolve-i0'],
+    )[0].values[0];
+    assert.equal(Number(afterThrow[0] ?? 0), 0, 'a resolver throw must NOT mark SUSPECT');
+    assert.equal(afterThrow[1], null, 'nothing persisted while unresolved');
+
+    await h.loop.runTick();
+    assert.equal(resolverCalls, 2, 'message retried on the next tick');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advances once the resolution succeeds');
+    const resolved = h.db.exec(
+      'SELECT sender_global_metaid, sender_suspect FROM group_chat_messages WHERE pin_id = ?',
+      ['transient-resolve-i0'],
+    )[0].values[0];
+    assert.equal(resolved[0], 'gmid-w2');
+    assert.equal(Number(resolved[1]), 0, 'member sender is not SUSPECT');
+    assert.equal(h.sends.length, 1, 'the legitimate member message is answered after recovery');
+    assert.equal(h.sends[0].metabotId, 3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R2P1-4: permanently throwing resolver drops the message after the bounded retries, never SUSPECT', async () => {
+  const h = await createHarness({
+    resolveGlobalMetaId: async () => { throw new Error('manapi down for good'); },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'down-resolve-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Coder Bot hi',
+    });
+    const msgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['down-resolve-i0'],
+    )[0].values[0][0];
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      await h.loop.runTick();
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+        `tick ${tick}: cursor held while the resolver keeps failing`);
+    }
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'bounded retries spent: cursor advances past the unresolvable message');
+    const row = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['down-resolve-i0'],
+    )[0].values[0];
+    assert.equal(Number(row[0] ?? 0), 0, 'never stamped SUSPECT on transient-resolution failures');
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M3 deferred-reply re-check: a reply deferred by the cooldown is dropped when
+// the sender was kicked (or flagged SUSPECT) before the deferred turn runs.
+// ---------------------------------------------------------------------------
+
+const setupDeferredReply = async (h) => {
+  const task = h.createTask([2, 3]);
+  // First mention: Designer Bot answers (cooldown starts).
+  insertGroupMessage(h.db, {
+    pinId: 'defer-first-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+    senderName: 'Coder Bot', content: '@Designer Bot first task',
+  });
+  await h.loop.runTick();
+  assert.equal(h.sends.length, 1, 'first mention answered');
+  assert.equal(h.sends[0].metabotId, 3);
+
+  // Second mention inside the cooldown window: deferred to a later tick.
+  insertGroupMessage(h.db, {
+    pinId: 'defer-second-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+    senderName: 'Coder Bot', content: '@Designer Bot second task',
+  });
+  await h.loop.runTick();
+  assert.equal(h.sends.length, 1, 'cooldown mention deferred, not answered yet');
+  const secondMsgId = h.db.exec(
+    'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['defer-second-i0'],
+  )[0].values[0][0];
+  return { task, secondMsgId };
+};
+
+test('M3 deferred re-check: sender kicked before the deferred turn — reply dropped', async () => {
+  const h = await createHarness();
+  try {
+    const { task } = await setupDeferredReply(h);
+
+    // The owner kicks the SENDER of the deferred message; the replier stays.
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2, removePinId: 'pin-remove-2' });
+
+    h.state.nowMs += 30_000; // past the worker cooldown
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'no reply on a kicked sender\'s message');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 deferred re-check: sender flagged SUSPECT before the deferred turn — reply dropped', async () => {
+  const h = await createHarness();
+  try {
+    const { secondMsgId } = await setupDeferredReply(h);
+
+    // Late attribution flip (e.g. a manual/host re-evaluation) marks the row suspect.
+    h.groupTaskStore.setMessageSenderSuspect(secondMsgId, true);
+
+    h.state.nowMs += 30_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'no reply on a suspect message');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 deferred re-check: sender still an active member — deferred reply fires normally', async () => {
+  const h = await createHarness();
+  try {
+    await setupDeferredReply(h);
+    h.state.nowMs += 30_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'deferred reply fires once the cooldown elapsed');
+    assert.equal(h.sends[1].metabotId, 3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R2P1-4: a resolver failure holds the whole batch — a later clean message cannot leapfrog the cursor', async () => {
+  let resolverCalls = 0;
+  const h = await createHarness({
+    resolveGlobalMetaId: async (legacy) => {
+      resolverCalls += 1;
+      if (resolverCalls === 1) throw new Error('manapi unreachable');
+      return legacy === 'metaid-2' ? 'gmid-w2' : null;
+    },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    // N: needs resolution (throws transiently on the first tick).
+    insertGroupMessage(h.db, {
+      pinId: 'unresolved-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Designer Bot from an unresolved sender',
+    });
+    // N+1: fully attributable owner message — would succeed if it were reached.
+    insertGroupMessage(h.db, {
+      pinId: 'clean-owner-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Human', content: 'status update please',
+    });
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor held at the failing message');
+    assert.equal(h.chatCalls.length, 0,
+      'the later clean message was NOT processed behind the failed one (no leapfrog)');
+
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'both messages processed after recovery');
+    assert.equal(h.sends[0].metabotId, 3, 'the previously failing message answered first (in order)');
+    assert.equal(h.sends[1].metabotId, 1, 'the owner message answered after it');
   } finally {
     h.cleanup();
   }

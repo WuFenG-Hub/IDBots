@@ -256,6 +256,48 @@ test('local member regression: addMember idempotent, isMember, name from metabot
 });
 
 
+test('hasRemovedMember: removed-row check with the optional not-before cutoff', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    const task = createTask(groupTaskStore);
+    groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote-1', role: 'worker', displayName: 'Remote Bot One',
+    });
+    // An ACTIVE member row is not a removed row.
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), false);
+
+    groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: 'gmid-remote-1', removePinId: 'pin-rm' });
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), true);
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-2'), false, 'other invitees unaffected');
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, ''), false, 'blank id never matches');
+    assert.equal(groupTaskStore.hasRemovedMember(999, 'gmid-remote-1'), false, 'other tasks unaffected');
+
+    // notBeforeMs cutoff: the kick counts only at/after the given moment.
+    assert.equal(
+      groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now() - 60_000),
+      true,
+      'kick after the cutoff counts',
+    );
+    assert.equal(
+      groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now() + 60_000),
+      false,
+      'kick before the cutoff belongs to an earlier membership',
+    );
+    // A backdated removed row (kick clearly before a later invite) fails the cutoff.
+    db.run(
+      `UPDATE group_task_members SET removed_at = datetime('now', '-10 seconds')
+       WHERE task_id = ? AND globalmetaid = ?`,
+      [task.id, 'gmid-remote-1'],
+    );
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1'), true, 'blanket check ignores timing');
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, 'gmid-remote-1', Date.now()), false);
+  } finally {
+    store.close();
+  }
+});
+
+
 test('local member re-join after kick: addMember revives the removed row in place (M3)', async () => {
   const tempDir = makeTempDir();
   const { store, groupTaskStore, db } = await openStores(tempDir);
@@ -289,6 +331,79 @@ test('local member re-join after kick: addMember revives the removed row in plac
     assert.equal(revivedAgain.id, worker.id);
     assert.equal(revivedAgain.removedAt, null);
     assert.equal(revivedAgain.joinedPinId, 'pin-rejoin-2', 'previous join pin preserved when none provided');
+  } finally {
+    store.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// globalmetaid normalization (M3): entry points normalize via
+// normalizeRawGlobalMetaId with a trimmed fallback for legacy values, so
+// case/whitespace variants of a canonical GlobalMetaID hit the same row.
+// ---------------------------------------------------------------------------
+
+const CANONICAL_GMID = 'idq1remotemember0000000000000000000000000000001';
+
+test('globalmetaid normalization: addMember stores the canonical form; isMember/markMemberRemoved match variants', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin' });
+    const task = createTask(groupTaskStore);
+
+    const member = groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: `  ${CANONICAL_GMID.toUpperCase()}  `,
+      role: 'worker',
+      displayName: 'Remote Bot One',
+    });
+    assert.equal(member.globalmetaid, CANONICAL_GMID, 'stored normalized (trimmed + lowercased)');
+
+    assert.equal(groupTaskStore.isMember(task.id, null, CANONICAL_GMID), true);
+    assert.equal(
+      groupTaskStore.isMember(task.id, null, ` ${CANONICAL_GMID.toUpperCase()} `),
+      true,
+      'isMember matches an uppercase/padded variant of the same canonical id',
+    );
+
+    // Dedupe: a variant re-add returns the same row instead of duplicating.
+    const readded = groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: CANONICAL_GMID.toUpperCase(), role: 'worker',
+    });
+    assert.equal(readded.id, member.id, 'no duplicate row for a case variant');
+    assert.equal(
+      groupTaskStore.listMembers(task.id, { includeRemoved: true }).filter((m) => m.metabotId == null).length,
+      1,
+    );
+
+    const removed = groupTaskStore.markMemberRemoved({
+      taskId: task.id, globalmetaid: CANONICAL_GMID.toUpperCase(), removePinId: 'pin-remove-r1',
+    });
+    assert.equal(removed.id, member.id, 'markMemberRemoved matches a case variant');
+    assert.ok(removed.removedAt);
+    assert.equal(groupTaskStore.hasRemovedMember(task.id, CANONICAL_GMID.toUpperCase()), true);
+  } finally {
+    store.close();
+  }
+});
+
+test('globalmetaid normalization: legacy non-canonical values keep working (trimmed fallback)', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin' });
+    const task = createTask(groupTaskStore);
+
+    const member = groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: ' gmid-legacy-remote ', role: 'worker',
+    });
+    assert.equal(member.globalmetaid, 'gmid-legacy-remote', 'trimmed fallback preserved verbatim');
+    assert.equal(groupTaskStore.isMember(task.id, null, 'gmid-legacy-remote'), true);
+    const removed = groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: 'gmid-legacy-remote' });
+    assert.ok(removed.removedAt);
   } finally {
     store.close();
   }

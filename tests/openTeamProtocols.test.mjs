@@ -8,6 +8,7 @@ const {
   buildOpenTeamInviteMessage,
   buildOpenTeamAcceptMessage,
   buildOpenTeamDeclineMessage,
+  buildOpenTeamKickMessage,
   parseOpenTeamEnvelope,
 } = require('../dist-electron/main/services/openTeamProtocols.js');
 
@@ -140,4 +141,34 @@ test('requiredSkills filters non-string entries', () => {
   const payload = { ...sampleInvite(), requiredSkills: ['search', 42, null, '  ', 'write'] };
   const parsed = parseOpenTeamEnvelope(`[OPENTEAM_INVITE] ${JSON.stringify(payload)}`);
   assert.deepEqual(parsed?.invite?.requiredSkills, ['search', 'write']);
+});
+
+test('kick envelope round-trips through build/parse', () => {
+  const payload = { v: 1, groupId: GROUP_ID, taskTitle: 'External Task', reason: 'off-topic output' };
+  const message = buildOpenTeamKickMessage(payload);
+  assert.ok(message.startsWith('[OPENTEAM_KICK] '));
+  assert.deepEqual(parseOpenTeamEnvelope(message), { kind: 'kick', kick: payload });
+});
+
+test('kick payload tolerates missing optional fields', () => {
+  const parsed = parseOpenTeamEnvelope(`[OPENTEAM_KICK] ${JSON.stringify({ v: 1, groupId: GROUP_ID })}`);
+  assert.deepEqual(parsed, {
+    kind: 'kick',
+    kick: { v: 1, groupId: GROUP_ID, taskTitle: '', reason: '' },
+  });
+});
+
+test('malformed kick payloads return null', () => {
+  const cases = [
+    '[OPENTEAM_KICK]', // no JSON
+    '[OPENTEAM_KICK] not-json',
+    '[OPENTEAM_KICK] [1,2,3]',
+    `[OPENTEAM_KICK] ${JSON.stringify({ v: 2, groupId: GROUP_ID })}`,
+    `[OPENTEAM_KICK] ${JSON.stringify({ v: 1, groupId: '' })}`,
+    `[OPENTEAM_KICK] ${JSON.stringify({ v: 1, groupId: '   ' })}`,
+    `[OPENTEAM_KICK] ${JSON.stringify({ groupId: GROUP_ID })}`, // missing v
+  ];
+  for (const content of cases) {
+    assert.equal(parseOpenTeamEnvelope(content), null, content);
+  }
 });

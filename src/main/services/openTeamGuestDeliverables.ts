@@ -97,6 +97,15 @@ export interface CollectGuestDeliverableFilesInput {
    * against it, and it is the root of the generated-file scan fallback.
    */
   cwd: string;
+  /**
+   * Allowlist root for every collected file (explicit mentions AND scan
+   * results): anything outside is dropped and logged. Defaults to cwd — the
+   * daemon wires cwd to the guest session's private workspace, so files can
+   * never be picked up from arbitrary host paths or other processes' dirs.
+   */
+  allowedRoot?: string;
+  /** Drop/audit log; defaults to a no-op. */
+  emitLog?: (message: string) => void;
   /** Turn start (ms epoch); the scan fallback only picks files touched at/after this. */
   turnStartedAt?: number;
   /** Turn end (ms epoch); the scan fallback ignores files touched after this. */
@@ -216,18 +225,33 @@ function scanGeneratedFilePaths(
  * 2. otherwise, files inside the skill working directory whose mtime falls in
  *    the turn window (generated-but-unmentioned output).
  * Verified (existing, regular file, under the on-chain size limit), deduped,
- * capped at maxFiles.
+ * capped at maxFiles. Every candidate — mentioned or scanned — must resolve
+ * inside allowedRoot (default cwd); outside paths are dropped and logged so a
+ * forged/absolute mention can never put an arbitrary host file on-chain.
  */
 export function collectGuestDeliverableFiles(
   input: CollectGuestDeliverableFilesInput,
 ): GuestDeliverableFile[] {
   const maxFiles = Math.max(1, Math.trunc(input.maxFiles ?? DEFAULT_MAX_DELIVERABLE_FILES));
   const cwd = path.resolve(String(input.cwd || '') || process.cwd());
+  const allowedRoot = path.resolve(String(input.allowedRoot ?? cwd) || cwd);
+  const emitLog = input.emitLog ?? (() => undefined);
+
+  const isInsideAllowedRoot = (filePath: string): boolean => {
+    const relative = path.relative(allowedRoot, filePath);
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
 
   const collected: GuestDeliverableFile[] = [];
   const seen = new Set<string>();
   const push = (filePath: string): void => {
     if (collected.length >= maxFiles || seen.has(filePath)) return;
+    if (!isInsideAllowedRoot(filePath)) {
+      emitLog(
+        `[OpenTeam] Deliverable dropped: ${filePath} is outside the allowed workspace ${allowedRoot}`,
+      );
+      return;
+    }
     const artifact = makeDeliverableFile(filePath);
     if (!artifact) return;
     seen.add(filePath);

@@ -79,6 +79,19 @@ const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, sende
   );
 };
 
+/**
+ * Backdate the remote member's join to before the fake daemon clock
+ * (1e12 ms = 2001-09-09): sqlite datetime('now') is real time, which the
+ * daemon would read as "joined in the future" and trip the M3 join grace.
+ */
+const backdateRemoteJoin = (db, taskId) => {
+  db.run(
+    `UPDATE group_task_members SET created_at = '2000-01-01 00:00:00'
+     WHERE task_id = ? AND metabot_id IS NULL`,
+    [taskId],
+  );
+};
+
 const createHarness = async () => {
   const tempDir = makeTempDir();
   const store = await SqliteStore.create(tempDir);
@@ -143,6 +156,10 @@ const createHarness = async () => {
     groupTaskStore.addMember({
       taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: REMOTE_NAME,
     });
+    // Backdate the join beyond the unreachable window: the daemon clock is
+    // fixed (1e12 ms, 2001) while sqlite datetime('now') is real time, which
+    // would otherwise read as "just joined" and trip the M3 join grace.
+    backdateRemoteJoin(db, task.id);
     groupTaskStore.updateTaskStatus(task.id, 'executing');
     return groupTaskStore.getTaskById(task.id);
   };
@@ -340,6 +357,78 @@ test('remote presence: probe failure is silent (tick continues, no hint, no brie
     assert.ok(chairCall, 'chair still answered despite the failed probe');
     assert.ok(!chairCall.userMessage.includes('Remote teammate status'));
     assert.equal(h.ownerReportCalls.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 join grace: a just-joined offline teammate is never flagged unreachable', async () => {
+  const h = await createHarness();
+  try {
+    // Create the task WITHOUT backdating the remote join: relative to the fake
+    // daemon clock the membership row reads as brand new, so the grace applies.
+    const task = h.groupTaskStore.createTask({
+      groupId: GROUP_ID, title: 'Build MetaApp', goal: 'Build and publish the intro MetaApp',
+      acceptanceCriteria: 'Preview URL works', chairMetabotId: 1, createdBy: 'user', createPinId: 'pin-create',
+    });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 1, globalmetaid: 'gmid-twin', role: 'chair', joinedPinId: 'pin-create' });
+    h.groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: REMOTE_NAME,
+    });
+    h.groupTaskStore.updateTaskStatus(task.id, 'executing');
+
+    h.state.presence = h.offlinePresence(1500); // offline ~25 min, and never posted here
+    insertGroupMessage(h.db, {
+      pinId: 'owner-grace-i0', senderMetaId: 'metaid-boss', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Boss', content: 'status update please', chainTimestamp: nowSec(h) - 60,
+    });
+
+    await h.loop.runTick();
+
+    const chairCall = h.chatCalls.find((call) => call.llmId === 'llm-1');
+    assert.ok(chairCall, 'chair answered the owner message');
+    assert.ok(
+      !chairCall.userMessage.includes('Remote teammate status'),
+      'a teammate inside the join grace is not flagged unreachable',
+    );
+    assert.equal(h.ownerReportCalls.length, 0, 'no owner brief during the join grace');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 kick: notified-key cleanup — a re-invited teammate that goes silent re-briefs the owner', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask();
+    h.state.presence = h.offlinePresence(1500);
+    insertGroupMessage(h.db, {
+      pinId: 'remote-stale-i0', senderMetaId: 'metaid-remote', senderGlobalMetaId: REMOTE_GMID,
+      senderName: REMOTE_NAME, content: '@Twin Bot joining the task', chainTimestamp: nowSec(h) - 1200,
+    });
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'first unreachable streak briefed the owner');
+
+    // The owner kicks the remote teammate (task stays active).
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, globalmetaid: REMOTE_GMID, removePinId: 'pin-remove-r1' });
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'no brief about a kicked member');
+
+    // Re-invite (explicit owner decision): fresh ACTIVE row for the same bot,
+    // joined long enough ago that the grace does not apply.
+    h.groupTaskStore.addMember({
+      taskId: task.id, metabotId: null, globalmetaid: REMOTE_GMID, role: 'worker', displayName: REMOTE_NAME,
+    });
+    backdateRemoteJoin(h.db, task.id);
+    h.state.presence = h.offlinePresence(2400);
+    h.state.nowMs += 61_000;
+    await h.loop.runTick();
+    assert.equal(
+      h.ownerReportCalls.length, 2,
+      'the stale notified key must not suppress the brief for the re-invited teammate',
+    );
+    assert.ok(h.ownerReportCalls[1].text.includes(`"${REMOTE_NAME}"`));
   } finally {
     h.cleanup();
   }

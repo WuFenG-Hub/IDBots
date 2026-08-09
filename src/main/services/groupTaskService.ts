@@ -30,12 +30,16 @@ import {
   sendGroupChatMessage,
   sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
+  fetchGroupMembers,
 } from './groupChatTransport';
 import {
   validateDeliverableLines,
   type DeliverableValidation,
 } from './groupTaskDeliverableParser';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
+import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
+import { buildOpenTeamKickMessage } from './openTeamProtocols';
+import type { OpenTeamGuestSendSimplemsgFn } from './openTeamGuestService';
 import {
   ensureGroupTaskMemberReady,
   GROUP_TASK_CONVERSATION_CHANNEL,
@@ -44,7 +48,7 @@ import {
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
 } from './groupTaskDaemon';
-import { getMetaIdDetail } from './metaIdSearchService';
+import { getMetaIdDetail, type MetaIdDetail } from './metaIdSearchService';
 import {
   recordTaskCloseImpressions,
   recordKickImpression,
@@ -114,6 +118,10 @@ export const GROUP_TASK_ERROR_WINDOW_MINUTES = 60;
 
 /** Round-4: minutes of host inactivity before a non-terminal task reads as stalled. */
 export const GROUP_TASK_STALL_AFTER_MINUTES = 30;
+
+/** R2P1-2: post-kick on-chain removal re-check cadence (2s x 15 by default). */
+export const KICK_CONFIRM_POLL_INTERVAL_MS = 2_000;
+export const KICK_CONFIRM_MAX_ATTEMPTS = 15;
 
 /** sqlite datetime('now') strings are UTC 'YYYY-MM-DD HH:MM:SS'. */
 function parseSqliteUtc(value: string | null): number | null {
@@ -217,6 +225,13 @@ let sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
 let waitForGroupIndexedFn = waitForGroupIndexed;
 // Indexer lookup seam (OpenTeam M3): resolves a remote member's legacy metaId.
 let getMetaIdDetailFn = getMetaIdDetail;
+// R2P1-2: member-list read seam for the post-kick on-chain removal re-check.
+let fetchGroupMembersFn = fetchGroupMembers;
+// P1-2: simplemsg seam for the kick notification. No safe default (createPin
+// must be host-bound), so unwired = the notification is skipped with a warn.
+let sendEncryptedSimplemsgFn: OpenTeamGuestSendSimplemsgFn | null = null;
+let kickConfirmPollIntervalMs = KICK_CONFIRM_POLL_INTERVAL_MS;
+let kickConfirmMaxAttempts = KICK_CONFIRM_MAX_ATTEMPTS;
 
 export interface GroupTaskServiceTransportOverrides {
   createGroupChat?: typeof createGroupChat;
@@ -227,6 +242,11 @@ export interface GroupTaskServiceTransportOverrides {
   sendGroupChatMessageAsIdentity?: typeof sendGroupChatMessageAsIdentity;
   waitForGroupIndexed?: typeof waitForGroupIndexed;
   getMetaIdDetail?: typeof getMetaIdDetail;
+  fetchGroupMembers?: typeof fetchGroupMembers;
+  sendEncryptedSimplemsg?: OpenTeamGuestSendSimplemsgFn;
+  /** R2P1-2 poll tuning (tests inject tiny values). */
+  kickConfirmPollIntervalMs?: number;
+  kickConfirmMaxAttempts?: number;
 }
 
 export function setGroupTaskServiceTransport(overrides: GroupTaskServiceTransportOverrides): void {
@@ -238,6 +258,16 @@ export function setGroupTaskServiceTransport(overrides: GroupTaskServiceTranspor
   sendGroupChatMessageAsIdentityFn = overrides.sendGroupChatMessageAsIdentity ?? sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = overrides.waitForGroupIndexed ?? waitForGroupIndexed;
   getMetaIdDetailFn = overrides.getMetaIdDetail ?? getMetaIdDetail;
+  fetchGroupMembersFn = overrides.fetchGroupMembers ?? fetchGroupMembers;
+  sendEncryptedSimplemsgFn = overrides.sendEncryptedSimplemsg ?? null;
+  kickConfirmPollIntervalMs = Math.max(
+    1,
+    Math.trunc(overrides.kickConfirmPollIntervalMs ?? KICK_CONFIRM_POLL_INTERVAL_MS),
+  );
+  kickConfirmMaxAttempts = Math.max(
+    1,
+    Math.trunc(overrides.kickConfirmMaxAttempts ?? KICK_CONFIRM_MAX_ATTEMPTS),
+  );
 }
 
 export function resetGroupTaskServiceTransport(): void {
@@ -249,6 +279,10 @@ export function resetGroupTaskServiceTransport(): void {
   sendGroupChatMessageAsIdentityFn = sendGroupChatMessageAsIdentity;
   waitForGroupIndexedFn = waitForGroupIndexed;
   getMetaIdDetailFn = getMetaIdDetail;
+  fetchGroupMembersFn = fetchGroupMembers;
+  sendEncryptedSimplemsgFn = null;
+  kickConfirmPollIntervalMs = KICK_CONFIRM_POLL_INTERVAL_MS;
+  kickConfirmMaxAttempts = KICK_CONFIRM_MAX_ATTEMPTS;
 }
 
 const OWNER_JOINED_KV_PREFIX = 'group_task_owner_joined:';
@@ -773,16 +807,37 @@ export interface KickGroupTaskMemberInput {
 }
 
 /**
+ * Fetch a remote member's indexer detail once per kick: its legacy metaId feeds
+ * the /protocols/simplegroupremoveuser body and its chatPubkey the kick
+ * notification. Lookup failures degrade both paths (GlobalMetaID fallback, no
+ * notification) without affecting the kick itself. Never throws.
+ */
+async function fetchRemoteMemberDetail(gmid: string): Promise<MetaIdDetail | null> {
+  try {
+    return await getMetaIdDetailFn(gmid);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] MetaID detail lookup for ${gmid} failed (remove pin falls back to the ` +
+      `GlobalMetaID, kick notification skipped): ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Resolve the legacy MetaID the /protocols/simplegroupremoveuser body expects
  * (idchat's removeMember writes the legacy metaId, not the GlobalMetaID).
  * Local members read it from the metabots row; remote OpenTeam members only
- * carry a GlobalMetaID locally, so it is resolved through the MetaID search
- * indexer — falling back to the GlobalMetaID itself when the lookup fails or
- * returns no metaId (the indexer tolerates the GlobalMetaID form for member
- * matching; a wrong value only means the on-chain removal is a no-op while the
- * local kick still holds).
+ * carry a GlobalMetaID locally, so it comes from the prefetched MetaID search
+ * indexer detail — falling back to the GlobalMetaID itself when the lookup
+ * failed or returned no metaId (the indexer tolerates the GlobalMetaID form
+ * for member matching; a wrong value only means the on-chain removal is a
+ * no-op while the local kick still holds).
  */
-async function resolveRemoveMetaid(member: GroupTaskMember): Promise<string> {
+async function resolveRemoveMetaid(
+  member: GroupTaskMember,
+  remoteDetail?: MetaIdDetail | null,
+): Promise<string> {
   if (member.metabotId != null) {
     const metaid = getMetabotStore().getMetabotById(member.metabotId)?.metaid?.trim() ?? '';
     if (!metaid) {
@@ -792,18 +847,110 @@ async function resolveRemoveMetaid(member: GroupTaskMember): Promise<string> {
   }
   const gmid = (member.globalmetaid ?? '').trim();
   if (!gmid) throw new Error(`Member ${member.id} has neither metabotId nor globalmetaid`);
-  try {
-    const detail = await getMetaIdDetailFn(gmid);
-    const metaid = detail.metaId?.trim() ?? '';
-    if (metaid) return metaid;
+  const metaid = remoteDetail?.metaId?.trim() ?? '';
+  if (metaid) return metaid;
+  if (remoteDetail) {
     console.warn(`[GroupTask] MetaID detail for ${gmid} has no metaId; falling back to the GlobalMetaID`);
-  } catch (error) {
-    console.warn(
-      `[GroupTask] metaId resolution for ${gmid} failed; falling back to the GlobalMetaID: ` +
-      `${error instanceof Error ? error.message : String(error)}`,
-    );
   }
   return gmid;
+}
+
+/**
+ * P1-2: tell a kicked REMOTE guest about its removal via a deterministic
+ * [OPENTEAM_KICK] simplemsg from the chair, so its guest side marks the
+ * membership left immediately (the guest daemon's periodic on-chain membership
+ * self-check is the fallback when this never arrives). Local members need no
+ * notification — the kick lands in their own machine's DB. Best-effort: every
+ * failure mode is logged and never changes the kick result.
+ */
+async function notifyKickedRemoteMember(input: {
+  chairMetabotId: number;
+  task: GroupTask;
+  member: GroupTaskMember;
+  remoteDetail: MetaIdDetail | null;
+  reason?: string;
+}): Promise<void> {
+  const gmid = (input.member.globalmetaid ?? '').trim();
+  if (!gmid) return;
+  if (!sendEncryptedSimplemsgFn) {
+    console.warn(`[GroupTask] Kick notification for ${gmid} skipped: simplemsg sender not wired`);
+    return;
+  }
+  const chatPubkey = input.remoteDetail?.chatPubkey?.trim() ?? '';
+  if (!chatPubkey) {
+    console.warn(`[GroupTask] Kick notification for ${gmid} skipped: no on-chain chat pubkey`);
+    return;
+  }
+  const wallet = getMetabotStore().getMetabotWalletByMetabotId(input.chairMetabotId);
+  if (!wallet?.mnemonic?.trim()) {
+    console.warn(`[GroupTask] Kick notification for ${gmid} skipped: chair wallet unavailable`);
+    return;
+  }
+  try {
+    await sendEncryptedSimplemsgFn({
+      metabotId: input.chairMetabotId,
+      wallet,
+      peerGlobalMetaId: gmid,
+      peerChatPubkey: chatPubkey,
+      plaintext: buildOpenTeamKickMessage({
+        v: 1,
+        groupId: input.task.groupId!,
+        taskTitle: input.task.title,
+        reason: input.reason ?? '',
+      }),
+    });
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Kick notification to ${gmid} failed (the kick still holds; the guest ` +
+      `self-check is the fallback): ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * R2P1-2: after the removeuser pin, poll the indexer member list until none of
+ * the kicked identities (legacy metaId + GlobalMetaID forms) appear anymore.
+ * An unreachable indexer simply costs one attempt; "unconfirmed" is NOT an
+ * error — the local removal and SUSPECT gating hold regardless. Never throws.
+ */
+async function confirmChainRemoval(
+  groupId: string,
+  identities: Array<string | null | undefined>,
+): Promise<boolean> {
+  const candidates = new Set(
+    identities.map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean),
+  );
+  if (candidates.size === 0) return false;
+  for (let attempt = 1; attempt <= kickConfirmMaxAttempts; attempt += 1) {
+    let members: string[] | null = null;
+    try {
+      members = await fetchGroupMembersFn(groupId);
+    } catch {
+      members = null; // injected fakes may throw; the real client never does
+    }
+    if (members && !members.some((member) => candidates.has(member.trim().toLowerCase()))) {
+      return true;
+    }
+    if (attempt < kickConfirmMaxAttempts) {
+      await sleepMs(kickConfirmPollIntervalMs);
+    }
+  }
+  return false;
+}
+
+export interface KickGroupTaskMemberResult extends GroupTaskMember {
+  /**
+   * R2P1-2: true once the indexer member list no longer contains the kicked
+   * identity. False means the local removal + SUSPECT gating hold but the
+   * on-chain removal could not be confirmed within the poll budget (a warning
+   * is logged; the kick is NOT considered failed). The idempotent no-op path
+   * (member already removed by an earlier kick) sends no new pin but still
+   * re-checks the member list read-only, so a removal that never landed
+   * on-chain surfaces here too.
+   */
+  chainRemovalConfirmed: boolean;
 }
 
 /**
@@ -811,9 +958,12 @@ async function resolveRemoveMetaid(member: GroupTaskMember): Promise<string> {
  * on-chain creator) signs a /protocols/simplegroupremoveuser pin, then the
  * member row is marked removed and the chair posts a deterministic moderation
  * notice in the group (no LLM). On-chain failure aborts before any DB write.
- * Idempotent: an already-removed member is returned without a new pin.
+ * A kicked REMOTE member also gets a one-way [OPENTEAM_KICK] simplemsg so its
+ * guest side marks the membership left (P1-2), and the removal is re-checked
+ * against the indexer member list (R2P1-2, chainRemovalConfirmed on the
+ * result). Idempotent: an already-removed member is returned without a new pin.
  */
-export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Promise<GroupTaskMember> {
+export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Promise<KickGroupTaskMemberResult> {
   const taskId = Math.trunc(Number(input.taskId));
   if (!Number.isInteger(taskId) || taskId <= 0) throw new Error('taskId is required');
   const task = requireRunnableTask(taskId);
@@ -821,9 +971,14 @@ export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Prom
   const metabotStore = getMetabotStore();
 
   const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
-  const globalmetaid = input.globalmetaid?.trim() || null;
+  // Normalize the remote identity at the entry point, same as the invite path.
+  const rawGlobalMetaId = input.globalmetaid?.trim() ?? '';
+  const globalmetaid = rawGlobalMetaId ? normalizeRawGlobalMetaId(rawGlobalMetaId) : null;
   if (metabotId != null && (!Number.isInteger(metabotId) || metabotId <= 0)) {
     throw new Error('metabotId must be a positive integer');
+  }
+  if (rawGlobalMetaId && !globalmetaid) {
+    throw new Error('globalmetaid must be a valid GlobalMetaID');
   }
   if (metabotId == null && !globalmetaid) {
     throw new Error('metabotId or globalmetaid is required');
@@ -844,7 +999,18 @@ export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Prom
   if (member.role === 'chair') {
     throw new Error('The chair (twin bot) cannot be removed from its own group task');
   }
-  if (member.removedAt) return member; // idempotent: already kicked
+  if (member.removedAt) {
+    // Idempotent: no new pin — but still re-check the chain state (read-only)
+    // so a repeat kick surfaces a removal that never landed on-chain instead
+    // of blindly reporting success.
+    const chainRemovalConfirmed = await confirmChainRemoval(task.groupId!, [
+      member.globalmetaid,
+      member.metabotId != null
+        ? metabotStore.getMetabotById(member.metabotId)?.metaid
+        : null,
+    ]);
+    return { ...member, chainRemovalConfirmed };
+  }
 
   const chair = metabotStore.getMetabotById(task.chairMetabotId);
   if (!chair) {
@@ -852,7 +1018,12 @@ export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Prom
   }
 
   const reason = input.reason?.trim() || undefined;
-  const removeMetaid = await resolveRemoveMetaid(member);
+  // One indexer lookup serves both the legacy-metaId resolution (removeuser
+  // body) and the chat pubkey (kick notification) for remote members.
+  const remoteDetail = member.metabotId == null
+    ? await fetchRemoteMemberDetail((member.globalmetaid ?? '').trim())
+    : null;
+  const removeMetaid = await resolveRemoveMetaid(member, remoteDetail);
   const { pinId } = await removeGroupChatMemberFn(task.chairMetabotId, task.groupId!, {
     removeMetaid,
     reason,
@@ -882,11 +1053,35 @@ export async function kickGroupTaskMember(input: KickGroupTaskMemberInput): Prom
     );
   }
 
+  // P1-2: proactively notify a kicked REMOTE guest (a local member's own
+  // machine records the removal directly). Best-effort, never throws.
+  if (member.metabotId == null) {
+    await notifyKickedRemoteMember({
+      chairMetabotId: task.chairMetabotId,
+      task,
+      member,
+      remoteDetail,
+      reason,
+    });
+  }
+
   // OpenTeam M3: the chair sediments a collaboration impression about a kicked
   // REMOTE member. Best-effort — the removal above already holds; the recorder
   // no-ops for local members and never throws.
   recordKickImpression(taskId, member.globalmetaid ?? '', reason);
-  return removed;
+
+  // R2P1-2: re-check the on-chain removal against the indexer member list.
+  const chainRemovalConfirmed = await confirmChainRemoval(task.groupId!, [
+    removeMetaid,
+    member.globalmetaid,
+  ]);
+  if (!chainRemovalConfirmed) {
+    console.warn(
+      `[GroupTask] Kick of member ${member.id} in task ${taskId} not confirmed on-chain within ` +
+      `${kickConfirmMaxAttempts} member-list poll(s); the local removal holds and the indexer may just be lagging`,
+    );
+  }
+  return { ...removed, chainRemovalConfirmed };
 }
 
 /**

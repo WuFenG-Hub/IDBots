@@ -6,6 +6,9 @@ interface GroupTaskKickConfirmModalProps {
   memberName: string;
   kicking: boolean;
   error?: string | null;
+  /** Optional kick reason (recorded on-chain and sent with the kick notification). */
+  reason: string;
+  onReasonChange: (reason: string) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -14,6 +17,8 @@ const GroupTaskKickConfirmModal: React.FC<GroupTaskKickConfirmModalProps> = ({
   memberName,
   kicking,
   error,
+  reason,
+  onReasonChange,
   onConfirm,
   onCancel,
 }) => {
@@ -37,9 +42,19 @@ const GroupTaskKickConfirmModal: React.FC<GroupTaskKickConfirmModalProps> = ({
           <h3 className="text-sm font-semibold dark:text-claude-darkText text-claude-text mb-2">
             {i18nService.t('groupTasksRemoveMember')}
           </h3>
-          <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary mb-5">
+          <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary mb-4">
             {i18nService.t('groupTasksRemoveMemberConfirm').replace('{name}', memberName)}
           </p>
+          {/* Optional reason — recorded on the removeuser pin and forwarded in
+              the [OPENTEAM_KICK] notification. English placeholder by design. */}
+          <input
+            type="text"
+            value={reason}
+            onChange={(e) => onReasonChange(e.target.value)}
+            disabled={kicking}
+            placeholder="Reason for removal (optional)"
+            className="w-full mb-4 px-3 py-2 text-sm rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text placeholder:dark:text-claude-darkTextSecondary/60 placeholder:text-claude-textSecondary/60 focus:outline-none focus:ring-1 focus:ring-red-400 disabled:opacity-50"
+          />
           {error && (
             <p className="text-xs text-red-500 mb-4 w-full text-left">{error}</p>
           )}
