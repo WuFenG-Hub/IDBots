@@ -10,7 +10,7 @@ const TABS_PATH = '/api/idbots/bot-browser/tabs';
 const TAB_ACTIONS = new Set(['open-tab', 'close-tab', 'switch-tab', 'get-tabs', 'get-active-tab']);
 const PIN_ID_RE = /\b[0-9a-f]{64}i0\b/i;
 const GLOBAL_META_ID_RE = /\bid[qprzyt]1[a-z0-9]{20,}\b/i;
-const SUPPORTED_URI_RE = /\b(metaid|pin|metaapp|map|metafile):\/\/[^\s"'<>，。！？、]+/i;
+const SUPPORTED_URI_RE = /\b(preview-metaapp|metaid|pin|metaapp|map|metafile):\/\/[^\s"'<>，。！？、]+/i;
 const ANY_URI_SCHEME_RE = /\b([a-z][a-z0-9+.-]*):\/\//i;
 const WEB3_DOMAIN_RE = /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.(?:eth|lens|crypto|nft|wallet|bitcoin|btc|dao|888|zil|blockchain|polygon|sol|arb|base)\b/i;
 const TRAILING_PUNCTUATION_RE = /[),.;!?，。！？、）]+$/;
@@ -27,7 +27,7 @@ function normalizeSupportedUri(rawUri) {
   }
 
   const scheme = match[1].toLowerCase();
-  if (!['metaid', 'pin', 'metaapp', 'map', 'metafile'].includes(scheme)) {
+  if (!['preview-metaapp', 'metaid', 'pin', 'metaapp', 'map', 'metafile'].includes(scheme)) {
     return null;
   }
 
@@ -36,7 +36,10 @@ function normalizeSupportedUri(rawUri) {
     return null;
   }
 
-  return `${scheme}://${scheme === 'map' ? rest : rest.toLowerCase()}`;
+  // Local file paths under preview-metaapp:// are case-sensitive; keep the
+  // authority/path verbatim (like map://), unlike on-chain URI hosts.
+  const keepsCase = scheme === 'preview-metaapp' || scheme === 'map';
+  return `${scheme}://${keepsCase ? rest : rest.toLowerCase()}`;
 }
 
 function pickPayloadTarget(payload) {

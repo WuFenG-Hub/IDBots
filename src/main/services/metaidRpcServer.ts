@@ -87,7 +87,7 @@ const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-d
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
-const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
+const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile', 'preview-metaapp']);
 
 export type BotBrowserRpcOpenRequest = {
   uri: string;
@@ -148,11 +148,23 @@ function normalizeBotBrowserUri(value: unknown): string {
     throw new Error(`unsupported Bot Browser URI scheme: ${scheme}`);
   }
 
-  if (!match[2].trim() || /\s/.test(match[2])) {
+  const authority = match[2].trim();
+  if (scheme === 'preview-metaapp') {
+    // preview-metaapp is a local preview channel only: the renderer resolves a
+    // local path when the host is exactly 'localhost' (it never equals
+    // 'localhost:<port>'). Reject other hosts so this RPC cannot be used to
+    // point the Bot Browser at arbitrary https URLs.
+    const host = authority.split('/')[0];
+    if (host !== 'localhost') {
+      throw new Error('preview-metaapp URIs must use localhost as the host');
+    }
+  }
+
+  if (!authority || /\s/.test(authority)) {
     throw new Error('uri must not contain whitespace');
   }
 
-  return `${scheme}://${match[2].trim()}`;
+  return `${scheme}://${authority}`;
 }
 
 function normalizeOptionalActorId(value: unknown): string | null {

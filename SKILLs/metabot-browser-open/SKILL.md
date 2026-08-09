@@ -13,6 +13,7 @@ Open or control the existing IDBots top Bot Browser. Do not use this skill for s
 Use `scripts/index.js` for deterministic target parsing and Browser opening. The script normalizes:
 
 - `metaapp://<pinId>` as a MetaApp URI.
+- `preview-metaapp://localhost/<absolute-path>` as a local preview URI (the host resolves the local path; equivalent to `bot_browser_preview_local`).
 - `pin://<pinId>` as a chain pin URI.
 - `metafile://<pinId-or-path>` as a MetaFile URI.
 - `map://...` as a MAP protocol URI.
