@@ -283,6 +283,32 @@ export function decideGroupTaskResponders(
   return decisions;
 }
 
+export interface PlanningCoverage {
+  ok: boolean;
+  /** Worker names mentioned/assigned in the plan text. */
+  mentionedWorkers: string[];
+  /** Worker names NOT mentioned at all. */
+  unmentionedWorkers: string[];
+}
+
+/**
+ * C-1 defensive check: the chair's auto plan must not concentrate every
+ * subtask on a single member when 2+ workers are on the roster. A worker is
+ * considered "assigned" when the plan text mentions its name (with or without
+ * @). Pure + exported for unit tests.
+ */
+export function checkPlanningCoverage(reply: string, workerNames: string[]): PlanningCoverage {
+  const text = String(reply ?? '');
+  const mentioned = workerNames.filter((name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return false;
+    return text.includes(trimmed) || text.includes(`@${trimmed}`);
+  });
+  const unmentioned = workerNames.filter((name) => !mentioned.includes(name));
+  const ok = workerNames.length < 2 || mentioned.length >= 2;
+  return { ok, mentionedWorkers: mentioned, unmentionedWorkers: unmentioned };
+}
+
 // ---------------------------------------------------------------------------
 // Daemon loop
 // ---------------------------------------------------------------------------
@@ -1519,10 +1545,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       // Plain LLM path: the chair is planning here, not executing skills.
-      const reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      let reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
+      // C-1 defensive coverage check: never let a multi-worker plan concentrate
+      // every subtask on one member. Retry while attempts remain; on the final
+      // attempt, attach a host warning instead of blocking the plan.
+      const workerNames = promptMembers
+        .filter((member) => member.role === 'worker')
+        .map((member) => member.name);
+      if (workerNames.length > 1) {
+        const coverage = checkPlanningCoverage(reply, workerNames);
+        if (!coverage.ok) {
+          if (attempts + 1 < MAX_CHAIR_PLAN_ATTEMPTS) {
+            throw new Error(
+              'planning coverage check failed: all subtasks assigned to a single member ' +
+              `(${coverage.mentionedWorkers.join(', ') || 'none'})`,
+            );
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: planning coverage check failed on final attempt — ` +
+            `appending host warning (mentioned: ${coverage.mentionedWorkers.join(', ') || 'none'})`,
+          );
+          reply += `\n\n⚠ Host warning: this plan concentrates the work on one member ` +
+            `(${coverage.mentionedWorkers.join(', ') || 'unknown'}). Verify that every roster ` +
+            `member got a subtask or an explicit standby note.`;
+        }
+      }
+
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });

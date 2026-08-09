@@ -2334,3 +2334,64 @@ test('P0-8: member correction message records an integrity event (deduped by pin
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// C-1: chair auto-planning must cover >= 2 members (defensive check)
+// ---------------------------------------------------------------------------
+
+test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers', () => {
+  const { checkPlanningCoverage } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const tenWorkers = ['AI_小新', 'Builder', 'Lucy', 'eleven', 'loop AI', '小明同学', '10th bot', '77', 'Stephen', 'claude-bot2'];
+
+  const single = checkPlanningCoverage(
+    'Plan: @AI_小新 you are the only worker, do everything. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(single.ok, false);
+  assert.deepEqual(single.mentionedWorkers, ['AI_小新']);
+
+  const spread = checkPlanningCoverage(
+    'Plan: @AI_小新 research, @Lucy copy, @Builder assemble; others standby. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(spread.ok, true);
+  assert.ok(spread.mentionedWorkers.length >= 2);
+
+  const singleWorkerRoster = checkPlanningCoverage('Plan: @Coder Bot do it', ['Coder Bot']);
+  assert.equal(singleWorkerRoster.ok, true);
+});
+
+test('C-1: single-worker plan is retried, then posted with a host warning on the final attempt', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot, you are the only worker — do everything. [STATUS:EXECUTING]',
+    disableChairPlanningTurn: false,
+  });
+  try {
+    // 3 workers: 2, 3, 4; the plan only mentions Coder Bot.
+    const task = h.createTask([2, 3, 4], { activate: false });
+    for (let i = 0; i < 4; i++) {
+      await h.loop.runTick();
+    }
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 2, 'two failed coverage attempts then posted with warning');
+    assert.equal(h.sends.length, 1, 'posted on final attempt with warning');
+    assert.match(h.sends[0].content, /Host warning/);
+    assert.match(h.sends[0].content, /concentrates the work on one member/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('C-1: multi-worker plan posts immediately without warning', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2, 3, 4], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.doesNotMatch(h.sends[0].content, /Host warning/);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
