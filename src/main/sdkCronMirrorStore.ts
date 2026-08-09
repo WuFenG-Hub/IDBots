@@ -355,9 +355,13 @@ export class SdkCronMirrorStore {
     const humanSchedule = cron.humanSchedule ?? null;
 
     if (existing) {
-      // 任一来源重新看到该 cron（如文件扫描补充、会话重新活跃）都恢复 active。
+      // 任一来源重新看到该 cron（如文件扫描补充、会话重新活跃）都恢复 active；
+      // deletion_requested（删除/停用曾发起但 SDK 侧仍活着）也自愈回 active，
+      // 避免「删除中」死锁：SDK 侧 cron 还在 = 任务还活着，不应卡在删除中。
       const status: SdkCronMirrorStatus =
-        existing.status === 'deleted' ? 'active' : (existing.status as SdkCronMirrorStatus);
+        existing.status === 'deleted' || existing.status === 'deletion_requested'
+          ? 'active'
+          : (existing.status as SdkCronMirrorStatus);
       this.db.run(
         `UPDATE sdk_cron_mirror
          SET session_id = ?, name = ?, schedule = ?, human_schedule = ?, recurring = ?,
@@ -400,12 +404,13 @@ export class SdkCronMirrorStore {
    * 保留软删除行（历史可查、migration 映射不丢失）；durable 任务跨会话存活，
    * 不应因所属会话结束而被对账掉——durable 行仅在来自文件扫描/Stop hook 且当前
    * 会话明确结束时标记，这里只处理非 durable 行，durable 行由文件扫描对账兜底。
+   * 停用行（enabled=0，SDK 侧已删、镜像保留 spec 待重建）跳过，不被对账掉。
    */
   reconcileSession(sessionId: string, activeIds: string[]): number {
     const activeSet = new Set(activeIds);
     const rows = this.getAll<MirrorRow>(
       `SELECT * FROM sdk_cron_mirror
-       WHERE session_id = ? AND status != 'deleted'`,
+       WHERE session_id = ? AND status != 'deleted' AND enabled = 1`,
       [sessionId]
     );
     const now = new Date().toISOString();
@@ -428,13 +433,14 @@ export class SdkCronMirrorStore {
 
   /**
    * durable 文件扫描对账：对给定会话 cwd 下的 scheduled_tasks.json 做全量对账。
-   * 返回 [新增/更新数, 标记删除数]。
+   * 返回 [新增/更新数, 标记删除数]。停用行（enabled=0）跳过——SDK 侧已删但镜像保留
+   * 待重建，文件里没有是预期的，不应标记 deleted。
    */
   reconcileDurableFile(sessionId: string, fileCrons: { id: string }[]): { upserted: number; deleted: number } {
     const activeIds = fileCrons.map((c) => c.id);
     const activeSet = new Set(activeIds);
     const rows = this.getAll<MirrorRow>(
-      `SELECT * FROM sdk_cron_mirror WHERE session_id = ? AND status != 'deleted' AND durable = 1`,
+      `SELECT * FROM sdk_cron_mirror WHERE session_id = ? AND status != 'deleted' AND durable = 1 AND enabled = 1`,
       [sessionId]
     );
     const now = new Date().toISOString();

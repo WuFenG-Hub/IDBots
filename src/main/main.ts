@@ -5317,6 +5317,9 @@ const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
       sdkCronMirrorLastKnownCrons.set(sessionId, crons);
       // 轻量对账：本次 session_crons 未包含的非 durable 行 → deleted（幂等，无变化不写盘）。
       store.reconcileSession(sessionId, ids);
+      // 管理会话（新建/重新启用）结束后对账：nonce 匹配的镜像回写 schedule_spec。
+      // 挂在 Stop hook 上，使「提交即返回」的异步创建最终能回填 spec（可编辑/可重建）。
+      reconcileCronCreateResults();
     } catch (error) {
       console.warn('[SdkCronMirror] Failed to collect session crons:', error);
     }
@@ -5422,6 +5425,10 @@ const getSdkCronHostTriggerBridge = (): SdkCronHostTriggerBridge => {
       },
       getSession: (id) => getCoworkStore().getSessionWithoutMessages(id),
       isSessionRunningInCwd,
+      isCronEnabled: (cronId) => {
+        const mirror = getSdkCronMirrorStore().getById(cronId);
+        return mirror ? mirror.enabled : true;
+      },
       launchSession: async (spec) => {
         // 与旧 Scheduler.startCoworkSession 同构：createSession → addMessage → startSession。
         const coworkStore = getCoworkStore();
@@ -5499,19 +5506,27 @@ const reconcileMigrationResults = (): number => {
  */
 const pendingCronSpecByNonce = new Map<string, SdkCronScheduleSpec>();
 
+/** 管理会话通用选项（与 migrateExecute 一致：跳过初始用户消息、不写记忆、文本确认）。 */
+const MANAGEMENT_SESSION_OPTIONS = {
+  skipInitialUserMessage: true,
+  disableMemoryUpdates: true,
+  confirmationMode: 'text',
+} as const;
+
 /**
- * 启动一个一次性管理会话执行 CronCreate，由会话内 bot 创建 durable cron。
- * 复用 migrateExecute 的会话拉起模式。对账通过 nonce 标记在 Stop hook / 文件扫描采集时回写 spec。
- * @returns 创建会话的 sessionId（结果经后续对账写入镜像）。
+ * 启动一个一次性管理会话执行 CronCreate（fire-and-forget，不等待会话结束）。
+ * 会话内 bot 创建 durable cron 后，Stop hook 采集 → upsert 镜像 → reconcileCronCreateResults
+ * 回写 spec（挂在 collectSessionCrons）。立即返回，结果经对账异步可见。
+ * @returns 创建会话的 sessionId（调用方/渲染层轮询对账结果）。
  */
-async function launchCronCreateSession(params: {
+function launchCronCreateSession(params: {
   cronExpression: string;
   prompt: string;
   recurring: boolean;
   nonce: string;
   spec: SdkCronScheduleSpec;
   title: string;
-}): Promise<string> {
+}): string {
   const { cronExpression, prompt, recurring, nonce, spec, title } = params;
   const marker = buildCronMarker(nonce);
   const promptWithMarker = buildCronPromptWithMarker(marker, prompt);
@@ -5525,17 +5540,42 @@ async function launchCronCreateSession(params: {
   const sessionId = session.id;
   getCoworkStore().updateSession(sessionId, { status: 'running' });
   getCoworkStore().addMessage(sessionId, { type: 'user', content: instruction });
-  try {
-    await getCoworkRunner().startSession(sessionId, instruction, {
-      skipInitialUserMessage: true,
-      disableMemoryUpdates: true,
-      confirmationMode: 'text',
-    });
-  } catch (error) {
+  getCoworkRunner().startSession(sessionId, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
+    // 会话失败不阻断：部分结果仍会经 Stop hook 对账。
     console.warn('[SdkCronMirror] Create session failed (partial results still reconciled):', error);
-  }
-  // 创建会话结束后立即尝试对账（Stop hook 通常已采集到新 cron）。
-  reconcileCronCreateResults();
+  });
+  return sessionId;
+}
+
+/**
+ * 启动一个一次性管理会话执行 CronDelete（fire-and-forget，不等待会话结束）。
+ *
+ * 关键架构修正：durable cron 是文件级（`.claude/scheduled_tasks.json`），同 cwd 的任意新会话
+ * 都能 CronList/CronDelete——不再依赖「所属会话」活跃（原 trySubmitSteer 注入在会话不活跃时
+ * 直接失败，导致删除/停用不生效、任务照常执行、镜像卡「删除中」）。
+ * @returns 删除会话的 sessionId。
+ */
+function launchCronDeleteSession(params: { cronId: string; name: string; metabotId?: number | null }): string {
+  const { cronId, name, metabotId } = params;
+  const coworkConfig = getCoworkStore().getConfig();
+  const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+  const instruction = buildCronDeleteInstruction({ id: cronId, name });
+
+  const session = getCoworkStore().createSession(
+    `[删除定时任务] ${name}`,
+    cwd,
+    coworkConfig.systemPrompt,
+    'local',
+    [],
+    metabotId ?? null
+  );
+  const sessionId = session.id;
+  getCoworkStore().updateSession(sessionId, { status: 'running' });
+  getCoworkStore().addMessage(sessionId, { type: 'user', content: instruction });
+  getCoworkRunner().startSession(sessionId, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
+    // 删除会话失败不阻断：镜像经文件扫描对账自愈（SDK 侧还在 → 恢复 active；没了 → deleted）。
+    console.warn('[SdkCronMirror] Delete session failed:', error);
+  });
   return sessionId;
 }
 
@@ -9486,26 +9526,25 @@ if (!gotTheLock) {
         return { success: false, error: `Mirror cron not found: ${normalizedId}` };
       }
       if (mirror.status === 'deleted') {
-        return { success: true, status: 'deleted', injected: false, hint: '该任务已删除' };
+        return { success: true, status: 'deleted', hint: '该任务已删除' };
       }
 
+      // 提交即返回：启动一次性管理会话执行 CronDelete（不再依赖所属会话活跃的 steer 注入）。
+      // 镜像标 deletion_requested（UI「删除中」），SDK 侧删除后经文件扫描对账转 deleted；
+      // 若删除失败，upsert 自愈恢复 active（SDK 侧还活着）。
       mirrorStore.markDeletionRequested(normalizedId);
-
-      const steer = getCoworkRunner().trySubmitSteer(
-        mirror.sessionId,
-        `host-delete-cron-${normalizedId}`,
-        buildCronDeleteInstruction({ id: normalizedId, name: mirror.name })
-      );
-      if (steer.accepted) {
-        void steer.delivered.catch(() => undefined);
-        return { success: true, status: 'deletion_requested', injected: true };
-      }
-      const rejectReason = 'reason' in steer ? steer.reason : 'inactive';
-      const hint =
-        rejectReason === 'inactive'
-          ? `所属会话已结束，无法自动注入删除指令。请在原会话内让助手执行 CronDelete ${normalizedId}（名称：${mirror.name}）；删除后镜像会自动更新。`
-          : `所属会话当前不可注入（${rejectReason}），请在原会话内执行 CronDelete ${normalizedId}。`;
-      return { success: true, status: 'deletion_requested', injected: false, hint };
+      const sessionId = launchCronDeleteSession({
+        cronId: normalizedId,
+        name: mirror.name,
+        metabotId: mirror.scheduleSpec?.metabotId ?? null,
+      });
+      return {
+        success: true,
+        status: 'deletion_requested',
+        submitted: true,
+        sessionId,
+        hint: '已提交删除，正在后台会话执行…',
+      };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to request cron delete' };
     }
@@ -9529,17 +9568,16 @@ if (!gotTheLock) {
         return { success: false, error: 'name and prompt are required' };
       }
 
-      // 编辑：先删旧 cron（走 requestDelete 同流程：标记 deletion_requested + 注入 CronDelete）。
+      // 编辑：先删旧 cron（走专用删除管理会话，不再依赖所属会话活跃的 steer）。
       if (input.replacesId) {
         const oldMirror = getSdkCronMirrorStore().getById(String(input.replacesId));
         if (oldMirror && oldMirror.status !== 'deleted') {
           getSdkCronMirrorStore().markDeletionRequested(String(input.replacesId));
-          const steer = getCoworkRunner().trySubmitSteer(
-            oldMirror.sessionId,
-            `host-edit-delete-${input.replacesId}`,
-            buildCronDeleteInstruction({ id: input.replacesId, name: oldMirror.name })
-          );
-          if (steer.accepted) void steer.delivered.catch(() => undefined);
+          launchCronDeleteSession({
+            cronId: String(input.replacesId),
+            name: oldMirror.name,
+            metabotId: oldMirror.scheduleSpec?.metabotId ?? null,
+          });
         }
       }
 
@@ -9549,8 +9587,9 @@ if (!gotTheLock) {
         return { success: false, error: '无法从计划生成有效的 cron 表达式，请检查表单输入' };
       }
 
+      // 提交即返回：管理会话 fire-and-forget，spec 经 Stop hook 对账回写（nonce 匹配）。
       const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const sessionId = await launchCronCreateSession({
+      const sessionId = launchCronCreateSession({
         cronExpression: cron.expression,
         prompt: spec.prompt,
         recurring: cron.recurring,
@@ -9558,15 +9597,16 @@ if (!gotTheLock) {
         spec,
         title: `[定时任务] ${spec.name}`,
       });
-      return { success: true, sessionId, nonce };
+      return { success: true, submitted: true, sessionId, nonce, hint: '已提交，正在后台会话执行…' };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to create sdk cron' };
     }
   });
 
   /**
-   * 开关（删→重建）：enable=false 经 requestDelete 同流程删 SDK 侧 cron，镜像置 enabled=0 并保留 spec；
-   * enable=true 用存档 spec 经 CronCreate 重建（新 id），旧镜像标记 deleted。
+   * 开关（删→重建）：enable=false → 镜像置 enabled=0 保留 spec + 专用管理会话删 SDK 侧 cron；
+   * enable=true → 用存档 spec 经 CronCreate 重建（新 id），旧镜像标记 deleted。
+   * 提交即返回（fire-and-forget），结果经对账异步可见。
    */
   ipcMain.handle('sdkCronMirror:toggle', async (_event, cronId: string, enabled: boolean) => {
     try {
@@ -9578,24 +9618,21 @@ if (!gotTheLock) {
       if (mirror.status === 'deleted') return { success: true, status: 'deleted' };
 
       if (!enabled) {
-        // 停用：删 SDK 侧 cron（复用 requestDelete 注入路径），镜像保留 spec + enabled=0。
-        mirrorStore.markDeletionRequested(normalizedId);
+        // 停用：镜像置 enabled=0（保留 spec 待重建）+ 专用管理会话删 SDK 侧 cron。
+        // 对账兜底：删除成功 → 文件里没了，停用行因 enabled=0 被对账跳过（保留待重建）；
+        // 删除失败 → upsert 自愈恢复 active（SDK 侧还活着），且 host trigger 已跳过停用任务。
         mirrorStore.setEnabled(normalizedId, false);
-        const steer = getCoworkRunner().trySubmitSteer(
-          mirror.sessionId,
-          `host-toggle-off-${normalizedId}`,
-          buildCronDeleteInstruction({ id: normalizedId, name: mirror.name })
-        );
-        if (steer.accepted) {
-          void steer.delivered.catch(() => undefined);
-          return { success: true, status: 'deletion_requested', injected: true };
-        }
-        const rejectReason = 'reason' in steer ? steer.reason : 'inactive';
-        const hint =
-          rejectReason === 'inactive'
-            ? `已停用（镜像保留），但所属会话已结束、未能自动删除 SDK 侧任务。请在原会话内让助手执行 CronDelete ${normalizedId}。`
-            : `已停用（镜像保留），所属会话当前不可注入（${rejectReason}），请稍后重试或到原会话执行 CronDelete。`;
-        return { success: true, status: 'deletion_requested', injected: false, hint };
+        const sessionId = launchCronDeleteSession({
+          cronId: normalizedId,
+          name: mirror.name,
+          metabotId: mirror.scheduleSpec?.metabotId ?? null,
+        });
+        return {
+          success: true,
+          submitted: true,
+          sessionId,
+          hint: '已停用，正在后台删除任务…',
+        };
       }
 
       // 启用：必须有存档 spec 才能重建。
@@ -9612,7 +9649,7 @@ if (!gotTheLock) {
       // 旧镜像标记 deleted（重建会得到新 id），新 nonce 建立映射。
       mirrorStore.markDeleted(normalizedId);
       const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-      const sessionId = await launchCronCreateSession({
+      const sessionId = launchCronCreateSession({
         cronExpression: cron.expression,
         prompt: mirror.scheduleSpec.prompt,
         recurring: cron.recurring,
@@ -9620,7 +9657,7 @@ if (!gotTheLock) {
         spec: mirror.scheduleSpec,
         title: `[定时任务] ${mirror.scheduleSpec.name || mirror.name}`,
       });
-      return { success: true, sessionId, nonce, hint: '任务已重新启用，7 天过期计时已重置。' };
+      return { success: true, submitted: true, sessionId, nonce, hint: '已提交重新启用，正在后台会话执行…' };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to toggle sdk cron' };
     }
@@ -9629,6 +9666,7 @@ if (!gotTheLock) {
   /**
    * 立即运行：SDK 无「立即触发 cron」工具 → 当场执行该 cron 的 prompt。
    * 所属会话活跃且 local 开放 → trySubmitSteer 注入；否则启动一次性管理会话执行。
+   * 均 fire-and-forget：立即返回（runNow 的「已在会话中执行」即用户要的结果，不等会话结束）。
    */
   ipcMain.handle('sdkCronMirror:runNow', async (_event, cronId: string) => {
     try {
@@ -9648,9 +9686,9 @@ if (!gotTheLock) {
       );
       if (steer.accepted) {
         void steer.delivered.catch(() => undefined);
-        return { success: true, injected: true, sessionId: mirror.sessionId };
+        return { success: true, submitted: true, injected: true, sessionId: mirror.sessionId };
       }
-      // 会话不活跃：启动一次性管理会话执行 prompt（不创建 cron）。
+      // 会话不活跃：启动一次性管理会话执行 prompt（不创建 cron），fire-and-forget。
       const coworkConfig = getCoworkStore().getConfig();
       const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
       const session = getCoworkStore().createSession(
@@ -9663,16 +9701,10 @@ if (!gotTheLock) {
       );
       getCoworkStore().updateSession(session.id, { status: 'running' });
       getCoworkStore().addMessage(session.id, { type: 'user', content: instruction });
-      try {
-        await getCoworkRunner().startSession(session.id, instruction, {
-          skipInitialUserMessage: true,
-          disableMemoryUpdates: true,
-          confirmationMode: 'text',
-        });
-      } catch (error) {
+      getCoworkRunner().startSession(session.id, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
         console.warn('[SdkCronMirror] Run-now session failed:', error);
-      }
-      return { success: true, injected: false, sessionId: session.id };
+      });
+      return { success: true, submitted: true, injected: false, sessionId: session.id };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to run sdk cron now' };
     }

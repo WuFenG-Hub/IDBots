@@ -141,12 +141,19 @@ const SdkCronTaskForm: React.FC<SdkCronTaskFormProps> = ({ mode, mirror, onCance
         setSubmitting(false);
         return;
       }
+      // 提交即返回：createSdkCron 内部轮询等待后台对账（最长 60s），不再无限「保存中」。
+      let result = null;
       if (mode === 'create') {
-        await scheduledTaskService.createSdkCron(spec);
+        result = await scheduledTaskService.createSdkCron(spec);
       } else if (mirror) {
-        await scheduledTaskService.createSdkCron(spec, mirror.id);
+        result = await scheduledTaskService.createSdkCron(spec, mirror.id);
       }
+      // 保存成功（或后台仍在执行）都立即返回列表，用 toast 反馈结果。
       onSaved();
+      const hint = result?.timedOut
+        ? '保存已提交，后台仍在执行，可稍后刷新查看'
+        : '已提交，正在后台会话执行…';
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: hint }));
     } catch {
       // 错误由 service 层处理（setError 进 store）。
     } finally {

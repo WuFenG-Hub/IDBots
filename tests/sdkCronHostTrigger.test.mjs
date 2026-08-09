@@ -515,6 +515,45 @@ test('bridge + mirror store: file removal reconciles the mirror to deleted', asy
   }
 });
 
+test('bridge: disabled (enabled=0) cron is skipped even if still in the durable file', async () => {
+  const harness = await createRealHarness({
+    isCronEnabled: (cronId) => cronId !== 'cron-1', // cron-1 已停用
+  });
+  try {
+    const { bridge, files, launches } = harness;
+    const file = path.join(harness.root, '.claude', 'scheduled_tasks.json');
+    // 文件里 cron-1 还在（SDK 侧删除未及时生效）——但镜像开关已关 → 宿主不得触发。
+    files.set(file, makeTaskFile(mkTask({ recurring: true })));
+
+    const report = await bridge.scanAndTrigger(harness.root);
+    assert.equal(report.triggered.length, 0);
+    assert.equal(launches.length, 0);
+    // 文件条目保留（未触发就不移除——删除由管理会话/对账负责）。
+    assert.deepEqual(JSON.parse(files.get(file)).tasks.length, 1);
+    // 跳过原因记录在案
+    assert.ok(report.skippedFiles.some((s) => s.reason.includes('disabled by host toggle')));
+  } finally {
+    harness.cleanup();
+  }
+});
+
+test('bridge: enabled cron still fires when isCronEnabled returns true', async () => {
+  const harness = await createRealHarness({
+    isCronEnabled: () => true,
+  });
+  try {
+    const { bridge, files, launches } = harness;
+    const file = path.join(harness.root, '.claude', 'scheduled_tasks.json');
+    files.set(file, makeTaskFile(mkTask({ recurring: true })));
+
+    const report = await bridge.scanAndTrigger(harness.root);
+    assert.equal(report.triggered.length, 1);
+    assert.equal(launches.length, 1);
+  } finally {
+    harness.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // 真实临时目录 + 内存 sqlite 的 harness（读取真实文件系统）
 // ---------------------------------------------------------------------------

@@ -219,59 +219,111 @@ class ScheduledTaskService {
     }
   }
 
-  /** 管理桥：UI 删除/停用 SDK cron → 所属会话内 bot 执行 CronDelete。 */
-  async requestDeleteSdkCron(cronId: string): Promise<{ status?: string; injected?: boolean; hint?: string } | null> {
+  /** 管理操作轮询参数：间隔 2s，最长 60s。 */
+  private static readonly POLL_INTERVAL_MS = 2000;
+  private static readonly POLL_TIMEOUT_MS = 60_000;
+
+  /**
+   * 提交后轮询：管理会话 fire-and-forget，结果经对账异步写回镜像。
+   * 每 POLL_INTERVAL_MS 刷新一次镜像，直到 predicate 命中或超时。
+   * @returns true=命中（操作成功可见）；false=超时（仍在后台执行，可稍后刷新）。
+   */
+  private async pollSdkMirrors(
+    predicate: (mirrors: import('../types/scheduledTask').SdkCronMirror[]) => boolean,
+    timeoutMs: number = ScheduledTaskService.POLL_TIMEOUT_MS
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      await this.loadSdkMirrors();
+      const mirrors = store.getState().scheduledTask.sdkMirrors;
+      if (predicate(mirrors)) return true;
+      await new Promise((resolve) => setTimeout(resolve, ScheduledTaskService.POLL_INTERVAL_MS));
+    }
+    return false;
+  }
+
+  /** 管理桥：UI 删除 SDK cron → 启动管理会话执行 CronDelete，轮询确认镜像消失。 */
+  async requestDeleteSdkCron(
+    cronId: string
+  ): Promise<{ status?: string; hint?: string; done?: boolean; timedOut?: boolean } | null> {
     const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
     if (!mirrorApi) return null;
     try {
       const result = await mirrorApi.requestDelete(cronId);
-      if (result.success) {
-        // 刷新镜像（deletion_requested 状态立即可见）
-        await this.loadSdkMirrors();
-        return { status: result.status, injected: result.injected, hint: result.hint };
-      }
-      throw new Error(result.error || 'Failed to request cron delete');
+      if (!result.success) throw new Error(result.error || 'Failed to request cron delete');
+      const done = await this.pollSdkMirrors(
+        (mirrors) => !mirrors.some((m) => m.id === cronId)
+      );
+      return {
+        status: result.status,
+        hint: result.hint,
+        done,
+        timedOut: !done,
+      };
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
       throw err;
     }
   }
 
-  /** 管理桥：UI 新建/编辑 SDK cron → 启动管理会话执行 CronCreate(durable=true)，对账回镜像。 */
+  /**
+   * 管理桥：UI 新建/编辑 SDK cron → 启动管理会话执行 CronCreate(durable=true)。
+   * 轮询直到带 [SDK_CRON:<nonce>] 的新镜像出现（创建成功）或超时。
+   */
   async createSdkCron(
     spec: import('../types/scheduledTask').SdkCronScheduleSpec,
     replacesId?: string | null
-  ): Promise<{ sessionId?: string; nonce?: string } | null> {
+  ): Promise<{ sessionId?: string; nonce?: string; done?: boolean; timedOut?: boolean } | null> {
     const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
     if (!mirrorApi?.create) return null;
     try {
       const result = await mirrorApi.create({ spec, replacesId: replacesId ?? null });
-      if (result.success) {
-        // 创建会话结束后对账已尝试一次；刷新让镜像立即可见（可能仍在采集）。
-        await this.loadSdkMirrors();
-        return { sessionId: result.sessionId, nonce: result.nonce };
+      if (!result.success) throw new Error(result.error || 'Failed to create sdk cron');
+      const nonce = result.nonce as string | undefined;
+      const marker = nonce ? `[SDK_CRON:${nonce}]` : null;
+      let done = true;
+      if (marker) {
+        done = await this.pollSdkMirrors(
+          (mirrors) => mirrors.some((m) => m.prompt?.includes(marker))
+        );
       }
-      throw new Error(result.error || 'Failed to create sdk cron');
+      return { sessionId: result.sessionId, nonce, done, timedOut: !done };
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
       throw err;
     }
   }
 
-  /** 管理桥：开关（删→重建）。enable=false 删 SDK 侧 cron + 镜像 enabled=0；enable=true 用 spec 重建。 */
+  /**
+   * 管理桥：开关（删→重建）。
+   * - enable=false：镜像立即置 enabled=0（同步），SDK 侧删除后台执行，无需轮询确认；
+   * - enable=true：用 spec 重建，轮询直到带 nonce 的新镜像出现。
+   */
   async toggleSdkCron(
     cronId: string,
     enabled: boolean
-  ): Promise<{ status?: string; injected?: boolean; hint?: string } | null> {
+  ): Promise<{ status?: string; hint?: string; done?: boolean; timedOut?: boolean } | null> {
     const mirrorApi = window.electron?.scheduledTasks?.sdkCronMirror;
     if (!mirrorApi?.toggle) return null;
     try {
       const result = await mirrorApi.toggle(cronId, enabled);
-      if (result.success) {
-        await this.loadSdkMirrors();
-        return { status: result.status, injected: result.injected, hint: result.hint };
+      if (!result.success) throw new Error(result.error || 'Failed to toggle sdk cron');
+      let done = true;
+      if (enabled) {
+        const nonce = result.nonce as string | undefined;
+        const marker = nonce ? `[SDK_CRON:${nonce}]` : null;
+        if (marker) {
+          done = await this.pollSdkMirrors(
+            (mirrors) => mirrors.some((m) => m.prompt?.includes(marker))
+          );
+        }
       }
-      throw new Error(result.error || 'Failed to toggle sdk cron');
+      return {
+        status: result.status,
+        hint: result.hint,
+        done,
+        timedOut: !done,
+      };
     } catch (err: unknown) {
       store.dispatch(setError(err instanceof Error ? err.message : String(err)));
       throw err;

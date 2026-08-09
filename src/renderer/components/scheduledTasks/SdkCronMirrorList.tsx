@@ -58,7 +58,8 @@ const SdkCronMirrorList: React.FC<SdkCronMirrorListProps> = ({ onEdit }) => {
 
   const handleRequestDelete = useCallback(
     (mirror: SdkCronMirror) => {
-      if (mirror.status !== 'active' || deletingId) return;
+      // 解死锁：deletion_requested（上次删除/停用未生效）允许重试删除；仅已删除/进行中拦截。
+      if (mirror.status === 'deleted' || deletingId) return;
       setDeleteTarget({ id: mirror.id, name: `${mirror.name}（${mirror.id}）` });
     },
     [deletingId]
@@ -72,7 +73,11 @@ const SdkCronMirrorList: React.FC<SdkCronMirrorListProps> = ({ onEdit }) => {
     try {
       const result = await scheduledTaskService.requestDeleteSdkCron(id);
       if (result?.hint) showToast(result.hint);
-      else showToast('已发起删除，等待会话确认…');
+      if (result?.timedOut) {
+        showToast('删除仍在后台执行，可稍后刷新查看');
+      } else if (result?.done) {
+        showToast('任务已删除');
+      }
     } catch (error) {
       showToast(`删除失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -243,8 +248,8 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
 
   // 只读镜像（无 scheduleSpec）不可开关/编辑，仅可删除——降级保护。
   const readOnly = !mirror.scheduleSpec;
-  // 删除中 / 已停用 时开关不可点。
-  const toggleDisabled = readOnly || mirror.status !== 'active' || toggling;
+  // 已删除的镜像不可再操作；deletion_requested（上次删除/停用未生效）允许重试，不拦截。
+  const toggleDisabled = readOnly || mirror.status === 'deleted' || toggling;
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -276,6 +281,9 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
     try {
       const result = await scheduledTaskService.toggleSdkCron(mirror.id, nextEnabled);
       if (result?.hint) showToast(result.hint);
+      if (nextEnabled && result?.timedOut) {
+        showToast('重新启用仍在后台执行，可稍后刷新查看');
+      }
     } catch (error) {
       showToast(`开关失败: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -337,6 +345,11 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
             已迁移
           </span>
         )}
+        {!mirror.enabled && (
+          <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-slate-700/50 bg-slate-100 dark:text-slate-300 text-slate-600">
+            已停用
+          </span>
+        )}
         {mirror.status === 'deletion_requested' && (
           <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded dark:bg-orange-900/40 bg-orange-100 dark:text-orange-300 text-orange-700">
             删除中
@@ -393,7 +406,7 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
               <button
                 type="button"
                 onClick={handleRunNow}
-                disabled={running || mirror.status !== 'active'}
+                disabled={running || mirror.status === 'deleted' || !mirror.enabled}
                 className="w-full text-left px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
               >
                 {i18nService.t('scheduledTasksRun')}
@@ -401,7 +414,7 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
               <button
                 type="button"
                 onClick={handleEdit}
-                disabled={readOnly}
+                disabled={readOnly || !mirror.enabled}
                 className="w-full text-left px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
               >
                 {i18nService.t('scheduledTasksEdit')}
@@ -409,7 +422,7 @@ const SdkCronMirrorListItem: React.FC<SdkCronMirrorListItemProps> = ({
               <button
                 type="button"
                 onClick={handleDelete}
-                disabled={mirror.status !== 'active' || deletingId !== null}
+                disabled={mirror.status === 'deleted' || deletingId !== null}
                 className="w-full text-left px-3 py-1.5 text-sm text-red-500 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-50"
               >
                 {i18nService.t('scheduledTasksDelete')}
