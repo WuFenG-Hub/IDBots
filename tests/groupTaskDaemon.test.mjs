@@ -2850,3 +2850,45 @@ test('F2: gateChairDrivingSend — worker sends pass; chair sends are mutually e
   assert.equal(byDefault.ok, true);
   assert.equal(store.get('group_task_driver:8'), 'rpc:1|9000');
 });
+
+// ---------------------------------------------------------------------------
+// F6 (GT#11): [STATUS:REVIEW] parsing chain — the P2-7 Twin-activity
+// suppression window must never swallow the chair's status switch
+// ---------------------------------------------------------------------------
+
+test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is still parsed', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]); // executing
+
+    // The Twin speaks proactively inside the 60s suppression window — any
+    // daemon chair AUTO reply is suppressed from this point on.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-twin-active-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，这个任务我来主导。', chainTimestamp: 1_000_000_000,
+    });
+    // A worker deliverable arrives — the auto-verify reply would be suppressed.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-dlv-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+      chainTimestamp: 1_000_000_005,
+    });
+    // The chair flips the task to REVIEW while the window is still active.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部交付已核验', chainTimestamp: 1_000_000_010,
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'review',
+      'chair status switch is parsed and applied despite the suppression window',
+    );
+    assert.equal(h.sends.length, 0, 'chair auto replies are still suppressed inside the window');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
+  } finally {
+    h.cleanup();
+  }
+});

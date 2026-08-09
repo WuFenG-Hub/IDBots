@@ -355,7 +355,20 @@ export class GroupTaskOrchestrationBridge {
       ['ready', 'queued', 'running', 'blocked'].includes(step.status),
     );
     if (unfinished.length > 0) {
-      throw new Error(`Group task ${groupTaskId} has unfinished canonical steps`);
+      // F6 (GT#11): the close error names every remaining step with its status
+      // and the concrete remedy — previously it was a bare "unfinished
+      // canonical steps" with no way to see what blocked the close.
+      const detail = unfinished
+        .map((step) =>
+          `#${step.ordinal} "${step.title}" [${step.status}]` +
+          (step.assigneeMetabotId != null ? ` assignee=bot-${step.assigneeMetabotId}` : ''),
+        )
+        .join('; ');
+      throw new Error(
+        `Group task ${groupTaskId} has ${unfinished.length} unfinished canonical step(s): ${detail}. ` +
+        'Let the running steps finish, or re-dispatch the queued/blocked ones (chair @mentions the assignee), ' +
+        'then set the task to review again; failed/cancelled noise steps never block acceptance.',
+      );
     }
     if (steps.length > 0 && groupTask.status !== 'review' && groupTask.status !== 'done') {
       throw new Error(`Group task ${groupTaskId} must be in review before owner acceptance`);
