@@ -856,6 +856,8 @@ interface ActiveSession {
     upstreamBaseURL?: string;
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
+    /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
+    lastTurnInputTokens?: number;
     /**
      * Cache-miss attribution trail: one entry per turn where the provider
      * reported cache-creation (miss) tokens, recording the turn index and the
@@ -1390,6 +1392,31 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Returns the real total input tokens (cached + uncached) of the most recent
+   * LLM turn, from the provider-reported result usage (proxy-translated for
+   * DeepSeek). Used by the compaction budget as the authoritative context size
+   * when available (Phase 2). Returns undefined when no turn has reported
+   * usage yet (first turn, sandbox, or providers without usage data).
+   */
+  getSessionLastTurnInputTokens(sessionId: string): number | undefined {
+    const activeSession = this.activeSessions.get(sessionId);
+    const inMemory = activeSession?.usageStats?.lastTurnInputTokens;
+    if (Number.isFinite(inMemory) && (inMemory as number) > 0) {
+      return inMemory as number;
+    }
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId) as
+        { lastTurnInputTokens?: number } | null;
+      if (persisted && Number.isFinite(persisted.lastTurnInputTokens) && (persisted.lastTurnInputTokens as number) > 0) {
+        return persisted.lastTurnInputTokens as number;
+      }
+    } catch {
+      // Best-effort read; the heuristic estimator remains the fallback.
+    }
+    return undefined;
+  }
+
+  /**
    * Accumulates per-turn token usage from an SDK result event into the active
    * session's usageStats. The proxy translates DeepSeek's OpenAI usage into
    * Anthropic cache fields (cache_read = prompt_cache_hit, cache_creation =
@@ -1517,6 +1544,15 @@ export class CoworkRunner extends EventEmitter {
         };
       }
     }
+    const activeForBilling = this.activeSessions.get(sessionId);
+    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
+    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
+    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
+    // fresh-only with cache partitioned into the cache_* fields.
+    const cacheIncludedInInput = billingSource !== 'anthropic';
+    const lastTurnContextTokens = cacheIncludedInInput
+      ? inputTokens
+      : inputTokens + cacheReadTokens + cacheCreationTokens;
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
@@ -1525,13 +1561,8 @@ export class CoworkRunner extends EventEmitter {
       totalCostUsd: typeof payload.total_cost_usd === 'number'
         ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
-      // Source of truth is the billing source resolved from the API config at
-      // run start — NOT the model id (gateway providers can serve deepseek
-      // models without billing the DeepSeek account). Fall back to the
-      // persisted source when no active session is available (e.g. a stale
-      // result event); 'other' is the neutral default for unknown providers.
-      source: this.activeSessions.get(sessionId)?.billingSource
-        ?? (prev.source === 'none' ? 'other' : prev.source),
+      source: billingSource,
+      lastTurnInputTokens: lastTurnContextTokens,
       // Real upstream identity for observability (usage panel "upstream" row).
       upstreamProvider: this.activeSessions.get(sessionId)?.upstreamProvider ?? prev.upstreamProvider,
       upstreamBaseURL: this.activeSessions.get(sessionId)?.upstreamBaseURL ?? prev.upstreamBaseURL,
@@ -4869,6 +4900,9 @@ export class CoworkRunner extends EventEmitter {
         // compaction stays as a safety net near the real ceiling so the two
         // mechanisms don't double-compact at the same threshold.
         ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
+        // Real provider-reported context size from the last turn (Phase 2);
+        // the heuristic estimate stays as the floor when unavailable.
+        realUsageTokens: this.getSessionLastTurnInputTokens(sessionId),
       });
 
       if (budget.shouldCompact) {

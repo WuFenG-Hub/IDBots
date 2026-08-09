@@ -16,6 +16,13 @@ export interface CoworkContextBudgetInput {
   currentPrompt?: string;
   systemPrompt?: string;
   softThresholdRatio?: number;
+  /**
+   * Real total input tokens from the most recent LLM turn (provider-reported,
+   * cached + uncached). When available it is the authoritative context size; the
+   * heuristic estimate is kept as the floor so a missing/stale real value still
+   * compacts on the store-based estimate.
+   */
+  realUsageTokens?: number;
 }
 
 export interface CoworkContextBudget {
@@ -114,6 +121,13 @@ export function getCoworkContextBudget(input: CoworkContextBudgetInput): CoworkC
   const currentPrompt = input.currentPrompt?.trim() ?? '';
   if (currentPrompt && !isCurrentPromptAlreadyPresent(input.messages, currentPrompt)) {
     estimatedTokens += estimateCoworkTextTokens(currentPrompt) + MESSAGE_FRAME_TOKEN_OVERHEAD;
+  }
+
+  const realUsageTokens = Number.isFinite(input.realUsageTokens) && (input.realUsageTokens as number) > 0
+    ? Math.floor(input.realUsageTokens as number)
+    : 0;
+  if (realUsageTokens > estimatedTokens) {
+    estimatedTokens = realUsageTokens;
   }
 
   return {

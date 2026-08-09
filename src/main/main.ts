@@ -8381,6 +8381,9 @@ if (!gotTheLock) {
               messages: session.messages ?? [],
               systemPrompt: session.systemPrompt,
               modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+              // Real provider-reported context size from the last turn (Phase 2):
+              // keeps the fallback ring consistent with the compaction trigger.
+              realUsageTokens: getCoworkRunner().getSessionLastTurnInputTokens(sessionId),
               // A2A private chats rebuild the model context every turn from only
               // the latest segment messages; cap the estimate the same way so the
               // ring reflects real per-turn usage instead of full history.

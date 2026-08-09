@@ -90,3 +90,81 @@ test('isContextWindowExceededError recognizes context overflow without catching 
     false
   );
 });
+
+test('getCoworkContextBudget uses real provider-reported input tokens when higher than the heuristic (Phase 2)', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'hello',
+      timestamp: 1,
+    },
+    {
+      id: 'assistant-1',
+      type: 'assistant',
+      content: 'hi there',
+      timestamp: 2,
+    },
+  ];
+
+  // Heuristic estimate is tiny (~4 tokens); the real last-turn context is huge.
+  const withReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 900_000,
+  });
+  assert.equal(withReal.estimatedTokens, 900_000);
+  assert.equal(withReal.shouldCompact, true);
+
+  const withoutReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+  });
+  assert.ok(withoutReal.estimatedTokens < 100);
+  assert.equal(withoutReal.shouldCompact, false);
+});
+
+test('getCoworkContextBudget keeps the heuristic as the floor when real usage is stale or missing', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'x'.repeat(4_000),
+      timestamp: 1,
+    },
+  ];
+
+  // Real usage below the heuristic must not shrink the estimate.
+  const withLowReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 10,
+  });
+  const withoutReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+  });
+  assert.equal(withLowReal.estimatedTokens, withoutReal.estimatedTokens);
+  assert.ok(withLowReal.estimatedTokens > 10);
+
+  // Zero / non-finite real usage behaves like missing.
+  const withZero = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 0,
+  });
+  assert.equal(withZero.estimatedTokens, withoutReal.estimatedTokens);
+});
