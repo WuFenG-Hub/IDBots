@@ -53,6 +53,34 @@ function makeKv() {
   };
 }
 
+// Recording fake for the host CoworkRunner seam (P1-5b default path):
+// insertCrossSessionMessageAndQueue returns a success insert + queued run.
+function makeRecordingRunner() {
+  const calls = [];
+  const runner = {
+    insertCrossSessionMessageAndQueue(input) {
+      calls.push(input);
+      return {
+        insert: {
+          ok: true,
+          sourceSessionId: input.sourceSessionId,
+          targetSessionId: input.targetSessionId,
+          message: {
+            id: 'm-' + calls.length,
+            type: 'user',
+            content: input.message,
+            timestamp: 1700000000000,
+            metadata: null,
+          },
+        },
+        runQueued: true,
+        queueDepth: 1,
+      };
+    },
+  };
+  return { runner, calls };
+}
+
 async function makeService(runWorkerTurn, overrides = {}) {
   const sqliteStore = await SqliteStore.create(makeTempDir());
   const orchestrationStore = new OrchestrationStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
@@ -62,10 +90,14 @@ async function makeService(runWorkerTurn, overrides = {}) {
     listMetabots: () => bots,
     getOwnerGlobalMetaId: () => 'owner-global',
   };
+  const defaultRunner = makeRecordingRunner();
   const service = new TwinOrchestrationService({
     orchestrationStore,
     coworkStore: {},
-    coworkRunner: {},
+    // P1-5b: the DEFAULT notification path (no insertCrossSessionUserMessage
+    // override) now calls the host runner's insertCrossSessionMessageAndQueue
+    // seam. Tests exercising that path observe it via the recording runner.
+    coworkRunner: overrides.coworkRunner ?? defaultRunner.runner,
     directory,
     getMetabotById: (id) => bots.find((bot) => bot.id === id) ?? null,
     getWorkerWorkspace: (id) => `/tmp/idbots-worker-${id}`,
@@ -75,7 +107,7 @@ async function makeService(runWorkerTurn, overrides = {}) {
       : {}),
     ...(overrides.kv ? { kv: overrides.kv } : {}),
   });
-  return { sqliteStore, orchestrationStore, service };
+  return { sqliteStore, orchestrationStore, service, defaultRunnerCalls: defaultRunner.calls };
 }
 
 async function waitFor(assertion, timeoutMs = 500) {
@@ -310,6 +342,115 @@ test('r6: missing worker session identity skips the notification without throwin
     await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
     assert.equal(cross.inserted.length, 0, 'no worker session id → notify skipped, no throw');
     assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed', 'failure flow unaffected');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// P1-5b: the DEFAULT notification path must route through the host runner's
+// insertCrossSessionMessageAndQueue seam (insert + queue-to-continue), so the
+// ORCH-NOTIFY message also wakes/activates the target Twin session — not just
+// a bare store write. Insert and queue are decoupled: the kv idempotency
+// guard semantics are unchanged even when the queue is rejected.
+// ---------------------------------------------------------------------------
+test('P1-5b: default ORCH-NOTIFY path calls the host runner insert+queue seam and sets the kv guard', async () => {
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service, defaultRunnerCalls } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return 'Handoff: done. Evidence: built.';
+  }, { kv });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Build the MetaID knowledge-base MetaApp',
+      idempotencyKey: 'p1-5b-default-path',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
+
+    assert.equal(defaultRunnerCalls.length, 1, 'default path hit the runner seam exactly once');
+    assert.equal(defaultRunnerCalls[0].sourceSessionId, 'worker-session-2');
+    assert.equal(defaultRunnerCalls[0].targetSessionId, 'twin-session');
+    assert.match(defaultRunnerCalls[0].message, /\[ORCH-NOTIFY\] worker Builder 已完成 task/);
+    assert.match(defaultRunnerCalls[0].message, /→ review，请验收/);
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1', 'guard set after successful insert');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), undefined);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P1-5b: default path preserves message + kv guard when the queue-to-continue is rejected (stopped target)', async () => {
+  const kv = makeKv();
+  const runnerCalls = [];
+  const runner = {
+    insertCrossSessionMessageAndQueue(input) {
+      runnerCalls.push(input);
+      return {
+        insert: {
+          ok: true,
+          sourceSessionId: input.sourceSessionId,
+          targetSessionId: input.targetSessionId,
+          message: {
+            id: 'm-queued-fail',
+            type: 'user',
+            content: input.message,
+            timestamp: 1700000000000,
+            metadata: null,
+          },
+        },
+        runQueued: false,
+        warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+        reason: 'TARGET_SESSION_STOPPED',
+        error: 'TARGET_SESSION_STOPPED: target session twin-session is stopped.',
+      };
+    },
+  };
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return 'Handoff: done. Evidence: built.';
+  }, { kv, coworkRunner: runner });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Build something',
+      idempotencyKey: 'p1-5b-queue-rejected',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
+
+    assert.equal(runnerCalls.length, 1);
+    assert.match(runnerCalls[0].message, /\[ORCH-NOTIFY\]/);
+    // Insert succeeded → the idempotency guard still holds; the rejected
+    // queue (best-effort activation) must not change the notify semantics.
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1', 'guard set even when queue rejected');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P1-5b: default path insert failure leaves the kv guard unset and never throws', async () => {
+  const kv = makeKv();
+  const runner = {
+    insertCrossSessionMessageAndQueue() {
+      return {
+        insert: { ok: false, code: 'SESSION_NOT_FOUND', message: 'Target session not found: twin-session' },
+        runQueued: false,
+      };
+    },
+  };
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return 'Handoff: done. Evidence: built.';
+  }, { kv, coworkRunner: runner });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'Build something',
+      idempotencyKey: 'p1-5b-insert-failed',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), undefined, 'failed insert must not set the guard');
   } finally {
     sqliteStore.close();
   }
