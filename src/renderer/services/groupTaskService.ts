@@ -115,7 +115,7 @@ class GroupTaskService {
     return result.task as GroupTaskDetail;
   }
 
-  async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }): Promise<GroupTaskDetail> {
+  async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }): Promise<GroupTaskDetail> {
     const api = window.electron?.groupTask;
     if (!api) throw new Error('Group task API unavailable');
 

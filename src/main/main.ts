@@ -8912,7 +8912,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string }) => {
+  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string; rating?: number; ratingComment?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -8922,8 +8922,18 @@ if (!gotTheLock) {
       if (status !== 'done' && status !== 'cancelled') {
         throw new Error("status must be 'done' or 'cancelled'");
       }
+      // Owner acceptance requires the human rating (1-5 stars); 'cancelled' never carries one.
+      let rating: number | undefined;
+      if (status === 'done') {
+        const raw = Number(input?.rating);
+        if (!Number.isInteger(raw) || raw < 1 || raw > 5) {
+          throw new Error('rating (1-5) is required when accepting a group task');
+        }
+        rating = raw;
+      }
+      const ratingComment = typeof input?.ratingComment === 'string' ? input.ratingComment : undefined;
       const task = await withSqliteRecovery('groupTask:close', () =>
-        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined, rating, ratingComment }));
       broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
       return { success: true, task };
     } catch (error) {

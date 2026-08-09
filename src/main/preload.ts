@@ -663,7 +663,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:create', input),
     list: (filter?: { status?: string }) => ipcRenderer.invoke('groupTask:list', filter),
     get: (taskId: number) => ipcRenderer.invoke('groupTask:get', { taskId }),
-    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) =>
+    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }) =>
       ipcRenderer.invoke('groupTask:close', input),
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) =>
       ipcRenderer.invoke('groupTask:listMessages', input),
