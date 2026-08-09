@@ -208,6 +208,12 @@ const createHarness = async (overrides = {}) => {
       ? { resolveGlobalMetaId: overrides.resolveGlobalMetaId }
       : {}),
     ...(overrides.probeUrl ? { probeUrl: overrides.probeUrl } : { probeUrl: async () => null }),
+    ...(overrides.readPinSecondaryForVerification
+      ? { readPinSecondaryForVerification: overrides.readPinSecondaryForVerification }
+      : {}),
+    ...(overrides.verificationRetryMs != null
+      ? { verificationRetryMs: overrides.verificationRetryMs }
+      : {}),
     emitLog: overrides.emitLog ?? (() => {}),
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
@@ -219,6 +225,12 @@ const createHarness = async (overrides = {}) => {
       : {}),
     ...(overrides.disableChairPlanningTurn != null
       ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
+      : {}),
+    ...(overrides.memberUnreachableAfterMinutes != null
+      ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
+      : {}),
+    ...(overrides.ackTimeoutMs != null
+      ? { ackTimeoutMs: overrides.ackTimeoutMs }
       : {}),
   });
 
@@ -2066,6 +2078,336 @@ test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
     await h.loop.runTick();
     const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
     assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-2: silent assigned/working members are auto-marked unreachable after the threshold', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    // Anchor the daemon clock to wall time so sqlite created_at baselines
+    // (real datetime('now')) compare sensibly.
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Worker 2 spoke 1 minute ago (within threshold); worker 3 never spoke.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-old-1',
+      senderMetaId: 'metaid-2',
+      senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: 'hello',
+      chainTimestamp: Math.floor((startMs - 60_000) / 1000),
+    });
+
+    // Fresh task: worker 2 spoke (implicit ACK → working); worker 3 is still
+    // within threshold → assigned (not yet unreachable).
+    await h.loop.runTick();
+    let members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'assigned');
+
+    // Advance past the threshold: both become unreachable.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'unreachable');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'unreachable');
+
+    // Chair member is never auto-marked.
+    assert.equal(members.find((m) => m.metabotId === 1).status, 'working');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] ACK + chair reminders
+// ---------------------------------------------------------------------------
+
+test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it and marks working', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2') != null, true);
+
+    // Worker 2 ACKs with [WORKING] and an estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：build metaapp，预计 5 分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working');
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'expected delivery deadline recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fails', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+
+    // Before timeout: no reminder.
+    h.state.nowMs = startMs + 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2).status, 'assigned');
+
+    // Past timeout: one reminder as the chair.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0].content, /@chair/);
+    assert.match(h.sends[0].content, /has not sent a \[WORKING\] ACK/);
+
+    // A later tick does not re-remind.
+    h.state.nowMs = startMs + 400_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2 and worker 3.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot and @Designer Bot please work',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_ack_pending:1:2'));
+    assert.ok(h.store.get('group_task_ack_pending:1:3'));
+
+    // Worker 3 posts [STANDBY] → standby; worker 2 posts ordinary speech → working (implicit ACK).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-standby-1', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[STANDBY] 静默观察 / 待命接手 / 可退出',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-implicit-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it, will deliver soon',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'standby');
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-4: deliverable verification + deadline reminders
+// ---------------------------------------------------------------------------
+
+test('P0-4: pinid deliverable gets multi-source verification persisted (found+found → verified)', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_1] = 'found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    assert.ok(deliverable, 'deliverable recorded');
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, true);
+    assert.equal(report.sources.length, 2);
+    assert.deepEqual(report.sources.map((s) => s.outcome).sort(), ['found', 'found']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: indexer lag (man not_found, secondary found) persists pending-sync, not a hard failure', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_2] = 'not_found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_2}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, false);
+    assert.equal(report.sources.some((s) => s.outcome === 'not_found'), true);
+    assert.equal(report.sources.some((s) => s.outcome === 'found'), true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: missed delivery deadline posts ONE reminder; delivered members are skipped', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Chair assigns worker 2; worker ACKs with a 5-minute estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：deliver，预计 5 分钟',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
+    h.sends.length = 0;
+
+    // Before deadline: no reminder.
+    h.state.nowMs = startMs + 3 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+
+    // Past deadline: one reminder.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    const reminders = h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content));
+    assert.equal(reminders.length, 1);
+    assert.match(reminders[0].content, /@chair/);
+
+    // No repeat.
+    h.state.nowMs = startMs + 12 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content)).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-8: member correction message records an integrity event (deduped by pin)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-correction-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '更正：我此前的链接无效，正确预览如下',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const events = h.groupTaskStore.listIntegrityEvents(task.id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].eventType, 'correction');
+    assert.equal(events[0].msgPinId, 'pin-correction-1');
+
+    // same pin re-processed (retry) → no duplicate
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// C-1: chair auto-planning must cover >= 2 members (defensive check)
+// ---------------------------------------------------------------------------
+
+test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers', () => {
+  const { checkPlanningCoverage } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const tenWorkers = ['AI_小新', 'Builder', 'Lucy', 'eleven', 'loop AI', '小明同学', '10th bot', '77', 'Stephen', 'claude-bot2'];
+
+  const single = checkPlanningCoverage(
+    'Plan: @AI_小新 you are the only worker, do everything. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(single.ok, false);
+  assert.deepEqual(single.mentionedWorkers, ['AI_小新']);
+
+  const spread = checkPlanningCoverage(
+    'Plan: @AI_小新 research, @Lucy copy, @Builder assemble; others standby. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(spread.ok, true);
+  assert.ok(spread.mentionedWorkers.length >= 2);
+
+  const singleWorkerRoster = checkPlanningCoverage('Plan: @Coder Bot do it', ['Coder Bot']);
+  assert.equal(singleWorkerRoster.ok, true);
+});
+
+test('C-1: single-worker plan is retried, then posted with a host warning on the final attempt', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot, you are the only worker — do everything. [STATUS:EXECUTING]',
+    disableChairPlanningTurn: false,
+  });
+  try {
+    // 3 workers: 2, 3, 4; the plan only mentions Coder Bot.
+    const task = h.createTask([2, 3, 4], { activate: false });
+    for (let i = 0; i < 4; i++) {
+      await h.loop.runTick();
+    }
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 2, 'two failed coverage attempts then posted with warning');
+    assert.equal(h.sends.length, 1, 'posted on final attempt with warning');
+    assert.match(h.sends[0].content, /Host warning/);
+    assert.match(h.sends[0].content, /concentrates the work on one member/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('C-1: multi-worker plan posts immediately without warning', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2, 3, 4], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.doesNotMatch(h.sends[0].content, /Host warning/);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
   } finally {
     h.cleanup();
   }

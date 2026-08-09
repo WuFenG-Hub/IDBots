@@ -36,6 +36,9 @@ import {
 } from '../libs/experiencePromptBlocks';
 import {
   parseDeliverableLines,
+  parseWorkingAck,
+  hasStandbyMarker,
+  isIntegrityDeclaration,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
 
@@ -92,6 +95,10 @@ const MAX_CHAIR_PLAN_ATTEMPTS = 3;
  * Exported so the reopen service path clears the same guard.
  */
 export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
+const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
+const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
+const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
@@ -121,6 +128,12 @@ const DEFAULT_CHAIR_TWIN_SUPPRESS_WINDOW_MS = 60_000;
 const DEFAULT_REPLY_BUDGET = 40;
 const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
+/** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
+const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
+/** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
+const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
+/** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
+const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Pure gating (exported for tests)
@@ -306,6 +319,32 @@ export function decideGroupTaskResponders(
   return decisions;
 }
 
+export interface PlanningCoverage {
+  ok: boolean;
+  /** Worker names mentioned/assigned in the plan text. */
+  mentionedWorkers: string[];
+  /** Worker names NOT mentioned at all. */
+  unmentionedWorkers: string[];
+}
+
+/**
+ * C-1 defensive check: the chair's auto plan must not concentrate every
+ * subtask on a single member when 2+ workers are on the roster. A worker is
+ * considered "assigned" when the plan text mentions its name (with or without
+ * @). Pure + exported for unit tests.
+ */
+export function checkPlanningCoverage(reply: string, workerNames: string[]): PlanningCoverage {
+  const text = String(reply ?? '');
+  const mentioned = workerNames.filter((name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return false;
+    return text.includes(trimmed) || text.includes(`@${trimmed}`);
+  });
+  const unmentioned = workerNames.filter((name) => !mentioned.includes(name));
+  const ok = workerNames.length < 2 || mentioned.length >= 2;
+  return { ok, mentionedWorkers: mentioned, unmentionedWorkers: unmentioned };
+}
+
 // ---------------------------------------------------------------------------
 // Daemon loop
 // ---------------------------------------------------------------------------
@@ -425,6 +464,8 @@ export interface GroupTaskDaemonDeps {
   runSkillTurn?: GroupTaskDaemonRunSkillTurnFn;
   emitTaskEvent?: (payload: GroupTaskDaemonTaskEvent) => void;
   readPinForVerification?: GroupTaskDaemonReadPinFn;
+  /** P0-4: secondary indexer (metafile-indexer) for multi-source pin verification. */
+  readPinSecondaryForVerification?: GroupTaskDaemonReadPinFn;
   resolveGlobalMetaId?: GroupTaskDaemonResolveGlobalMetaIdFn;
   probeUrl?: GroupTaskDaemonProbeUrlFn;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
@@ -471,6 +512,15 @@ export interface GroupTaskDaemonDeps {
    * DEFAULT_DRIVER_GRACE_MS. 0 disables the mutex entirely.
    */
   driverGraceMs?: number;
+  /**
+   * P0-2: minutes of silence before an assigned/working member is auto-marked
+   * unreachable (default 30).
+   */
+  memberUnreachableAfterMinutes?: number;
+  /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
+  ackTimeoutMs?: number;
+  /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
+  verificationRetryMs?: number;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -504,6 +554,17 @@ function mapMessageRows(result: ReturnType<Database['exec']>): GroupChatMessageR
     });
     return row as unknown as GroupChatMessageRow;
   });
+}
+
+/** sqlite datetime('now') strings are UTC 'YYYY-MM-DD HH:MM:SS'. */
+function parseSqliteUtcMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  return Date.UTC(
+    Number(match[1]), Number(match[2]) - 1, Number(match[3]),
+    Number(match[4]), Number(match[5]), Number(match[6]),
+  );
 }
 
 function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
@@ -543,6 +604,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   );
   const driverGraceMs = Math.max(0, Math.trunc(deps.driverGraceMs ?? DEFAULT_DRIVER_GRACE_MS));
   const driverInstanceId = randomUUID();
+  const memberUnreachableAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberUnreachableAfterMinutes ?? DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES),
+  );
+  const ackTimeoutMs = Math.max(
+    30_000,
+    Math.trunc(deps.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS),
+  );
+  const verificationRetryMs = Math.max(
+    60_000,
+    Math.trunc(deps.verificationRetryMs ?? DEFAULT_VERIFICATION_RETRY_MS),
+  );
   const emitLog = deps.emitLog ?? (() => undefined);
   const now = deps.now ?? (() => Date.now());
 
@@ -1350,6 +1423,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const superseded = findSupersededDeliverable(task.id, message.senderGlobalMetaId, candidate);
           if (superseded) {
             store.updateDeliverableUri(superseded.id, candidate.uri, candidate.kind);
+            // P0-4: corrected deliverable is re-verified on the next monitor pass.
+            store.updateDeliverableVerification(superseded.id, '{}');
             verificationNotes.push(
               `✓ 更正优先：交付物 #${superseded.id}（${superseded.kind ?? 'text'}）已就地更新为 ${candidate.uri}`,
             );
@@ -1389,6 +1464,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           uri: candidate.uri,
         });
         recordedDeliverables.push(candidate);
+        // P0-4: persist multi-source on-chain verification for pinid deliverables.
+        if (candidate.kind === 'metaapp' || candidate.kind === 'metafile' || candidate.kind === 'pinid') {
+          const pinid = pinidFromDeliverable(candidate.uri);
+          if (pinid) {
+            try {
+              const report = await verifyPinSources(pinid);
+              store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+              const lagging = report.sources.some((entry) => entry.outcome === 'not_found')
+                && report.sources.some((entry) => entry.outcome === 'found');
+              if (!report.verified) {
+                verificationNotes.push(
+                  lagging
+                    ? `… Host verification: pinid ${pinid.slice(0, 10)}… 未同步（索引延迟，多源不一致），将自动重试`
+                    : `⚠ Host verification: pinid ${pinid.slice(0, 10)}… not found on-chain`,
+                );
+              }
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} verification failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        }
         if (deps.orchestrationBridge) {
           try {
             deps.orchestrationBridge.recordDeliverable({
@@ -1417,6 +1516,31 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
 
+    // P0-8: public integrity declarations (honest correction/report) are
+    // recorded into the acceptance record. Dedupe by message pin.
+    if (!message.senderSuspect && message.pinId && isIntegrityDeclaration(content)) {
+      try {
+        if (!store.hasIntegrityEventWithMsgPin(task.id, message.pinId)) {
+          const isCorrection = /更正|修正|纠正|以…?为准|以此为准|补正|勘误/.test(content);
+          store.addIntegrityEvent({
+            taskId: task.id,
+            msgPinId: message.pinId,
+            authorGlobalmetaid: message.senderGlobalMetaId,
+            eventType: isCorrection ? 'correction' : 'honest_report',
+            detail: content.slice(0, 500),
+          });
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: recorded integrity ${isCorrection ? 'correction' : 'report'} from ${message.senderName}`,
+          );
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: integrity event record failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     const statusMatch = STATUS_TAG.exec(content);
     if (statusMatch) {
       const chairMember = members.find((member) => member.role === 'chair');
@@ -1428,14 +1552,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const beforeStatus = store.getTaskById(task.id)?.status;
           // P1-5: the on-chain status tag is a chair action — record the actor
           // on the transition event (who moved the task where and when).
+          // P0-5: status tags also write the transition audit log (reason =
+          // the STATUS tag) via addTaskTransition below.
+          const chairName = (chairMember?.name ?? members.find((m) => m.role === 'chair')?.name ?? 'chair').trim();
           const updated = store.updateTaskStatus(task.id, nextStatus, {
             actor: {
               kind: 'chair',
               globalMetaId: senderGlobalMetaId,
-              name: chairMember?.name ?? null,
+              name: chairName || null,
             },
           });
           if (beforeStatus && updated.status !== beforeStatus) {
+            try {
+              // P0-5: transition audit log (actor = chair name, reason = the STATUS tag).
+              store.addTaskTransition({
+                taskId: task.id,
+                fromStatus: beforeStatus,
+                toStatus: updated.status,
+                actor: chairName || `metabot:${chairMember?.metabotId ?? 'chair'}`,
+                reason: `[STATUS:${statusMatch[1].toUpperCase()}] tag`,
+              });
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: transition log write failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
             try {
               deps.orchestrationBridge?.syncStatus(task.id);
             } catch (error) {
@@ -1573,10 +1715,35 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
       const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
       // Plain LLM path: the chair is planning here, not executing skills.
-      const reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      let reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
+      // C-1 defensive coverage check: never let a multi-worker plan concentrate
+      // every subtask on one member. Retry while attempts remain; on the final
+      // attempt, attach a host warning instead of blocking the plan.
+      const workerNames = promptMembers
+        .filter((member) => member.role === 'worker')
+        .map((member) => member.name);
+      if (workerNames.length > 1) {
+        const coverage = checkPlanningCoverage(reply, workerNames);
+        if (!coverage.ok) {
+          if (attempts + 1 < MAX_CHAIR_PLAN_ATTEMPTS) {
+            throw new Error(
+              'planning coverage check failed: all subtasks assigned to a single member ' +
+              `(${coverage.mentionedWorkers.join(', ') || 'none'})`,
+            );
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: planning coverage check failed on final attempt — ` +
+            `appending host warning (mentioned: ${coverage.mentionedWorkers.join(', ') || 'none'})`,
+          );
+          reply += `\n\n⚠ Host warning: this plan concentrates the work on one member ` +
+            `(${coverage.mentionedWorkers.join(', ') || 'unknown'}). Verify that every roster ` +
+            `member got a subtask or an explicit standby note.`;
+        }
+      }
+
       const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
       coworkStore.addMessage(session.id, { type: 'user', content: directive });
       coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
@@ -1839,6 +2006,318 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return { ...message, senderGlobalMetaId: globalMetaId || null, senderSuspect: suspect };
   };
 
+  /**
+   * P0-2: auto-mark silent assigned/working members as unreachable after
+   * memberUnreachableAfterMinutes without any chain speech. Baseline = last
+   * speak time (fallback: member join time); never marks chair members, done
+   * members, or members who already show a non-active status.
+   */
+  const monitorMemberUnreachable = (task: GroupTask, members: GroupTaskMember[]): void => {
+    const thresholdMs = memberUnreachableAfterMinutes * 60_000;
+    const store = deps.getGroupTaskStore();
+    const workers = members.filter(
+      (member) => member.role === 'worker'
+        && (member.status === 'assigned' || member.status === 'working'),
+    );
+    if (workers.length === 0 || !task.groupId) return;
+    const speakMap = store.getMembersLastSpeakAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
+    for (const member of workers) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const speakSec = gmid ? speakMap.get(gmid) ?? null : null;
+      const lastMs = speakSec != null
+        ? speakSec * 1000
+        : parseSqliteUtcMs(member.createdAt);
+      if (lastMs == null) continue;
+      if (now() - lastMs <= thresholdMs) continue;
+      try {
+        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: member ${member.name ?? member.metabotId} marked ` +
+          `unreachable (no speech for ${memberUnreachableAfterMinutes}+ min) — chair should re-assign or check`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: failed to mark member ${member.metabotId} unreachable: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
+  /**
+   * P0-3: per-message protocol markers:
+   * - chair message that @mentions a worker = an ASSIGNMENT → record a pending
+   *   [WORKING] ACK expectation for that worker (kv, timestamped).
+   * - worker [WORKING] ACK → status working, clears the pending ACK, records
+   *   the estimated delivery deadline for P0-4.
+   * - worker [STANDBY] → status standby.
+   * - any other worker speech clears the pending ACK (implicit ACK) and marks
+   *   the member working (silence is never assumed).
+   */
+  const handleMemberProtocolMarkers = (
+    task: GroupTask,
+    message: GroupTaskDaemonMessage,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): void => {
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const senderGmid = (message.senderGlobalMetaId ?? '').trim().toLowerCase();
+    if (!senderGmid || message.senderSuspect) return;
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const chairGmid = (chairMember?.globalmetaid ?? '').trim().toLowerCase();
+    const isChairMessage = Boolean(chairGmid && senderGmid === chairGmid);
+    if (isChairMessage) {
+      for (const member of members) {
+        if (member.role !== 'worker' || member.metabotId == null) continue;
+        const bot = botsById.get(member.metabotId);
+        if (!bot || !isMentioned(message, bot)) continue;
+        const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+        const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+        if (sqlite.get<string>(pendingKey) == null && sqlite.get<string>(remindedKey) !== '1') {
+          sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: assignment to ${member.name ?? member.metabotId} (message #${message.id}); waiting for [WORKING] ACK`,
+          );
+        }
+      }
+      return;
+    }
+
+    const member = members.find(
+      (candidate) => (candidate.globalmetaid ?? '').trim().toLowerCase() === senderGmid,
+    );
+    if (!member || member.role !== 'worker' || member.metabotId == null) return;
+
+    const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+    const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+    const ack = parseWorkingAck(message.content);
+    if (ack) {
+      store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+      if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
+      if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+      if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
+        sqlite.set(
+          `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
+          JSON.stringify({
+            dueAt: now() + ack.estimatedMinutes * 60_000,
+            ackedAt: now(),
+            taskDescription: ack.taskDescription,
+          }),
+        );
+      }
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} ACKed [WORKING]` +
+        (ack.estimatedMinutes != null ? ` (est. ${ack.estimatedMinutes} min)` : ''),
+      );
+      return;
+    }
+    if (hasStandbyMarker(message.content)) {
+      store.setMemberStatus(task.id, member.metabotId, 'standby', member.globalmetaid);
+      return;
+    }
+    // Implicit ACK: any worker speech counts as engaged.
+    if (member.status === 'assigned') {
+      store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
+    }
+    if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
+    if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+  };
+
+  /**
+   * P0-3: chair reminder when an assignment got no [WORKING] ACK within
+   * ackTimeoutMs (default 3 min). Fires ONCE per pending assignment; never
+   * auto-fails the worker.
+   */
+  const monitorAcksAndReminders = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+  ): Promise<void> => {
+    if (task.status !== 'planning' && task.status !== 'executing') return;
+    const sqlite = deps.getStore();
+    const chair = members.find((member) => member.role === 'chair');
+    if (!chair?.metabotId) return;
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
+      const raw = sqlite.get<string>(pendingKey);
+      if (!raw) continue;
+      let entry: { assignedAt: number; messageId: number };
+      try {
+        entry = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!entry || typeof entry.assignedAt !== 'number') continue;
+      if (now() - entry.assignedAt < ackTimeoutMs) continue;
+      const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(remindedKey) === '1') continue;
+      const text =
+        `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned ` +
+        `(message #${entry.messageId}) but has not sent a [WORKING] ACK within ` +
+        `${Math.round(ackTimeoutMs / 60_000)} min. Check whether the assignment ` +
+        `was received; do not auto-fail.`;
+      try {
+        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        sqlite.set(remindedKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: reminded chair that ${member.name ?? member.metabotId} has not ACKed`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ACK reminder post failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
+  /**
+   * P0-4: multi-source on-chain existence check. MAN (local sqlite + manapi)
+   * is always queried via deps.readPinForVerification; the metafile-indexer
+   * is queried when deps.readPinSecondaryForVerification is wired. A 404 from
+   * ONE source with success from another is treated as indexer lag ("待同步"),
+   * never as a hard failure.
+   */
+  const verifyPinSources = async (pinId: string): Promise<{
+    sources: Array<{ source: string; outcome: 'found' | 'not_found' | 'unavailable' }>;
+    verified: boolean;
+    checkedAt: number;
+  }> => {
+    const sources: Array<{ source: string; outcome: 'found' | 'not_found' | 'unavailable' }> = [];
+    const primary = deps.readPinForVerification;
+    if (primary) {
+      try {
+        sources.push({ source: 'man', outcome: await primary(pinId) });
+      } catch {
+        sources.push({ source: 'man', outcome: 'unavailable' });
+      }
+    }
+    if (deps.readPinSecondaryForVerification) {
+      try {
+        sources.push({
+          source: 'metafile-indexer',
+          outcome: await deps.readPinSecondaryForVerification(pinId),
+        });
+      } catch {
+        sources.push({ source: 'metafile-indexer', outcome: 'unavailable' });
+      }
+    }
+    const found = sources.some((entry) => entry.outcome === 'found');
+    const notFound = sources.some((entry) => entry.outcome === 'not_found');
+    // verified only when at least one source found it AND no source hard-404s.
+    const verified = found && !notFound;
+    return { sources, verified, checkedAt: now() };
+  };
+
+  /** P0-4: extract the first 64-hex+i0 pinid from a deliverable uri. */
+  const pinidFromDeliverable = (uri: string | null): string | null => {
+    const match = (uri ?? '').match(/[0-9a-f]{64}i0/i);
+    return match ? match[0].toLowerCase() : null;
+  };
+
+  /**
+   * P0-4: periodic re-verification for deliverables that are NOT verified yet
+   * (indexer lag / 40400). Re-checks every verificationRetryMinutes (default
+   * 10) per deliverable until verified.
+   */
+  const monitorDeliverableVerification = async (task: GroupTask): Promise<void> => {
+    const store = deps.getGroupTaskStore();
+    const deliverables = store.listDeliverables(task.id);
+    const nowMs = now();
+    for (const deliverable of deliverables) {
+      if (deliverable.status === 'rejected') continue;
+      const pinid = pinidFromDeliverable(deliverable.uri);
+      if (!pinid) continue;
+      let report: { verified?: boolean; checkedAt?: number } = {};
+      try {
+        if (deliverable.verification) report = JSON.parse(deliverable.verification);
+      } catch {
+        // corrupt/missing → re-verify
+      }
+      if (report.verified === true) continue;
+      const checkedAt = typeof report.checkedAt === 'number' ? report.checkedAt : 0;
+      if (nowMs - checkedAt < verificationRetryMs) continue;
+      try {
+        const fresh = await verifyPinSources(pinid);
+        store.updateDeliverableVerification(deliverable.id, JSON.stringify(fresh));
+        const lagging = fresh.sources.some((entry) => entry.outcome === 'not_found')
+          && fresh.sources.some((entry) => entry.outcome === 'found');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} ${pinid.slice(0, 10)}… ` +
+          `${fresh.verified ? 'verified on-chain' : (lagging ? 'awaiting indexer sync' : 'not found')}`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} re-verification failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
+  /**
+   * P0-4: delivery deadline reminders. When a worker's [WORKING] ACK carried an
+   * estimated duration and the deadline passes without ANY deliverable from
+   * that member, post ONE reminder addressed to both chair and worker.
+   */
+  const monitorDeliveryDeadlines = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+  ): Promise<void> => {
+    if (task.status !== 'executing') return;
+    const sqlite = deps.getStore();
+    const store = deps.getGroupTaskStore();
+    const nowMs = now();
+    for (const member of members) {
+      if (member.role !== 'worker' || member.metabotId == null) continue;
+      const raw = sqlite.get<string>(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+      if (!raw) continue;
+      let entry: { dueAt: number };
+      try {
+        entry = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      if (!entry || typeof entry.dueAt !== 'number' || nowMs < entry.dueAt) continue;
+      const remindedKey = `${DELIVERY_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(remindedKey) === '1') continue;
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const hasDeliverable = store.listDeliverables(task.id).some(
+        (deliverable) =>
+          Boolean(gmid)
+          && (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() === gmid
+          && deliverable.status !== 'rejected',
+      );
+      if (hasDeliverable) {
+        sqlite.delete(`${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`);
+        continue;
+      }
+      const chair = members.find((candidate) => candidate.role === 'chair');
+      if (!chair?.metabotId) continue;
+      const text =
+        `@chair ⚠ @${member.name ?? `bot-${member.metabotId}`} estimated delivery ` +
+        `by ${new Date(entry.dueAt).toISOString()} but no [DELIVERABLE] arrived yet. ` +
+        `Check status; do not auto-fail.`;
+      try {
+        await deps.postGroupTaskMessage(task.id, chair.metabotId, text);
+        sqlite.set(remindedKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: reminded chair+worker ${member.name ?? member.metabotId} about missed delivery deadline`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: delivery reminder post failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -1917,6 +2396,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         `${error instanceof Error ? error.message : String(error)}`,
       );
     }
+
+    // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
+    if (task.status === 'executing') {
+      monitorMemberUnreachable(task, members);
+    }
+
+    // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
+    await monitorAcksAndReminders(task, members);
+    // P0-4: re-verify lagging deliverables + missed delivery deadlines.
+    await monitorDeliverableVerification(task);
+    await monitorDeliveryDeadlines(task, members);
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {
@@ -2016,6 +2506,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       try {
         recordGroupTaskMessageForLocalMembers(task, message, members, botsById);
         const verificationNotes = await processMessageTags(task, message, members, botsById, promptMembers);
+        // P0-3: [WORKING] ACK / [STANDBY] markers + assignment ACK tracking.
+        handleMemberProtocolMarkers(task, message, members, botsById);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
         // the tick-start snapshot.

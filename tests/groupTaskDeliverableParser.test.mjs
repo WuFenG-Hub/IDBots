@@ -220,3 +220,87 @@ test('uppercase pinid token is normalized to lowercase', () => {
   valid(parsed[0]);
   assert.equal(parsed[0].uri, `metaapp://${PIN_A}`);
 });
+
+// ---------------------------------------------------------------------------
+// P0-1: structured field-level validation (warn-and-deliver)
+// ---------------------------------------------------------------------------
+
+test('P0-1: invalid pinid (truncated) surfaces as a field-level pinid error', () => {
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const result = validateDeliverableLines(
+    '**[DELIVERABLE] metaapp: metaapp://1e3847c20c028f4b4f72ae54e1c2e6bec757bb7898492c65ed9e6ea077b9262b**',
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].valid, false);
+  assert.equal(result.errors.length, 1);
+  assert.equal(result.errors[0].field, 'pinid');
+  assert.equal(result.warnings.length, 0);
+});
+
+test('P0-1: buzz pinid wrapped in metaapp:// gets a non-blocking buzz-link warning', () => {
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const result = validateDeliverableLines(
+    `**[DELIVERABLE] buzz 交付: metaapp://${PIN_B}**`,
+  );
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].valid, true);
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.warnings.length, 1);
+  assert.equal(result.warnings[0].field, 'pinid');
+  assert.match(result.warnings[0].message, /buzz link/);
+});
+
+test('P0-1: valid URL has no errors/warnings; malformed URL (ellipsis) errors on url field', () => {
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const ok = validateDeliverableLines('**[DELIVERABLE] url: https://example.com/preview**');
+  assert.equal(ok.errors.length, 0);
+  assert.equal(ok.warnings.length, 0);
+  assert.equal(ok.candidates[0].valid, true);
+
+  const bad = validateDeliverableLines('**[DELIVERABLE] url: https://**');
+  assert.equal(bad.errors.length, 1);
+  assert.equal(bad.errors[0].field, 'url');
+});
+
+test('P0-1: plain text deliverable + valid sibling → no errors, no false positives', () => {
+  const { validateDeliverableLines } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const result = validateDeliverableLines(
+    [
+      '**[DELIVERABLE] ① 文案（已完成）**',
+      `**[DELIVERABLE] 群聊推广: pinid ${PIN_C}**`,
+    ].join('\n'),
+  );
+  assert.equal(result.errors.length, 0);
+  assert.equal(result.warnings.length, 0);
+  assert.equal(result.candidates.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] ACK / [STANDBY] marker parsing
+// ---------------------------------------------------------------------------
+
+test('P0-3: parseWorkingAck extracts subtask + estimated minutes; no tag → null', () => {
+  const { parseWorkingAck, hasStandbyMarker } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const ack = parseWorkingAck('[WORKING] 已接单：build metaapp，预计 15 分钟');
+  assert.equal(ack.acknowledged, true);
+  assert.match(ack.taskDescription, /build metaapp/);
+  assert.equal(ack.estimatedMinutes, 15);
+
+  const english = parseWorkingAck('[WORKING] accepted: task X, ~10 min');
+  assert.equal(english.estimatedMinutes, 10);
+
+  assert.equal(parseWorkingAck('no marker here'), null);
+  assert.equal(hasStandbyMarker('[STANDBY] 静默观察'), true);
+  assert.equal(hasStandbyMarker('nothing'), false);
+});
+
+// ---------------------------------------------------------------------------
+// P0-8: integrity declarations
+// ---------------------------------------------------------------------------
+
+test('P0-8: isIntegrityDeclaration recognizes honest correction language', () => {
+  const { isIntegrityDeclaration } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  assert.equal(isIntegrityDeclaration('更正：我此前的链接无效，正确预览如下'), true);
+  assert.equal(isIntegrityDeclaration('如实说明：该 pinid 未发布成功'), true);
+  assert.equal(isIntegrityDeclaration('普通消息没有任何关键词'), false);
+});

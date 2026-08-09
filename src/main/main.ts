@@ -146,6 +146,7 @@ import {
   getGroupTask,
   closeGroupTask,
   reopenGroupTask,
+  reworkGroupTask,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
@@ -3440,6 +3441,21 @@ const startSqliteDaemons = (): void => {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return message.includes('404') ? 'not_found' : 'unavailable';
+      }
+    },
+    // P0-4: secondary indexer (metafile-indexer) so deliverable pinids are
+    // verified against MULTIPLE index sources; a 404 on one source with a hit
+    // on another is reported as indexer lag, never a hard failure.
+    readPinSecondaryForVerification: async (pinId) => {
+      try {
+        const response = await fetch(
+          `https://file.metaid.io/metafile-indexer/api/v1/pins/${encodeURIComponent(pinId)}`,
+          { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8_000) },
+        );
+        if (response.ok) return 'found';
+        return response.status === 404 ? 'not_found' : 'unavailable';
+      } catch {
+        return 'unavailable';
       }
     },
     // Round-4 attribution: resolve a chain-signature legacy metaid to its
@@ -8974,6 +8990,21 @@ if (!gotTheLock) {
       return { success: true, task };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to reopen group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:rework', async (_event, input: { taskId?: number; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:rework', () =>
+        reworkGroupTask(taskId, { reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to rework group task' };
     }
   });
 

@@ -31,15 +31,19 @@ import {
   createGroupTask,
   listGroupTasks,
   getGroupTask,
+  getGroupTaskChairMetabotId,
   postGroupTaskMessage,
   joinGroupTaskMemberWithSession,
   closeGroupTask,
   deleteGroupTaskDeliverable,
   getGroupTaskMemberStatus,
+  setGroupTaskMemberStatus,
+  reworkGroupTask,
+  exportGroupTask,
 } from './groupTaskService';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
-import type { GroupTaskStatus } from '../groupTaskStore';
+import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from './feeRateStore';
 import { listenWithRetry } from './httpListenWithRetry';
@@ -86,6 +90,9 @@ const GROUP_TASK_INVITE_PATH = '/api/idbots/group-task/invite';
 const GROUP_TASK_CLOSE_PATH = '/api/idbots/group-task/close';
 const GROUP_TASK_MEMBER_STATUS_PATH = '/api/idbots/group-task/member-status';
 const GROUP_TASK_DELIVERABLE_DELETE_PATH = '/api/idbots/group-task/deliverable-delete';
+const GROUP_TASK_SET_MEMBER_STATUS_PATH = '/api/idbots/group-task/set-member-status';
+const GROUP_TASK_REWORK_PATH = '/api/idbots/group-task/rework';
+const GROUP_TASK_EXPORT_PATH = '/api/idbots/group-task/export';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
@@ -1163,6 +1170,8 @@ export function startMetaidRpcServer(
         member_metabot_ids?: unknown[];
         member_names?: unknown[];
         created_by?: string;
+        observer_roles?: Record<string, unknown>;
+        active_member_names?: unknown[];
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1208,6 +1217,17 @@ export function startMetaidRpcServer(
         // whole roster only when the caller did not name any member — silently
         // overriding a provided member list with the full roster was the bug.
         const autoSelectWorkers = memberMetabotIds.length === 0;
+        // P0-6: observer expectations for listed-but-unassigned members.
+        const observerRoles: Record<string, string> = {};
+        if (parsed.observer_roles && typeof parsed.observer_roles === 'object' && !Array.isArray(parsed.observer_roles)) {
+          for (const [name, value] of Object.entries(parsed.observer_roles)) {
+            const text = String(value ?? '').trim();
+            if (name.trim() && text) observerRoles[name.trim()] = text;
+          }
+        }
+        const activeMemberNames = Array.isArray(parsed.active_member_names)
+          ? parsed.active_member_names.map((raw) => String(raw ?? '').trim()).filter(Boolean)
+          : undefined;
         const task = await createGroupTask({
           title,
           goal,
@@ -1215,6 +1235,8 @@ export function startMetaidRpcServer(
           memberMetabotIds,
           autoSelectWorkers,
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
+          observerRoles: Object.keys(observerRoles).length > 0 ? observerRoles : undefined,
+          activeMemberNames,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));
@@ -1343,12 +1365,11 @@ export function startMetaidRpcServer(
             }
             metabotId = resolved;
           } else {
-            res.writeHead(400);
-            res.end(JSON.stringify({
-              success: false,
-              error: 'metabot_id or metabot_name is required: group messages must be sent with an explicit sender identity (the chair default was removed)',
-            }));
-            return;
+            // C-2: restore the documented chair default. When the caller omits
+            // an explicit sender (SKILL.md documents "default = chair"), speak
+            // as the task chair instead of failing — explicit identity remains
+            // fully supported and takes precedence.
+            metabotId = getGroupTaskChairMetabotId(taskId);
           }
         }
         const mention = Array.isArray(parsed.mention)
@@ -1358,8 +1379,10 @@ export function startMetaidRpcServer(
           replyPin: typeof parsed.reply_pin === 'string' && parsed.reply_pin.trim() ? parsed.reply_pin.trim() : undefined,
           mention,
         });
+        // P0-1: warn-and-deliver — validation issues are returned to the caller
+        // but never block the chain write.
         res.writeHead(200);
-        res.end(JSON.stringify({ success: true, pinId: result.pinId }));
+        res.end(JSON.stringify({ success: true, pinId: result.pinId, deliverableValidation: result.deliverableValidation }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
@@ -1613,6 +1636,157 @@ export function startMetaidRpcServer(
         const deleted = await deleteGroupTaskDeliverable(taskId, deliverableId);
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, deleted }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_SET_MEMBER_STATUS_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        task_id?: number;
+        metabot_id?: number;
+        globalmetaid?: string;
+        status?: string;
+        actor_metabot_id?: number;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      const status = String(parsed.status ?? '').trim();
+      if (!status) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'status is required' }));
+        return;
+      }
+      const targetMetabotId = Number(parsed.metabot_id);
+      const targetGlobalMetaId = typeof parsed.globalmetaid === 'string' && parsed.globalmetaid.trim()
+        ? parsed.globalmetaid.trim()
+        : undefined;
+      if ((!Number.isInteger(targetMetabotId) || targetMetabotId <= 0) && !targetGlobalMetaId) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'metabot_id or globalmetaid is required' }));
+        return;
+      }
+      const actorMetabotIdRaw = Number(parsed.actor_metabot_id);
+      const actorMetabotId = Number.isInteger(actorMetabotIdRaw) && actorMetabotIdRaw > 0
+        ? actorMetabotIdRaw
+        : (Number.isInteger(targetMetabotId) && targetMetabotId > 0 ? targetMetabotId : null);
+      try {
+        const member = await setGroupTaskMemberStatus(
+          taskId,
+          Number.isInteger(targetMetabotId) && targetMetabotId > 0 ? targetMetabotId : null,
+          status as GroupTaskMemberStatus,
+          { actorMetabotId, targetGlobalMetaId },
+        );
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, member }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_REWORK_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: {
+        task_id?: number;
+        reason?: string;
+        actor_metabot_id?: number;
+        actor_metabot_name?: string;
+      };
+      try {
+        parsed = JSON.parse(body) as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      let actorMetabotId: number | null = null;
+      let actorName: string | null = null;
+      const rawActorId = Number(parsed.actor_metabot_id);
+      if (Number.isInteger(rawActorId) && rawActorId > 0) {
+        actorMetabotId = rawActorId;
+      } else if (typeof parsed.actor_metabot_name === 'string' && parsed.actor_metabot_name.trim()) {
+        actorName = parsed.actor_metabot_name.trim();
+        const resolved = resolveMetabotIdByName(getMetabotStore(), actorName);
+        if (resolved == null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ success: false, error: `MetaBot not found: ${actorName}` }));
+          return;
+        }
+        actorMetabotId = resolved;
+      }
+      try {
+        const task = await reworkGroupTask(taskId, {
+          reason: typeof parsed.reason === 'string' ? parsed.reason : undefined,
+          actorMetabotId,
+          actorName,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, task }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_TASK_EXPORT_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      let parsed: { task_id?: number; message_limit?: number };
+      try {
+        parsed = JSON.parse(body || '{}') as typeof parsed;
+      } catch {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'Invalid JSON body' }));
+        return;
+      }
+      const taskId = Number(parsed.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'task_id is required' }));
+        return;
+      }
+      try {
+        const exported = await exportGroupTask(taskId, {
+          messageLimit: Number.isInteger(Number(parsed.message_limit)) && Number(parsed.message_limit) > 0
+            ? Number(parsed.message_limit)
+            : undefined,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ success: true, task: exported }));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);

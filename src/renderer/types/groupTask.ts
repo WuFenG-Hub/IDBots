@@ -5,6 +5,7 @@
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
@@ -42,6 +43,33 @@ export interface GroupTaskMember {
   /** Set when the member was kicked (M3); active members have null. */
   removedAt?: string | null;
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status?: GroupTaskMemberStatus;
+  /** P0-2: sqlite UTC timestamp of the last status change. */
+  statusChangedAt?: string | null;
+  /** P0-2: epoch seconds of the member's last chain speech (summary/detail). */
+  lastSpeakAt?: number | null;
+}
+
+
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: 'correction' | 'honest_report';
+  detail: string | null;
+  createdAt: string | null;
+}
+
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
 }
 
 export interface GroupTaskDeliverable {
@@ -53,6 +81,8 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (multi-source outcomes). */
+  verification?: string | null;
 }
 
 export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
@@ -86,6 +116,10 @@ export interface GroupTaskDriverInfo {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** P0-5: state-transition audit log. */
+  transitions?: GroupTaskTransition[];
+  /** P0-8: public integrity declarations (honest corrections/reports). */
+  integrityEvents?: GroupTaskIntegrityEvent[];
   /** P1-5: status transition history (newest first). */
   statusEvents?: GroupTaskStatusEvent[];
   /** P2-8: the daemon instance currently driving this task. */

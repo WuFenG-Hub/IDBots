@@ -603,3 +603,195 @@ test('round-4: show view=summary is compact (5 messages, members with lastSpeakA
     h.cleanup();
   }
 });
+
+test('C-2: getGroupTaskChairMetabotId resolves the task chair; throws for unknown task', async () => {
+  const harness = await createHarness();
+  const task = await createGroupTask({
+    title: 'C-2 chair resolution',
+    goal: 'verify chair default',
+    memberMetabotIds: [2],
+    createdBy: 'user',
+  });
+  assert.equal(groupTaskService.getGroupTaskChairMetabotId(task.id), 1);
+  assert.throws(() => groupTaskService.getGroupTaskChairMetabotId(9999), /not found/);
+});
+
+test('P0-1: postGroupTaskMessage returns field-level deliverable validation without blocking', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-1 validation', goal: 'verify warn-and-deliver', memberMetabotIds: [2], createdBy: 'user',
+    });
+    h.calls.send.length = 0;
+    const result = await postGroupTaskMessage(
+      detail.id,
+      2,
+      '**[DELIVERABLE] buzz: metaapp://5345dcdcd40ca628113de5ed18087df16667021d5246437d4f927e4c17c72525i0**',
+    );
+    // chain write succeeded (warn-and-deliver)
+    assert.equal(result.pinId, 'msg-pin-1');
+    assert.ok(result.deliverableValidation);
+    assert.equal(result.deliverableValidation.errors.length, 0);
+    assert.ok(result.deliverableValidation.warnings.length >= 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-2: setGroupTaskMemberStatus — self-set, chair-set, unauthorized rejected, invalid status rejected', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-2 status', goal: 'member state machine', memberMetabotIds: [2], createdBy: 'user',
+    });
+    const members = detail.members;
+    const worker = members.find((m) => m.metabotId === 2);
+    assert.equal(worker.status, 'assigned');
+
+    // self-set
+    const selfSet = await groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'working');
+    assert.equal(selfSet.status, 'working');
+
+    // chair-set (actor 1 = twin)
+    const chairSet = await groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'unreachable', { actorMetabotId: 1 });
+    assert.equal(chairSet.status, 'unreachable');
+
+    // unauthorized actor (worker 3 tries to set worker 2)
+    await assert.rejects(
+      groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'working', { actorMetabotId: 3 }),
+      /Only the member itself or the task chair/,
+    );
+
+    // invalid status
+    await assert.rejects(
+      groupTaskService.setGroupTaskMemberStatus(detail.id, 2, 'bogus'),
+      /must be one of/,
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-5: reworkGroupTask moves review→executing with transition log; guards status + actor', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-5 rework', goal: 'rework hatch', memberMetabotIds: [2], createdBy: 'user',
+    });
+    // not in review yet
+    await assert.rejects(
+      groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'early' }),
+      /rework is only available from review/,
+    );
+    // move to executing then review (simulate chair STATUS tags through the store with log)
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'executing', { actor: 'Twin Bot', reason: '[STATUS:EXECUTING] tag' });
+    h.groupTaskStore.updateTaskStatusWithLog(detail.id, 'review', { actor: 'Twin Bot', reason: '[STATUS:REVIEW] tag' });
+
+    // non-chair rejected
+    await assert.rejects(
+      groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 2, reason: 'hijack' }),
+      /Only the task chair/,
+    );
+
+    // chair rework succeeds + logs
+    const updated = await groupTaskService.reworkGroupTask(detail.id, { actorMetabotId: 1, reason: 'owner asked for fixes' });
+    assert.equal(updated.status, 'executing');
+    const transitions = h.groupTaskStore.listTaskTransitions(detail.id);
+    const rework = transitions.find((t) => t.fromStatus === 'review' && t.toStatus === 'executing');
+    assert.ok(rework, 'review→executing transition logged');
+    assert.equal(rework.reason, 'owner asked for fixes');
+
+    // show carries the transition log
+    const shown = await getGroupTask(detail.id, { view: 'summary' });
+    assert.ok(shown.transitions.length >= 2);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-6: kickoff includes observer expectations when activeMemberNames is smaller than the roster', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-6 observers',
+      goal: 'observer role notes',
+      memberMetabotIds: [2, 3],
+      activeMemberNames: ['Coder Bot'],
+      observerRoles: { 'Designer Bot': '静默观察，待命接手' },
+      createdBy: 'user',
+    });
+    const kickoff = h.calls.send.find((call) => call.opts?.content?.includes('[GROUP TASK]'))?.opts?.content ?? '';
+    assert.match(kickoff, /未派活成员预期/);
+    assert.match(kickoff, /Designer Bot：静默观察，待命接手/);
+    assert.doesNotMatch(kickoff, /Coder Bot：静默观察/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-6: no observer fields → kickoff unchanged (no regression)', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-6 plain', goal: 'no observers', memberMetabotIds: [2, 3], createdBy: 'user',
+    });
+    const kickoff = h.calls.send.find((call) => call.opts?.content?.includes('[GROUP TASK]'))?.opts?.content ?? '';
+    assert.doesNotMatch(kickoff, /未派活成员预期/);
+    assert.match(kickoff, /Members: Coder Bot, Designer Bot/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-7: exportGroupTask returns full message bodies + daily summaries', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-7 export', goal: 'archive', memberMetabotIds: [2], createdBy: 'user',
+    });
+    h.db.run(
+      `INSERT INTO group_chat_messages (
+        pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
+        sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
+        reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
+      ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, NULL, '[]', ?, 'mvc', '{}', 0, NULL)`,
+      ['pin-exp-1', 'tx-exp-1', detail.groupId, 'metaid-2', 'gmid-w2', 'Coder Bot', 'deliverable body here', 1700000000],
+    );
+    const exported = await groupTaskService.exportGroupTask(detail.id);
+    assert.equal(exported.fullMessages.length, 1);
+    assert.equal(exported.fullMessages[0].content, 'deliverable body here');
+    assert.ok(exported.dailySummaries.length >= 1);
+    assert.equal(exported.dailySummaries[0].count, 1);
+    assert.ok(exported.exportedAt);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-8: recordGroupTaskIntegrityEvent persists + show returns integrityEvents', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({
+      title: 'P0-8 integrity', goal: 'record honesty', memberMetabotIds: [2], createdBy: 'user',
+    });
+    const event = await groupTaskService.recordGroupTaskIntegrityEvent(detail.id, {
+      msgPinId: 'pin-honest-1',
+      authorGlobalmetaid: 'gmid-coder',
+      eventType: 'correction',
+      detail: '更正：此前交付的 pinid 无效，正确如下',
+    });
+    assert.equal(event.eventType, 'correction');
+    // dedupe by pin
+    const dup = await groupTaskService.recordGroupTaskIntegrityEvent(detail.id, {
+      msgPinId: 'pin-honest-1',
+      authorGlobalmetaid: 'gmid-coder',
+      eventType: 'correction',
+      detail: 'duplicate',
+    });
+    assert.equal(dup.id, event.id);
+    const shown = await getGroupTask(detail.id, { view: 'summary' });
+    assert.equal(shown.integrityEvents.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});

@@ -8,6 +8,7 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 /**
@@ -89,6 +90,10 @@ export interface GroupTaskMember {
   removedAt: string | null;
   /** Joined from metabots for display / mention matching (falls back to displayName for remote members). */
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status: GroupTaskMemberStatus;
+  /** P0-2: epoch-seconds (sqlite datetime) of the last status change. */
+  statusChangedAt: string | null;
 }
 
 export interface GroupTaskDeliverable {
@@ -100,6 +105,8 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (sources + outcomes) for a deliverable. */
+  verification: string | null;
 }
 
 /** One transcript row for the Group Task chat view (content already decrypted). */
@@ -150,6 +157,37 @@ export interface AddGroupTaskDeliverableInput {
   kind?: string | null;
   uri?: string | null;
 }
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
+}
+
+export interface AddGroupTaskTransitionInput {
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor?: string | null;
+  reason?: string | null;
+}
+export type GroupTaskIntegrityEventType = 'correction' | 'honest_report';
+
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: GroupTaskIntegrityEventType;
+  /** Human-readable detail (the public declaration text, capped). */
+  detail: string | null;
+  createdAt: string | null;
+}
+
+
 
 interface GroupTaskRow {
   id: number;
@@ -184,6 +222,8 @@ interface GroupTaskMemberRow {
   removed_at: string | null;
   metabot_name: string | null;
   metabot_globalmetaid: string | null;
+  status: string;
+  status_changed_at: string | null;
 }
 
 interface GroupTaskDeliverableRow {
@@ -194,6 +234,27 @@ interface GroupTaskDeliverableRow {
   kind: string | null;
   uri: string | null;
   status: string;
+  created_at: string | null;
+  verification: string | null;
+}
+
+interface GroupTaskTransitionRow {
+  id: number;
+  task_id: number;
+  from_status: string | null;
+  to_status: string;
+  actor: string | null;
+  reason: string | null;
+  created_at: string | null;
+}
+
+interface GroupTaskIntegrityEventRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  event_type: string;
+  detail: string | null;
   created_at: string | null;
 }
 
@@ -271,6 +332,11 @@ const LEGAL_TRANSITIONS: Record<GroupTaskStatus, GroupTaskStatus[]> = {
   cancelled: [],
 };
 
+function isGroupTaskMemberStatus(value: string): value is GroupTaskMemberStatus {
+  return value === 'assigned' || value === 'working' || value === 'standby'
+    || value === 'done' || value === 'unreachable';
+}
+
 function isGroupTaskStatus(value: string): value is GroupTaskStatus {
   return value === 'planning' || value === 'executing' || value === 'review'
     || value === 'done' || value === 'cancelled';
@@ -314,6 +380,39 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
     // Local members get the metabots-table name; remote members fall back to
     // the display_name snapshot recorded at invite time.
     name: row.metabot_name ?? row.display_name ?? null,
+    // P0-2: default status — chair starts 'working', workers 'assigned'. Old
+    // rows without a status column default the same way.
+    status: isGroupTaskMemberStatus(row.status)
+      ? row.status
+      : (row.role === 'chair' ? 'working' : 'assigned'),
+    statusChangedAt: row.status_changed_at ?? null,
+  };
+}
+
+function rowToGroupTaskIntegrityEvent(row: GroupTaskIntegrityEventRow): GroupTaskIntegrityEvent {
+  const type = row.event_type === 'honest_report' ? 'honest_report' : 'correction';
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    eventType: type,
+    detail: row.detail ?? null,
+    createdAt: row.created_at ?? null,
+  };
+}
+
+function rowToGroupTaskTransition(row: GroupTaskTransitionRow): GroupTaskTransition {
+  const from = row.from_status;
+  const to = row.to_status;
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    fromStatus: from && isGroupTaskStatus(from) ? from : null,
+    toStatus: isGroupTaskStatus(to) ? to : 'planning',
+    actor: row.actor ?? null,
+    reason: row.reason ?? null,
+    createdAt: row.created_at ?? null,
   };
 }
 
@@ -328,6 +427,7 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     uri: row.uri ?? null,
     status: status === 'accepted' || status === 'rejected' ? status : 'pending',
     createdAt: row.created_at ?? null,
+    verification: row.verification ?? null,
   };
 }
 
@@ -685,8 +785,8 @@ export class GroupTaskStore {
     if (existing) return rowToGroupTaskMember(existing);
 
     this.db.run(
-      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         input.taskId,
         input.metabotId,
@@ -694,6 +794,7 @@ export class GroupTaskStore {
         input.role,
         input.joinedPinId ?? null,
         input.displayName ?? null,
+        input.role === 'chair' ? 'working' : 'assigned',
       ],
     );
     this.saveDb();
@@ -777,6 +878,149 @@ export class GroupTaskStore {
       [joinedPinId, taskId, metabotId],
     );
     this.saveDb();
+  }
+
+  // --- P0-2: member state machine ---
+
+  /**
+   * Set a member's state-machine status with a change timestamp. Local members
+   * match by metabot_id; remote members (metabotId === null) by globalmetaid.
+   */
+  setMemberStatus(
+    taskId: number,
+    metabotId: number | null,
+    status: GroupTaskMemberStatus,
+    globalmetaid?: string | null,
+  ): GroupTaskMember | undefined {
+    if (metabotId == null) {
+      const gmid = (globalmetaid ?? '').trim();
+      if (!gmid) throw new Error(`setMemberStatus failed for task ${taskId}: remote member requires globalmetaid`);
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL`,
+        [status, taskId, gmid],
+      );
+    } else {
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id = ?`,
+        [status, taskId, metabotId],
+      );
+    }
+    this.saveDb();
+    const updated = this.listMembers(taskId).find((member) =>
+      metabotId == null
+        ? member.globalmetaid?.trim() === (globalmetaid ?? '').trim()
+        : member.metabotId === metabotId,
+    );
+    return updated;
+  }
+
+  /** P0-2: list members whose status is one of the given values. */
+  listMembersWithStatus(taskId: number, statuses: GroupTaskMemberStatus[]): GroupTaskMember[] {
+    const set = new Set(statuses);
+    return this.listMembers(taskId).filter((member) => set.has(member.status));
+  }
+
+  /** P0-5: update a task's status with an optional transition-log entry (actor/reason). */
+  updateTaskStatusWithLog(
+    id: number,
+    nextStatus: GroupTaskStatus,
+    meta?: { actor?: string | null; reason?: string | null },
+  ): GroupTask {
+    const before = this.getTaskById(id);
+    const updated = this.updateTaskStatus(id, nextStatus);
+    if (before && before.status !== updated.status) {
+      this.addTaskTransition({
+        taskId: id,
+        fromStatus: before.status,
+        toStatus: updated.status,
+        actor: meta?.actor ?? null,
+        reason: meta?.reason ?? null,
+      });
+    }
+    return updated;
+  }
+
+  /** P0-5: append a state-transition log row. */
+  addTaskTransition(input: AddGroupTaskTransitionInput): GroupTaskTransition {
+    this.db.run(
+      `INSERT INTO group_task_transitions (task_id, from_status, to_status, actor, reason)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.fromStatus ?? null,
+        input.toStatus,
+        input.actor ?? null,
+        input.reason ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addTaskTransition failed: row ${id} not found after insert`);
+    return rowToGroupTaskTransition(row);
+  }
+
+  /** P0-5: full transition history for one task, oldest first. */
+  listTaskTransitions(taskId: number): GroupTaskTransition[] {
+    const rows = this.getAll<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskTransition);
+  }
+
+  /** P0-8: record a public integrity declaration (honest correction/report). */
+  addIntegrityEvent(input: {
+    taskId: number;
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    eventType: GroupTaskIntegrityEventType;
+    detail?: string | null;
+  }): GroupTaskIntegrityEvent {
+    this.db.run(
+      `INSERT INTO group_task_integrity_events (task_id, msg_pin_id, author_globalmetaid, event_type, detail)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.msgPinId ?? null,
+        input.authorGlobalmetaid ?? null,
+        input.eventType,
+        input.detail ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addIntegrityEvent failed: row ${id} not found after insert`);
+    return rowToGroupTaskIntegrityEvent(row);
+  }
+
+  /** P0-8: all integrity events for one task, oldest first. */
+  listIntegrityEvents(taskId: number): GroupTaskIntegrityEvent[] {
+    const rows = this.getAll<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskIntegrityEvent);
+  }
+
+  /** P0-8: dedupe check — an event already recorded for this message pin. */
+  hasIntegrityEventWithMsgPin(taskId: number, msgPinId: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      'SELECT 1 AS found FROM group_task_integrity_events WHERE task_id = ? AND msg_pin_id = ? LIMIT 1',
+      [taskId, msgPinId],
+    );
+    return Boolean(row);
   }
 
   // --- group_task_deliverables ---
@@ -919,6 +1163,15 @@ export class GroupTaskStore {
 
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
+    this.saveDb();
+  }
+
+  /** P0-4: persist the multi-source verification report for a deliverable. */
+  updateDeliverableVerification(id: number, verification: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET verification = ? WHERE id = ?',
+      [verification, id],
+    );
     this.saveDb();
   }
 

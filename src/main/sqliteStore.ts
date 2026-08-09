@@ -777,6 +777,22 @@ export class SqliteStore {
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
+    // P0-5: state-transition audit log (who/from/to/reason + timestamp).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_transitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        actor TEXT,
+        reason TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_transitions_task
+        ON group_task_transitions(task_id, id);
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -803,6 +819,25 @@ export class SqliteStore {
     `);
     // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
     this.migrateGroupTaskMembersOpenTeamColumns();
+    this.migrateGroupTaskMembersStatusColumns();
+    this.migrateGroupTaskDeliverablesVerification();
+    // P0-8: public integrity declarations (honest corrections/reports).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_integrity_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        event_type TEXT NOT NULL DEFAULT 'correction'
+          CHECK(event_type IN ('correction','honest_report')),
+        detail TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_integrity_events_task
+        ON group_task_integrity_events(task_id, id);
+    `);
 
     // Group Task status transition history (who moved the task from/to which
     // status and when) — the source for the detail-view status timeline.
@@ -1947,6 +1982,51 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-2): member state-machine status columns. status defaults to
+   * 'assigned' at the SQL level; rowToGroupTaskMember upgrades chair rows to
+   * 'working' for legacy rows without a status. Idempotent PRAGMA-guarded.
+   */
+  private migrateGroupTaskMembersStatusColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_members)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('status')) {
+        this.db.run(
+          "ALTER TABLE group_task_members ADD COLUMN status TEXT NOT NULL DEFAULT 'assigned'",
+        );
+        changed = true;
+      }
+      if (!columns.includes('status_changed_at')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN status_changed_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskMembersStatusColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-4): deliverable verification report column (JSON text).
+   * Idempotent PRAGMA-guarded; existing rows stay NULL (unverified).
+   */
+  private migrateGroupTaskDeliverablesVerification(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_deliverables)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('verification')) {
+        this.db.run('ALTER TABLE group_task_deliverables ADD COLUMN verification TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesVerification:', error);
     }
   }
 

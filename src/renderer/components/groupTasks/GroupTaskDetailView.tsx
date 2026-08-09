@@ -11,7 +11,11 @@ import GroupTaskRatingStars from './GroupTaskRatingStars';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
+  deliverableVerificationBadgeClass,
+  deliverableVerificationState,
   formatGroupTaskTime,
+  groupTaskMemberStatusBadgeClass,
+  groupTaskMemberStatusLabel,
   groupTaskStatusBadgeClass,
   groupTaskWorkStatusLabelKey,
   isActiveGroupTaskStatus,
@@ -174,6 +178,22 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
+  const [reworking, setReworking] = useState(false);
+  const [reworkError, setReworkError] = useState<string | null>(null);
+  const handleRework = async () => {
+    if (!detail || reworking) return;
+    setReworking(true);
+    setReworkError(null);
+    try {
+      const updated = await groupTaskService.reworkTask({ taskId, reason: 'Owner/chair requested supplementary work' });
+      setDetail(updated);
+    } catch (err) {
+      setReworkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setReworking(false);
+    }
+  };
+
   const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
     setClosing(true);
@@ -308,6 +328,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   {i18nService.t('groupTasksAcceptClose')}
                 </button>
               )}
+              {canAcceptGroupTask(detail.status) && (
+                <button
+                  type="button"
+                  onClick={() => void handleRework()}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors"
+                  title="Move the task back to executing for supplementary work"
+                >
+                  {i18nService.t('groupTasksRework')}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}
@@ -319,6 +349,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           )}
           <WindowTitleBar inline />
         </div>
+        {reworkError && (
+          <div className="px-4 py-1 text-xs text-red-500">{reworkError}</div>
+        )}
       </div>
 
       {/* Body: transcript column + right rail */}
@@ -465,6 +498,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             </h3>
             <div className="space-y-1.5">
               {detail.members.map((member) => (
+                <>
                 <div key={member.id} className="flex items-center gap-2">
                   <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
                     {member.name ?? (member.metabotId != null
@@ -496,7 +530,23 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       {i18nService.t(groupTaskWorkStatusLabelKey(member.workStatus))}
                     </span>
                   )}
+                  {member.status && (
+                    <span
+                      className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${groupTaskMemberStatusBadgeClass(member.status)}`}
+                      title={member.statusChangedAt
+                        ? `Status changed ${formatGroupTaskTime(member.statusChangedAt)}`
+                        : groupTaskMemberStatusLabel(member.status)}
+                    >
+                      {groupTaskMemberStatusLabel(member.status)}
+                    </span>
+                  )}
                 </div>
+                {member.lastSpeakAt != null && (
+                  <div className="text-[10px] leading-tight dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 pl-0.5">
+                    last spoke {formatGroupTaskTime(member.lastSpeakAt)}
+                  </div>
+                )}
+                </>
               ))}
             </div>
           </div>
@@ -525,6 +575,54 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               )}
             </details>
           </div>
+
+          <div className="px-4 py-3 border-t dark:border-claude-darkBorder/50 border-claude-border/50">
+            <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
+              Transitions
+            </h3>
+            {(detail.transitions ?? []).length === 0 ? (
+              <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                No transitions yet
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {(detail.transitions ?? []).map((transition) => (
+                  <div key={transition.id} className="text-[11px] leading-tight dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
+                    <span className="font-medium dark:text-claude-darkText text-claude-text">
+                      {(transition.fromStatus ?? '—')} → {transition.toStatus}
+                    </span>
+                    {transition.reason ? ` — ${transition.reason}` : ''}
+                    <div className="text-[10px] opacity-70">
+                      {transition.actor ?? 'system'} · {formatGroupTaskTime(transition.createdAt)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="px-4 py-3 border-t dark:border-claude-darkBorder/50 border-claude-border/50">
+            <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
+              Integrity events
+            </h3>
+            {(detail.integrityEvents ?? []).length === 0 ? (
+              <p className="text-xs dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                No integrity events yet
+              </p>
+            ) : (
+              <div className="space-y-1.5">
+                {(detail.integrityEvents ?? []).map((event) => (
+                  <div key={event.id} className="text-[11px] leading-tight dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
+                    <span className={`font-medium ${event.eventType === 'correction' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                      {event.eventType === 'correction' ? 'correction' : 'honest report'}
+                    </span>
+                    <div className="text-[10px] opacity-80 line-clamp-2">{event.detail ?? ''}</div>
+                    <div className="text-[10px] opacity-70">{formatGroupTaskTime(event.createdAt)}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <div className="px-4 py-3">
             <h3 className="text-xs font-semibold uppercase tracking-wide dark:text-claude-darkTextSecondary text-claude-textSecondary mb-2">
               {i18nService.t('groupTasksDeliverables')}
@@ -549,6 +647,18 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       <span className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                         {deliverable.status}
                       </span>
+                      {(() => {
+                        const state = deliverableVerificationState(deliverable.verification);
+                        if (state === 'unknown') return null;
+                        return (
+                          <span
+                            className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${deliverableVerificationBadgeClass(state)}`}
+                            title={deliverable.verification ?? ''}
+                          >
+                            {state === 'verified' ? 'on-chain ✓' : state === 'pending-sync' ? 'pending sync' : 'unverified'}
+                          </span>
+                        );
+                      })()}
                     </div>
                     {deliverable.uri && (
                       /^https?:\/\//i.test(deliverable.uri) ? (

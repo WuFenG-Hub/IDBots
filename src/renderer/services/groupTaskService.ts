@@ -115,6 +115,20 @@ class GroupTaskService {
     return result.task as GroupTaskDetail;
   }
 
+  /** P0-5: move a REVIEW task back to EXECUTING (rework hatch). */
+  async reworkTask(input: { taskId: number; reason?: string }): Promise<GroupTaskDetail> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.rework(input);
+    if (!result.success || !result.task) {
+      throw new Error(result.error ?? 'Failed to rework group task');
+    }
+    const task = result.task as GroupTaskDetail;
+    store.dispatch(upsertTask(this.toSummary(task)));
+    return task;
+  }
+
   async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }): Promise<GroupTaskDetail> {
     const api = window.electron?.groupTask;
     if (!api) throw new Error('Group task API unavailable');

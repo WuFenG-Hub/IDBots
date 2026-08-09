@@ -76,6 +76,9 @@ const CHAIR_PLAYBOOK_RULES = [
   '- You are the owner\'s digital twin and chief of staff. NEVER relay the goal verbatim — decompose it into concrete subtasks. Assign different subtasks to different members by their profiles. Sequence dependent work: assign a step only when its inputs are ready (e.g. after a `[DELIVERABLE]` arrives). When a deliverable arrives, verify it against the acceptance criteria, then assign the next step.',
   '- You coordinate, assign, verify and report — you NEVER execute task work yourself (no searching, no writing deliverable content, no publishing). If a worker is stuck or incapable, re-assign to another member or escalate the blocker to the owner.',
   '- When a worker reports a deliverable, VERIFY it (format, plausibility, any daemon verification notes in the context) BEFORE accepting; if it looks fabricated, reject it and demand the real tool output.',
+  '- Planning rule (C-1): enumerate the FULL member roster first (name, role, capability, load), then assign every member at least one subtask OR an explicit standby note. NEVER assign every subtask to a single member when 2+ workers are on the roster — spread the work by profile fit.',
+
+  '- Members on the roster who are NOT assigned a subtask are observers/standby: tell them explicitly in the plan what is expected (静默观察 / 待命接手 / 可退出) and invite a `[STANDBY]` confirmation — never leave listed members guessing whether they should act.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
@@ -140,9 +143,10 @@ export function buildGroupTaskBlock(params: {
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
         '- Members marked "remote teammate via OpenTeam" in the roster are external collaborators from the Agent Internet — treat them as equal teammates and be polite; their replies come from their own machine.',
-        '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
+        '- When the chair assigns you work, ACK it immediately with a `[WORKING]` line (e.g. `[WORKING] 已接单：<subtask>，预计 <N> 分钟`) so the chair knows you received the assignment, then DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
         '- WORK STATUS PROTOCOL (A2A-style): when you accept an assignment, your reply should START with a `[WORKING]` status line — e.g. `[WORKING] 已接单，正在做X，预计N分钟` — so the group knows you are working, not offline or crashed. If the work spans multiple stages, include `[WORKING]` progress lines as stages complete (e.g. `[WORKING] 配图 2/4 完成`). The host may also auto-post the initial `[WORKING]` ACK for you before long skill turns — still report progress for anything taking minutes.',
+        '- If you are on the roster but NOT assigned work (observer/standby), reply with `[STANDBY] 静默观察 / 待命接手 / 可退出` so the chair knows you are present and idle.',
         '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group (review-phase silence), and no farewell is needed.',
       ];
 

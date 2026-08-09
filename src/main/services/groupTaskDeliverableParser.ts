@@ -35,6 +35,12 @@ export interface ParsedDeliverable {
   valid: boolean;
   /** Human-readable reason when invalid (test/debug aid). */
   note: string | null;
+  /**
+   * P0-1: non-blocking field-level hints (e.g. a buzz pinid wrapped in
+   * `metaapp://` should be delivered as a buzz link). Warnings never
+   * invalidate a candidate — the chair decides.
+   */
+  warnings?: string[];
 }
 
 /** Non-global (no lastIndex state) for test(); split uses the global variant. */
@@ -80,8 +86,23 @@ function invalid(kind: DeliverableKind, note: string): ParsedDeliverable {
   return { kind, uri: null, valid: false, note };
 }
 
-function valid(kind: DeliverableKind, uri: string): ParsedDeliverable {
-  return { kind, uri, valid: true, note: null };
+function valid(kind: DeliverableKind, uri: string, warnings: string[] = []): ParsedDeliverable {
+  // warnings are omitted when empty so the candidate shape stays stable for
+  // existing consumers (deepEqual tests, JSON payloads).
+  return warnings.length > 0
+    ? { kind, uri, valid: true, note: null, warnings }
+    : { kind, uri, valid: true, note: null };
+}
+
+/** P0-1: a buzz pinid wrapped in metaapp:// (loop AI #4 lesson) — advise a buzz link. */
+function buzzWrappingWarnings(text: string, kind: DeliverableKind): string[] {
+  if (!/buzz/i.test(text)) return [];
+  if (kind === 'metaapp' || kind === 'pinid') {
+    return [
+      'buzz deliverable should be shared as a buzz link (e.g. https://openagentinternet.org/browser/buzz/<pinid>), not wrapped in metaapp://',
+    ];
+  }
+  return [];
 }
 
 /**
@@ -110,7 +131,7 @@ function parseSegment(segment: string): ParsedDeliverable {
     const normalizedPayload = pinidToken === pinidToken.toLowerCase()
       ? payload
       : payload.replace(pinidToken, pinidToken.toLowerCase());
-    return valid(kind, `${kind}://${normalizedPayload}`);
+    return valid(kind, `${kind}://${normalizedPayload}`, buzzWrappingWarnings(text, kind));
   }
 
   const httpMatch = HTTP_URI_RE.exec(text);
@@ -125,7 +146,7 @@ function parseSegment(segment: string): ParsedDeliverable {
 
   const pinidMatch = BARE_PINID_RE.exec(text);
   if (pinidMatch) {
-    return valid('pinid', pinidMatch[0].toLowerCase());
+    return valid('pinid', pinidMatch[0].toLowerCase(), buzzWrappingWarnings(text, 'pinid'));
   }
 
   // uri-shaped but malformed → placeholder/truncated/example, never text.
@@ -161,4 +182,101 @@ export function parseDeliverableLines(content: string): ParsedDeliverable[] {
 /** Text deliverables (valid, uri null) only — helper for callers that skip them. */
 export function isTextDeliverable(candidate: ParsedDeliverable): boolean {
   return candidate.valid && candidate.kind === 'text' && candidate.uri === null;
+}
+
+// ---------------------------------------------------------------------------
+// P0-1: structured field-level validation for the send path / UI (non-blocking)
+// ---------------------------------------------------------------------------
+
+export interface DeliverableIssue {
+  /** Which field carries the problem: pinid / url / kind / text. */
+  field: 'pinid' | 'url' | 'kind' | 'text';
+  /** Index of the [DELIVERABLE] candidate this issue belongs to. */
+  index: number;
+  message: string;
+}
+
+export interface DeliverableValidation {
+  candidates: ParsedDeliverable[];
+  /** Format failures (invalid candidates) — warn, do NOT block. */
+  errors: DeliverableIssue[];
+  /** Non-blocking hints (e.g. buzz pinid wrapped in metaapp://). */
+  warnings: DeliverableIssue[];
+}
+
+function issueField(kind: DeliverableKind): DeliverableIssue['field'] {
+  if (kind === 'url') return 'url';
+  if (kind === 'metaapp' || kind === 'metafile' || kind === 'pinid') return 'pinid';
+  return 'text';
+}
+
+/**
+ * Validate every [DELIVERABLE] tag occurrence in a message. Returns field-level
+ * errors (invalid candidates, each with the human-readable reason) and
+ * non-blocking warnings. Callers may surface these to the sender but MUST NOT
+ * block the chain write (warn-and-deliver; the chair decides).
+ */
+export function validateDeliverableLines(content: string): DeliverableValidation {
+  const candidates = parseDeliverableLines(content);
+  const errors: DeliverableIssue[] = [];
+  const warnings: DeliverableIssue[] = [];
+  candidates.forEach((candidate, index) => {
+    if (!candidate.valid) {
+      errors.push({
+        field: issueField(candidate.kind),
+        index,
+        message: candidate.note ?? 'invalid deliverable format',
+      });
+      return;
+    }
+    for (const warning of candidate.warnings ?? []) {
+      warnings.push({ field: issueField(candidate.kind), index, message: warning });
+    }
+  });
+  return { candidates, errors, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] / [STANDBY] protocol markers
+// ---------------------------------------------------------------------------
+
+export interface ParsedWorkingAck {
+  acknowledged: boolean;
+  /** Text after the [WORKING] tag (subtask label), trimmed/capped. */
+  taskDescription: string | null;
+  /** Estimated minutes parsed from e.g. "预计 15 分钟" / "15 min". */
+  estimatedMinutes: number | null;
+}
+
+/**
+ * Parse a [WORKING] ACK line: `[WORKING] 已接单：<subtask>，预计 <N> 分钟`.
+ * Returns null when the message carries no [WORKING] tag.
+ */
+export function parseWorkingAck(content: string): ParsedWorkingAck | null {
+  const text = String(content ?? '');
+  const match = /\[WORKING\]/i.exec(text);
+  if (!match) return null;
+  const rest = text.slice(match.index + match[0].length);
+  const minutesMatch = /\b(\d{1,3})\s*(?:分钟|min(?:ute)?s?)/i.exec(rest);
+  const description = rest.replace(/^[：:\s-]+/, '').trim().slice(0, 120);
+  return {
+    acknowledged: true,
+    taskDescription: description || null,
+    estimatedMinutes: minutesMatch ? Number(minutesMatch[1]) : null,
+  };
+}
+
+/** True when the message carries the [STANDBY] protocol marker. */
+export function hasStandbyMarker(content: string): boolean {
+  return /\[STANDBY\]/i.test(String(content ?? ''));
+}
+
+// ---------------------------------------------------------------------------
+// P0-8: integrity declarations (honest self-correction)
+// ---------------------------------------------------------------------------
+
+/** True when the message publicly declares a correction or honest report. */
+export function isIntegrityDeclaration(content: string): boolean {
+  const text = String(content ?? '');
+  return /更正|修正|诚实|如实|纠正|以…?为准|以此为准|补正|勘误/.test(text);
 }

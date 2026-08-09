@@ -104,3 +104,28 @@ test('shouldStickToBottom: threshold semantics', () => {
   assert.equal(shouldStickToBottom(720, 200, 1000), true, 'within the 80px threshold');
   assert.equal(shouldStickToBottom(100, 200, 1000), false, 'scrolled up');
 });
+
+test('P0-2: member status badge class + label cover all states', async () => {
+  const { groupTaskMemberStatusBadgeClass, groupTaskMemberStatusLabel } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  for (const status of ['assigned', 'working', 'standby', 'done', 'unreachable']) {
+    assert.equal(typeof groupTaskMemberStatusBadgeClass(status), 'string');
+    assert.equal(groupTaskMemberStatusLabel(status), status);
+  }
+  assert.equal(typeof groupTaskMemberStatusBadgeClass('unknown'), 'string');
+});
+
+test('P0-4: deliverableVerificationState maps stored reports', async () => {
+  const { deliverableVerificationState, deliverableVerificationBadgeClass } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(deliverableVerificationState(null), 'unknown');
+  assert.equal(deliverableVerificationState('garbage'), 'unknown');
+  assert.equal(deliverableVerificationState(JSON.stringify({ verified: true, sources: [{ outcome: 'found' }] })), 'verified');
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }, { outcome: 'found' }] })),
+    'pending-sync',
+  );
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }] })),
+    'unverified',
+  );
+  assert.equal(typeof deliverableVerificationBadgeClass('verified'), 'string');
+});

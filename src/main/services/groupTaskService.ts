@@ -13,6 +13,9 @@ import {
   GroupTaskStore,
   type GroupTask,
   type GroupTaskMember,
+  type GroupTaskMemberStatus,
+  type GroupTaskTransition,
+  type GroupTaskIntegrityEvent,
   type GroupTaskDeliverable,
   type GroupTaskStatus,
   type GroupTaskStatusEvent,
@@ -27,6 +30,10 @@ import {
   sendGroupChatMessageAsIdentity,
   waitForGroupIndexed,
 } from './groupChatTransport';
+import {
+  validateDeliverableLines,
+  type DeliverableValidation,
+} from './groupTaskDeliverableParser';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import {
   ensureGroupTaskMemberReady,
@@ -43,6 +50,19 @@ export interface CreateGroupTaskOptions {
   acceptanceCriteria?: string;
   /** Worker metabot ids; chair (the current twin) is added automatically. */
   memberMetabotIds?: number[];
+  /**
+   * P0-6: per-member observer expectation (name → e.g. "静默观察 / 待命接手 / 可退出").
+   * Injected into the kickoff message so listed-but-unassigned members know
+   * their expected role instead of "在列猜谜".
+   */
+  observerRoles?: Record<string, string>;
+  /**
+   * P0-6: names of members who already have assigned work at kickoff. When
+   * provided and smaller than the roster, the remaining members get an
+   * auto-generated observer note (default standby text).
+   */
+  activeMemberNames?: string[];
+
   /** When true, make the entire small local Worker roster available to the Twin chair;
    * the chair's LLM selects the specialist and only its assignment is mentioned. */
   autoSelectWorkers?: boolean;
@@ -52,6 +72,10 @@ export interface CreateGroupTaskOptions {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** P0-5: state-transition audit log (who/from/to/reason). */
+  transitions: GroupTaskTransition[];
+  /** P0-8: public integrity declarations (honest corrections/reports). */
+  integrityEvents: GroupTaskIntegrityEvent[];
   /** Latest group transcript page (P2-6: chair can read the message flow). */
   messages: GroupChatTranscriptMessage[];
   /**
@@ -284,6 +308,8 @@ function buildKickoffMessage(input: {
   acceptanceCriteria?: string;
   chairName: string;
   memberNames: string[];
+  observerRoles?: Record<string, string>;
+  activeMemberNames?: string[];
 }): string {
   const lines = [
     `[GROUP TASK] ${input.title}`,
@@ -294,8 +320,27 @@ function buildKickoffMessage(input: {
       ? `Members: ${input.memberNames.join(', ')}`
       : 'Members: (chair only)',
   ];
+  // P0-6: observer expectations for listed-but-unassigned members. Only active
+  // when the caller supplied assignment info (activeMemberNames) or explicit
+  // observerRoles — otherwise the kickoff stays unchanged (no regression).
+  const hasActiveList = Array.isArray(input.activeMemberNames) && input.activeMemberNames.length > 0;
+  const hasObserverRoles = Boolean(input.observerRoles && Object.keys(input.observerRoles).length > 0);
+  if (hasActiveList || hasObserverRoles) {
+    const assigned = new Set((input.activeMemberNames ?? []).map((name) => name.trim()).filter(Boolean));
+    const observerLines: string[] = [];
+    for (const name of input.memberNames) {
+      if (assigned.has(name)) continue;
+      if (!hasActiveList && !input.observerRoles?.[name]) continue;
+      const expectation = input.observerRoles?.[name]?.trim() || '静默观察 / 待命接手 / 可退出';
+      observerLines.push(`- ${name}：${expectation}`);
+    }
+    if (observerLines.length > 0) {
+      lines.push('', '未派活成员预期（observer/standby）：', ...observerLines);
+    }
+  }
   return lines.join('\n');
 }
+
 
 /**
  * Create a group task end to end: resolve twin (chair) -> create the on-chain
@@ -430,6 +475,8 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
         acceptanceCriteria: opts.acceptanceCriteria,
         chairName,
         memberNames,
+        observerRoles: opts.observerRoles,
+        activeMemberNames: opts.activeMemberNames,
       }),
       nickName: chairName,
     });
@@ -545,7 +592,9 @@ export async function getGroupTask(
   // endpoint explicitly requests view='summary' by default.
   const view = opts?.view ?? 'full';
   const members = store.listMembers(id);
-  const speakMap = view === 'summary' && task.groupId
+  // P0-2: lastSpeakAt is computed for BOTH views — the detail/UI member list
+  // shows the member state badge plus when each member last spoke.
+  const speakMap = task.groupId
     ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
   const workingMap = view === 'summary' && task.groupId
@@ -577,6 +626,8 @@ export async function getGroupTask(
     ...task,
     members: membersWithStatus,
     deliverables: store.listDeliverables(id),
+    transitions: store.listTaskTransitions(id),
+    integrityEvents: store.listIntegrityEvents(id),
     messages: task.groupId
       ? store.listGroupChatMessages(task.groupId, { limit: view === 'full' ? 50 : 5 })
       : [],
@@ -593,12 +644,22 @@ export async function getGroupTask(
  * Post a message to the task group as one of its member bots.
  * Validates membership and that the task is not terminal.
  */
+/**
+ * Resolve the chair MetaBot id for a task (C-2: RPC `send` defaults to the
+ * chair identity when the caller omits an explicit sender). Throws when the
+ * task does not exist.
+ */
+export function getGroupTaskChairMetabotId(taskId: number): number {
+  const task = requireTask(taskId);
+  return task.chairMetabotId;
+}
+
 export async function postGroupTaskMessage(
   taskId: number,
   metabotId: number,
   content: string,
   opts?: PostGroupTaskMessageOptions,
-): Promise<{ pinId: string }> {
+): Promise<{ pinId: string; deliverableValidation: DeliverableValidation }> {
   const task = requireRunnableTask(taskId);
   const store = getGroupTaskStore();
   if (!store.isMember(taskId, metabotId)) {
@@ -608,13 +669,17 @@ export async function postGroupTaskMessage(
   if (!text) throw new Error('content is required');
   const metabot = getMetabotStore().getMetabotById(metabotId);
   const nickName = metabot?.name?.trim() || `bot-${metabotId}`;
-  return sendGroupChatMessageFn(metabotId, task.groupId!, {
+  // P0-1: field-level [DELIVERABLE] validation — surfaced to the caller but
+  // never blocks the chain write (warn-and-deliver; the chair decides).
+  const deliverableValidation = validateDeliverableLines(text);
+  const sent = await sendGroupChatMessageFn(metabotId, task.groupId!, {
     content: text,
     nickName,
     contentType: opts?.contentType,
     replyPin: opts?.replyPin,
     mention: opts?.mention,
   });
+  return { ...sent, deliverableValidation };
 }
 
 /**
@@ -626,16 +691,18 @@ export async function postGroupTaskMessageAsOwner(
   taskId: number,
   content: string,
   opts?: { replyPin?: string; mention?: string[] },
-): Promise<{ pinId: string }> {
+): Promise<{ pinId: string; deliverableValidation: DeliverableValidation }> {
   const task = requireRunnableTask(taskId);
   const text = content?.trim();
   if (!text) throw new Error('content is required');
   await ensureOwnerJoinedGroup(task.groupId!);
-  return sendGroupChatMessageAsIdentityFn(task.groupId!, {
+  const deliverableValidation = validateDeliverableLines(text);
+  const sent = await sendGroupChatMessageAsIdentityFn(task.groupId!, {
     content: text,
     replyPin: opts?.replyPin,
     mention: opts?.mention,
   });
+  return { ...sent, deliverableValidation };
 }
 
 /** Add a local bot to an existing task: on-chain join first, then the member row. */
@@ -693,6 +760,166 @@ export async function deleteGroupTaskDeliverable(taskId: number, deliverableId: 
     throw new Error(`Deliverable ${deliverableId} not found in group task ${taskId}`);
   }
   return store.deleteDeliverable(deliverableId);
+}
+
+export const GROUP_TASK_MEMBER_STATUSES: GroupTaskMemberStatus[] = [
+  'assigned',
+  'working',
+  'standby',
+  'done',
+  'unreachable',
+];
+
+/**
+ * P0-2: set a member's state-machine status. A member may set its own status
+ * (assigned/working/standby/done/unreachable); the chair may set any member's
+ * status. Throws for unknown members or unauthorized actors.
+ */
+export async function setGroupTaskMemberStatus(
+  taskId: number,
+  targetMetabotId: number | null,
+  status: GroupTaskMemberStatus,
+  opts?: { actorMetabotId?: number | null; targetGlobalMetaId?: string | null },
+): Promise<GroupTaskMember> {
+  const task = requireTask(taskId);
+  const store = getGroupTaskStore();
+  if (!GROUP_TASK_MEMBER_STATUSES.includes(status)) {
+    throw new Error(`member status must be one of: ${GROUP_TASK_MEMBER_STATUSES.join(', ')}`);
+  }
+  const members = store.listMembers(task.id);
+  const target = targetMetabotId != null
+    ? members.find((member) => member.metabotId === targetMetabotId)
+    : members.find((member) =>
+        (member.globalmetaid ?? '').trim().toLowerCase()
+        === (opts?.targetGlobalMetaId ?? '').trim().toLowerCase(),
+      );
+  if (!target) throw new Error(`Member not found in group task ${task.id}`);
+
+  const actorId = opts?.actorMetabotId ?? targetMetabotId;
+  const chair = members.find((member) => member.role === 'chair');
+  const isSelf = actorId != null && target.metabotId != null && actorId === target.metabotId;
+  const isChair = actorId != null && chair?.metabotId != null && actorId === chair.metabotId;
+  if (!isSelf && !isChair) {
+    throw new Error('Only the member itself or the task chair can set member status');
+  }
+
+  const updated = store.setMemberStatus(task.id, target.metabotId, status, target.globalmetaid);
+  if (!updated) throw new Error(`Member not found in group task ${task.id}`);
+  return updated;
+}
+
+/**
+ * P0-5: rework hatch — move a REVIEW task back to EXECUTING so the chair can
+ * assign supplementary work before acceptance. Only the task chair may call it
+ * (actorMetabotId matches the chair, or is omitted and defaults to the chair).
+ * Every transition is recorded in the transition log (C-建议2).
+ */
+export async function reworkGroupTask(
+  taskId: number,
+  opts: { reason?: string; actorMetabotId?: number | null; actorName?: string | null },
+): Promise<GroupTask> {
+  const task = requireTask(taskId);
+  const store = getGroupTaskStore();
+  if (task.status !== 'review') {
+    throw new Error(`Group task ${taskId} is ${task.status}; rework is only available from review`);
+  }
+  const actorId = opts.actorMetabotId ?? null;
+  if (actorId != null && actorId !== task.chairMetabotId) {
+    throw new Error('Only the task chair can rework a group task');
+  }
+  const actor = opts.actorName?.trim()
+    || (actorId != null ? `metabot:${actorId}` : `metabot:${task.chairMetabotId}`);
+  const updated = store.updateTaskStatusWithLog(taskId, 'executing', {
+    actor,
+    reason: opts.reason?.trim() || null,
+  });
+  if (orchestrationBridgeGetter) {
+    try {
+      orchestrationBridgeGetter().syncStatus(taskId);
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Rework status projection failed for task ${taskId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  return updated;
+}
+
+export interface GroupTaskExport extends GroupTaskDetail {
+  /** Full transcript (up to exportMessageLimit, default 2000), oldest first. */
+  fullMessages: GroupChatTranscriptMessage[];
+  /** P0-7: per-day digest of the message flow (date → count + first/last). */
+  dailySummaries: Array<{ date: string; count: number; firstAt: number | null; lastAt: number | null }>;
+  exportedAt: string;
+}
+
+/**
+ * P0-7: structured archive export — index + full message bodies + daily
+ * summaries. Used for review/acceptance and episode preservation.
+ */
+export async function exportGroupTask(
+  taskId: number,
+  opts?: { messageLimit?: number },
+): Promise<GroupTaskExport> {
+  const store = getGroupTaskStore();
+  const task = requireTask(taskId);
+  const detail = await getGroupTask(taskId, { view: 'full' });
+  const limit = Math.max(1, Math.min(5000, Math.trunc(opts?.messageLimit ?? 2000)));
+  const messages = task.groupId
+    ? store.listGroupChatMessages(task.groupId, { limit })
+    : [];
+
+  const byDay = new Map<string, { count: number; firstAt: number | null; lastAt: number | null }>();
+  for (const message of messages) {
+    if (message.chainTimestamp == null) continue;
+    const date = new Date(message.chainTimestamp * 1000).toISOString().slice(0, 10);
+    const entry = byDay.get(date) ?? { count: 0, firstAt: null, lastAt: null };
+    entry.count += 1;
+    entry.firstAt = entry.firstAt == null ? message.chainTimestamp : Math.min(entry.firstAt, message.chainTimestamp);
+    entry.lastAt = entry.lastAt == null ? message.chainTimestamp : Math.max(entry.lastAt, message.chainTimestamp);
+    byDay.set(date, entry);
+  }
+  const dailySummaries = [...byDay.entries()]
+    .map(([date, entry]) => ({ date, ...entry }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+
+  return {
+    ...detail,
+    fullMessages: messages,
+    dailySummaries,
+    exportedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * P0-8: record a public integrity declaration (honest self-correction /
+ * truthful report) into the acceptance record. Anyone in the task group may
+ * record; dedupe is by message pin when provided.
+ */
+export async function recordGroupTaskIntegrityEvent(
+  taskId: number,
+  input: {
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    eventType?: 'correction' | 'honest_report';
+    detail?: string | null;
+  },
+): Promise<GroupTaskIntegrityEvent> {
+  const store = getGroupTaskStore();
+  requireTask(taskId);
+  const msgPinId = input.msgPinId?.trim() || null;
+  if (msgPinId && store.hasIntegrityEventWithMsgPin(taskId, msgPinId)) {
+    const existing = store.listIntegrityEvents(taskId).find((event) => event.msgPinId === msgPinId);
+    if (existing) return existing;
+  }
+  return store.addIntegrityEvent({
+    taskId,
+    msgPinId,
+    authorGlobalmetaid: input.authorGlobalmetaid?.trim() || null,
+    eventType: input.eventType === 'honest_report' ? 'honest_report' : 'correction',
+    detail: (input.detail ?? '').trim().slice(0, 500) || null,
+  });
 }
 
 /**
