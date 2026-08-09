@@ -430,4 +430,19 @@ export class OpenTeamMembershipStore {
     );
     return Boolean(row);
   }
+
+  /**
+   * Negative-history check (M3 re-invite policy): a declined invite blocks
+   * re-inviting the same invitee unless the caller explicitly allows it.
+   * Expired invites are not negative history (retrying the next candidate is
+   * the normal flow) and stay out of this check.
+   */
+  hasDeclinedInvite(taskId: number, inviteeGlobalmetaid: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      `SELECT 1 AS found FROM openteam_invites
+       WHERE task_id = ? AND invitee_globalmetaid = ? AND status = 'declined' LIMIT 1`,
+      [taskId, inviteeGlobalmetaid],
+    );
+    return Boolean(row);
+  }
 }

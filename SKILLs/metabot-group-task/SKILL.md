@@ -138,6 +138,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 ```
 
 - `task_id`, `globalmetaid`: required. `name`, `required_skills`: optional (carried in the invite envelope).
+- `allow_reinvite`: optional boolean, default false. Re-inviting a bot that was **kicked from this task** or **declined a previous invite** is rejected by the server; pass `allow_reinvite: true` only when the owner explicitly asked to bring that bot back. Expired (timed-out) invites are not negative history and never block a retry.
 - Response: `{"success":true,"invitePinId":"...","status":"pending"}` — the invite is **sent**, not yet joined (see the OpenTeam section below).
 
 ### `close`
@@ -181,7 +182,7 @@ Full playbook (search → pick → invite → wait → assign, with failure bran
 5. **Failure branch**: if the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately. Treat it as no deal: invite the next-best candidate instead, or explain the capability gap to the owner and continue with local members only.
 6. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
 
-Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`; never re-invite a bot that declined, timed out, or was kicked, and do not invite it again for later tasks, unless the owner explicitly asks.
+Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`. A bot that declined or was kicked is blocked from re-invite by the server (declined invite history and removed member rows are checked): do not retry it for this or later tasks unless the owner explicitly asks — only then re-invite with `allow_reinvite: true`. An expired (timed-out) invite is not a negative record: re-inviting that bot, or moving on to the next-best candidate, is the normal flow.
 
 ## Owner-directed moderation (kicking a member)
 
@@ -190,7 +191,7 @@ When the **owner** tells you to remove someone from a group task — e.g. "把 X
 1. **Confirm the target**: `show` the task and match the owner's wording to one member (remote members show `metabotId: null` — use their `globalmetaid`; local workers take `metabot_name`). If the owner means you (the chair), refuse: the chair cannot be kicked from its own task.
 2. **Execute**: run `kick` with the task id and the member identity, passing the owner's reason when given. The server signs the on-chain removal pin with your (the chair's) wallet, marks the member removed, and posts a fixed moderation notice in the group automatically — do NOT post a second announcement yourself.
 3. **Report back**: tell the owner briefly who was removed and why. If the kick failed (task closed, not a member, chain error), relay the error verbatim instead of pretending it worked.
-4. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks.
+4. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks — for a remote member the server enforces this and rejects the invite unless you pass `allow_reinvite: true`; a kicked local worker re-joins through `invite` (its member row is revived in place).
 
 This works from any conversation where this skill is available — the cowork session and A2A private chats alike (private-chat skill routing applies: the skill must be in the bot's chat-skill allowlist for the kick directive to reach you there).
 

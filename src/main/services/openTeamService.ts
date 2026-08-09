@@ -201,6 +201,13 @@ export interface InviteRemoteBotInput {
   inviteeGlobalMetaId: string;
   inviteeName?: string;
   requiredSkills?: string[];
+  /**
+   * Explicit owner-requested override (M3): re-inviting an invitee who was
+   * previously kicked from this task or declined a previous invite is rejected
+   * by default; pass true only when the owner explicitly asked for the
+   * re-invite. Expired invites are not negative history and never block.
+   */
+  allowReinvite?: boolean;
 }
 
 export interface InviteRemoteBotResult {
@@ -217,7 +224,8 @@ function generateOpenTeamInviteId(): string {
 /**
  * Send an [OPENTEAM_INVITE] to a remote online bot and track it as pending.
  * Validation order: runnable task -> valid/non-local invitee -> not a member
- * -> no pending duplicate -> online -> chat pubkey available. Throws with a
+ * -> no pending duplicate -> no blocked re-invite (kicked/declined history,
+ * unless allowReinvite) -> online -> chat pubkey available. Throws with a
  * user-readable message on the first failing check.
  */
 export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<InviteRemoteBotResult> {
@@ -246,6 +254,26 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   }
   if (membershipStore.hasPendingInvite(taskId, invitee)) {
     throw new Error(`a pending invite for ${invitee} already exists on group task ${taskId}`);
+  }
+  if (!input.allowReinvite) {
+    // Re-invite policy (M3): kicked members and declined invitees are not
+    // re-invited unless the owner explicitly asks (allowReinvite). Expired
+    // invites are not negative history and never block.
+    const wasRemoved = store
+      .listMembers(taskId, { includeRemoved: true })
+      .some((m) => m.metabotId == null && m.removedAt && m.globalmetaid === invitee);
+    if (wasRemoved) {
+      throw new Error(
+        `invitee ${invitee} was previously removed from group task ${taskId}; ` +
+        're-invite only when the owner explicitly asks (allowReinvite)',
+      );
+    }
+    if (membershipStore.hasDeclinedInvite(taskId, invitee)) {
+      throw new Error(
+        `invitee ${invitee} previously declined an invite to group task ${taskId}; ` +
+        're-invite only when the owner explicitly asks (allowReinvite)',
+      );
+    }
   }
 
   const presence = await resolved.fetchOnlineStatus([invitee]);

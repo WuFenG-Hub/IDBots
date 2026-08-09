@@ -532,6 +532,12 @@ export class GroupTaskStore {
    * in code on (task_id, globalmetaid) among active rows, because the UNIQUE
    * constraint does not apply to NULL metabot_id. Returns the existing row when
    * the member is already present instead of throwing after a no-op insert.
+   *
+   * Re-join after a kick (M3): a LOCAL member whose row is already marked
+   * removed is revived in place (removed_at/remove_pin_id cleared, the provided
+   * joined_pin_id/display_name refreshed) because the UNIQUE constraint forbids
+   * a second row. A removed REMOTE member instead gets a fresh row, keeping the
+   * removed row as history.
    */
   addMember(input: AddGroupTaskMemberInput): GroupTaskMember {
     const isRemote = input.metabotId == null;
@@ -540,7 +546,7 @@ export class GroupTaskStore {
       throw new Error(`addMember failed for task ${input.taskId}: remote member requires globalmetaid`);
     }
 
-    // Code-level pre-check: an already-present member is returned as-is.
+    // Code-level pre-check: an already-present active member is returned as-is.
     const existing = isRemote
       ? this.getOne<GroupTaskMemberRow>(
           `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
@@ -550,7 +556,26 @@ export class GroupTaskStore {
           `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
           [input.taskId, input.metabotId!],
         );
-    if (existing) return rowToGroupTaskMember(existing);
+    if (existing) {
+      if (!isRemote && existing.removed_at) {
+        // Revive the kicked local member on the same row (UNIQUE forbids a new one).
+        this.db.run(
+          `UPDATE group_task_members
+           SET removed_at = NULL, remove_pin_id = NULL,
+               joined_pin_id = COALESCE(?, joined_pin_id),
+               display_name = COALESCE(?, display_name)
+           WHERE id = ?`,
+          [input.joinedPinId ?? null, input.displayName ?? null, existing.id],
+        );
+        this.saveDb();
+        const revived = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [existing.id]);
+        if (!revived || revived.removed_at) {
+          throw new Error(`addMember failed for task ${input.taskId}: member ${existing.id} not revived`);
+        }
+        return rowToGroupTaskMember(revived);
+      }
+      return rowToGroupTaskMember(existing);
+    }
 
     this.db.run(
       `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name)

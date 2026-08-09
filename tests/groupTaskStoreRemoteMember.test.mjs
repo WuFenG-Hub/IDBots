@@ -254,3 +254,42 @@ test('local member regression: addMember idempotent, isMember, name from metabot
     store.close();
   }
 });
+
+
+test('local member re-join after kick: addMember revives the removed row in place (M3)', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Twin Bot', type: 'twin', globalmetaid: 'gmid-twin' });
+    insertMetabot(db, { id: 2, walletId: 1, name: 'Worker Bot', type: 'worker', globalmetaid: 'gmid-worker' });
+
+    const task = createTask(groupTaskStore);
+    groupTaskStore.addMember({ taskId: task.id, metabotId: 1, role: 'chair', joinedPinId: 'pin-create' });
+    const worker = groupTaskStore.addMember({ taskId: task.id, metabotId: 2, role: 'worker', joinedPinId: 'pin-join-2' });
+
+    // Kick (M3): the row is kept and marked removed.
+    const removed = groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2, removePinId: 'pin-remove-2' });
+    assert.ok(removed.removedAt);
+    assert.equal(removed.removePinId, 'pin-remove-2');
+    assert.ok(!groupTaskStore.isMember(task.id, 2));
+
+    // UNIQUE(task_id, metabot_id) forbids a fresh row: re-adding revives in place.
+    const revived = groupTaskStore.addMember({ taskId: task.id, metabotId: 2, role: 'worker', joinedPinId: 'pin-rejoin-2' });
+    assert.equal(revived.id, worker.id, 'the removed row itself is revived');
+    assert.equal(revived.removedAt, null);
+    assert.equal(revived.removePinId, null);
+    assert.equal(revived.joinedPinId, 'pin-rejoin-2', 'the new join pin replaces the old one');
+    assert.equal(groupTaskStore.listMembers(task.id, { includeRemoved: true }).length, 2, 'no duplicate row');
+    assert.ok(groupTaskStore.isMember(task.id, 2));
+
+    // A revive without a new join pin keeps the previous joined_pin_id.
+    groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2 });
+    const revivedAgain = groupTaskStore.addMember({ taskId: task.id, metabotId: 2, role: 'worker' });
+    assert.equal(revivedAgain.id, worker.id);
+    assert.equal(revivedAgain.removedAt, null);
+    assert.equal(revivedAgain.joinedPinId, 'pin-rejoin-2', 'previous join pin preserved when none provided');
+  } finally {
+    store.close();
+  }
+});

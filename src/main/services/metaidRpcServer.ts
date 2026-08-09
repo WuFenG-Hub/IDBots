@@ -1517,7 +1517,7 @@ export function startMetaidRpcServer(
       for await (const chunk of req) {
         body += chunk;
       }
-      let parsed: { task_id?: number; globalmetaid?: string; name?: string; required_skills?: unknown[] };
+      let parsed: { task_id?: number; globalmetaid?: string; name?: string; required_skills?: unknown[]; allow_reinvite?: unknown };
       try {
         parsed = JSON.parse(body) as typeof parsed;
       } catch {
@@ -1552,6 +1552,7 @@ export function startMetaidRpcServer(
           inviteeGlobalMetaId: globalmetaid,
           inviteeName: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : undefined,
           requiredSkills,
+          allowReinvite: parsed.allow_reinvite === true,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, ...result }));

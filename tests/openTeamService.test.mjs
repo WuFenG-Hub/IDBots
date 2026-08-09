@@ -366,6 +366,96 @@ test('inviteRemoteBot: rejects a duplicate pending invite', async () => {
 });
 
 // ---------------------------------------------------------------------------
+// inviteRemoteBot re-invite policy (M3)
+// ---------------------------------------------------------------------------
+
+test('inviteRemoteBot: re-inviting a kicked remote member is rejected unless allowReinvite', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+    });
+    h.groupTaskStore.markMemberRemoved({
+      taskId: h.task.id,
+      globalmetaid: REMOTE_GMID,
+      removePinId: 'pin-remove-remote',
+    });
+    assert.ok(!h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID), 'kicked member is no longer active');
+
+    await assert.rejects(
+      () => inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID }),
+      /previously removed/,
+    );
+    assert.equal(h.calls.send.length, 0, 'blocked before any invite is sent');
+
+    // The owner explicitly asked for the re-invite: normal flow resumes.
+    const result = await inviteRemoteBot({
+      taskId: h.task.id,
+      inviteeGlobalMetaId: REMOTE_GMID,
+      allowReinvite: true,
+    });
+    assert.equal(result.status, 'pending');
+    assert.equal(h.calls.send.length, 1);
+    const invite = h.membershipStore.getInviteByPinId(result.invitePinId);
+    assert.equal(invite.status, 'pending', 'a fresh invite row tracks the new handshake');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: re-inviting a declined invitee is rejected unless allowReinvite', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    const declined = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      invitePinId: `${'d'.repeat(64)}i0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: declined.invitePinId }, 'declined', 'not interested');
+
+    await assert.rejects(
+      () => inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID }),
+      /previously declined/,
+    );
+    assert.equal(h.calls.send.length, 0);
+
+    const result = await inviteRemoteBot({
+      taskId: h.task.id,
+      inviteeGlobalMetaId: REMOTE_GMID,
+      allowReinvite: true,
+    });
+    assert.equal(result.status, 'pending');
+    assert.equal(h.calls.send.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: an expired invite is not negative history and does not block', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    const expired = h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      invitePinId: `${'e'.repeat(63)}ei0`,
+    });
+    h.membershipStore.updateInviteStatus({ invitePinId: expired.invitePinId }, 'expired', 'invite_response_timeout');
+
+    const result = await inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID });
+    assert.equal(result.status, 'pending');
+    assert.equal(h.calls.send.length, 1, 'retry after a timeout is the normal flow');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // inviteRemoteBot happy path
 // ---------------------------------------------------------------------------
 

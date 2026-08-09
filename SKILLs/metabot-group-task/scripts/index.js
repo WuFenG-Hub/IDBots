@@ -187,6 +187,9 @@ async function main() {
       if (Array.isArray(params.required_skills) && params.required_skills.length) {
         body.required_skills = params.required_skills.map((s) => String(s ?? '').trim()).filter(Boolean);
       }
+      if (params.allow_reinvite === true || params.allow_reinvite === 'true') {
+        body.allow_reinvite = true;
+      }
       break;
     }
     case 'close': {

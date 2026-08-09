@@ -401,6 +401,35 @@ test('joinGroupTaskMember: on-chain join + member row; idempotent; surfaces chai
   }
 });
 
+test('joinGroupTaskMember: re-join after a kick revives the removed member row (M3)', async () => {
+  const h = await createHarness();
+  try {
+    const detail = await createGroupTask({ title: 'T', goal: 'G', createdBy: 'user' });
+    const member = await joinGroupTaskMember(detail.id, 2);
+    assert.equal(member.joinedPinId, 'join-pin-2');
+    assert.equal(h.calls.join.length, 1);
+
+    // Kick the local worker (row kept, marked removed), then invite it back.
+    h.groupTaskStore.markMemberRemoved({ taskId: detail.id, metabotId: 2, removePinId: 'pin-remove-2' });
+    assert.ok(!h.groupTaskStore.isMember(detail.id, 2));
+
+    const rejoined = await joinGroupTaskMember(detail.id, 2);
+    assert.equal(h.calls.join.length, 2, 'a fresh on-chain join pin is signed');
+    assert.equal(rejoined.id, member.id, 'UNIQUE(task_id, metabot_id): the removed row is revived in place');
+    assert.equal(rejoined.removedAt, null);
+    assert.equal(rejoined.removePinId, null);
+    assert.equal(rejoined.joinedPinId, 'join-pin-2', 'joined_pin_id refreshed with the new join pin');
+    assert.ok(h.groupTaskStore.isMember(detail.id, 2));
+    assert.equal(
+      h.groupTaskStore.listMembers(detail.id, { includeRemoved: true }).length,
+      2,
+      'chair + revived worker, no duplicate row',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('closeGroupTask: state machine transitions and terminal lock', async () => {
   const h = await createHarness();
   try {
