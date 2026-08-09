@@ -603,3 +603,15 @@ test('round-4: show view=summary is compact (5 messages, members with lastSpeakA
     h.cleanup();
   }
 });
+
+test('C-2: getGroupTaskChairMetabotId resolves the task chair; throws for unknown task', async () => {
+  const harness = await createHarness();
+  const task = await createGroupTask({
+    title: 'C-2 chair resolution',
+    goal: 'verify chair default',
+    memberMetabotIds: [2],
+    createdBy: 'user',
+  });
+  assert.equal(groupTaskService.getGroupTaskChairMetabotId(task.id), 1);
+  assert.throws(() => groupTaskService.getGroupTaskChairMetabotId(9999), /not found/);
+});

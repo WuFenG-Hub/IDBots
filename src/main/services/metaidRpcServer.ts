@@ -31,6 +31,7 @@ import {
   createGroupTask,
   listGroupTasks,
   getGroupTask,
+  getGroupTaskChairMetabotId,
   postGroupTaskMessage,
   joinGroupTaskMember,
   closeGroupTask,
@@ -1341,12 +1342,11 @@ export function startMetaidRpcServer(
             }
             metabotId = resolved;
           } else {
-            res.writeHead(400);
-            res.end(JSON.stringify({
-              success: false,
-              error: 'metabot_id or metabot_name is required: group messages must be sent with an explicit sender identity (the chair default was removed)',
-            }));
-            return;
+            // C-2: restore the documented chair default. When the caller omits
+            // an explicit sender (SKILL.md documents "default = chair"), speak
+            // as the task chair instead of failing — explicit identity remains
+            // fully supported and takes precedence.
+            metabotId = getGroupTaskChairMetabotId(taskId);
           }
         }
         const mention = Array.isArray(parsed.mention)

@@ -457,6 +457,16 @@ export async function getGroupTask(
  * Post a message to the task group as one of its member bots.
  * Validates membership and that the task is not terminal.
  */
+/**
+ * Resolve the chair MetaBot id for a task (C-2: RPC `send` defaults to the
+ * chair identity when the caller omits an explicit sender). Throws when the
+ * task does not exist.
+ */
+export function getGroupTaskChairMetabotId(taskId: number): number {
+  const task = requireTask(taskId);
+  return task.chairMetabotId;
+}
+
 export async function postGroupTaskMessage(
   taskId: number,
   metabotId: number,
