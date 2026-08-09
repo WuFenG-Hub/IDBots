@@ -4917,6 +4917,11 @@ export class CoworkRunner extends EventEmitter {
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: activeSession.permissionMode,
       includePartialMessages: true,
+      // Explicitly enable the SDK's todo/task tracking panel. The CLI binary
+      // defaults it to on, but passing it keeps the behavior deterministic and
+      // lets the model emit TaskCreate/TaskUpdate (headless) or TodoWrite so
+      // the renderer can surface the live step list.
+      todoFeatureEnabled: true,
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
         : {}),
