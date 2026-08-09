@@ -75,10 +75,10 @@ traffic balance, and per-bot/day usage views.
 **Milestones**:
 
 - `[x]` M3.1 Traffic account service client (ensure account, bind bots, balance/usage)
-- `[ ]` M3.2 Settings "Traffic" tab: pricing table + recharge flow (mock pay)
-- `[ ]` M3.3 Traffic center: balance, ledger, per-bot daily usage
-- `[ ]` M3.4 Traffic/self-pay toggle UI; low-balance & insufficient-traffic UX
-- `[ ]` M3.5 Account binding automation: bind all local bot addresses to the user account
+- `[x]` M3.2 Settings "Traffic" tab: pricing table + recharge flow (mock pay)
+- `[x]` M3.3 Traffic center: balance, ledger, per-bot daily usage
+- `[x]` M3.4 Traffic/self-pay toggle UI; low-balance & insufficient-traffic UX
+- `[x]` M3.5 Account binding automation: bind all local bot addresses to the user account
 
 **Acceptance**: a fresh user can complete: see pricing → recharge ¥10 (mock) →
 see 100 MB balance → send messages → watch per-bot usage update.
