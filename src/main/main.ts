@@ -157,6 +157,10 @@ import {
 } from './services/openTeamGuestDaemon';
 import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
 import {
+  getRendererMetabotSetting,
+  setRendererMetabotSetting,
+} from './services/metabotSettingsService';
+import {
   resumeOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
   stopOpenTeamInviteWatchers,
@@ -9506,6 +9510,31 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
   });
+
+  // Per-metabot kv settings (metabot_settings table) are not metabots-table
+  // columns, so they bypass metabot:update; the whitelist lives in
+  // metabotSettingsService and rejects any key the renderer may not touch.
+  ipcMain.handle('metabot:getSetting', async (_event, metabotId: number, key: string) =>
+    withSqliteRecovery('metabot:getSetting', async () => {
+      try {
+        const value = getRendererMetabotSetting(getMetabotStore(), metabotId, key);
+        return { success: true, value };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to get metabot setting' };
+      }
+    }));
+
+  ipcMain.handle('metabot:setSetting', async (_event, metabotId: number, key: string, value: unknown) =>
+    withSqliteRecovery('metabot:setSetting', async () => {
+      try {
+        const stored = setRendererMetabotSetting(getMetabotStore(), metabotId, key, value);
+        return { success: true, value: stored };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to set metabot setting' };
+      }
+    }));
 
   ipcMain.handle('idbots:addMetaBot', async (_event, input: {
     name: string;

@@ -189,3 +189,4 @@ man_base_data_pebble/
 !tests/avatarSource.test.mjs
 
 !tests/sdkCronHostTrigger.test.mjs
+!tests/metabotSettingsService.test.mjs

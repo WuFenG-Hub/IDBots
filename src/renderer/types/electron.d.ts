@@ -1193,6 +1193,9 @@ interface IElectronAPI {
     create: (input: MetabotCreateInput) => Promise<{ success: boolean; metabot?: Metabot; error?: string }>;
     update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
+    /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
+    getSetting: (id: number, key: string) => Promise<{ success: boolean; value?: string | null; error?: string }>;
+    setSetting: (id: number, key: string, value: string) => Promise<{ success: boolean; value?: string; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
   };
   dream: {
