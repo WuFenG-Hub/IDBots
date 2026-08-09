@@ -3,17 +3,29 @@
  * the inviter-side ACCEPT/DECLINE bookkeeping.
  *
  * Guest flow: validate an incoming [OPENTEAM_INVITE] envelope against local
- * policy (bot enabled -> allowRemoteCollab switch -> target match -> duplicate
- * -> expiry), join the group on-chain, record the membership (which instantly
+ * policy, join the group on-chain, record the membership (which instantly
  * adds the group to the chat backfill union) and reply ACCEPT/DECLINE via
- * encrypted simplemsg. Any validation failure still gets a DECLINE reply so
- * the inviter learns why.
+ * encrypted simplemsg. The product decision stays "default on, fully
+ * automatic" — but because any on-chain sender can forge an invite envelope,
+ * the validation chain is hardened before the guest wallet spends anything:
+ *
+ *   duplicate inviteId (silent skip) -> bot enabled -> allowRemoteCollab
+ *   switch -> target match -> sender match (envelope inviter vs actual row
+ *   sender) -> per-inviter/per-group rate limit -> already-member -> expiry
+ *   (60s clock-skew tolerance) -> on-chain group verification (group must
+ *   exist and the inviter must be its creator/chair) -> join.
+ *
+ * A validation failure still gets a DECLINE reply so the inviter learns why;
+ * duplicates are skipped silently (socket + backfill double delivery). All
+ * GlobalMetaID comparisons normalize through normalizeRawGlobalMetaId with a
+ * trim/lowercase fallback for legacy non-canonical values.
  *
  * Dependencies are injectable two ways: handleOpenTeamInvite takes an explicit
  * deps object (tests), while the privateChatDaemon interception path calls the
  * module-level handleIncomingOpenTeamInvite / handleIncomingOpenTeamResponse,
  * which resolve the deps wired once by main.ts (setOpenTeamGuestServiceDeps,
- * same setter-injection style as groupChatTransport).
+ * same setter-injection style as groupChatTransport). Rate-limit/dedup state
+ * is keyed per deps object (WeakMap), so tests get fresh state per harness.
  */
 
 import type { MetabotStore } from '../metabotStore';
@@ -27,6 +39,7 @@ import type {
   SendEncryptedSimplemsgResult,
   SimplemsgWalletInput,
 } from './encryptedSimplemsg';
+import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
 import {
   buildOpenTeamAcceptMessage,
   buildOpenTeamDeclineMessage,
@@ -38,6 +51,14 @@ import {
 /** Per-metabot kill switch (metabot_settings kv): missing = allowed, '0' = off. */
 export const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
 
+/** Clock-skew tolerance when judging envelope expiry (guest clock may lag the inviter). */
+export const OPENTEAM_INVITE_EXPIRY_SKEW_MS = 60_000;
+/** Rate limit: at most this many invites processed per inviter AND per group per window. */
+export const OPENTEAM_INVITE_RATE_LIMIT_DEFAULT = 3;
+export const OPENTEAM_INVITE_RATE_WINDOW_MS = 60_000;
+/** Cap on the in-memory processed-inviteId dedup set (FIFO trim). */
+const PROCESSED_INVITE_IDS_MAX = 1_000;
+
 /** deps.sendEncryptedSimplemsg already has createPin bound by the host. */
 export type OpenTeamGuestSendSimplemsgFn = (input: {
   metabotId: number;
@@ -48,11 +69,36 @@ export type OpenTeamGuestSendSimplemsgFn = (input: {
   replyPin?: string | null;
 }) => Promise<SendEncryptedSimplemsgResult>;
 
+/**
+ * On-chain group verification lookup (wired to groupChatTransport.fetchGroupInfo
+ * in main.ts). 'found' carries the group creator's identity fields (both the
+ * legacy metaId and the GlobalMetaID form, whichever the indexer exposes);
+ * 'not_found' means the indexer answered but has no such group; 'error' means
+ * every indexer endpoint failed. Structurally compatible with
+ * groupChatTransport.FetchGroupInfoResult.
+ */
+export type OpenTeamFetchGroupInfoResult =
+  | { status: 'found'; createUserMetaId: string; createUserGlobalMetaId: string }
+  | { status: 'not_found' }
+  | { status: 'error' };
+
+export type OpenTeamFetchGroupInfoFn = (
+  groupId: string,
+) => Promise<OpenTeamFetchGroupInfoResult>;
+
 export interface OpenTeamGuestServiceDeps {
   getMetabotStore: () => MetabotStore;
   getMembershipStore: () => OpenTeamMembershipStore;
   joinGroupChat: (metabotId: number, groupId: string) => Promise<{ pinId: string }>;
   sendEncryptedSimplemsg: OpenTeamGuestSendSimplemsgFn;
+  /**
+   * Group existence + creator verification. Fail-closed: an unwired dep is
+   * treated as 'error' and the invite is declined (group_verify_failed).
+   */
+  fetchGroupInfo?: OpenTeamFetchGroupInfoFn;
+  /** Rate-limit tuning (tests); defaults OPENTEAM_INVITE_RATE_LIMIT_DEFAULT / _WINDOW_MS. */
+  inviteRateLimitPerWindow?: number;
+  inviteRateWindowMs?: number;
   emitLog?: (message: string) => void;
   now?: () => number;
 }
@@ -67,7 +113,11 @@ export interface OpenTeamInviteReplyContext {
 }
 
 export interface OpenTeamGuestResult {
-  action: 'accepted' | 'declined';
+  /**
+   * accepted: joined + ACCEPT sent. declined: DECLINE reply attempted.
+   * skipped: duplicate inviteId delivery — no state change, no reply.
+   */
+  action: 'accepted' | 'declined' | 'skipped';
   /** Short machine-ish decline reason tag (empty when accepted). */
   reason: string;
   joinedPinId: string | null;
@@ -96,10 +146,83 @@ const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
 /**
+ * Canonical GlobalMetaID comparison key: normalizeRawGlobalMetaId first, with
+ * a trim/lowercase fallback so legacy non-canonical values still compare
+ * deterministically (never throws, '' for unusable input).
+ */
+function globalMetaIdCompareKey(value: unknown): string {
+  return normalizeRawGlobalMetaId(value) ?? (typeof value === 'string' ? value.trim().toLowerCase() : '');
+}
+
+// ---------------------------------------------------------------------------
+// Per-deps invite guard: duplicate delivery dedup + fixed-window rate limit.
+// ---------------------------------------------------------------------------
+
+interface OpenTeamInviteGuardState {
+  /** `<metabotId>:<inviteId>` keys already handled (any outcome). */
+  processedInviteIds: Set<string>;
+  /** Fixed-window timestamps per key (`inviter:<gmid>` / `group:<groupId>`). */
+  windows: Map<string, number[]>;
+}
+
+const inviteGuardStateByDeps = new WeakMap<OpenTeamGuestServiceDeps, OpenTeamInviteGuardState>();
+
+function getInviteGuardState(target: OpenTeamGuestServiceDeps): OpenTeamInviteGuardState {
+  let state = inviteGuardStateByDeps.get(target);
+  if (!state) {
+    state = { processedInviteIds: new Set(), windows: new Map() };
+    inviteGuardStateByDeps.set(target, state);
+  }
+  return state;
+}
+
+function markInviteProcessed(state: OpenTeamInviteGuardState, key: string): void {
+  if (state.processedInviteIds.has(key)) return;
+  state.processedInviteIds.add(key);
+  if (state.processedInviteIds.size > PROCESSED_INVITE_IDS_MAX) {
+    // FIFO trim: Set iterates in insertion order.
+    let remaining = state.processedInviteIds.size - PROCESSED_INVITE_IDS_MAX;
+    for (const oldest of state.processedInviteIds) {
+      if (remaining <= 0) break;
+      state.processedInviteIds.delete(oldest);
+      remaining -= 1;
+    }
+  }
+}
+
+/**
+ * Fixed-window rate limiter. Records the attempt and returns true when any of
+ * the keys is already at the limit inside the current window (the attempt is
+ * NOT recorded in that case, so a rejected burst cannot extend the lockout).
+ */
+function isInviteRateLimited(
+  state: OpenTeamInviteGuardState,
+  keys: string[],
+  limit: number,
+  windowMs: number,
+  nowMs: number,
+): boolean {
+  const cutoff = nowMs - windowMs;
+  const pruned = keys.map((key) => {
+    const stamps = (state.windows.get(key) ?? []).filter((ts) => ts > cutoff);
+    state.windows.set(key, stamps);
+    return stamps;
+  });
+  if (pruned.some((stamps) => stamps.length >= limit)) return true;
+  for (const [index, key] of keys.entries()) {
+    pruned[index]!.push(nowMs);
+    state.windows.set(key, pruned[index]!);
+  }
+  return false;
+}
+
+/**
  * Core guest accept flow with explicit deps (unit-testable). Validation order:
- * bot enabled -> allowRemoteCollab switch -> target match -> duplicate -> expiry.
- * Every failure path replies DECLINE with a reason; a join failure also
- * declines (reason carries the underlying error, e.g. insufficient balance).
+ * duplicate -> bot enabled -> allowRemoteCollab switch -> target match ->
+ * sender match -> rate limit -> already-member -> expiry (60s skew) ->
+ * on-chain group/creator verification -> join. Every failure path replies
+ * DECLINE with a reason (a join failure declines with the underlying error,
+ * e.g. insufficient balance); only a duplicate inviteId is skipped silently.
  */
 export async function handleOpenTeamInvite(
   deps: OpenTeamGuestServiceDeps,
@@ -107,6 +230,13 @@ export async function handleOpenTeamInvite(
     metabot: Metabot;
     invite: OpenTeamInvitePayload;
     replyContext: OpenTeamInviteReplyContext;
+    /**
+     * Actual sender of the invite simplemsg row (from_global_metaid). When
+     * provided and it does not match the envelope's inviterGlobalMetaId the
+     * invite is declined (sender_mismatch) — a forged envelope naming another
+     * inviter must never spend the guest wallet.
+     */
+    senderGlobalMetaId?: string;
   },
 ): Promise<OpenTeamGuestResult> {
   const { metabot, invite, replyContext } = input;
@@ -114,6 +244,7 @@ export async function handleOpenTeamInvite(
   const now = deps.now ?? (() => Date.now());
   const metabotStore = deps.getMetabotStore();
   const membershipStore = deps.getMembershipStore();
+  const guard = getInviteGuardState(deps);
 
   const sendReply = async (plaintext: string): Promise<string | null> => {
     const wallet = metabotStore.getMetabotWalletByMetabotId(metabot.id);
@@ -146,6 +277,21 @@ export async function handleOpenTeamInvite(
     return { action: 'declined', reason, joinedPinId: null, replyPinId };
   };
 
+  // Idempotency: the socket push and the history backfill can deliver the same
+  // invite twice, and the async daemon dispatch can overlap them. A previously
+  // handled inviteId (in-memory, or the membership row's invite_pin_id from an
+  // earlier accept) is skipped silently — no second join, no second reply.
+  const dedupKey = `${metabot.id}:${invite.inviteId}`;
+  const existing = membershipStore.getMembership(invite.groupId, metabot.id);
+  if (guard.processedInviteIds.has(dedupKey) || existing?.invitePinId === invite.inviteId) {
+    markInviteProcessed(guard, dedupKey);
+    emitLog(
+      `[OpenTeam] MetaBot ${metabot.id}: duplicate invite ${invite.inviteId}; skipped without reply`,
+    );
+    return { action: 'skipped', reason: 'duplicate_invite', joinedPinId: null, replyPinId: null };
+  }
+  markInviteProcessed(guard, dedupKey);
+
   if (metabot.enabled === false) {
     return decline('bot_disabled', 'the invited MetaBot is disabled');
   }
@@ -154,15 +300,63 @@ export async function handleOpenTeamInvite(
     return decline('remote_collab_disabled', 'remote collaboration is disabled by the bot owner');
   }
   const localGlobalMetaId = (metabot.globalmetaid ?? '').trim();
-  if (!localGlobalMetaId || localGlobalMetaId !== invite.targetGlobalMetaId.trim()) {
+  const localCompareKey = globalMetaIdCompareKey(localGlobalMetaId);
+  if (!localCompareKey || localCompareKey !== globalMetaIdCompareKey(invite.targetGlobalMetaId)) {
     return decline('target_mismatch', 'invite target does not match this bot');
   }
-  const existing = membershipStore.getMembership(invite.groupId, metabot.id);
+  const senderKey = globalMetaIdCompareKey(input.senderGlobalMetaId);
+  if (senderKey && senderKey !== globalMetaIdCompareKey(invite.inviterGlobalMetaId)) {
+    return decline('sender_mismatch', 'the simplemsg sender does not match the envelope inviter');
+  }
+  const rateLimit = Math.max(1, Math.trunc(deps.inviteRateLimitPerWindow ?? OPENTEAM_INVITE_RATE_LIMIT_DEFAULT));
+  const rateWindowMs = Math.max(1_000, Math.trunc(deps.inviteRateWindowMs ?? OPENTEAM_INVITE_RATE_WINDOW_MS));
+  const rateKeys = [
+    `inviter:${globalMetaIdCompareKey(invite.inviterGlobalMetaId) || invite.inviterGlobalMetaId}`,
+    `group:${invite.groupId.trim().toLowerCase()}`,
+  ];
+  if (isInviteRateLimited(guard, rateKeys, rateLimit, rateWindowMs, now())) {
+    return decline('rate_limited', 'too many invites from this inviter or for this group; retry later');
+  }
   if (existing?.status === 'active') {
     return decline('already_member', 'bot is already an active member of this group');
   }
-  if (invite.expiresAt * 1000 <= now()) {
+  // 60s clock-skew tolerance: the inviter's clock may be slightly ahead.
+  if (invite.expiresAt * 1000 <= now() - OPENTEAM_INVITE_EXPIRY_SKEW_MS) {
     return decline('invite_expired', 'the invite has expired');
+  }
+
+  // On-chain verification BEFORE the guest wallet pays a join pin: the group
+  // must really exist and the inviter must be its creator (chair). Both
+  // creator identity forms (globalMetaId / legacy metaId) are accepted against
+  // either envelope identity field (inviterGlobalMetaId / chairGlobalMetaId).
+  // Fail-closed: a network failure declines (group_verify_failed).
+  let groupInfo: OpenTeamFetchGroupInfoResult;
+  if (typeof deps.fetchGroupInfo !== 'function') {
+    groupInfo = { status: 'error' };
+  } else {
+    try {
+      groupInfo = await deps.fetchGroupInfo(invite.groupId);
+    } catch (error) {
+      emitLog(
+        `[OpenTeam] MetaBot ${metabot.id}: group-info lookup failed for ${invite.groupId}: ${errorMessage(error)}`,
+      );
+      groupInfo = { status: 'error' };
+    }
+  }
+  if (!groupInfo || groupInfo.status === 'error') {
+    return decline('group_verify_failed', 'could not verify the invited group on-chain');
+  }
+  if (groupInfo.status === 'not_found') {
+    return decline('invalid_group', 'the invited group does not exist on-chain');
+  }
+  const creatorKeys = [groupInfo.createUserGlobalMetaId, groupInfo.createUserMetaId]
+    .map(globalMetaIdCompareKey)
+    .filter((key) => key.length > 0);
+  const inviterKeys = [invite.inviterGlobalMetaId, invite.chairGlobalMetaId]
+    .map(globalMetaIdCompareKey)
+    .filter((key) => key.length > 0);
+  if (creatorKeys.length === 0 || !inviterKeys.some((key) => creatorKeys.includes(key))) {
+    return decline('inviter_not_chair', 'only the group creator (chair) can invite members');
   }
 
   let joinedPinId: string;
@@ -204,6 +398,8 @@ export async function handleIncomingOpenTeamInvite(input: {
   metabot: Metabot;
   invite: OpenTeamInvitePayload;
   replyContext: OpenTeamInviteReplyContext;
+  /** Actual sender of the invite simplemsg row (from_global_metaid). */
+  senderGlobalMetaId?: string;
 }): Promise<OpenTeamGuestResult> {
   return handleOpenTeamInvite(getOpenTeamGuestServiceDeps(), input);
 }
@@ -218,11 +414,14 @@ export interface OpenTeamResponseResult {
  * Inviter-side bookkeeping for ACCEPT/DECLINE envelopes: transition the
  * matching pending invite row. The join-confirmation watcher that turns an
  * accepted invite into a task member is a later milestone; here we only
- * persist the state change.
+ * persist the state change. When the actual sender is provided it must match
+ * the invite row's invitee — a forged ACCEPT/DECLINE from anyone else is
+ * ignored (no state change).
  */
 export function handleOpenTeamResponse(
   deps: OpenTeamGuestServiceDeps,
   envelope: OpenTeamAcceptEnvelope | OpenTeamDeclineEnvelope,
+  options?: { senderGlobalMetaId?: string },
 ): OpenTeamResponseResult {
   const emitLog = deps.emitLog ?? (() => undefined);
   const membershipStore = deps.getMembershipStore();
@@ -230,6 +429,14 @@ export function handleOpenTeamResponse(
   if (!invite) {
     emitLog(`[OpenTeam] ${envelope.kind} for unknown invite ${envelope.inviteId}; ignored`);
     return { matched: false, invite: null };
+  }
+  const senderKey = globalMetaIdCompareKey(options?.senderGlobalMetaId);
+  if (senderKey && senderKey !== globalMetaIdCompareKey(invite.inviteeGlobalmetaid)) {
+    emitLog(
+      `[OpenTeam] ${envelope.kind} for invite ${envelope.inviteId} from a sender that is not ` +
+      'the invitee; ignored',
+    );
+    return { matched: true, invite };
   }
   if (invite.status !== 'pending') {
     emitLog(
@@ -254,6 +461,7 @@ export function handleOpenTeamResponse(
 /** Daemon entry point: resolves the module deps wired by main.ts. */
 export function handleIncomingOpenTeamResponse(
   envelope: OpenTeamAcceptEnvelope | OpenTeamDeclineEnvelope,
+  options?: { senderGlobalMetaId?: string },
 ): OpenTeamResponseResult {
-  return handleOpenTeamResponse(getOpenTeamGuestServiceDeps(), envelope);
+  return handleOpenTeamResponse(getOpenTeamGuestServiceDeps(), envelope, options);
 }

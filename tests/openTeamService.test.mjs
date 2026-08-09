@@ -132,7 +132,7 @@ const createHarness = async (overrides = {}) => {
   setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(() => groupTaskStore);
 
-  const calls = { search: [], presence: [], detail: [], send: [], wait: [], ownerReport: [] };
+  const calls = { search: [], presence: [], detail: [], send: [], wait: [], ownerReport: [], pendingAtSend: [] };
   const searchItems = overrides.searchItems ?? [];
   // gmid -> { isOnline, ago } presence map; missing entries report offline.
   const presenceMap = overrides.presenceMap ?? {};
@@ -172,6 +172,10 @@ const createHarness = async (overrides = {}) => {
     },
     sendEncryptedSimplemsg: async (input) => {
       calls.send.push(input);
+      // Snapshot taken while inside the send: proves the pending invite row was
+      // persisted BEFORE the envelope went out (crash-safety ordering).
+      calls.pendingAtSend.push(membershipStore.listPendingInvites().length);
+      if (overrides.sendError) throw new Error(overrides.sendError);
       return { txids: ['tx-invite'], pinId: SEND_PIN_ID };
     },
     sendOwnerPrivateReport: noOwnerReport
@@ -495,6 +499,42 @@ test('inviteRemoteBot: sends the invite envelope and records a pending invite', 
     assert.equal(invite.groupId, GROUP_ID);
     assert.equal(invite.inviteeGlobalmetaid, REMOTE_GMID);
     assert.equal(invite.inviteeName, 'Remote Bot');
+
+    // The pending row landed BEFORE the envelope send (crash-safe ordering).
+    assert.deepEqual(h.calls.pendingAtSend, [1]);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: a send failure finalizes the pre-persisted invite as expired (send_failed)', async () => {
+  const h = await createHarness({
+    presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } },
+    sendError: 'insufficient SPACE',
+  });
+  try {
+    await assert.rejects(
+      () => inviteRemoteBot({
+        taskId: h.task.id,
+        inviteeGlobalMetaId: REMOTE_GMID,
+        inviteeName: 'Remote Bot',
+      }),
+      /insufficient SPACE/,
+    );
+    assert.equal(h.calls.send.length, 1);
+    // The row existed when the send was attempted...
+    assert.deepEqual(h.calls.pendingAtSend, [1]);
+    // ...and was finalized as expired instead of being left a ghost pending row.
+    const envelope = parseOpenTeamEnvelope(h.calls.send[0].plaintext);
+    const invite = h.membershipStore.getInviteByPinId(envelope.invite.inviteId);
+    assert.ok(invite, 'invite row persisted before the send attempt');
+    assert.equal(invite.status, 'expired');
+    assert.equal(invite.declineReason, 'send_failed');
+    assert.equal(
+      h.membershipStore.hasPendingInvite(h.task.id, REMOTE_GMID),
+      false,
+      'expired row must not block a later re-invite',
+    );
   } finally {
     h.cleanup();
   }

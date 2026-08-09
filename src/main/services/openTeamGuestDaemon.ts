@@ -363,6 +363,10 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     const files = collectGuestDeliverableFiles({
       texts: [input.reply],
       cwd: input.cwd,
+      // The allowlist root IS the guest session workspace (the daemon wiring
+      // runs the skill turn there): anything outside is dropped + logged.
+      allowedRoot: input.cwd,
+      emitLog,
       turnStartedAt: input.turnStartedAt,
       turnCompletedAt: input.turnCompletedAt,
       maxFiles: maxDeliverableFilesPerTurn,

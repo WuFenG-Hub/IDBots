@@ -326,13 +326,10 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     targetGlobalMetaId: invitee,
     expiresAt: Math.floor(now() / 1000) + inviteTtlSeconds,
   });
-  const sent = await resolved.sendEncryptedSimplemsg({
-    metabotId: twin.id,
-    wallet,
-    peerGlobalMetaId: invitee,
-    peerChatPubkey: chatPubkey,
-    plaintext,
-  });
+  // Persist the pending invite BEFORE sending the envelope: a crash between
+  // send and record would otherwise leave a ghost invite the guest may accept
+  // while no local row tracks it. invite_pin_id stores the generated inviteId
+  // from the start (it is the envelope identifier, not the simplemsg pinId).
   membershipStore.createInvite({
     taskId,
     groupId: task.groupId!,
@@ -340,6 +337,24 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     inviteeName: inviteeName || null,
     invitePinId: inviteId,
   });
+  let sent: Awaited<ReturnType<typeof resolved.sendEncryptedSimplemsg>>;
+  try {
+    sent = await resolved.sendEncryptedSimplemsg({
+      metabotId: twin.id,
+      wallet,
+      peerGlobalMetaId: invitee,
+      peerChatPubkey: chatPubkey,
+      plaintext,
+    });
+  } catch (error) {
+    // Send failed after the row landed: finalize it as expired (send_failed)
+    // so it never blocks a later re-invite as a phantom pending row.
+    membershipStore.updateInviteStatus({ invitePinId: inviteId }, 'expired', 'send_failed');
+    emitLog(
+      `[OpenTeam] Invite ${inviteId} to ${inviteeName || invitee} failed to send; marked expired (send_failed): ${errorMessage(error)}`,
+    );
+    throw error;
+  }
   emitLog(
     `[OpenTeam] Invite ${inviteId} sent to ${inviteeName || invitee} for task ${taskId} ` +
     `(simplemsg pin ${sent.pinId}); join-confirmation watcher started`,

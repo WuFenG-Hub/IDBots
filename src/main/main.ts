@@ -215,7 +215,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -3532,6 +3532,18 @@ const startSqliteDaemons = (): void => {
       ...input,
       createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
     }),
+    // Invite hardening: the guest verifies the invited group exists on-chain
+    // and that the inviter is its creator before spending any join pin.
+    fetchGroupInfo: async (groupId) => {
+      const result = await fetchGroupInfo(groupId);
+      return result.status === 'found'
+        ? {
+            status: 'found' as const,
+            createUserMetaId: result.info.createUserMetaId,
+            createUserGlobalMetaId: result.info.createUserGlobalMetaId,
+          }
+        : result;
+    },
     emitLog: (msg) => console.log(msg),
   });
   startOpenTeamGuestDaemon({
@@ -3547,8 +3559,12 @@ const startSqliteDaemons = (): void => {
     // never the owner).
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
     runSkillTurn: async (params) => {
+      // Run inside the guest session's own per-bot workspace instead of the
+      // shared skills root: generated files stay isolated per session, and the
+      // deliverable collection allowlists exactly this directory.
+      const sessionCwd = (getCoworkStore().getSession(params.sessionId)?.cwd ?? '').trim();
       const roots = skillMgr.getAllSkillRoots();
-      const cwd = roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot();
+      const cwd = sessionCwd || (roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot());
       const result = await runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
         sessionId: params.sessionId,
         systemPrompt: params.systemPrompt,

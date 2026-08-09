@@ -338,6 +338,7 @@ const SKILL_PINID = `${'ef'.repeat(32)}i0`;
 const createSkillHarness = async (overrides = {}) => {
   const artifactDir = makeTempDir();
   const skillCalls = { routing: [], skillTurn: [], upload: [] };
+  const logs = [];
   const state = {
     routing: overrides.routing ?? { prompt: 'SKILL ROUTING PROMPT', activeSkillIds: ['skill-doc'] },
     routingError: overrides.routingError ?? null,
@@ -370,10 +371,11 @@ const createSkillHarness = async (overrides = {}) => {
         if (state.uploadError) throw new Error(state.uploadError);
         return { pinId: state.uploadPinId };
       },
+      emitLog: (line) => logs.push(String(line)),
       ...(overrides.realNow ? { now: () => Date.now() } : {}),
     }),
   });
-  return { ...harness, artifactDir, skillCalls };
+  return { ...harness, artifactDir, skillCalls, logs };
 };
 
 const joinAndMention = (db, membershipStore, pinId) => {
@@ -583,6 +585,29 @@ test('skill: [NO_REPLY] from a skill turn suppresses the send and never uploads'
     assert.equal(calls.send.length, 0);
     const membership = membershipStore.getMembership(GROUP_ID, 7);
     assert.equal(membership.lastProcessedMsgId, messageIdOf(db, `${'9'.repeat(64)}i0`));
+  } finally {
+    store.close();
+  }
+});
+
+test('skill: a mentioned file outside the session workspace is dropped, never uploaded', async () => {
+  const outsideDir = makeTempDir();
+  const outsidePath = path.join(outsideDir, 'secret.pdf');
+  fs.writeFileSync(outsidePath, 'secret-bytes');
+  const { store, db, membershipStore, loop, calls, skillCalls, logs } = await createSkillHarness({
+    skillReply: `Done.\n${outsidePath}`,
+  });
+  try {
+    joinAndMention(db, membershipStore, `${'8'.repeat(64)}i0`);
+    await loop.runTick();
+    assert.equal(skillCalls.upload.length, 0, 'outside-workspace files are never uploaded');
+    assert.equal(calls.send.length, 1, 'the text reply itself is still delivered');
+    const content = calls.send[0][2].content;
+    assert.ok(!content.includes('[DELIVERABLE]'), 'no deliverable tag for a dropped file');
+    assert.ok(
+      logs.some((line) => line.includes('outside the allowed workspace') && line.includes(outsidePath)),
+      `expected a drop log, got: ${JSON.stringify(logs)}`,
+    );
   } finally {
     store.close();
   }
