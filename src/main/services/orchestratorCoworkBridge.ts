@@ -5,6 +5,7 @@
 
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
+import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
 /**
@@ -83,6 +84,42 @@ export interface RunExistingSessionSkillTurnParams {
 export interface RunExistingSessionSkillTurnResult {
   replyText: string;
   assistantMessageId: string | null;
+}
+
+/**
+ * Extract the final usable assistant reply from a session's messages.
+ *
+ * A message counts as a usable final reply only when ALL of these hold:
+ * - it is an assistant text message (not a persisted thinking block);
+ * - it is not a known non-answer placeholder (e.g. DeepSeek's
+ *   `[reasoning unavailable]` can be persisted as thinking content);
+ * - it is not followed by any tool_use/tool_result — text emitted before
+ *   more tool activity is an intermediate progress note, not the handoff.
+ *
+ * This prevents a worker session that ended with a reasoning-only turn (no
+ * real text output) from being reported as a successful completion with
+ * `[reasoning unavailable]` as its "reply".
+ */
+function extractFinalAssistantReply(
+  messages: Array<{ id: string; type: string; content: string; metadata?: Record<string, unknown> }>
+): { replyText: string; assistantMessageId: string | null } {
+  let sawToolAfter = false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.type === 'tool_use' || message.type === 'tool_result') {
+      sawToolAfter = true;
+      continue;
+    }
+    if (message.type !== 'assistant') continue;
+    if (message.metadata?.privateChatSkillWaitNotice === true) continue;
+    if (message.metadata?.isThinking === true) continue;
+    const content = String(message.content ?? '');
+    if (isNonAnswerAssistantReply(content)) continue;
+    if (sawToolAfter) continue; // intermediate text, more tool activity followed
+    return { replyText: content.trim(), assistantMessageId: message.id ?? null };
+  }
+  return { replyText: '', assistantMessageId: null };
 }
 
 /**
@@ -203,12 +240,7 @@ export function runOrchestratorSkillTurn(
 
     const extractLastAssistantContent = (): string => {
       const messages = store.getSession(sessionId)?.messages ?? [];
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].type === 'assistant' && messages[i].content) {
-          return String(messages[i].content).trim();
-        }
-      }
-      return '';
+      return extractFinalAssistantReply(messages).replyText;
     };
 
     const reportLateCompletion = (replyText: string) => {
@@ -418,23 +450,10 @@ export function runSkillTurnInExistingSession(
       if (sid !== sessionId) return;
       const sessionWithMessages = store.getSession(sessionId);
       const messages = sessionWithMessages?.messages ?? [];
-      let lastAssistantContent = '';
-      let lastAssistantMessageId: string | null = null;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (
-          messages[i].type === 'assistant'
-          && messages[i].content
-          && messages[i].metadata?.privateChatSkillWaitNotice !== true
-          && messages[i].metadata?.isThinking !== true
-        ) {
-          lastAssistantContent = String(messages[i].content).trim();
-          lastAssistantMessageId = messages[i].id;
-          break;
-        }
-      }
+      const { replyText, assistantMessageId } = extractFinalAssistantReply(messages);
       finishAfterSkillStartNotice({
-        replyText: lastAssistantContent || '',
-        assistantMessageId: lastAssistantMessageId,
+        replyText,
+        assistantMessageId,
       });
     };
 

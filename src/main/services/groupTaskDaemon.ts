@@ -23,6 +23,7 @@ import type {
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
+import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import {
   ensureGroupTaskSession,
@@ -2159,7 +2160,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         coworkStore.addMessage(session.id, { type: 'assistant', content: reply });
       }
     }
-    if (!reply) {
+    if (!reply || isNonAnswerAssistantReply(reply)) {
       failCanonicalAttempt('WORKER_EMPTY_HANDOFF');
       return;
     }

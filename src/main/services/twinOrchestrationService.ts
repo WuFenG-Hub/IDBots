@@ -3,6 +3,7 @@ import {
   SkillTurnTimeoutError,
   type RunOrchestratorSkillTurnParams,
 } from './orchestratorCoworkBridge';
+import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
 import {
@@ -235,7 +236,7 @@ export class TwinOrchestrationService {
           this.settleTimedOutAttempt(attemptId, 'SKILL_TURN_TIMEOUT_NO_RECOVERY');
         },
       });
-      if (!replyText?.trim()) throw new Error('WORKER_EMPTY_HANDOFF');
+      if (isNonAnswerAssistantReply(replyText ?? '')) throw new Error('WORKER_EMPTY_HANDOFF');
       const result = { replyText: replyText.trim(), verified: false };
       this.deps.orchestrationStore.updateAttempt(attempt.id, 'completed', { result });
       this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', { acceptedResult: result });
@@ -300,7 +301,7 @@ export class TwinOrchestrationService {
     if (!currentAttempt || !['queued', 'running', 'timed_out'].includes(currentAttempt.status)) return;
     const currentStep = store.getStep(step.id);
     if (!currentStep || currentStep.activeAttemptId !== attemptId || !['queued', 'running'].includes(currentStep.status)) return;
-    if (!replyText?.trim()) {
+    if (isNonAnswerAssistantReply(replyText ?? '')) {
       this.settleTimedOutAttempt(attemptId, 'WORKER_EMPTY_HANDOFF');
       return;
     }

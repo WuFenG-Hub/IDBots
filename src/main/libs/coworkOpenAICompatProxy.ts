@@ -11,6 +11,7 @@ import {
   type OpenAIStreamChunk,
 } from './coworkFormatTransform';
 import { DeepSeekReasoningStore } from './deepseekReasoningStore';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply';
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
@@ -108,7 +109,6 @@ const DEEPSEEK_REASONING_PLACEHOLDER = '';
 // same 400. When the real reasoning is unrecoverable in the Responses path we
 // inject this CONSTANT placeholder instead — byte-stable across turns (any set
 // of lost-reasoning turns serializes identically), unlike a variable text.
-const DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER = '[reasoning unavailable]';
 
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
