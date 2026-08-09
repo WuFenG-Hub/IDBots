@@ -2,7 +2,7 @@
 
 Date: 2026-08-09
 Branch: `feat/context-auto-compact`
-Status: Phase 1 in progress (implementation); Phases 2–3 planned, not yet started
+Status: all 3 phases implemented on `feat/context-auto-compact` (see per-phase status below); awaiting acceptance testing
 
 ## Background
 
@@ -94,23 +94,32 @@ windows, at the same ~82% intent as the original custom logic.
 
 ## Phase 2 — Better IDBots-side fallback accuracy
 
-Not started. Planned:
+Status: implemented (`99c2a44a`).
 
-- Use the **real** per-turn `input_tokens` already accumulated from the proxy
-  (`accumulateResultUsage` in `coworkRunner.ts`) as the primary signal for the IDBots-side
-  safety net, instead of the CJK heuristic.
-- Optionally drive the trigger from `getContextUsage()` real usage (after Phase 1, its window
-  denominator is correct too).
-- Re-baseline the estimator (include SDK system prompt/tool overhead) if the real-usage signal
-  is unavailable (sandbox mode, first turn).
+- The runner now records `lastTurnInputTokens` in the per-session usage stats (provider
+  reported TOTAL input: cached + uncached for DeepSeek/OpenAI-compat; Anthropic sums the
+  cache_* fields) and feeds it into `getCoworkContextBudget` via `realUsageTokens`.
+- The budget uses `max(heuristic, real)` so the real context size is authoritative when
+  available and the store-based heuristic remains the floor (first turn, sandbox, providers
+  without usage data). After SDK in-session compaction the real signal drops naturally, so
+  the IDBots fallback does not double-compact.
+- The fallback context-ring estimate (`computeCoworkContextUsage`) receives the same real
+  token signal so the indicator stays consistent with the compaction trigger.
+- Not done (kept as-is): `getContextUsage()` real usage already feeds the ring in local mode;
+  re-baselining the estimator further was unnecessary now that real usage drives the trigger.
 
 ## Phase 3 — UI / manual control
 
-Not started. Planned:
+Status: implemented (`806641bb`).
 
-- Add a "Compact now" action (button/command) that triggers the existing compacted-context
-  retry path immediately, with a confirmation system message.
-- Settings page entry: enable/disable automatic compaction and configure the threshold ratio
-  (default 82%).
-- Keep surfacing SDK `compact_boundary` events (already implemented) and, if useful, show the
-  compaction delta (pre → post tokens) in the transcript.
+- New `ManualCompactButton` in the Cowork header usage row (next to `UsageStatsChip`): a small
+  "compact now" icon button that appears only once context usage reaches **40%**
+  (`visibleRatio`, driven by `contextUsage.usageRatio`) and is disabled while a turn runs.
+- Clicking queues `pendingManualCompact` on the active local-mode session (guards: active,
+  local, idle, has history, not already queued); the next submitted message resets the SDK
+  session and continues from a synthetic compacted prompt (same path as automatic tier-2
+  compaction), with confirmation system messages at queue time and at apply time.
+- Surfacing SDK `compact_boundary` events was already implemented (Phase 1); the compaction
+  delta (pre → post tokens) is shown in the transcript system message.
+- Not done (deferred): settings-page toggle/threshold — the automatic ratio stays 82% (SDK)
+  and the visibility threshold stays 40%; a settings entry can follow if users need it.
