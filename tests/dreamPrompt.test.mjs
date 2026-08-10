@@ -398,3 +398,58 @@ test('buildDreamPrompt renders unrated (automation-closed) group tasks without s
   assert.ok(!user.includes('★'), 'no fabricated stars');
   assert.ok(user.includes('主持(chair)'));
 });
+
+test('buildDreamPrompt annotates human-rated messages and carries the feedback contract', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [{
+        sessionId: 'fb1',
+        title: '方案讨论',
+        sessionType: 'standard',
+        peerName: null,
+        isOrder: false,
+        messages: [
+          { type: 'user', content: '给个迁移方案', createdAt: 1 },
+          { type: 'assistant', content: '方案一:先迁移数据', createdAt: 2, feedbackRating: 'up' },
+          { type: 'assistant', content: '方案二:直接重写', createdAt: 3, feedbackRating: 'down', feedbackComment: '风险太大 没有考虑回滚' },
+          { type: 'assistant', content: '补充说明', createdAt: 4 },
+        ],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+    },
+  });
+
+  assert.ok(user.includes('方案一:先迁移数据〔人类评价:赞〕'), 'up marker appended inline');
+  assert.ok(
+    user.includes('方案二:直接重写〔人类评价:踩〕〔人类留言:风险太大 没有考虑回滚〕'),
+    'down marker plus human comment appended inline'
+  );
+  assert.ok(user.includes('补充说明'), 'unrated message still renders');
+  assert.ok(!user.includes('补充说明〔人类评价'), 'unrated message carries no marker');
+  assert.ok(user.includes('人类逐条评价 2 条(赞 1,踩 1)'), 'inventory counts rated messages');
+  assert.ok(user.includes('关于人类逐条消息评价'), 'feedback contract instruction present');
+  assert.ok(user.includes('ground truth'), 'contract points at the human comment as ground truth');
+});
+
+test('buildDreamPrompt omits the rated-message inventory when nothing was rated', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [{
+        sessionId: 'h1',
+        title: '日常闲聊',
+        sessionType: 'standard',
+        peerName: null,
+        isOrder: false,
+        messages: [{ type: 'user', content: '你好', createdAt: 1 }],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+    },
+  });
+  assert.ok(!user.includes('人类逐条评价'), 'no inventory mention without rated messages');
+});

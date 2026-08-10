@@ -79,6 +79,10 @@ export interface DreamActivityMessage {
   type: 'user' | 'assistant';
   content: string;
   createdAt: number;
+  /** Human's per-message rating (thumbs up/down), when the message was rated. */
+  feedbackRating?: 'up' | 'down';
+  /** Human's free-text comment attached to the rating, when present. */
+  feedbackComment?: string | null;
 }
 
 export interface DreamSessionActivity {
@@ -743,13 +747,21 @@ export class DreamStore {
     `, [metabotId, dayStartMs, dayEndMs]);
 
     const sessions: DreamSessionActivity[] = sessionRows.map((session) => {
-      const messageRows = this.getAll<{ type: string; content: string | null; created_at: number | string }>(`
-        SELECT type, content, created_at
-        FROM cowork_messages
-        WHERE session_id = ?
-          AND created_at >= ? AND created_at < ?
-          AND type IN ('user', 'assistant')
-        ORDER BY created_at ASC
+      const messageRows = this.getAll<{
+        type: string;
+        content: string | null;
+        created_at: number | string;
+        feedback_rating: string | null;
+        feedback_comment: string | null;
+      }>(`
+        SELECT m.type, m.content, m.created_at,
+          mf.rating AS feedback_rating, mf.comment AS feedback_comment
+        FROM cowork_messages m
+        LEFT JOIN message_feedback mf ON mf.message_id = m.id
+        WHERE m.session_id = ?
+          AND m.created_at >= ? AND m.created_at < ?
+          AND m.type IN ('user', 'assistant')
+        ORDER BY m.created_at ASC
       `, [session.id, dayStartMs, dayEndMs]);
       return {
         sessionId: session.id,
@@ -763,6 +775,10 @@ export class DreamStore {
             type: row.type as 'user' | 'assistant',
             content: row.content as string,
             createdAt: Number(row.created_at),
+            feedbackRating: row.feedback_rating === 'up' || row.feedback_rating === 'down'
+              ? row.feedback_rating
+              : undefined,
+            feedbackComment: row.feedback_comment ?? undefined,
           })),
       };
     });

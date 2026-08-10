@@ -404,6 +404,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:refreshPeerProfile', input),
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
       ipcRenderer.invoke('cowork:session:getMessagesPage', input),
+    setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) =>
+      ipcRenderer.invoke('cowork:message:setFeedback', input),
+    listSessionFeedback: (input: { sessionId: string }) =>
+      ipcRenderer.invoke('cowork:session:listFeedback', input),
     getA2AConversationHistoryPage: (input: {
       sessionId: string;
       beforeCursor?: { episodeIndex: number; beforeSequence: number } | null;
