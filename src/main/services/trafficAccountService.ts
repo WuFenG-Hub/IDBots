@@ -26,6 +26,7 @@ import { signMvcAddressMessage, type MvcSponsorTrafficAccount } from './mvcSpons
 import {
   getTrafficPinMode,
   getTrafficSettings,
+  readTrafficApiBase,
   setTrafficSettings,
   type TrafficSettingsReader,
   type TrafficSettingsSnapshot,
@@ -39,8 +40,7 @@ const DEFAULT_WALLET_PATH = "m/44'/10001'/0'/0/0";
 const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
 const BALANCE_CACHE_TTL_MS = 30_000;
 
-/** kvStore keys. */
-const TRAFFIC_API_BASE_KEY = 'traffic.apiBase';
+/** kvStore keys (traffic.apiBase lives in trafficSettings.ts). */
 const TRAFFIC_ACCOUNT_KEY = 'traffic.account';
 const TRAFFIC_BINDINGS_KEY = 'traffic.bindings';
 
@@ -215,17 +215,23 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/**
+ * The configured assist-service base URL override (kvStore traffic.apiBase),
+ * or undefined when unset — callers then fall back to their own production
+ * default. Electron-free: reads through the same injected store accessor the
+ * rest of the service uses, so plain-node tests work unchanged.
+ */
+export function getConfiguredTrafficApiBase(): string | undefined {
+  const configured = readTrafficApiBase(getKvStore());
+  return configured || undefined;
+}
+
 function resolveApiBaseUrl(): string {
   if (depsRef?.baseUrl && normalizeText(depsRef.baseUrl)) {
     return normalizeText(depsRef.baseUrl).replace(/\/+$/, '');
   }
-  try {
-    const stored = getKvStore()?.get(TRAFFIC_API_BASE_KEY);
-    const text = normalizeText(stored);
-    if (text) return text.replace(/\/+$/, '');
-  } catch {
-    // fall through to default
-  }
+  const configured = getConfiguredTrafficApiBase();
+  if (configured) return configured;
   return DEFAULT_TRAFFIC_API_BASE_URL;
 }
 
@@ -827,6 +833,7 @@ export function getTrafficSettingsSnapshot(): TrafficSettingsSnapshot {
 export function setTrafficSettingsSnapshot(input: {
   mode?: unknown;
   fallbackPolicy?: unknown;
+  apiBase?: unknown;
 }): TrafficSettingsSnapshot {
   return setTrafficSettings(getKvStore(), input);
 }
@@ -1097,7 +1104,7 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
       return { success: false, error: getErrorMessage(error) };
     }
   });
-  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown }) => {
+  ipcMain.handle('traffic:setSettings', async (_event, input: { mode?: unknown; fallbackPolicy?: unknown; apiBase?: unknown }) => {
     try {
       return { success: true, settings: setTrafficSettingsSnapshot(input ?? {}) };
     } catch (error) {

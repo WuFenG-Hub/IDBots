@@ -14,6 +14,7 @@ const {
   bindAllLocalBots,
   createRechargeOrder,
   ensureTrafficAccount,
+  getConfiguredTrafficApiBase,
   getLocalTrafficAccount,
   getRechargeOrder,
   getTrafficBalance,
@@ -27,6 +28,7 @@ const {
   resolveSponsorTrafficAccount,
   setTrafficSettingsSnapshot,
 } = await import('../dist-electron/main/services/trafficAccountService.js');
+const { createMvcSponsorV2Client } = await import('../dist-electron/main/services/mvcSponsorClient.js');
 const { runMvcSponsorCreatePin } = await import('../dist-electron/main/services/mvcSponsorCreatePin.js');
 const { assembleMvcPinTransaction } = await import('../dist-electron/main/libs/createPinWorker.js');
 
@@ -627,14 +629,81 @@ test('mockConfirmRechargeOrder signs traffic-recharge-confirm and invalidates th
 test('traffic settings snapshot round-trips through the kv store', async () => {
   const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
 
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay', apiBase: '' });
   setTrafficSettingsSnapshot({ mode: 'traffic' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
   setTrafficSettingsSnapshot({ fallbackPolicy: 'strict' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'strict' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'strict', apiBase: '' });
   assert.equal(store.get('traffic.mode'), 'traffic');
   assert.equal(store.get('traffic.fallbackPolicy'), 'strict');
   // Garbage input normalizes back to the safe default.
   setTrafficSettingsSnapshot({ mode: 'garbage' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'strict' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'strict', apiBase: '' });
+});
+
+test('traffic apiBase setting: set/get/validate/clear, and sponsor client wiring', async () => {
+  const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
+
+  // Unset -> undefined (clients fall back to their own production default).
+  assert.equal(getConfiguredTrafficApiBase(), undefined);
+  assert.equal(getTrafficSettingsSnapshot().apiBase, '');
+
+  // Valid URL is normalized (trailing slashes stripped) and persisted.
+  setTrafficSettingsSnapshot({ apiBase: 'http://47.76.58.120:7882/' });
+  assert.equal(getTrafficSettingsSnapshot().apiBase, 'http://47.76.58.120:7882');
+  assert.equal(getConfiguredTrafficApiBase(), 'http://47.76.58.120:7882');
+  assert.equal(store.get('traffic.apiBase'), 'http://47.76.58.120:7882');
+
+  // The metaidCore/metaFileUploadService wiring contract: explicit arg wins,
+  // otherwise the kv override reaches the sponsor client.
+  const wired = createMvcSponsorV2Client({ baseUrl: getConfiguredTrafficApiBase() });
+  assert.equal(wired.baseUrl, 'http://47.76.58.120:7882');
+  const explicit = createMvcSponsorV2Client({ baseUrl: 'https://sponsor.test' });
+  assert.equal(explicit.baseUrl, 'https://sponsor.test');
+
+  // Invalid values throw and are never persisted.
+  assert.throws(() => setTrafficSettingsSnapshot({ apiBase: 'not-a-url' }), /valid URL/);
+  assert.throws(() => setTrafficSettingsSnapshot({ apiBase: 'ftp://example.com' }), /http or https/);
+  assert.equal(getTrafficSettingsSnapshot().apiBase, 'http://47.76.58.120:7882');
+
+  // Empty string clears the override; the client default kicks back in.
+  setTrafficSettingsSnapshot({ apiBase: '' });
+  assert.equal(getTrafficSettingsSnapshot().apiBase, '');
+  assert.equal(getConfiguredTrafficApiBase(), undefined);
+  const fallback = createMvcSponsorV2Client({ baseUrl: getConfiguredTrafficApiBase() });
+  assert.equal(fallback.baseUrl, 'https://www.metaso.network/assist-open-api');
+});
+
+test('traffic service HTTP honors the kv apiBase when no explicit baseUrl is injected', async () => {
+  const kvHost = 'https://kv-configured.test';
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/pricing', [{ planId: 'p1', chain: 'mvc', payCurrency: 'CNY', payAmount: 1, trafficBytes: 1048576 }]],
+  ]);
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'idbots-traffic-apibase-'));
+  const store = await SqliteStore.create(dir);
+  store.set('traffic.apiBase', kvHost);
+  resetTrafficAccountServiceForTests();
+  initTrafficAccountService({
+    getStore: () => store,
+    getMetabotStore: () => ({ listMetabots: () => [], getMetabotWalletById: () => null }),
+    getUserIdentityStore: () => ({ get: () => null }),
+    fetchImpl,
+    // note: no baseUrl dep — the kv override must drive the request host
+  });
+
+  const plans = await getTrafficPricing();
+  assert.equal(plans.length, 1);
+  assert.ok(fetchImpl.calls[0].url.startsWith(kvHost));
+
+  // Clear the override -> requests fall back to the production default host.
+  store.set('traffic.apiBase', '');
+  resetTrafficAccountServiceForTests();
+  initTrafficAccountService({
+    getStore: () => store,
+    getMetabotStore: () => ({ listMetabots: () => [], getMetabotWalletById: () => null }),
+    getUserIdentityStore: () => ({ get: () => null }),
+    fetchImpl,
+  });
+  await getTrafficPricing();
+  assert.ok(fetchImpl.calls[1].url.startsWith('https://www.metaso.network/assist-open-api'));
 });

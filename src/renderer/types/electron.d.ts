@@ -131,6 +131,8 @@ interface TrafficRechargeOrderStatusInfo {
 interface TrafficSettingsInfo {
   mode: 'traffic' | 'selfpay';
   fallbackPolicy: 'selfpay' | 'strict';
+  /** Configured assist-service base URL override; '' = production default. */
+  apiBase: string;
 }
 
 interface ApiStreamResponse {
@@ -1000,7 +1002,7 @@ interface IElectronAPI {
     getRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
     mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
-    setSettings: (input: { mode?: string; fallbackPolicy?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };
   appInfo: {
     getVersion: () => Promise<string>;

@@ -587,7 +587,7 @@ contextBridge.exposeInMainWorld('electron', {
     getRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:getRechargeOrder', input),
     mockConfirmRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:mockConfirmRechargeOrder', input),
     getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
-    setSettings: (input: { mode?: string; fallbackPolicy?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
   },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),

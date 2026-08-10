@@ -19,6 +19,8 @@ import {
 type TrafficSettingsInfo = {
   mode: 'traffic' | 'selfpay';
   fallbackPolicy: 'selfpay' | 'strict';
+  /** Configured assist-service base URL override; '' = production default. */
+  apiBase: string;
 };
 type TrafficAccountInfo = {
   accountId: string;
@@ -139,6 +141,11 @@ const TrafficSettings: React.FC = () => {
   const [ledgerLoading, setLedgerLoading] = useState(false);
   const [ledgerError, setLedgerError] = useState('');
   const [botNames, setBotNames] = useState<Record<string, string>>({});
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [apiBaseInput, setApiBaseInput] = useState('');
+  const [apiBaseSaving, setApiBaseSaving] = useState(false);
+  const [apiBaseError, setApiBaseError] = useState('');
+  const [apiBaseNotice, setApiBaseNotice] = useState('');
   const pollTimerRef = useRef<number | null>(null);
 
   const trafficApi = window.electron.traffic;
@@ -306,6 +313,28 @@ const TrafficSettings: React.FC = () => {
       }
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const handleSaveApiBase = async (value: string) => {
+    if (apiBaseSaving) return;
+    setApiBaseSaving(true);
+    setApiBaseError('');
+    setApiBaseNotice('');
+    try {
+      const res = await trafficApi.setSettings({ apiBase: value });
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+        setApiBaseInput('');
+        setApiBaseNotice('Saved. New requests use this endpoint from now on.');
+        refreshBalance(true);
+      } else {
+        setApiBaseError(res.error || 'Failed to save the API base URL.');
+      }
+    } catch (error) {
+      setApiBaseError(error instanceof Error ? error.message : 'Failed to save the API base URL.');
+    } finally {
+      setApiBaseSaving(false);
     }
   };
 
@@ -826,6 +855,64 @@ const TrafficSettings: React.FC = () => {
             >
               {ledgerLoading ? 'Loading…' : 'Load more'}
             </button>
+          </div>
+        )}
+      </div>
+
+      {/* Advanced: assist-service endpoint override (integration testing) */}
+      <div className={cardClass}>
+        <button
+          type="button"
+          className="flex items-center justify-between w-full text-left"
+          onClick={() => setAdvancedOpen((open) => !open)}
+        >
+          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">Advanced</span>
+          <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {advancedOpen ? 'Hide' : 'Show'}
+          </span>
+        </button>
+        {advancedOpen && (
+          <div className="mt-3">
+            <span className={labelClass}>Assist service API base</span>
+            <p className={`${hintClass} mt-1`}>
+              Current: {settings?.apiBase ? settings.apiBase : 'production default (www.metaso.network)'}
+            </p>
+            <p className={`${hintClass} mt-1`}>
+              Points the app at a different assist-service instance (used for integration testing).
+            </p>
+            <div className="flex items-center gap-2 mt-2">
+              <input
+                type="text"
+                value={apiBaseInput}
+                onChange={(event) => {
+                  setApiBaseInput(event.target.value);
+                  setApiBaseError('');
+                  setApiBaseNotice('');
+                }}
+                placeholder="http://host:port or https://host/assist-open-api"
+                className="flex-1 min-w-0 rounded-lg dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
+              />
+              <button
+                type="button"
+                className={primaryButtonClass}
+                onClick={() => handleSaveApiBase(apiBaseInput)}
+                disabled={apiBaseSaving || !apiBaseInput.trim()}
+              >
+                {apiBaseSaving ? 'Saving…' : 'Save'}
+              </button>
+              {settings?.apiBase ? (
+                <button
+                  type="button"
+                  className={ghostButtonClass}
+                  onClick={() => handleSaveApiBase('')}
+                  disabled={apiBaseSaving}
+                >
+                  Reset
+                </button>
+              ) : null}
+            </div>
+            {apiBaseError && <p className="text-xs text-red-500 mt-2">{apiBaseError}</p>}
+            {apiBaseNotice && <p className="text-xs text-claude-accent mt-2">{apiBaseNotice}</p>}
           </div>
         )}
       </div>

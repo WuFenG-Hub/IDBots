@@ -35,7 +35,7 @@ import { OWNER_BINDING_PATH } from './ownerBindingService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 import { runMvcSponsorCreatePin, type CreatePinFeeAssistMetadata } from './mvcSponsorCreatePin';
-import { resolveSponsorTrafficAccount } from './trafficAccountService';
+import { getConfiguredTrafficApiBase, resolveSponsorTrafficAccount } from './trafficAccountService';
 import type { MvcSponsorTrafficAccount } from './mvcSponsorClient';
 import {
   getTrafficFallbackPolicy,
@@ -798,7 +798,7 @@ export async function createPin(
             mvcAddress: sponsorMvcAddress,
             feeRate: options?.feeRate ?? FALLBACK_FEE_RATES.mvc,
             fallbackPolicy: options?.sponsorFallbackPolicy ?? getTrafficFallbackPolicy(getMetaidCoreKvReader()),
-            baseUrl: options?.sponsorBaseUrl,
+            baseUrl: options?.sponsorBaseUrl ?? getConfiguredTrafficApiBase(),
             fetchImpl: options?.sponsorFetchImpl,
             trafficAccount: options?.sponsorTrafficAccount,
           },
