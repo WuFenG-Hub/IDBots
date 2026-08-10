@@ -67,6 +67,7 @@ tests/*
 !tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
+!tests/orchestratorSessionTitle.test.ts
 !tests/orderPromptBuilder.test.ts
 !tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 !tests/privateChatRatingPrompt.test.ts

@@ -6,6 +6,9 @@
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
+import { generateSessionTitle } from '../libs/coworkUtil';
+import { buildOrchestratorSessionTitle } from '../libs/orchestratorSessionTitle';
+import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
 /**
@@ -123,11 +126,35 @@ function extractFinalAssistantReply(
 }
 
 /**
+ * Resolve the session title for an orchestrator-delegated (non-group) worker
+ * session: localized prefix + LLM one-sentence summary of the delegation
+ * content, using the same summarization logic as regular Co-Worker session
+ * titles (generateSessionTitle — whose prompt already forces the title to be
+ * in the same language as the input, so a Chinese delegation yields a Chinese
+ * title and an English delegation an English one). On summarization failure
+ * the title falls back to a meaningful fragment of the delegation objective
+ * instead of an opaque timestamp.
+ */
+async function resolveOrchestratorSessionTitle(store: CoworkStore, userMessage: string): Promise<string> {
+  let summary: string | null = null;
+  try {
+    summary = await generateSessionTitle(userMessage);
+  } catch (error) {
+    if (isSqliteWasmBoundsError(error)) throw error;
+    console.warn(
+      '[Orchestrator] Session title summarization failed, using fallback title:',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  return buildOrchestratorSessionTitle(store.getAppLanguage(), summary, userMessage);
+}
+
+/**
  * Run one skill turn using CoworkRunner: create a new session,
  * startSession with autoApprove, wait for 'complete', extract last assistant
  * content, keep session for UI visibility, return reply text.
  */
-export function runOrchestratorSkillTurn(
+export async function runOrchestratorSkillTurn(
   runner: CoworkRunner,
   store: CoworkStore,
   params: RunOrchestratorSkillTurnParams
@@ -154,7 +181,7 @@ export function runOrchestratorSkillTurn(
   const normalizedGroupId = (groupId ?? '').trim();
   const sessionTitle = normalizedGroupId
     ? `Group-${normalizedGroupId.slice(0, 12)}-${now}`
-    : `[Orchestrator] skill-turn-${now}`;
+    : await resolveOrchestratorSessionTitle(store, userMessage);
   const externalConversationId = normalizedGroupId
     ? `metaweb-group:${normalizedGroupId}:${now}`
     : `orchestrator:${now}`;
