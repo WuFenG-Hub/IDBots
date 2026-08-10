@@ -324,6 +324,26 @@ export class SqliteStore {
       ON cowork_messages(session_id, created_at DESC);
     `);
 
+    // Per-message human feedback (thumbs up/down) on cowork messages — one row
+    // per rated message, read by the dream consolidation as the human's
+    // per-message alignment signal. CREATE TABLE IF NOT EXISTS is the
+    // idempotent first-run migration; existing rows are never touched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS message_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL,
+        rating TEXT NOT NULL CHECK(rating IN ('up','down')),
+        comment TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (message_id) REFERENCES cowork_messages(id) ON DELETE CASCADE
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id);
+    `);
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS cowork_config (
         key TEXT PRIMARY KEY,
