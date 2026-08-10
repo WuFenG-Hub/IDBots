@@ -9,6 +9,8 @@ import type {
   CoworkPermissionRequest,
   CoworkPermissionMode,
   CoworkSessionStatus,
+  MessageFeedback,
+  MessageFeedbackRating,
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../../types/cowork';
@@ -37,6 +39,8 @@ interface CoworkState {
   subagentTasks: Record<string, SubagentTaskState>;
   /** Whether the subagent panel is open. */
   isSubagentPanelOpen: boolean;
+  /** Per-message human feedback (thumbs up/down) keyed by message id. */
+  feedbackByMessageId: Record<string, MessageFeedback>;
 }
 
 const initialState: CoworkState = {
@@ -53,6 +57,7 @@ const initialState: CoworkState = {
   pendingPermissions: [],
   subagentTasks: {},
   isSubagentPanelOpen: false,
+  feedbackByMessageId: {},
   config: {
     workingDirectory: '',
     systemPrompt: '',
@@ -294,6 +299,21 @@ const coworkSlice = createSlice({
       markSessionUnread(state, sessionId);
     },
 
+    setMessageFeedback(state, action: PayloadAction<{ messageId: string; rating: MessageFeedbackRating; comment?: string }>) {
+      const { messageId, rating, comment } = action.payload;
+      state.feedbackByMessageId[messageId] = { rating, comment };
+    },
+
+    clearMessageFeedback(state, action: PayloadAction<string>) {
+      delete state.feedbackByMessageId[action.payload];
+    },
+
+    loadSessionFeedback(state, action: PayloadAction<Array<{ messageId: string; rating: MessageFeedbackRating; comment?: string }>>) {
+      for (const record of action.payload) {
+        state.feedbackByMessageId[record.messageId] = { rating: record.rating, comment: record.comment };
+      }
+    },
+
     setStreaming(state, action: PayloadAction<boolean>) {
       state.isStreaming = action.payload;
     },
@@ -436,6 +456,9 @@ export const {
   addMessage,
   prependMessages,
   updateMessageContent,
+  setMessageFeedback,
+  clearMessageFeedback,
+  loadSessionFeedback,
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,

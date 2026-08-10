@@ -9,6 +9,9 @@ import {
   addMessage,
   prependMessages,
   updateMessageContent,
+  setMessageFeedback as setMessageFeedbackAction,
+  clearMessageFeedback as clearMessageFeedbackAction,
+  loadSessionFeedback as loadSessionFeedbackAction,
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,
@@ -49,6 +52,7 @@ import type {
   CoworkSubmitInput,
   CoworkSubmitInputResult,
   CoworkMessage,
+  MessageFeedbackRating,
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../types/cowork';
@@ -797,6 +801,43 @@ class CoworkService {
       },
     }));
     return result.page.messages.length;
+  }
+
+  async setMessageFeedback(input: { messageId: string; rating: MessageFeedbackRating | null; comment?: string | null }): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setMessageFeedback) return false;
+
+    const result = await cowork.setMessageFeedback(input);
+    if (!result.success) {
+      console.error('Failed to set message feedback:', result.error);
+      return false;
+    }
+    if (result.feedback) {
+      store.dispatch(setMessageFeedbackAction({
+        messageId: result.feedback.messageId,
+        rating: result.feedback.rating,
+        comment: result.feedback.comment ?? undefined,
+      }));
+    } else {
+      store.dispatch(clearMessageFeedbackAction(input.messageId));
+    }
+    return true;
+  }
+
+  async loadSessionFeedback(sessionId: string): Promise<void> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.listSessionFeedback) return;
+
+    const result = await cowork.listSessionFeedback({ sessionId });
+    if (!result.success || !result.feedback) {
+      console.error('Failed to load session feedback:', result.error);
+      return;
+    }
+    store.dispatch(loadSessionFeedbackAction(result.feedback.map((record) => ({
+      messageId: record.messageId,
+      rating: record.rating,
+      comment: record.comment ?? undefined,
+    }))));
   }
 
   async getA2AConversationHistoryPage(input: {
