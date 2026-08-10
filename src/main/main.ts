@@ -5686,7 +5686,8 @@ const getTwinOrchestrationService = () => new TwinOrchestrationService({
     return workspace;
   },
   // Round-4 r6: persistent idempotency guard for [ORCH-NOTIFY] terminal-state
-  // messages to the Twin session (kv key orch_notify:<taskId>:<status>).
+  // messages to the Twin session (kv key orch_notify:<taskId>:<attemptId>:<status>,
+  // per attempt so retried failures still notify — 清单 #3).
   kv: getStore(),
 });
 

@@ -91,8 +91,11 @@ export interface TwinOrchestrationServiceDeps {
   insertCrossSessionUserMessage?: TwinOrchestrationInsertCrossSessionMessageFn;
   /**
    * Round-4 r6: persistent idempotency guard for terminal-state notifications
-   * (kv key `orch_notify:<taskId>:<status>`). Without it a process restart
-   * between a notification and the guard write could double-notify.
+   * (kv key `orch_notify:<taskId>:<attemptId>:<status>`). Without it a process
+   * restart between a notification and the guard write could double-notify.
+   * The key is per attempt — not per task — so a retried attempt that fails
+   * again still notifies the Twin (清单 #3: the old per-task key swallowed the
+   * ORCH-NOTIFY of every attempt after the first failure of the same task).
    */
   kv?: TwinOrchestrationKvStore;
 }
@@ -154,8 +157,11 @@ export class TwinOrchestrationService {
   /**
    * Round-4 r6: one short [ORCH-NOTIFY] status message into the Twin session
    * that delegated the task (task.sourceSessionId). Idempotent per terminal
-   * state via kv `orch_notify:<taskId>:<completed|failed>`; the fixed prefix
-   * + taskId lets the Twin's own context recognize it as a status update.
+   * state per attempt via kv `orch_notify:<taskId>:<attemptId>:<completed|failed>`;
+   * the fixed prefix + taskId lets the Twin's own context recognize it as a
+   * status update. The attempt-scoped key (清单 #3) keeps retried attempts
+   * notifiable: with the old task-scoped key, the second failure of the same
+   * task was silently swallowed by the first failure's guard.
    * Never throws into the orchestration flow: any failure (missing session,
    * A2A target, kv absence) is logged and skipped.
    */
@@ -170,7 +176,9 @@ export class TwinOrchestrationService {
       const targetSessionId = (task.sourceSessionId ?? '').trim();
       const workerSessionId = (attempt.workerSessionId ?? '').trim();
       if (!targetSessionId) return; // no Twin session to notify
-      const guardKey = `orch_notify:${task.id}:${outcome}`;
+      // One notify per attempt per terminal state. Per-attempt (not per-task)
+      // so a reassigned attempt that fails again still reaches the Twin.
+      const guardKey = `orch_notify:${task.id}:${attempt.id}:${outcome}`;
       if (this.deps.kv?.get<string>(guardKey) === '1') return; // one notify per terminal state
       if (!workerSessionId) return; // no worker session identity to attribute the message to
       const text = outcome === 'completed'

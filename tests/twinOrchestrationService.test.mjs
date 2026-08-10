@@ -218,8 +218,8 @@ test('r6: normal completion notifies the Twin with [ORCH-NOTIFY] 已完成 + tas
     assert.match(cross.inserted[0].message.content, /→ review，请验收/);
     assert.equal(cross.inserted[0].message.metadata.sourceChannel, 'idbots_cross_session');
     assert.equal(cross.inserted[0].message.metadata.sourceSessionId, 'worker-session-2');
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1', 'kv guard set');
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), undefined);
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed'), '1', 'kv guard set');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), undefined);
   } finally {
     sqliteStore.close();
   }
@@ -244,7 +244,7 @@ test('r6: direct failure notifies the Twin with 未完成 + reason', async () =>
     assert.equal(cross.inserted.length, 1, 'exactly one failure notification');
     assert.match(cross.inserted[0].message.content, /\[ORCH-NOTIFY\] worker Builder 未完成 task/);
     assert.match(cross.inserted[0].message.content, /worker crashed（failed）/);
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), '1', 'failure guard set');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), '1', 'failure guard set');
   } finally {
     sqliteStore.close();
   }
@@ -272,7 +272,7 @@ test('r6: late completion (onLateCompletion after watchdog) notifies once — kv
 
     assert.equal(cross.inserted.length, 1, 'completion notified exactly once despite two paths firing');
     assert.match(cross.inserted[0].message.content, /已完成/);
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed'), '1');
   } finally {
     sqliteStore.close();
   }
@@ -298,7 +298,7 @@ test('r6: late failure settlement (onLateTermination) notifies the Twin with the
     assert.equal(cross.inserted.length, 1, 'one failure notification');
     assert.match(cross.inserted[0].message.content, /未完成/);
     assert.match(cross.inserted[0].message.content, /worker died late（failed）/);
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), '1');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), '1');
   } finally {
     sqliteStore.close();
   }
@@ -319,7 +319,7 @@ test('r6: pre-set kv guard suppresses a second notification for the same termina
       workerMetabotId: 2, objective: 'silent complete', idempotencyKey: 'r6-pre-guarded',
     });
     // Simulate a duplicate terminal transition: the guard is already set.
-    kv.set('orch_notify:' + result.task.id + ':completed', '1');
+    kv.set('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed', '1');
     await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
     assert.equal(cross.inserted.length, 0, 'guard key already set → no duplicate notification');
   } finally {
@@ -349,6 +349,53 @@ test('r6: missing worker session identity skips the notification without throwin
   }
 });
 
+// ---------------------------------------------------------------------------
+// 清单 #3: ORCH-NOTIFY must reach the Twin for EVERY terminal transition of
+// EVERY attempt. The kv guard is per (task, attempt, outcome), so a reassigned
+// attempt that fails again notifies like the first one did — the old per-task
+// guard silently swallowed every notification after the first failure.
+// ---------------------------------------------------------------------------
+test('#3: a retried attempt that fails again still notifies the Twin (per-attempt kv guard)', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    // Both attempts use the harness's known worker session identity so the
+    // ORCH-NOTIFY insert succeeds.
+    await params.onSessionCreated('worker-session-2');
+    throw new Error('worker crashed');
+  }, {
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    // First attempt fails → first notification + guard for attempt 1.
+    const first = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fail once', idempotencyKey: '#3-first',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(first.attempt.id).status, 'failed'));
+    assert.equal(cross.inserted.length, 1, 'first failure notified');
+    assert.equal(kv.get('orch_notify:' + first.task.id + ':' + first.attempt.id + ':failed'), '1');
+    assert.equal(kv.get('orch_notify:' + first.task.id + ':failed'), undefined, 'no legacy per-task key');
+
+    // Chair reassigns the same step → second attempt fails → must notify again.
+    const second = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'fail again',
+      taskId: first.task.id,
+      stepId: first.step.id,
+      idempotencyKey: '#3-second',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(second.attempt.id).status, 'failed'));
+    assert.notEqual(second.attempt.id, first.attempt.id, 'reassign creates a fresh attempt');
+    assert.equal(cross.inserted.length, 2, 'second failure notified too — regression: old per-task guard swallowed it');
+    assert.match(cross.inserted[1].message.content, /\[ORCH-NOTIFY\]/);
+    assert.equal(kv.get('orch_notify:' + second.task.id + ':' + second.attempt.id + ':failed'), '1');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+
 
 // ---------------------------------------------------------------------------
 // P1-5b: the DEFAULT notification path must route through the host runner's
@@ -376,8 +423,8 @@ test('P1-5b: default ORCH-NOTIFY path calls the host runner insert+queue seam an
     assert.equal(defaultRunnerCalls[0].targetSessionId, 'twin-session');
     assert.match(defaultRunnerCalls[0].message, /\[ORCH-NOTIFY\] worker Builder 已完成 task/);
     assert.match(defaultRunnerCalls[0].message, /→ review，请验收/);
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1', 'guard set after successful insert');
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), undefined);
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed'), '1', 'guard set after successful insert');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), undefined);
   } finally {
     sqliteStore.close();
   }
@@ -425,7 +472,7 @@ test('P1-5b: default path preserves message + kv guard when the queue-to-continu
     assert.match(runnerCalls[0].message, /\[ORCH-NOTIFY\]/);
     // Insert succeeded → the idempotency guard still holds; the rejected
     // queue (best-effort activation) must not change the notify semantics.
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), '1', 'guard set even when queue rejected');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed'), '1', 'guard set even when queue rejected');
   } finally {
     sqliteStore.close();
   }
@@ -452,7 +499,7 @@ test('P1-5b: default path insert failure leaves the kv guard unset and never thr
       idempotencyKey: 'p1-5b-insert-failed',
     });
     await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), undefined, 'failed insert must not set the guard');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':completed'), undefined, 'failed insert must not set the guard');
   } finally {
     sqliteStore.close();
   }
@@ -604,7 +651,7 @@ test('P-A: late completion with empty reply + substantive session activity → s
     assert.match(attempt.error, /files=\[src\/a\.ts,src\/b\.ts\]/);
     assert.equal(cross.inserted.length, 1, 'late failure notified once');
     assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF_WITH_ACTIVITY/);
-    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), '1');
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':' + result.attempt.id + ':failed'), '1');
   } finally {
     sqliteStore.close();
   }
