@@ -29,6 +29,55 @@ function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }
 
+function escapeXmlText(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+const PROMPT_GUIDELINES_MAX = 300;
+
+/**
+ * Build the `## Local Projects` system-prompt section. Enabled projects carry
+ * their key facts inline (source directory + guidelines excerpt) so the bot
+ * knows them with zero tool calls — weak models otherwise skip the tool call
+ * and go clone from GitHub (observed failure). Frozen projects are named only,
+ * never with paths. Returns null when there is nothing configured.
+ */
+export function buildProjectsPromptSection(projects: ProjectRecord[]): string | null {
+  if (!projects.length) return null;
+  const enabled = projects.filter((project) => project.enabled);
+  const disabled = projects.filter((project) => !project.enabled);
+  const lines = [
+    '## Local Projects',
+    `This machine has ${projects.length} configured project(s). Key facts are inlined below — use them directly when the user mentions a project by name, and NEVER clone or fetch that project from a remote repository when a source directory is listed here. Call the \`project_query\` tool with the name for full guidelines and the resource list. Treat each project's guidelines as binding instructions for any work on that project.`,
+    '<available_projects>',
+    ...enabled.map((project) => {
+      const entry = ['<project>', `<name>${escapeXmlText(project.name)}</name>`];
+      if (project.sourceDir) {
+        entry.push(`<source_dir>${escapeXmlText(project.sourceDir)}</source_dir>`);
+      }
+      const guidelines = project.guidelines?.replace(/\s+/g, ' ').trim();
+      if (guidelines) {
+        entry.push(`<guidelines>${escapeXmlText(truncate(guidelines, PROMPT_GUIDELINES_MAX))}</guidelines>`);
+      }
+      entry.push(`<resources_count>${project.resources.length}</resources_count>`);
+      entry.push('</project>');
+      return entry.join('\n');
+    }),
+    '</available_projects>',
+  ];
+  if (disabled.length) {
+    lines.push(
+      `Frozen (disabled) projects — do NOT read, modify or write anything under their paths: ${disabled.map((project) => escapeXmlText(project.name)).join(', ')}`
+    );
+  }
+  return lines.join('\n');
+}
+
 interface StatResult {
   type: 'directory' | 'file';
   missing?: boolean;
