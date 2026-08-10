@@ -3092,3 +3092,80 @@ test('P1-4: worker who spoke before the watch armed is not flagged at ACK timeou
     h.cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// 清单 #10 P-A (groupTaskDaemon canonical path): a worker whose session did
+// real work but ended with an EMPTY reply must fail the canonical attempt with
+// WORKER_EMPTY_HANDOFF_WITH_ACTIVITY + summary, not an opaque bare code.
+// ---------------------------------------------------------------------------
+test('canonical: empty worker reply + substantive session activity → attempt fails with WORKER_EMPTY_HANDOFF_WITH_ACTIVITY', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    skillReply: '',
+  });
+  try {
+    // The fake skill turn now also persists real-looking activity into the
+    // task session (mimicking the real runner appending tool messages while
+    // the worker worked) and ends with an empty final reply.
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      const result = await baseRunSkillTurn(params);
+      h.coworkStore.addMessage(params.sessionId, { type: 'assistant', content: 'Plan: implement the fix.' });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_use', content: 'Using tool: Edit', metadata: { toolName: 'Edit', toolInput: { file_path: 'src/a.ts' }, toolUseId: 'tu-1' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_result', content: 'Edited src/a.ts', metadata: { toolUseId: 'tu-1', isError: false, toolResult: 'Edited src/a.ts' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_use', content: 'Using tool: Bash', metadata: { toolName: 'Bash', toolInput: { command: 'npm test' }, toolUseId: 'tu-2' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_result', content: '315/315 tests passed', metadata: { toolUseId: 'tu-2', isError: false, toolResult: '315/315 tests passed' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'assistant', content: 'Progress: core fix done.' });
+      return result; // replyText: ''
+    };
+
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'empty-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot implement the fix and report back',
+    });
+    await h.loop.runTick();
+
+    const canonicalId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    assert.ok(canonicalId, 'canonical orchestration task linked');
+    const canonical = h.orchestrationStore.getTask(canonicalId);
+    const step = h.orchestrationStore.listSteps(canonical.id)[0];
+    const attempt = h.orchestrationStore.listAttempts(step.id)[0];
+    assert.equal(attempt.status, 'failed');
+    assert.match(attempt.error, /^WORKER_EMPTY_HANDOFF_WITH_ACTIVITY:/);
+    assert.match(attempt.error, /files=\[src\/a\.ts\]/);
+    assert.match(attempt.error, /tests=\[.*315\/315/);
+    assert.match(attempt.error, /toolCalls=2/);
+    // the activity the summary describes matches what the session recorded
+    const sessionMessages = h.coworkStore.getSessionMessages(attempt.workerSessionId);
+    assert.equal(sessionMessages.filter((m) => m.type === 'tool_use').length, 2);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('canonical: empty worker reply + bare session keeps the plain WORKER_EMPTY_HANDOFF', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    skillReply: '',
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'bare-empty-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot quick question',
+    });
+    await h.loop.runTick();
+
+    const canonicalId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    const canonical = h.orchestrationStore.getTask(canonicalId);
+    const step = h.orchestrationStore.listSteps(canonical.id)[0];
+    const attempt = h.orchestrationStore.listAttempts(step.id)[0];
+    assert.equal(attempt.status, 'failed');
+    assert.equal(attempt.error, 'WORKER_EMPTY_HANDOFF');
+  } finally {
+    h.cleanup();
+  }
+});

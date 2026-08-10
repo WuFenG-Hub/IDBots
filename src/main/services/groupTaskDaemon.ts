@@ -28,6 +28,13 @@ import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
+import {
+  formatWorkerEmptyHandoffError,
+  hasSubstantiveActivity,
+  summarizeSessionActivity,
+  WORKER_EMPTY_HANDOFF,
+  type CoworkSessionActivityMessage,
+} from '../libs/coworkSessionActivity';
 import { buildGroupTaskSystemPrompt } from './groupTaskPrompts';
 import {
   ensureGroupTaskSession,
@@ -79,6 +86,27 @@ export const GROUP_TASK_DRIVER_KV_PREFIX = 'group_task_driver:';
 export const DEFAULT_DRIVER_GRACE_MS = 20_000;
 /** Default bounded wait for an upstream deliverable referenced by [DEPENDS_ON]. */
 const DEFAULT_DEPENDENCY_WAIT_MAX_MS = 15 * 60_000;
+
+/**
+ * 清单 #10 P-A: read a task session's messages for substantive-activity
+ * detection. Tolerant — store errors yield [] so the EMPTY_HANDOFF judgment
+ * degrades to the old behavior.
+ */
+function readTaskSessionActivityMessages(
+  coworkStore: CoworkStore,
+  sessionId: string,
+): CoworkSessionActivityMessage[] {
+  try {
+    const page = coworkStore.getSessionMessagesPage(sessionId, { limit: 100 });
+    return (page?.messages ?? []).map((message) => ({
+      type: message.type,
+      content: String(message.content ?? ''),
+      metadata: (message.metadata ?? null) as Record<string, unknown> | null,
+    }));
+  } catch {
+    return [];
+  }
+}
 
 /**
  * P1-4 / round-4: lines carrying the [DELIVERABLE] protocol tag — the ONLY
@@ -2518,7 +2546,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
     }
     if (!reply || isNonAnswerAssistantReply(reply)) {
-      failCanonicalAttempt('WORKER_EMPTY_HANDOFF');
+      // 清单 #10 P-A (groupTaskDaemon canonical path): an empty reply is only
+      // a bare EMPTY_HANDOFF when the session shows no substantive activity;
+      // otherwise fail the attempt with the WORKER_EMPTY_HANDOFF_WITH_ACTIVITY
+      // summary (commit/tests/files/toolCalls/errors/lastError) so the chair
+      // can recognize a false failure and reuse the produced work.
+      const activity = summarizeSessionActivity(
+        readTaskSessionActivityMessages(coworkStore, session.id),
+      );
+      failCanonicalAttempt(
+        hasSubstantiveActivity(activity)
+          ? formatWorkerEmptyHandoffError(activity)
+          : WORKER_EMPTY_HANDOFF,
+      );
       return;
     }
 
