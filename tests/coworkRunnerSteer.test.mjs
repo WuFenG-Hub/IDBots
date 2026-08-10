@@ -316,6 +316,7 @@ function createRetrySdk() {
   return {
     get queryCalls() { return queryCalls; },
     get activeInputConsumers() { return activeInputConsumers; },
+    get queryInputs() { return queryInputs; },
     createSdkMcpServer: (definition) => definition,
     tool: (name, description, schema, handler) => ({ name, description, schema, handler }),
     failFirstQuery() { failFirstQuery(); },
@@ -402,6 +403,11 @@ test('initial input and steer share one SDK query and settle in FIFO order', { s
   const second = runner.trySubmitSteer(sessionId, 'steer-2', 'keep the tests');
   assert.equal(first.accepted, true);
   assert.equal(second.accepted, true);
+  // Steers are held until the CLI reaches a turn boundary (the SDK 0.3.x
+  // native runtime drops user messages written while a tool is running).
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sdk.inputs.length, 1);
+  sdk.emitTerminalStream();
   await Promise.all([first.delivered, second.delivered]);
   await sdk.waitForInputCount(3);
   sdk.finishAllResults();
@@ -450,10 +456,11 @@ test('two top-level streaming end turns settle two delivered inputs before one r
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-terminal', 'apply this correction');
   assert.equal(steer.accepted, true);
+  // First top-level boundary flushes the buffered steer to the CLI.
+  sdk.emitTerminalStream();
   await steer.delivered;
   await sdk.waitForInputCount(2);
 
-  sdk.emitTerminalStream();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resolved, false);
   assert.deepEqual(settled, []);
@@ -484,6 +491,9 @@ test('late delivery acknowledgement waits for a new terminal assistant boundary'
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-late-ack', 'apply after acknowledgement');
   assert.equal(steer.accepted, true);
+  // Initial boundary flushes the buffered steer; the fake SDK then blocks the
+  // delivery ack and emits the steer's own boundary before it is acknowledged.
+  sdk.emitTerminalStream();
   await sdk.waitForInputCount(2);
   await new Promise((resolve) => setImmediate(resolve));
   const capabilityAtTerminalBoundary = runner.getSteerCapability(sessionId);
@@ -547,11 +557,11 @@ test('result after a top-level terminal assistant boundary does not settle anoth
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-after-result', 'wait for my own boundary');
   assert.equal(steer.accepted, true);
+  // Initial boundary flushes the buffered steer to the CLI.
+  sdk.emitTerminalStream();
   await steer.delivered;
   await sdk.waitForInputCount(2);
 
-  sdk.emitTerminalStream();
-  await new Promise((resolve) => setImmediate(resolve));
   sdk.emitResult('query-level-result');
   await new Promise((resolve) => setImmediate(resolve));
   const resolvedAfterResult = resolved;
@@ -578,11 +588,12 @@ test('result consumes one assistant credit before a later result-only steer sett
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-result-only', 'settle from result fallback');
   assert.equal(steer.accepted, true);
+  // Initial boundary flushes the buffered steer; the initial result consumes
+  // the assistant credit so the steer's own result-only boundary settles it.
+  sdk.emitTerminalStream();
   await steer.delivered;
   await sdk.waitForInputCount(2);
 
-  sdk.emitTerminalStream();
-  await new Promise((resolve) => setImmediate(resolve));
   sdk.emitResult('initial-result');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resolved, false);
@@ -598,7 +609,7 @@ test('result consumes one assistant credit before a later result-only steer sett
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
-test('steered turn whose interrupted predecessor emits no terminal events is settled by the stall watchdog', async () => {
+test('delivered steer with no further terminal boundary is settled by the stall watchdog', async () => {
   const { runner, sdk, store, sessionId } = createRunnerHarness({
     runnerOptions: { localTurnStallTimeoutMs: 40 },
   });
@@ -611,15 +622,12 @@ test('steered turn whose interrupted predecessor emits no terminal events is set
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-silent-interrupt', 'stop that and do this instead');
   assert.equal(steer.accepted, true);
+
+  // The initial turn reaches a boundary, flushing the buffered steer to the
+  // CLI, but the steered turn then emits no further terminal events.
+  sdk.emitTerminalStream();
   await steer.delivered;
   await sdk.waitForInputCount(2);
-
-  // The interrupted first turn ends silently: no end_turn, no result. The
-  // steered turn then produces exactly one boundary and one result, which
-  // settles only the initial input and leaves the delivered steer unsettled.
-  sdk.emitTerminalStream();
-  await new Promise((resolve) => setImmediate(resolve));
-  sdk.emitResult('steer-turn-result');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resolved, false);
   assert.deepEqual(settled, []);
@@ -650,10 +658,11 @@ test('high-level assistant end turn does not double count a streaming boundary',
   await sdk.waitForInputCount(1);
   const steer = runner.trySubmitSteer(sessionId, 'steer-dual-provider', 'avoid duplicate settlement');
   assert.equal(steer.accepted, true);
+  // Initial boundary flushes the buffered steer to the CLI.
+  sdk.emitTerminalStream();
   await steer.delivered;
   await sdk.waitForInputCount(2);
 
-  sdk.emitTerminalStream();
   sdk.emitTerminalAssistant();
   sdk.emitResult('initial-result');
   await new Promise((resolve) => setImmediate(resolve));
@@ -688,6 +697,9 @@ test('generic runtime failure rejects an unacknowledged steer and allows explici
     await sdk.waitForInputCount(1);
     const submissionId = '22222222-2222-4222-8222-222222222222';
     const submitted = controller.submit({ sessionId, submissionId, text: 'pending correction' });
+    // Initial boundary flushes the buffered steer; the delivery ack stays
+    // paused so the failure still arrives before the steer is acknowledged.
+    sdk.emitTerminalStream();
     await sdk.waitForInputCount(2);
     sdk.failQuery(new Error('generic provider failure before delivery ack'));
 
@@ -732,8 +744,12 @@ test('generic runtime failure marks a delivered but unsettled steer failed', asy
     const run = runner.startSession(sessionId, 'initial task');
     await sdk.waitForInputCount(1);
     const submissionId = '33333333-3333-4333-8333-333333333333';
-    const delivered = await controller.submit({ sessionId, submissionId, text: 'delivered correction' });
-    assert.equal(delivered.success, true);
+    const delivered = controller.submit({ sessionId, submissionId, text: 'delivered correction' });
+    // Initial boundary flushes the buffered steer; submit resolves once the
+    // SDK has delivered it to the CLI.
+    sdk.emitTerminalStream();
+    const deliveredResult = await delivered;
+    assert.equal(deliveredResult.success, true);
     assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'delivered');
 
     sdk.failQuery(new Error('generic provider failure after delivery'));
@@ -780,10 +796,13 @@ test('automatic retry fails pending steers and closes the superseded input chann
   await sdk.waitForQueryInputCount(0, 1);
   const accepted = runner.trySubmitSteer(sessionId, 'steer-before-retry', 'preserve tests');
   assert.equal(accepted.accepted, true);
-  await sdk.waitForQueryInputCount(0, 2);
-  await accepted.delivered;
+  // The steer stays buffered (the retry SDK never reaches a turn boundary);
+  // the stale-session retry fails it together with the superseded channel.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sdk.queryInputs[0].length, 1);
 
   sdk.failFirstQuery();
+  await assert.rejects(accepted.delivered, /retry/i);
   await secondLoaderEntered;
   const duringRetry = runner.trySubmitSteer(sessionId, 'steer-during-retry', 'too late');
   if (duringRetry.accepted) void duringRetry.delivered.catch(() => undefined);
@@ -915,6 +934,9 @@ test('Stop cancels in-flight and queued controller steers within a bounded time'
     const inFlightId = '44444444-4444-4444-8444-444444444444';
     const queuedId = '55555555-5555-4555-8555-555555555555';
     const inFlight = controller.submit({ sessionId, submissionId: inFlightId, text: 'in-flight correction' });
+    // Initial boundary flushes the buffered steer; the delivery ack stays
+    // paused so it remains in-flight when Stop arrives.
+    sdk.emitTerminalStream();
     await sdk.waitForInputCount(2);
     const queued = controller.submit({ sessionId, submissionId: queuedId, text: 'queued correction' });
 
@@ -965,8 +987,11 @@ test('Stop preserves a delivered but unsettled runner steer', async () => {
     const run = runner.startSession(sessionId, 'initial task');
     await sdk.waitForInputCount(1);
     const submissionId = '66666666-6666-4666-8666-666666666666';
-    const delivered = await controller.submit({ sessionId, submissionId, text: 'delivered correction' });
-    assert.equal(delivered.success, true);
+    const delivered = controller.submit({ sessionId, submissionId, text: 'delivered correction' });
+    // Initial boundary flushes the buffered steer to the CLI.
+    sdk.emitTerminalStream();
+    const deliveredResult = await delivered;
+    assert.equal(deliveredResult.success, true);
     assert.equal(store.getMessageById(sessionId, submissionId).metadata.steerStatus, 'delivered');
 
     runner.stopSession(sessionId);
