@@ -38,9 +38,12 @@ by `txSize`, recharge orders (mock payment), and usage-statistics APIs.
 - `[x]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
 - `[x]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
   account lookup, manual grants (backend-spec §10)
-- `[~]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
+- `[x]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
   (code review passed 2026-08-09; 2 must-fix items returned to backend; 10/13
   acceptance criteria need the integration env)
+  → done 2026-08-10: backend instance at http://47.76.58.120:7882; all 13
+  acceptance criteria verified live (§9.1-9.13) via `scripts/traffic-e2e/`;
+  §9.9 (enabled=false) covered by backend unit tests (config-side).
 
 **Acceptance**: against `backend-spec.md` acceptance criteria; an IDBots client
 can bind, recharge (mock), spend traffic on real on-chain pins, and read usage.
