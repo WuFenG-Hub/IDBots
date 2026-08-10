@@ -91,8 +91,11 @@ export interface TwinOrchestrationServiceDeps {
   insertCrossSessionUserMessage?: TwinOrchestrationInsertCrossSessionMessageFn;
   /**
    * Round-4 r6: persistent idempotency guard for terminal-state notifications
-   * (kv key `orch_notify:<taskId>:<status>`). Without it a process restart
-   * between a notification and the guard write could double-notify.
+   * (kv key `orch_notify:<taskId>:<attemptId>:<status>`). Without it a process
+   * restart between a notification and the guard write could double-notify.
+   * The key is per attempt — not per task — so a retried attempt that fails
+   * again still notifies the Twin (清单 #3: the old per-task key swallowed the
+   * ORCH-NOTIFY of every attempt after the first failure of the same task).
    */
   kv?: TwinOrchestrationKvStore;
 }
@@ -154,8 +157,11 @@ export class TwinOrchestrationService {
   /**
    * Round-4 r6: one short [ORCH-NOTIFY] status message into the Twin session
    * that delegated the task (task.sourceSessionId). Idempotent per terminal
-   * state via kv `orch_notify:<taskId>:<completed|failed>`; the fixed prefix
-   * + taskId lets the Twin's own context recognize it as a status update.
+   * state per attempt via kv `orch_notify:<taskId>:<attemptId>:<completed|failed>`;
+   * the fixed prefix + taskId lets the Twin's own context recognize it as a
+   * status update. The attempt-scoped key (清单 #3) keeps retried attempts
+   * notifiable: with the old task-scoped key, the second failure of the same
+   * task was silently swallowed by the first failure's guard.
    * Never throws into the orchestration flow: any failure (missing session,
    * A2A target, kv absence) is logged and skipped.
    */
@@ -170,7 +176,9 @@ export class TwinOrchestrationService {
       const targetSessionId = (task.sourceSessionId ?? '').trim();
       const workerSessionId = (attempt.workerSessionId ?? '').trim();
       if (!targetSessionId) return; // no Twin session to notify
-      const guardKey = `orch_notify:${task.id}:${outcome}`;
+      // One notify per attempt per terminal state. Per-attempt (not per-task)
+      // so a reassigned attempt that fails again still reaches the Twin.
+      const guardKey = `orch_notify:${task.id}:${attempt.id}:${outcome}`;
       if (this.deps.kv?.get<string>(guardKey) === '1') return; // one notify per terminal state
       if (!workerSessionId) return; // no worker session identity to attribute the message to
       const text = outcome === 'completed'
@@ -529,6 +537,10 @@ export class TwinOrchestrationService {
       workerMetabotId: worker.id,
       prompt: objective,
     });
+    // 清单 #12: a retry supersedes this step's earlier failed attempt — mark
+    // its worker session so the UI shows "already retried" instead of a bare
+    // error that reads like an abandoned task.
+    this.markSupersededAttemptSessions(step.id);
     void this.executeAttempt(task, step, attempt, worker, input);
     return {
       task: this.deps.orchestrationStore.getTask(task.id)!,
@@ -537,6 +549,40 @@ export class TwinOrchestrationService {
       replyText: null,
       reused: false,
     };
+  }
+
+  /**
+   * 清单 #12: mark the cowork sessions of a step's superseded failed attempts
+   * as 'error_retried' so the session list can distinguish "attempt failed,
+   * already retried" from "task failed and nobody is handling it". Only
+   * terminal 'failed' attempts with a worker session still in the plain
+   * 'error' state are touched; sessions that later got revived (running/
+   * completed) are left alone. Tolerant by design — store access problems are
+   * logged and never break the delegation flow.
+   */
+  private markSupersededAttemptSessions(stepId: string): void {
+    try {
+      const store = this.deps.coworkStore as unknown as {
+        getSession?: (sessionId: string) => { status?: string } | null;
+        updateSession?: (sessionId: string, updates: { status: string }) => void;
+      };
+      for (const previous of this.deps.orchestrationStore.listAttempts(stepId)) {
+        const workerSessionId = (previous.workerSessionId ?? '').trim();
+        if (!workerSessionId || previous.status !== 'failed') continue;
+        const session = store.getSession?.(workerSessionId);
+        if (!session || session.status !== 'error') continue;
+        store.updateSession?.(workerSessionId, { status: 'error_retried' });
+        console.log(
+          `[TwinOrchestration] Marked superseded attempt session ${workerSessionId} ` +
+          `(attempt ${previous.id}) as error_retried`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[TwinOrchestration] Superseded-attempt session marking failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   getTaskStatus(sourceSessionId: string, taskId: string): TwinTaskStatusResult {

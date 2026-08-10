@@ -1,5 +1,7 @@
 // Cowork session status
-export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// 'error_retried' (清单 #12): a failed orchestration attempt whose step was
+// already retried — historical failure, not an unattended task.
+export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried';
 
 /**
  * Permission mode controls how tool calls are gated in the cowork session.
