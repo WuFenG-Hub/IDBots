@@ -26,12 +26,15 @@ Module._load = function patchedLoad(request, ...rest) {
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { OpenTeamMembershipStore } = require('../dist-electron/main/openTeamMembershipStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
 const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
+  resolveDerivedAssignmentUpstream,
+  buildOpenTeamPlanningStatusBlock,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 
@@ -154,7 +157,7 @@ const createHarness = async (overrides = {}) => {
     getMetabotById: (id) => metabotStore.getMetabotById(id),
   });
 
-  const loop = createGroupTaskDaemonLoop({
+  const deps = {
     getStore: () => store,
     getGroupTaskStore: () => groupTaskStore,
     getMetabotStore: () => metabotStore,
@@ -241,7 +244,8 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.ackTimeoutMs != null
       ? { ackTimeoutMs: overrides.ackTimeoutMs }
       : {}),
-  });
+  };
+  const loop = createGroupTaskDaemonLoop(deps);
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
     const task = groupTaskStore.createTask({
@@ -259,7 +263,7 @@ const createHarness = async (overrides = {}) => {
   };
 
   return {
-    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop,
+    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop, deps,
     chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
     cleanup: () => store.close(),
   };
@@ -2888,6 +2892,202 @@ test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is s
     );
     assert.equal(h.sends.length, 0, 'chair auto replies are still suppressed inside the window');
     assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-4: [DEPENDS_ON] derived assignments inherit the upstream ACK (ack-seen)
+// ---------------------------------------------------------------------------
+
+/** Minimal sqlite-like mock: kv for ack-seen + a message-pin table. */
+const makeDerivedSqlite = ({ upstreamMessageId = null, ackSeen = false } = {}) => {
+  const kv = new Map();
+  if (ackSeen) kv.set('group_task_ack_seen:7:101', '1');
+  return {
+    get: (key) => (kv.has(key) ? kv.get(key) : null),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+    getDatabase: () => ({
+      exec: (sql, params) => {
+        if (upstreamMessageId != null && String(params?.[1]) === REAL_PINID_1) {
+          return [{ values: [[upstreamMessageId]] }];
+        }
+        return [];
+      },
+    }),
+  };
+};
+
+test('P1-4: resolveDerivedAssignmentUpstream returns null for non-derived messages', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  const sqlite = makeDerivedSqlite();
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: 'please do step 1' }, sqlite), null);
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: '[DEPENDS_ON: ' }, sqlite), null);
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: '' }, sqlite), null);
+});
+
+test('P1-4: a descriptive [DEPENDS_ON] (no resolvable pinid) gets a normal watch (falsy)', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: '[DEPENDS_ON: the upstream design]' }, makeDerivedSqlite()),
+    '',
+    'descriptive reference -> normal watch',
+  );
+  assert.equal(
+    resolveDerivedAssignmentUpstream(
+      task,
+      { content: `[DEPENDS_ON: ${REAL_PINID_1}]` },
+      makeDerivedSqlite({ upstreamMessageId: null }),
+    ),
+    '',
+    'pinid not found in this group -> normal watch',
+  );
+});
+
+test('P1-4: derived assignment inherits the upstream ACK only when ack-seen', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  const upstreamAcked = makeDerivedSqlite({ upstreamMessageId: 101, ackSeen: true });
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: `[DEPENDS_ON: ${REAL_PINID_1}]` }, upstreamAcked),
+    REAL_PINID_1,
+    'upstream ACKed -> inherits, no new watch',
+  );
+  const upstreamNotAcked = makeDerivedSqlite({ upstreamMessageId: 101, ackSeen: false });
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: `[DEPENDS_ON: ${REAL_PINID_1}]` }, upstreamNotAcked),
+    '',
+    'upstream message exists but not ACKed -> normal watch',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// P1-3: the chair planning directive carries pending invites / placeholders
+// ---------------------------------------------------------------------------
+
+test('P1-3: buildOpenTeamPlanningStatusBlock reports pending invites and placeholders', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false });
+    const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+    const groupTaskStore = h.groupTaskStore;
+
+    // Nothing to report -> empty block.
+    assert.equal(buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore), '');
+    assert.equal(buildOpenTeamPlanningStatusBlock(undefined, task, groupTaskStore), '', 'unwired store');
+
+    // A live pending invite must appear with the "do not re-decompose" hint.
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-invitee',
+      inviteeName: 'Fortune Bot',
+      invitePinId: 'pending-pin-1',
+    });
+    const block = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.match(block, /Fortune Bot/);
+    assert.match(block, /Do NOT plan a "search for a remote bot/);
+    assert.match(block, /already invited/);
+
+    // A placeholder member (no join pin, no pending invite) must appear too.
+    groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-stale-placeholder',
+      displayName: 'Stale Placeholder',
+      role: 'worker',
+      joinedPinId: null,
+    });
+    const block2 = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.match(block2, /Stale Placeholder/);
+    assert.match(block2, /join never confirmed/);
+
+    // A confirmed remote member (joined pin) is NOT a placeholder.
+    groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-confirmed-remote',
+      displayName: 'Confirmed Remote',
+      role: 'worker',
+      joinedPinId: 'joined-pin-x',
+    });
+    const block3 = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.doesNotMatch(block3, /Confirmed Remote/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-3: the planning directive embeds the OpenTeam block when invites are pending', async () => {
+  const h = await createHarness();
+  try {
+    const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+    // Wire the optional store getter (same shape main.ts passes).
+    h.loop = createGroupTaskDaemonLoop({
+      ...h.deps,
+      getOpenTeamMembershipStore: () => membershipStore,
+    });
+    const task = h.createTask([2], { activate: false }); // planning
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-invitee',
+      inviteeName: 'Fortune Bot',
+      invitePinId: 'pending-pin-2',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 1, 'chair posted exactly one plan');
+    const planningCall = h.chatCalls[0];
+    assert.match(planningCall.userMessage, /OpenTeam invites already sent/);
+    assert.match(planningCall.userMessage, /Fortune Bot/);
+    assert.match(planningCall.userMessage, /Do NOT plan a "search for a remote bot/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: worker who spoke before the watch armed is not flagged at ACK timeout (implicit ACK)', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Cursor edge: the worker's speech message has a LOWER id than the
+    // assignment, so it is processed first (no watch exists yet — clearPendingAck
+    // is a no-op), and the assignment re-arms the watch afterwards. The worker
+    // demonstrably spoke at the same chain second as the assignment, so the
+    // watchdog must treat it as engaged instead of flagging it as not ACKed.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-impack-s1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it, checking the sources',
+      chainTimestamp: Math.ceil(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-impack-a1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-impack-a1'])[0].values[0][0];
+    const watch = JSON.parse(h.store.get(`group_task_ack_pending:${task.id}:2`));
+    assert.equal(watch.messageId, assignId, 'watch armed by the assignment, not the speech');
+    h.sends.length = 0;
+
+    // Past the ACK timeout: the worker spoke at the assignment's chain second
+    // (implicit ACK) → ack-seen recorded, watch cleared, NO chair reminder.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no no-ACK reminder for an engaged worker');
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1', 'ack-seen recorded for the assignment');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined, 'pending watch cleared (kv delete)');
+
+    // Later ticks stay quiet — the reminder never fires.
+    h.state.nowMs = startMs + 400_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
   } finally {
     h.cleanup();
   }

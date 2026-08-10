@@ -915,6 +915,36 @@ export class SqliteStore {
     `);
     // Migration: add invitee_metaid to openteam_invites (legacy identity form for watchers).
     this.migrateOpenTeamInvitesMetaIdColumn();
+    // Migration: add joined_pin_id to openteam_invites (P1-2: the ACCEPT
+    // envelope's join pin is persisted here and copied into the member row).
+    this.migrateOpenTeamInvitesJoinedPinColumn();
+    // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
+    // bots received, regardless of outcome, so the invite is visible in the
+    // A2A session system / collab UI even before (or without) a join.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_guest_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        inviter_globalmetaid TEXT NOT NULL,
+        inviter_name TEXT,
+        task_title TEXT,
+        goal_summary TEXT,
+        required_skills TEXT,
+        invite_pin_id TEXT,
+        target_globalmetaid TEXT,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'invited'
+          CHECK(status IN ('invited','accepted','declined','skipped','expired')),
+        decline_reason TEXT,
+        joined_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        responded_at TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_openteam_guest_invites_group
+        ON openteam_guest_invites(group_id, id);
+    `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
         ON group_chat_messages(group_id, id);
@@ -2080,6 +2110,27 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamInvitesMetaIdColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: join pin of the ACCEPT envelope on openteam_invites (P1-2).
+   * The guest echoes its join pin in [OPENTEAM_ACCEPT]; persisting it here lets
+   * the inviter's watcher copy it into the remote member row when the join is
+   * confirmed, so "already joined" becomes readable from the member row.
+   * PRAGMA-guarded and idempotent; existing accepted rows keep NULL (their
+   * member rows keep NULL too until the next join).
+   */
+  private migrateOpenTeamInvitesJoinedPinColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('joined_pin_id')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN joined_pin_id TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesJoinedPinColumn:', error);
     }
   }
 

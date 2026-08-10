@@ -40,6 +40,8 @@ const {
   stopOpenTeamInviteWatchers,
   setOpenTeamServiceDeps,
   resetOpenTeamServiceDeps,
+  tokenizeOpenTeamQuery,
+  scoreOpenTeamCandidate,
 } = require('../dist-electron/main/services/openTeamService.js');
 
 Module._load = originalLoad;
@@ -146,7 +148,10 @@ const createHarness = async (overrides = {}) => {
     getMembershipStore: () => membershipStore,
     searchMetaIds: async (params) => {
       calls.search.push(params);
-      return { items: searchItems, nextCursor: null, hasMore: false };
+      const items = typeof overrides.searchItemsByCall === 'function'
+        ? overrides.searchItemsByCall(params, calls.search.length)
+        : searchItems;
+      return { items, nextCursor: null, hasMore: false };
     },
     getMetaIdDetail: async (identity) => {
       calls.detail.push(identity);
@@ -233,8 +238,11 @@ test('searchRemoteCandidates: filters offline + local bots, maps candidate field
   });
   try {
     const candidates = await searchRemoteCandidates({ keyword: 'translator', limit: 10 });
-    assert.equal(h.calls.search.length, 1);
+    // P1-5: keyword searches run TWO recalls — the exact path (keyword passed
+    // through) plus a loose path without the keyword (local fuzzy ranking).
+    assert.equal(h.calls.search.length, 2, 'exact path + P1-5 fuzzy recall');
     assert.equal(h.calls.search[0].keyword, 'translator');
+    assert.equal(h.calls.search[1].keyword, undefined, 'fuzzy recall drops the exact-match keyword');
     assert.equal(h.calls.search[0].hasChatPubkey, true, 'server-side pubkey pre-filter');
     assert.deepEqual(
       h.calls.presence[0].sort(),
@@ -316,10 +324,62 @@ test('inviteRemoteBot: rejects an invitee who is already a member', async () => 
       globalmetaid: REMOTE_GMID,
       displayName: 'Remote Bot',
       role: 'worker',
+      // P1-1/P1-2: a CONFIRMED member carries the join pin — that is what blocks
+      // a re-invite. A bare placeholder row (joinedPinId null) must not.
+      joinedPinId: 'joined-pin-confirmed',
     });
     await assert.rejects(
       () => inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID }),
       /already a member/,
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: P1-1 releases a placeholder member whose join never confirmed', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    // Placeholder row created by the join watcher without a join pin — the
+    // invite expired (or the join never settled). No invite is pending, so the
+    // retry is released and the invite goes out again.
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+      joinedPinId: null,
+    });
+    const result = await inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID });
+    assert.equal(result.status, 'pending');
+    assert.ok(result.invitePinId, 'a re-invite pin must be produced');
+    assert.equal(h.calls.send.length, 1, 'the retry must actually send a fresh invite');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('inviteRemoteBot: P1-1 placeholder + live pending invite still blocks the duplicate', async () => {
+  const h = await createHarness({ presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 5 } } });
+  try {
+    h.groupTaskStore.addMember({
+      taskId: h.task.id,
+      metabotId: null,
+      globalmetaid: REMOTE_GMID,
+      displayName: 'Remote Bot',
+      role: 'worker',
+      joinedPinId: null,
+    });
+    h.membershipStore.createInvite({
+      taskId: h.task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: REMOTE_GMID,
+      invitePinId: 'pending-pin-live',
+    });
+    await assert.rejects(
+      () => inviteRemoteBot({ taskId: h.task.id, inviteeGlobalMetaId: REMOTE_GMID }),
+      /a pending invite for .* already exists/,
     );
   } finally {
     h.cleanup();
@@ -590,8 +650,10 @@ test('watcher: accepted + join confirmed -> remote member row, invite stays acce
       inviteeGlobalMetaId: REMOTE_GMID,
       inviteeName: 'Remote Bot',
     });
-    // Simulates handleIncomingOpenTeamResponse landing the guest's ACCEPT.
+    // Simulates handleIncomingOpenTeamResponse landing the guest's ACCEPT,
+    // including the P1-2 join-pin echo persisted on the invite row.
     h.membershipStore.updateInviteStatus({ invitePinId }, 'accepted');
+    h.membershipStore.updateInviteJoinedPinId(invitePinId, 'joined-pin-abc');
 
     await waitFor(() => h.groupTaskStore.isMember(h.task.id, null, REMOTE_GMID));
     const member = h.groupTaskStore
@@ -600,6 +662,9 @@ test('watcher: accepted + join confirmed -> remote member row, invite stays acce
     assert.ok(member);
     assert.equal(member.role, 'worker');
     assert.equal(member.displayName, 'Remote Bot');
+    // P1-2: the member row carries the join pin, so "already joined" is
+    // readable from the member itself (and blocks duplicate invites).
+    assert.equal(member.joinedPinId, 'joined-pin-abc');
 
     assert.equal(h.calls.wait.length, 1);
     assert.equal(h.calls.wait[0].groupId, GROUP_ID);
@@ -1091,6 +1156,56 @@ test('resume: accepted + member row already present -> no watcher, no duplicate 
     assert.equal(members.length, 1, 'still exactly one remote member row');
     const after = h.membershipStore.getInviteByPinId(invite.invitePinId);
     assert.equal(after.status, 'accepted', 'invite row untouched');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-5: fuzzy recall (bot full name + skill-description matching)
+// ---------------------------------------------------------------------------
+
+test('P1-5: tokenizeOpenTeamQuery splits separators and adds CJK bigrams', () => {
+  const tokens = tokenizeOpenTeamQuery('占卜塔罗 fortune-teller');
+  assert.ok(tokens.includes('占卜塔罗'), 'CJK run kept whole');
+  assert.ok(tokens.includes('占卜') && tokens.includes('卜塔') && tokens.includes('塔罗'), 'CJK bigrams added');
+  assert.ok(tokens.includes('fortune-teller'), 'ASCII token kept');
+  assert.ok(!tokenizeOpenTeamQuery('  ').length, 'blank query yields no tokens');
+});
+
+test('P1-5: scoreOpenTeamCandidate weighs name > chatSkills > bio and misses at 0', () => {
+  const item = {
+    name: 'Fortune Teller Master',
+    bio: 'Reads tarot cards and tells fortunes for the group',
+    chatSkills: ['tarot', 'divination'],
+  };
+  const nameScore = scoreOpenTeamCandidate(item, tokenizeOpenTeamQuery('fortune'));
+  const skillScore = scoreOpenTeamCandidate(item, tokenizeOpenTeamQuery('divination'));
+  const bioScore = scoreOpenTeamCandidate(item, tokenizeOpenTeamQuery('tarot cards'));
+  assert.ok(nameScore > skillScore, 'name hits outrank skill hits');
+  assert.ok(skillScore > 0 && bioScore > 0);
+  assert.equal(scoreOpenTeamCandidate(item, tokenizeOpenTeamQuery('quantum physics')), 0, 'no match -> excluded');
+});
+
+test('P1-5: fuzzy path recalls candidates the exact path missed (bio match)', async () => {
+  const h = await createHarness({
+    searchItems: [],
+    searchItemsByCall: (params, callIndex) => {
+      // Call 1 = exact path (keyword passed) -> nothing matches server-side.
+      // Call 2 = fuzzy recall (no keyword) -> the full candidate page.
+      return callIndex === 1 ? [] : [makeSearchItem(REMOTE_GMID, { name: 'FTM Bot', bio: '占卜塔罗牌大师', chatSkills: ['tarot'] })];
+    },
+    presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 7 } },
+  });
+  try {
+    const candidates = await searchRemoteCandidates({ keyword: '占卜塔罗', limit: 10 });
+    assert.ok(
+      candidates.some((c) => c.globalMetaId === REMOTE_GMID),
+      'bio-match candidate recalled by the fuzzy path (CJK bigram overlap)',
+    );
+    assert.equal(h.calls.search.length, 2, 'exact path + P1-5 fuzzy recall');
+    assert.equal(h.calls.search[1].keyword, undefined, 'fuzzy recall drops the exact keyword');
+    assert.equal(candidates[0].name, 'FTM Bot');
   } finally {
     h.cleanup();
   }

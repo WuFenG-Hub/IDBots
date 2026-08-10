@@ -26,6 +26,7 @@ Module._load = function patchedLoad(request, ...rest) {
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { OpenTeamMembershipStore } = require('../dist-electron/main/openTeamMembershipStore.js');
 const groupTaskService = require('../dist-electron/main/services/groupTaskService.js');
 
 Module._load = originalLoad;
@@ -42,10 +43,12 @@ const {
   ensureOwnerJoinedGroup,
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOpenTeamMembershipStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
+  deriveGroupTaskMemberInviteStatus,
 } = groupTaskService;
 
 const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
@@ -821,6 +824,90 @@ test('P0-8: recordGroupTaskIntegrityEvent persists + show returns integrityEvent
     const shown = await getGroupTask(detail.id, { view: 'summary' });
     assert.equal(shown.integrityEvents.length, 1);
   } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-1: member inviteStatus readout (distinguishable invite states)
+// ---------------------------------------------------------------------------
+
+test('P1-1: deriveGroupTaskMemberInviteStatus covers every state', () => {
+  const derive = (overrides) => deriveGroupTaskMemberInviteStatus({
+    metabotId: null,
+    memberJoinedPinId: null,
+    inviteStatus: null,
+    inviteJoinedPinId: null,
+    ...overrides,
+  });
+  assert.equal(derive({}), 'none', 'no invite row / unknown');
+  assert.equal(derive({ metabotId: 7 }), 'none', 'local member never has invites');
+  assert.equal(derive({ inviteStatus: 'pending' }), 'invite_pending');
+  assert.equal(derive({ inviteStatus: 'accepted' }), 'invite_accepted');
+  assert.equal(derive({ inviteStatus: 'declined' }), 'invite_declined');
+  assert.equal(derive({ inviteStatus: 'expired' }), 'invite_expired');
+  assert.equal(derive({ memberJoinedPinId: 'pin-x' }), 'joined', 'member row join pin wins');
+  assert.equal(derive({ inviteJoinedPinId: 'pin-y' }), 'joined', 'invite-row join pin is the fallback');
+});
+
+test('P1-1: getGroupTask exposes inviteStatus per remote member', async () => {
+  const h = await createHarness();
+  try {
+    const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+    setGroupTaskServiceOpenTeamMembershipStoreGetter(() => membershipStore);
+    const created = await createGroupTask({
+      title: 'Invite status task',
+      goal: 'Check the invite status readout',
+      memberMetabotIds: [2],
+      createdBy: 'twinbot',
+    });
+    const taskId = created.id;
+
+    // A remote placeholder member with a LIVE pending invite.
+    h.groupTaskStore.addMember({
+      taskId,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Bot',
+      role: 'worker',
+    });
+    membershipStore.createInvite({
+      taskId,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-fortune',
+      inviteeName: 'Fortune Bot',
+      invitePinId: 'pending-pin-1',
+    });
+
+    let detail = await getGroupTask(taskId);
+    const fortune = detail.members.find((m) => m.globalmetaid === 'gmid-remote-fortune');
+    assert.equal(fortune.inviteStatus, 'invite_pending');
+    const local = detail.members.find((m) => m.globalmetaid === 'gmid-coder');
+    assert.equal(local.inviteStatus, 'none', 'local members always none');
+
+    // ACCEPT lands -> invite_accepted; join pin on the member row -> joined.
+    membershipStore.updateInviteStatus({ invitePinId: 'pending-pin-1' }, 'accepted');
+    detail = await getGroupTask(taskId);
+    assert.equal(
+      detail.members.find((m) => m.globalmetaid === 'gmid-remote-fortune').inviteStatus,
+      'invite_accepted',
+    );
+    h.groupTaskStore.addMember({
+      taskId,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Bot',
+      role: 'worker',
+      joinedPinId: 'joined-pin-1',
+    });
+    detail = await getGroupTask(taskId);
+    assert.equal(
+      detail.members.find((m) => m.globalmetaid === 'gmid-remote-fortune').inviteStatus,
+      'joined',
+      'member-row join pin flips the readout to joined',
+    );
+  } finally {
+    setGroupTaskServiceOpenTeamMembershipStoreGetter(null);
     h.cleanup();
   }
 });

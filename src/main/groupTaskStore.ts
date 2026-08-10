@@ -819,6 +819,22 @@ export class GroupTaskStore {
         }
         return rowToGroupTaskMember(revived);
       }
+      if (isRemote && existing.joined_pin_id == null && input.joinedPinId) {
+        // P1-2: the join watcher previously created a placeholder row (or an
+        // indexer-created row predated the ACCEPT); now that the join pin is
+        // known, backfill it on the existing row so "already joined" is
+        // readable from the member.
+        this.db.run(
+          `UPDATE group_task_members
+           SET joined_pin_id = ?,
+               display_name = COALESCE(?, display_name)
+           WHERE id = ?`,
+          [input.joinedPinId, input.displayName ?? null, existing.id],
+        );
+        this.saveDb();
+        const updated = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [existing.id]);
+        if (updated) return rowToGroupTaskMember(updated);
+      }
       return rowToGroupTaskMember(existing);
     }
 
@@ -864,6 +880,22 @@ export class GroupTaskStore {
           [taskId],
         );
     return rows.map(rowToGroupTaskMember);
+  }
+
+  /**
+   * P1-1: active remote member row for one GlobalMetaID, or null. A remote row
+   * with joined_pin_id NULL is a PLACEHOLDER ("invite sent, join not yet
+   * confirmed") — invite_remote retries key off this to decide whether the
+   * member actually blocks a re-invite.
+   */
+  getActiveRemoteMember(taskId: number, globalmetaid?: string | null): GroupTaskMember | null {
+    const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+    if (!gmid) return null;
+    const row = this.getOne<GroupTaskMemberRow>(
+      `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+      [taskId, gmid],
+    );
+    return row ? rowToGroupTaskMember(row) : null;
   }
 
   /**

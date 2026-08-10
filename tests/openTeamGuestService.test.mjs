@@ -63,6 +63,9 @@ const makeDeps = (options = {}) => {
     getInviteByPinId: [],
     updateInviteStatus: [],
     groupInfo: [],
+    createGuestInvite: [],
+    updateGuestInviteStatus: [],
+    updateInviteJoinedPinId: [],
   };
   const settings = options.settings ?? {};
   const membership = options.membership ?? null;
@@ -94,6 +97,21 @@ const makeDeps = (options = {}) => {
       updateInviteStatus: (identity, status, declineReason) => {
         calls.updateInviteStatus.push([identity, status, declineReason ?? null]);
         return inviteRow ? { ...inviteRow, status, declineReason: declineReason ?? null } : null;
+      },
+      // P0-1: guest-side invite history hooks (recorded on entry, finalized by
+      // outcome) — recorded for assertions, never fail the handling path.
+      createGuestInvite: (input) => {
+        calls.createGuestInvite.push(input);
+        return { id: 1, status: 'invited', requiredSkills: [], createdAt: '2026-08-10 00:00:00', ...input };
+      },
+      updateGuestInviteStatus: (invitePinId, status, options) => {
+        calls.updateGuestInviteStatus.push([invitePinId, status, options ?? null]);
+        return { id: 1, invitePinId, status, ...options };
+      },
+      // P1-2: ACCEPT echoes the join pin — persist it on the invite row.
+      updateInviteJoinedPinId: (invitePinId, joinedPinId) => {
+        calls.updateInviteJoinedPinId.push([invitePinId, joinedPinId]);
+        return inviteRow ? { ...inviteRow, status: 'accepted', joinedPinId } : null;
       },
     }),
     joinGroupChat: async (metabotId, groupId) => {
@@ -152,6 +170,18 @@ test('happy path: joins, records membership, catches cursor up, replies ACCEPT',
     inviteId: INVITE_ID,
     joinedPinId: JOINED_PIN_ID,
   });
+
+  // P0-1: the invite entered the guest-side history on entry and was finalized
+  // as accepted with the join pin.
+  assert.equal(calls.createGuestInvite.length, 1, 'invite recorded in guest history on entry');
+  const recorded = calls.createGuestInvite[0];
+  assert.equal(recorded.groupId, GROUP_ID);
+  assert.equal(recorded.inviterGlobalmetaid, 'gmid-inviter');
+  assert.equal(recorded.inviterName, 'Twin Bot');
+  assert.equal(recorded.taskTitle, 'External Task');
+  assert.equal(recorded.invitePinId, INVITE_ID);
+  assert.equal(recorded.targetGlobalmetaid, 'gmid-guest');
+  assert.deepEqual(calls.updateGuestInviteStatus, [[INVITE_ID, 'accepted', { joinedPinId: JOINED_PIN_ID }]]);
 });
 
 test('declines when the metabot is disabled', async () => {
@@ -171,6 +201,10 @@ test('declines when the metabot is disabled', async () => {
   assert.equal(envelope.inviteId, INVITE_ID);
   assert.match(envelope.reason, /bot_disabled/);
   assert.equal(calls.send[0].replyPin, INVITE_ID);
+  // P0-1: history row exists even for a declined invite, finalized as declined.
+  assert.equal(calls.createGuestInvite.length, 1, 'invite recorded before the decline decision');
+  assert.equal(calls.updateGuestInviteStatus[0][1], 'declined');
+  assert.match(calls.updateGuestInviteStatus[0][2].reason, /bot_disabled/);
 });
 
 test('declines when the allowRemoteCollab switch is off', async () => {
@@ -391,6 +425,12 @@ test('duplicate inviteId redelivery is skipped silently (idempotent)', async () 
   assert.equal(second.replyPinId, null);
   assert.equal(calls.join.length, 1, 'no second join');
   assert.equal(calls.send.length, 1, 'no second reply');
+  // P0-1: the duplicate is finalized as skipped in the guest history.
+  assert.equal(calls.createGuestInvite.length, 2, 'each delivery records (idempotent by pin)');
+  assert.deepEqual(
+    calls.updateGuestInviteStatus.at(-1),
+    [INVITE_ID, 'skipped', { reason: 'duplicate_invite' }],
+  );
 });
 
 test('redelivery of an invite whose membership row carries invite_pin_id is skipped silently', async () => {

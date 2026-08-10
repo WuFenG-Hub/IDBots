@@ -20,6 +20,10 @@ import type {
   GroupTaskMember,
   GroupTaskDeliverable,
 } from '../groupTaskStore';
+import type {
+  OpenTeamInvite,
+  OpenTeamMembershipStore,
+} from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
 import { normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
@@ -114,6 +118,14 @@ const DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS = 10 * 60_000;
 export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
+/**
+ * P1-4: ack-seen marker — the worker ACKed (or implicitly engaged on) an
+ * assignment message, recorded as `group_task_ack_seen:<taskId>:<messageId>`.
+ * Derived [DEPENDS_ON] assignments inherit the upstream ack-seen so the ACK
+ * watchdog never starts a fresh 3-min watch on an already-engaged chain, and
+ * a re-processed assignment message (cursor retry) never re-arms the watch.
+ */
+const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
@@ -637,6 +649,13 @@ export interface GroupTaskDaemonDeps {
   getGroupTaskStore: () => GroupTaskStore;
   getMetabotStore: () => MetabotStore;
   getCoworkStore: () => CoworkStore;
+  /**
+   * P1-3: OpenTeam invite store. When wired, the chair planning directive
+   * carries the task's pending invites / unconfirmed remote placeholders so
+   * the plan never re-decomposes "search + invite" as a subtask after the
+   * chair already invited someone. Unwired = the directive stays as before.
+   */
+  getOpenTeamMembershipStore?: () => OpenTeamMembershipStore;
   orchestrationBridge?: GroupTaskOrchestrationBridge;
   performChat: GroupTaskDaemonPerformChatFn;
   postGroupTaskMessage: GroupTaskDaemonSendFn;
@@ -782,6 +801,111 @@ function toDaemonMessage(row: GroupChatMessageRow): GroupTaskDaemonMessage {
     replyPin: row.reply_pin ?? null,
     senderSuspect: Number(row.sender_suspect ?? 0) === 1,
   };
+}
+
+/**
+ * P1-4: resolve a chair message's [DEPENDS_ON] reference to the upstream
+ * assignment the worker ACKed. Returns:
+ * - null: the message is NOT a derived assignment (no [DEPENDS_ON] tag);
+ * - '' (falsy): derived assignment whose upstream cannot be verified as ACKed
+ *   (descriptive reference, pinid not found in this group's messages, or the
+ *   upstream message has no ack-seen) → the caller starts a normal watch;
+ * - a pinid: derived assignment whose upstream message IS ack-seen → the
+ *   caller inherits the upstream ACK and starts no new watch.
+ */
+export function resolveDerivedAssignmentUpstream(
+  task: GroupTask,
+  message: { content: string | null },
+  sqlite: GroupTaskDaemonSqliteStoreLike,
+): string | null {
+  const content = (message.content ?? '').trim();
+  const match = DEPENDS_ON_TAG.exec(content);
+  if (!match) return null;
+  const token = match[1].trim();
+  const tokenPin = token.match(/^[0-9a-f]{64}i0$/i)?.[0]?.toLowerCase() ?? null;
+  if (!tokenPin || !task.groupId) return '';
+  let upstreamMessageId: number | null = null;
+  try {
+    const db = sqlite.getDatabase();
+    const result = db.exec(
+      'SELECT id FROM group_chat_messages WHERE group_id = ? AND pin_id = ? LIMIT 1',
+      [task.groupId, tokenPin],
+    );
+    const rawId = result[0]?.values?.[0]?.[0];
+    upstreamMessageId = typeof rawId === 'number' ? rawId : Number(rawId);
+    if (!Number.isInteger(upstreamMessageId) || (upstreamMessageId as number) <= 0) {
+      upstreamMessageId = null;
+    }
+  } catch {
+    return '';
+  }
+  if (upstreamMessageId == null) return '';
+  const seen = sqlite.get<string>(`${ACK_SEEN_PREFIX}${task.id}:${upstreamMessageId}`);
+  return seen === '1' ? tokenPin : '';
+}
+
+/**
+ * P1-3: build the OpenTeam status block for the chair planning directive.
+ * Collects the task's LIVE pending invites (openteam_invites.status='pending')
+ * plus remote placeholder members whose join never confirmed (member row with
+ * joined_pin_id NULL, no invite pending — the invite expired or the join
+ * watcher gave up). The block tells the chair NOT to decompose
+ * "search + invite a remote bot" as a subtask: the invitation is already out
+ * (or already failed), and re-inviting would hit the server's duplicate guard.
+ * Empty string when there is nothing to report (or the store is unwired).
+ */
+export function buildOpenTeamPlanningStatusBlock(
+  membershipStore: OpenTeamMembershipStore | undefined,
+  task: GroupTask,
+  groupTaskStore: GroupTaskStore,
+): string {
+  if (!membershipStore || !task.groupId) return '';
+  const pending = membershipStore
+    .listPendingInvites()
+    .filter((invite) => invite.taskId === task.id);
+  const inviteeGmids = new Set(
+    pending.map((invite) => invite.inviteeGlobalmetaid.trim().toLowerCase()),
+  );
+  const placeholders = groupTaskStore
+    .listMembers(task.id)
+    .filter(
+      (member) =>
+        member.metabotId == null
+        && !member.joinedPinId
+        && !inviteeGmids.has((member.globalmetaid ?? '').trim().toLowerCase()),
+    );
+  if (pending.length === 0 && placeholders.length === 0) return '';
+
+  const lines: string[] = [
+    '[OpenTeam invites already sent — host facts, NOT suggestions]',
+  ];
+  if (pending.length > 0) {
+    lines.push(
+      'The chair has already invited remote bot(s) below; they have NOT joined yet ' +
+      '(invites are pending, waiting for the guest machine to accept and join on-chain).',
+    );
+    for (const invite of pending) {
+      const label = invite.inviteeName?.trim() || invite.inviteeGlobalmetaid;
+      lines.push(
+        `- ${label} (${invite.inviteeGlobalmetaid}): pending since ${invite.createdAt ?? 'unknown'}`,
+      );
+    }
+    lines.push(
+      'Do NOT plan a "search for a remote bot / invite a remote bot" subtask for these ' +
+      '— the invite is already out and a duplicate invite is rejected by the server. ' +
+      'Plan their work as post-join assignments (only if they join), or proceed with ' +
+      'the current roster without them.',
+    );
+  }
+  for (const member of placeholders) {
+    const label = member.displayName?.trim() || member.globalmetaid;
+    lines.push(
+      `- ${label} (${member.globalmetaid}): remote member placeholder, join never confirmed ` +
+      '(previous invite expired or timed out) — do not plan work for it as if joined; ' +
+      're-invite it yourself if you want it, else drop it from the plan.',
+    );
+  }
+  return lines.join('\n');
 }
 
 export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskDaemonLoop {
@@ -2066,6 +2190,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
    * group log (P1-5: the planning turn fired before any member message existed).
    */
   const buildPlanningDirective = (db: Database, task: GroupTask, promptMembers: DaemonPromptMember[]): string => {
+    // P1-3: the chair's own manual `invite_remote` calls create pending invites
+    // and/or unconfirmed remote placeholder members BEFORE the planning turn
+    // fires. The plan must know: re-decomposing "search + invite a remote bot"
+    // as a subtask would make the assigned worker re-invite someone who is
+    // already being invited (server rejects duplicates) — useless work. The
+    // directive states the pending invites and tells the chair to plan around
+    // them (wait for the join, or continue with the current roster).
+    const openTeamStatusBlock = buildOpenTeamPlanningStatusBlock(
+      deps.getOpenTeamMembershipStore?.(),
+      task,
+      deps.getGroupTaskStore(),
+    );
     const recent = queryRecentMessages(db, task.groupId!, contextMessageCount);
     const logLines = recent.map((row) => {
       const message = toDaemonMessage(row);
@@ -2095,6 +2231,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '',
       'Full member roster (assign only to these members, by exact name):',
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
+      ...(openTeamStatusBlock ? ['', openTeamStatusBlock] : []),
       '',
       `[Group Task #${task.id} "${task.title}" — recent group log (last ${contextMessageCount} messages)]`,
       ...(logLines.length > 0 ? logLines : ['(no messages yet)']),
@@ -2563,7 +2700,40 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (!bot || !isMentioned(message, bot)) continue;
         const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
         const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+        // P1-4: an assignment message this worker already ACKed must never
+        // re-arm the watch — a cursor retry / duplicate processing of the
+        // same message would otherwise re-start the 3-min no-ACK watch on an
+        // already-engaged worker and misreport it to the chair.
+        if (sqlite.get<string>(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`) === '1') {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: assignment to ${member.name ?? member.metabotId} ` +
+            `(message #${message.id}) already ACKed (ack-seen); no new ACK watch`,
+          );
+          continue;
+        }
         if (sqlite.get<string>(pendingKey) == null && sqlite.get<string>(remindedKey) !== '1') {
+          // P1-4: a DERIVED assignment (chair tags [DEPENDS_ON]) inherits the
+          // upstream ACK: the worker already engaged on the chain the derived
+          // step continues, so a fresh no-ACK watch would misreport a worker
+          // who is demonstrably working. Inherit only when the referenced
+          // upstream pinid resolves to a message this worker ACKed.
+          const derived = resolveDerivedAssignmentUpstream(task, message, sqlite);
+          if (derived !== null) {
+            if (derived) {
+              sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${message.id}`, '1');
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
+                `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
+              );
+            } else {
+              sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
+                `(message #${message.id}) upstream not ACKed; waiting for [WORKING] ACK`,
+              );
+            }
+            continue;
+          }
           sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: assignment to ${member.name ?? member.metabotId} (message #${message.id}); waiting for [WORKING] ACK`,
@@ -2580,11 +2750,28 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
     const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+    // P1-4: clearing a pending watch records ack-seen for the assignment
+    // message, so derived [DEPENDS_ON] assignments and re-processed messages
+    // inherit the ACK instead of re-arming the no-ACK watch.
+    const clearPendingAck = (): void => {
+      const raw = sqlite.get<string>(pendingKey);
+      if (raw != null) {
+        try {
+          const entry = JSON.parse(raw) as { assignedAt?: number; messageId?: number };
+          if (entry && typeof entry.messageId === 'number') {
+            sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${entry.messageId}`, '1');
+          }
+        } catch {
+          // unparsable pending entry: drop it without ack-seen
+        }
+      }
+      sqlite.delete(pendingKey);
+      if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+    };
     const ack = parseWorkingAck(message.content);
     if (ack) {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
-      if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
-      if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+      clearPendingAck();
       if (ack.estimatedMinutes != null && ack.estimatedMinutes > 0) {
         sqlite.set(
           `${EXPECTED_DELIVERY_PREFIX}${task.id}:${member.metabotId}`,
@@ -2609,8 +2796,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (member.status === 'assigned') {
       store.setMemberStatus(task.id, member.metabotId, 'working', member.globalmetaid);
     }
-    if (sqlite.get<string>(pendingKey) != null) sqlite.delete(pendingKey);
-    if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+    clearPendingAck();
   };
 
   /**
@@ -2639,6 +2825,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       }
       if (!entry || typeof entry.assignedAt !== 'number') continue;
       if (now() - entry.assignedAt < ackTimeoutMs) continue;
+      // P1-4: a worker who spoke ANYTHING after the assignment is engaged —
+      // implicit ACK. The pending watch was either missed (cursor retry /
+      // member-match gap) or the worker is mid-work; clear it, record
+      // ack-seen for the assignment message, and never misreport it as
+      // "not ACKed" (the 8/10 #11 incident: worker [WORKING]-ed at 18:36 but
+      // the chair still got a no-ACK alert at 18:43).
+      const store = deps.getGroupTaskStore();
+      const memberGmid = (member.globalmetaid ?? '').trim();
+      if (memberGmid && task.groupId) {
+        const speakMap = store.getMembersLastSpeakAt(task.groupId, [memberGmid]);
+        const lastSpeakSec = speakMap.get(memberGmid.toLowerCase());
+        if (lastSpeakSec != null && Number.isFinite(lastSpeakSec) && lastSpeakSec * 1000 >= entry.assignedAt) {
+          sqlite.set(`${ACK_SEEN_PREFIX}${task.id}:${entry.messageId}`, '1');
+          sqlite.delete(pendingKey);
+          if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
+            sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
+          }
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} spoke after ` +
+            `assignment #${entry.messageId} (implicit ACK); no no-ACK reminder`,
+          );
+          continue;
+        }
+      }
       const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(remindedKey) === '1') continue;
       const text =

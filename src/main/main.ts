@@ -149,6 +149,7 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOpenTeamMembershipStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceCoworkStoreGetter,
@@ -3151,6 +3152,10 @@ const startSqliteDaemons = (): void => {
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  // P1-1: wire the OpenTeam invite store into member summaries so remote
+  // members expose inviteStatus (invite_pending / invite_accepted /
+  // invite_declined / invite_expired / joined) instead of an opaque row.
+  setGroupTaskServiceOpenTeamMembershipStoreGetter(getOpenTeamMembershipStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
   setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
@@ -3454,6 +3459,10 @@ const startSqliteDaemons = (): void => {
     getGroupTaskStore,
     getMetabotStore,
     getCoworkStore,
+    // P1-3: the chair planning directive carries the task's pending OpenTeam
+    // invites / unconfirmed remote placeholders, so the plan never re-decomposes
+    // "search + invite a remote bot" as a subtask after the chair invited.
+    getOpenTeamMembershipStore,
     orchestrationBridge: getGroupTaskOrchestrationBridge(),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
@@ -9374,6 +9383,19 @@ if (!gotTheLock) {
       return { success: true, items };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaborations' };
+    }
+  });
+
+  // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
+  // bots received, regardless of outcome, newest first. Records exist even for
+  // declined/skipped/expired invites, so the collab UI shows the full flow.
+  ipcMain.handle('openTeamCollab:listGuestInvites', async () => {
+    try {
+      const items = await withSqliteRecovery('openTeamCollab:listGuestInvites', () =>
+        getOpenTeamMembershipStore().listGuestInvites());
+      return { success: true, items };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list received OpenTeam invites' };
     }
   });
 
