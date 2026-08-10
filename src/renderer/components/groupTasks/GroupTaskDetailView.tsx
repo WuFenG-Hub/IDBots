@@ -121,6 +121,15 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     };
   }, [refreshDetail]);
 
+  // Reset per-task transcript state when the parent reuses this component
+  // instance for a different task (defensive: callers normally remount via
+  // `key`, but an in-place taskId change must never show the previous task's
+  // messages).
+  useEffect(() => {
+    setMessages([]);
+    setMessagesError(null);
+  }, [taskId]);
+
   // Transcript: initial load + 5s poll while mounted.
   useEffect(() => {
     let cancelled = false;
