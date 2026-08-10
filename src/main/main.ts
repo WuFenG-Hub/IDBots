@@ -4614,10 +4614,21 @@ const getCoworkRunner = () => {
       getSkillSessionEnvOverrides: async (sessionId: string): Promise<Record<string, string>> => {
         const session = getCoworkStore().getSession(sessionId);
         const overrides: Record<string, string> = {};
-        if (session?.title === '[Orchestrator] skill-turn' && session.cwd) {
-          overrides.SKILLS_ROOT = session.cwd;
-          overrides.IDBOTS_SKILLS_ROOT = session.cwd;
-        }
+        // NOTE: SKILLS_ROOT / IDBOTS_SKILLS_ROOT are intentionally NOT derived
+        // from session.cwd here. The legacy exact-title match against
+        // '[Orchestrator] skill-turn' died on 2026-03-14 (58ab6d57) when
+        // delegated session titles gained a timestamp suffix, and the
+        // 2026-08-10 title refactor (8dd66c1a) moved them to
+        // '[编排任务] <summary>' / '[Orchestration Task] <summary>' /
+        // 'Group-<id>-<ts>'. Reviving cwd-based injection would also be wrong:
+        // worker skills resolve from the app-global skill roots
+        // (getSkillsRoot / getSkillRoots), not the worker workspace, while
+        // getEnhancedEnv()/getEnhancedEnvWithTmpdir() already inject
+        // SKILLS_ROOT/IDBOTS_SKILLS_ROOT = getSkillsRoot() for every execution
+        // path, and the sandbox paths additionally discover workspace-relative
+        // SKILLs via collectHostSkillsRoots(). Keep this method free of
+        // title-based matching; the overrides below are image-skill and
+        // metabot-identity only.
         const skillIds = session?.activeSkillIds ?? [];
         const metabotStore = getMetabotStore();
         const metabotId = session?.metabotId;
