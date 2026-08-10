@@ -48,6 +48,7 @@ import { requireRunnableTask } from './groupTaskService';
 import {
   getMetaIdDetail,
   searchMetaIds,
+  type MetaIdSearchItem,
 } from './metaIdSearchService';
 import type { IdchatOnlineStatusResult } from './idchatPresenceService';
 import type { OpenTeamGuestSendSimplemsgFn } from './openTeamGuestService';
@@ -178,7 +179,61 @@ export interface SearchRemoteCandidatesInput {
  * has a chat pubkey (server-side filter), not one of this machine's own bots,
  * currently online per idchat presence. Presence failures propagate — an
  * unverifiable candidate list is worse than none.
+ *
+ * P1-5 fuzzy recall: the remote search API matches `keyword` exactly (full-name
+ * lookups and bio-described skills return nothing). When the caller supplies a
+ * keyword/skill, a second, looser recall runs WITHOUT the keyword against the
+ * same skill filter and matches locally: query tokens (whitespace/separator
+ * split, plus 2-grams for CJK runs) are matched against name/bio/chatSkills,
+ * each candidate gets a relevance score, and results are returned best-match
+ * first. The loose recall never drops the exact-path results — it only adds
+ * candidates the exact path missed.
  */
+
+/** Split a query into match tokens: separator-split words plus 2-grams of CJK runs. */
+export function tokenizeOpenTeamQuery(text: string): string[] {
+  const tokens = new Set<string>();
+  const parts = String(text ?? '')
+    .toLowerCase()
+    .split(/[\s,，。;；:：/|]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  for (const part of parts) {
+    tokens.add(part);
+    // CJK runs (no ASCII letters): add 2-grams so "占卜塔罗" matches a bio
+    // containing "占卜塔罗牌" without needing a manual space.
+    if (/[一-鿿]/.test(part) && !/[a-z0-9]/.test(part) && part.length > 2) {
+      for (let index = 0; index < part.length - 1; index += 1) {
+        tokens.add(part.slice(index, index + 2));
+      }
+    }
+  }
+  return [...tokens];
+}
+
+/**
+ * Local fuzzy relevance: how well one candidate matches the query tokens.
+ * Name hits weigh most, then chatSkills, then bio. Long exact tokens beat
+ * short substrings. Returns 0 when nothing matched (candidate excluded).
+ */
+export function scoreOpenTeamCandidate(
+  item: Pick<MetaIdSearchItem, 'name' | 'bio' | 'chatSkills'>,
+  tokens: string[],
+): number {
+  if (tokens.length === 0) return 0;
+  const name = (item.name ?? '').toLowerCase();
+  const bio = (item.bio ?? '').toLowerCase();
+  const skills = (item.chatSkills ?? []).map((skill) => String(skill ?? '').toLowerCase());
+  let score = 0;
+  for (const token of tokens) {
+    const weight = Math.min(4, Math.max(1, token.length));
+    if (name.includes(token)) score += 4 * weight;
+    if (skills.some((skill) => skill.includes(token))) score += 2 * weight;
+    if (bio.includes(token)) score += weight;
+  }
+  return score;
+}
+
 export async function searchRemoteCandidates(
   input: SearchRemoteCandidatesInput = {},
 ): Promise<OpenTeamRemoteCandidate[]> {
@@ -186,25 +241,78 @@ export async function searchRemoteCandidates(
   const limit = clampInt(input.limit, DEFAULT_CANDIDATE_LIMIT, 1, MAX_CANDIDATE_LIMIT);
   const keyword = input.keyword?.trim() || undefined;
   const skill = input.skill?.trim() || undefined;
-  // Extra headroom: own-bot + offline filtering shrink the page.
+  const ownGmids = listOwnGlobalMetaIds(resolved.getMetabotStore());
+  const seen = new Set<string>();
+  const byScore = new Map<string, number>();
+  // P1-5: item-by-gmid for the merged candidate list (exact hits first, then
+  // fuzzy-only recalls) — the final filter must run over BOTH paths, not just
+  // the exact page, or fuzzy-only recalls would be scored and then dropped.
+  const byGmid = new Map<string, MetaIdSearchItem>();
+
+  // Exact path: pass keyword/skill to the server-side matcher as-is.
   const page = await resolved.searchMetaIds({
     keyword,
     skill,
     hasChatPubkey: true,
     size: Math.min(100, limit * 3),
   });
-  const ownGmids = listOwnGlobalMetaIds(resolved.getMetabotStore());
-  const items = page.items.filter((item) => {
+  for (const item of page.items) {
     const gmid = item.globalMetaId?.trim();
-    return Boolean(gmid) && !ownGmids.has(gmid.toLowerCase());
+    if (!gmid || ownGmids.has(gmid.toLowerCase()) || seen.has(gmid.toLowerCase())) continue;
+    seen.add(gmid.toLowerCase());
+    // Exact-path hits that ALSO match the tokens get ranked by score; hits the
+    // exact path returned but the local matcher misses keep a base score of 1
+    // so they are never dropped below the fuzzy-only candidates.
+    byScore.set(gmid, Math.max(1, scoreOpenTeamCandidate(item, tokenizeOpenTeamQuery([keyword, skill].filter(Boolean).join(' ')))));
+    byGmid.set(gmid.toLowerCase(), item);
+  }
+
+  // P1-5 fuzzy path: only when the caller asked for keyword/skill matching.
+  // One loose recall WITHOUT the keyword (server exact-match is what missed),
+  // same skill filter; candidates are ranked locally by token relevance.
+  if (keyword || skill) {
+    try {
+      const loose = await resolved.searchMetaIds({
+        skill,
+        hasChatPubkey: true,
+        size: Math.min(100, limit * 10),
+      });
+      const tokens = tokenizeOpenTeamQuery([keyword, skill].filter(Boolean).join(' '));
+      for (const item of loose.items) {
+        const gmid = item.globalMetaId?.trim();
+        if (!gmid || ownGmids.has(gmid.toLowerCase()) || seen.has(gmid.toLowerCase())) continue;
+        const score = scoreOpenTeamCandidate(item, tokens);
+        if (score <= 0) continue;
+        seen.add(gmid.toLowerCase());
+        byScore.set(gmid, score);
+        byGmid.set(gmid.toLowerCase(), item);
+      }
+    } catch (error) {
+      // The fuzzy path is a recall enhancement: an API failure here must never
+      // fail the whole search when the exact path already produced candidates.
+      resolved.emitLog?.(
+        `[OpenTeam] fuzzy candidate recall failed (exact results kept): ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  const items = [...byGmid.values()].filter((item) => {
+    const gmid = item.globalMetaId?.trim();
+    return Boolean(gmid) && byScore.has(gmid.toLowerCase());
   });
   if (items.length === 0) return [];
   const presence = await resolved.fetchOnlineStatus(items.map((item) => item.globalMetaId.trim()));
   const onlineByGmid = new Map(
     presence.list.map((entry) => [entry.globalMetaId.trim().toLowerCase(), entry]),
   );
+  const ranked = items
+    .map((item) => ({
+      item,
+      score: byScore.get(item.globalMetaId.trim().toLowerCase()) ?? 0,
+    }))
+    .sort((left, right) => right.score - left.score);
   const candidates: OpenTeamRemoteCandidate[] = [];
-  for (const item of items) {
+  for (const { item } of ranked) {
     const gmid = item.globalMetaId.trim();
     const entry = onlineByGmid.get(gmid.toLowerCase());
     if (!entry?.isOnline) continue;
@@ -288,11 +396,27 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
   if (listOwnGlobalMetaIds(metabotStore).has(invitee)) {
     throw new Error('invitee is a local MetaBot; use the local group-task invite action instead');
   }
-  if (store.isMember(taskId, null, invitee)) {
+  // P1-1: only a CONFIRMED member blocks a re-invite. A remote placeholder row
+  // (joined_pin_id NULL — created by the join watcher without the join pin,
+  // or by the indexer lag) means "invite sent, join not confirmed yet"; when
+  // its invite has expired it must not keep blocking the retry forever.
+  // The pending-invite check right below still stops a duplicate WHILE an
+  // invite is live.
+  const activeRemote = store.getActiveRemoteMember(taskId, invitee);
+  if (activeRemote && activeRemote.joinedPinId) {
     throw new Error(`invitee ${invitee} is already a member of group task ${taskId}`);
   }
   if (membershipStore.hasPendingInvite(taskId, invitee)) {
     throw new Error(`a pending invite for ${invitee} already exists on group task ${taskId}`);
+  }
+  if (activeRemote && !activeRemote.joinedPinId) {
+    // The placeholder exists but no invite is pending: the previous invite
+    // expired (or its join never confirmed). The retry is allowed; log it so
+    // the operator can see the release happened.
+    emitLog(
+      `[OpenTeam] Re-inviting ${input.inviteeName?.trim() || invitee} to task ${taskId}: previous remote ` +
+      'placeholder member never confirmed a join (joined_pin_id NULL) and no invite is pending; retry released',
+    );
   }
   if (!input.allowReinvite) {
     // Re-invite policy (M3): kicked members and invitees who declined out of
@@ -536,13 +660,16 @@ async function runWatcherStep(watcher: InviteWatcherState): Promise<void> {
       if (joined) {
         // Idempotent on (task_id, globalmetaid); invite stays 'accepted' = the
         // whole handshake completed (no extra status; CHECK constraint).
+        // P1-2: the ACCEPT envelope's joinedPinId (persisted on the invite row
+        // by handleOpenTeamResponse) now lands on the member row, so "already
+        // joined" is readable from the member itself.
         resolved.getGroupTaskStore().addMember({
           taskId: invite.taskId,
           metabotId: null,
           globalmetaid: invite.inviteeGlobalmetaid,
           displayName: invite.inviteeName,
           role: 'worker',
-          joinedPinId: null,
+          joinedPinId: invite.joinedPinId,
         });
         emitLog(
           `[OpenTeam] Invite ${watcher.invitePinId}: ${invite.inviteeName || invite.inviteeGlobalmetaid} ` +

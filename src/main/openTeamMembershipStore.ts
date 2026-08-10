@@ -52,7 +52,36 @@ export interface OpenTeamInvite {
   declineReason: string | null;
   createdAt: string | null;
   respondedAt: string | null;
+  /**
+   * P1-2: join pin echoed by the guest's [OPENTEAM_ACCEPT] envelope. Persisted
+   * here when the ACCEPT lands and copied into the remote member row by the
+   * join-confirmation watcher, so "already joined" is readable from the member
+   * row instead of staying null forever.
+   */
+  joinedPinId: string | null;
 }
+
+/** P0-1: guest-side invite history row (one per received [OPENTEAM_INVITE]). */
+export interface OpenTeamGuestInvite {
+  id: number;
+  groupId: string;
+  inviterGlobalmetaid: string;
+  inviterName: string | null;
+  taskTitle: string | null;
+  goalSummary: string | null;
+  requiredSkills: string[];
+  invitePinId: string | null;
+  targetGlobalmetaid: string | null;
+  /** Envelope expiresAt (unix seconds); null when the envelope omitted it. */
+  expiresAt: number | null;
+  status: OpenTeamGuestInviteStatus;
+  declineReason: string | null;
+  joinedPinId: string | null;
+  createdAt: string | null;
+  respondedAt: string | null;
+}
+
+export type OpenTeamGuestInviteStatus = 'invited' | 'accepted' | 'declined' | 'skipped' | 'expired';
 
 /**
  * Owner-facing traceability row (openTeamCollab:list): one membership plus the
@@ -114,6 +143,7 @@ interface OpenTeamInviteRow {
   decline_reason: string | null;
   created_at: string | null;
   responded_at: string | null;
+  joined_pin_id: string | null;
 }
 
 function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership {
@@ -145,6 +175,59 @@ function rowToOpenTeamInvite(row: OpenTeamInviteRow): OpenTeamInvite {
     invitePinId: row.invite_pin_id ?? null,
     status: status === 'accepted' || status === 'declined' || status === 'expired' ? status : 'pending',
     declineReason: row.decline_reason ?? null,
+    createdAt: row.created_at ?? null,
+    respondedAt: row.responded_at ?? null,
+    joinedPinId: row.joined_pin_id ?? null,
+  };
+}
+
+interface OpenTeamGuestInviteRow {
+  id: number;
+  group_id: string;
+  inviter_globalmetaid: string;
+  inviter_name: string | null;
+  task_title: string | null;
+  goal_summary: string | null;
+  required_skills: string | null;
+  invite_pin_id: string | null;
+  target_globalmetaid: string | null;
+  expires_at: number | null;
+  status: string;
+  decline_reason: string | null;
+  joined_pin_id: string | null;
+  created_at: string | null;
+  responded_at: string | null;
+}
+
+function rowToOpenTeamGuestInvite(row: OpenTeamGuestInviteRow): OpenTeamGuestInvite {
+  const status = row.status;
+  let requiredSkills: string[] = [];
+  try {
+    const parsed = JSON.parse(row.required_skills ?? '[]');
+    if (Array.isArray(parsed)) {
+      requiredSkills = parsed.map((item) => String(item ?? '').trim()).filter(Boolean);
+    }
+  } catch {
+    requiredSkills = [];
+  }
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    inviterGlobalmetaid: row.inviter_globalmetaid,
+    inviterName: row.inviter_name ?? null,
+    taskTitle: row.task_title ?? null,
+    goalSummary: row.goal_summary ?? null,
+    requiredSkills,
+    invitePinId: row.invite_pin_id ?? null,
+    targetGlobalmetaid: row.target_globalmetaid ?? null,
+    expiresAt: row.expires_at != null && Number.isFinite(Number(row.expires_at))
+      ? Number(row.expires_at)
+      : null,
+    status: status === 'accepted' || status === 'declined' || status === 'skipped' || status === 'expired'
+      ? status
+      : 'invited',
+    declineReason: row.decline_reason ?? null,
+    joinedPinId: row.joined_pin_id ?? null,
     createdAt: row.created_at ?? null,
     respondedAt: row.responded_at ?? null,
   };
@@ -508,5 +591,154 @@ export class OpenTeamMembershipStore {
       ],
     );
     return Boolean(row);
+  }
+
+  /**
+   * P1-2: persist the join pin echoed by the guest's [OPENTEAM_ACCEPT] on the
+   * invite row. The join-confirmation watcher copies it into the remote member
+   * row when the join is confirmed. Returns the updated row (null when the
+   * invite is unknown).
+   */
+  updateInviteJoinedPinId(invitePinId: string, joinedPinId: string): OpenTeamInvite | null {
+    const normalized = (joinedPinId ?? '').trim();
+    if (!normalized) return null;
+    const existing = this.getOne<OpenTeamInviteRow>(
+      'SELECT * FROM openteam_invites WHERE invite_pin_id = ?',
+      [invitePinId],
+    );
+    if (!existing) return null;
+    this.db.run(
+      `UPDATE openteam_invites SET joined_pin_id = ?
+       WHERE id = ?`,
+      [normalized, existing.id],
+    );
+    this.saveDb();
+    const updated = this.getOne<OpenTeamInviteRow>(
+      'SELECT * FROM openteam_invites WHERE id = ?',
+      [existing.id],
+    );
+    return updated ? rowToOpenTeamInvite(updated) : null;
+  }
+
+  /**
+   * P1-1: newest invite row for one (task, invitee) — the member_status invite
+   * readout and the expired-pending release both key off this. null when the
+   * invitee was never invited to this task.
+   */
+  getLatestInvite(taskId: number, inviteeGlobalmetaid: string): OpenTeamInvite | null {
+    const row = this.getOne<OpenTeamInviteRow>(
+      `SELECT * FROM openteam_invites
+       WHERE task_id = ? AND invitee_globalmetaid = ?
+       ORDER BY id DESC LIMIT 1`,
+      [taskId, inviteeGlobalmetaid],
+    );
+    return row ? rowToOpenTeamInvite(row) : null;
+  }
+
+  // --- openteam_guest_invites (P0-1: guest-side invite history) ---
+
+  /**
+   * Record an incoming [OPENTEAM_INVITE] the moment it is handled, so the
+   * invite exists in the guest-side history even when the bot later declines
+   * or the join fails. Deduped by invite_pin_id: re-deliveries (socket +
+   * backfill) update nothing and return the existing row.
+   */
+  createGuestInvite(input: {
+    groupId: string;
+    inviterGlobalmetaid: string;
+    inviterName?: string | null;
+    taskTitle?: string | null;
+    goalSummary?: string | null;
+    requiredSkills?: string[];
+    invitePinId?: string | null;
+    targetGlobalmetaid?: string | null;
+    expiresAt?: number | null;
+  }): OpenTeamGuestInvite {
+    const existing = input.invitePinId
+      ? this.getOne<OpenTeamGuestInviteRow>(
+          'SELECT * FROM openteam_guest_invites WHERE invite_pin_id = ?',
+          [input.invitePinId],
+        )
+      : undefined;
+    if (existing) return rowToOpenTeamGuestInvite(existing);
+    this.db.run(
+      `INSERT INTO openteam_guest_invites (
+        group_id, inviter_globalmetaid, inviter_name, task_title, goal_summary,
+        required_skills, invite_pin_id, target_globalmetaid, expires_at, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'invited')`,
+      [
+        input.groupId,
+        input.inviterGlobalmetaid,
+        input.inviterName ?? null,
+        input.taskTitle ?? null,
+        input.goalSummary ?? null,
+        JSON.stringify(input.requiredSkills ?? []),
+        input.invitePinId ?? null,
+        input.targetGlobalmetaid ?? null,
+        input.expiresAt != null && Number.isFinite(input.expiresAt) ? Math.trunc(input.expiresAt) : null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<OpenTeamGuestInviteRow>(
+      'SELECT * FROM openteam_guest_invites WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`createGuestInvite failed: row ${id} not found after insert`);
+    return rowToOpenTeamGuestInvite(row);
+  }
+
+  /**
+   * Finalize a guest invite row after the handling outcome (accepted /
+   * declined / skipped / expired), stamping responded_at. `reason` carries the
+   * decline reason (or 'duplicate_invite' for skips); `joinedPinId` rides the
+   * accept outcome.
+   */
+  updateGuestInviteStatus(
+    invitePinId: string,
+    status: OpenTeamGuestInviteStatus,
+    options?: { reason?: string | null; joinedPinId?: string | null },
+  ): OpenTeamGuestInvite | null {
+    const existing = this.getOne<OpenTeamGuestInviteRow>(
+      'SELECT * FROM openteam_guest_invites WHERE invite_pin_id = ?',
+      [invitePinId],
+    );
+    if (!existing) return null;
+    this.db.run(
+      `UPDATE openteam_guest_invites
+       SET status = ?,
+         decline_reason = COALESCE(?, decline_reason),
+         joined_pin_id = COALESCE(?, joined_pin_id),
+         responded_at = strftime('%Y-%m-%d %H:%M:%f','now')
+       WHERE id = ?`,
+      [
+        status,
+        options?.reason ?? null,
+        options?.joinedPinId ?? null,
+        existing.id,
+      ],
+    );
+    this.saveDb();
+    const updated = this.getOne<OpenTeamGuestInviteRow>(
+      'SELECT * FROM openteam_guest_invites WHERE id = ?',
+      [existing.id],
+    );
+    return updated ? rowToOpenTeamGuestInvite(updated) : null;
+  }
+
+  /** All guest-side invite history, newest first (backs the collab UI). */
+  listGuestInvites(): OpenTeamGuestInvite[] {
+    const rows = this.getAll<OpenTeamGuestInviteRow>(
+      'SELECT * FROM openteam_guest_invites ORDER BY id DESC',
+    );
+    return rows.map(rowToOpenTeamGuestInvite);
+  }
+
+  getGuestInviteByPinId(invitePinId: string): OpenTeamGuestInvite | null {
+    const row = this.getOne<OpenTeamGuestInviteRow>(
+      'SELECT * FROM openteam_guest_invites WHERE invite_pin_id = ?',
+      [invitePinId],
+    );
+    return row ? rowToOpenTeamGuestInvite(row) : null;
   }
 }

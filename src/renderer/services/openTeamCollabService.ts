@@ -1,5 +1,5 @@
 import type { GroupChatTranscriptMessage } from '../types/groupTask';
-import type { OpenTeamCollabSummary } from '../types/openTeamCollab';
+import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from '../types/openTeamCollab';
 
 /**
  * Renderer-side wrapper for the openTeamCollab:* IPC surface (invitee-side
@@ -28,6 +28,18 @@ class OpenTeamCollabService {
       throw new Error(result.error ?? 'Failed to load messages');
     }
     return (result.messages ?? []) as GroupChatTranscriptMessage[];
+  }
+
+  // P0-1: received-invite history (every [OPENTEAM_INVITE] on this machine,
+  // joined or not), newest first.
+  async listGuestInvites(): Promise<OpenTeamGuestInvite[]> {
+    const api = window.electron?.openTeamCollab;
+    if (!api) return [];
+    const result = await api.listGuestInvites();
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to load received OpenTeam invites');
+    }
+    return (result.items ?? []) as OpenTeamGuestInvite[];
   }
 }
 

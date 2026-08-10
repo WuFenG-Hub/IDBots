@@ -24,3 +24,25 @@ export interface OpenTeamCollabSummary {
   /** chain_timestamp of the newest indexed message; null when none. */
   lastMessageAt: number | null;
 }
+
+/** P0-1: one received [OPENTEAM_INVITE] on this machine, whatever its outcome. */
+export type OpenTeamGuestInviteStatus = 'invited' | 'accepted' | 'declined' | 'skipped' | 'expired';
+
+export interface OpenTeamGuestInvite {
+  id: number;
+  groupId: string;
+  inviterGlobalmetaid: string;
+  inviterName: string | null;
+  taskTitle: string | null;
+  goalSummary: string | null;
+  requiredSkills: string[];
+  invitePinId: string | null;
+  targetGlobalmetaid: string | null;
+  /** Envelope expiresAt (unix seconds); null when the envelope omitted it. */
+  expiresAt: number | null;
+  status: OpenTeamGuestInviteStatus;
+  declineReason: string | null;
+  joinedPinId: string | null;
+  createdAt: string | null;
+  respondedAt: string | null;
+}

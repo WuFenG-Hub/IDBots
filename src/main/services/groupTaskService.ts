@@ -40,6 +40,10 @@ import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridg
 import { normalizeRawGlobalMetaId } from '../shared/globalMetaId';
 import { buildOpenTeamKickMessage } from './openTeamProtocols';
 import type { OpenTeamGuestSendSimplemsgFn } from './openTeamGuestService';
+import type {
+  OpenTeamInviteStatus,
+  OpenTeamMembershipStore,
+} from '../openTeamMembershipStore';
 import {
   ensureGroupTaskMemberReady,
   GROUP_TASK_CONVERSATION_CHANNEL,
@@ -165,6 +169,12 @@ const TERMINAL_STATUSES: ReadonlySet<GroupTaskStatus> = new Set(['done', 'cancel
 let metabotStoreGetter: (() => MetabotStore) | null = null;
 let groupTaskStoreGetter: (() => GroupTaskStore) | null = null;
 let orchestrationBridgeGetter: (() => GroupTaskOrchestrationBridge) | null = null;
+/**
+ * P1-1: optional OpenTeamMembershipStore getter (wired by main.ts; null in
+ * contexts without OpenTeam). When unset, member summaries report
+ * inviteStatus 'none' and remote placeholder reads are skipped.
+ */
+let openTeamMembershipStoreGetter: (() => OpenTeamMembershipStore) | null = null;
 
 export function setGroupTaskServiceMetabotStoreGetter(getter: () => MetabotStore): void {
   metabotStoreGetter = getter;
@@ -172,6 +182,12 @@ export function setGroupTaskServiceMetabotStoreGetter(getter: () => MetabotStore
 
 export function setGroupTaskServiceGroupTaskStoreGetter(getter: () => GroupTaskStore): void {
   groupTaskStoreGetter = getter;
+}
+
+export function setGroupTaskServiceOpenTeamMembershipStoreGetter(
+  getter: (() => OpenTeamMembershipStore) | null,
+): void {
+  openTeamMembershipStoreGetter = getter;
 }
 
 export function setGroupTaskServiceOrchestrationBridgeGetter(
@@ -572,6 +588,49 @@ export interface GroupTaskMemberSummary extends GroupTaskMember {
   lastWorkingAt: number | null;
   /** P1-4: host-computed work state — the chair can query instead of guessing. */
   workStatus: GroupTaskMemberWorkStatus;
+  /**
+   * P1-1: OpenTeam invite state for remote members ('invited' while an invite
+   * is live, 'accepted' after the ACCEPT, 'declined', 'expired' after the
+   * pending window, 'joined' when the member row itself confirms a join via
+   * joined_pin_id). Local members and remote members without any invite row
+   * report 'none'. Derived from the newest openteam_invites row for the
+   * (task, invitee); when the OpenTeam store is not wired, always 'none'.
+   */
+  inviteStatus: GroupTaskMemberInviteStatus;
+}
+
+export type GroupTaskMemberInviteStatus =
+  | 'none'
+  | 'invite_pending'
+  | 'invite_accepted'
+  | 'invite_declined'
+  | 'invite_expired'
+  | 'joined';
+
+/**
+ * P1-1: pure invite-status derivation for one member summary. Rules:
+ * - local members (metabotId != null): 'none';
+ * - 'joined' wins once the MEMBER row itself carries a join pin (P1-2:
+ *   joined_pin_id on the member row is the source of truth for "already
+ *   joined"), even when no invite row exists on record (e.g. legacy rows) —
+ *   the invite row's own joined pin is the fallback;
+ * - otherwise the invite row's status maps 1:1, 'pending' -> 'invite_pending',
+ *   and members without an invite row: 'none'.
+ */
+export function deriveGroupTaskMemberInviteStatus(input: {
+  metabotId: number | null;
+  memberJoinedPinId: string | null;
+  inviteStatus: OpenTeamInviteStatus | null;
+  inviteJoinedPinId: string | null;
+}): GroupTaskMemberInviteStatus {
+  if (input.metabotId != null) return 'none';
+  if (input.memberJoinedPinId || input.inviteJoinedPinId) return 'joined';
+  if (!input.inviteStatus) return 'none';
+  if (input.inviteStatus === 'pending') return 'invite_pending';
+  if (input.inviteStatus === 'accepted') return 'invite_accepted';
+  if (input.inviteStatus === 'declined') return 'invite_declined';
+  if (input.inviteStatus === 'expired') return 'invite_expired';
+  return 'none';
 }
 
 /**
@@ -650,6 +709,21 @@ export async function getGroupTask(
     ? store.getMembersWorkingAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
   const bridge = orchestrationBridgeGetter?.();
+  // P1-1: newest invite row per remote member (one store query per remote
+  // member; local members have no invites and skip the lookup).
+  const inviteByGmid = new Map<string, { status: OpenTeamInviteStatus | null; joinedPinId: string | null }>();
+  if (openTeamMembershipStoreGetter) {
+    const membershipStore = openTeamMembershipStoreGetter();
+    for (const member of members) {
+      const gmid = (member.globalmetaid ?? '').trim();
+      if (!gmid || member.metabotId != null) continue;
+      const invite = membershipStore.getLatestInvite(id, gmid);
+      inviteByGmid.set(gmid.toLowerCase(), {
+        status: invite?.status ?? null,
+        joinedPinId: invite?.joinedPinId ?? null,
+      });
+    }
+  }
   const membersWithStatus: GroupTaskMemberSummary[] = members.map((member) => {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
     const lastSpeakAt = gmid ? (speakMap.get(gmid) ?? null) : null;
@@ -658,6 +732,7 @@ export async function getGroupTask(
       member.metabotId != null && bridge?.getWorkerAttemptStatus
         ? bridge.getWorkerAttemptStatus(id, member.metabotId)
         : { status: null, atMs: null };
+    const invite = inviteByGmid.get(gmid);
     return {
       ...member,
       lastSpeakAt,
@@ -668,6 +743,12 @@ export async function getGroupTask(
         lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
         attemptStatus: attempt.status,
         attemptAtMs: attempt.atMs,
+      }),
+      inviteStatus: deriveGroupTaskMemberInviteStatus({
+        metabotId: member.metabotId,
+        memberJoinedPinId: member.joinedPinId,
+        inviteStatus: invite?.status ?? null,
+        inviteJoinedPinId: invite?.joinedPinId ?? null,
       }),
     };
   });

@@ -1,7 +1,7 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
 import type { ProjectFormData, ProjectRecord } from './project';
 import type { GroupChatTranscriptMessage } from './groupTask';
-import type { OpenTeamCollabSummary } from './openTeamCollab';
+import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
   MetaAppGalleryRecord,
@@ -997,6 +997,8 @@ interface IElectronAPI {
     list: () => Promise<{ success: boolean; items?: OpenTeamCollabSummary[]; error?: string }>;
     listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
       Promise<{ success: boolean; messages?: GroupChatTranscriptMessage[]; error?: string }>;
+    // P0-1: received-invite history (joined or not), newest first.
+    listGuestInvites: () => Promise<{ success: boolean; items?: OpenTeamGuestInvite[]; error?: string }>;
   };
   idbots: {
     getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>; error?: string }>;

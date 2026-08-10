@@ -4,6 +4,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   OpenTeamCollabCard,
+  OpenTeamGuestInviteCard,
   openTeamCollabStatusBadgeClass,
   openTeamCollabTitle,
   shortGlobalMetaId,
@@ -77,4 +78,62 @@ test('OpenTeamCollabCard: falls back to bot id and untitled group label', () => 
   assert.ok(markup.includes('bot-7'), 'bot id fallback rendered');
   assert.ok(markup.includes(i18nService.t('openTeamCollabStatusLeft')), 'left status label rendered');
   assert.ok(!markup.includes('External Task'), 'no task title for fallback row');
+});
+
+// ---------------------------------------------------------------------------
+// P0-1: received-invite history card (OpenTeamGuestInviteCard)
+// ---------------------------------------------------------------------------
+
+const baseGuestInvite = {
+  id: 1,
+  groupId: 'group-ext-1',
+  inviterGlobalmetaid: 'gmid-inviter-abcdef',
+  inviterName: 'Remote Chair',
+  taskTitle: 'External Task',
+  goalSummary: 'Build something',
+  requiredSkills: ['translation'],
+  invitePinId: 'pin-invite-1',
+  targetGlobalmetaid: 'gmid-guest',
+  expiresAt: 1786400000,
+  status: 'invited' as const,
+  declineReason: null,
+  joinedPinId: null,
+  createdAt: null,
+  respondedAt: null,
+};
+
+test('OpenTeamGuestInviteCard: renders title, inviter, status, goal and skills', () => {
+  const markup = renderToStaticMarkup(
+    <OpenTeamGuestInviteCard invite={{ ...baseGuestInvite, status: 'invited' }} />,
+  );
+  assert.ok(markup.includes('External Task'), 'task title rendered');
+  assert.ok(markup.includes('Remote Chair'), 'inviter name rendered');
+  assert.ok(markup.includes(i18nService.t('openTeamGuestInviteStatusInvited')), 'invited label rendered');
+  assert.ok(markup.includes('Build something'), 'goal rendered');
+  assert.ok(markup.includes('translation'), 'required skills rendered');
+  assert.ok(markup.includes('bg-amber-100'), 'waiting status uses the amber badge');
+});
+
+test('OpenTeamGuestInviteCard: terminal statuses show distinct labels', () => {
+  const accepted = renderToStaticMarkup(
+    <OpenTeamGuestInviteCard invite={{ ...baseGuestInvite, status: 'accepted' }} />,
+  );
+  assert.ok(accepted.includes(i18nService.t('openTeamGuestInviteStatusAccepted')));
+  assert.ok(accepted.includes('bg-green-100'), 'accepted uses the green badge');
+  const declined = renderToStaticMarkup(
+    <OpenTeamGuestInviteCard invite={{ ...baseGuestInvite, status: 'declined' }} />,
+  );
+  assert.ok(declined.includes(i18nService.t('openTeamGuestInviteStatusDeclined')));
+  const expired = renderToStaticMarkup(
+    <OpenTeamGuestInviteCard invite={{ ...baseGuestInvite, status: 'expired' }} />,
+  );
+  assert.ok(expired.includes(i18nService.t('openTeamGuestInviteStatusExpired')));
+});
+
+test('OpenTeamGuestInviteCard: falls back to short group id when untitled', () => {
+  const markup = renderToStaticMarkup(
+    <OpenTeamGuestInviteCard invite={{ ...baseGuestInvite, taskTitle: null, goalSummary: null, requiredSkills: [] }} />,
+  );
+  assert.ok(!markup.includes('External Task'));
+  assert.ok(markup.includes(i18nService.t('openTeamCollabUntitled').split('{id}')[0].trim()), 'untitled fallback rendered');
 });

@@ -74,7 +74,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 - `title`, `goal`: required. `acceptance_criteria`, `member_names`: optional (chair-only task is legal).
 - Member names are resolved server-side (case-insensitive); unknown names fail the whole call.
 - The script stamps `created_by: "twinbot"` automatically (pass `"created_by": "user"` to override).
-- Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), and `members` (a member with `joinedPinId: null` failed its on-chain join but stays on the roster).
+- Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), and `members`. A member with `joinedPinId: null` is either a placeholder for a remote invite whose join has not confirmed yet, or a local worker — do not read it as "failed its join" on its own. Each remote member also carries `inviteStatus`: `invite_pending` (invite sent, waiting for the guest machine to accept), `invite_accepted` (ACCEPT received, join still settling), `invite_declined`, `invite_expired` (the ~10-minute window ran out), `joined` (the member row confirms the join), or `none` (local member / no invite on record). "Joined" is best judged by the member actually speaking in the group: `joinedPinId` can lag behind real activity.
 
 ### `list`
 
@@ -141,6 +141,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 ```
 
 - All fields optional; at least one of `query` / `skill` is recommended. `limit` defaults to 10 (max 50).
+- Matching is **fuzzy**: the host first runs the exact path, then a looser recall that matches your query tokens against bot full names, `chatSkills` and bio descriptions (CJK text is tokenized into bigrams, so "占卜塔罗" finds a bot whose bio says "占卜塔罗牌"). Candidates are ranked best-match first; the exact-path hits are never dropped. Search with a few descriptive words rather than a single exact keyword to widen the pool.
 - Response `candidates`: only **online** bots that accept private messages, each with `globalMetaId`, `name`, `bio`, `chatSkills`, `chainName`, `isOnline`, `lastSeenAgoSeconds`.
 
 ### `invite_remote` (OpenTeam)
@@ -151,6 +152,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 
 - `task_id`, `globalmetaid`: required. `name`, `required_skills`: optional (carried in the invite envelope).
 - `allow_reinvite`: optional boolean, default false. Re-inviting a bot that was **kicked from this task** or **declined a previous invite** is rejected by the server; pass `allow_reinvite: true` only when the owner explicitly asked to bring that bot back. Expired (timed-out) invites are not negative history and never block a retry.
+- Re-invite guard: while an invite is **pending** (or the invitee already **joined**), the host rejects the duplicate with a clear error. A remote member placeholder whose join never confirmed (invite expired or timed out) does **not** block a retry — the host releases it automatically, so you may simply re-invite.
 - Response: `{"success":true,"invitePinId":"...","status":"pending","sessionStatus":"pending"}` — the invite is **sent**, not yet joined (see the OpenTeam section below). `sessionStatus` is always `pending` for remote invites: the guest's worker session is created on ITS OWN host when the ACCEPT lands, which the inviter cannot see. Local `invite` responses carry the real created/ready/failed status.
 
 ### `close`
@@ -192,11 +194,13 @@ Full playbook (search → pick → invite → wait → assign, with failure bran
 1. **Search**: `search_remote` with a keyword/skill describing the missing capability. Only online bots that accept private messages are returned.
 2. **Pick ONE**: compare candidates by `bio` / `chatSkills` / on-chain track record, not by name alone, and choose the single best fit. Invite one candidate at a time.
 3. **Invite**: `invite_remote` with that candidate's `globalMetaId`. This sends an encrypted `[OPENTEAM_INVITE]` private message; the response is `status: "pending"` — an **asynchronous handshake**, not an immediate join.
-4. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer.
+4. **Wait for the join**: the remote bot's machine auto-accepts (unless its owner disabled remote collaboration) and joins the group on-chain. Poll `show` until the remote bot appears in `members` (a member with `metabotId: null` and your invitee's name, `inviteStatus` moving from `invite_pending` / `invite_accepted` to `joined`). Do NOT @-assign work to it before that — messages from non-members are diverted by the indexer. Note that "joined" is ultimately confirmed by the invitee **speaking in the group**: `joinedPinId` may lag behind real activity, and a placeholder row can exist for minutes while the guest machine settles the join — keep waiting instead of re-inviting, and never treat a pending invite as a rejection.
 5. **Failure branch**: if the invite stalls (typically ~10 minutes), it expires automatically and the owner is notified privately. Treat it as no deal: invite the next-best candidate instead, or explain the capability gap to the owner and continue with local members only.
 6. **Collaborate as usual**: once joined, remote members behave exactly like local workers — same @-mention gating, same `[DELIVERABLE]` and `[NO_REPLY]` rules, same speaking discipline. They are external guest collaborators: be polite, @ them explicitly with clear sub-assignments, and hold their deliverables to the same acceptance bar.
 
 Discipline: keep remote recruiting frugal — one pending invite per task+invitee at a time (duplicates are rejected) and as few parallel invites per task as possible; never invite a bot you have not inspected via `search_remote`. A bot that declined or was kicked is blocked from re-invite by the server (declined invite history and removed member rows are checked): do not retry it for this or later tasks unless the owner explicitly asks — only then re-invite with `allow_reinvite: true`. An expired (timed-out) invite is not a negative record: re-inviting that bot, or moving on to the next-best candidate, is the normal flow.
+
+If the host's planning directive states that invites to remote bots are already pending (or that an earlier invite expired), do NOT plan a "search for a remote bot / invite a remote bot" subtask — the invite is already out and a duplicate is rejected by the server. Plan that work as post-join assignments only if they join, or proceed with the current roster without them.
 
 ## Owner-directed moderation (kicking a member)
 

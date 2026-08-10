@@ -292,6 +292,10 @@ export async function handleOpenTeamInvite(
   const decline = async (reason: string, detail?: string): Promise<OpenTeamGuestResult> => {
     const text = detail ? `${reason}: ${detail}` : reason;
     emitLog(`[OpenTeam] MetaBot ${metabot.id}: declining invite ${invite.inviteId} (${text})`);
+    // P0-1: the invite history row exists (recorded on entry); finalize it as
+    // declined so the guest-side UI shows the outcome instead of a dangling
+    // "invited".
+    membershipStore.updateGuestInviteStatus(invite.inviteId, 'declined', { reason: text });
     const replyPinId = await sendReply(buildOpenTeamDeclineMessage(invite.inviteId, text));
     return { action: 'declined', reason, joinedPinId: null, replyPinId };
   };
@@ -300,10 +304,27 @@ export async function handleOpenTeamInvite(
   // invite twice, and the async daemon dispatch can overlap them. A previously
   // handled inviteId (in-memory, or the membership row's invite_pin_id from an
   // earlier accept) is skipped silently — no second join, no second reply.
+  // P0-1: record the invite in the guest-side history as soon as it is handled
+  // (idempotent on invite_pin_id — a re-delivered envelope returns the same
+  // row). The row exists even when the bot later declines, so the invite is
+  // visible to the A2A session system / collab UI regardless of the outcome.
+  membershipStore.createGuestInvite({
+    groupId: invite.groupId,
+    inviterGlobalmetaid: invite.inviterGlobalMetaId,
+    inviterName: invite.inviterName || null,
+    taskTitle: invite.taskTitle || null,
+    goalSummary: invite.goalSummary || null,
+    requiredSkills: invite.requiredSkills,
+    invitePinId: invite.inviteId,
+    targetGlobalmetaid: invite.targetGlobalMetaId,
+    expiresAt: invite.expiresAt,
+  });
+
   const dedupKey = `${metabot.id}:${invite.inviteId}`;
   const existing = membershipStore.getMembership(invite.groupId, metabot.id);
   if (guard.processedInviteIds.has(dedupKey) || existing?.invitePinId === invite.inviteId) {
     markInviteProcessed(guard, dedupKey);
+    membershipStore.updateGuestInviteStatus(invite.inviteId, 'skipped', { reason: 'duplicate_invite' });
     emitLog(
       `[OpenTeam] MetaBot ${metabot.id}: duplicate invite ${invite.inviteId}; skipped without reply`,
     );
@@ -405,6 +426,9 @@ export async function handleOpenTeamInvite(
     return decline('membership_record_failed', errorMessage(error));
   }
 
+  // P0-1: finalize the guest-side history row as accepted with the join pin.
+  membershipStore.updateGuestInviteStatus(invite.inviteId, 'accepted', { joinedPinId });
+
   // P1-3 (invitee-side immediate wake-up): eagerly create the invited bot's
   // cowork session and inject the group context. Best-effort — a session
   // failure must never flip a successful join into a decline.
@@ -423,6 +447,20 @@ export async function handleOpenTeamInvite(
         taskTitle: invite.taskTitle,
         inviterGlobalmetaid: invite.inviterGlobalMetaId,
         recentMessages: deps.listRecentGroupMessages(invite.groupId, 20),
+      });
+      // P0-1: the invite itself enters the guest's A2A session stream, so the
+      // bot's own conversation history shows the invitation that started the
+      // collaboration (not only the group messages after the join).
+      coworkStore.addMessage(session.id, {
+        type: 'assistant',
+        content:
+          `[OpenTeam invite accepted] ${invite.inviterName?.trim() || invite.inviterGlobalMetaId} ` +
+          `invited you to group task "${invite.taskTitle || invite.groupId}" ` +
+          `(invite ${invite.inviteId}, joined pin ${joinedPinId}). ` +
+          `Goal: ${invite.goalSummary || '(not provided)'}` +
+          (invite.requiredSkills.length > 0
+            ? ` Required skills: ${invite.requiredSkills.join(', ')}`
+            : ''),
       });
       emitLog(
         `[OpenTeam] MetaBot ${metabot.id}: guest session ready for group ${invite.groupId} (${session.id})`,
@@ -494,14 +532,21 @@ export function handleOpenTeamResponse(
   }
   const status: OpenTeamInviteStatus = envelope.kind === 'accept' ? 'accepted' : 'declined';
   const declineReason = envelope.kind === 'decline' ? envelope.reason || null : null;
-  const updated = membershipStore.updateInviteStatus(
+  let updated = membershipStore.updateInviteStatus(
     { invitePinId: envelope.inviteId },
     status,
     declineReason,
   );
+  // P1-2: the ACCEPT envelope echoes the guest's join pin — persist it on the
+  // invite row so the join-confirmation watcher can copy it into the remote
+  // member row (joined_pin_id was null forever before, hiding "already joined").
+  if (envelope.kind === 'accept' && envelope.joinedPinId) {
+    updated = membershipStore.updateInviteJoinedPinId(envelope.inviteId, envelope.joinedPinId) ?? updated;
+  }
   emitLog(
     `[OpenTeam] Invite ${envelope.inviteId} marked ${status}` +
-    (declineReason ? ` (${declineReason})` : ''),
+    (declineReason ? ` (${declineReason})` : '') +
+    (envelope.kind === 'accept' && envelope.joinedPinId ? ` (joined pin ${envelope.joinedPinId})` : ''),
   );
   return { matched: true, invite: updated };
 }
