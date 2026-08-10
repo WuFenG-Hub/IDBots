@@ -2,15 +2,23 @@
  * User Identity Service: create/import/logout the local human user identity
  * and publish its MetaID info pins (/info/name, /info/avatar, /info/chatpubkey).
  *
- * Unlike MetaBot creation, chain publish is best-effort: the local identity
- * is kept even when pins fail, so the user can retry syncing later. Only one
- * user identity may exist at a time (enforced by UserIdentityStore).
+ * Bootstrap model (mirrors OAC's local-identity flow):
+ *  1. Create the identity (wallet + mnemonic) and persist it locally.
+ *  2. Claim the MVC gas subsidy. This is a distinct, retryable step: when it
+ *     fails we do NOT attempt on-chain pins (they would all fail with
+ *     "not enough balance").
+ *  3. Publish the /info pins. Each successful pin stores its PinID, so a retry
+ *     only republishes the pins that are still missing.
+ *
+ * The local identity is always kept, even when subsidy/pins fail, so the user
+ * can retry from the profile panel (Retry subsidy / Retry chain sync) or fund
+ * the MVC address directly.
  */
 
 import * as bip39 from '@scure/bip39';
 import { wordlist } from '@scure/bip39/wordlists/english';
 import type { UserIdentityStore } from '../userIdentityStore';
-import type { UserIdentity } from '../types/userIdentity';
+import type { UserIdentity, UserSubsidyState, UserSyncState } from '../types/userIdentity';
 import { createMetaBotWallet } from './metabotWalletService';
 import { requestMvcGasSubsidy } from './mvcSubsidyService';
 import { fetchMetaidRestoreProfile } from './metabotRestoreService';
@@ -34,8 +42,17 @@ export interface UserChainSyncResult {
   success: boolean;
   txids: string[];
   chatPublicKeyPinId?: string;
+  namePinId?: string;
+  avatarPinId?: string;
   failedSteps: UserInfoSyncStep[];
   error?: string;
+}
+
+export interface UserSubsidyResult {
+  success: boolean;
+  error?: string;
+  step1?: unknown;
+  step2?: unknown;
 }
 
 export interface UserIdentityResult {
@@ -44,6 +61,7 @@ export interface UserIdentityResult {
   identity?: UserIdentity;
   /** Present only right after createUserIdentity so the UI can show the backup step. */
   mnemonic?: string;
+  subsidy?: UserSubsidyResult;
   chainSync?: UserChainSyncResult;
   /** 'chain' when the profile came from on-chain data (import), 'local' otherwise. */
   profileSource?: 'chain' | 'local';
@@ -62,27 +80,48 @@ function defaultSleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function requestSubsidySafe(
+  requestSubsidy: (options: { mvcAddress: string; mnemonic?: string; path?: string }) => Promise<UserSubsidyResult>,
+  mvcAddress: string,
+  mnemonic: string,
+  path: string,
+): Promise<UserSubsidyResult> {
+  try {
+    return await requestSubsidy({ mvcAddress, mnemonic, path });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { success: false, error: message };
+  }
+}
+
 /**
- * Build the pin plan for the current identity. Profile steps (name/avatar) are
- * included only when includeProfileSteps is true (fresh create, or import of an
- * account without on-chain profile); chatpubkey is included only while no
- * chat_public_key_pin_id is recorded (protocol: chatpubkey is immutable).
+ * Build the pin plan for the current identity. Only pins that are still
+ * missing locally are included, so retries are idempotent:
+ *  - name/avatar are candidates only when includeProfileSteps is true and
+ *    their PinID is not recorded yet;
+ *  - chatpubkey is included only while no chat_public_key_pin_id is recorded
+ *    (protocol: chatpubkey is immutable).
  */
 export function buildUserInfoSyncSteps(
-  identity: Pick<UserIdentity, 'name' | 'avatar' | 'chat_public_key' | 'chat_public_key_pin_id'>,
+  identity: Pick<
+    UserIdentity,
+    'name' | 'avatar' | 'chat_public_key' | 'chat_public_key_pin_id' | 'name_pin_id' | 'avatar_pin_id'
+  >,
   options: { includeProfileSteps: boolean },
 ): UserInfoSyncStepPlan[] {
   const steps: UserInfoSyncStepPlan[] = [];
 
   if (options.includeProfileSteps) {
-    steps.push({
-      key: 'name',
-      path: '/info/name',
-      contentType: 'text/plain',
-      payload: identity.name,
-    });
+    if (!identity.name_pin_id && identity.name.trim()) {
+      steps.push({
+        key: 'name',
+        path: '/info/name',
+        contentType: 'text/plain',
+        payload: identity.name,
+      });
+    }
     const avatarData = parseDataUrlAvatar(identity.avatar);
-    if (avatarData) {
+    if (!identity.avatar_pin_id && avatarData) {
       steps.push({
         key: 'avatar',
         path: '/info/avatar',
@@ -106,10 +145,24 @@ export function buildUserInfoSyncSteps(
   return steps;
 }
 
+/** Persist the PinID of a successfully published step. */
+function persistStepPin(
+  userStore: UserIdentityStore,
+  stepKey: UserInfoSyncStep,
+  pinId: string,
+): void {
+  const patch: Parameters<UserIdentityStore['update']>[0] = {};
+  if (stepKey === 'name') patch.name_pin_id = pinId;
+  if (stepKey === 'avatar') patch.avatar_pin_id = pinId;
+  if (stepKey === 'chatpubkey') patch.chat_public_key_pin_id = pinId;
+  userStore.update(patch);
+}
+
 /**
  * Publish pending pins for the current identity. Best-effort per step with a
  * 3s gap (indexer delay) and threaded outpoint exclusions to avoid UTXO
- * double-spend across sequential pins of the same wallet.
+ * double-spend across sequential pins of the same wallet. Every successful
+ * step persists its PinID so later retries skip it.
  */
 export async function syncUserIdentityToChain(
   userStore: UserIdentityStore,
@@ -135,10 +188,11 @@ export async function syncUserIdentityToChain(
 
   for (let index = 0; index < steps.length; index += 1) {
     const step = steps[index];
+    const current = userStore.get() ?? identity;
     try {
       const result = await createPin({
-        mnemonic: identity.mnemonic,
-        path: identity.path,
+        mnemonic: current.mnemonic,
+        path: current.path,
         metaidData: {
           operation: 'create',
           path: step.path,
@@ -154,18 +208,17 @@ export async function syncUserIdentityToChain(
         lastError = `${step.key} pin failed: no txid`;
       } else {
         txids.push(txid);
-        if (step.key === 'chatpubkey') {
-          const pinId = result.pinId ?? `${txid}i0`;
-          userStore.update({ chat_public_key_pin_id: pinId });
-        }
+        const pinId = result.pinId ?? `${txid}i0`;
+        persistStepPin(userStore, step.key, pinId);
         if (Array.isArray(result.spentOutpoints) && result.spentOutpoints.length > 0) {
           sessionSnapshot.excludeOutpoints.push(...result.spentOutpoints);
         }
         sessionSnapshot.preferredFundingUtxos = result.changeUtxo ? [result.changeUtxo] : [];
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       failedSteps.push(step.key);
-      lastError = error instanceof Error ? error.message : String(error);
+      lastError = `${step.key}: ${message}`;
     }
 
     if (index < steps.length - 1) {
@@ -173,10 +226,19 @@ export async function syncUserIdentityToChain(
     }
   }
 
+  const syncState: UserSyncState = failedSteps.length === 0 ? 'synced' : (txids.length > 0 ? 'partial' : 'failed');
+  userStore.update({
+    sync_state: syncState,
+    sync_error: failedSteps.length > 0 ? lastError : null,
+  });
+
+  const latest = userStore.get();
   return {
     success: failedSteps.length === 0,
     txids,
-    chatPublicKeyPinId: userStore.get()?.chat_public_key_pin_id ?? undefined,
+    chatPublicKeyPinId: latest?.chat_public_key_pin_id ?? undefined,
+    namePinId: latest?.name_pin_id ?? undefined,
+    avatarPinId: latest?.avatar_pin_id ?? undefined,
     failedSteps,
     error: failedSteps.length > 0 ? lastError : undefined,
   };
@@ -202,12 +264,17 @@ export async function createUserIdentity(
 
   const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
   const wallet = await createMetaBotWallet({});
-  try {
-    await requestSubsidy({ mvcAddress: wallet.mvc_address, mnemonic: wallet.mnemonic, path: wallet.path });
-  } catch {
-    // Best-effort gas subsidy; pin steps surface their own errors.
-  }
 
+  // 1. Claim MVC gas subsidy. When it fails, skip on-chain pins: without gas
+  // every pin would fail with "not enough balance" and waste user attempts.
+  const subsidy = await requestSubsidySafe(
+    requestSubsidy,
+    wallet.mvc_address,
+    wallet.mnemonic,
+    wallet.path,
+  );
+
+  const subsidyState: UserSubsidyState = subsidy.success ? 'claimed' : 'failed';
   const identity = userStore.insert({
     mnemonic: wallet.mnemonic,
     path: wallet.path,
@@ -221,13 +288,28 @@ export async function createUserIdentity(
     globalmetaid: wallet.globalmetaid,
     name,
     avatar,
+    subsidy_state: subsidyState,
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    sync_state: subsidy.success ? 'pending' : 'failed',
+    sync_error: subsidy.success ? null : 'MVC subsidy must be claimed before syncing to chain.',
   });
+
+  if (!subsidy.success) {
+    return {
+      success: true,
+      identity,
+      mnemonic: wallet.mnemonic,
+      subsidy,
+      profileSource: 'local',
+    };
+  }
 
   const chainSync = await syncUserIdentityToChain(userStore, { includeProfileSteps: true }, deps);
   return {
     success: true,
-    identity,
+    identity: userStore.get() ?? identity,
     mnemonic: wallet.mnemonic,
+    subsidy,
     chainSync,
     profileSource: 'local',
   };
@@ -292,11 +374,13 @@ export async function importUserIdentity(
   }
 
   const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
-  try {
-    await requestSubsidy({ mvcAddress: wallet.mvc_address, mnemonic, path });
-  } catch {
-    // Best-effort gas subsidy; pin steps surface their own errors.
-  }
+  const subsidy = await requestSubsidySafe(
+    requestSubsidy,
+    wallet.mvc_address,
+    mnemonic,
+    path,
+  );
+  const subsidyState: UserSubsidyState = subsidy.success ? 'claimed' : 'failed';
 
   const identity = userStore.insert({
     mnemonic,
@@ -311,19 +395,116 @@ export async function importUserIdentity(
     globalmetaid: wallet.globalmetaid,
     name,
     avatar,
+    subsidy_state: subsidyState,
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    sync_state: subsidy.success ? 'pending' : 'failed',
+    sync_error: subsidy.success ? null : 'MVC subsidy must be claimed before syncing to chain.',
   });
+
+  // Only sync when the subsidy is available; a chain import with a full
+  // on-chain profile needs no pins anyway.
+  const needsWrites = buildUserInfoSyncSteps(identity, { includeProfileSteps: false }).length > 0;
+  if (!subsidy.success && needsWrites) {
+    return { success: true, identity, subsidy, profileSource };
+  }
 
   const chainSync = await syncUserIdentityToChain(
     userStore,
-    { includeProfileSteps: false },
+    { includeProfileSteps: profileSource === 'local' },
     deps,
   );
-  return { success: true, identity, chainSync, profileSource };
+  return { success: true, identity: userStore.get() ?? identity, subsidy, chainSync, profileSource };
 }
 
 /** Log out: delete the local identity (on-chain pins stay as-is). */
 export function logoutUserIdentity(userStore: UserIdentityStore): boolean {
   return userStore.remove();
+}
+
+/** Re-request the MVC gas subsidy for the current identity (retry action). */
+export async function retryUserIdentitySubsidy(
+  userStore: UserIdentityStore,
+  deps: UserIdentityServiceDeps = {},
+): Promise<UserIdentityResult> {
+  const identity = userStore.get();
+  if (!identity) {
+    return { success: false, error: 'USER_IDENTITY_MISSING' };
+  }
+  const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
+  const subsidy = await requestSubsidySafe(
+    requestSubsidy,
+    identity.mvc_address,
+    identity.mnemonic,
+    identity.path,
+  );
+  const updated = userStore.update({
+    subsidy_state: subsidy.success ? 'claimed' : 'failed',
+    subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+    sync_state: subsidy.success ? 'pending' : 'failed',
+    sync_error: subsidy.success
+      ? null
+      : 'MVC subsidy must be claimed before syncing to chain.',
+  });
+  return { success: true, identity: updated ?? identity, subsidy };
+}
+
+/**
+ * Resume the bootstrap flow for the current identity: claim the subsidy when
+ * it is not claimed yet, then publish every /info pin that is still missing.
+ * Idempotent — safe to call repeatedly after failures.
+ */
+export async function resumeUserIdentitySetup(
+  userStore: UserIdentityStore,
+  deps: UserIdentityServiceDeps = {},
+): Promise<UserIdentityResult> {
+  const identity = userStore.get();
+  if (!identity) {
+    return { success: false, error: 'USER_IDENTITY_MISSING' };
+  }
+
+  let subsidy: UserSubsidyResult | undefined;
+  if (identity.subsidy_state !== 'claimed') {
+    const requestSubsidy = deps.requestSubsidy ?? requestMvcGasSubsidy;
+    subsidy = await requestSubsidySafe(
+      requestSubsidy,
+      identity.mvc_address,
+      identity.mnemonic,
+      identity.path,
+    );
+    userStore.update({
+      subsidy_state: subsidy.success ? 'claimed' : 'failed',
+      subsidy_error: subsidy.success ? null : (subsidy.error ?? 'MVC subsidy request failed.'),
+      sync_state: subsidy.success ? 'pending' : 'failed',
+      sync_error: subsidy.success
+        ? null
+        : 'MVC subsidy must be claimed before syncing to chain.',
+    });
+    if (!subsidy.success) {
+      return {
+        success: true,
+        identity: userStore.get() ?? identity,
+        subsidy,
+        chainSync: {
+          success: false,
+          txids: [],
+          failedSteps: [],
+          error: subsidy.error ?? 'SUBSIDY_NOT_CLAIMED',
+        },
+      };
+    }
+  }
+
+  const chainSync = await syncUserIdentityToChain(
+    userStore,
+    { includeProfileSteps: true },
+    deps,
+  );
+  return {
+    success: true,
+    identity: userStore.get() ?? identity,
+    subsidy,
+    chainSync,
+  };
 }
 
 /**
@@ -348,6 +529,16 @@ export async function updateUserIdentityName(
   if (name === identity.name) {
     return { success: true, identity, profileSource: 'local' };
   }
+  // Renaming publishes a pin, so it needs gas. Surface a clear, actionable
+  // error instead of a raw "Not enough balance" from the chain worker.
+  // Legacy identities without a recorded subsidy state and without any pinned
+  // chat key are also treated as unclaimed (their setup never completed).
+  if (
+    identity.subsidy_state === 'failed' ||
+    (!identity.subsidy_state && !identity.chat_public_key_pin_id)
+  ) {
+    return { success: false, error: 'SUBSIDY_NOT_CLAIMED' };
+  }
 
   const createPin = deps.createPin ?? createPinForIdentity;
   let result: Awaited<ReturnType<typeof createPinForIdentity>>;
@@ -369,11 +560,21 @@ export async function updateUserIdentityName(
     return { success: false, error: 'name pin failed: no txid' };
   }
 
-  const updated = userStore.update({ name });
+  const updated = userStore.update({
+    name,
+    name_pin_id: result.pinId ?? `${result.txids[0]}i0`,
+    sync_state: 'synced',
+    sync_error: null,
+  });
   return {
     success: true,
     identity: updated ?? undefined,
-    chainSync: { success: true, txids: result.txids, failedSteps: [] },
+    chainSync: {
+      success: true,
+      txids: result.txids,
+      namePinId: result.pinId ?? `${result.txids[0]}i0`,
+      failedSteps: [],
+    },
     profileSource: 'local',
   };
 }

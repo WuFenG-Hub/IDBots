@@ -83,7 +83,8 @@ import {
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
-  syncUserIdentityToChain,
+  resumeUserIdentitySetup,
+  retryUserIdentitySubsidy,
   updateUserIdentityName,
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
@@ -10322,6 +10323,7 @@ if (!gotTheLock) {
         identity: toPublicUserIdentity(result.identity ?? null),
         // Returned only here so the renderer can show the one-time backup step.
         mnemonic: result.mnemonic,
+        subsidy: result.subsidy,
         chainSync: result.chainSync,
       };
     } catch (error) {
@@ -10341,6 +10343,7 @@ if (!gotTheLock) {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
         profileSource: result.profileSource,
+        subsidy: result.subsidy,
         chainSync: result.chainSync,
       };
     } catch (error) {
@@ -10393,14 +10396,46 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('userIdentity:retrySubsidy', async () => {
+    try {
+      const store = getUserIdentityStore();
+      if (!store.get()) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      const result = await retryUserIdentitySubsidy(store);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        subsidy: result.subsidy,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:retrySubsidy failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  // Resume the whole bootstrap flow: claim the subsidy when needed, then
+  // publish every /info pin that is still missing (idempotent).
   ipcMain.handle('userIdentity:retryChainSync', async () => {
     try {
       const store = getUserIdentityStore();
       if (!store.get()) {
         return { success: false, error: 'USER_IDENTITY_MISSING' };
       }
-      const chainSync = await syncUserIdentityToChain(store, { includeProfileSteps: false });
-      return { success: true, identity: toPublicUserIdentity(store.get()), chainSync };
+      const result = await resumeUserIdentitySetup(store);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        subsidy: result.subsidy,
+        chainSync: result.chainSync,
+      };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[UserIdentity] userIdentity:retryChainSync failed:', errMsg);

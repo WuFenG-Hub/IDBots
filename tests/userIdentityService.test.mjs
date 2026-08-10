@@ -12,6 +12,8 @@ const {
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
+  resumeUserIdentitySetup,
+  retryUserIdentitySubsidy,
   syncUserIdentityToChain,
   buildUserInfoSyncSteps,
   updateUserIdentityName,
@@ -311,5 +313,139 @@ test('updateUserIdentityName validates input and identity presence', async () =>
   const same = await updateUserIdentityName(userStore, { name: 'Original' }, baseDeps(pinMock));
   assert.equal(same.success, true);
   assert.equal(userStore.get().name, 'Original');
+  store.close();
+});
+
+test('createUserIdentity skips on-chain pins when subsidy fails and keeps identity', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  const result = await createUserIdentity(
+    userStore,
+    { name: 'Alice' },
+    {
+      ...baseDeps(pinMock),
+      requestSubsidy: async () => ({ success: false, error: 'not enough balance' }),
+    },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(result.subsidy.success, false);
+  assert.equal(result.chainSync, undefined);
+  assert.equal(pinMock.calls.length, 0);
+  const saved = userStore.get();
+  assert.equal(saved.subsidy_state, 'failed');
+  assert.equal(saved.subsidy_error, 'not enough balance');
+  assert.equal(saved.sync_state, 'failed');
+  store.close();
+});
+
+test('retryUserIdentitySubsidy re-claims the subsidy and clears the error', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  await createUserIdentity(
+    userStore,
+    { name: 'Alice' },
+    {
+      ...baseDeps(pinMock),
+      requestSubsidy: async () => ({ success: false, error: 'not enough balance' }),
+    },
+  );
+  assert.equal(userStore.get().subsidy_state, 'failed');
+
+  const result = await retryUserIdentitySubsidy(userStore, baseDeps(pinMock));
+  assert.equal(result.success, true);
+  assert.equal(result.subsidy.success, true);
+  assert.equal(userStore.get().subsidy_state, 'claimed');
+  assert.equal(userStore.get().subsidy_error, null);
+  // Retry subsidy alone never writes pins.
+  assert.equal(pinMock.calls.length, 0);
+  store.close();
+});
+
+test('resumeUserIdentitySetup claims subsidy then publishes only missing pins', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  await createUserIdentity(
+    userStore,
+    { name: 'Alice' },
+    {
+      ...baseDeps(pinMock),
+      requestSubsidy: async () => ({ success: false, error: 'not enough balance' }),
+    },
+  );
+  assert.equal(userStore.get().subsidy_state, 'failed');
+  assert.equal(pinMock.calls.length, 0);
+
+  const resumeMock = makePinMock();
+  const resumed = await resumeUserIdentitySetup(userStore, baseDeps(resumeMock));
+  assert.equal(resumed.subsidy.success, true);
+  assert.equal(resumed.chainSync.success, true);
+  assert.equal(userStore.get().subsidy_state, 'claimed');
+  assert.equal(userStore.get().chat_public_key_pin_id, 'pin-2');
+  assert.equal(userStore.get().name_pin_id, 'pin-1');
+  assert.equal(userStore.get().sync_state, 'synced');
+  assert.deepEqual(resumeMock.calls.map((c) => c.metaidData.path), ['/info/name', '/info/chatpubkey']);
+  store.close();
+});
+
+test('resumeUserIdentitySetup only republishes pins that are still missing', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock({ failOn: ['/info/name'] });
+  await createUserIdentity(userStore, { name: 'Alice' }, baseDeps(pinMock));
+  // name failed (no avatar supplied); chatpubkey succeeded.
+  assert.equal(userStore.get().name_pin_id, null);
+  assert.equal(userStore.get().avatar_pin_id, null);
+  assert.equal(userStore.get().chat_public_key_pin_id, 'pin-2');
+
+  const retryMock = makePinMock();
+  const resumed = await resumeUserIdentitySetup(userStore, baseDeps(retryMock));
+  assert.equal(resumed.success, true);
+  assert.equal(resumed.chainSync.success, true);
+  assert.deepEqual(retryMock.calls.map((c) => c.metaidData.path), ['/info/name']);
+  assert.equal(userStore.get().name_pin_id, 'pin-1');
+  store.close();
+});
+
+test('updateUserIdentityName rejects with SUBSIDY_NOT_CLAIMED when subsidy failed', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  await createUserIdentity(
+    userStore,
+    { name: 'Alice' },
+    {
+      ...baseDeps(pinMock),
+      requestSubsidy: async () => ({ success: false, error: 'not enough balance' }),
+    },
+  );
+  assert.equal(userStore.get().subsidy_state, 'failed');
+
+  const result = await updateUserIdentityName(userStore, { name: 'Bob' }, baseDeps(pinMock));
+  assert.equal(result.success, false);
+  assert.equal(result.error, 'SUBSIDY_NOT_CLAIMED');
+  assert.equal(pinMock.calls.length, 0);
+  assert.equal(userStore.get().name, 'Alice');
+  store.close();
+});
+
+test('retryChainSync (resume) still reports failure when subsidy cannot be claimed', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  await createUserIdentity(
+    userStore,
+    { name: 'Alice' },
+    {
+      ...baseDeps(pinMock),
+      requestSubsidy: async () => ({ success: false, error: 'not enough balance' }),
+    },
+  );
+
+  const resumed = await resumeUserIdentitySetup(userStore, {
+    ...baseDeps(pinMock),
+    requestSubsidy: async () => ({ success: false, error: 'still not enough balance' }),
+  });
+  assert.equal(resumed.subsidy.success, false);
+  assert.equal(resumed.chainSync.success, false);
+  assert.equal(userStore.get().subsidy_state, 'failed');
+  assert.equal(pinMock.calls.length, 0);
   store.close();
 });

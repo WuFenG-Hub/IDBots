@@ -32,7 +32,12 @@ interface UserIdentity {
   avatar: string | null;
   metaid: string;
   globalmetaid: string | null;
+  mvc_address: string;
   chat_public_key_pin_id: string | null;
+  subsidy_state: 'pending' | 'claimed' | 'failed' | null;
+  subsidy_error: string | null;
+  sync_state: 'pending' | 'synced' | 'partial' | 'failed' | null;
+  sync_error: string | null;
 }
 
 const showToast = (message: string) => {
@@ -52,6 +57,8 @@ const resolveErrorMessage = (raw: string | undefined): string => {
       return i18nService.t('userSettingsErrorExists');
     case 'INVALID_AVATAR':
       return i18nService.t('userSettingsErrorInvalidAvatar');
+    case 'SUBSIDY_NOT_CLAIMED':
+      return i18nService.t('userSettingsErrorSubsidyNotClaimed');
     default:
       return raw || i18nService.t('userSettingsErrorUnknown');
   }
@@ -145,6 +152,8 @@ const UserSettings: React.FC = () => {
   const [creating, setCreating] = useState(false);
   const [createdMnemonic, setCreatedMnemonic] = useState('');
   const [createChainSyncFailed, setCreateChainSyncFailed] = useState(false);
+  const [createSubsidyFailed, setCreateSubsidyFailed] = useState(false);
+  const [createSubsidyError, setCreateSubsidyError] = useState('');
 
   // Import flow
   const [importWordCount, setImportWordCount] = useState<12 | 24>(12);
@@ -154,8 +163,8 @@ const UserSettings: React.FC = () => {
   const [importing, setImporting] = useState(false);
 
   // Profile
-  const [partialSyncWarning, setPartialSyncWarning] = useState(false);
   const [retryingSync, setRetryingSync] = useState(false);
+  const [subsidyRetrying, setSubsidyRetrying] = useState(false);
   const [nameDraft, setNameDraft] = useState('');
   const [nameSaving, setNameSaving] = useState(false);
   const [nameError, setNameError] = useState('');
@@ -299,6 +308,8 @@ const UserSettings: React.FC = () => {
       setIdentity(result.identity);
       setCreatedMnemonic(result.mnemonic);
       setCreateChainSyncFailed(result.chainSync ? !result.chainSync.success : false);
+      setCreateSubsidyFailed(result.subsidy ? !result.subsidy.success : false);
+      setCreateSubsidyError(result.subsidy?.error ?? '');
       setView('backup');
     } catch (error: any) {
       setCreateError(resolveErrorMessage(error?.message));
@@ -308,9 +319,10 @@ const UserSettings: React.FC = () => {
   };
 
   const handleBackupConfirmed = () => {
-    setPartialSyncWarning(createChainSyncFailed);
     setCreatedMnemonic('');
     setCreateChainSyncFailed(false);
+    setCreateSubsidyFailed(false);
+    setCreateSubsidyError('');
     setCreateName('');
     setCreateAvatar('');
     setCreateError('');
@@ -331,8 +343,6 @@ const UserSettings: React.FC = () => {
         return;
       }
       setIdentity(result.identity);
-      const chainSyncFailed = result.chainSync ? !result.chainSync.success : false;
-      setPartialSyncWarning(result.profileSource === 'local' && chainSyncFailed);
       setImportWordCount(12);
       setImportWords(Array.from({ length: 12 }, () => ''));
       setImportPath(DEFAULT_DERIVATION_PATH);
@@ -376,7 +386,6 @@ const UserSettings: React.FC = () => {
         setIdentity(result.identity);
       }
       if (syncOk) {
-        setPartialSyncWarning(false);
         showToast(i18nService.t('userSettingsRetrySuccess'));
       } else {
         const detail = result.error || result.chainSync?.error || '';
@@ -386,6 +395,30 @@ const UserSettings: React.FC = () => {
       showToast(`${i18nService.t('userSettingsRetryFailed')}: ${error?.message || ''}`);
     } finally {
       setRetryingSync(false);
+    }
+  };
+
+  const handleRetrySubsidy = async () => {
+    if (subsidyRetrying) return;
+    setSubsidyRetrying(true);
+    try {
+      const result = await window.electron.userIdentity.retrySubsidy();
+      if (result.identity) {
+        setIdentity(result.identity);
+      }
+      const ok = result.success && (result.subsidy ? result.subsidy.success : true);
+      if (ok) {
+        showToast(i18nService.t('userSettingsSubsidySuccess'));
+      } else {
+        const detail = result.error || result.subsidy?.error || '';
+        showToast(detail
+          ? `${i18nService.t('userSettingsSubsidyFailed')}: ${detail}`
+          : i18nService.t('userSettingsSubsidyFailed'));
+      }
+    } catch (error: any) {
+      showToast(`${i18nService.t('userSettingsSubsidyFailed')}: ${error?.message || ''}`);
+    } finally {
+      setSubsidyRetrying(false);
     }
   };
 
@@ -429,7 +462,6 @@ const UserSettings: React.FC = () => {
         return;
       }
       setIdentity(null);
-      setPartialSyncWarning(false);
       setLogoutModalOpen(false);
       setRevealedMnemonic('');
       setView('empty');
@@ -587,6 +619,20 @@ const UserSettings: React.FC = () => {
         </p>
       </div>
 
+      {createSubsidyFailed && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+          <ExclamationTriangleIcon className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+          <p className="text-sm text-amber-700 dark:text-amber-300">
+            {i18nService.t('userSettingsSubsidyBackupWarning')}
+          </p>
+          {createSubsidyError && (
+            <p className="text-xs mt-1 text-amber-700/80 dark:text-amber-300/80 break-all">
+              {createSubsidyError}
+            </p>
+          )}
+        </div>
+      )}
+
       {createChainSyncFailed && (
         <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
           <ExclamationTriangleIcon className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -715,13 +761,20 @@ const UserSettings: React.FC = () => {
     </div>
   );
 
-  const renderSyncWarning = (messageKey: string) => (
+  const renderSyncWarning = (messageKey: string, detail?: string) => (
     <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
       <div className="flex items-start gap-3 min-w-0">
         <ExclamationTriangleIcon className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
-        <p className="text-sm text-amber-700 dark:text-amber-300">
-          {i18nService.t(messageKey)}
-        </p>
+        <div className="min-w-0">
+          <p className="text-sm text-amber-700 dark:text-amber-300">
+            {i18nService.t(messageKey)}
+          </p>
+          {detail && (
+            <p className="text-xs mt-1 text-amber-700/80 dark:text-amber-300/80 break-all">
+              {detail}
+            </p>
+          )}
+        </div>
       </div>
       <button
         type="button"
@@ -735,11 +788,51 @@ const UserSettings: React.FC = () => {
     </div>
   );
 
+  const renderSubsidyWarning = (detail?: string) => (
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3">
+      <div className="flex items-start gap-3 min-w-0">
+        <ExclamationTriangleIcon className="h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-amber-700 dark:text-amber-300">
+            {i18nService.t('userSettingsSubsidyFailedTitle')}
+          </p>
+          <p className="text-xs mt-1 text-amber-700/80 dark:text-amber-300/80">
+            {i18nService.t('userSettingsSubsidyFailedMessage')}
+          </p>
+          {detail && (
+            <p className="text-xs mt-1 text-amber-700/80 dark:text-amber-300/80 break-all">
+              {detail}
+            </p>
+          )}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => { void handleRetrySubsidy(); }}
+        disabled={subsidyRetrying}
+        className="inline-flex shrink-0 items-center px-3 py-1.5 text-xs font-medium rounded-xl border border-amber-500/50 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+      >
+        <ArrowPathIcon className={`h-3.5 w-3.5 mr-1.5 ${subsidyRetrying ? 'animate-spin' : ''}`} />
+        {subsidyRetrying ? i18nService.t('userSettingsRetryingSubsidy') : i18nService.t('userSettingsRetrySubsidy')}
+      </button>
+    </div>
+  );
+
   const renderProfile = () => {
     if (!identity) return null;
     const avatarUrl = identity.avatar && identity.avatar.startsWith('data:') ? identity.avatar : null;
     const nameMissing = !identity.name.trim();
     const nameInitial = identity.name.trim().charAt(0).toUpperCase() || '?';
+    const chatPubkeyPinned = Boolean(identity.chat_public_key_pin_id);
+    // Legacy identities have no recorded subsidy state; when nothing is pinned
+    // yet, treat them as needing a subsidy claim so the user gets a retry path.
+    const subsidyFailed = identity.subsidy_state === 'failed'
+      || (!identity.subsidy_state && !chatPubkeyPinned);
+    const syncIncomplete =
+      identity.sync_state === 'failed' ||
+      identity.sync_state === 'partial' ||
+      identity.sync_state === 'pending' ||
+      (!identity.sync_state && !chatPubkeyPinned);
     return (
       <div className="space-y-4">
         {/* Header with backup + logout */}
@@ -821,11 +914,24 @@ const UserSettings: React.FC = () => {
         </div>
 
         {renderIdRow('userSettingsGlobalMetaId', identity.globalmetaid)}
-        {renderIdRow('userSettingsMetaId', identity.metaid)}
+        {renderIdRow('userSettingsMvcAddress', identity.mvc_address)}
+
+        {/* MVC subsidy status: must be claimed before on-chain writes can work */}
+        {subsidyFailed && renderSubsidyWarning(identity.subsidy_error ?? undefined)}
 
         {/* Chain sync status */}
-        {!identity.chat_public_key_pin_id && renderSyncWarning('userSettingsChatPubkeyNotPinned')}
-        {identity.chat_public_key_pin_id && partialSyncWarning && renderSyncWarning('userSettingsChainSyncWarning')}
+        {syncIncomplete && (
+          <div className="space-y-3">
+            {!chatPubkeyPinned && !identity.sync_state && renderSyncWarning('userSettingsChatPubkeyNotPinned', identity.sync_error ?? undefined)}
+            {(chatPubkeyPinned || identity.sync_state) && renderSyncWarning('userSettingsChainSyncWarning', identity.sync_error ?? undefined)}
+          </div>
+        )}
+
+        {(subsidyFailed || syncIncomplete) && (
+          <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('userSettingsDepositHint')}
+          </div>
+        )}
 
         {/* Logout confirmation modal */}
         {logoutModalOpen && (

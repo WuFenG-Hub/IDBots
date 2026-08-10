@@ -74,6 +74,12 @@ interface PublicUserIdentity {
   globalmetaid: string | null;
   name: string;
   avatar: string | null;
+  subsidy_state: 'pending' | 'claimed' | 'failed' | null;
+  subsidy_error: string | null;
+  name_pin_id: string | null;
+  avatar_pin_id: string | null;
+  sync_state: 'pending' | 'synced' | 'partial' | 'failed' | null;
+  sync_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -82,8 +88,17 @@ interface UserIdentityChainSyncResult {
   success: boolean;
   txids: string[];
   chatPublicKeyPinId?: string;
+  namePinId?: string;
+  avatarPinId?: string;
   failedSteps: Array<'name' | 'avatar' | 'chatpubkey'>;
   error?: string;
+}
+
+interface UserIdentitySubsidyResult {
+  success: boolean;
+  error?: string;
+  step1?: unknown;
+  step2?: unknown;
 }
 
 interface AppUpdateDownloadProgress {
@@ -1175,6 +1190,7 @@ interface IElectronAPI {
       identity?: PublicUserIdentity | null;
       /** Present only on create, for the one-time backup step. */
       mnemonic?: string;
+      subsidy?: UserIdentitySubsidyResult;
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;
@@ -1182,6 +1198,7 @@ interface IElectronAPI {
       success: boolean;
       identity?: PublicUserIdentity | null;
       profileSource?: 'chain' | 'local';
+      subsidy?: UserIdentitySubsidyResult;
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;
@@ -1193,7 +1210,8 @@ interface IElectronAPI {
     }>;
     logout: () => Promise<{ success: boolean; error?: string }>;
     revealMnemonic: () => Promise<{ success: boolean; mnemonic?: string; error?: string }>;
-    retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; chainSync?: UserIdentityChainSyncResult; error?: string }>;
+    retrySubsidy: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; error?: string }>;
+    retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; chainSync?: UserIdentityChainSyncResult; error?: string }>;
   };
   metaWebListener: {
     getListenerConfig: () => Promise<{ success: boolean; config?: { enabled: boolean; groupChats: boolean; privateChats: boolean; serviceRequests: boolean; respondToStrangerPrivateChats: boolean }; error?: string }>;

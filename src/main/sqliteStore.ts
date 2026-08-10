@@ -1372,6 +1372,12 @@ export class SqliteStore {
         globalmetaid TEXT,
         name TEXT NOT NULL,
         avatar TEXT,
+        subsidy_state TEXT,
+        subsidy_error TEXT,
+        name_pin_id TEXT,
+        avatar_pin_id TEXT,
+        sync_state TEXT,
+        sync_error TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1489,6 +1495,9 @@ export class SqliteStore {
     // One-shot migration: normalize metabot_type, collapse duplicate twins, and
     // promote the earliest bot when no twin exists (unique-Twin backfill).
     this.migrateMetabotTwinBackfill();
+    // Migration: persist user-identity bootstrap state (subsidy + per-pin sync status)
+    // so chain setup can be resumed/retried idempotently after failures.
+    this.migrateUserIdentitySetupColumns();
 
     // Migrations - safely add columns if they don't exist
     try {
@@ -2547,6 +2556,32 @@ export class SqliteStore {
       this.set(METABOT_TWIN_BACKFILL_MIGRATION_KEY, true);
     } catch (error) {
       console.warn('migrateMetabotTwinBackfill:', error);
+    }
+  }
+
+  /** Idempotently add user-identity bootstrap-state columns to user_identity. */
+  private migrateUserIdentitySetupColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(user_identity);');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const additions: Array<[string, string]> = [
+        ['subsidy_state', 'TEXT'],
+        ['subsidy_error', 'TEXT'],
+        ['name_pin_id', 'TEXT'],
+        ['avatar_pin_id', 'TEXT'],
+        ['sync_state', 'TEXT'],
+        ['sync_error', 'TEXT'],
+      ];
+      let changed = false;
+      for (const [col, decl] of additions) {
+        if (!columns.includes(col)) {
+          this.db.run(`ALTER TABLE user_identity ADD COLUMN ${col} ${decl};`);
+          changed = true;
+        }
+      }
+      if (changed) this.save();
+    } catch (error) {
+      console.warn('migrateUserIdentitySetupColumns:', error);
     }
   }
 
