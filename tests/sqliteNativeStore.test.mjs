@@ -218,3 +218,89 @@ test('deleting a MetaBot clears child boss ids instead of failing FK constraints
   assert.equal(childBossId, null);
   store.close();
 });
+
+// ---------------------------------------------------------------------------
+// 清单 #11: concurrent-write safety on the native connection.
+// The default SQLite settings (rollback journal, busy_timeout=0) make a write
+// from a second connection fail instantly with SQLITE_BUSY ('database is
+// locked') — reproduced live when a Twin session and a delegated worker
+// session wrote the same database concurrently. The native connection must
+// open with WAL + busy_timeout and wait out overlapping writers.
+// ---------------------------------------------------------------------------
+test('native connection opens with WAL journal mode + busy_timeout (清单 #11)', async () => {
+  const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
+  const tempDir = makeTempDir();
+  const store = await SqliteStore.create(tempDir);
+  try {
+    const db = store.getDatabase();
+
+    const journal = db.exec('PRAGMA journal_mode')[0];
+    assert.equal(journal.columns[0], 'journal_mode');
+    assert.equal(journal.values[0][0], 'wal', 'WAL journal must be active');
+
+    const timeout = db.exec('PRAGMA busy_timeout')[0];
+    assert.equal(timeout.columns[0], 'timeout');
+    assert.equal(timeout.values[0][0], 5000, 'busy_timeout must be set');
+  } finally {
+    store.close();
+  }
+
+  // WAL persists in the database header: a reopened store keeps working and
+  // the data written before close (checkpointed) is fully readable.
+  const reopened = await SqliteStore.create(tempDir);
+  try {
+    reopened.set('wal-persist-check', { ok: true });
+    assert.equal(reopened.get('wal-persist-check').ok, true);
+    assert.equal(reopened.getDatabase().exec('PRAGMA journal_mode')[0].values[0][0], 'wal');
+  } finally {
+    reopened.close();
+  }
+});
+
+test('concurrent writer waits via busy_timeout instead of throwing database is locked (清单 #11)', async () => {
+  const { createNativeSqliteDatabase } = require('../dist-electron/main/nativeSqliteDatabase.js');
+  const { Worker } = await import('node:worker_threads');
+  const tempDir = makeTempDir();
+  const dbPath = path.join(tempDir, 'concurrent.sqlite');
+
+  // Second writer on its OWN event loop: takes the write lock (BEGIN IMMEDIATE),
+  // signals 'locked', then commits after a short delay — its transaction
+  // overlaps our connection's write.
+  const holder = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { DatabaseSync } = require('node:sqlite');
+    const db = new DatabaseSync(workerData.dbPath);
+    db.exec('PRAGMA busy_timeout = 0;');
+    db.exec('BEGIN IMMEDIATE');
+    parentPort.postMessage('locked');
+    setTimeout(() => {
+      db.exec('COMMIT');
+      db.close();
+      parentPort.postMessage('committed');
+    }, workerData.commitAfterMs);
+  `, {
+    eval: true,
+    workerData: { dbPath, commitAfterMs: 400 },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      holder.once('message', (message) => { if (message === 'locked') resolve(); });
+      holder.once('error', reject);
+    });
+
+    // Our connection opens with busy_timeout=5000: the write must block until
+    // the other writer's transaction commits instead of failing immediately
+    // with 'database is locked'.
+    const db = createNativeSqliteDatabase(dbPath);
+    const started = Date.now();
+    db.run('CREATE TABLE concurrent_t (id INTEGER PRIMARY KEY, v TEXT)');
+    db.run("INSERT INTO concurrent_t (v) VALUES ('ok')");
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 300, `write waited for the other writer instead of failing (${elapsed}ms)`);
+    const rows = db.exec('SELECT v FROM concurrent_t')[0].values;
+    assert.deepEqual(rows, [['ok']]);
+    db.close();
+  } finally {
+    await holder.terminate();
+  }
+});
