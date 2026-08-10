@@ -537,6 +537,10 @@ export class TwinOrchestrationService {
       workerMetabotId: worker.id,
       prompt: objective,
     });
+    // 清单 #12: a retry supersedes this step's earlier failed attempt — mark
+    // its worker session so the UI shows "already retried" instead of a bare
+    // error that reads like an abandoned task.
+    this.markSupersededAttemptSessions(step.id);
     void this.executeAttempt(task, step, attempt, worker, input);
     return {
       task: this.deps.orchestrationStore.getTask(task.id)!,
@@ -545,6 +549,40 @@ export class TwinOrchestrationService {
       replyText: null,
       reused: false,
     };
+  }
+
+  /**
+   * 清单 #12: mark the cowork sessions of a step's superseded failed attempts
+   * as 'error_retried' so the session list can distinguish "attempt failed,
+   * already retried" from "task failed and nobody is handling it". Only
+   * terminal 'failed' attempts with a worker session still in the plain
+   * 'error' state are touched; sessions that later got revived (running/
+   * completed) are left alone. Tolerant by design — store access problems are
+   * logged and never break the delegation flow.
+   */
+  private markSupersededAttemptSessions(stepId: string): void {
+    try {
+      const store = this.deps.coworkStore as unknown as {
+        getSession?: (sessionId: string) => { status?: string } | null;
+        updateSession?: (sessionId: string, updates: { status: string }) => void;
+      };
+      for (const previous of this.deps.orchestrationStore.listAttempts(stepId)) {
+        const workerSessionId = (previous.workerSessionId ?? '').trim();
+        if (!workerSessionId || previous.status !== 'failed') continue;
+        const session = store.getSession?.(workerSessionId);
+        if (!session || session.status !== 'error') continue;
+        store.updateSession?.(workerSessionId, { status: 'error_retried' });
+        console.log(
+          `[TwinOrchestration] Marked superseded attempt session ${workerSessionId} ` +
+          `(attempt ${previous.id}) as error_retried`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        `[TwinOrchestration] Superseded-attempt session marking failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   getTaskStatus(sourceSessionId: string, taskId: string): TwinTaskStatusResult {

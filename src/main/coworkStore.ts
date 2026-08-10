@@ -492,7 +492,10 @@ export function buildA2AParticipantPairKey(localGlobalMetaId: string, peerGlobal
 }
 
 // Types mirroring src/types/cowork.ts for main process use
-export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// 'error_retried' (清单 #12): an orchestration attempt failed AND the step was
+// already retried with a fresh attempt — the session is a historical failure,
+// distinguishable from an un-attended 'error'.
+export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';

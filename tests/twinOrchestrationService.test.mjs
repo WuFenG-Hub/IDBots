@@ -395,6 +395,125 @@ test('#3: a retried attempt that fails again still notifies the Twin (per-attemp
   }
 });
 
+// ---------------------------------------------------------------------------
+// 清单 #12: a retried (reassigned) step supersedes the failed attempt — the
+// old attempt's worker session must be marked error_retried so the UI can
+// distinguish "attempt failed, already retried" from "task failed, abandoned".
+// ---------------------------------------------------------------------------
+test('#12: reassign marks the superseded failed attempt session as error_retried', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const sessions = new Map([
+    ['worker-session-2', { id: 'worker-session-2', status: 'error' }],
+  ]);
+  const sessionUpdates = [];
+  const coworkStore = {
+    getSession: (id) => sessions.get(id) ?? null,
+    updateSession: (id, updates) => {
+      sessionUpdates.push({ id, updates });
+      const existing = sessions.get(id);
+      if (existing) Object.assign(existing, updates);
+    },
+  };
+  let runCount = 0;
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    runCount += 1;
+    await params.onSessionCreated(runCount === 1 ? 'worker-session-2' : 'worker-session-3');
+    throw new Error('worker crashed');
+  }, {
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+    coworkStore,
+  });
+  try {
+    // First attempt fails with its session in the plain 'error' state.
+    const first = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fail', idempotencyKey: '#12-first',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(first.attempt.id).status, 'failed'));
+    assert.deepEqual(sessionUpdates, [], 'first delegation has nothing to supersede');
+
+    // Reassign → the old failed attempt's session gets marked error_retried.
+    const second = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'retry',
+      taskId: first.task.id,
+      stepId: first.step.id,
+      idempotencyKey: '#12-second',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(second.attempt.id).status, 'failed'));
+    assert.deepEqual(sessionUpdates, [
+      { id: 'worker-session-2', updates: { status: 'error_retried' } },
+    ]);
+    assert.equal(sessions.get('worker-session-2').status, 'error_retried');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('#12: only terminal-failed attempts with a session still in error are marked — completed/running/absent are untouched', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const sessions = new Map([
+    ['worker-session-1', { id: 'worker-session-1', status: 'error' }],
+    ['worker-session-2', { id: 'worker-session-2', status: 'completed' }],
+    ['worker-session-3', { id: 'worker-session-3', status: 'running' }],
+  ]);
+  const sessionUpdates = [];
+  const coworkStore = {
+    getSession: (id) => sessions.get(id) ?? null,
+    updateSession: (id, updates) => {
+      sessionUpdates.push({ id, updates });
+      const existing = sessions.get(id);
+      if (existing) Object.assign(existing, updates);
+    },
+  };
+  let runCount = 0;
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    runCount += 1;
+    await params.onSessionCreated('worker-session-' + runCount);
+    if (runCount === 1) return 'Handoff: completed successfully.'; // attempt 1 completes
+    throw new Error('worker crashed'); // attempt 2 fails, attempt 3 fails
+  }, {
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+    coworkStore,
+  });
+  try {
+    // Attempt 1 completes — completed attempts are never considered for
+    // marking regardless of their session status.
+    const first = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'complete', idempotencyKey: '#12-neg-first',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(first.attempt.id).status, 'completed'));
+
+    // Attempt 2 fails — its session (worker-session-2) shows 'completed' in
+    // the fake store → must NOT be overwritten.
+    const second = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'fail',
+      taskId: first.task.id,
+      stepId: first.step.id,
+      idempotencyKey: '#12-neg-second',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(second.attempt.id).status, 'failed'));
+    assert.deepEqual(sessionUpdates, [], 'completed-status session must not be overwritten');
+
+    // Attempt 3 fails — its session (worker-session-3) shows 'running' in the
+    // fake store → still not marked. Only a plain 'error' session is marked.
+    const third = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2,
+      objective: 'fail again',
+      taskId: first.task.id,
+      stepId: first.step.id,
+      idempotencyKey: '#12-neg-third',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(third.attempt.id).status, 'failed'));
+    assert.deepEqual(sessionUpdates, [], 'running-status session must not be overwritten');
+  } finally {
+    sqliteStore.close();
+  }
+});
 
 
 // ---------------------------------------------------------------------------
