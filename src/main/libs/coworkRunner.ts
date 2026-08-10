@@ -912,6 +912,13 @@ export interface PermissionRequest {
   toolInput: Record<string, unknown>;
 }
 
+export type LocalBufferedSteer = {
+  submissionId: string;
+  text: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
 interface ActiveSession {
   sessionId: string;
   claudeSessionId: string | null;
@@ -942,6 +949,14 @@ interface ActiveSession {
   contextOverflowRetryAllowed: boolean;
   executionMode: CoworkExecutionMode;
   localInputChannel?: CoworkSteerChannel;
+  /**
+   * Steers accepted while the CLI is mid-turn. The native SDK runtime drops
+   * user messages written to stdin while a tool is running (the transcript
+   * records an enqueue followed by a remove), so accepted steers are held here
+   * and written into the input channel only at the next local turn boundary
+   * (end_turn / result), when the CLI is idle at the input prompt.
+   */
+  localBufferedSteers: LocalBufferedSteer[];
   localAcceptedInputs: number;
   localSettledInputs: number;
   localPendingSteerIds: string[];
@@ -1439,6 +1454,10 @@ export class CoworkRunner extends EventEmitter {
     if (this.activeSessions.get(sessionId) !== activeSession) return;
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.close();
+    this.rejectBufferedSteers(
+      activeSession,
+      new Error('Cowork steer input channel closed before delivery')
+    );
     this.activeSessions.delete(sessionId);
     // R1 会话结束对账：SDK 侧已删的会话内 cron 从镜像标记 deleted（幂等，失败仅告警）。
     if (this.sdkCronMirror) {
@@ -1474,6 +1493,7 @@ export class CoworkRunner extends EventEmitter {
     activeSession.localInputChannel?.stop(error);
     activeSession.localInputChannel = undefined;
     activeSession.maybeCloseLocalTurn = undefined;
+    this.rejectBufferedSteers(activeSession, error);
     const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
       ? activeSession.localPendingSteerIds.splice(0)
       : [];
@@ -1490,6 +1510,7 @@ export class CoworkRunner extends EventEmitter {
   ): void {
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.stop(error);
+    this.rejectBufferedSteers(activeSession, error);
     const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
       ? activeSession.localPendingSteerIds.splice(0)
       : [];
@@ -1499,6 +1520,15 @@ export class CoworkRunner extends EventEmitter {
       }
     }
     activeSession.localDeliveredSteerIds?.clear();
+  }
+
+  private rejectBufferedSteers(activeSession: ActiveSession, error: Error): void {
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers.splice(0)
+      : [];
+    for (const pending of buffered) {
+      pending.reject(error);
+    }
   }
 
   trySubmitSteer(
@@ -1515,14 +1545,20 @@ export class CoworkRunner extends EventEmitter {
       return { accepted: false, reason: 'closing' };
     }
 
-    const queued = activeSession.localInputChannel.enqueue(buildCoworkSteerSdkMessage(text));
-    const delivered = queued.delivered.then(() => {
-      activeSession.localDeliveredSteerIds.add(submissionId);
-      activeSession.maybeCloseLocalTurn?.();
+    let resolveDelivered!: () => void;
+    let rejectDelivered!: (error: Error) => void;
+    const delivered = new Promise<void>((resolve, reject) => {
+      resolveDelivered = resolve;
+      rejectDelivered = reject;
     });
     // The submission controller observes this promise too, but attach a rejection
     // observer immediately so Stop cannot create a transient unhandled rejection.
     void delivered.then(undefined, () => undefined);
+
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers
+      : (activeSession.localBufferedSteers = []);
+    buffered.push({ submissionId, text, resolve: resolveDelivered, reject: rejectDelivered });
     activeSession.localPendingSteerIds.push(submissionId);
     activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
     return { accepted: true, delivered };
@@ -4305,6 +4341,7 @@ export class CoworkRunner extends EventEmitter {
       localSettledInputs: 0,
       localPendingSteerIds: [],
       localDeliveredSteerIds: new Set(),
+      localBufferedSteers: [],
       localTurnState: 'starting',
       pendingManualCompact: false,
       turnSettled,
@@ -6133,6 +6170,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localSettledInputs = 0;
       activeSession.localPendingSteerIds = [];
       activeSession.localDeliveredSteerIds = new Set();
+      activeSession.localBufferedSteers = [];
       activeSession.localTurnState = 'open';
       let unmatchedTopLevelAssistantBoundaries = 0;
       const settleNextLocalInput = (requireDelivery: boolean) => {
@@ -6146,6 +6184,35 @@ export class CoworkRunner extends EventEmitter {
             this.emit('steerSettled', sessionId, settledSubmissionId);
           }
         }
+      };
+      // Accepted steers are held in localBufferedSteers until the CLI reaches a
+      // local turn boundary. Writing them mid-turn (while a tool is running) is
+      // unreliable on the SDK 0.3.x native runtime: the CLI records an enqueue
+      // and then a queue remove when the in-flight tool result arrives, so the
+      // model never sees the correction. At the boundary the CLI is idle at the
+      // input prompt and processes the queued user message as its next turn.
+      const flushBufferedSteers = (): void => {
+        if (activeSession.localInputChannel !== channel) return;
+        const buffered = Array.isArray(activeSession.localBufferedSteers)
+          ? activeSession.localBufferedSteers.splice(0)
+          : [];
+        if (buffered.length === 0) return;
+        for (const pending of buffered) {
+          if (activeSession.localTurnState !== 'open' || !channel.isOpen) {
+            pending.reject(new Error('Cowork steer input channel closed before delivery'));
+            continue;
+          }
+          const queued = channel.enqueue(buildCoworkSteerSdkMessage(pending.text));
+          void queued.delivered.then(
+            () => {
+              activeSession.localDeliveredSteerIds.add(pending.submissionId);
+              pending.resolve();
+              activeSession.maybeCloseLocalTurn?.();
+            },
+            (error: Error) => pending.reject(error)
+          );
+        }
+        coworkLog('INFO', 'runClaudeCodeLocal', `Flushed ${buffered.length} buffered cowork steer(s) at local turn boundary`, { sessionId });
       };
       // Stall watchdog: a steered (interrupted) turn can end without any
       // terminal assistant boundary or result event, leaving a delivered input
@@ -6186,6 +6253,12 @@ export class CoworkRunner extends EventEmitter {
       };
       const maybeCloseLocalTurn = () => {
         if (activeSession.localInputChannel !== channel) return;
+        // Keep the channel open while accepted steers are still buffered; they
+        // are written at the next boundary and need a live channel.
+        if ((activeSession.localBufferedSteers?.length ?? 0) > 0) {
+          armLocalTurnStallWatchdog();
+          return;
+        }
         if (
           activeSession.localSettledInputs >= channel.acceptedCount
           && channel.deliveredCount >= channel.acceptedCount
@@ -6219,6 +6292,11 @@ export class CoworkRunner extends EventEmitter {
           unmatchedTopLevelAssistantBoundaries += 1;
           settleNextLocalInput(true);
           maybeCloseLocalTurn();
+          // The turn has reached a safe boundary (CLI idle at the input
+          // prompt): flush buffered steers so the CLI processes them as the
+          // next turn instead of dropping them mid-tool.
+          flushBufferedSteers();
+          maybeCloseLocalTurn();
         }
         if (isSdkResultEvent(event)) {
           if (unmatchedTopLevelAssistantBoundaries > 0) {
@@ -6226,6 +6304,8 @@ export class CoworkRunner extends EventEmitter {
           } else {
             settleNextLocalInput(false);
           }
+          maybeCloseLocalTurn();
+          flushBufferedSteers();
           maybeCloseLocalTurn();
         }
       }
