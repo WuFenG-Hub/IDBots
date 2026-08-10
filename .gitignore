@@ -210,3 +210,4 @@ man_base_data_pebble/
 !tests/metabotSettingsService.test.mjs
 !tests/coworkReadImageGuard.test.mjs
 !tests/coworkToolResultFold.test.mjs
+!tests/messageFeedback.test.mjs

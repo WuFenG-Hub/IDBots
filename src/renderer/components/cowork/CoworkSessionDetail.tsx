@@ -17,6 +17,7 @@ import TodoPanel from './TodoPanel';
 import UsageStatsChip from './UsageStatsChip';
 import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
+import MessageFeedbackControls from './MessageFeedbackControls';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -1741,6 +1742,10 @@ const AssistantMessageItem: React.FC<{
             content={displayContent}
             visible={isHovered}
           />
+          <MessageFeedbackControls
+            messageId={message.id}
+            visible={isHovered}
+          />
           <MessageTimestamp
             timestamp={message.timestamp}
             visible={isHovered}
@@ -2670,6 +2675,12 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   useEffect(() => {
     historyLoadInFlightRef.current = false;
     setIsLoadingEarlierMessages(false);
+  }, [currentSession?.id]);
+
+  // Load persisted per-message feedback (thumbs up/down) when the session changes
+  useEffect(() => {
+    if (!currentSession?.id) return;
+    void coworkService.loadSessionFeedback(currentSession.id);
   }, [currentSession?.id]);
 
   // Focus rename input when entering rename mode

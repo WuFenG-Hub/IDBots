@@ -20,6 +20,7 @@ import type {
 import type {
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
 } from './cowork';
 import type {
@@ -805,6 +806,8 @@ interface IElectronAPI {
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
+    setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord | null; error?: string }>;
+    listSessionFeedback: (input: { sessionId: string }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord[]; error?: string }>;
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{

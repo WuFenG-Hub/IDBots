@@ -200,6 +200,7 @@ import {
 import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
+import { MessageFeedbackStore } from './messageFeedbackStore';
 import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
@@ -2543,6 +2544,7 @@ process.on('unhandledRejection', (error) => {
 let store: SqliteStore | null = null;
 let coworkStore: CoworkStore | null = null;
 let dreamStore: DreamStore | null = null;
+let messageFeedbackStore: MessageFeedbackStore | null = null;
 let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
@@ -2983,6 +2985,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   }
   coworkStore = null;
   dreamStore = null;
+  messageFeedbackStore = null;
   mcpStore = null;
   projectStore = null;
   coworkRunner = null;
@@ -3919,6 +3922,17 @@ const getDreamStore = (): DreamStore => {
     dreamStore = new DreamStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return dreamStore;
+};
+
+const getMessageFeedbackStore = (): MessageFeedbackStore => {
+  if (!messageFeedbackStore) {
+    const sqliteStore = getStore();
+    messageFeedbackStore = new MessageFeedbackStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return messageFeedbackStore;
 };
 
 const scheduleCoworkStoreHeavyMaintenance = (): void => {
@@ -8523,6 +8537,80 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to get session messages',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:message:setFeedback', async (_event, input: {
+    messageId?: unknown;
+    rating?: unknown;
+    comment?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:message:setFeedback', async () => {
+      try {
+        const messageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
+        if (!messageId) {
+          return { success: false, error: 'messageId is required' };
+        }
+        const coworkStore = getCoworkStore();
+        const ownerSessionId = coworkStore.getMessageOwnerSessionId(messageId);
+        const message = ownerSessionId ? coworkStore.getMessageById(ownerSessionId, messageId) : null;
+        if (!ownerSessionId || !message) {
+          return { success: false, error: 'Message not found' };
+        }
+        if (message.type !== 'assistant') {
+          return { success: false, error: 'Only assistant messages can be rated' };
+        }
+        const rating = input?.rating;
+        if (rating !== null && rating !== 'up' && rating !== 'down') {
+          return { success: false, error: 'Invalid rating' };
+        }
+        let comment: string | null | undefined;
+        if (input?.comment !== undefined) {
+          if (input.comment !== null && typeof input.comment !== 'string') {
+            return { success: false, error: 'comment must be a string' };
+          }
+          comment = typeof input.comment === 'string' ? input.comment.slice(0, 2000) : null;
+        }
+        const feedbackStore = getMessageFeedbackStore();
+        if (rating === null) {
+          feedbackStore.clearFeedback(messageId);
+          return { success: true, feedback: null };
+        }
+        const feedback = feedbackStore.upsertFeedback({
+          messageId,
+          sessionId: ownerSessionId,
+          rating: rating as 'up' | 'down',
+          ...(comment !== undefined ? { comment } : {}),
+        });
+        return { success: true, feedback };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set message feedback',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:listFeedback', async (_event, input: {
+    sessionId?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:listFeedback', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        if (!sessionId || !getCoworkStore().getSessionMetadata(sessionId)) {
+          return { success: false, error: 'Session not found' };
+        }
+        const feedback = getMessageFeedbackStore().listFeedbackForSession(sessionId);
+        return { success: true, feedback };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list session feedback',
         };
       }
     });

@@ -25,7 +25,7 @@ export const DREAM_WINDOW_END_MINUTES = 6 * 60;
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0.
  */
-export const DREAM_VERSION = 5;
+export const DREAM_VERSION = 6;
 /** Default activity input budget for a day-level prompt, measured in tokens. */
 export const DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET = 48_000;
 export const SELF_IDENTITY_MIN_CHARS = 200;
@@ -248,7 +248,17 @@ function formatSessionActivity(session: DreamSessionActivity): string {
   const lines: string[] = [];
   for (const message of session.messages) {
     const speaker = message.type === 'user' ? '对方' : '你';
-    lines.push(`${speaker}: ${message.content.replace(/\s+/g, ' ').trim()}`);
+    let line = `${speaker}: ${message.content.replace(/\s+/g, ' ').trim()}`;
+    // Human thumbs up/down on an assistant reply is first-hand alignment
+    // evidence — keep it inline so the review cannot miss it.
+    if (message.type === 'assistant' && message.feedbackRating) {
+      line += message.feedbackRating === 'up' ? '〔人类评价:赞〕' : '〔人类评价:踩〕';
+      const comment = message.feedbackComment?.trim();
+      if (comment) {
+        line += `〔人类留言:${comment.replace(/\s+/g, ' ')}〕`;
+      }
+    }
+    lines.push(line);
   }
   return lines.join('\n');
 }
@@ -395,10 +405,20 @@ export function buildDreamPrompt(input: {
   }
 
   const sessionTitles = input.activity.sessions.map((session) => `「${truncateText(session.title, 40)}」`).join('、');
+  let ratedUpCount = 0;
+  let ratedDownCount = 0;
+  for (const session of input.activity.sessions) {
+    for (const message of session.messages) {
+      if (message.feedbackRating === 'up') ratedUpCount += 1;
+      else if (message.feedbackRating === 'down') ratedDownCount += 1;
+    }
+  }
+  const ratedTotal = ratedUpCount + ratedDownCount;
   const inventory =
     `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
     `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次;` +
     `群任务验收评价 ${(input.activity.groupTasks ?? []).length} 项。` +
+    (ratedTotal > 0 ? `人类逐条评价 ${ratedTotal} 条(赞 ${ratedUpCount},踩 ${ratedDownCount})。` : '') +
     (sourceMode === 'fragment_summaries'
       ? '以下内容是从当天真实记录中分块提炼出的证据摘要,请综合摘要而不是臆造未展示的原文细节。'
       : '以下内容按 token 预算做了均衡摘录,被截断或从略的会话以其标题为准,不要臆造未展示的细节。');
@@ -421,6 +441,7 @@ export function buildDreamPrompt(input: {
       '}',
       '',
       '只保留有证据的 sections 键,不要推断整天发生的事,不要生成自我身份或泛泛而谈的结论。',
+      '若消息行尾带有〔人类评价:赞/踩〕或〔人类留言:...〕标记,在摘要中引用该消息时必须原样保留这些标记。',
     ].join('\n');
     return { system: personaLines.join('\n'), user };
   }
@@ -472,6 +493,7 @@ export function buildDreamPrompt(input: {
     '}',
     '',
     '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
+    '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
     '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 

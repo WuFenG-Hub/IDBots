@@ -180,6 +180,24 @@ export interface CoworkMessage {
   metadata?: CoworkMessageMetadata;
 }
 
+// Per-message human feedback (thumbs up/down) recorded on assistant messages.
+export type MessageFeedbackRating = 'up' | 'down';
+
+export interface MessageFeedback {
+  rating: MessageFeedbackRating;
+  comment?: string;
+}
+
+/** Persisted feedback record as returned by the main process. */
+export interface CoworkMessageFeedbackRecord {
+  messageId: string;
+  sessionId: string;
+  rating: MessageFeedbackRating;
+  comment: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface CoworkMessagePage {
   messages: CoworkMessage[];
   hasMoreBefore: boolean;
