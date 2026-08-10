@@ -23,6 +23,12 @@ interface UserIdentityRow {
   globalmetaid: string | null;
   name: string;
   avatar: string | null;
+  subsidy_state: string | null;
+  subsidy_error: string | null;
+  name_pin_id: string | null;
+  avatar_pin_id: string | null;
+  sync_state: string | null;
+  sync_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -42,6 +48,12 @@ function rowToUserIdentity(row: UserIdentityRow): UserIdentity {
     globalmetaid: row.globalmetaid ?? null,
     name: row.name,
     avatar: row.avatar ?? null,
+    subsidy_state: (row.subsidy_state as UserIdentity['subsidy_state']) ?? null,
+    subsidy_error: row.subsidy_error ?? null,
+    name_pin_id: row.name_pin_id ?? null,
+    avatar_pin_id: row.avatar_pin_id ?? null,
+    sync_state: (row.sync_state as UserIdentity['sync_state']) ?? null,
+    sync_error: row.sync_error ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -87,8 +99,9 @@ export class UserIdentityStore {
       `INSERT INTO user_identity (
         id, mnemonic, path, mvc_address, btc_address, doge_address, public_key,
         chat_public_key, chat_public_key_pin_id, metaid, globalmetaid, name, avatar,
+        subsidy_state, subsidy_error, name_pin_id, avatar_pin_id, sync_state, sync_error,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         USER_IDENTITY_ROW_ID,
         data.mnemonic,
@@ -103,6 +116,12 @@ export class UserIdentityStore {
         data.globalmetaid ?? null,
         data.name,
         data.avatar ?? null,
+        data.subsidy_state ?? null,
+        data.subsidy_error ?? null,
+        data.name_pin_id ?? null,
+        data.avatar_pin_id ?? null,
+        data.sync_state ?? null,
+        data.sync_error ?? null,
         now,
         now,
       ],
@@ -113,7 +132,7 @@ export class UserIdentityStore {
     return created;
   }
 
-  /** Updates profile fields; returns the updated identity, or null when none exists. */
+  /** Updates profile/setup fields; returns the updated identity, or null when none exists. */
   update(patch: UserIdentityUpdate): UserIdentity | null {
     const existing = this.get();
     if (!existing) return null;
@@ -126,12 +145,39 @@ export class UserIdentityStore {
           : patch.chat_public_key_pin_id,
       globalmetaid:
         patch.globalmetaid === undefined ? existing.globalmetaid : patch.globalmetaid,
+      subsidy_state:
+        patch.subsidy_state === undefined ? existing.subsidy_state : patch.subsidy_state,
+      subsidy_error:
+        patch.subsidy_error === undefined ? existing.subsidy_error : patch.subsidy_error,
+      name_pin_id:
+        patch.name_pin_id === undefined ? existing.name_pin_id : patch.name_pin_id,
+      avatar_pin_id:
+        patch.avatar_pin_id === undefined ? existing.avatar_pin_id : patch.avatar_pin_id,
+      sync_state:
+        patch.sync_state === undefined ? existing.sync_state : patch.sync_state,
+      sync_error:
+        patch.sync_error === undefined ? existing.sync_error : patch.sync_error,
     };
     this.db.run(
       `UPDATE user_identity
-       SET name = ?, avatar = ?, chat_public_key_pin_id = ?, globalmetaid = ?, updated_at = ?
+       SET name = ?, avatar = ?, chat_public_key_pin_id = ?, globalmetaid = ?,
+           subsidy_state = ?, subsidy_error = ?, name_pin_id = ?, avatar_pin_id = ?,
+           sync_state = ?, sync_error = ?, updated_at = ?
        WHERE id = ?`,
-      [next.name, next.avatar, next.chat_public_key_pin_id, next.globalmetaid, Date.now(), USER_IDENTITY_ROW_ID],
+      [
+        next.name,
+        next.avatar,
+        next.chat_public_key_pin_id,
+        next.globalmetaid,
+        next.subsidy_state,
+        next.subsidy_error,
+        next.name_pin_id,
+        next.avatar_pin_id,
+        next.sync_state,
+        next.sync_error,
+        Date.now(),
+        USER_IDENTITY_ROW_ID,
+      ],
     );
     this.saveDb();
     return this.get();

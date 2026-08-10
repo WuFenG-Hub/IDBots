@@ -818,6 +818,7 @@ contextBridge.exposeInMainWorld('electron', {
     updateName: (input: { name: string }) => ipcRenderer.invoke('userIdentity:updateName', input),
     logout: () => ipcRenderer.invoke('userIdentity:logout'),
     revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
+    retrySubsidy: () => ipcRenderer.invoke('userIdentity:retrySubsidy'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
   },
   metaWebListener: {
