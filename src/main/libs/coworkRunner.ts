@@ -81,6 +81,7 @@ import {
 } from './metaIdSearchAgentTools';
 import {
   buildProjectsAgentTools,
+  buildProjectsPromptSection,
   type ProjectsControl,
 } from './projectsAgentTools';
 import {
@@ -3566,23 +3567,7 @@ export class CoworkRunner extends EventEmitter {
   private buildProjectsPrompt(): string | null {
     if (!this.projects) return null;
     try {
-      const projects = this.projects.list();
-      if (!projects.length) return null;
-      const enabled = projects.filter((project) => project.enabled);
-      const disabled = projects.filter((project) => !project.enabled);
-      const lines = [
-        '## Local Projects',
-        `This machine has ${projects.length} configured project(s). When the user mentions a project by name, call the \`project_query\` tool with the name to fetch its guidelines, source directory and resource paths BEFORE working on it. Treat each project's guidelines as binding instructions for any work on that project.`,
-        '<available_projects>',
-        ...enabled.map((project) => `<project><name>${this.escapeXmlText(project.name)}</name></project>`),
-        '</available_projects>',
-      ];
-      if (disabled.length) {
-        lines.push(
-          `Frozen (disabled) projects — do NOT read, modify or write anything under their paths: ${disabled.map((project) => this.escapeXmlText(project.name)).join(', ')}`
-        );
-      }
-      return lines.join('\n');
+      return buildProjectsPromptSection(this.projects.list());
     } catch {
       return null;
     }
@@ -3797,8 +3782,11 @@ export class CoworkRunner extends EventEmitter {
     const sections = [
       personaBlock,
       safetyPrompt,
-      memoryStrategyPrompt,
+      // Projects sit ahead of the memory strategy/base prompt on purpose: the
+      // section is small, changes rarely, and early placement makes weak models
+      // noticeably more likely to honor it.
       projectsPrompt,
+      memoryStrategyPrompt,
       trimmedBasePrompt,
       // R4 防护（追加在末尾，避免破坏 DeepSeek 前缀缓存的首段）：
       // SDK 定时任务触发（cron prompt）与用户消息在同一会话队列竞争（8/8 事故根因，
