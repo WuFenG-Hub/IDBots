@@ -104,10 +104,12 @@ test('getAddressInfo unwraps the envelope, normalizes fields, and sends address 
 });
 
 test('getAddressInfo rejects missing required fields and non-object responses', async () => {
+  // status is optional (backend omits it when empty); a missing numeric quota
+  // field is still a hard parse failure.
   const missingFields = createMvcSponsorV2Client({
     baseUrl: 'https://sponsor.test',
     fetchImpl: createFetchStub([
-      ['/v2/assist/gas/address/info', { exists: true, balance: 10, grantedAmount: 20, reservedAmount: 5, spentAmount: 5, availableAmount: 10 }],
+      ['/v2/assist/gas/address/info', { exists: true, balance: 10, grantedAmount: 20, reservedAmount: 5, spentAmount: 5, status: 'active' }],
     ]),
   });
   await assert.rejects(missingFields.getAddressInfo({ address: MVC_ADDRESS }), (error) => {
@@ -115,6 +117,17 @@ test('getAddressInfo rejects missing required fields and non-object responses', 
     assert.equal(error.reason, 'service_unavailable');
     return true;
   });
+
+  const statusOmitted = createMvcSponsorV2Client({
+    baseUrl: 'https://sponsor.test',
+    fetchImpl: createFetchStub([
+      ['/v2/assist/gas/address/info', { exists: false, balance: 10, grantedAmount: 20, reservedAmount: 5, spentAmount: 5, availableAmount: 10 }],
+    ]),
+  });
+  const info = await statusOmitted.getAddressInfo({ address: MVC_ADDRESS });
+  assert.equal(info.exists, false);
+  assert.equal(info.status, '');
+  assert.equal(info.availableAmount, 10);
 
   const nonObject = createMvcSponsorV2Client({
     baseUrl: 'https://sponsor.test',

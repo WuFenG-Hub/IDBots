@@ -344,8 +344,10 @@ function normalizeUserInputIndexes(value: unknown): number[] {
 
 function normalizeAddressInfo(record: Record<string, unknown>): MvcSponsorAddressInfo {
   const exists = normalizeBoolean(record.exists);
+  // status is optional: the backend serializes it with omitempty and drops the
+  // field for addresses without an explicit status (e.g. fresh auto-grant ones).
   const status = pickText(record, 'status');
-  if (exists === null || !status) {
+  if (exists === null) {
     throw createSponsorError('address_info', 'Sponsor address info response is missing required fields.', {
       data: record,
     });
