@@ -98,6 +98,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   if (selectedCollab) {
     return (
       <OpenTeamCollabDetailView
+        key={selectedCollab.id}
         collab={selectedCollab}
         isSidebarCollapsed={isSidebarCollapsed}
         onToggleSidebar={onToggleSidebar}
@@ -111,6 +112,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   if (selectedTaskId != null) {
     return (
       <GroupTaskDetailView
+        key={selectedTaskId}
         taskId={selectedTaskId}
         isSidebarCollapsed={isSidebarCollapsed}
         onToggleSidebar={onToggleSidebar}
