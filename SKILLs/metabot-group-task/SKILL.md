@@ -170,6 +170,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 3. **@ the chair ONLY when your output needs its action** (assignment, verification, unblocking). Never @ anyone for courtesy — manufactured handoffs cause loops.
 4. **Deliverables are posted with a `[DELIVERABLE]` tag line**, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per tag line so the chair can collect them.
 5. Keep messages short and task-focused; no small talk in a task group.
+6. **Always end with a report**: every reply to an assignment ends with a concrete report — what was done, the evidence (file paths, test results, pin ids), and any blocker. Never end a turn with a bare tool error, an empty reply, or a reasoning placeholder: if a step failed, still report the failure with what you attempted and what blocked you, so the chair can judge the result and reuse the work. `[NO_REPLY]` applies only to messages that need no response — never to an assignment.
 
 ## In-group protocol
 

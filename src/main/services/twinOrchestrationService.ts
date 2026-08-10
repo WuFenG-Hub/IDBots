@@ -4,6 +4,14 @@ import {
   type RunOrchestratorSkillTurnParams,
 } from './orchestratorCoworkBridge';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
+import {
+  collectWorkspaceCommits,
+  formatWorkerEmptyHandoffError,
+  hasSubstantiveActivity,
+  summarizeSessionActivity,
+  WORKER_EMPTY_HANDOFF,
+  type CoworkSessionActivityMessage,
+} from '../libs/coworkSessionActivity';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
 import {
@@ -118,6 +126,7 @@ function buildWorkerPrompt(input: DelegateLocalWorkerInput, task: OrchestrationT
     '  </permission_scope>',
     '  <handoff_contract>',
     'Return a concise structured handoff with summary, deliverables, verification evidence, and blockers. Do not claim an external action succeeded without evidence.',
+    'ALWAYS close the session with a plain-text handoff summary — what was done, evidence, and blockers — even when a step failed or the last tool call errored. Never end with an empty reply, a bare tool error, or a reasoning placeholder.',
     '  </handoff_contract>',
     '</twin_delegation>',
   ].filter((line): line is string => line != null).join('\n');
@@ -193,6 +202,65 @@ export class TwinOrchestrationService {
     return this.deps.getMetabotById(metabotId)?.name?.trim() || `bot-${metabotId}`;
   }
 
+  /**
+   * 清单 #10 P-A: read the worker session's messages for substantive-activity
+   * detection. Tolerant by design — a missing store method or a store error
+   * yields [] so the EMPTY_HANDOFF judgment degrades to the old behavior.
+   */
+  private readSessionActivityMessages(sessionId: string | null): CoworkSessionActivityMessage[] {
+    if (!sessionId) return [];
+    try {
+      const reader = this.deps.coworkStore as unknown as {
+        getSessionMessagesPage?: (
+          sid: string,
+          opts?: { limit?: number },
+        ) => { messages?: Array<{ type: string; content: string; metadata?: Record<string, unknown> | null }> } | null;
+      };
+      const page = reader.getSessionMessagesPage?.(sessionId, { limit: 100 });
+      return (page?.messages ?? []).map((message) => ({
+        type: message.type,
+        content: String(message.content ?? ''),
+        metadata: message.metadata ?? null,
+      }));
+    } catch (error) {
+      console.warn(
+        `[TwinOrchestration] Session activity read failed (${sessionId}): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * 清单 #10 P-A: build the EMPTY_HANDOFF error for a session whose final
+   * reply was empty. When the session shows substantive activity (file edits,
+   * commits, test evidence, tool/error counts, tail narration) the error
+   * carries the WORKER_EMPTY_HANDOFF_WITH_ACTIVITY summary so the chair can
+   * immediately recognize a false failure and reuse the output; a truly bare
+   * session keeps the plain WORKER_EMPTY_HANDOFF.
+   */
+  private async buildEmptyHandoffError(attempt: OrchestrationAttempt, worker: Metabot): Promise<string> {
+    // The attempt passed into executeAttempt is a pre-run snapshot (no worker
+    // session identity yet); read the fresh record so activity detection and
+    // git evidence see the session that actually ran.
+    const freshAttempt = this.deps.orchestrationStore.getAttempt(attempt.id) ?? attempt;
+    const summary = summarizeSessionActivity(this.readSessionActivityMessages(freshAttempt.workerSessionId));
+    if (!hasSubstantiveActivity(summary)) return WORKER_EMPTY_HANDOFF;
+    let workspaceCommits: string[] = [];
+    try {
+      workspaceCommits = await collectWorkspaceCommits(
+        this.deps.getWorkerWorkspace(worker.id),
+        freshAttempt.startedAt,
+      );
+    } catch (error) {
+      console.warn(
+        `[TwinOrchestration] Workspace commit read failed: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    return formatWorkerEmptyHandoffError(summary, workspaceCommits);
+  }
+
   private async executeAttempt(
     task: OrchestrationTask,
     step: OrchestrationStep,
@@ -224,7 +292,12 @@ export class TwinOrchestrationService {
         // completion corrects the attempt to completed; a late error/stop or a
         // silent recovery window settles it to failed.
         onLateCompletion: (late) => {
-          this.applyLateAttemptResult(task, step, attemptId, late.replyText);
+          void this.applyLateAttemptResult(task, step, attemptId, late.replyText).catch((error) => {
+            console.warn(
+              `[TwinOrchestration] Late completion settlement failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
         },
         onLateTermination: (late) => {
           const error = late.reason === 'error'
@@ -236,7 +309,14 @@ export class TwinOrchestrationService {
           this.settleTimedOutAttempt(attemptId, 'SKILL_TURN_TIMEOUT_NO_RECOVERY');
         },
       });
-      if (isNonAnswerAssistantReply(replyText ?? '')) throw new Error('WORKER_EMPTY_HANDOFF');
+      if (isNonAnswerAssistantReply(replyText ?? '')) {
+        // 清单 #10 P-A: an empty final reply is only a bare EMPTY_HANDOFF when
+        // the session shows no substantive activity; otherwise the error
+        // carries the activity summary (commit/files/tests/toolCalls/errors/
+        // lastError) so the chair can recognize the false failure and reuse
+        // the produced work.
+        throw new Error(await this.buildEmptyHandoffError(attempt, worker));
+      }
       const result = { replyText: replyText.trim(), verified: false };
       this.deps.orchestrationStore.updateAttempt(attempt.id, 'completed', { result });
       this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', { acceptedResult: result });
@@ -295,14 +375,21 @@ export class TwinOrchestrationService {
    * the same flow a normal completion takes. Attempts cancelled, reassigned or
    * already completed in the meantime are left untouched.
    */
-  private applyLateAttemptResult(task: OrchestrationTask, step: OrchestrationStep, attemptId: string, replyText: string): void {
+  private async applyLateAttemptResult(task: OrchestrationTask, step: OrchestrationStep, attemptId: string, replyText: string): Promise<void> {
     const store = this.deps.orchestrationStore;
     const currentAttempt = store.getAttempt(attemptId);
     if (!currentAttempt || !['queued', 'running', 'timed_out'].includes(currentAttempt.status)) return;
     const currentStep = store.getStep(step.id);
     if (!currentStep || currentStep.activeAttemptId !== attemptId || !['queued', 'running'].includes(currentStep.status)) return;
     if (isNonAnswerAssistantReply(replyText ?? '')) {
-      this.settleTimedOutAttempt(attemptId, 'WORKER_EMPTY_HANDOFF');
+      // 清单 #10 P-A (late-completion path): same activity-aware judgment as
+      // executeAttempt — a late session that worked but ended empty fails with
+      // the WITH_ACTIVITY summary instead of an opaque WORKER_EMPTY_HANDOFF.
+      const worker = this.deps.getMetabotById(currentAttempt.workerMetabotId);
+      const error = worker
+        ? await this.buildEmptyHandoffError(currentAttempt, worker)
+        : WORKER_EMPTY_HANDOFF;
+      this.settleTimedOutAttempt(attemptId, error);
       return;
     }
     const result = { replyText: replyText.trim(), verified: false };

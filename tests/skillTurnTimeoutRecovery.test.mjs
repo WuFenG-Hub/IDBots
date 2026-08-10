@@ -19,12 +19,38 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import Module from 'node:module';
 
 const require = createRequire(import.meta.url);
+
+// orchestratorCoworkBridge -> coworkUtil touches electron (app.isPackaged /
+// app.getAppPath). Under plain `node --test` the electron module resolves to
+// the binary path string, so `app` is undefined and every bridge-level test
+// dies with a TypeError instead of exercising the watchdog/recovery flow.
+// Mock electron (same shape as groupTaskDaemon.test.mjs) and stub
+// generateSessionTitle (it would otherwise fire a real SDK query — the
+// session-title fallback is not what these tests cover).
+const originalLoad = Module._load;
+Module._load = function patchedLoad(request, ...rest) {
+  if (request === 'electron') {
+    return {
+      app: {
+        isPackaged: false,
+        getAppPath: () => process.cwd(),
+        getPath: () => process.cwd(),
+      },
+    };
+  }
+  return originalLoad.call(this, request, ...rest);
+};
+const coworkUtilPath = require.resolve('../dist-electron/main/libs/coworkUtil.js');
+require(coworkUtilPath); // load under the mock so the cache entry exists
+require.cache[coworkUtilPath].exports.generateSessionTitle = async () => 'Test Title';
 const {
   runOrchestratorSkillTurn,
   SkillTurnTimeoutError,
 } = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
+Module._load = originalLoad;
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { TwinOrchestrationService } = require('../dist-electron/main/services/twinOrchestrationService.js');
@@ -58,6 +84,9 @@ function makeBridgeFixtures(sessionId) {
       assert.equal(targetSessionId, session.id);
       sessionPatches.push(patch);
     },
+    // orchestrator session-title resolution (title feature, 5122b709) reads
+    // the app language to localize the `[Orchestrator]` prefix.
+    getAppLanguage: () => 'en',
   };
   runner.startSession = async () => { /* session runs on its own; no auto-complete */ };
   return { runner, store, session, sessionPatches };
@@ -85,6 +114,7 @@ test('bridge: watchdog rejects with SkillTurnTimeoutError and a late completion 
     onRecoveryExpired: (late) => { expiries.push(late); },
   });
 
+  await Promise.resolve();
   await Promise.resolve();
   t.mock.timers.tick(300); // watchdog fires
 
@@ -127,6 +157,7 @@ test('bridge: late session error after the watchdog settles via onLateTerminatio
   });
 
   await Promise.resolve();
+  await Promise.resolve();
   t.mock.timers.tick(300);
   await assert.rejects(resultPromise, (error) => {
     assert.equal(error.name, 'SkillTurnTimeoutError');
@@ -156,6 +187,7 @@ test('bridge: session stopped after the watchdog settles via onLateTermination(s
   });
 
   await Promise.resolve();
+  await Promise.resolve();
   t.mock.timers.tick(300);
   await assert.rejects(resultPromise, (error) => {
     assert.equal(error.name, 'SkillTurnTimeoutError');
@@ -182,6 +214,7 @@ test('bridge: silent session abandons recovery after the window via onRecoveryEx
     onRecoveryExpired: (late) => { expiries.push(late); },
   });
 
+  await Promise.resolve();
   await Promise.resolve();
   t.mock.timers.tick(300);
   await assert.rejects(resultPromise, (error) => {
@@ -220,6 +253,7 @@ test('bridge: session completing before the watchdog resolves normally without r
     onRecoveryExpired: (late) => { expiries.push(late); },
   });
 
+  await Promise.resolve();
   await Promise.resolve();
   t.mock.timers.tick(100); // before the watchdog
   assert.equal(await resultPromise, 'on-time handoff');
@@ -440,6 +474,7 @@ test('bridge: a session ending with a reasoning-only [reasoning unavailable] tur
   });
 
   await Promise.resolve();
+  await Promise.resolve();
   t.mock.timers.tick(100); // before the watchdog
   assert.equal(await resultPromise, '');
 });
@@ -464,6 +499,7 @@ test('bridge: a real final text after tool activity and a thinking block is stil
   });
 
   await Promise.resolve();
+  await Promise.resolve();
   t.mock.timers.tick(100);
   assert.equal(await resultPromise, 'Final handoff: tests green');
 });
@@ -481,6 +517,7 @@ test('bridge: a late completion that only contains [reasoning unavailable] is re
     onLateCompletion: (late) => { lateCompletions.push(late); },
   });
 
+  await Promise.resolve();
   await Promise.resolve();
   t.mock.timers.tick(300);
   await assert.rejects(resultPromise, (error) => {

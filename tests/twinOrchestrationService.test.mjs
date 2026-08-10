@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
@@ -94,14 +95,14 @@ async function makeService(runWorkerTurn, overrides = {}) {
   const defaultRunner = makeRecordingRunner();
   const service = new TwinOrchestrationService({
     orchestrationStore,
-    coworkStore: {},
+    coworkStore: overrides.coworkStore ?? {},
     // P1-5b: the DEFAULT notification path (no insertCrossSessionUserMessage
     // override) now calls the host runner's insertCrossSessionMessageAndQueue
     // seam. Tests exercising that path observe it via the recording runner.
     coworkRunner: overrides.coworkRunner ?? defaultRunner.runner,
     directory,
     getMetabotById: (id) => bots.find((bot) => bot.id === id) ?? null,
-    getWorkerWorkspace: (id) => `/tmp/idbots-worker-${id}`,
+    getWorkerWorkspace: overrides.getWorkerWorkspace ?? ((id) => `/tmp/idbots-worker-${id}`),
     runWorkerTurn,
     ...(overrides.insertCrossSessionUserMessage
       ? { insertCrossSessionUserMessage: overrides.insertCrossSessionUserMessage }
@@ -452,6 +453,178 @@ test('P1-5b: default path insert failure leaves the kv guard unset and never thr
     });
     await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'review'));
     assert.equal(kv.get('orch_notify:' + result.task.id + ':completed'), undefined, 'failed insert must not set the guard');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 清单 #10 P-A: WORKER_EMPTY_HANDOFF activity-aware judgment
+// A worker that did real work (file edits, test runs) but ended with an empty
+// final reply must fail with WORKER_EMPTY_HANDOFF_WITH_ACTIVITY + summary so
+// the chair can recognize the false failure and reuse the output. A truly
+// bare session keeps the plain WORKER_EMPTY_HANDOFF.
+// ---------------------------------------------------------------------------
+
+// Mirrors the message shapes CoworkRunner.handleClaudeEvent persists:
+// tool_use carries { toolName, toolInput }, tool_result carries { isError }.
+function activityMessages() {
+  return [
+    { type: 'assistant', content: 'Plan: read the repo first.' },
+    { type: 'tool_use', content: 'Using tool: Edit', metadata: { toolName: 'Edit', toolInput: { file_path: 'src/a.ts' }, toolUseId: 'tu-1' } },
+    { type: 'tool_result', content: 'Edited src/a.ts', metadata: { toolUseId: 'tu-1', isError: false, toolResult: 'Edited src/a.ts' } },
+    { type: 'tool_use', content: 'Using tool: Bash', metadata: { toolName: 'Bash', toolInput: { command: 'npm test' }, toolUseId: 'tu-2' } },
+    { type: 'tool_result', content: '315/315 tests passed', metadata: { toolUseId: 'tu-2', isError: false, toolResult: '315/315 tests passed' } },
+    { type: 'tool_use', content: 'Using tool: Edit', metadata: { toolName: 'Edit', toolInput: { file_path: 'src/b.ts' }, toolUseId: 'tu-3' } },
+    { type: 'tool_result', content: 'File has not been read yet', metadata: { toolUseId: 'tu-3', isError: true, error: 'File has not been read yet', toolResult: 'File has not been read yet' } },
+    { type: 'assistant', content: 'Progress: core fix done.' },
+  ];
+}
+
+const coworkStoreWithMessages = (messages) => ({
+  getSessionMessagesPage: () => ({ messages }),
+});
+
+test('P-A: empty final reply + substantive session activity → attempt fails with WORKER_EMPTY_HANDOFF_WITH_ACTIVITY carrying the summary', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return ''; // the session worked hard, but the final reply text is empty
+  }, {
+    coworkStore: coworkStoreWithMessages(activityMessages()),
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fix', idempotencyKey: 'pa-activity-execute',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
+
+    const attempt = orchestrationStore.getAttempt(result.attempt.id);
+    assert.equal(attempt.status, 'failed');
+    assert.match(attempt.error, /^WORKER_EMPTY_HANDOFF_WITH_ACTIVITY:/);
+    assert.match(attempt.error, /commit=\[\]/);
+    assert.match(attempt.error, /files=\[src\/a\.ts,src\/b\.ts\]/);
+    assert.match(attempt.error, /tests=\[.*315\/315/);
+    assert.match(attempt.error, /toolCalls=3/);
+    assert.match(attempt.error, /errors=1/);
+    assert.match(attempt.error, /lastError=File has not been read yet/);
+
+    // the [ORCH-NOTIFY] failure message carries the summary so the chair can
+    // immediately judge the false failure
+    assert.equal(cross.inserted.length, 1);
+    assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF_WITH_ACTIVITY/);
+    assert.match(cross.inserted[0].message.content, /files=\[src\/a\.ts,src\/b\.ts\]/);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P-A: empty final reply + bare session → plain WORKER_EMPTY_HANDOFF (unchanged)', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return '';
+  }, {
+    coworkStore: coworkStoreWithMessages([]),
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fix', idempotencyKey: 'pa-bare-execute',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
+
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).error, 'WORKER_EMPTY_HANDOFF');
+    assert.equal(cross.inserted.length, 1);
+    assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF（failed）/);
+    assert.doesNotMatch(cross.inserted[0].message.content, /WITH_ACTIVITY/);
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P-A: workspace git evidence is merged into the summary (commit=[...])', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-worker-git-'));
+  const run = (args) => execFileSync('git', args, { cwd: dir, stdio: 'pipe' });
+  run(['init', '-q']);
+  run(['config', 'user.email', 'worker@test']);
+  run(['config', 'user.name', 'Worker']);
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'v1');
+  run(['add', '-A']);
+  run(['commit', '-q', '-m', 'feat: worker deliverable']);
+  const short = run(['rev-parse', '--short=7', 'HEAD']).toString().trim();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return '';
+  }, {
+    coworkStore: coworkStoreWithMessages(activityMessages()),
+    getWorkerWorkspace: () => dir,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fix', idempotencyKey: 'pa-workspace-commits',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
+    const error = orchestrationStore.getAttempt(result.attempt.id).error;
+    assert.match(error, new RegExp(`commit=\\[${short}\\]`));
+  } finally {
+    sqliteStore.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('P-A: late completion with empty reply + substantive session activity → settled failed with WITH_ACTIVITY', async () => {
+  const cross = makeCrossSessionHarness();
+  const kv = makeKv();
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    // watchdog fired, then the session finished late with an EMPTY reply
+    // despite having worked — the late-completion path must apply the same
+    // activity-aware judgment.
+    params.onLateCompletion({ replyText: '' });
+    throw { name: 'SkillTurnTimeoutError', sessionId: 'worker-session-2', timeoutMs: 300000, message: 'watchdog' };
+  }, {
+    coworkStore: coworkStoreWithMessages(activityMessages()),
+    insertCrossSessionUserMessage: (input) => cross.service.insertUserMessage(input),
+    kv,
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'late empty', idempotencyKey: 'pa-late-empty-activity',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'failed'));
+
+    const attempt = orchestrationStore.getAttempt(result.attempt.id);
+    assert.match(attempt.error, /^WORKER_EMPTY_HANDOFF_WITH_ACTIVITY:/);
+    assert.match(attempt.error, /files=\[src\/a\.ts,src\/b\.ts\]/);
+    assert.equal(cross.inserted.length, 1, 'late failure notified once');
+    assert.match(cross.inserted[0].message.content, /WORKER_EMPTY_HANDOFF_WITH_ACTIVITY/);
+    assert.equal(kv.get('orch_notify:' + result.task.id + ':failed'), '1');
+  } finally {
+    sqliteStore.close();
+  }
+});
+
+test('P-A: store read failure degrades gracefully to plain WORKER_EMPTY_HANDOFF', async () => {
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return '';
+  }, {
+    coworkStore: {
+      getSessionMessagesPage: () => { throw new Error('store boom'); },
+    },
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'fix', idempotencyKey: 'pa-store-error',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getTask(result.task.id).status, 'failed'));
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).error, 'WORKER_EMPTY_HANDOFF');
   } finally {
     sqliteStore.close();
   }
