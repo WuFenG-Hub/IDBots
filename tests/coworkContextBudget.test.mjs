@@ -182,3 +182,113 @@ async function loadRunner() {
     Module._load = originalLoad;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2: the provider-reported real context size drives the estimate.
+// ---------------------------------------------------------------------------
+
+test('getCoworkContextBudget uses real provider-reported input tokens when higher than the heuristic (Phase 2)', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'hello',
+      timestamp: 1,
+    },
+    {
+      id: 'assistant-1',
+      type: 'assistant',
+      content: 'hi there',
+      timestamp: 2,
+    },
+  ];
+
+  // Heuristic estimate is tiny (~4 tokens); the real last-turn context is huge.
+  const withReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 900_000,
+  });
+  assert.equal(withReal.estimatedTokens, 900_000);
+  assert.equal(withReal.shouldCompact, true);
+
+  const withoutReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+  });
+  assert.ok(withoutReal.estimatedTokens < 100);
+  assert.equal(withoutReal.shouldCompact, false);
+});
+
+test('getCoworkContextBudget prefers real context size over stale store history after compaction', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'x'.repeat(4_000),
+      timestamp: 1,
+    },
+  ];
+
+  // The store history is huge (heuristic ~1000 tokens) but the SDK session was
+  // just compacted (real last-turn context = 10 tokens). The real value wins so
+  // a post-compaction turn does not immediately re-trigger tier-2 compaction.
+  const withLowReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 10,
+  });
+  assert.equal(withLowReal.estimatedTokens, 10);
+  assert.equal(withLowReal.shouldCompact, false);
+
+  // Zero / non-finite real usage behaves like missing → heuristic fallback.
+  const withoutReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+  });
+  const withZero = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 0,
+  });
+  assert.equal(withZero.estimatedTokens, withoutReal.estimatedTokens);
+  assert.ok(withoutReal.estimatedTokens > 10);
+});
+
+test('getCoworkContextBudget adds the new prompt on top of the real context size', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'hello',
+      timestamp: 1,
+    },
+  ];
+
+  const withPrompt = getCoworkContextBudget({
+    messages,
+    currentPrompt: 'x'.repeat(4_000),
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 1_000,
+  });
+  // 4_000 ASCII chars ≈ 1_000 tokens + 4 frame overhead.
+  assert.equal(withPrompt.estimatedTokens, 1_000 + 1_000 + 4);
+});

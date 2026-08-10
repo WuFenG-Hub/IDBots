@@ -110,6 +110,8 @@ export interface CoworkUsageStats {
   turnCount?: number;
   /** Latest estimated thinking-token count from SDK thinking_tokens events (observability only, not billed). */
   thinkingTokensEstimate?: number;
+  /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
+  lastTurnInputTokens?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */

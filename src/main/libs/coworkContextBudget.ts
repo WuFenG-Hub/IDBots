@@ -2,6 +2,10 @@ import type { CoworkMessage } from '../coworkStore';
 import type { CoworkModelLimits } from './coworkModelLimits';
 
 export const COWORK_CONTEXT_SOFT_THRESHOLD_RATIO = 0.82;
+// When the SDK owns proactive compaction (coworkSdkAutoCompact), IDBots' own
+// tier-1/tier-2 compaction stays as a safety net near the real ceiling so the
+// two mechanisms do not double-compact at the same threshold.
+export const COWORK_CONTEXT_SAFETY_NET_RATIO = 0.95;
 const MESSAGE_FRAME_TOKEN_OVERHEAD = 4;
 
 type CoworkContextMessage = Pick<CoworkMessage, 'type' | 'content' | 'metadata'>;
@@ -12,6 +16,13 @@ export interface CoworkContextBudgetInput {
   currentPrompt?: string;
   systemPrompt?: string;
   softThresholdRatio?: number;
+  /**
+   * Real total input tokens from the most recent LLM turn (provider-reported,
+   * cached + uncached). When available it is the authoritative context size; the
+   * heuristic estimate is kept as the floor so a missing/stale real value still
+   * compacts on the store-based estimate.
+   */
+  realUsageTokens?: number;
 }
 
 export interface CoworkContextBudget {
@@ -110,6 +121,21 @@ export function getCoworkContextBudget(input: CoworkContextBudgetInput): CoworkC
   const currentPrompt = input.currentPrompt?.trim() ?? '';
   if (currentPrompt && !isCurrentPromptAlreadyPresent(input.messages, currentPrompt)) {
     estimatedTokens += estimateCoworkTextTokens(currentPrompt) + MESSAGE_FRAME_TOKEN_OVERHEAD;
+  }
+
+  const realUsageTokens = Number.isFinite(input.realUsageTokens) && (input.realUsageTokens as number) > 0
+    ? Math.floor(input.realUsageTokens as number)
+    : 0;
+  if (realUsageTokens > 0) {
+    // Provider-reported context size from the last turn is authoritative: it
+    // reflects the ACTUAL SDK session (including SDK in-session compaction),
+    // so a freshly compacted session does not re-trigger compaction from the
+    // store-history heuristic. The new prompt is added on top; the heuristic
+    // estimate is only used until the first real usage is reported.
+    const currentPromptTokens = currentPrompt && !isCurrentPromptAlreadyPresent(input.messages, currentPrompt)
+      ? estimateCoworkTextTokens(currentPrompt) + MESSAGE_FRAME_TOKEN_OVERHEAD
+      : 0;
+    estimatedTokens = realUsageTokens + currentPromptTokens;
   }
 
   return {

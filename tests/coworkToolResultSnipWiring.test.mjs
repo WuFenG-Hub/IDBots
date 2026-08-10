@@ -61,8 +61,13 @@ test('runner soft-threshold branch tries tool-result snipping before hard compac
   const source = read('src/main/libs/coworkRunner.ts');
   const localBody = methodBody(source, 'private async runClaudeCodeLocal(');
 
-  const snipIndex = localBody.indexOf('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)');
-  const compactIndex = localBody.indexOf('buildCoworkCompactedPrompt({');
+  // Scope the ordering check to the automatic soft-threshold branch: the
+  // Phase 3 manual-compaction block (which also calls buildCoworkCompactedPrompt)
+  // runs before it and takes precedence by design.
+  const shouldCompactIdx = localBody.indexOf('if (budget.shouldCompact)');
+  assert.ok(shouldCompactIdx >= 0, 'soft-threshold branch must exist');
+  const snipIndex = localBody.indexOf('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)', shouldCompactIdx);
+  const compactIndex = localBody.indexOf('buildCoworkCompactedPrompt({', shouldCompactIdx);
   assert.ok(snipIndex >= 0, 'soft-threshold branch must call setCoworkSnipHeadTokens');
   assert.ok(compactIndex >= 0, 'soft-threshold branch must keep the buildCoworkCompactedPrompt fallback');
   assert.ok(snipIndex < compactIndex, 'snipping must be attempted before hard compaction');
@@ -79,7 +84,11 @@ test('runner soft-threshold branch tries tool-result snipping before hard compac
   // (Match full call strings: 'resetCoworkSnipHeadTokens(' contains
   // 'setCoworkSnipHeadTokens(' as a substring.)
   assert.equal(source.split('setCoworkSnipHeadTokens(sessionId, snipHeadTokens)').length - 1, 1);
-  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 1);
+  assert.equal(source.split('resetCoworkSnipHeadTokens(sessionId)').length - 1, 2);
+  assert.ok(
+    localBody.indexOf('resetCoworkSnipHeadTokens(sessionId)') < localBody.indexOf("activeSession.pendingCacheBreakReason = 'manual_compact'"),
+    'manual-compaction branch must reset the snip boundary before starting the compacted session'
+  );
 });
 
 test('proxy parses the session-scoped route and snips before format conversion', () => {

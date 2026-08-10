@@ -26,10 +26,11 @@ import {
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
-import { getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
+import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
+import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
   getCoworkOpenAICompatProxyStatus,
@@ -1008,6 +1009,8 @@ interface ActiveSession {
     upstreamBaseURL?: string;
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
+    /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
+    lastTurnInputTokens?: number;
     /**
      * Cache-miss attribution trail: one entry per turn where the provider
      * reported cache-creation (miss) tokens, recording the turn index and the
@@ -1064,6 +1067,14 @@ interface ActiveSession {
    * (Reasonix CompareShape-style attribution, adapted to SDK-managed history).
    */
   pendingCacheBreakReason?: string | null;
+  /**
+   * Set by requestManualCompaction() while the session is idle. The next
+   * local-mode turn resets the SDK session and sends a synthetic compacted
+   * prompt instead of resuming (same path as automatic tier-2 compaction).
+   * In-memory only: if the app restarts before the next message, the user
+   * simply clicks the button again.
+   */
+  pendingManualCompact: boolean;
   /**
    * SHA-256 (8 hex chars) of the effective system prompt sent on the previous
    * turn. A change without a known reset event means silent drift — recorded
@@ -1542,6 +1553,31 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Returns the real total input tokens (cached + uncached) of the most recent
+   * LLM turn, from the provider-reported result usage (proxy-translated for
+   * DeepSeek). Used by the compaction budget as the authoritative context size
+   * when available (Phase 2). Returns undefined when no turn has reported
+   * usage yet (first turn, sandbox, or providers without usage data).
+   */
+  getSessionLastTurnInputTokens(sessionId: string): number | undefined {
+    const activeSession = this.activeSessions.get(sessionId);
+    const inMemory = activeSession?.usageStats?.lastTurnInputTokens;
+    if (Number.isFinite(inMemory) && (inMemory as number) > 0) {
+      return inMemory as number;
+    }
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId) as
+        { lastTurnInputTokens?: number } | null;
+      if (persisted && Number.isFinite(persisted.lastTurnInputTokens) && (persisted.lastTurnInputTokens as number) > 0) {
+        return persisted.lastTurnInputTokens as number;
+      }
+    } catch {
+      // Best-effort read; the heuristic estimator remains the fallback.
+    }
+    return undefined;
+  }
+
+  /**
    * Accumulates per-turn token usage from an SDK result event into the active
    * session's usageStats. The proxy translates DeepSeek's OpenAI usage into
    * Anthropic cache fields (cache_read = prompt_cache_hit, cache_creation =
@@ -1669,6 +1705,15 @@ export class CoworkRunner extends EventEmitter {
         };
       }
     }
+    const activeForBilling = this.activeSessions.get(sessionId);
+    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
+    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
+    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
+    // fresh-only with cache partitioned into the cache_* fields.
+    const cacheIncludedInInput = billingSource !== 'anthropic';
+    const lastTurnContextTokens = cacheIncludedInInput
+      ? inputTokens
+      : inputTokens + cacheReadTokens + cacheCreationTokens;
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
@@ -1677,13 +1722,8 @@ export class CoworkRunner extends EventEmitter {
       totalCostUsd: typeof payload.total_cost_usd === 'number'
         ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
-      // Source of truth is the billing source resolved from the API config at
-      // run start — NOT the model id (gateway providers can serve deepseek
-      // models without billing the DeepSeek account). Fall back to the
-      // persisted source when no active session is available (e.g. a stale
-      // result event); 'other' is the neutral default for unknown providers.
-      source: this.activeSessions.get(sessionId)?.billingSource
-        ?? (prev.source === 'none' ? 'other' : prev.source),
+      source: billingSource,
+      lastTurnInputTokens: lastTurnContextTokens,
       // Real upstream identity for observability (usage panel "upstream" row).
       upstreamProvider: this.activeSessions.get(sessionId)?.upstreamProvider ?? prev.upstreamProvider,
       upstreamBaseURL: this.activeSessions.get(sessionId)?.upstreamBaseURL ?? prev.upstreamBaseURL,
@@ -4278,6 +4318,7 @@ export class CoworkRunner extends EventEmitter {
       localPendingSteerIds: [],
       localDeliveredSteerIds: new Set(),
       localTurnState: 'starting',
+      pendingManualCompact: false,
       turnSettled,
       resolveTurnSettled,
       turnSettlementResolved: false,
@@ -4466,6 +4507,51 @@ export class CoworkRunner extends EventEmitter {
     }
     this.store.updateSession(sessionId, { permissionMode: mode });
     coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Queues a user-initiated manual compaction for the next local-mode turn.
+   *
+   * The SDK session is reset and the next submitted message is sent with a
+   * synthetic compacted prompt (the same path the automatic tier-2 compaction
+   * uses), so the user keeps chatting seamlessly from a summarized history.
+   *
+   * Guards: the session must be active, in local mode, idle (no turn running),
+   * with actual conversation history, and no compaction already queued.
+   */
+  async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (!activeSession) {
+      return { success: false, error: 'Session is not active. Send a message first, then try again.' };
+    }
+    if (activeSession.executionMode !== 'local') {
+      return { success: false, error: 'Manual compaction is only available in local mode.' };
+    }
+    if (activeSession.localTurnState !== 'none') {
+      return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+    }
+    if (activeSession.pendingManualCompact) {
+      return { success: false, error: 'Manual compaction is already queued for the next message.' };
+    }
+    const session = this.store.getSession(sessionId);
+    const messages = session?.messages ?? [];
+    const hasCompressibleHistory = messages.some(
+      (message) => message.type === 'user' || message.type === 'assistant' || message.type === 'tool_use' || message.type === 'tool_result'
+    );
+    if (!hasCompressibleHistory) {
+      return { success: false, error: 'No conversation history to compact yet.' };
+    }
+
+    activeSession.pendingManualCompact = true;
+    this.addSystemMessage(
+      sessionId,
+      '已请求手动压缩历史：下一条消息将自动从压缩后的上下文继续。'
+    );
+    coworkLog('INFO', 'requestManualCompaction', 'Manual compaction queued for next turn', {
+      sessionId,
+      messageCount: messages.length,
+    });
+    return { success: true };
   }
 
   /**
@@ -4951,6 +5037,27 @@ export class CoworkRunner extends EventEmitter {
     envVars.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
     // So the SDK's forked process uses the correct Electron exe on Windows (avoids process.execPath returning e.g. lDBots.exe)
     envVars.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+
+    // Enable the SDK/CLI built-in auto-compact for non-Claude models with
+    // known context windows (DeepSeek V4 1M, Qwen, GLM, ...). The native CLI
+    // falls back to a 200K window for unknown models and skips its auto-compact
+    // gate when no window override is configured, which is why sessions used to
+    // grow until the provider rejected them. CLAUDE_CODE_MAX_CONTEXT_TOKENS is
+    // only honored by the CLI for non-claude-* model ids. The SDK then owns
+    // proactive (segmented/reactive) compaction in-session; IDBots' own tier
+    // compaction demotes to a safety net (see getCoworkContextBudget below).
+    const sdkAutoCompactEnv = buildCoworkSdkAutoCompactEnv(modelLimits);
+    if (sdkAutoCompactEnv) {
+      Object.assign(envVars, sdkAutoCompactEnv.env);
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Enabled SDK built-in auto-compact', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        contextWindow: modelLimits.contextWindow,
+        maxOutputTokens: modelLimits.maxOutputTokens,
+        limitSource: modelLimits.source,
+        autoCompactWindow: sdkAutoCompactEnv.autoCompactWindow,
+      });
+    }
     const skillEnvOverrides = await this.getSkillSessionEnvOverrides?.(sessionId);
     if (skillEnvOverrides && Object.keys(skillEnvOverrides).length > 0) {
       Object.assign(envVars, skillEnvOverrides);
@@ -4991,6 +5098,36 @@ export class CoworkRunner extends EventEmitter {
 
     let effectivePrompt = prompt;
     const sessionSnapshotForBudget = this.store.getSession(sessionId);
+    // User-initiated manual compaction (Phase 3): the button queues this flag
+    // while the session is idle; the next turn resets the SDK session and
+    // folds the conversation into a synthetic compacted prompt (same path as
+    // the automatic tier-2 compaction). Consumed once; retries never re-run it.
+    let manualCompactApplied = false;
+    if (activeSession.pendingManualCompact && !isRetry) {
+      activeSession.pendingManualCompact = false;
+      resetCoworkSnipHeadTokens(sessionId);
+      const compacted = buildCoworkCompactedPrompt({
+        messages: sessionSnapshotForBudget?.messages ?? [],
+        currentPrompt: prompt,
+        modelLimits,
+      });
+      effectivePrompt = compacted.prompt;
+      this.store.updateSession(sessionId, { claudeSessionId: null });
+      activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'manual_compact';
+      manualCompactApplied = true;
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Manual compaction requested; starting compacted SDK session instead of resume', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        compactedEstimatedTokens: compacted.estimatedTokens,
+        compactedRecentMessages: compacted.recentMessages,
+        compactedSummarizedMessages: compacted.summarizedMessages,
+      });
+      this.addSystemMessage(
+        sessionId,
+        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
+      );
+    }
     // N4 (GT#12): budget evaluation must not depend on claudeSessionId being
     // present. DeepSeek reasoning-history resets clear claudeSessionId and
     // start a fresh SDK session while the cowork store history keeps growing;
@@ -5000,8 +5137,10 @@ export class CoworkRunner extends EventEmitter {
     // intervention). Evaluate whenever there is history to evaluate — a brand
     // new session with zero messages still skips the first run — and keep
     // skipping automatic error-retry re-runs (isRetry) so a retry never
-    // double-compacts the same turn.
-    if (shouldEvaluateCoworkContextBudget({
+    // double-compacts the same turn. The manual-compaction branch above
+    // already compacted this turn, so it takes precedence over the automatic
+    // budget (no re-evaluation on top of an explicit compaction).
+    if (!manualCompactApplied && shouldEvaluateCoworkContextBudget({
       claudeSessionId: activeSession.claudeSessionId,
       isRetry,
       messageCount: sessionSnapshotForBudget?.messages?.length ?? 0,
@@ -5011,6 +5150,13 @@ export class CoworkRunner extends EventEmitter {
         currentPrompt: prompt,
         systemPrompt,
         modelLimits,
+        // When the SDK owns proactive compaction, IDBots' tier-1/tier-2
+        // compaction stays as a safety net near the real ceiling so the two
+        // mechanisms don't double-compact at the same threshold.
+        ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
+        // Real provider-reported context size from the last turn (Phase 2);
+        // the heuristic estimate stays as the floor when unavailable.
+        realUsageTokens: this.getSessionLastTurnInputTokens(sessionId),
       });
 
       if (budget.shouldCompact) {

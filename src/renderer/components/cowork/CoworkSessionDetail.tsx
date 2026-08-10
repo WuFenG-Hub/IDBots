@@ -15,6 +15,7 @@ import EffortSelector from './EffortSelector';
 import SubagentPanel from './SubagentPanel';
 import TodoPanel from './TodoPanel';
 import UsageStatsChip from './UsageStatsChip';
+import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import {
@@ -3620,6 +3621,14 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         <div className="p-4 shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className="flex items-center justify-end gap-2 mb-2">
+              {currentSession.contextUsage && (
+                <ManualCompactButton
+                  sessionId={currentSession.id}
+                  usageRatio={currentSession.contextUsage.usageRatio}
+                  visibleRatio={0.4}
+                  disabled={isStreaming}
+                />
+              )}
               {currentSession.usageStats && (
                 <UsageStatsChip
                   usageStats={currentSession.usageStats}
