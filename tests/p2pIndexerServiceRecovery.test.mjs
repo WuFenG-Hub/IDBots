@@ -57,6 +57,43 @@ test('analyzeStartupFailure marks pebble WAL panic as recoverable local data cor
   assert.match(analysis.summary, /corrupted local p2p data/i);
 });
 
+test('analyzeStartupFailure marks DB lock conflict (resource temporarily unavailable) as lock conflict, not corruption', () => {
+  const utils = loadTestUtils();
+  assert.ok(utils, 'Expected __p2pIndexerServiceTestUtils to be exported');
+
+  const analysis = utils.analyzeStartupFailure({
+    exitCode: 2,
+    signal: null,
+    logLines: [
+      '========NEW PEBBLE DATABASE========',
+      '2026/08/10 18:09:55 resource temporarily unavailable',
+      'panic: runtime error: invalid memory address or nil pointer dereference',
+      'man-p2p/pebblestore.(*Database).StatPinSortTable(0x0)',
+    ],
+  });
+
+  assert.equal(analysis.likelyDataCorruption, false);
+  assert.equal(analysis.likelyDbLockConflict, true);
+  assert.match(analysis.summary, /another man-p2p instance/i);
+});
+
+test('analyzeStartupFailure marks explicit pebble lock-held message as lock conflict, not corruption', () => {
+  const utils = loadTestUtils();
+  assert.ok(utils, 'Expected __p2pIndexerServiceTestUtils to be exported');
+
+  const analysis = utils.analyzeStartupFailure({
+    exitCode: 1,
+    signal: null,
+    logLines: [
+      'pebble: lock held by another process',
+      'panic: runtime error: invalid memory address or nil pointer dereference',
+    ],
+  });
+
+  assert.equal(analysis.likelyDataCorruption, false);
+  assert.equal(analysis.likelyDbLockConflict, true);
+});
+
 test('analyzeStartupFailure does not mark generic timeout/network issue as data corruption', () => {
   const utils = loadTestUtils();
   assert.ok(utils, 'Expected __p2pIndexerServiceTestUtils to be exported');
@@ -71,6 +108,48 @@ test('analyzeStartupFailure does not mark generic timeout/network issue as data 
   });
 
   assert.equal(analysis.likelyDataCorruption, false);
+});
+
+test('start adopts an existing healthy local man-p2p instead of spawning a duplicate', async () => {
+  const originalLoad = patchElectron();
+  const originalSpawn = require('node:child_process').spawn;
+  const originalFetch = globalThis.fetch;
+  let spawnCalled = false;
+  try {
+    require('node:child_process').spawn = () => {
+      spawnCalled = true;
+      throw new Error('start() must not spawn when a healthy man-p2p is already running');
+    };
+    globalThis.fetch = async (url) => {
+      const href = String(url);
+      if (href.endsWith('/health')) {
+        return { ok: true, status: 200, json: async () => ({ status: 'ok' }) };
+      }
+      if (href.endsWith('/api/p2p/status')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            code: 1,
+            message: 'ok',
+            data: { running: true, peerId: '12D3KooWNVkPhRvongDjRWn7CZXhZxdWcmu3XxpBHps3ousnbiBH', listenAddrs: [] },
+          }),
+        };
+      }
+      throw new Error('unexpected fetch: ' + href);
+    };
+
+    const mod = require('../dist-electron/main/services/p2pIndexerService.js');
+    await mod.start(process.cwd(), process.cwd());
+
+    assert.equal(spawnCalled, false, 'expected adoption to skip spawning');
+    assert.equal(mod.getP2PStatus().running, true);
+    await mod.stop();
+  } finally {
+    require('node:child_process').spawn = originalSpawn;
+    globalThis.fetch = originalFetch;
+    Module._load = originalLoad;
+  }
 });
 
 test('recoverCorruptedPebbleDataDir moves pebble directory to timestamped backup', () => {
