@@ -3215,6 +3215,61 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Shared WHERE builder for archived-session listing/counting: archived rows,
+   * optional bot filter, and text search across title / peer name / message
+   * content. Content search is intentionally a LIKE scan (the UI accepts
+   * slower results in exchange for finding older conversation bodies).
+   */
+  private buildArchivedSessionFilter(options?: {
+    metabotId?: number | null;
+    query?: string;
+    /** When true, also match archived conversations whose message bodies contain the query. */
+    searchContent?: boolean;
+  }): { clauses: string[]; params: Array<string | number> } {
+    const clauses: string[] = ['s.archived_at IS NOT NULL'];
+    const params: Array<string | number> = [];
+
+    const metabotId = options?.metabotId;
+    if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
+      clauses.push('s.metabot_id = ?');
+      params.push(metabotId);
+    }
+    const query = options?.query?.trim();
+    if (query) {
+      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`).toLowerCase();
+      const titleClauses = [
+        `LOWER(s.title) LIKE ? ESCAPE '\\'`,
+        `LOWER(COALESCE(s.peer_name, '')) LIKE ? ESCAPE '\\'`,
+      ];
+      params.push(`%${escaped}%`, `%${escaped}%`);
+      if (options?.searchContent === true) {
+        titleClauses.push(`EXISTS (
+          SELECT 1 FROM cowork_messages m
+          WHERE m.session_id = s.id AND LOWER(m.content) LIKE ? ESCAPE '\\'
+        )`);
+        params.push(`%${escaped}%`);
+      }
+      clauses.push(`(${titleClauses.join(' OR ')})`);
+    }
+    return { clauses, params };
+  }
+
+  /** Total archived sessions matching the same filters (for pagination). */
+  countArchivedSessions(options?: {
+    metabotId?: number | null;
+    query?: string;
+    searchContent?: boolean;
+  }): number {
+    const { clauses, params } = this.buildArchivedSessionFilter(options);
+    const row = this.getOne<{ count: number }>(`
+      SELECT COUNT(*) AS count
+      FROM cowork_sessions s
+      WHERE ${clauses.join(' AND ')}
+    `, params);
+    return Number(row?.count ?? 0);
+  }
+
+  /**
    * Archived conversations for the Settings "Archived Chats" panel: sessions
    * put away by the user (records preserved), newest archive first. Separate
    * from listSessions, which deliberately excludes archived rows.
@@ -3222,6 +3277,7 @@ export class CoworkStore implements MemoryBackend {
   listArchivedSessions(options?: {
     metabotId?: number | null;
     query?: string;
+    searchContent?: boolean;
     limit?: number;
     offset?: number;
   }): CoworkSessionSummary[] {
@@ -3241,20 +3297,7 @@ export class CoworkStore implements MemoryBackend {
       updated_at: number;
     }
 
-    const clauses: string[] = ['s.archived_at IS NOT NULL'];
-    const params: Array<string | number> = [];
-
-    const metabotId = options?.metabotId;
-    if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
-      clauses.push('s.metabot_id = ?');
-      params.push(metabotId);
-    }
-    const query = options?.query?.trim();
-    if (query) {
-      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`).toLowerCase();
-      clauses.push(`(LOWER(s.title) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.peer_name, '')) LIKE ? ESCAPE '\\')`);
-      params.push(`%${escaped}%`, `%${escaped}%`);
-    }
+    const { clauses, params } = this.buildArchivedSessionFilter(options);
     const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 50)));
     const offset = Math.max(0, Math.floor(options?.offset ?? 0));
 

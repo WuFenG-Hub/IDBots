@@ -8354,11 +8354,13 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) => {
+  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) => {
     return withSqliteRecovery('cowork:session:listArchived', async () => {
       try {
-        const sessions = getCoworkStore().listArchivedSessions(options);
-        return { success: true, sessions };
+        const coworkStoreInstance = getCoworkStore();
+        const sessions = coworkStoreInstance.listArchivedSessions(options);
+        const total = coworkStoreInstance.countArchivedSessions(options);
+        return { success: true, sessions, total };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {

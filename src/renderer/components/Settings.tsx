@@ -47,6 +47,9 @@ interface SettingsProps extends SettingsOpenOptions {
   onClose: () => void;
 }
 
+/** Archived Chats panel page size (Settings). */
+const ARCHIVED_CHATS_PAGE_SIZE = 20;
+
 const formatLocalDateInput = (date: Date): string => {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -554,7 +557,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [archivedChats, setArchivedChats] = useState<CoworkSessionSummary[]>([]);
   const [archivedChatsLoading, setArchivedChatsLoading] = useState<boolean>(false);
   const [archivedChatsQuery, setArchivedChatsQuery] = useState<string>('');
+  const [archivedChatsSearchContent, setArchivedChatsSearchContent] = useState<boolean>(false);
   const [archivedChatsMetabotId, setArchivedChatsMetabotId] = useState<number | null>(null);
+  const [archivedChatsPage, setArchivedChatsPage] = useState<number>(0);
+  const [archivedChatsTotal, setArchivedChatsTotal] = useState<number>(0);
   const [archivedChatsNotice, setArchivedChatsNotice] = useState<string | null>(null);
 
   // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
@@ -1242,16 +1248,24 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const result = await window.electron?.cowork?.listArchivedSessions({
         metabotId: archivedChatsMetabotId,
         query: archivedChatsQuery.trim() || undefined,
-        limit: 100,
+        searchContent: archivedChatsSearchContent || undefined,
+        limit: ARCHIVED_CHATS_PAGE_SIZE,
+        offset: archivedChatsPage * ARCHIVED_CHATS_PAGE_SIZE,
       });
       setArchivedChats(result?.success && Array.isArray(result.sessions) ? result.sessions : []);
+      setArchivedChatsTotal(result?.success && typeof result.total === 'number' ? result.total : 0);
     } catch (loadError) {
       console.error('Failed to load archived chats:', loadError);
       setArchivedChats([]);
     } finally {
       setArchivedChatsLoading(false);
     }
-  }, [archivedChatsQuery, archivedChatsMetabotId]);
+  }, [archivedChatsQuery, archivedChatsMetabotId, archivedChatsSearchContent, archivedChatsPage]);
+
+  // Jump back to the first page whenever a filter (bot, query or content toggle) changes.
+  useEffect(() => {
+    setArchivedChatsPage(0);
+  }, [archivedChatsQuery, archivedChatsMetabotId, archivedChatsSearchContent]);
 
   useEffect(() => {
     if (activeTab !== 'archivedChats') return;
@@ -1271,7 +1285,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     try {
       const result = await window.electron?.cowork?.unarchiveSession(sessionId);
       if (result?.success) {
-        setArchivedChats((current) => current.filter((session) => session.id !== sessionId));
+        const remaining = archivedChats.filter((session) => session.id !== sessionId);
+        setArchivedChats(remaining);
+        if (remaining.length === 0 && archivedChatsPage > 0) {
+          setArchivedChatsPage((page) => Math.max(0, page - 1));
+        }
         setArchivedChatsNotice(i18nService.t('archivedChatsRestored'));
       }
     } catch (unarchiveError) {
@@ -2943,7 +2961,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           </div>
         );
 
-      case 'archivedChats':
+      case 'archivedChats': {
+        const totalArchivedChatPages = Math.max(1, Math.ceil(archivedChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));
         return (
           <div className="space-y-6">
             <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
@@ -2973,13 +2992,24 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </select>
               </div>
 
-              <input
-                type="text"
-                value={archivedChatsQuery}
-                onChange={(event) => setArchivedChatsQuery(event.target.value)}
-                placeholder={i18nService.t('archivedChatsSearchPlaceholder')}
-                className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              />
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={archivedChatsQuery}
+                  onChange={(event) => setArchivedChatsQuery(event.target.value)}
+                  placeholder={i18nService.t('archivedChatsSearchPlaceholder')}
+                  className="flex-1 min-w-0 rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                />
+                <label className="flex shrink-0 items-center gap-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={archivedChatsSearchContent}
+                    onChange={(event) => setArchivedChatsSearchContent(event.target.checked)}
+                    className="h-3.5 w-3.5 accent-claude-accent"
+                  />
+                  {i18nService.t('archivedChatsSearchContent')}
+                </label>
+              </div>
 
               {archivedChatsNotice && (
                 <div className="text-xs text-green-600 dark:text-green-400">{archivedChatsNotice}</div>
@@ -3030,9 +3060,40 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   </div>
                 )}
               </div>
+
+              {!archivedChatsLoading && archivedChatsTotal > 0 && (
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService
+                      .t('archivedChatsPageInfo')
+                      .replace('{page}', String(archivedChatsPage + 1))
+                      .replace('{totalPages}', String(totalArchivedChatPages))
+                      .replace('{total}', String(archivedChatsTotal))}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={archivedChatsPage === 0}
+                      onClick={() => setArchivedChatsPage((page) => Math.max(0, page - 1))}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsPrevPage')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={archivedChatsPage + 1 >= totalArchivedChatPages}
+                      onClick={() => setArchivedChatsPage((page) => page + 1)}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsNextPage')}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
+      }
 
       case 'dreamDiary':
         return (

@@ -392,7 +392,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:archive', sessionId),
     unarchiveSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:unarchive', sessionId),
-    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) =>
+    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) =>
       ipcRenderer.invoke('cowork:session:listArchived', options),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
