@@ -166,8 +166,17 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   // web_search must be present and FIRST (stable for cache prefix).
   assert.ok(Array.isArray(result.tools));
   assert.equal(result.tools[0].type, 'web_search');
-  // tool_choice defaults to 'auto'.
-  assert.equal(result.tool_choice, 'auto');
+  // 'What is the weather?' is a real-time topic (layer-1 signal): the proxy
+  // forces the built-in web_search via the Responses {"type":"web_search"}
+  // tool_choice instead of trusting auto, which the model skips in long
+  // agent sessions.
+  assert.deepEqual(result.tool_choice, { type: 'web_search' });
+  // A non-signal question keeps the auto default.
+  const plain = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+    'deepseek',
+  );
+  assert.equal(plain.tool_choice, 'auto');
   // reasoning.effort mapped from reasoning_effort.
   assert.deepEqual(result.reasoning, { effort: 'max' });
   // instructions extracted from system message, with the anti-hallucination
@@ -254,6 +263,358 @@ test('convertChatCompletionsRequestToResponsesRequest appends anti-hallucination
   );
   assert.equal(openai.instructions, 'You are helpful.');
   assert.ok(!String(openai.instructions ?? '').includes('实时信息规范'));
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 trigger strategy: real-time signal detection (layer 1) and
+// unverified-assertion downgrade (layer 2)
+// ---------------------------------------------------------------------------
+
+test('hasRealtimeSearchSignal flags recent-year and real-time keyword turns', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { hasRealtimeSearchSignal } = __openAICompatProxyTestUtils;
+
+  // Fixed clock (2026-08) so year-window assertions stay deterministic.
+  const now = new Date(2026, 7, 11);
+
+  // Recent-year reference in the window → signal.
+  assert.equal(hasRealtimeSearchSignal('2026年世界杯冠军是谁？', now), true);
+  assert.equal(hasRealtimeSearchSignal('2026 Wimbledon men singles champion?', now), true);
+  // Boundary years of the window.
+  assert.equal(hasRealtimeSearchSignal('2025年的最新进展如何？', now), true);
+  assert.equal(hasRealtimeSearchSignal('2027年有什么规划？', now), true);
+  // Real-time keyword without any year reference → signal.
+  assert.equal(hasRealtimeSearchSignal('今天有什么新闻？', now), true);
+  assert.equal(hasRealtimeSearchSignal('What is the weather?', now), true);
+  assert.equal(hasRealtimeSearchSignal('帮我查一下最新股价', now), true);
+});
+
+test('hasRealtimeSearchSignal keeps historical years and plain chat on auto', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { hasRealtimeSearchSignal } = __openAICompatProxyTestUtils;
+
+  const now = new Date(2026, 7, 11);
+
+  // Stale year outside the window wins over real-time keywords: the 2010
+  // World Cup is inside training data and must stay on auto.
+  assert.equal(hasRealtimeSearchSignal('2010年世界杯冠军是谁？', now), false);
+  assert.equal(hasRealtimeSearchSignal('2024年欧洲杯冠军是谁？', now), false);
+  assert.equal(hasRealtimeSearchSignal('2023年的天气数据', now), false);
+  // Plain chat / code work: no signal.
+  assert.equal(hasRealtimeSearchSignal('帮我写个 hello world', now), false);
+  assert.equal(hasRealtimeSearchSignal('解释一下什么是闭包', now), false);
+  assert.equal(hasRealtimeSearchSignal('hi', now), false);
+});
+
+test('hasUnverifiedRealtimeAssertion gates on recent year + assertion term', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { hasUnverifiedRealtimeAssertion } = __openAICompatProxyTestUtils;
+
+  const now = new Date(2026, 7, 11);
+
+  // Recent year + factual assertion → would be downgraded without search.
+  assert.equal(hasUnverifiedRealtimeAssertion('2026年世界杯冠军是西班牙队。', now), true);
+  assert.equal(hasUnverifiedRealtimeAssertion('2026温网男单冠军是辛纳。', now), true);
+  // Historical-year assertions are training data: never flagged.
+  assert.equal(hasUnverifiedRealtimeAssertion('2010年世界杯冠军是西班牙队。', now), false);
+  // Recent year but no assertion term (planning talk) → not flagged.
+  assert.equal(hasUnverifiedRealtimeAssertion('2026年的开发计划是推进 Agent 运行时。', now), false);
+  assert.equal(hasUnverifiedRealtimeAssertion('你好，2026年快乐', now), false);
+});
+
+test('convertChatCompletionsRequestToResponsesRequest forces web_search on real-time signal', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // Keyword signal (year-independent, stable across time).
+  const weather = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'What is the weather?' }] },
+    'deepseek',
+  );
+  assert.deepEqual(weather.tool_choice, { type: 'web_search' });
+
+  // Recent-year signal.
+  const wc2026 = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '2026年世界杯冠军是谁？' }] },
+    'deepseek',
+  );
+  assert.deepEqual(wc2026.tool_choice, { type: 'web_search' });
+
+  // Historical-year question stays on auto.
+  const wc2010 = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '2010年世界杯冠军是谁？' }] },
+    'deepseek',
+  );
+  assert.equal(wc2010.tool_choice, 'auto');
+
+  // Plain chat stays on auto.
+  const plain = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '帮我写个 hello world' }] },
+    'deepseek',
+  );
+  assert.equal(plain.tool_choice, 'auto');
+
+  // Gateway provider (opencode) serving deepseek-v4-flash gets the same force.
+  const gateway = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'What is the weather?' }] },
+    'opencode',
+  );
+  assert.deepEqual(gateway.tool_choice, { type: 'web_search' });
+
+  // Non-DeepSeek: never forced (no injected web_search tool).
+  const openai = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'gpt-5.6', messages: [{ role: 'user', content: 'What is the weather?' }] },
+    'openai',
+  );
+  assert.notDeepEqual(openai.tool_choice, { type: 'web_search' });
+});
+
+test('convertChatCompletionsRequestToResponsesRequest respects explicit tool_choice none', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // Caller explicitly disabled tools: never overridden by the trigger.
+  const forcedNone = convertChatCompletionsRequestToResponsesRequest(
+    {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'What is the weather?' }],
+      tool_choice: 'none',
+    },
+    'deepseek',
+  );
+  assert.equal(forcedNone.tool_choice, 'none');
+
+  // Caller pinned a specific function: preserved.
+  const pinned = convertChatCompletionsRequestToResponsesRequest(
+    {
+      model: 'deepseek-v4-flash',
+      messages: [{ role: 'user', content: 'What is the weather?' }],
+      tool_choice: { type: 'function', name: 'Read' },
+    },
+    'deepseek',
+  );
+  assert.deepEqual(pinned.tool_choice, { type: 'function', name: 'Read' });
+});
+
+test('convertChatCompletionsRequestToResponsesRequest uses the LAST user message for the signal', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // Earlier turns are code work; the LAST user turn is the real-time question.
+  const multi = convertChatCompletionsRequestToResponsesRequest(
+    {
+      model: 'deepseek-v4-flash',
+      messages: [
+        { role: 'user', content: '帮我重构这个模块' },
+        { role: 'assistant', content: '好的，已完成重构。' },
+        { role: 'user', content: '顺便问下今天天气怎么样？' },
+      ],
+    },
+    'deepseek',
+  );
+  assert.deepEqual(multi.tool_choice, { type: 'web_search' });
+
+  // ...and the reverse: last turn plain → auto even if an earlier turn had a
+  // real-time question that was already answered.
+  const reverse = convertChatCompletionsRequestToResponsesRequest(
+    {
+      model: 'deepseek-v4-flash',
+      messages: [
+        { role: 'user', content: '今天天气怎么样？' },
+        { role: 'assistant', content: '今天晴，25°C。' },
+        { role: 'user', content: '继续帮我把模块重构完' },
+      ],
+    },
+    'deepseek',
+  );
+  assert.equal(reverse.tool_choice, 'auto');
+});
+
+// ---------------------------------------------------------------------------
+// Layer-2 downgrade: unverified real-time assertions
+// ---------------------------------------------------------------------------
+
+test('responses stream appends unverified note when no search backed a real-time assertion', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // The model confidently asserted a 2026 fact with NO web_search_call.
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_text.delta', {
+    type: 'response.output_text.delta',
+    response_id: 'resp_nosearch',
+    model: 'deepseek-v4-flash',
+    delta: '2026年世界杯冠军是英格兰队。',
+  });
+  processResponsesStreamEvent(recorder.res, state, context, 'response.completed', {
+    type: 'response.completed',
+    response: {
+      id: 'resp_nosearch',
+      model: 'deepseek-v4-flash',
+      status: 'completed',
+      output: [],
+      usage: { input_tokens: 10, output_tokens: 20 },
+    },
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const textDeltas = events
+    .filter((e) => e.event === 'content_block_delta' && e.data.delta?.type === 'text_delta')
+    .map((e) => e.data.delta.text);
+  const joined = textDeltas.join('');
+  assert.ok(joined.includes('2026年世界杯冠军是英格兰队。'), 'answer text streamed');
+  assert.ok(joined.includes('无法确认'), 'unverified downgrade note appended');
+  assert.ok(joined.includes('未执行 web 搜索验证'), 'note explains missing search evidence');
+});
+
+test('responses stream does NOT append note when a web search ran', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // A real web_search_call was relayed → search evidence exists, no note.
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_item.done', {
+    type: 'response.output_item.done',
+    item: { type: 'web_search_call', id: 'call_00_ws_real', status: 'completed' },
+  });
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_text.delta', {
+    type: 'response.output_text.delta',
+    response_id: 'resp_searched',
+    model: 'deepseek-v4-flash',
+    delta: '2026年世界杯冠军是西班牙队。',
+  });
+  processResponsesStreamEvent(recorder.res, state, context, 'response.completed', {
+    type: 'response.completed',
+    response: {
+      id: 'resp_searched',
+      model: 'deepseek-v4-flash',
+      status: 'completed',
+      output: [],
+      usage: { input_tokens: 10, output_tokens: 20 },
+    },
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const textDeltas = events
+    .filter((e) => e.event === 'content_block_delta' && e.data.delta?.type === 'text_delta')
+    .map((e) => e.data.delta.text);
+  const joined = textDeltas.join('');
+  assert.ok(joined.includes('2026年世界杯冠军是西班牙队。'), 'answer streamed');
+  assert.ok(!joined.includes('无法确认'), 'no downgrade note when search evidence exists');
+});
+
+test('responses stream does NOT append note for non-time-sensitive answers', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // Historical fact (training data) and plain chat: never flagged.
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_text.delta', {
+    type: 'response.output_text.delta',
+    response_id: 'resp_hist',
+    model: 'deepseek-v4-flash',
+    delta: '2010年世界杯冠军是西班牙队。',
+  });
+  processResponsesStreamEvent(recorder.res, state, context, 'response.completed', {
+    type: 'response.completed',
+    response: {
+      id: 'resp_hist',
+      model: 'deepseek-v4-flash',
+      status: 'completed',
+      output: [],
+      usage: { input_tokens: 10, output_tokens: 20 },
+    },
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const textDeltas = events
+    .filter((e) => e.event === 'content_block_delta' && e.data.delta?.type === 'text_delta')
+    .map((e) => e.data.delta.text);
+  const joined = textDeltas.join('');
+  assert.ok(joined.includes('2010年世界杯冠军是西班牙队。'), 'answer streamed');
+  assert.ok(!joined.includes('无法确认'), 'historical answer not flagged');
+});
+
+test('appendUnverifiedRealtimeNoteIfNeeded appends note on non-stream path when no search', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { appendUnverifiedRealtimeNoteIfNeeded } = __openAICompatProxyTestUtils;
+
+  const upstream = {
+    id: 'resp_ns_1',
+    output: [
+      {
+        type: 'message',
+        id: 'msg_ns_1',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '2026年世界杯冠军是英格兰队。' }],
+      },
+    ],
+  };
+  const anthropic = {
+    content: [{ type: 'text', text: '2026年世界杯冠军是英格兰队。' }],
+  };
+  appendUnverifiedRealtimeNoteIfNeeded(anthropic, upstream);
+
+  assert.equal(anthropic.content.length, 2, 'note block appended');
+  const note = anthropic.content[1];
+  assert.equal(note.type, 'text');
+  assert.ok(note.text.includes('无法确认'));
+
+  // With a web_search_call present → no note.
+  const upstreamSearched = {
+    id: 'resp_ns_2',
+    output: [
+      { type: 'web_search_call', id: 'call_ws_2', status: 'completed' },
+      {
+        type: 'message',
+        id: 'msg_ns_2',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '2026年世界杯冠军是西班牙队。' }],
+      },
+    ],
+  };
+  const anthropicSearched = {
+    content: [{ type: 'text', text: '2026年世界杯冠军是西班牙队。' }],
+  };
+  appendUnverifiedRealtimeNoteIfNeeded(anthropicSearched, upstreamSearched);
+  assert.equal(anthropicSearched.content.length, 1, 'no note when search ran');
+
+  // Historical answer → no note.
+  const upstreamHist = {
+    id: 'resp_ns_3',
+    output: [
+      {
+        type: 'message',
+        id: 'msg_ns_3',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '2010年世界杯冠军是西班牙队。' }],
+      },
+    ],
+  };
+  const anthropicHist = { content: [{ type: 'text', text: '2010年世界杯冠军是西班牙队。' }] };
+  appendUnverifiedRealtimeNoteIfNeeded(anthropicHist, upstreamHist);
+  assert.equal(anthropicHist.content.length, 1, 'historical answer not flagged');
 });
 
 // ---------------------------------------------------------------------------
