@@ -95,6 +95,8 @@ type ResponsesStreamContext = {
    * fallback each emit the marker exactly once per search.
    */
   emittedWebSearchItemIds: Set<string>;
+  /** Text deltas relayed to the client this stream (layer-2 assertion gate). */
+  accumulatedText: string;
 };
 
 const PROXY_BIND_HOST = '0.0.0.0';
@@ -121,9 +123,127 @@ const DEEPSEEK_REASONING_PLACEHOLDER = '';
  * Constant text keeps the cached prompt prefix byte-stable across turns.
  */
 const DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD =
-  '实时信息规范：对于训练截止之后发生或变化的事实（新闻、奖项、赛事、行情、天气、最新数据等），'
-  + '必须依据本次会话中 web_search 搜索到的结果作答。若未执行搜索或搜索结果不足以确认答案，'
-  + '必须明确标注「未验证」或「无法确认」，不得凭记忆自信编造人名、日期、数字或结论。';
+  '实时信息规范：对于训练截止之后发生或变化的事实（新闻、奖项、赛事、行情、天气、最新数据、人物当选或任命等），'
+  + '第一步必须调用 web_search 工具搜索后再作答，禁止凭记忆直接作答。'
+  + '若未执行搜索或搜索结果不足以确认答案，只能回答「无法确认」或「未验证」并简述原因，'
+  + '禁止给出具体的人名、日期、比分、数字或结论。';
+
+/**
+ * Trigger-strategy signal tables (round 2): detect time-sensitive turns from
+ * the LAST user message text so the proxy can force the built-in web_search
+ * tool (layer 1) instead of trusting tool_choice=auto, which the model skips
+ * in long agent sessions. Matched lowercased; a false positive costs one
+ * extra server-side search, a false negative lets the model answer from
+ * memory without evidence — kept deliberately narrow.
+ */
+const REALTIME_SIGNAL_TERMS: ReadonlyArray<string> = [
+  // Time references.
+  '最新', '最近', '今天', '今晚', '昨天', '本周', '本月', '今年', '刚刚', '近日', '当前',
+  // News-ish topics (sports, elections, markets, weather, releases).
+  '新闻', '赛事', '比赛', '世界杯', '温网', '奥运会', '欧冠', '冠军', '决赛', '比分',
+  '成绩', '排名', '夺冠', '击败', '战胜', '颁奖', '当选', '任命', '就任', '发布', '宣布',
+  '上市', '行情', '汇率', '股价', '金价', '油价', '房价', '天气', '气温', '降雨', '地震',
+  '台风', '涨停', '跌停', '财报', '涨价', '降价', '获奖', '转会', '签约',
+  // English equivalents.
+  'news', 'latest', 'today', 'yesterday', 'champion', 'championship', 'winner',
+  'score', 'final', 'weather', 'price', 'stock', 'election', 'elected',
+  'appointed', 'release', 'launch', 'breaking', 'updated',
+];
+
+/**
+ * Assertion terms that make an answer look like a confident real-time claim
+ * (champion/score/election/price/record...). Gated by a recent-year match:
+ * only answers that reference the recent year window AND assert a fact are
+ * downgraded when no web_search_call happened (layer 2). Historical years
+ * (2010 World Cup) are inside training data and never flagged.
+ */
+const REALTIME_ASSERTION_TERMS: ReadonlyArray<string> = [
+  '冠军', '亚军', '季军', '比分', '夺冠', '击败', '战胜', '当选', '任命', '就任',
+  '就职', '发布', '上市', '推出', '夺得', '捧起', '获胜', '打破', '纪录', '新高',
+  '新低', '价格', '市值', '涨停', '跌停', '气温', '摄氏度', '官方宣布', '证实',
+  'champion', 'winner', 'score', 'beat', 'defeated', 'elected', 'appointed',
+  'price', 'record', 'announced',
+];
+
+/**
+ * Layer-2 downgrade note appended to an answer that asserts time-sensitive
+ * facts without any web_search_call in the same response. Constant text.
+ */
+const DEEPSEEK_UNVERIFIED_REALTIME_NOTE =
+  '\n\n（注：以上回答包含时间敏感信息，但本次会话未执行 web 搜索验证，具体人名、日期或数字可能不准确，无法确认，请以官方信源核实。）';
+
+/** Recent-year window: [currentYear-1, currentYear+1], so 2026 questions
+ * trigger while 2010 history questions stay on auto. */
+function recentYearWindow(now: Date): [number, number] {
+  const year = now.getFullYear();
+  return [year - 1, year + 1];
+}
+
+function hasRecentYearInText(text: string, now: Date): boolean {
+  const [minYear, maxYear] = recentYearWindow(now);
+  const matches = text.match(/(19|20)\d{2}/g) ?? [];
+  return matches.some((m) => {
+    const year = Number(m);
+    return year >= minYear && year <= maxYear;
+  });
+}
+
+/**
+ * True when the text looks time-sensitive: either a recent-year reference
+ * (dynamic window around the current year) or a real-time keyword. Drives the
+ * forced web_search tool_choice for DeepSeek requests.
+ */
+function hasRealtimeSearchSignal(text: string, now: Date = new Date()): boolean {
+  const normalized = text.toLowerCase();
+  const years = normalized.match(/(19|20)\d{2}/g) ?? [];
+  if (years.length > 0) {
+    // A year reference decides: recent-year → signal; stale year (2010 World
+    // Cup, in training data) → NOT a signal even if real-time keywords
+    // appear. Keeps historical-fact questions on auto while 2026-style
+    // questions force search.
+    const [minYear, maxYear] = recentYearWindow(now);
+    return years.some((m) => {
+      const year = Number(m);
+      return year >= minYear && year <= maxYear;
+    });
+  }
+  return REALTIME_SIGNAL_TERMS.some((term) => normalized.includes(term.toLowerCase()));
+}
+
+/**
+ * True when the text confidently asserts a time-sensitive fact (recent year
+ * AND an assertion term) — the pattern that layer 2 downgrades when no
+ * web_search_call backed it. `now` injectable for deterministic tests.
+ */
+function hasUnverifiedRealtimeAssertion(text: string, now: Date = new Date()): boolean {
+  if (!hasRecentYearInText(text, now)) {
+    return false;
+  }
+  const normalized = text.toLowerCase();
+  return REALTIME_ASSERTION_TERMS.some((term) => normalized.includes(term.toLowerCase()));
+}
+
+/** Concatenated final answer text of a Responses output (message/output_text). */
+function extractResponsesOutputText(responseObj: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) !== 'message') {
+      continue;
+    }
+    for (const block of toArray(itemObj?.content)) {
+      const blockObj = toOptionalObject(block);
+      if (toString(blockObj?.type) !== 'output_text') {
+        continue;
+      }
+      const text = toString(blockObj?.text);
+      if (text) {
+        parts.push(text);
+      }
+    }
+  }
+  return parts.join('');
+}
 
 // DeepSeek's Responses API is stricter than chat/completions: it REJECTS an
 // empty reasoning pass-back (`reasoning` input items with empty text) with the
@@ -1066,6 +1186,20 @@ function convertChatCompletionsRequestToResponsesRequest(
 
   const isDeepSeek = provider?.toLowerCase() === 'deepseek'
     || isDeepSeekModel(toString(chatRequest.model));
+  // Layer-1 trigger input: text of the LAST user message, scanned up front so
+  // the tool_choice decision (below) can see it. Decides whether this turn is
+  // time-sensitive enough to force web_search.
+  let lastUserText = '';
+  for (const probeMessage of toArray(chatRequest.messages)) {
+    const probeObj = toOptionalObject(probeMessage);
+    if (!probeObj || toString(probeObj.role) !== 'user') {
+      continue;
+    }
+    const probeText = extractTextFromChatContent(probeObj.content);
+    if (probeText) {
+      lastUserText = probeText;
+    }
+  }
   // N1 scheme-B: whether the effective model can consume image blocks. Unknown
   // models default to true (safe default), only known non-vision models
   // (DeepSeek V4 family) degrade images to placeholders.
@@ -1096,8 +1230,25 @@ function convertChatCompletionsRequestToResponsesRequest(
   if (responseTools.length > 0) {
     request.tools = responseTools;
   }
-  if (chatRequest.tool_choice !== undefined) {
-    request.tool_choice = normalizeResponsesToolChoiceFromChat(chatRequest.tool_choice);
+  const explicitToolChoice = chatRequest.tool_choice;
+  const explicitChoiceType = toString(toOptionalObject(explicitToolChoice)?.type);
+  const choiceAllowsOverride = explicitToolChoice === undefined
+    || explicitToolChoice === 'auto'
+    || explicitChoiceType === 'auto';
+  const forceWebSearch = isDeepSeek
+    && responseTools.length > 0
+    && choiceAllowsOverride
+    && hasRealtimeSearchSignal(lastUserText);
+  if (forceWebSearch) {
+    // Round-2 trigger strategy: a time-sensitive turn (recent-year reference
+    // or real-time keyword) forces the built-in server-side web_search via
+    // the Responses `{"type":"web_search"}` tool_choice (verified against the
+    // upstream). The model must search instead of answering from memory —
+    // tool_choice=auto is reliably skipped in long agent sessions. Non-signal
+    // turns keep auto, so ordinary conversation is untouched.
+    request.tool_choice = { type: 'web_search' };
+  } else if (explicitToolChoice !== undefined) {
+    request.tool_choice = normalizeResponsesToolChoiceFromChat(explicitToolChoice);
   } else if (isDeepSeek && responseTools.length > 0) {
     // Default to auto so the model decides when to invoke web_search.
     request.tool_choice = 'auto';
@@ -1616,6 +1767,7 @@ function createResponsesStreamContext(): ResponsesStreamContext {
     hasAnyDelta: false,
     hasReasoningDeltas: false,
     emittedWebSearchItemIds: new Set<string>(),
+    accumulatedText: '',
   };
 }
 
@@ -2441,6 +2593,65 @@ function emitResponsesCompletedFunctionCalls(
   }
 }
 
+/**
+ * Layer-2 downgrade gate (streaming path): when the completed response
+ * contains a confident time-sensitive assertion (recent year + assertion
+ * term) but NO web_search_call was relayed, append the unverified note so a
+ * confident fabrication can't masquerade as a fact. Runs right before the
+ * finish chunk so the note is part of the assistant turn. No-op when any
+ * web search ran (search is the evidence; the note would be noise).
+ */
+function emitResponsesUnverifiedRealtimeNoteIfNeeded(
+  res: http.ServerResponse,
+  state: StreamState,
+  context: ResponsesStreamContext,
+  responseObj: Record<string, unknown>
+): void {
+  if (context.emittedWebSearchItemIds.size > 0) {
+    return;
+  }
+  const answerText = context.accumulatedText || extractResponsesOutputText(responseObj);
+  if (!hasUnverifiedRealtimeAssertion(answerText)) {
+    return;
+  }
+  processOpenAIChunk(res, state, {
+    id: toString(responseObj.id),
+    model: toString(responseObj.model),
+    choices: [{ delta: { content: DEEPSEEK_UNVERIFIED_REALTIME_NOTE } }],
+  });
+  context.hasAnyDelta = true;
+}
+
+/**
+ * Layer-2 downgrade gate (non-streaming path): appends the same unverified
+ * note as an extra text block when the response asserted time-sensitive
+ * facts without any web_search_call output item.
+ */
+function appendUnverifiedRealtimeNoteIfNeeded(
+  anthropicResponse: Record<string, unknown>,
+  upstreamJSON: unknown
+): void {
+  const responseObj = resolveResponsesObject(upstreamJSON);
+  const hadWebSearch = toArray(responseObj.output).some(
+    (item) => toString(toOptionalObject(item)?.type) === 'web_search_call'
+  );
+  if (hadWebSearch) {
+    return;
+  }
+  const answerText = extractResponsesOutputText(responseObj);
+  if (!hasUnverifiedRealtimeAssertion(answerText)) {
+    return;
+  }
+  const content = Array.isArray(anthropicResponse.content)
+    ? anthropicResponse.content
+    : [];
+  content.push({
+    type: 'text',
+    text: DEEPSEEK_UNVERIFIED_REALTIME_NOTE.trim(),
+  });
+  anthropicResponse.content = content;
+}
+
 function emitResponsesFallbackContent(
   res: http.ServerResponse,
   state: StreamState,
@@ -2560,6 +2771,7 @@ function processResponsesStreamEvent(
         choices: [{ delta: { content: textDelta } }],
       });
       context.hasAnyDelta = true;
+      context.accumulatedText += textDelta;
     }
     return;
   }
@@ -2687,6 +2899,9 @@ function processResponsesStreamEvent(
     if (!context.hasAnyDelta) {
       emitResponsesFallbackContent(res, state, responseObj, context);
     }
+    // Layer-2 downgrade: the turn asserted time-sensitive facts without any
+    // web_search_call; tag the answer as unverified BEFORE the finish chunk.
+    emitResponsesUnverifiedRealtimeNoteIfNeeded(res, state, context, responseObj);
     emitResponsesCompletedFunctionCalls(res, state, context, responseObj);
 
     const usage = toOptionalObject(responseObj.usage);
@@ -3343,6 +3558,9 @@ async function handleRequest(
     // relay them as server_tool_use blocks so the SDK context still records
     // that a web search ran (streaming path relays per output_item.done).
     injectResponsesWebSearchBlocks(anthropicResponse, upstreamJSON);
+    // Layer-2 downgrade: assert time-sensitive facts without any search →
+    // append the unverified note (no-op when web_search_call existed).
+    appendUnverifiedRealtimeNoteIfNeeded(anthropicResponse, upstreamJSON);
     writeJSON(res, 200, anthropicResponse);
     return;
   }
@@ -3373,6 +3591,10 @@ export const __openAICompatProxyTestUtils = {
   resolveEffectiveUpstreamModel,
   parseMessagesRouteSessionKey,
   injectResponsesWebSearchBlocks,
+  appendUnverifiedRealtimeNoteIfNeeded,
+  hasRealtimeSearchSignal,
+  hasUnverifiedRealtimeAssertion,
+  extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;
     deepSeekReasoningStore.clear();
