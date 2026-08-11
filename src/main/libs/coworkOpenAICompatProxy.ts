@@ -918,6 +918,30 @@ function extractErrorMessage(raw: string): string {
   return raw;
 }
 
+/**
+ * Extracts the machine error code of an OpenAI-style error body (error.code),
+ * e.g. "free_quota_exhausted" from the free-quota relay. Returns '' when the
+ * body carries no usable code.
+ */
+function extractUpstreamErrorCode(raw: string): string {
+  if (!raw) {
+    return '';
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const errorObj = parsed.error;
+    if (errorObj && typeof errorObj === 'object' && !Array.isArray(errorObj)) {
+      const code = (errorObj as Record<string, unknown>).code;
+      if (typeof code === 'string' && code.trim()) {
+        return code.trim();
+      }
+    }
+  } catch {
+    // noop
+  }
+  return '';
+}
+
 function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: string): UpstreamAPIType {
   // An explicit user-selected 'responses' format always wins so custom
   // providers pointing at Responses-only endpoints work.
@@ -3560,6 +3584,12 @@ async function handleRequest(
       let firstErrorMessage = extractErrorMessage(firstErrorText);
       if (firstErrorMessage === 'Upstream API request failed') {
         firstErrorMessage = `Upstream API request failed (${upstreamResponse.status}) ${currentTargetURL}`;
+      }
+      // Preserve the upstream machine error code (e.g. free_quota_exhausted)
+      // in the surfaced message so renderer guidance can key off it.
+      const firstErrorCode = extractUpstreamErrorCode(firstErrorText);
+      if (firstErrorCode && !firstErrorMessage.includes(firstErrorCode)) {
+        firstErrorMessage = `${firstErrorCode}: ${firstErrorMessage}`;
       }
 
       if (upstreamAPIType === 'chat_completions' && upstreamResponse.status === 400) {

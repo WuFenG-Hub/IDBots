@@ -9,6 +9,7 @@ import type {
   CoworkServiceOrderSummary,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
+import type { SettingsOpenOptions } from '../Settings';
 import CoworkPromptInput from './CoworkPromptInput';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
@@ -86,10 +87,13 @@ interface CoworkSessionDetailProps {
     name?: string | null;
     avatar?: string | null;
   }) => void;
+  onRequestAppSettings?: (options?: SettingsOpenOptions) => void;
   updateBadge?: React.ReactNode;
 }
 
 const AUTO_SCROLL_THRESHOLD = 120;
+/** Machine error code of the free-quota relay, preserved in error text by the proxy. */
+const FREE_QUOTA_EXHAUSTED_CODE = 'free_quota_exhausted';
 const REFUND_STATUS_DISMISS_STORAGE_KEY = 'idbots.cowork.dismissedRefundStatusCards.v1';
 const INVALID_FILE_NAME_PATTERN = /[<>:"/\\|?*\u0000-\u001F]/g;
 const ORDER_TAG_TXID_RE = /^\[(?:ORDER_STATUS|DELIVERY|NeedsRating):([0-9a-f]{64})(?:\s+[^\]]*)?\]/i;
@@ -2317,6 +2321,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   onToggleSidebar,
   onNewChat,
   onOpenBotInBrowser,
+  onRequestAppSettings,
   updateBadge,
 }) => {
   const isMac = window.electron.platform === 'darwin';
@@ -2340,6 +2345,20 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       }
     }
     return ended;
+  }, [currentSession?.messages]);
+  // The free-quota relay surfaces 429 + code free_quota_exhausted (annotated
+  // into the error text by the OpenAI-compat proxy). Detect it from persisted
+  // system error messages and guide the user to configure their own key.
+  const freeQuotaExhausted = useMemo(() => {
+    for (const message of currentSession?.messages ?? []) {
+      if (message.type !== 'system') continue;
+      const content = typeof message.content === 'string' ? message.content : '';
+      const metaError = typeof message.metadata?.error === 'string' ? message.metadata.error : '';
+      if (content.includes(FREE_QUOTA_EXHAUSTED_CODE) || metaError.includes(FREE_QUOTA_EXHAUSTED_CODE)) {
+        return true;
+      }
+    }
+    return false;
   }, [currentSession?.messages]);
   // Latest SDK prompt suggestion for the follow-up chips. The SDK emits at most
   // one per turn (after the result message); we surface the most recent one.
@@ -3685,6 +3704,25 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 <span className="text-xs text-amber-700 dark:text-amber-300">
                   {i18nService.t('delegationWaitingForResult')}
                 </span>
+              </div>
+            </div>
+          )}
+          {freeQuotaExhausted && (
+            <div className="max-w-3xl mx-auto mb-2">
+              <div className="flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800">
+                <ExclamationTriangleIcon className="h-4 w-4 text-red-500 shrink-0" />
+                <span className="text-xs text-red-700 dark:text-red-300">
+                  {i18nService.t('freeQuotaExhaustedBanner')}
+                </span>
+                {onRequestAppSettings && (
+                  <button
+                    type="button"
+                    onClick={() => onRequestAppSettings({ initialTab: 'model', notice: i18nService.t('freeQuotaExhaustedNotice') })}
+                    className="text-xs font-medium text-red-700 dark:text-red-300 underline hover:no-underline shrink-0"
+                  >
+                    {i18nService.t('freeQuotaGoSettings')}
+                  </button>
+                )}
               </div>
             </div>
           )}

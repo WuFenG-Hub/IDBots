@@ -511,6 +511,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
           onToggleSidebar={onToggleSidebar}
           onNewChat={onNewChat}
           onOpenBotInBrowser={onOpenBotInBrowser}
+          onRequestAppSettings={onRequestAppSettings}
           updateBadge={updateBadge}
         />
       </>
