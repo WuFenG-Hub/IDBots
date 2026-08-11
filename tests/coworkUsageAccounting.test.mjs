@@ -76,3 +76,19 @@ test('DeepSeek cost/totals never double-count input_tokens (it already includes 
   assert.match(chip, /const totalTokens = cacheIncludedInInput\s*\?\s*usageStats\.inputTokens \+ usageStats\.outputTokens/);
   assert.match(chip, /const modelInput = cacheIncludedInInput\s*\?\s*u\.inputTokens/);
 });
+
+test('accumulateResultUsage normalizes a partial prev (context-snapshot seed) instead of producing NaN', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  // persistRealContextUsage can seed the in-memory stats map with a partial
+  // object (lastRealContextUsage only) BEFORE the first turn's usage
+  // accumulates. prev.inputTokens would then be undefined and undefined + n
+  // = NaN — which JSON.stringify persists as null, poisoning the session row
+  // so the usage chip renders NaN for input/output/cache rows (regression
+  // from ad61a168). The accumulation must normalize the counters no matter
+  // where prev came from.
+  assert.match(source, /finiteOrZero\(prev\.inputTokens\)/);
+  assert.match(source, /finiteOrZero\(prev\.outputTokens\)/);
+  assert.match(source, /finiteOrZero\(prev\.cacheReadTokens\)/);
+  assert.match(source, /finiteOrZero\(prev\.cacheCreationTokens\)/);
+});

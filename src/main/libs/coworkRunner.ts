@@ -1873,6 +1873,22 @@ export class CoworkRunner extends EventEmitter {
         // Persisted read is best-effort; fall back to zeroed stats.
       }
     }
+    // The in-memory map can hold a PARTIAL stats object seeded by
+    // persistRealContextUsage before any turn's usage has accumulated (it only
+    // sets lastRealContextUsage). Trusting it blindly leaves the counters
+    // undefined — undefined + n = NaN, which JSON.stringify then persists as
+    // null, and the usage chip renders NaN for input/output/cache rows.
+    // Normalize the counters no matter where prev came from (also heals rows
+    // already poisoned with null).
+    const finiteOrZero = (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : 0;
+    prev = {
+      ...prev,
+      inputTokens: finiteOrZero(prev.inputTokens),
+      outputTokens: finiteOrZero(prev.outputTokens),
+      cacheReadTokens: finiteOrZero(prev.cacheReadTokens),
+      cacheCreationTokens: finiteOrZero(prev.cacheCreationTokens),
+    };
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
     // cached yet). For later turns, consume the pending break reason recorded at
