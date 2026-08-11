@@ -35,6 +35,12 @@ export interface CoworkUsageStats {
     cacheReadTokens: number;
     cacheCreationTokens: number;
   }>;
+  /**
+   * Last real per-category context usage snapshot from the SDK's
+   * getContextUsage() (local mode), persisted so the ring keeps showing real
+   * numbers after the active session is cleaned up at turn end.
+   */
+  lastRealContextUsage?: CoworkContextUsage | null;
 }
 
 export interface CoworkContextUsage {
