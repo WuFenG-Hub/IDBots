@@ -128,92 +128,6 @@ const DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD =
   + '若未执行搜索或搜索结果不足以确认答案，只能回答「无法确认」或「未验证」并简述原因，'
   + '禁止给出具体的人名、日期、比分、数字或结论。';
 
-/**
- * Trigger-strategy signal tables (round 2): detect time-sensitive turns from
- * the LAST user message text so the proxy can force the built-in web_search
- * tool (layer 1) instead of trusting tool_choice=auto, which the model skips
- * in long agent sessions. Matched lowercased; a false positive costs one
- * extra server-side search, a false negative lets the model answer from
- * memory without evidence — kept deliberately narrow.
- */
-const REALTIME_SIGNAL_TERMS: ReadonlyArray<string> = [
-  // Time references.
-  '最新', '最近', '今天', '今晚', '昨天', '本周', '本月', '今年', '刚刚', '近日', '当前',
-  // News-ish topics (sports, elections, markets, weather, releases).
-  '新闻', '赛事', '比赛', '世界杯', '温网', '奥运会', '欧冠', '冠军', '决赛', '比分',
-  '成绩', '排名', '夺冠', '击败', '战胜', '颁奖', '当选', '任命', '就任', '发布', '宣布',
-  '上市', '行情', '汇率', '股价', '金价', '油价', '房价', '天气', '气温', '降雨', '地震',
-  '台风', '涨停', '跌停', '财报', '涨价', '降价', '获奖', '转会', '签约',
-  // English equivalents.
-  'news', 'latest', 'today', 'yesterday', 'champion', 'championship', 'winner',
-  'score', 'final', 'weather', 'price', 'stock', 'election', 'elected',
-  'appointed', 'release', 'launch', 'breaking', 'updated',
-];
-
-/** Recent-year window: [currentYear-1, currentYear+1], so 2026 questions
- * trigger while 2010 history questions stay on auto. */
-function recentYearWindow(now: Date): [number, number] {
-  const year = now.getFullYear();
-  return [year - 1, year + 1];
-}
-
-function hasRecentYearInText(text: string, now: Date): boolean {
-  const [minYear, maxYear] = recentYearWindow(now);
-  const matches = text.match(/(19|20)\d{2}/g) ?? [];
-  return matches.some((m) => {
-    const year = Number(m);
-    return year >= minYear && year <= maxYear;
-  });
-}
-
-/**
- * True when the text looks time-sensitive: either a recent-year reference
- * (dynamic window around the current year) or a real-time keyword. Drives the
- * forced web_search tool_choice for DeepSeek requests.
- */
-function hasRealtimeSearchSignal(text: string, now: Date = new Date()): boolean {
-  const normalized = text.toLowerCase();
-  const years = normalized.match(/(19|20)\d{2}/g) ?? [];
-  if (years.length > 0) {
-    // A year reference decides: recent-year → signal; stale year (2010 World
-    // Cup, in training data) → NOT a signal even if real-time keywords
-    // appear. Keeps historical-fact questions on auto while 2026-style
-    // questions force search.
-    const [minYear, maxYear] = recentYearWindow(now);
-    return years.some((m) => {
-      const year = Number(m);
-      return year >= minYear && year <= maxYear;
-    });
-  }
-  return REALTIME_SIGNAL_TERMS.some((term) => normalized.includes(term.toLowerCase()));
-}
-
-// Marker pair wrapping the user's own text inside a composed cowork prompt.
-// The runner prepends volatile context (Local Time Context — which always
-// carries the current year — plus memories and remote services) ahead of the
-// user's text; scanning that injected context for real-time signals forces
-// web_search on EVERY turn, and on short sessions the upstream enforces the
-// forced tool_choice so strictly that the model is confined to the
-// server-side search tools (search/open_page/find_in_page) and cannot call
-// any real function tool. Keep in sync with IDBOTS_USER_MESSAGE_OPEN/CLOSE in
-// coworkRunner.ts.
-const IDBOTS_USER_MESSAGE_OPEN = '<idbots_user_message>';
-const IDBOTS_USER_MESSAGE_CLOSE = '</idbots_user_message>';
-
-/**
- * Scope the real-time signal scan to the user's own text: when the runner's
- * marker pair is present, only the marked region is scanned; unmarked
- * payloads (legacy sessions, non-cowork clients) fall back to the full text.
- */
-function extractUserTextForSignalScan(text: string): string {
-  const openIndex = text.lastIndexOf(IDBOTS_USER_MESSAGE_OPEN);
-  const closeIndex = text.lastIndexOf(IDBOTS_USER_MESSAGE_CLOSE);
-  if (openIndex >= 0 && closeIndex > openIndex + IDBOTS_USER_MESSAGE_OPEN.length) {
-    return text.slice(openIndex + IDBOTS_USER_MESSAGE_OPEN.length, closeIndex);
-  }
-  return text;
-}
-
 /** Concatenated final answer text of a Responses output (message/output_text). */
 function extractResponsesOutputText(responseObj: Record<string, unknown>): string {
   const parts: string[] = [];
@@ -1177,20 +1091,6 @@ function convertChatCompletionsRequestToResponsesRequest(
 
   const isDeepSeek = provider?.toLowerCase() === 'deepseek'
     || isDeepSeekModel(toString(chatRequest.model));
-  // Layer-1 trigger input: text of the LAST user message, scanned up front so
-  // the tool_choice decision (below) can see it. Decides whether this turn is
-  // time-sensitive enough to force web_search.
-  let lastUserText = '';
-  for (const probeMessage of toArray(chatRequest.messages)) {
-    const probeObj = toOptionalObject(probeMessage);
-    if (!probeObj || toString(probeObj.role) !== 'user') {
-      continue;
-    }
-    const probeText = extractTextFromChatContent(probeObj.content);
-    if (probeText) {
-      lastUserText = probeText;
-    }
-  }
   // N1 scheme-B: whether the effective model can consume image blocks. Unknown
   // models default to true (safe default), only known non-vision models
   // (DeepSeek V4 family) degrade images to placeholders.
@@ -1222,23 +1122,7 @@ function convertChatCompletionsRequestToResponsesRequest(
     request.tools = responseTools;
   }
   const explicitToolChoice = chatRequest.tool_choice;
-  const explicitChoiceType = toString(toOptionalObject(explicitToolChoice)?.type);
-  const choiceAllowsOverride = explicitToolChoice === undefined
-    || explicitToolChoice === 'auto'
-    || explicitChoiceType === 'auto';
-  const forceWebSearch = isDeepSeek
-    && responseTools.length > 0
-    && choiceAllowsOverride
-    && hasRealtimeSearchSignal(extractUserTextForSignalScan(lastUserText));
-  if (forceWebSearch) {
-    // Round-2 trigger strategy: a time-sensitive turn (recent-year reference
-    // or real-time keyword) forces the built-in server-side web_search via
-    // the Responses `{"type":"web_search"}` tool_choice (verified against the
-    // upstream). The model must search instead of answering from memory —
-    // tool_choice=auto is reliably skipped in long agent sessions. Non-signal
-    // turns keep auto, so ordinary conversation is untouched.
-    request.tool_choice = { type: 'web_search' };
-  } else if (explicitToolChoice !== undefined) {
+  if (explicitToolChoice !== undefined) {
     request.tool_choice = normalizeResponsesToolChoiceFromChat(explicitToolChoice);
   } else if (isDeepSeek && responseTools.length > 0) {
     // Default to auto so the model decides when to invoke web_search.
@@ -3517,8 +3401,6 @@ export const __openAICompatProxyTestUtils = {
   resolveEffectiveUpstreamModel,
   parseMessagesRouteSessionKey,
   injectResponsesWebSearchBlocks,
-  hasRealtimeSearchSignal,
-  extractUserTextForSignalScan,
   extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;

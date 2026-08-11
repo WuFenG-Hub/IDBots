@@ -126,13 +126,6 @@ const SANDBOX_SKILLS_GUEST_PATH = '/workspace/skills';
 const SANDBOX_SKILLS_GUEST_PATH_WINDOWS = '/workspace/project/SKILLs';
 const SANDBOX_WORKSPACE_GUEST_ROOT = '/workspace/project';
 const SANDBOX_WORKSPACE_LEGACY_ROOT = '/workspace';
-// Marker pair wrapping the user's own text inside the composed prompt. The
-// OpenAI-compat proxy scopes its real-time signal scan (forced web_search)
-// to the marked region so prepended volatile context (Local Time Context,
-// memories, remote services) cannot force a search turn by itself. Keep in
-// sync with IDBOTS_USER_MESSAGE_OPEN/CLOSE in coworkOpenAICompatProxy.ts.
-const IDBOTS_USER_MESSAGE_OPEN = '<idbots_user_message>';
-const IDBOTS_USER_MESSAGE_CLOSE = '</idbots_user_message>';
 const SAFE_ATTACHMENT_PROMPT_LABEL = '附件路径';
 const ATTACHMENT_LINE_RE = /^\s*(?:[-*]\s*)?(输入文件|input\s*file|附件路径|附件文件|attachment\s*path|attachment\s*file)\s*[:：]\s*(.+?)\s*$/i;
 // Raster image formats the model would receive as base64 image blocks. Used by
@@ -5544,14 +5537,7 @@ export class CoworkRunner extends EventEmitter {
     const volatileHead = [localTimePrompt, volatileBlocks]
       .filter((section) => section?.trim())
       .join('\n\n');
-    // Mark the user's own text so the OpenAI-compat proxy can scope its
-    // real-time signal scan (forced web_search) to it: the prepended volatile
-    // context always carries the current year (Local Time Context) and would
-    // otherwise force web_search on EVERY turn, which confines short sessions
-    // to the server-side search tools only. Mirror constants:
-    // IDBOTS_USER_MESSAGE_OPEN/CLOSE in coworkOpenAICompatProxy.ts.
-    const markedPrompt = `${IDBOTS_USER_MESSAGE_OPEN}\n${effectivePrompt}\n${IDBOTS_USER_MESSAGE_CLOSE}`;
-    effectivePrompt = volatileHead ? `${volatileHead}\n\n${markedPrompt}` : markedPrompt;
+    effectivePrompt = volatileHead ? `${volatileHead}\n\n${effectivePrompt}` : effectivePrompt;
 
     const forceTextOnlyAttachments = shouldForceTextOnlyAttachmentMode(
       envVars.ANTHROPIC_BASE_URL,
