@@ -210,6 +210,32 @@ function hasRealtimeSearchSignal(text: string, now: Date = new Date()): boolean 
   return REALTIME_SIGNAL_TERMS.some((term) => normalized.includes(term.toLowerCase()));
 }
 
+// Marker pair wrapping the user's own text inside a composed cowork prompt.
+// The runner prepends volatile context (Local Time Context — which always
+// carries the current year — plus memories and remote services) ahead of the
+// user's text; scanning that injected context for real-time signals forces
+// web_search on EVERY turn, and on short sessions the upstream enforces the
+// forced tool_choice so strictly that the model is confined to the
+// server-side search tools (search/open_page/find_in_page) and cannot call
+// any real function tool. Keep in sync with IDBOTS_USER_MESSAGE_OPEN/CLOSE in
+// coworkRunner.ts.
+const IDBOTS_USER_MESSAGE_OPEN = '<idbots_user_message>';
+const IDBOTS_USER_MESSAGE_CLOSE = '</idbots_user_message>';
+
+/**
+ * Scope the real-time signal scan to the user's own text: when the runner's
+ * marker pair is present, only the marked region is scanned; unmarked
+ * payloads (legacy sessions, non-cowork clients) fall back to the full text.
+ */
+function extractUserTextForSignalScan(text: string): string {
+  const openIndex = text.lastIndexOf(IDBOTS_USER_MESSAGE_OPEN);
+  const closeIndex = text.lastIndexOf(IDBOTS_USER_MESSAGE_CLOSE);
+  if (openIndex >= 0 && closeIndex > openIndex + IDBOTS_USER_MESSAGE_OPEN.length) {
+    return text.slice(openIndex + IDBOTS_USER_MESSAGE_OPEN.length, closeIndex);
+  }
+  return text;
+}
+
 /**
  * True when the text confidently asserts a time-sensitive fact (recent year
  * AND an assertion term) — the pattern that layer 2 downgrades when no
@@ -1238,7 +1264,7 @@ function convertChatCompletionsRequestToResponsesRequest(
   const forceWebSearch = isDeepSeek
     && responseTools.length > 0
     && choiceAllowsOverride
-    && hasRealtimeSearchSignal(lastUserText);
+    && hasRealtimeSearchSignal(extractUserTextForSignalScan(lastUserText));
   if (forceWebSearch) {
     // Round-2 trigger strategy: a time-sensitive turn (recent-year reference
     // or real-time keyword) forces the built-in server-side web_search via
@@ -3593,6 +3619,7 @@ export const __openAICompatProxyTestUtils = {
   injectResponsesWebSearchBlocks,
   appendUnverifiedRealtimeNoteIfNeeded,
   hasRealtimeSearchSignal,
+  extractUserTextForSignalScan,
   hasUnverifiedRealtimeAssertion,
   extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
