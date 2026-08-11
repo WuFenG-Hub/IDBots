@@ -35,6 +35,7 @@ const {
   createGroupTaskDaemonLoop,
   resolveDerivedAssignmentUpstream,
   buildOpenTeamPlanningStatusBlock,
+  buildMemberJoinWelcomeText,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 
@@ -244,6 +245,9 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.ackTimeoutMs != null
       ? { ackTimeoutMs: overrides.ackTimeoutMs }
       : {}),
+    // Generic dep override seam (e.g. getOpenTeamMembershipStore for the #13
+    // join-welcome tests); spreads last so tests can override anything above.
+    ...(overrides.deps ? overrides.deps : {}),
   };
   const loop = createGroupTaskDaemonLoop(deps);
 
@@ -718,6 +722,134 @@ test('status tags: chair-only, transitions, same-status silent, review->executin
   }
 });
 
+// ---------------------------------------------------------------------------
+// #13 join-welcome handshake + #14 closing ceremony
+// ---------------------------------------------------------------------------
+
+test('#13 welcome: remote member joining mid-task triggers ONE welcome broadcast (who + why + handshake @s)', async () => {
+  const h = await createHarness();
+  const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+  h.deps.getOpenTeamMembershipStore = () => membershipStore;
+  try {
+    const task = h.createTask([2, 3]);
+    // First tick snapshots the create-time roster (chair has a join pin here;
+    // local workers carry none in this harness) — no welcome for it.
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'create-time roster produces no welcome');
+
+    // The invite row records WHY the remote member was invited; then the join
+    // lands (member row with joined_pin_id appears — P1-2 watcher behavior).
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-fortune',
+      inviteeName: 'Fortune Teller Master',
+      invitePinId: 'invite-fortune',
+      requiredSkills: ['占卜', '塔罗'],
+    });
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Teller Master',
+      role: 'worker',
+      joinedPinId: 'pin-join-fortune',
+    });
+
+    await h.loop.runTick();
+
+    const welcome = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(welcome, 'welcome posted as the chair');
+    assert.match(welcome.content, /欢迎 @Fortune Teller Master/);
+    assert.match(welcome.content, /受邀参与:占卜, 塔罗/, 'invite required-skills explain why');
+    assert.match(welcome.content, /先向群内打个招呼确认就位/);
+    assert.match(welcome.content, /@Coder Bot/);
+    assert.match(welcome.content, /@Designer Bot/);
+    assert.match(welcome.content, /确认在线/);
+
+    // Second tick: no duplicate welcome (kv-guarded), no new sends at all.
+    const sendCount = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, sendCount, 'welcome fires exactly once');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('#13 welcome: existing members reply once to the handshake and nothing replies back', async () => {
+  const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
+  const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+  h.deps.getOpenTeamMembershipStore = () => membershipStore;
+  try {
+    const task = h.createTask([2, 3]);
+    await h.loop.runTick(); // snapshot tick
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Teller Master',
+      role: 'worker',
+      joinedPinId: 'pin-join-fortune',
+    });
+    await h.loop.runTick(); // welcome posted, @s Coder Bot + Designer Bot
+
+    const welcome = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(welcome, 'welcome posted');
+    assert.equal(h.sends.length, 1, 'welcome tick posts only the welcome');
+
+    // Simulate the on-chain round-trip: the welcome enters the group log.
+    insertGroupMessage(h.db, {
+      pinId: 'welcome-pin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: welcome.content,
+    });
+    await h.loop.runTick();
+
+    const replies = h.sends.filter((s) => s.metabotId !== 1);
+    assert.deepEqual(
+      replies.map((s) => s.metabotId).sort(),
+      [2, 3],
+      'existing members confirmed once (mention-gated reply to the welcome)',
+    );
+
+    // Their confirmations carry no mentions: no further replies, no loop.
+    const count = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, count, 'handshake stops after one round');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('#14 closing ceremony: review entry posts a system closing line as chair (never ends on worker [WORKING])', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing (planning->review is illegal by the state machine)
+    // A worker's [WORKING] sits last in the log; the chair posts the bare tag.
+    insertGroupMessage(h.db, {
+      pinId: 'working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，正在收尾',
+      chainTimestamp: 100,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+      chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(closing, 'review entry posts the system closing line as the chair');
+    assert.match(closing.content, /任务 #\d+「Build MetaApp」/);
+    assert.match(closing.content, /所有步骤已完成/);
+    assert.match(closing.content, /等待人类评审/);
+    // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
+    assert.equal(h.sends[h.sends.length - 1].metabotId, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('skill path: routing hit runs the skill turn in the existing session, plain path untouched', async () => {
   const h = await createHarness({
     coderChatSkills: ['web-search'],
@@ -874,11 +1006,15 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
     await h.loop.runTick();
 
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const sends = h.sends.map((s) => [s.metabotId, s.content]);
     assert.deepEqual(
-      h.sends.map((s) => [s.metabotId, s.content]),
+      sends.slice(0, 1),
       [[2, 'reply-for-llm-2']],
       'worker answered the pre-flip mention only; the post-flip mention is gated silent',
     );
+    assert.equal(sends.length, 2, 'plus the review-entry system closing line (#14)');
+    assert.equal(sends[1][0], 1, 'closing posted as the chair');
+    assert.match(sends[1][1], /进入验收阶段/, 'closing line content');
     assert.equal(
       h.chatCalls.filter((c) => c.llmId === 'llm-2').length, 1,
       'no LLM call for the post-flip message (the other call is the owner-report turn)',
@@ -1503,8 +1639,14 @@ test('owner report: review transition sends exactly one private report to the bo
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1, 'no duplicate on the next tick');
 
-    // the report never goes through the group send fn; only the deliverable ack did
-    assert.deepEqual(h.sends.map((s) => s.metabotId), [1], 'only the chair deliverable ack hit the group');
+    // the report never goes through the group send fn; only the chair
+    // deliverable ack and the #14 review-entry closing line hit the group
+    assert.deepEqual(
+      h.sends.map((s) => s.metabotId),
+      [1, 1],
+      'only chair-identity sends (deliverable ack + review closing) hit the group',
+    );
+    assert.match(h.sends[1].content, /进入验收阶段/, 'second chair send is the closing line');
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
     const sessionText = h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.content).join('\n');
     assert.match(sessionText, /\[Private report sent to the owner/);
@@ -2890,7 +3032,12 @@ test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is s
       'review',
       'chair status switch is parsed and applied despite the suppression window',
     );
-    assert.equal(h.sends.length, 0, 'chair auto replies are still suppressed inside the window');
+    // #14: the review entry posts the deterministic system closing line (a
+    // host guarantee, NOT an LLM auto reply — still posted in the window so
+    // the group never rests on a worker [WORKING]).
+    assert.equal(h.sends.length, 1, 'no chair auto replies, only the system closing line');
+    assert.equal(h.sends[0].metabotId, 1, 'closing posted as the chair');
+    assert.match(h.sends[0].content, /进入验收阶段/, 'closing line content');
     assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
   } finally {
     h.cleanup();

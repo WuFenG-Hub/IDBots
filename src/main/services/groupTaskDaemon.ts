@@ -159,6 +159,16 @@ const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
+/**
+ * #13 join-welcome bookkeeping (handshake protocol): the first tick snapshots
+ * the initially-joined member keys (create-time roster) under
+ * `group_task_welcome_initial_joined:<taskId>`; any member whose joined_pin_id
+ * appears LATER (esp. a remote OpenTeam member whose join just confirmed) and
+ * is not yet welcomed under `group_task_welcome_done:<taskId>:<memberKey>`
+ * gets ONE welcome broadcast as the chair.
+ */
+const WELCOME_INITIAL_JOINED_PREFIX = 'group_task_welcome_initial_joined:';
+const WELCOME_DONE_PREFIX = 'group_task_welcome_done:';
 
 /** Deliverable verification: strict formats (lowercase hex only). */
 const PINID_FORMAT = /^[0-9a-f]{64}i0$/;
@@ -932,6 +942,40 @@ export function buildOpenTeamPlanningStatusBlock(
       '(previous invite expired or timed out) — do not plan work for it as if joined; ' +
       're-invite it yourself if you want it, else drop it from the plan.',
     );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * #13 handshake: the welcome text for a member joining a task AFTER the
+ * initial roster (especially a remote OpenTeam member). It states who joined
+ * and why (invite required-skills), tells the joiner to greet the group and
+ * confirm presence BEFORE starting work, and asks the existing members for a
+ * ONE-round online confirmation. The existing members' mention-gated replies
+ * ARE the handshake round; their confirmations carry no mentions, so nothing
+ * replies to them and the ritual stops after one round ([NO_REPLY] discipline
+ * stays intact — only explicitly @-addressed members speak).
+ */
+export function buildMemberJoinWelcomeText(input: {
+  taskId: number;
+  taskTitle: string;
+  joinerName: string;
+  /** Why the joiner was invited (invite required-skills summary); null for plain invites. */
+  invitedFor?: string | null;
+  /** Display names of existing local members (NOT the joiner, NOT the chair). */
+  existingMemberNames: string[];
+}): string {
+  const why = input.invitedFor?.trim()
+    ? `受邀参与:${input.invitedFor.trim()}`
+    : '受邀参与本任务协作';
+  const lines = [
+    `🎉 欢迎 @${input.joinerName} 加入任务 #${input.taskId}「${input.taskTitle}」!`,
+    `${input.joinerName} ${why}。`,
+    `@${input.joinerName}:请先向群内打个招呼确认就位,再开始工作。`,
+  ];
+  const names = input.existingMemberNames.map((name) => name.trim()).filter(Boolean);
+  if (names.length > 0) {
+    lines.push(`${names.map((name) => `@${name}`).join(' ')}:请确认在线(每人一次即可,无需客套)。`);
   }
   return lines.join('\n');
 }
@@ -2199,6 +2243,24 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   `${error instanceof Error ? error.message : String(error)}`,
                 );
               }
+              // #14 closing ceremony: the group must never rest on a worker's
+              // [WORKING] when it enters acceptance. Post a system closing line
+              // as the chair so the LAST group message is the closing summary
+              // (the chair's own final summary may precede it). No mentions:
+              // review-phase silence + self-skip keep it reply-free.
+              try {
+                const closing =
+                  `📦 任务 #${task.id}「${task.title}」所有步骤已完成,进入验收阶段,等待人类评审。`;
+                const sent = await postGroupMessage(task.id, chairMember.metabotId!, closing);
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: closing ceremony posted on review entry (pin ${sent.pinId})`,
+                );
+              } catch (error) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: review closing post failed: ` +
+                  `${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
               await maybeSendOwnerReport(task, members, botsById, promptMembers);
             }
           }
@@ -3053,6 +3115,116 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     }
   };
 
+  /** Stable per-member welcome key (local members by metabot_id, remote by gmid). */
+  const memberJoinKey = (member: GroupTaskMember): string =>
+    member.metabotId != null
+      ? `local:${member.metabotId}`
+      : `remote:${(member.globalmetaid ?? '').trim().toLowerCase()}`;
+
+  /**
+   * #13 handshake (inviter side): ONE welcome broadcast when a member joins a
+   * task AFTER the initial roster — especially a remote OpenTeam member whose
+   * join just confirmed (joined_pin_id appears). The welcome names the joiner
+   * and why they were invited (invite required-skills), tells the joiner to
+   * greet the group first, and @s the existing local members once for an
+   * online confirmation. Their mention-gated replies are the one-round
+   * handshake; the confirmations carry no mentions, so nothing replies to
+   * them and no chat loop starts ([NO_REPLY] discipline intact). The welcome
+   * itself @s members only — the chair is skipped (self-skip by sender), so
+   * the chair does not floor-control a reply to it.
+   *
+   * Bookkeeping: the first tick snapshots the initially-joined member keys
+   * (create-time roster); later joins outside that snapshot and not yet
+   * welcomed get the broadcast (kv `group_task_welcome_done:<taskId>:<key>`).
+   * Review/terminal tasks never welcome (review-phase silence must keep the
+   * last message as the closing ceremony).
+   */
+  const monitorMemberJoinWelcomes = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+  ): Promise<void> => {
+    if (task.status !== 'planning' && task.status !== 'executing') return;
+    const sqlite = deps.getStore();
+    const initialKey = `${WELCOME_INITIAL_JOINED_PREFIX}${task.id}`;
+    const rawInitial = sqlite.get<string>(initialKey);
+    if (rawInitial == null) {
+      // First tick for this task: snapshot the roster that is already joined.
+      // Create-time members are introduced by the kickoff — never welcomed.
+      const initialJoined = members
+        .filter((member) => member.joinedPinId)
+        .map(memberJoinKey);
+      sqlite.set(initialKey, JSON.stringify(initialJoined));
+      return;
+    }
+    let initialJoined: string[] = [];
+    try {
+      const parsed = JSON.parse(rawInitial);
+      initialJoined = Array.isArray(parsed) ? parsed.map(String) : [];
+    } catch {
+      initialJoined = [];
+    }
+    const chair = members.find((member) => member.role === 'chair');
+    if (!chair?.metabotId) return;
+    const membershipStore = deps.getOpenTeamMembershipStore?.();
+    // Why was each remote joiner invited? (invite required-skills, best-effort)
+    const invitedForByGmid = new Map<string, string>();
+    for (const member of members) {
+      if (member.role === 'chair' || member.metabotId != null || !member.joinedPinId) continue;
+      const gmid = (member.globalmetaid ?? '').trim();
+      if (!gmid) continue;
+      try {
+        const invite = membershipStore?.getLatestInvite(task.id, gmid);
+        if (invite?.requiredSkills?.length) {
+          invitedForByGmid.set(gmid.toLowerCase(), invite.requiredSkills.join(', '));
+        }
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: invite lookup for welcome failed (welcome proceeds): ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    for (const member of members) {
+      if (member.role === 'chair' || !member.joinedPinId) continue;
+      const key = memberJoinKey(member);
+      if (initialJoined.includes(key)) continue; // create-time roster
+      const doneKey = `${WELCOME_DONE_PREFIX}${task.id}:${key}`;
+      if (sqlite.get<string>(doneKey) === '1') continue; // already welcomed
+      const isRemote = member.metabotId == null;
+      const joinerName = member.name?.trim()
+        || (isRemote ? 'remote-member' : `bot-${member.metabotId}`);
+      const existingNames = members
+        .filter((candidate) => candidate.id !== member.id)
+        .filter((candidate) => candidate.role === 'worker' && candidate.metabotId != null)
+        .map((candidate) => {
+          const bot = botsById.get(candidate.metabotId!);
+          return bot?.name?.trim() || candidate.name?.trim() || '';
+        })
+        .filter(Boolean);
+      const text = buildMemberJoinWelcomeText({
+        taskId: task.id,
+        taskTitle: task.title,
+        joinerName,
+        invitedFor: invitedForByGmid.get((member.globalmetaid ?? '').trim().toLowerCase()),
+        existingMemberNames: existingNames,
+      });
+      try {
+        const sent = await postGroupMessage(task.id, chair.metabotId, text);
+        sqlite.set(doneKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: welcomed new ${isRemote ? 'remote' : 'local'} member ` +
+          `${joinerName} as chair (pin ${sent.pinId})`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: join welcome post failed (retried on next tick): ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  };
+
   const processTask = async (task: GroupTask): Promise<void> => {
     if (!task.groupId) return;
     const store = deps.getGroupTaskStore();
@@ -3157,6 +3329,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
     await monitorDeliverableVerification(task);
     await monitorDeliveryDeadlines(task, members);
+
+    // #13: welcome broadcast + one-round handshake for members joining after
+    // the initial roster (esp. remote OpenTeam members). Runs before the
+    // planning turn so a mid-planning join is greeted before work is assigned.
+    try {
+      await monitorMemberJoinWelcomes(task, members, botsById);
+    } catch (error) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: join welcome monitor failed (tick continues): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
     // Exactly one chair planning turn per task, while it is still in 'planning'.
     if (task.status === 'planning') {

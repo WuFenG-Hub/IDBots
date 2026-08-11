@@ -256,6 +256,50 @@ test('loop: mentions trigger a reply; unrelated and own messages do not; cursor 
   }
 });
 
+test('#13 handshake: guest prompt carries the greet-first rule and WHY it was invited (goal + required skills)', async () => {
+  const { store, db, membershipStore, loop, calls } = await createHarness();
+  try {
+    // The guest-side invite history row records why the bot was invited; the
+    // membership echoes the invite pin so the daemon can look it up.
+    membershipStore.createGuestInvite({
+      groupId: GROUP_ID,
+      inviterGlobalmetaid: 'gmid-inviter',
+      inviterName: 'Twin Bot',
+      taskTitle: 'Remote divination collab',
+      goalSummary: 'Run a remote fortune-telling collaboration',
+      requiredSkills: ['占卜', '塔罗'],
+      invitePinId: 'invite-xyz',
+      targetGlobalmetaid: GUEST_GMID,
+    });
+    membershipStore.upsertActiveMembership({
+      groupId: GROUP_ID,
+      metabotId: 7,
+      globalmetaid: GUEST_GMID,
+      inviterGlobalmetaid: 'gmid-inviter',
+      taskTitle: 'Remote divination collab',
+      invitePinId: 'invite-xyz',
+    });
+    insertGroupMessage(db, {
+      pinId: `${'2'.repeat(64)}i0`, senderMetaId: 'metaid-other', senderGlobalMetaId: 'gmid-other',
+      senderName: 'Other Bot', content: 'Welcome @Guest Bot, please confirm you are online and start working.',
+    });
+
+    await loop.runTick();
+
+    assert.equal(calls.chat.length, 1);
+    const prompt = calls.chat[0].systemPrompt;
+    // Greet-first handshake rule injected into the playbook.
+    assert.match(prompt, /when you FIRST appear in this group/i);
+    assert.match(prompt, /START with a short greeting confirming you are present/i);
+    assert.match(prompt, /Never start working before that greeting/);
+    // Why the bot was invited (goal summary + required skills).
+    assert.match(prompt, /You were invited because: Run a remote fortune-telling collaboration/);
+    assert.match(prompt, /required skills: 占卜, 塔罗/);
+  } finally {
+    store.close();
+  }
+});
+
 test('loop: [NO_REPLY] suppresses the on-chain send but still advances the cursor', async () => {
   const { store, db, membershipStore, loop, calls } = await createHarness({ replyText: '[NO_REPLY]' });
   try {

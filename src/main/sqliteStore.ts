@@ -930,7 +930,8 @@ export class SqliteStore {
         decline_reason TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         responded_at TEXT,
-        invitee_metaid TEXT
+        invitee_metaid TEXT,
+        required_skills TEXT
       );
     `);
     // Migration: add invitee_metaid to openteam_invites (legacy identity form for watchers).
@@ -938,6 +939,10 @@ export class SqliteStore {
     // Migration: add joined_pin_id to openteam_invites (P1-2: the ACCEPT
     // envelope's join pin is persisted here and copied into the member row).
     this.migrateOpenTeamInvitesJoinedPinColumn();
+    // Migration: add required_skills to openteam_invites (#13: the join-welcome
+    // handshake states WHY the remote member was invited — required skills
+    // carried on the invite row, JSON array text).
+    this.migrateOpenTeamInvitesRequiredSkillsColumn();
     // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
     // bots received, regardless of outcome, so the invite is visible in the
     // A2A session system / collab UI even before (or without) a join.
@@ -2151,6 +2156,26 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamInvitesJoinedPinColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: required-skills on openteam_invites (#13 join-welcome handshake).
+   * The inviter stores the invite's required_skills (JSON array text) so the
+   * daemon's welcome broadcast can state WHY the remote member was invited.
+   * PRAGMA-guarded and idempotent; existing rows keep NULL (welcome falls back
+   * to a generic "invited to collaborate on this task").
+   */
+  private migrateOpenTeamInvitesRequiredSkillsColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('required_skills')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN required_skills TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesRequiredSkillsColumn:', error);
     }
   }
 
