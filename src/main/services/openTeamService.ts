@@ -57,6 +57,13 @@ import { buildOpenTeamInviteMessage } from './openTeamProtocols';
 const DEFAULT_CANDIDATE_LIMIT = 10;
 const MAX_CANDIDATE_LIMIT = 50;
 const GOAL_SUMMARY_MAX_CHARS = 200;
+/**
+ * #16: per-token fuzzy recall cap. Multi-keyword queries are recalled as ONE
+ * server search per token (OR semantics); a long CJK run expands into many
+ * bigram tokens, so cap the per-token searches (the broad feed fallback still
+ * runs for the remainder).
+ */
+const MAX_RECALL_TOKENS = 6;
 const DEFAULT_INVITE_TTL_SECONDS = 600; // envelope expiresAt = now + 10 min
 // The guest may legally accept until expiresAt (+60s clock-skew tolerance on
 // its side) and the ACCEPT then crosses the indexer + private-message layers,
@@ -268,24 +275,47 @@ export async function searchRemoteCandidates(
   }
 
   // P1-5 fuzzy path: only when the caller asked for keyword/skill matching.
-  // One loose recall WITHOUT the keyword (server exact-match is what missed),
-  // same skill filter; candidates are ranked locally by token relevance.
+  // #16 (2026-08-11 verification): the multi-token semantics were already a
+  // weighted PARTIAL match in scoreOpenTeamCandidate (a candidate matching ANY
+  // token scores > 0), NOT a hard AND — but the recall source was a single
+  // no-keyword feed page, which can miss niche candidates entirely (FTM was
+  // not in the top-50 feed, so "占卜 塔罗 命运" recalled nothing to score).
+  // Fixed: recall runs ONE server keyword search PER TOKEN (server-side OR
+  // semantics), merged and ranked locally by partial-match score; a broad
+  // no-keyword feed stays as the final safety net.
   if (keyword || skill) {
     try {
-      const loose = await resolved.searchMetaIds({
-        skill,
-        hasChatPubkey: true,
-        size: Math.min(100, limit * 10),
-      });
       const tokens = tokenizeOpenTeamQuery([keyword, skill].filter(Boolean).join(' '));
-      for (const item of loose.items) {
-        const gmid = item.globalMetaId?.trim();
-        if (!gmid || ownGmids.has(gmid.toLowerCase()) || seen.has(gmid.toLowerCase())) continue;
-        const score = scoreOpenTeamCandidate(item, tokens);
-        if (score <= 0) continue;
-        seen.add(gmid.toLowerCase());
-        byScore.set(gmid, score);
-        byGmid.set(gmid.toLowerCase(), item);
+      const recallPages = [];
+      for (const token of tokens.slice(0, MAX_RECALL_TOKENS)) {
+        recallPages.push(
+          await resolved.searchMetaIds({
+            keyword: token,
+            skill,
+            hasChatPubkey: true,
+            size: Math.min(100, limit * 3),
+          }),
+        );
+      }
+      // Broad no-keyword feed fallback: candidates the per-token server
+      // searches missed but the local scorer still matches.
+      recallPages.push(
+        await resolved.searchMetaIds({
+          skill,
+          hasChatPubkey: true,
+          size: Math.min(100, limit * 10),
+        }),
+      );
+      for (const page of recallPages) {
+        for (const item of page.items) {
+          const gmid = item.globalMetaId?.trim();
+          if (!gmid || ownGmids.has(gmid.toLowerCase()) || seen.has(gmid.toLowerCase())) continue;
+          const score = scoreOpenTeamCandidate(item, tokens);
+          if (score <= 0) continue;
+          seen.add(gmid.toLowerCase());
+          byScore.set(gmid, score);
+          byGmid.set(gmid.toLowerCase(), item);
+        }
       }
     } catch (error) {
       // The fuzzy path is a recall enhancement: an API failure here must never
@@ -500,6 +530,9 @@ export async function inviteRemoteBot(input: InviteRemoteBotInput): Promise<Invi
     inviteeMetaid: detail.metaId?.trim() || null,
     inviteeName: inviteeName || null,
     invitePinId: inviteId,
+    // #13: why the invitee is invited — the join-welcome handshake reads this
+    // to state the reason in the welcome broadcast.
+    requiredSkills,
   });
   let sent: Awaited<ReturnType<typeof resolved.sendEncryptedSimplemsg>>;
   try {

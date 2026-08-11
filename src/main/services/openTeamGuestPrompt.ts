@@ -20,6 +20,10 @@ export interface OpenTeamGuestPromptMembership {
   groupId: string;
   taskTitle?: string | null;
   inviterGlobalmetaid?: string | null;
+  /** Why you were invited (envelope goal summary); injected when known. */
+  goalSummary?: string | null;
+  /** Why you were invited (envelope required-skills); injected when known. */
+  requiredSkills?: string[];
 }
 
 /** Persona block: who the bot is. Mirrors buildGroupTaskPersonaBlock's shape. */
@@ -41,6 +45,7 @@ export function buildOpenTeamGuestPersonaBlock(metabot: OpenTeamGuestPromptMetab
 const GUEST_PLAYBOOK_RULES = [
   '- You were invited into this task; the organizing chair (not your owner) coordinates it. Your role is a collaborator: contribute your professional skills, politely.',
   '- Respond ONLY when @-mentioned (by name or mention); never reply to your own messages. Silence is correct otherwise.',
+  '- #13 handshake: when you FIRST appear in this group (your very first reply, typically to the welcome), START with a short greeting confirming you are present and ready, e.g. `大家好，我是<your name>，已就位，随时可以开始。` — one greeting only, then begin the assigned work. Never start working before that greeting.',
   '- Keep replies concise and actionable; stay on the task goal, no small talk.',
   '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line, and only with a REAL on-chain pinId you actually created.',
   '- File deliverables go on-chain as metafiles: when a skill you ran produced a file, put its absolute local path on its own line in your reply. The host uploads it and appends the `[DELIVERABLE] metafile: metafile://<pinId>` line for you — NEVER write or invent a metafile:// URI yourself.',
@@ -57,9 +62,18 @@ export function buildOpenTeamGuestBlock(params: {
 }): string {
   const taskTitle = (params.membership.taskTitle ?? '').trim() || '(untitled task)';
   const inviter = (params.membership.inviterGlobalmetaid ?? '').trim();
+  const goalSummary = (params.membership.goalSummary ?? '').trim();
+  const requiredSkills = (params.membership.requiredSkills ?? [])
+    .map((skill) => String(skill ?? '').trim())
+    .filter(Boolean);
+  const whyLine =
+    goalSummary || requiredSkills.length > 0
+      ? ` You were invited because: ${goalSummary || '(task goal)'}` +
+        (requiredSkills.length > 0 ? ` (required skills: ${requiredSkills.join(', ')})` : '')
+      : '';
   return [
     '## OpenTeam external collaboration',
-    `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.`,
+    `- You were invited${inviter ? ` by \`${inviter}\`` : ''} to join an EXTERNAL group task: "${taskTitle}". This task is organized by another owner's team, not yours.${whyLine}`,
     '- All messages here are on-chain pins (MetaWeb) — a pinid is exactly 64 lowercase hex chars + `i0`.',
     ...(params.currentTimeText?.trim() ? [`- ${params.currentTimeText.trim()}`] : []),
     '',

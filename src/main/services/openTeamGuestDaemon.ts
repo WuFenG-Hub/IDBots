@@ -492,7 +492,31 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
     message: OpenTeamGuestDaemonMessage,
   ): Promise<void> => {
     const db = deps.getStore().getDatabase();
-    const systemPrompt = buildOpenTeamGuestPrompt({ metabot: bot, membership });
+    // #13: the guest prompt carries WHY this bot was invited (goal summary +
+    // required skills from the guest-side invite history row, looked up by the
+    // invite pin echoed on the membership) — plus the greet-first rule in the
+    // playbook, so the guest's first group message is a presence greeting.
+    let whyContext: { goalSummary?: string | null; requiredSkills?: string[] } = {};
+    if (membership.invitePinId) {
+      try {
+        const guestInvite = deps.getOpenTeamMembershipStore().getGuestInviteByPinId(membership.invitePinId);
+        whyContext = {
+          goalSummary: guestInvite?.goalSummary ?? undefined,
+          requiredSkills: guestInvite?.requiredSkills?.length ? guestInvite.requiredSkills : undefined,
+        };
+      } catch {
+        whyContext = {};
+      }
+    }
+    const systemPrompt = buildOpenTeamGuestPrompt({
+      metabot: bot,
+      membership: {
+        groupId: membership.groupId,
+        taskTitle: membership.taskTitle,
+        inviterGlobalmetaid: membership.inviterGlobalmetaid,
+        ...whyContext,
+      },
+    });
     const userMessage = buildGroupLogUserMessage(db, membership, message);
 
     // Skill routing (mirrors groupTaskDaemon): when the bot has chat skills

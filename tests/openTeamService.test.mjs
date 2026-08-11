@@ -238,11 +238,13 @@ test('searchRemoteCandidates: filters offline + local bots, maps candidate field
   });
   try {
     const candidates = await searchRemoteCandidates({ keyword: 'translator', limit: 10 });
-    // P1-5: keyword searches run TWO recalls — the exact path (keyword passed
-    // through) plus a loose path without the keyword (local fuzzy ranking).
-    assert.equal(h.calls.search.length, 2, 'exact path + P1-5 fuzzy recall');
+    // P1-5: keyword searches run THREE recalls — the exact path (keyword passed
+    // through), a per-token fuzzy recall (same keyword, local scoring), and a
+    // broad no-keyword feed as the final safety net (#16).
+    assert.equal(h.calls.search.length, 3, 'exact path + per-token fuzzy recall + broad feed');
     assert.equal(h.calls.search[0].keyword, 'translator');
-    assert.equal(h.calls.search[1].keyword, undefined, 'fuzzy recall drops the exact-match keyword');
+    assert.equal(h.calls.search[1].keyword, 'translator', 'per-token fuzzy recall keeps the token as its own keyword');
+    assert.equal(h.calls.search[2].keyword, undefined, 'broad feed recall drops the keyword');
     assert.equal(h.calls.search[0].hasChatPubkey, true, 'server-side pubkey pre-filter');
     assert.deepEqual(
       h.calls.presence[0].sort(),
@@ -281,6 +283,52 @@ test('searchRemoteCandidates: empty page and all-offline both yield []', async (
     assert.deepEqual(await searchRemoteCandidates({ skill: 'coding' }), []);
   } finally {
     h2.cleanup();
+  }
+});
+
+test('#16: multi-keyword query recalls candidates matching ANY token (weighted partial match, not hard AND)', async () => {
+  const fortuneItem = makeSearchItem('idq1fortune000000000000', {
+    name: 'Fortune Teller Master',
+    bio: '擅长占卜,包括塔罗牌',
+    chatSkills: [],
+  });
+  const otherItem = makeSearchItem('idq1other00000000000000', {
+    name: 'Some Other Bot',
+    bio: '研究命运与星象',
+    chatSkills: [],
+  });
+  const h = await createHarness({
+    // Mirrors the real MetaID search API (2026-08-11 复测): the exact path on
+    // the FULL multi-word query returns nothing (server-side hard AND /
+    // full-string match); per-token searches return the bots each token
+    // matches; the broad no-keyword feed returns nothing relevant.
+    searchItemsByCall: (params) => {
+      if (params.keyword === '占卜 塔罗 命运') return [];
+      if (params.keyword === '占卜' || params.keyword === '塔罗') return [fortuneItem];
+      if (params.keyword === '命运') return [otherItem];
+      return [];
+    },
+    presenceMap: {
+      [fortuneItem.globalMetaId]: { isOnline: true, ago: 5 },
+      [otherItem.globalMetaId]: { isOnline: true, ago: 9 },
+    },
+  });
+  try {
+    const candidates = await searchRemoteCandidates({ keyword: '占卜 塔罗 命运', limit: 10 });
+    const names = candidates.map((candidate) => candidate.name);
+    assert.ok(
+      names.includes('Fortune Teller Master'),
+      'partial match: a bot missing one keyword token (命运) is still recalled via the other tokens',
+    );
+    assert.ok(names.includes('Some Other Bot'), 'partial match: a bot hitting a single token is recalled');
+    // Weighted ranking: FTM hits two tokens (占卜+塔罗) -> ranks above the
+    // single-token (命运) hit.
+    assert.ok(
+      names.indexOf('Fortune Teller Master') < names.indexOf('Some Other Bot'),
+      'more token hits rank higher',
+    );
+  } finally {
+    h.cleanup();
   }
 });
 
@@ -1191,8 +1239,10 @@ test('P1-5: fuzzy path recalls candidates the exact path missed (bio match)', as
   const h = await createHarness({
     searchItems: [],
     searchItemsByCall: (params, callIndex) => {
-      // Call 1 = exact path (keyword passed) -> nothing matches server-side.
-      // Call 2 = fuzzy recall (no keyword) -> the full candidate page.
+      // Call 1 = exact path (full keyword passed) -> nothing matches server-side.
+      // Calls 2-5 = per-token fuzzy recalls (#16: the token plus its CJK
+      // bigrams, each as its own server keyword) -> the candidate page.
+      // Call 6 = broad no-keyword feed -> the candidate page again (deduped).
       return callIndex === 1 ? [] : [makeSearchItem(REMOTE_GMID, { name: 'FTM Bot', bio: '占卜塔罗牌大师', chatSkills: ['tarot'] })];
     },
     presenceMap: { [REMOTE_GMID]: { isOnline: true, ago: 7 } },
@@ -1203,8 +1253,12 @@ test('P1-5: fuzzy path recalls candidates the exact path missed (bio match)', as
       candidates.some((c) => c.globalMetaId === REMOTE_GMID),
       'bio-match candidate recalled by the fuzzy path (CJK bigram overlap)',
     );
-    assert.equal(h.calls.search.length, 2, 'exact path + P1-5 fuzzy recall');
-    assert.equal(h.calls.search[1].keyword, undefined, 'fuzzy recall drops the exact keyword');
+    assert.equal(h.calls.search.length, 6, 'exact path + per-token fuzzy recalls + broad feed');
+    assert.equal(h.calls.search[1].keyword, '占卜塔罗', 'per-token recall keeps the full token first');
+    assert.equal(h.calls.search[2].keyword, '占卜', 'CJK bigram token recalled per-token');
+    assert.equal(h.calls.search[3].keyword, '卜塔', 'second CJK bigram token');
+    assert.equal(h.calls.search[4].keyword, '塔罗', 'third CJK bigram token');
+    assert.equal(h.calls.search[5].keyword, undefined, 'broad feed drops the keyword');
     assert.equal(candidates[0].name, 'FTM Bot');
   } finally {
     h.cleanup();

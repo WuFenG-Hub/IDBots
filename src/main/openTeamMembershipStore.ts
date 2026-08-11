@@ -59,6 +59,12 @@ export interface OpenTeamInvite {
    * row instead of staying null forever.
    */
   joinedPinId: string | null;
+  /**
+   * #13: why the invitee was invited (the chair's `required_skills`, JSON
+   * array text). Read by the join-welcome handshake so the welcome broadcast
+   * can state why the remote member joined.
+   */
+  requiredSkills: string[];
 }
 
 /** P0-1: guest-side invite history row (one per received [OPENTEAM_INVITE]). */
@@ -114,6 +120,11 @@ export interface CreateOpenTeamInviteInput {
   inviteeMetaid?: string | null;
   inviteeName?: string | null;
   invitePinId?: string | null;
+  /**
+   * #13: why the invitee is invited (chair-provided required skills). Stored
+   * as JSON text; read by the join-welcome handshake for the welcome message.
+   */
+  requiredSkills?: string[];
 }
 
 interface OpenTeamMembershipRow {
@@ -144,6 +155,7 @@ interface OpenTeamInviteRow {
   created_at: string | null;
   responded_at: string | null;
   joined_pin_id: string | null;
+  required_skills: string | null;
 }
 
 function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership {
@@ -165,6 +177,15 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
 
 function rowToOpenTeamInvite(row: OpenTeamInviteRow): OpenTeamInvite {
   const status = row.status;
+  let requiredSkills: string[] = [];
+  try {
+    const parsed = JSON.parse(row.required_skills ?? '[]');
+    if (Array.isArray(parsed)) {
+      requiredSkills = parsed.map((item) => String(item ?? '').trim()).filter(Boolean);
+    }
+  } catch {
+    requiredSkills = [];
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -178,6 +199,7 @@ function rowToOpenTeamInvite(row: OpenTeamInviteRow): OpenTeamInvite {
     createdAt: row.created_at ?? null,
     respondedAt: row.responded_at ?? null,
     joinedPinId: row.joined_pin_id ?? null,
+    requiredSkills,
   };
 }
 
@@ -472,8 +494,8 @@ export class OpenTeamMembershipStore {
     // where a same-second kick + re-invite must stay unambiguous.
     this.db.run(
       `INSERT INTO openteam_invites (
-        task_id, group_id, invitee_globalmetaid, invitee_metaid, invitee_name, invite_pin_id, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', strftime('%Y-%m-%d %H:%M:%f','now'))`,
+        task_id, group_id, invitee_globalmetaid, invitee_metaid, invitee_name, invite_pin_id, status, created_at, required_skills
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', strftime('%Y-%m-%d %H:%M:%f','now'), ?)`,
       [
         input.taskId,
         input.groupId,
@@ -481,6 +503,7 @@ export class OpenTeamMembershipStore {
         input.inviteeMetaid ?? null,
         input.inviteeName ?? null,
         input.invitePinId ?? null,
+        input.requiredSkills?.length ? JSON.stringify(input.requiredSkills) : null,
       ],
     );
     const id = this.lastInsertId();
