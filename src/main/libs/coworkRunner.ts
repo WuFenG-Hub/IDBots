@@ -18,6 +18,7 @@ import {
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, isEmptyTerminalSdkResult } from './coworkAssistantReply';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
@@ -947,6 +948,15 @@ interface ActiveSession {
   staleResumeRetryAllowed: boolean;
   contextOverflowDetected: boolean;
   contextOverflowRetryAllowed: boolean;
+  /**
+   * True when the SDK reported a `success` result for the turn but the final
+   * assistant message carried no usable text (empty `payload.result`). This is
+   * the signature of a DeepSeek thinking turn that ended after emitting only
+   * the `[reasoning unavailable]` placeholder (or otherwise no handoff). When
+   * set, the turn must NOT be falsely reported as `completed` — see the
+   * completion guard in runClaudeCodeLocal.
+   */
+  emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
   localInputChannel?: CoworkSteerChannel;
   /**
@@ -4520,6 +4530,7 @@ export class CoworkRunner extends EventEmitter {
       staleResumeRetryAllowed: true,
       contextOverflowDetected: false,
       contextOverflowRetryAllowed: false,
+      emptyTerminalTurnDetected: false,
       readFiles: new Map(),
       executionMode: session.executionMode || this.store.getConfig().executionMode || 'local',
       localAcceptedInputs: 0,
@@ -5211,6 +5222,7 @@ export class CoworkRunner extends EventEmitter {
     activeSession.staleResumeRetryAllowed = !isRetry;
     activeSession.contextOverflowDetected = false;
     activeSession.contextOverflowRetryAllowed = false;
+    activeSession.emptyTerminalTurnDetected = false;
 
     const automationModelOverride = this.getSessionAutomationModelOverride(sessionId);
     let apiConfigResolution = automationModelOverride
@@ -6578,7 +6590,20 @@ export class CoworkRunner extends EventEmitter {
 
       const session = this.store.getSession(sessionId);
       if (session?.status !== 'error') {
-        this.store.updateSession(sessionId, { status: 'completed' });
+        // Empty terminal turn: the SDK reported success but the final assistant
+        // message had no usable text (DeepSeek thinking-placeholder truncation,
+        // etc.). Do NOT falsely report `completed` — the task list would show
+        // "done" while the final handoff is missing. Surface a clear diagnostic
+        // and leave the session `idle` so the user can re-send the last message
+        // to continue. Still emit `complete` so any automation waiter resolves
+        // (the orchestrator bridge already treats an empty reply as a
+        // non-answer via isNonAnswerAssistantReply).
+        if (activeSession.emptyTerminalTurnDetected) {
+          this.reportEmptyTerminalTurn(sessionId);
+          this.store.updateSession(sessionId, { status: 'idle' });
+        } else {
+          this.store.updateSession(sessionId, { status: 'completed' });
+        }
         this.applyTurnMemoryUpdatesForSession(sessionId);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
       }
@@ -8287,6 +8312,28 @@ export class CoworkRunner extends EventEmitter {
       if (typeof payload.result === 'string' && payload.result.trim()) {
         this.persistFinalResult(sessionId, activeSession, payload.result);
         markAssistantTextOutput();
+      } else if (isEmptyTerminalSdkResult(payload)) {
+        // The SDK reported a `success` result but the final assistant message
+        // carried no usable text (empty/missing `payload.result`). This is the
+        // signature of a DeepSeek thinking turn that ended after emitting only
+        // the `[reasoning unavailable]` placeholder (or otherwise produced no
+        // handoff) — intermediate progress notes may exist, but the final
+        // synthesis is missing. `payload.result` is the SDK's authoritative
+        // final-answer text, so an empty value reliably means no final reply
+        // was produced. Flag it so the completion guard in runClaudeCodeLocal
+        // (and the sandbox completion below) does NOT falsely report the
+        // session as `completed`.
+        activeSession.emptyTerminalTurnDetected = true;
+        coworkLog(
+          'WARN',
+          'handleClaudeEvent',
+          'SDK success result carried no final reply text (empty terminal turn) — likely DeepSeek thinking-placeholder truncation; will not mark completed',
+          {
+            sessionId,
+            hasAssistantTextOutput: activeSession.hasAssistantTextOutput,
+            hasAssistantThinkingOutput: activeSession.hasAssistantThinkingOutput,
+          }
+        );
       }
 
       // Accumulate per-turn token usage into the session stats. The proxy
@@ -8300,7 +8347,12 @@ export class CoworkRunner extends EventEmitter {
         this.finalizeStreamingContent(activeSession);
         const session = this.store.getSession(sessionId);
         if (session?.status !== 'error' && session?.status !== 'completed') {
-          this.store.updateSession(sessionId, { status: 'completed' });
+          if (activeSession.emptyTerminalTurnDetected) {
+            this.reportEmptyTerminalTurn(sessionId);
+            this.store.updateSession(sessionId, { status: 'idle' });
+          } else {
+            this.store.updateSession(sessionId, { status: 'completed' });
+          }
           this.applyTurnMemoryUpdatesForSession(sessionId);
           this.emit('complete', sessionId, activeSession.claudeSessionId);
         }
@@ -8440,6 +8492,14 @@ export class CoworkRunner extends EventEmitter {
       const blockType = String(record.type ?? '');
 
       if (blockType === 'thinking' && typeof record.thinking === 'string' && record.thinking.trim()) {
+        // Skip the DeepSeek `[reasoning unavailable]` placeholder: it is an
+        // injected request-history sentinel (coworkOpenAICompatProxy) that can
+        // round-trip back as thinking content, not real reasoning. Persisting
+        // it pollutes the conversation (one failure session accumulated 24 such
+        // messages) and confuses downstream reply extraction.
+        if (record.thinking.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER) {
+          continue;
+        }
         if (hasStreamedThinking || hadPendingThinkingStreaming) {
           continue;
         }
@@ -8523,9 +8583,15 @@ export class CoworkRunner extends EventEmitter {
       if (blockType === 'thinking') {
         // Start a new thinking message for streaming
         const initialThinkingRaw = typeof contentBlock.thinking === 'string' ? contentBlock.thinking : '';
-        const initialThinking = this.truncateLargeContent(initialThinkingRaw, STREAMING_THINKING_MAX_CHARS);
+        // Drop the DeepSeek `[reasoning unavailable]` placeholder sentinel at
+        // the block boundary too — see the thinking_delta guard below and the
+        // result-event thinking-block guard for the full rationale.
+        const sanitizedInitialRaw = initialThinkingRaw.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER
+          ? ''
+          : initialThinkingRaw;
+        const initialThinking = this.truncateLargeContent(sanitizedInitialRaw, STREAMING_THINKING_MAX_CHARS);
         activeSession.currentStreamingThinking = initialThinking;
-        activeSession.currentStreamingThinkingTruncated = initialThinking.length < initialThinkingRaw.length;
+        activeSession.currentStreamingThinkingTruncated = initialThinking.length < sanitizedInitialRaw.length;
         activeSession.lastStreamingThinkingUpdateAt = 0;
         activeSession.currentStreamingBlockType = 'thinking';
 
@@ -8579,6 +8645,13 @@ export class CoworkRunner extends EventEmitter {
 
       if (deltaType === 'thinking_delta' && typeof delta.thinking === 'string') {
         if (delta.thinking.length === 0) return;
+        // Skip the DeepSeek `[reasoning unavailable]` placeholder sentinel — it
+        // is not real reasoning (see the result-event thinking-block guard
+        // above for the full rationale) and persisting/streaming it only
+        // pollutes the conversation.
+        if (delta.thinking.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER) {
+          return;
+        }
         const next = this.appendStreamingDelta(
           activeSession.currentStreamingThinking,
           delta.thinking,
@@ -9120,6 +9193,23 @@ export class CoworkRunner extends EventEmitter {
       ...(metadata ? { metadata } : {}),
     });
     this.emit('message', sessionId, message);
+  }
+
+  /**
+   * Surface a clear explanation when a turn ended without producing a final
+   * reply (the SDK reported success but the terminal assistant message had no
+   * usable text — the DeepSeek thinking-placeholder truncation signature).
+   *
+   * The session is left `idle` (not `completed`) by the caller so the task
+   * list stops falsely showing "done"; this message tells the user why and how
+   * to continue. Earlier tool work in the session is preserved.
+   */
+  private reportEmptyTerminalTurn(sessionId: string): void {
+    this.addSystemMessage(
+      sessionId,
+      '本轮未输出最终回复就结束了——模型只产出了思考过程（通常是 DeepSeek thinking 被截断或 reasoning 历史失效），没有给出汇报或交接。之前的工具执行结果仍保留在会话里。重新发送你的上一条消息，或直接要求“总结目前进展/给出最终结论”，即可继续。',
+      { emptyTerminalTurn: true }
+    );
   }
 
   private findAttachmentsOutsideCwd(prompt: string, cwd: string): string[] {
