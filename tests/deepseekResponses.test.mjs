@@ -234,6 +234,47 @@ test('signal scan is scoped to the marked user text, not prepended volatile cont
   assert.deepEqual(legacy.tool_choice, { type: 'web_search' });
 });
 
+test('machine-composed agent turns are never forced into web_search', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // Worker delegation briefs are machine-composed <twin_delegation> envelopes
+  // whose objective text routinely contains broad signal terms ('当前',
+  // '发布', recent-year dates). Forcing there confines the worker to the
+  // server-side search tools (search/open_page/find_in_page) and breaks every
+  // function tool call — the live 21:51 Worker session failed exactly so.
+  const delegation = [
+    '<idbots_user_message>',
+    '<twin_delegation>',
+    '  <task_id>046c2bd7-7329-4a8b-9753-e31c1a9b68da</task_id>',
+    '  <objective>移除当前代理里的某个机制并更新测试</objective>',
+    '</twin_delegation>',
+    '</idbots_user_message>',
+  ].join('\n');
+  const worker = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: delegation }] },
+    'deepseek',
+  );
+  assert.equal(worker.tool_choice, 'auto');
+
+  // Long machine-composed envelopes (and legacy unmarked payloads whose
+  // volatile context is not marked off) stay on auto via the length cap —
+  // the safe side, since web_search remains available under auto.
+  const longText = `<idbots_user_message>\n${'任务背景描述。'.repeat(300)}\n2026 最新进展也写进去了\n</idbots_user_message>`;
+  const longTurn = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: longText }] },
+    'deepseek',
+  );
+  assert.equal(longTurn.tool_choice, 'auto');
+
+  // Short interactive user questions keep the forcing behavior.
+  const shortSignal = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '<idbots_user_message>\n2026 温网男单冠军是谁？\n</idbots_user_message>' }] },
+    'deepseek',
+  );
+  assert.deepEqual(shortSignal.tool_choice, { type: 'web_search' });
+});
+
 test('convertChatCompletionsRequestToResponsesRequest disables thinking via effort none', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;

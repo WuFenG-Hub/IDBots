@@ -214,6 +214,39 @@ function extractUserTextForSignalScan(text: string): string {
   return text;
 }
 
+/**
+ * Machine-composed prompt envelopes that must never be forced into a
+ * web_search round. Worker delegation briefs are wrapped in
+ * <twin_delegation> (buildWorkerPrompt in twinOrchestrationService.ts).
+ */
+const AGENT_PROMPT_MARKERS: ReadonlyArray<string> = ['<twin_delegation>'];
+/**
+ * Max scan-text length eligible for forcing. Genuine forcing exists for
+ * short interactive user questions; anything longer is a machine-composed
+ * envelope (delegation/group-task/scheduled briefs) or a pasted document,
+ * and on short sessions the upstream ENFORCES the forced tool_choice so
+ * strictly that the model is confined to the server-side search tools
+ * (search/open_page/find_in_page) and cannot call any real function tool.
+ * Long unmarked payloads (legacy sessions whose volatile context is not
+ * marked off) also exceed this cap, so they stay on auto — the safe side.
+ */
+const MAX_FORCEABLE_SCAN_CHARS = 2000;
+
+/**
+ * Whether this turn may be forced into web_search. Agent/machine turns are
+ * excluded: confinement breaks the tools they need to work, and web_search
+ * stays available to them under tool_choice=auto anyway.
+ */
+function shouldForceWebSearchForTurn(scanText: string, now: Date = new Date()): boolean {
+  if (AGENT_PROMPT_MARKERS.some((marker) => scanText.includes(marker))) {
+    return false;
+  }
+  if (scanText.length > MAX_FORCEABLE_SCAN_CHARS) {
+    return false;
+  }
+  return hasRealtimeSearchSignal(scanText, now);
+}
+
 /** Concatenated final answer text of a Responses output (message/output_text). */
 function extractResponsesOutputText(responseObj: Record<string, unknown>): string {
   const parts: string[] = [];
@@ -1229,7 +1262,7 @@ function convertChatCompletionsRequestToResponsesRequest(
   const forceWebSearch = isDeepSeek
     && responseTools.length > 0
     && choiceAllowsOverride
-    && hasRealtimeSearchSignal(extractUserTextForSignalScan(lastUserText));
+    && shouldForceWebSearchForTurn(extractUserTextForSignalScan(lastUserText));
   if (forceWebSearch) {
     // Round-2 trigger strategy: a time-sensitive turn (recent-year reference
     // or real-time keyword) forces the built-in server-side web_search via
@@ -3519,6 +3552,7 @@ export const __openAICompatProxyTestUtils = {
   injectResponsesWebSearchBlocks,
   hasRealtimeSearchSignal,
   extractUserTextForSignalScan,
+  shouldForceWebSearchForTurn,
   extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;
