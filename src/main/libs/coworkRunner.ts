@@ -9203,13 +9203,13 @@ export class CoworkRunner extends EventEmitter {
    * The session is left `idle` (not `completed`) by the caller so the task
    * list stops falsely showing "done"; this message tells the user why and how
    * to continue. Earlier tool work in the session is preserved.
+   *
+   * Sends empty content + an `emptyTerminalTurn: true` metadata flag, mirroring
+   * the sdkConversationReset pattern: the renderer renders the localized text
+   * via i18n key `coworkEmptyTerminalTurn` so it always follows the UI language.
    */
   private reportEmptyTerminalTurn(sessionId: string): void {
-    this.addSystemMessage(
-      sessionId,
-      '本轮未输出最终回复就结束了——模型只产出了思考过程（通常是 DeepSeek thinking 被截断或 reasoning 历史失效），没有给出汇报或交接。之前的工具执行结果仍保留在会话里。重新发送你的上一条消息，或直接要求“总结目前进展/给出最终结论”，即可继续。',
-      { emptyTerminalTurn: true }
-    );
+    this.addSystemMessage(sessionId, '', { emptyTerminalTurn: true });
   }
 
   private findAttachmentsOutsideCwd(prompt: string, cwd: string): string[] {
