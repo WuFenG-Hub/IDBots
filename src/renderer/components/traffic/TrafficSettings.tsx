@@ -12,6 +12,8 @@ import {
   ArrowPathIcon,
   BoltIcon,
   CheckCircleIcon,
+  CheckIcon,
+  ClipboardDocumentIcon,
   ExclamationTriangleIcon,
   UserCircleIcon,
 } from '@heroicons/react/24/outline';
@@ -65,6 +67,10 @@ type TrafficLedgerEntryInfo = {
   sourceId: string;
   remark: string;
   timestamp: number;
+  /** Local-journal enrichment (this-device sponsored commits only). */
+  txId?: string;
+  botAddress?: string;
+  kind?: string;
 };
 
 type RechargeStage =
@@ -89,6 +95,69 @@ const LEDGER_DIRECTION_KEYS: Record<number, string> = {
   2: 'trafficLedgerSpend',
   3: 'trafficLedgerReserve',
   4: 'trafficLedgerRelease',
+};
+
+// Locally journaled pin paths mapped to friendly business names; anything
+// else falls back to a shortened raw path (see resolveLedgerKindLabel).
+const LEDGER_KIND_KEYS: Record<string, string> = {
+  '/protocols/simplemsg': 'trafficKindSimplemsg',
+  '/protocols/simplebuzz': 'trafficKindSimplebuzz',
+  '/file': 'trafficKindFile',
+};
+
+const resolveLedgerKindLabel = (kind: string): string => {
+  const normalized = String(kind || '').trim().toLowerCase();
+  if (!normalized) return '';
+  const key = LEDGER_KIND_KEYS[normalized];
+  if (key) return i18nService.t(key);
+  // Unknown kind: shorthand for the raw path ('/protocols/paycomment' -> 'paycomment').
+  if (normalized.startsWith('/protocols/')) return normalized.slice('/protocols/'.length);
+  return normalized;
+};
+
+// Deterministic local-time ledger timestamp (YYYY-MM-DD HH:mm:ss).
+const formatLedgerTimestamp = (timestamp: number): string => {
+  if (!timestamp) return '—';
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return '—';
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+};
+
+// Copyable short TXID badge (same interaction as the group-task TxIdBadge):
+// click copies the full id, the hover tooltip always shows it in full.
+const LedgerTxIdBadge: React.FC<{ txId: string }> = ({ txId }) => {
+  const [copied, setCopied] = useState(false);
+  const short = txId.length > 16 ? `${txId.slice(0, 8)}…${txId.slice(-6)}` : txId;
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(txId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable (permissions) — the title tooltip still shows the full id
+    }
+  };
+
+  return (
+    <span className="inline-flex shrink-0 items-center gap-0.5" title={txId}>
+      <span className="font-mono text-[10px] dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60">
+        {short}
+      </span>
+      <button
+        type="button"
+        onClick={() => void handleCopy()}
+        title={i18nService.t(copied ? 'trafficLedgerTxidCopied' : 'trafficLedgerCopyTxid')}
+        aria-label={i18nService.t(copied ? 'trafficLedgerTxidCopied' : 'trafficLedgerCopyTxid')}
+        className="rounded p-0.5 dark:text-claude-darkTextSecondary/60 text-claude-textSecondary/60 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover hover:text-claude-text dark:hover:text-claude-darkText transition-colors"
+      >
+        {copied
+          ? <CheckIcon className="h-3 w-3 text-emerald-500" />
+          : <ClipboardDocumentIcon className="h-3 w-3" />}
+      </button>
+    </span>
+  );
 };
 
 const cardClass = 'rounded-xl dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted px-4 py-3';
@@ -306,6 +375,25 @@ const TrafficSettings: React.FC = () => {
     }
     const name = botNames[normalized];
     return name ? `${name} · ${shortAddress(address)}` : shortAddress(address);
+  }, [botNames, identityAddress]);
+
+  // Ledger source column: friendly kind + bot name for locally enriched
+  // entries; the raw sourceType/remark pair for everything else.
+  const resolveLedgerSourceLabel = useCallback((entry: TrafficLedgerEntryInfo): string => {
+    const parts: string[] = [];
+    const kindLabel = resolveLedgerKindLabel(entry.kind ?? '');
+    if (kindLabel) parts.push(kindLabel);
+    const botAddress = String(entry.botAddress || '');
+    if (botAddress) {
+      const normalized = botAddress.toLowerCase();
+      if (identityAddress && normalized === identityAddress.toLowerCase()) {
+        parts.push(i18nService.t('trafficYouIdentity'));
+      } else {
+        parts.push(botNames[normalized] ?? shortAddress(botAddress));
+      }
+    }
+    if (parts.length > 0) return parts.join(' · ');
+    return `${entry.sourceType}${entry.remark ? ` · ${entry.remark}` : ''}`;
   }, [botNames, identityAddress]);
 
   const ledgerDirectionLabel = (direction: number): string => {
@@ -875,14 +963,18 @@ const TrafficSettings: React.FC = () => {
             {ledgerEntries.map((entry) => (
               <div key={entry.id} className="flex items-center gap-3 text-xs">
                 <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary tabular-nums shrink-0">
-                  {entry.timestamp ? new Date(entry.timestamp).toISOString().slice(0, 10) : '—'}
+                  {formatLedgerTimestamp(entry.timestamp)}
                 </span>
-                <span className="dark:text-claude-darkText text-claude-text">
+                <span className="dark:text-claude-darkText text-claude-text shrink-0">
                   {ledgerDirectionLabel(entry.direction)}
                 </span>
-                <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary truncate flex-1">
-                  {entry.sourceType}{entry.remark ? ` · ${entry.remark}` : ''}
+                <span
+                  className="dark:text-claude-darkTextSecondary text-claude-textSecondary truncate flex-1"
+                  title={[entry.kind, entry.botAddress].filter(Boolean).join(' · ') || undefined}
+                >
+                  {resolveLedgerSourceLabel(entry)}
                 </span>
+                {entry.txId ? <LedgerTxIdBadge txId={entry.txId} /> : null}
                 <span className="tabular-nums font-medium dark:text-claude-darkText text-claude-text shrink-0">
                   {formatAmountWithSign(entry.direction, entry.amountBytes)}
                 </span>

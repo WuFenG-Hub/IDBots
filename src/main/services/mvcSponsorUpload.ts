@@ -476,6 +476,7 @@ export async function uploadMvcSponsorDirectFile(
     sponsoredMinerFee,
     savedFee: sponsoredMinerFee,
     billedBy: trafficAccount ? 'traffic' : 'quota',
+    kind: request.path,
   });
   let quotaAfter: MvcSponsorAddressInfo | undefined;
   try {

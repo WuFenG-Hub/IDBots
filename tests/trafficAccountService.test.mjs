@@ -18,6 +18,7 @@ const {
   getLocalTrafficAccount,
   getRechargeOrder,
   getTrafficBalance,
+  getTrafficLedger,
   getTrafficPricing,
   getTrafficSettingsSnapshot,
   initTrafficAccountService,
@@ -706,4 +707,134 @@ test('traffic service HTTP honors the kv apiBase when no explicit baseUrl is inj
   });
   await getTrafficPricing();
   assert.ok(fetchImpl.calls[1].url.startsWith('https://www.metaso.network/assist-open-api'));
+});
+
+test('journal kind column migrates old tables idempotently and round-trips', async () => {
+  const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
+
+  // Simulate a pre-kind database: the old schema without the kind column,
+  // plus one legacy row written before the upgrade.
+  store.getDatabase().run(`
+    CREATE TABLE traffic_spend_journal (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tx_id TEXT NOT NULL,
+      bot_address TEXT NOT NULL,
+      order_id TEXT NOT NULL DEFAULT '',
+      tx_size INTEGER NOT NULL DEFAULT 0,
+      sponsored_miner_fee INTEGER NOT NULL DEFAULT 0,
+      saved_fee INTEGER NOT NULL DEFAULT 0,
+      billed_by TEXT NOT NULL DEFAULT 'quota',
+      created_at INTEGER NOT NULL
+    );
+  `);
+  store.getDatabase().run(
+    `INSERT INTO traffic_spend_journal
+      (tx_id, bot_address, order_id, tx_size, sponsored_miner_fee, saved_fee, billed_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ['ee'.repeat(32), BOT1_ADDRESS, 'order-legacy', 200, 80, 80, 'traffic', 1700000000000],
+  );
+
+  // First write after the upgrade ALTERs the old table; the second write
+  // proves the migration guard is idempotent.
+  recordLocalTrafficSpend({
+    txId: COMMIT_TXID,
+    botAddress: BOT1_ADDRESS,
+    orderId: 'order-new',
+    txSize: 300,
+    billedBy: 'traffic',
+    kind: '/protocols/simplemsg',
+  });
+  recordLocalTrafficSpend({
+    txId: 'ff'.repeat(32),
+    botAddress: BOT2_ADDRESS,
+    orderId: 'order-new-2',
+    txSize: 100,
+    billedBy: 'quota',
+  });
+
+  const all = listLocalTrafficJournal();
+  assert.equal(all.length, 3);
+  const byOrder = new Map(all.map((entry) => [entry.orderId, entry]));
+  assert.equal(byOrder.get('order-new').kind, '/protocols/simplemsg');
+  assert.equal(byOrder.get('order-new').billedBy, 'traffic');
+  // Writes without a kind and legacy pre-migration rows both read back as ''.
+  assert.equal(byOrder.get('order-new-2').kind, '');
+  assert.equal(byOrder.get('order-legacy').kind, '');
+  assert.equal(byOrder.get('order-legacy').txSize, 200);
+  assert.equal(byOrder.get('order-legacy').createdAt, 1700000000000);
+});
+
+test('getTrafficLedger enriches sponsor entries from the local spend journal', async () => {
+  const LEDGER_TS = 1780000000000;
+  const fetchImpl = createFetchStub([
+    // Route matching is substring-based, so the ledger route must precede the
+    // accounts route that prefixes it.
+    ['/ledger', {
+      entries: [
+        { id: 4, direction: 2, amountBytes: 300, balanceAfter: 200, sourceType: 'sponsor_order', sourceId: 'order-1', remark: 'sponsor commit', timestamp: LEDGER_TS },
+        { id: 3, direction: 3, amountBytes: 500, balanceAfter: 500, sourceType: 'sponsor_order', sourceId: 'order-1', remark: 'sponsor reserve', timestamp: LEDGER_TS - 1000 },
+        { id: 2, direction: 4, amountBytes: 500, balanceAfter: 1000, sourceType: 'sponsor_order', sourceId: 'order-expired', remark: 'reservation expired', timestamp: LEDGER_TS - 2000 },
+        { id: 1, direction: 1, amountBytes: 1000, balanceAfter: 1000, sourceType: 'recharge_order', sourceId: 'recharge-1', remark: 'recharge credited', timestamp: LEDGER_TS - 3000 },
+      ],
+      nextCursor: 0,
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+  await ensureTrafficAccount();
+
+  recordLocalTrafficSpend({
+    txId: COMMIT_TXID,
+    botAddress: BOT1_ADDRESS,
+    orderId: 'order-1',
+    txSize: 300,
+    billedBy: 'traffic',
+    kind: '/protocols/simplemsg',
+  });
+
+  const { entries, nextCursor } = await getTrafficLedger({});
+  assert.equal(entries.length, 4);
+  assert.equal(nextCursor, 0);
+
+  const spend = entries.find((entry) => entry.direction === 2);
+  assert.equal(spend.txId, COMMIT_TXID);
+  assert.equal(spend.botAddress, BOT1_ADDRESS);
+  assert.equal(spend.kind, '/protocols/simplemsg');
+
+  // Same orderId: the matching reserve row is enriched too (it became this tx).
+  const reserve = entries.find((entry) => entry.direction === 3);
+  assert.equal(reserve.txId, COMMIT_TXID);
+  assert.equal(reserve.kind, '/protocols/simplemsg');
+
+  // Expired reservation (never committed locally) and the recharge credit
+  // have no local journal match: enrichment fields stay absent.
+  const release = entries.find((entry) => entry.direction === 4);
+  assert.equal(release.txId, undefined);
+  assert.equal(release.botAddress, undefined);
+  assert.equal(release.kind, undefined);
+  const credit = entries.find((entry) => entry.direction === 1);
+  assert.equal(credit.txId, undefined);
+  assert.equal(credit.botAddress, undefined);
+  assert.equal(credit.kind, undefined);
+});
+
+test('sponsored createPin journals the pin path as kind', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts/bindings', (init) => {
+      const body = JSON.parse(init.body);
+      return { botAddress: body.botAddress, accountId: SERVER_ACCOUNT_ID, status: 1, createdAt: 1 };
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+    ...sponsorRoutes(buildSponsorDraft(BOT1_ADDRESS)),
+  ]);
+  await makeServiceFixture({ fetchImpl, trafficMode: 'traffic' });
+
+  const result = await runSponsoredPin(fetchImpl, { journalKind: '/protocols/simplemsg' });
+  assert.equal(result.feeAssist.used, true);
+
+  const journal = listLocalTrafficJournal();
+  assert.equal(journal.length, 1);
+  assert.equal(journal[0].kind, '/protocols/simplemsg');
+  assert.equal(journal[0].txId, COMMIT_TXID);
+  assert.equal(journal[0].billedBy, 'traffic');
 });

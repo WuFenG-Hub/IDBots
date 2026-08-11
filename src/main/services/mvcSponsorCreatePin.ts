@@ -85,6 +85,8 @@ export interface MvcSponsorCreatePinInput {
   fetchImpl?: typeof fetch;
   /** Reserved pass-through for traffic-account billing (backend not yet live). */
   trafficAccount?: MvcSponsorTrafficAccount;
+  /** MetaID pin path (e.g. /protocols/simplemsg), journaled as the spend kind. */
+  journalKind?: string;
 }
 
 export interface MvcSponsorCreatePinDeps {
@@ -350,6 +352,7 @@ export async function runMvcSponsorCreatePin(
     sponsoredMinerFee,
     savedFee: sponsoredMinerFee,
     billedBy: trafficAccount ? 'traffic' : 'quota',
+    kind: input.journalKind,
   });
   const changeUtxo: MvcCachedFundingUtxo | null = draft.changeOutput
     ? {
