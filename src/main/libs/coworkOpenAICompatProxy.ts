@@ -31,6 +31,15 @@ export type OpenAICompatUpstreamConfig = {
    * Responses, everything else -> Chat Completions).
    */
   apiFormat?: 'anthropic' | 'openai' | 'responses';
+  /**
+   * Optional cowork session id. When set, configureCoworkOpenAICompatProxy
+   * additionally records this upstream under the session key so concurrent
+   * sessions on DIFFERENT openai/responses providers no longer clobber each
+   * other via the shared singleton (the historical default). The runner passes
+   * the cowork sessionId here; handleRequest then resolves the per-session
+   * entry first and falls back to the singleton when absent.
+   */
+  sessionKey?: string;
 };
 
 export type OpenAICompatProxyTarget = 'local' | 'sandbox';
@@ -160,6 +169,13 @@ let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
 let upstreamConfig: OpenAICompatUpstreamConfig | null = null;
 let lastProxyError: string | null = null;
+// Per-session upstream registry. Each cowork session whose provider routes via
+// this proxy (openai/responses apiFormat) registers its own upstream here, so
+// concurrent sessions on different providers no longer overwrite each other
+// through the shared `upstreamConfig` singleton. Resolved first in handleRequest;
+// the singleton remains as a fallback for non-session callers (sandbox,
+// scheduled tasks, internal API, legacy paths).
+const sessionUpstreams = new Map<string, OpenAICompatUpstreamConfig>();
 const toolCallExtraContentById = new Map<string, unknown>();
 const MAX_TOOL_CALL_EXTRA_CONTENT_CACHE = 1024;
 const MAX_DEEPSEEK_REASONING_CACHE = 1024;
@@ -3102,7 +3118,12 @@ async function handleRequest(
     return;
   }
 
-  if (!upstreamConfig) {
+  // Resolve the effective upstream for THIS request: a per-session entry (set
+  // by the runner when it started the session on a proxy-routed provider) wins
+  // over the shared singleton, so concurrent sessions on different openai/
+  // responses providers no longer clobber each other.
+  const upstream = getUpstreamForSession(messagesRouteSessionKey);
+  if (!upstream) {
     writeJSON(
       res,
       503,
@@ -3182,17 +3203,17 @@ async function handleRequest(
   const openAIRequest = anthropicToOpenAI(anthropicRequestBody);
   openAIRequest.model = resolveEffectiveUpstreamModel(
     toString(openAIRequest.model),
-    upstreamConfig.model
+    upstream.model
   );
   // Resolve the upstream API type from the EFFECTIVE model so that a request
   // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
-  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model), upstreamConfig.apiFormat);
-  filterOpenAIToolsForProvider(openAIRequest, upstreamConfig.provider);
-  hydrateOpenAIRequestToolCalls(openAIRequest, upstreamConfig.provider, upstreamConfig.baseURL);
+  const upstreamAPIType = resolveUpstreamAPIType(upstream.provider, toString(openAIRequest.model), upstream.apiFormat);
+  filterOpenAIToolsForProvider(openAIRequest, upstream.provider);
+  hydrateOpenAIRequestToolCalls(openAIRequest, upstream.provider, upstream.baseURL);
   const deepSeekReasoningHydrateResult = hydrateDeepSeekReasoningForRequest(
     openAIRequest,
-    upstreamConfig.provider,
-    upstreamConfig.baseURL
+    upstream.provider,
+    upstream.baseURL
   );
   if (deepSeekReasoningHydrateResult.hydratedCount > 0 || deepSeekReasoningHydrateResult.placeholderCount > 0) {
     console.info('[cowork-openai-compat-proxy] Hydrated DeepSeek reasoning_content for assistant tool-call history', {
@@ -3202,22 +3223,22 @@ async function handleRequest(
   }
 
   if (upstreamAPIType === 'chat_completions') {
-    normalizeMaxTokensFieldForOpenAIProvider(openAIRequest, upstreamConfig.provider);
+    normalizeMaxTokensFieldForOpenAIProvider(openAIRequest, upstream.provider);
   }
 
   const upstreamRequest = upstreamAPIType === 'responses'
-    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest, upstreamConfig.provider)
+    ? convertChatCompletionsRequestToResponsesRequest(openAIRequest, upstream.provider)
     : openAIRequest;
   const stream = Boolean(upstreamRequest.stream);
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
-  if (upstreamConfig.apiKey) {
-    headers.Authorization = `Bearer ${upstreamConfig.apiKey}`;
+  if (upstream.apiKey) {
+    headers.Authorization = `Bearer ${upstream.apiKey}`;
   }
 
-  const targetURLs = buildUpstreamTargetUrls(upstreamConfig.baseURL, upstreamAPIType, upstreamConfig.provider);
+  const targetURLs = buildUpstreamTargetUrls(upstream.baseURL, upstreamAPIType, upstream.provider);
   let currentTargetURL = targetURLs[0];
 
   const sendUpstreamRequest = async (
@@ -3331,16 +3352,16 @@ async function handleRequest(
       await handleResponsesStreamResponse(
         upstreamResponse,
         res,
-        upstreamConfig.provider,
-        upstreamConfig.baseURL,
+        upstream.provider,
+        upstream.baseURL,
         toString(openAIRequest.model)
       );
     } else {
       await handleChatCompletionsStreamResponse(
         upstreamResponse,
         res,
-        upstreamConfig.provider,
-        upstreamConfig.baseURL,
+        upstream.provider,
+        upstream.baseURL,
         toString(openAIRequest.model)
       );
     }
@@ -3360,8 +3381,8 @@ async function handleRequest(
     const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(upstreamJSON);
     attachDeepSeekReasoningToOpenAIResponseToolCalls(
       syntheticOpenAIResponse,
-      upstreamConfig.provider,
-      upstreamConfig.baseURL,
+      upstream.provider,
+      upstream.baseURL,
       toString(syntheticOpenAIResponse.model)
     );
     cacheToolCallExtraContentFromOpenAIResponse(syntheticOpenAIResponse);
@@ -3377,8 +3398,8 @@ async function handleRequest(
 
   attachDeepSeekReasoningToOpenAIResponseToolCalls(
     upstreamJSON,
-    upstreamConfig.provider,
-    upstreamConfig.baseURL,
+    upstream.provider,
+    upstream.baseURL,
     toString(openAIRequest.model)
   );
   cacheToolCallExtraContentFromOpenAIResponse(upstreamJSON);
@@ -3468,12 +3489,46 @@ export async function stopCoworkOpenAICompatProxy(): Promise<void> {
 }
 
 export function configureCoworkOpenAICompatProxy(config: OpenAICompatUpstreamConfig): void {
-  upstreamConfig = {
+  const normalized: OpenAICompatUpstreamConfig = {
     ...config,
     baseURL: config.baseURL.trim(),
     apiKey: config.apiKey?.trim(),
   };
+  // Always (re)publish the singleton so legacy / non-session callers keep
+  // working. Additionally pin a per-session copy so this session's traffic is
+  // isolated from concurrent sessions on other providers.
+  upstreamConfig = normalized;
+  const sessionKey = config.sessionKey?.trim();
+  if (sessionKey) {
+    sessionUpstreams.set(sessionKey, normalized);
+  }
   lastProxyError = null;
+}
+
+/**
+ * Drop the per-session upstream registered for this cowork session. Called by
+ * the runner when a session ends to keep the registry from growing unbounded.
+ * The singleton is intentionally left untouched (other sessions / fallbacks
+ * may still rely on it).
+ */
+export function clearCoworkSessionUpstream(sessionKey: string | null | undefined): void {
+  const key = sessionKey?.trim();
+  if (!key) return;
+  sessionUpstreams.delete(key);
+}
+
+/**
+ * Resolve the effective upstream for a session-scoped request: the per-session
+ * entry when present, otherwise the shared singleton. Returns null when neither
+ * is configured (caller surfaces a 503). Exposed for testability.
+ */
+export function getUpstreamForSession(sessionKey: string | null | undefined): OpenAICompatUpstreamConfig | null {
+  const key = sessionKey?.trim();
+  if (key) {
+    const perSession = sessionUpstreams.get(key);
+    if (perSession) return perSession;
+  }
+  return upstreamConfig;
 }
 
 export function getCoworkOpenAICompatProxyBaseURL(target: OpenAICompatProxyTarget = 'local'): string | null {

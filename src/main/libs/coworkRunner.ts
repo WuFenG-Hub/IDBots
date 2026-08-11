@@ -34,6 +34,7 @@ import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
+  clearCoworkSessionUpstream,
   getCoworkOpenAICompatProxyBaseURL,
   getCoworkOpenAICompatProxyStatus,
   getCoworkSnipHeadTokens,
@@ -1493,6 +1494,9 @@ export class CoworkRunner extends EventEmitter {
       new Error('Cowork steer input channel closed before delivery')
     );
     this.activeSessions.delete(sessionId);
+    // Drop this session's pinned proxy upstream so the per-session registry
+    // does not grow unbounded across the session's lifetime.
+    clearCoworkSessionUpstream(sessionId);
     // R1 会话结束对账：SDK 侧已删的会话内 cron 从镜像标记 deleted（幂等，失败仅告警）。
     if (this.sdkCronMirror) {
       try {
@@ -5245,7 +5249,7 @@ export class CoworkRunner extends EventEmitter {
 
     const automationModelOverride = this.getSessionAutomationModelOverride(sessionId);
     let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(automationModelOverride, 'local')
+      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId)
       : { config: getCurrentApiConfig('local') };
     let apiConfig = apiConfigResolution.config;
     if (!apiConfig && automationModelOverride) {
