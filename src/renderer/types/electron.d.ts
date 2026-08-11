@@ -136,6 +136,32 @@ interface TrafficSettingsInfo {
   apiBase: string;
 }
 
+interface LlmRelayModelInfo {
+  id: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
+interface LlmRelayBootstrapInfo {
+  /** Raw relay key; returned by bootstrap only (server stores only its hash). */
+  apiKey: string;
+  keyPrefix: string;
+  baseUrl: string;
+  models: LlmRelayModelInfo[];
+  quotaTotal: number;
+  quotaUsed: number;
+  quotaRemaining: number;
+}
+
+interface LlmRelayQuotaInfo {
+  keyPrefix: string;
+  baseUrl: string;
+  models: LlmRelayModelInfo[];
+  quotaTotal: number;
+  quotaUsed: number;
+  quotaRemaining: number;
+}
+
 interface ApiStreamResponse {
   ok: boolean;
   status: number;
@@ -1024,6 +1050,11 @@ interface IElectronAPI {
     mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+  };
+  llmRelay: {
+    bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;
+    getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => Promise<{ success: boolean; quota?: LlmRelayQuotaInfo; error?: string }>;
+    setApiBase: (input: { apiBase: string }) => Promise<{ success: boolean; apiBase?: string; error?: string }>;
   };
   appInfo: {
     getVersion: () => Promise<string>;

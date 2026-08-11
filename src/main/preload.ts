@@ -599,6 +599,11 @@ contextBridge.exposeInMainWorld('electron', {
     getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
   },
+  llmRelay: {
+    bootstrap: () => ipcRenderer.invoke('llmRelay:bootstrap'),
+    getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => ipcRenderer.invoke('llmRelay:getQuota', input),
+    setApiBase: (input: { apiBase: string }) => ipcRenderer.invoke('llmRelay:setApiBase', input),
+  },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getSystemLocale: () => ipcRenderer.invoke('app:getSystemLocale'),

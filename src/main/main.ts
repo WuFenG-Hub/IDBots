@@ -108,6 +108,7 @@ import {
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
+import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -12087,6 +12088,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerTrafficAccountIpcHandlers({ ipcMain });
+
+  // Free LLM quota relay: identity-signed bootstrap issues the relay key for
+  // the built-in `metaid-free` provider (first-run welcome experience).
+  initLlmRelayService({
+    getStore,
+    getUserIdentityStore,
+  });
+  registerLlmRelayIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {
