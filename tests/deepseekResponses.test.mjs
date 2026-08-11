@@ -166,17 +166,10 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   // web_search must be present and FIRST (stable for cache prefix).
   assert.ok(Array.isArray(result.tools));
   assert.equal(result.tools[0].type, 'web_search');
-  // 'What is the weather?' is a real-time topic (layer-1 signal): the proxy
-  // forces the built-in web_search via the Responses {"type":"web_search"}
-  // tool_choice instead of trusting auto, which the model skips in long
-  // agent sessions.
-  assert.deepEqual(result.tool_choice, { type: 'web_search' });
-  // A non-signal question keeps the auto default.
-  const plain = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
-    'deepseek',
-  );
-  assert.equal(plain.tool_choice, 'auto');
+  // tool_choice stays 'auto' even for time-sensitive questions — the proxy
+  // never forces web_search (forcing confined the session to the server-side
+  // search tools and broke all function tool calls).
+  assert.equal(result.tool_choice, 'auto');
   // reasoning.effort mapped from reasoning_effort.
   assert.deepEqual(result.reasoning, { effort: 'max' });
   // instructions extracted from system message, with the anti-hallucination
@@ -189,90 +182,43 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   assert.equal(result.input[0].role, 'user');
 });
 
-test('signal scan is scoped to the marked user text, not prepended volatile context', async () => {
+test('convertChatCompletionsRequestToResponsesRequest never forces web_search', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
 
-  // The runner prepends volatile context (Local Time Context always carries
-  // the current year) ahead of the user's own text, which is wrapped in
-  // <idbots_user_message> markers. A neutral question inside the markers must
-  // NOT be forced into web_search by the injected context — that previously
-  // fired on every turn and confined short sessions to the server-side
-  // search tools only (search/open_page/find_in_page), breaking all agent
-  // tool use.
-  const volatileHead = [
-    '## Local Time Context',
-    '- Current local datetime: 2026-08-11 20:31:04 (timezone: Asia/Shanghai, UTC+08:00)',
-    '',
-    '<ownerMemories>',
-    '- 用户在 2026 年重点关注 MetaID 项目进展和最新动态',
-    '</ownerMemories>',
-  ].join('\n');
-  const marked = (question) => `${volatileHead}\n\n<idbots_user_message>\n${question}\n</idbots_user_message>`;
+  // Regression guard: forcing tool_choice={"type":"web_search"} confined the
+  // session to the server-side search tools (surfacing in the UI as
+  // search/open_page/find_in_page) and broke every function tool call — the
+  // live Worker sessions failed exactly so. Whatever the user text looks
+  // like, tool_choice must stay 'auto'; the model decides when to search.
+  const cases = [
+    'What is the weather?',
+    '2026年世界杯冠军是谁？',
+    '今天有什么新闻？',
+    [
+      '<twin_delegation>',
+      '  <task_id>046c2bd7-7329-4a8b-9753-e31c1a9b68da</task_id>',
+      '  <objective>移除当前代理里的某个机制并更新测试</objective>',
+      '</twin_delegation>',
+    ].join('\n'),
+    `${'任务背景描述。'.repeat(300)}\n2026 最新进展也写进去了`,
+  ];
+  for (const content of cases) {
+    const result = convertChatCompletionsRequestToResponsesRequest(
+      { model: 'deepseek-v4-flash', messages: [{ role: 'user', content }] },
+      'deepseek',
+    );
+    assert.equal(result.tool_choice, 'auto');
+    // web_search stays injected and available under auto.
+    assert.equal(result.tools[0].type, 'web_search');
+  }
 
-  const neutral = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: marked('帮我读一下这个会话的内容') }] },
-    'deepseek',
+  // Gateway provider serving a DeepSeek model: same behavior.
+  const gateway = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'What is the weather?' }] },
+    'opencode',
   );
-  assert.equal(neutral.tool_choice, 'auto');
-  // The full tool list still goes upstream on the neutral turn.
-  assert.ok(neutral.tools.some((t) => t.type === 'web_search'));
-
-  // A genuinely time-sensitive question inside the markers still forces.
-  const timeSensitive = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: marked('2026 温网男单冠军是谁？') }] },
-    'deepseek',
-  );
-  assert.deepEqual(timeSensitive.tool_choice, { type: 'web_search' });
-
-  // Unmarked payloads (legacy sessions, non-cowork clients) keep the old
-  // full-text scan behavior: a signal anywhere in the text still forces.
-  const legacy = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: `${volatileHead}\n\n随便聊聊` }] },
-    'deepseek',
-  );
-  assert.deepEqual(legacy.tool_choice, { type: 'web_search' });
-});
-
-test('machine-composed agent turns are never forced into web_search', async () => {
-  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
-  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
-
-  // Worker delegation briefs are machine-composed <twin_delegation> envelopes
-  // whose objective text routinely contains broad signal terms ('当前',
-  // '发布', recent-year dates). Forcing there confines the worker to the
-  // server-side search tools (search/open_page/find_in_page) and breaks every
-  // function tool call — the live 21:51 Worker session failed exactly so.
-  const delegation = [
-    '<idbots_user_message>',
-    '<twin_delegation>',
-    '  <task_id>046c2bd7-7329-4a8b-9753-e31c1a9b68da</task_id>',
-    '  <objective>移除当前代理里的某个机制并更新测试</objective>',
-    '</twin_delegation>',
-    '</idbots_user_message>',
-  ].join('\n');
-  const worker = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: delegation }] },
-    'deepseek',
-  );
-  assert.equal(worker.tool_choice, 'auto');
-
-  // Long machine-composed envelopes (and legacy unmarked payloads whose
-  // volatile context is not marked off) stay on auto via the length cap —
-  // the safe side, since web_search remains available under auto.
-  const longText = `<idbots_user_message>\n${'任务背景描述。'.repeat(300)}\n2026 最新进展也写进去了\n</idbots_user_message>`;
-  const longTurn = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: longText }] },
-    'deepseek',
-  );
-  assert.equal(longTurn.tool_choice, 'auto');
-
-  // Short interactive user questions keep the forcing behavior.
-  const shortSignal = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '<idbots_user_message>\n2026 温网男单冠军是谁？\n</idbots_user_message>' }] },
-    'deepseek',
-  );
-  assert.deepEqual(shortSignal.tool_choice, { type: 'web_search' });
+  assert.equal(gateway.tool_choice, 'auto');
 });
 
 test('convertChatCompletionsRequestToResponsesRequest disables thinking via effort none', async () => {
@@ -352,98 +298,14 @@ test('convertChatCompletionsRequestToResponsesRequest appends anti-hallucination
 });
 
 // ---------------------------------------------------------------------------
-// Round-2 trigger strategy: real-time signal detection (layer 1) and
-// unverified-assertion downgrade (layer 2)
+// Explicit caller tool_choice passthrough
 // ---------------------------------------------------------------------------
-
-test('hasRealtimeSearchSignal flags recent-year and real-time keyword turns', async () => {
-  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
-  const { hasRealtimeSearchSignal } = __openAICompatProxyTestUtils;
-
-  // Fixed clock (2026-08) so year-window assertions stay deterministic.
-  const now = new Date(2026, 7, 11);
-
-  // Recent-year reference in the window → signal.
-  assert.equal(hasRealtimeSearchSignal('2026年世界杯冠军是谁？', now), true);
-  assert.equal(hasRealtimeSearchSignal('2026 Wimbledon men singles champion?', now), true);
-  // Boundary years of the window.
-  assert.equal(hasRealtimeSearchSignal('2025年的最新进展如何？', now), true);
-  assert.equal(hasRealtimeSearchSignal('2027年有什么规划？', now), true);
-  // Real-time keyword without any year reference → signal.
-  assert.equal(hasRealtimeSearchSignal('今天有什么新闻？', now), true);
-  assert.equal(hasRealtimeSearchSignal('What is the weather?', now), true);
-  assert.equal(hasRealtimeSearchSignal('帮我查一下最新股价', now), true);
-});
-
-test('hasRealtimeSearchSignal keeps historical years and plain chat on auto', async () => {
-  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
-  const { hasRealtimeSearchSignal } = __openAICompatProxyTestUtils;
-
-  const now = new Date(2026, 7, 11);
-
-  // Stale year outside the window wins over real-time keywords: the 2010
-  // World Cup is inside training data and must stay on auto.
-  assert.equal(hasRealtimeSearchSignal('2010年世界杯冠军是谁？', now), false);
-  assert.equal(hasRealtimeSearchSignal('2024年欧洲杯冠军是谁？', now), false);
-  assert.equal(hasRealtimeSearchSignal('2023年的天气数据', now), false);
-  // Plain chat / code work: no signal.
-  assert.equal(hasRealtimeSearchSignal('帮我写个 hello world', now), false);
-  assert.equal(hasRealtimeSearchSignal('解释一下什么是闭包', now), false);
-  assert.equal(hasRealtimeSearchSignal('hi', now), false);
-});
-
-test('convertChatCompletionsRequestToResponsesRequest forces web_search on real-time signal', async () => {
-  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
-  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
-
-  // Keyword signal (year-independent, stable across time).
-  const weather = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'What is the weather?' }] },
-    'deepseek',
-  );
-  assert.deepEqual(weather.tool_choice, { type: 'web_search' });
-
-  // Recent-year signal.
-  const wc2026 = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '2026年世界杯冠军是谁？' }] },
-    'deepseek',
-  );
-  assert.deepEqual(wc2026.tool_choice, { type: 'web_search' });
-
-  // Historical-year question stays on auto.
-  const wc2010 = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '2010年世界杯冠军是谁？' }] },
-    'deepseek',
-  );
-  assert.equal(wc2010.tool_choice, 'auto');
-
-  // Plain chat stays on auto.
-  const plain = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: '帮我写个 hello world' }] },
-    'deepseek',
-  );
-  assert.equal(plain.tool_choice, 'auto');
-
-  // Gateway provider (opencode) serving deepseek-v4-flash gets the same force.
-  const gateway = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'What is the weather?' }] },
-    'opencode',
-  );
-  assert.deepEqual(gateway.tool_choice, { type: 'web_search' });
-
-  // Non-DeepSeek: never forced (no injected web_search tool).
-  const openai = convertChatCompletionsRequestToResponsesRequest(
-    { model: 'gpt-5.6', messages: [{ role: 'user', content: 'What is the weather?' }] },
-    'openai',
-  );
-  assert.notDeepEqual(openai.tool_choice, { type: 'web_search' });
-});
 
 test('convertChatCompletionsRequestToResponsesRequest respects explicit tool_choice none', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
 
-  // Caller explicitly disabled tools: never overridden by the trigger.
+  // Caller explicitly disabled tools: passed through unchanged.
   const forcedNone = convertChatCompletionsRequestToResponsesRequest(
     {
       model: 'deepseek-v4-flash',
@@ -464,40 +326,6 @@ test('convertChatCompletionsRequestToResponsesRequest respects explicit tool_cho
     'deepseek',
   );
   assert.deepEqual(pinned.tool_choice, { type: 'function', name: 'Read' });
-});
-
-test('convertChatCompletionsRequestToResponsesRequest uses the LAST user message for the signal', async () => {
-  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
-  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
-
-  // Earlier turns are code work; the LAST user turn is the real-time question.
-  const multi = convertChatCompletionsRequestToResponsesRequest(
-    {
-      model: 'deepseek-v4-flash',
-      messages: [
-        { role: 'user', content: '帮我重构这个模块' },
-        { role: 'assistant', content: '好的，已完成重构。' },
-        { role: 'user', content: '顺便问下今天天气怎么样？' },
-      ],
-    },
-    'deepseek',
-  );
-  assert.deepEqual(multi.tool_choice, { type: 'web_search' });
-
-  // ...and the reverse: last turn plain → auto even if an earlier turn had a
-  // real-time question that was already answered.
-  const reverse = convertChatCompletionsRequestToResponsesRequest(
-    {
-      model: 'deepseek-v4-flash',
-      messages: [
-        { role: 'user', content: '今天天气怎么样？' },
-        { role: 'assistant', content: '今天晴，25°C。' },
-        { role: 'user', content: '继续帮我把模块重构完' },
-      ],
-    },
-    'deepseek',
-  );
-  assert.equal(reverse.tool_choice, 'auto');
 });
 
 // ---------------------------------------------------------------------------
