@@ -20,7 +20,7 @@
  */
 
 import { signMvcAddressMessage } from './mvcSponsorClient';
-import { createUserIdentity } from './userIdentityService';
+import { createUserIdentity, resumeUserIdentitySetup } from './userIdentityService';
 import type { SqliteStore } from '../sqliteStore';
 import type { UserIdentityStore } from '../userIdentityStore';
 
@@ -90,6 +90,8 @@ export interface LlmRelayServiceDeps {
   baseUrl?: string;
   /** Test seam for first-run identity provisioning. */
   createIdentityImpl?: typeof createUserIdentity;
+  /** Test seam for the background identity chain-sync resume. */
+  resumeIdentityImpl?: typeof resumeUserIdentitySetup;
 }
 
 let depsRef: LlmRelayServiceDeps | null = null;
@@ -343,14 +345,22 @@ async function ensureUserIdentity(): Promise<{ mnemonic: string; path: string; m
   const store = deps.getUserIdentityStore();
   let identity = store.get();
   if (!identity) {
+    // deferChainSync keeps first paint fast: the awaited on-chain pin publish
+    // would otherwise block the bootstrap for tens of seconds. The identity
+    // row is fully signable immediately; the background resume publishes the
+    // /info pins (idempotent, persisted per-step) without blocking startup.
     const createIdentity = deps.createIdentityImpl ?? createUserIdentity;
-    const result = await createIdentity(store, { name: DEFAULT_IDENTITY_NAME, avatar: null });
+    const result = await createIdentity(store, { name: DEFAULT_IDENTITY_NAME, avatar: null }, {}, { deferChainSync: true });
     if (!result.success) {
       throw new LlmRelayApiError({
         stage: 'bootstrap',
         message: `failed to provision local user identity: ${normalizeText(result.error) || 'unknown error'}`,
       });
     }
+    const resumeIdentity = deps.resumeIdentityImpl ?? resumeUserIdentitySetup;
+    void resumeIdentity(store).catch((error) => {
+      console.warn('[llm-relay] background identity chain sync failed:', getErrorMessage(error));
+    });
     identity = store.get();
   }
   const mvcAddress = normalizeText(identity?.mvc_address);

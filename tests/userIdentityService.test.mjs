@@ -85,6 +85,25 @@ test('createUserIdentity publishes name/avatar/chatpubkey and stores chat pin id
   store.close();
 });
 
+test('createUserIdentity with deferChainSync skips pins and leaves sync pending', async () => {
+  const { store, userStore } = await makeStores();
+  const pinMock = makePinMock();
+  const result = await createUserIdentity(
+    userStore,
+    { name: 'Alice', avatar: AVATAR_DATA_URL },
+    baseDeps(pinMock),
+    { deferChainSync: true },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(pinMock.calls.length, 0, 'no on-chain pins may be published');
+  assert.equal(result.chainSync, undefined);
+  const saved = userStore.get();
+  assert.equal(saved.subsidy_state, 'claimed');
+  assert.equal(saved.sync_state, 'pending');
+  store.close();
+});
+
 test('createUserIdentity keeps local identity when a pin step fails', async () => {
   const { store, userStore } = await makeStores();
   const pinMock = makePinMock({ failOn: ['/info/avatar'] });

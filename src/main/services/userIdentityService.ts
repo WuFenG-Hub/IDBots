@@ -251,6 +251,7 @@ export async function createUserIdentity(
   userStore: UserIdentityStore,
   input: { name: string; avatar?: string | null },
   deps: UserIdentityServiceDeps = {},
+  options: { deferChainSync?: boolean } = {},
 ): Promise<UserIdentityResult> {
   if (userStore.get()) {
     return { success: false, error: 'USER_IDENTITY_EXISTS' };
@@ -300,6 +301,19 @@ export async function createUserIdentity(
     return {
       success: true,
       identity,
+      mnemonic: wallet.mnemonic,
+      subsidy,
+      profileSource: 'local',
+    };
+  }
+
+  // deferChainSync (first-run free-quota bootstrap): skip the awaited pin
+  // publish so the caller can proceed immediately; sync_state stays 'pending'
+  // and the caller drives resumeUserIdentitySetup in the background.
+  if (options.deferChainSync) {
+    return {
+      success: true,
+      identity: userStore.get() ?? identity,
       mnemonic: wallet.mnemonic,
       subsidy,
       profileSource: 'local',
