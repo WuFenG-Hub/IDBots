@@ -1056,6 +1056,14 @@ interface ActiveSession {
       cacheReadTokens: number;
       cacheCreationTokens: number;
     }>;
+    /**
+     * Last real per-category context usage snapshot captured from the SDK's
+     * getContextUsage() (local mode). Persisted alongside the usage stats so
+     * the context ring can show the REAL current context size even after the
+     * active session is cleaned up at the end of the turn (the in-memory
+     * activeSession.realContextUsage dies with it).
+     */
+    lastRealContextUsage?: CoworkContextUsage | null;
   };
   /**
    * Live SDK Query control surface (local mode only) used by the subagent
@@ -1390,6 +1398,18 @@ export class CoworkRunner extends EventEmitter {
    * chip can be read after the turn completes via getSessionUsageStats.
    */
   private usageStatsBySessionId: Map<string, NonNullable<ActiveSession['usageStats']>> = new Map();
+  /**
+   * User-initiated manual compaction requests queued while the session is
+   * IDLE (no activeSession in memory). Local-mode sessions remove their
+   * activeSession at the end of every turn, so the classic
+   * activeSession.pendingManualCompact flag could never be set between turns —
+   * the button always failed with "Session is not active". This queue bridges
+   * the idle gap: requestManualCompaction records the session here and the
+   * next local-mode turn consumes it (same compacted-prompt path). In-memory
+   * only; if the app restarts before the next message, the user just clicks
+   * the button again.
+   */
+  private pendingManualCompactSessions: Set<string> = new Set();
   /** Latest estimated thinking-token count from SDK thinking_tokens events. */
   private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
@@ -1586,7 +1606,91 @@ export class CoworkRunner extends EventEmitter {
    */
   getRealContextUsage(sessionId: string): CoworkContextUsage | null {
     const activeSession = this.activeSessions.get(sessionId);
-    return activeSession?.realContextUsage ?? null;
+    if (activeSession?.realContextUsage) {
+      return activeSession.realContextUsage;
+    }
+    // The active session is removed at the end of every local turn, so the
+    // real snapshot is also persisted with the usage stats to keep the ring
+    // truthful between turns (and across app restarts).
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId) as
+        { lastRealContextUsage?: CoworkContextUsage | null } | null;
+      if (persisted?.lastRealContextUsage) {
+        return persisted.lastRealContextUsage;
+      }
+    } catch {
+      // Best-effort read; the estimator remains the fallback.
+    }
+    return null;
+  }
+
+  /**
+   * Asks the live SDK Query for its real per-category context usage and caches
+   * + persists it. Must be called while the CLI process is idle at the input
+   * prompt (end_turn boundary): after the result event the SDK closes stdin
+   * for single-turn queries and the control request fails with
+   * "ProcessTransport is not ready for writing". Failures are non-fatal.
+   */
+  private async captureRealContextUsageFromSdk(
+    sessionId: string,
+    activeSession: ActiveSession,
+    queryResult: { getContextUsage?: () => Promise<unknown> }
+  ): Promise<void> {
+    try {
+      const usageResult = await queryResult.getContextUsage?.();
+      if (usageResult && typeof usageResult === 'object') {
+        const usage = usageResult as {
+          totalTokens?: number;
+          maxTokens?: number;
+          percentage?: number;
+          categories?: Array<{ name?: string; tokens?: number; color?: string }>;
+        };
+        const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
+        const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
+        if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
+          const realContextUsage: CoworkContextUsage = {
+            usedTokens: totalTokens,
+            contextWindow: maxTokens,
+            usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
+            isRealUsage: true,
+            categories: Array.isArray(usage.categories)
+              ? usage.categories
+                  .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
+                  .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
+              : undefined,
+          };
+          activeSession.realContextUsage = realContextUsage;
+          // Persist so the ring keeps showing real numbers after the active
+          // session is cleaned up at turn end.
+          this.persistRealContextUsage(sessionId, realContextUsage);
+        }
+      }
+    } catch (usageError) {
+      coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
+        sessionId,
+        error: usageError instanceof Error ? usageError.message : String(usageError),
+      });
+    }
+  }
+
+  /**
+   * Persists the last real SDK context-usage snapshot so the context ring can
+   * show real numbers after the active session is cleaned up at turn end.
+   */
+  private persistRealContextUsage(sessionId: string, usage: CoworkContextUsage): void {
+    try {
+      const existing = this.usageStatsBySessionId.get(sessionId)
+        ?? (this.store.getSessionUsageStats(sessionId) as NonNullable<ActiveSession['usageStats']> | null)
+        ?? ({} as NonNullable<ActiveSession['usageStats']>);
+      existing.lastRealContextUsage = usage;
+      this.usageStatsBySessionId.set(sessionId, existing);
+      this.store.setSessionUsageStats(sessionId, existing);
+    } catch (error) {
+      coworkLog('WARN', 'persistRealContextUsage', 'Failed to persist real context usage', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -4546,19 +4650,36 @@ export class CoworkRunner extends EventEmitter {
    */
   async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
     const activeSession = this.activeSessions.get(sessionId);
-    if (!activeSession) {
-      return { success: false, error: 'Session is not active. Send a message first, then try again.' };
-    }
-    if (activeSession.executionMode !== 'local') {
-      return { success: false, error: 'Manual compaction is only available in local mode.' };
-    }
-    if (activeSession.localTurnState !== 'none') {
-      return { success: false, error: 'Wait for the current turn to finish before compacting.' };
-    }
-    if (activeSession.pendingManualCompact) {
-      return { success: false, error: 'Manual compaction is already queued for the next message.' };
+    if (activeSession) {
+      if (activeSession.executionMode !== 'local') {
+        return { success: false, error: 'Manual compaction is only available in local mode.' };
+      }
+      if (activeSession.localTurnState !== 'none') {
+        return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+      }
+      if (activeSession.pendingManualCompact) {
+        return { success: false, error: 'Manual compaction is already queued for the next message.' };
+      }
+    } else {
+      // Idle local sessions have no activeSession in memory (runClaudeCodeLocal
+      // removes it in its finally block), but the user must still be able to
+      // queue a manual compaction from the header button. Validate against the
+      // persisted session and the cross-session turn guard instead.
+      if (this.isCrossSessionTurnRunning(sessionId)) {
+        return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+      }
+      if (this.pendingManualCompactSessions.has(sessionId)) {
+        return { success: false, error: 'Manual compaction is already queued for the next message.' };
+      }
     }
     const session = this.store.getSession(sessionId);
+    if (!session) {
+      return { success: false, error: 'Session is not active. Send a message first, then try again.' };
+    }
+    const executionMode = session.executionMode || this.store.getConfig().executionMode || 'local';
+    if (executionMode !== 'local') {
+      return { success: false, error: 'Manual compaction is only available in local mode.' };
+    }
     const messages = session?.messages ?? [];
     const hasCompressibleHistory = messages.some(
       (message) => message.type === 'user' || message.type === 'assistant' || message.type === 'tool_use' || message.type === 'tool_result'
@@ -4567,7 +4688,11 @@ export class CoworkRunner extends EventEmitter {
       return { success: false, error: 'No conversation history to compact yet.' };
     }
 
-    activeSession.pendingManualCompact = true;
+    if (activeSession) {
+      activeSession.pendingManualCompact = true;
+    } else {
+      this.pendingManualCompactSessions.add(sessionId);
+    }
     this.addSystemMessage(
       sessionId,
       '已请求手动压缩历史：下一条消息将自动从压缩后的上下文继续。'
@@ -4575,6 +4700,7 @@ export class CoworkRunner extends EventEmitter {
     coworkLog('INFO', 'requestManualCompaction', 'Manual compaction queued for next turn', {
       sessionId,
       messageCount: messages.length,
+      queuedWhileIdle: !activeSession,
     });
     return { success: true };
   }
@@ -5128,8 +5254,14 @@ export class CoworkRunner extends EventEmitter {
     // folds the conversation into a synthetic compacted prompt (same path as
     // the automatic tier-2 compaction). Consumed once; retries never re-run it.
     let manualCompactApplied = false;
-    if (activeSession.pendingManualCompact && !isRetry) {
+    // Consume the user-initiated manual compaction: either queued on the live
+    // active session (button pressed mid-session) or in the idle queue
+    // (button pressed between turns, when no activeSession exists). The idle
+    // queue entry is consumed exactly once and never re-applied.
+    const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
+    if (manualCompactQueued && !isRetry) {
       activeSession.pendingManualCompact = false;
+      this.pendingManualCompactSessions.delete(sessionId);
       resetCoworkSnipHeadTokens(sessionId);
       const compacted = buildCoworkCompactedPrompt({
         messages: sessionSnapshotForBudget?.messages ?? [],
@@ -5170,6 +5302,24 @@ export class CoworkRunner extends EventEmitter {
       isRetry,
       messageCount: sessionSnapshotForBudget?.messages?.length ?? 0,
     })) {
+      const lastTurnInputTokens = this.getSessionLastTurnInputTokens(sessionId);
+      if (
+        lastTurnInputTokens !== undefined
+        && modelLimits.contextWindow > 0
+        && lastTurnInputTokens > modelLimits.contextWindow
+      ) {
+        // Some gateways serving DeepSeek report per-turn totals far above the
+        // model window (observed 1.5M-3.9M on a 1M model). These are NOT the
+        // current per-request context size, so they must not drive compaction
+        // or the ring. getCoworkContextBudget already ignores such values;
+        // log here so the phenomenon stays observable.
+        coworkLog('WARN', 'runClaudeCodeLocal', 'Provider-reported last-turn input exceeds model window; ignoring it for context budget', {
+          sessionId,
+          modelId: modelLimits.modelId,
+          contextWindow: modelLimits.contextWindow,
+          lastTurnInputTokens,
+        });
+      }
       const budget = getCoworkContextBudget({
         messages: sessionSnapshotForBudget?.messages ?? [],
         currentPrompt: prompt,
@@ -5180,8 +5330,10 @@ export class CoworkRunner extends EventEmitter {
         // mechanisms don't double-compact at the same threshold.
         ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
         // Real provider-reported context size from the last turn (Phase 2);
-        // the heuristic estimate stays as the floor when unavailable.
-        realUsageTokens: this.getSessionLastTurnInputTokens(sessionId),
+        // the heuristic estimate stays as the floor when unavailable. Values
+        // above the model window are ignored inside the budget (gateway
+        // per-turn totals are not per-request context).
+        realUsageTokens: lastTurnInputTokens,
       });
 
       if (budget.shouldCompact) {
@@ -6297,6 +6449,18 @@ export class CoworkRunner extends EventEmitter {
           // next turn instead of dropping them mid-tool.
           flushBufferedSteers();
           maybeCloseLocalTurn();
+          // The CLI is idle at the input prompt here and its transport is
+          // still writable — the ONLY reliable moment to ask it for real
+          // context usage. Once the result event arrives, the SDK closes
+          // stdin for single-turn queries and getContextUsage() fails with
+          // "ProcessTransport is not ready for writing".
+          if (!isRetry) {
+            void this.captureRealContextUsageFromSdk(
+              sessionId,
+              activeSession,
+              result as { getContextUsage?: () => Promise<unknown> }
+            ).catch(() => undefined);
+          }
         }
         if (isSdkResultEvent(event)) {
           if (unmatchedTopLevelAssistantBoundaries > 0) {
@@ -6311,44 +6475,18 @@ export class CoworkRunner extends EventEmitter {
       }
       clearLocalTurnStallWatchdog();
 
-      // Capture real per-category context usage from the SDK (local mode only).
-      // getContextUsage() is a Query method that asks the running CLI binary for
-      // its actual context accounting. We cache it on the active session so
-      // cowork:session:get can surface real numbers instead of the heuristic
-      // estimator. Failures are non-fatal — the estimator remains the fallback.
+      // Fallback capture after the loop. The reliable capture happens at the
+      // end_turn boundary above (CLI idle, transport still writable); by the
+      // time the result event arrives the SDK has already closed stdin for
+      // single-turn queries, so this normally no-ops with "ProcessTransport
+      // is not ready for writing". Failures are non-fatal — the estimator
+      // remains the fallback.
       if (!isRetry) {
-        try {
-          const usageResult = await (result as { getContextUsage?: () => Promise<unknown> })
-            .getContextUsage?.();
-          if (usageResult && typeof usageResult === 'object') {
-            const usage = usageResult as {
-              totalTokens?: number;
-              maxTokens?: number;
-              percentage?: number;
-              categories?: Array<{ name?: string; tokens?: number; color?: string }>;
-            };
-            const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
-            const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
-            if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
-              activeSession.realContextUsage = {
-                usedTokens: totalTokens,
-                contextWindow: maxTokens,
-                usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
-                isRealUsage: true,
-                categories: Array.isArray(usage.categories)
-                  ? usage.categories
-                      .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
-                      .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
-                  : undefined,
-              };
-            }
-          }
-        } catch (usageError) {
-          coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
-            sessionId,
-            error: usageError instanceof Error ? usageError.message : String(usageError),
-          });
-        }
+        await this.captureRealContextUsageFromSdk(
+          sessionId,
+          activeSession,
+          result as { getContextUsage?: () => Promise<unknown> }
+        );
       }
 
       if (activeSession.staleResumeDetected && !isRetry) {

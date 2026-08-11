@@ -292,3 +292,54 @@ test('getCoworkContextBudget adds the new prompt on top of the real context size
   // 4_000 ASCII chars ≈ 1_000 tokens + 4 frame overhead.
   assert.equal(withPrompt.estimatedTokens, 1_000 + 1_000 + 4);
 });
+
+test('getCoworkContextBudget ignores provider-reported usage above the model window (gateway per-turn totals)', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const messages = [
+    {
+      id: 'user-1',
+      type: 'user',
+      content: 'hello world',
+      timestamp: 1,
+    },
+  ];
+
+  // A 1M-window model must never be driven by a "3.9M used" provider number:
+  // some DeepSeek gateways report per-turn totals far above the window. The
+  // budget falls back to the store-history heuristic instead.
+  const budget = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 3_884_612,
+  });
+
+  const withoutReal = getCoworkContextBudget({
+    messages,
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+  });
+
+  assert.equal(budget.estimatedTokens, withoutReal.estimatedTokens);
+  assert.ok(budget.estimatedTokens < 100);
+  assert.equal(budget.shouldCompact, false);
+});
+
+test('getCoworkContextBudget still trusts plausible in-window provider usage', async () => {
+  const {
+    getCoworkContextBudget,
+  } = await import('../dist-electron/main/libs/coworkContextBudget.js');
+
+  const budget = getCoworkContextBudget({
+    messages: [],
+    modelLimits: { contextWindow: 1_000_000, maxOutputTokens: 32_768 },
+    softThresholdRatio: 0.82,
+    realUsageTokens: 450_986,
+  });
+
+  assert.equal(budget.estimatedTokens, 450_986);
+  assert.equal(budget.shouldCompact, false);
+});
