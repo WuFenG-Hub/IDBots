@@ -1,7 +1,8 @@
 /**
  * Tests for the DeepSeek Responses API integration: upstream routing, endpoint
- * URL construction, web_search injection, reasoning effort mapping, and cache
- * token parsing. Covers both the cowork proxy path and the cognitive layer.
+ * URL construction, web_search injection + relay + anti-hallucination guard,
+ * reasoning effort mapping, and cache token parsing. Covers both the cowork
+ * proxy path and the cognitive layer.
  */
 
 import test from 'node:test';
@@ -21,6 +22,35 @@ async function importCompiledService(modulePath) {
   } catch {
     return await import(`../dist-electron/services/${modulePath}.js`);
   }
+}
+
+function parseSSEEvents(raw) {
+  return raw
+    .split('\n\n')
+    .map((packet) => packet.trim())
+    .filter(Boolean)
+    .map((packet) => {
+      const lines = packet.split('\n');
+      const event = lines.find((line) => line.startsWith('event: '))?.slice('event: '.length) || '';
+      const data = lines
+        .filter((line) => line.startsWith('data: '))
+        .map((line) => line.slice('data: '.length))
+        .join('\n');
+      return { event, data: JSON.parse(data) };
+    });
+}
+
+function createWritableRecorder() {
+  const chunks = [];
+  return {
+    chunks,
+    res: {
+      write(chunk) {
+        chunks.push(String(chunk));
+        return true;
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -140,8 +170,11 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   assert.equal(result.tool_choice, 'auto');
   // reasoning.effort mapped from reasoning_effort.
   assert.deepEqual(result.reasoning, { effort: 'max' });
-  // instructions extracted from system message.
-  assert.equal(result.instructions, 'You are a helpful assistant.');
+  // instructions extracted from system message, with the anti-hallucination
+  // guard appended (web_search is injected, so the model must not fabricate
+  // real-time facts without search evidence).
+  assert.ok(result.instructions.startsWith('You are a helpful assistant.'));
+  assert.ok(result.instructions.includes('实时信息规范'));
   // input contains the user message.
   assert.ok(Array.isArray(result.input));
   assert.equal(result.input[0].role, 'user');
@@ -190,6 +223,224 @@ test('convertChatCompletionsRequestToResponsesRequest does NOT inject web_search
     assert.ok(!result.tools.some((t) => t.type === 'web_search'));
   }
   assert.equal(result.reasoning, undefined);
+  // No anti-hallucination guard for non-DeepSeek models (no web_search tool).
+  assert.equal(result.instructions, undefined);
+});
+
+test('convertChatCompletionsRequestToResponsesRequest appends anti-hallucination guard for DeepSeek only', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // DeepSeek: guard is present even when the caller supplied no system message
+  // (web_search is injected unconditionally, so the guard applies always).
+  const ds = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+    'deepseek',
+  );
+  assert.ok(ds.instructions.includes('实时信息规范'));
+  assert.ok(ds.instructions.includes('「未验证」'));
+
+  // Gateway provider (opencode) serving deepseek-v4-flash gets the same guard.
+  const gateway = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] },
+    'opencode',
+  );
+  assert.ok(gateway.instructions.includes('实时信息规范'));
+
+  // Non-DeepSeek: caller instructions pass through untouched.
+  const openai = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'gpt-5.6', messages: [{ role: 'system', content: 'You are helpful.' }] },
+    'openai',
+  );
+  assert.equal(openai.instructions, 'You are helpful.');
+  assert.ok(!String(openai.instructions ?? '').includes('实时信息规范'));
+});
+
+// ---------------------------------------------------------------------------
+// web_search_call relay: streaming path (server_tool_use blocks)
+// ---------------------------------------------------------------------------
+
+test('responses stream relays web_search_call as a single server_tool_use block', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // Real event sequence captured from opencode.ai/zen/go/v1 and
+  // api.deepseek.com: output_item.added then output_item.done carry the
+  // web_search_call item before the final message item.
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_item.added', {
+    type: 'response.output_item.added',
+    output_index: 1,
+    item: { type: 'web_search_call', id: 'call_00_ws_1', status: 'in_progress' },
+  });
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_item.done', {
+    type: 'response.output_item.done',
+    output_index: 1,
+    item: { type: 'web_search_call', id: 'call_00_ws_1', status: 'completed' },
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const blockStarts = events.filter((e) => e.event === 'content_block_start');
+  const blockStops = events.filter((e) => e.event === 'content_block_stop');
+
+  assert.equal(blockStarts.length, 1, 'exactly one content block for the search');
+  assert.equal(blockStops.length, 1);
+  const block = blockStarts[0].data.content_block;
+  assert.equal(block.type, 'server_tool_use');
+  assert.equal(block.id, 'call_00_ws_1');
+  assert.equal(block.name, 'web_search');
+  assert.deepEqual(block.input, {});
+  // added + done pairs must not duplicate the marker.
+  assert.equal(context.emittedWebSearchItemIds.size, 1);
+});
+
+test('responses stream relays multiple web_search_call items as separate blocks', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // Two sequential searches (seen in real gateway responses for hard
+  // questions), then the answer message.
+  for (const id of ['call_00_ws_a', 'call_00_ws_b']) {
+    processResponsesStreamEvent(recorder.res, state, context, 'response.output_item.done', {
+      type: 'response.output_item.done',
+      item: { type: 'web_search_call', id, status: 'completed' },
+    });
+  }
+  processResponsesStreamEvent(recorder.res, state, context, 'response.output_text.delta', {
+    type: 'response.output_text.delta',
+    response_id: 'resp_gw_2',
+    model: 'deepseek-v4-flash',
+    delta: '答案',
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const blocks = events
+    .filter((e) => e.event === 'content_block_start')
+    .map((e) => e.data.content_block);
+  const searchBlocks = blocks.filter((b) => b.type === 'server_tool_use');
+  assert.deepEqual(
+    searchBlocks.map((b) => b.id),
+    ['call_00_ws_a', 'call_00_ws_b'],
+    'one block per search, in stream order'
+  );
+  assert.ok(searchBlocks.every((b) => b.name === 'web_search'));
+  // The answer text block follows the search markers.
+  const textIndex = blocks.findIndex((b) => b.type === 'text');
+  assert.ok(textIndex !== -1, 'answer text block present');
+  assert.ok(textIndex > blocks.indexOf(searchBlocks[1]), 'search markers precede the answer text');
+});
+
+test('responses stream relays web_search_call from completed fallback when no deltas streamed', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const {
+    createStreamState,
+    createResponsesStreamContext,
+    processResponsesStreamEvent,
+  } = __openAICompatProxyTestUtils;
+
+  const state = createStreamState({ preserveDeepSeekReasoning: true });
+  const context = createResponsesStreamContext();
+  const recorder = createWritableRecorder();
+
+  // Truncated stream: only response.completed arrives, no per-item deltas.
+  processResponsesStreamEvent(recorder.res, state, context, 'response.completed', {
+    type: 'response.completed',
+    response: {
+      id: 'resp_gw_9',
+      model: 'deepseek-v4-flash',
+      status: 'completed',
+      output: [
+        { type: 'web_search_call', id: 'call_00_ws_fallback', status: 'completed' },
+        {
+          type: 'message',
+          status: 'completed',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: '获奖者：John Clarke 等三人。' }],
+        },
+      ],
+    },
+  });
+
+  const events = parseSSEEvents(recorder.chunks.join(''));
+  const blockStarts = events.filter((e) => e.event === 'content_block_start');
+  const searchBlock = blockStarts.find((e) => e.data.content_block.type === 'server_tool_use');
+  assert.ok(searchBlock, 'server_tool_use block present in fallback content');
+  assert.equal(searchBlock.data.content_block.id, 'call_00_ws_fallback');
+  const answerDelta = events.find(
+    (e) => e.event === 'content_block_delta' && String(e.data.delta?.text ?? '').includes('John Clarke')
+  );
+  assert.ok(answerDelta, 'answer text still emitted after the search marker');
+});
+
+// ---------------------------------------------------------------------------
+// web_search_call relay: non-stream path (server_tool_use injection)
+// ---------------------------------------------------------------------------
+
+test('injectResponsesWebSearchBlocks inserts server_tool_use before the answer text', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { injectResponsesWebSearchBlocks } = __openAICompatProxyTestUtils;
+
+  const anthropicResponse = {
+    id: 'msg_1',
+    type: 'message',
+    role: 'assistant',
+    model: 'deepseek-v4-flash',
+    content: [{ type: 'text', text: '获奖者是 John Clarke 等。' }],
+    stop_reason: 'end_turn',
+  };
+  injectResponsesWebSearchBlocks(anthropicResponse, {
+    id: 'resp_1',
+    output: [
+      { type: 'web_search_call', id: 'call_00_ws_ns', status: 'completed' },
+      {
+        type: 'message',
+        status: 'completed',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: '获奖者是 John Clarke 等。' }],
+      },
+    ],
+  });
+
+  assert.equal(anthropicResponse.content.length, 2);
+  assert.equal(anthropicResponse.content[0].type, 'server_tool_use');
+  assert.equal(anthropicResponse.content[0].name, 'web_search');
+  assert.equal(anthropicResponse.content[0].id, 'call_00_ws_ns');
+  assert.deepEqual(anthropicResponse.content[0].input, {});
+  assert.equal(anthropicResponse.content[1].type, 'text');
+});
+
+test('injectResponsesWebSearchBlocks is a no-op without web_search_call items', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { injectResponsesWebSearchBlocks } = __openAICompatProxyTestUtils;
+
+  const anthropicResponse = {
+    id: 'msg_2',
+    type: 'message',
+    role: 'assistant',
+    content: [{ type: 'text', text: 'hi' }],
+  };
+  injectResponsesWebSearchBlocks(anthropicResponse, {
+    id: 'resp_2',
+    output: [{ type: 'message', status: 'completed', content: [{ type: 'output_text', text: 'hi' }] }],
+  });
+
+  assert.equal(anthropicResponse.content.length, 1);
+  assert.equal(anthropicResponse.content[0].type, 'text');
 });
 
 // ---------------------------------------------------------------------------

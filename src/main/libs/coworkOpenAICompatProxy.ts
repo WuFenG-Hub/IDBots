@@ -89,6 +89,12 @@ type ResponsesStreamContext = {
   hasAnyDelta: boolean;
   /** True once any reasoning delta was forwarded to the client this stream. */
   hasReasoningDeltas: boolean;
+  /**
+   * Ids of web_search_call output items already relayed as Anthropic
+   * server_tool_use blocks, so output_item.added/done pairs and the completed
+   * fallback each emit the marker exactly once per search.
+   */
+  emittedWebSearchItemIds: Set<string>;
 };
 
 const PROXY_BIND_HOST = '0.0.0.0';
@@ -105,6 +111,19 @@ const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // constant and accepted by the API. Mirrors Reasonix openai.go which sends a
 // pointer to the (possibly empty) ReasoningContent field.
 const DEEPSEEK_REASONING_PLACEHOLDER = '';
+
+/**
+ * Anti-hallucination guard appended to the instructions of DeepSeek Responses
+ * requests (which carry the injected server-side web_search tool). The model
+ * must not confidently assert post-training real-time facts (news, awards,
+ * standings, prices, weather, latest figures) without search evidence — the
+ * confident fabrication of non-existent facts is worse than admitting a gap.
+ * Constant text keeps the cached prompt prefix byte-stable across turns.
+ */
+const DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD =
+  '实时信息规范：对于训练截止之后发生或变化的事实（新闻、奖项、赛事、行情、天气、最新数据等），'
+  + '必须依据本次会话中 web_search 搜索到的结果作答。若未执行搜索或搜索结果不足以确认答案，'
+  + '必须明确标注「未验证」或「无法确认」，不得凭记忆自信编造人名、日期、数字或结论。';
 
 // DeepSeek's Responses API is stricter than chat/completions: it REJECTS an
 // empty reasoning pass-back (`reasoning` input items with empty text) with the
@@ -1219,8 +1238,15 @@ function convertChatCompletionsRequestToResponsesRequest(
     }
   }
 
-  if (instructions.length > 0) {
-    request.instructions = instructions.join('\n\n');
+  if (instructions.length > 0 || isDeepSeek) {
+    const instructionParts = [...instructions];
+    if (isDeepSeek) {
+      // DeepSeek Responses requests always carry the injected web_search tool;
+      // the guard makes the model search instead of confidently fabricating
+      // real-time facts, and mark results it cannot verify as unverified.
+      instructionParts.push(DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD);
+    }
+    request.instructions = instructionParts.join('\n\n');
   }
 
   for (const messageItem of input) {
@@ -1589,6 +1615,7 @@ function createResponsesStreamContext(): ResponsesStreamContext {
     nextToolIndex: 0,
     hasAnyDelta: false,
     hasReasoningDeltas: false,
+    emittedWebSearchItemIds: new Set<string>(),
   };
 }
 
@@ -2267,6 +2294,98 @@ function emitResponsesFunctionCallArgumentsOnce(
   context.hasAnyDelta = true;
 }
 
+/**
+ * Relay a server-side `web_search_call` output item as an Anthropic
+ * `server_tool_use` content block, so the SDK context records that a web
+ * search actually ran (mirrors cognitiveChatCompletion marking response
+ * metadata with 'web_search'). Upstreams (opencode gateway, api.deepseek.com)
+ * do NOT embed search_results in the item, so the block carries an empty
+ * input — its purpose is the search marker, not the result text. Emitted
+ * exactly once per item id (output_item.added/done pairs + completed fallback
+ * all funnel here).
+ */
+function emitResponsesWebSearchBlockOnce(
+  res: http.ServerResponse,
+  state: StreamState,
+  context: ResponsesStreamContext,
+  itemObj: Record<string, unknown>
+): void {
+  const itemId = toString(itemObj.id);
+  if (!itemId || context.emittedWebSearchItemIds.has(itemId)) {
+    return;
+  }
+  context.emittedWebSearchItemIds.add(itemId);
+  context.hasAnyDelta = true;
+
+  // The block is real stream content: make sure message_start exists even if
+  // this was the first event of the stream.
+  ensureMessageStart(res, state, {});
+  closeCurrentBlockIfNeeded(res, state);
+
+  const index = state.contentIndex;
+  emitSSE(res, 'content_block_start', {
+    type: 'content_block_start',
+    index,
+    content_block: {
+      type: 'server_tool_use',
+      id: itemId,
+      name: 'web_search',
+      input: {},
+    },
+  });
+  emitSSE(res, 'content_block_stop', {
+    type: 'content_block_stop',
+    index,
+  });
+
+  state.contentIndex = index + 1;
+  state.currentBlockType = null;
+  state.activeToolIndex = null;
+}
+
+/**
+ * Non-stream path: inject web_search_call items from the Responses output as
+ * `server_tool_use` blocks into the Anthropic-shaped response, placed before
+ * the answer text (the search precedes the answer). The streaming path relays
+ * the same marker per output_item.done event instead.
+ */
+function injectResponsesWebSearchBlocks(
+  anthropicResponse: Record<string, unknown>,
+  upstreamJSON: unknown
+): void {
+  const responseObj = resolveResponsesObject(upstreamJSON);
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) !== 'web_search_call') {
+      continue;
+    }
+    const itemId = toString(itemObj?.id);
+    if (!itemId) {
+      continue;
+    }
+    blocks.push({
+      type: 'server_tool_use',
+      id: itemId,
+      name: 'web_search',
+      input: {},
+    });
+  }
+  if (blocks.length === 0) {
+    return;
+  }
+
+  const content = Array.isArray(anthropicResponse.content)
+    ? anthropicResponse.content
+    : [];
+  const firstTextIndex = content.findIndex(
+    (block) => toString(toOptionalObject(block)?.type) === 'text'
+  );
+  const insertAt = firstTextIndex === -1 ? content.length : firstTextIndex;
+  content.splice(insertAt, 0, ...blocks);
+  anthropicResponse.content = content;
+}
+
 function emitResponsesCompletedFunctionCalls(
   res: http.ServerResponse,
   state: StreamState,
@@ -2328,6 +2447,17 @@ function emitResponsesFallbackContent(
   responseObj: Record<string, unknown>,
   context: ResponsesStreamContext
 ): void {
+  // Server-side web searches recorded in the final output are relayed as
+  // server_tool_use blocks even when no deltas streamed (truncated stream that
+  // only produced response.completed). Deduped by item id, so the marker is
+  // not duplicated when the regular output_item.done path already emitted it.
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) === 'web_search_call') {
+      emitResponsesWebSearchBlockOnce(res, state, context, itemObj);
+    }
+  }
+
   const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(responseObj);
   const firstChoice = toOptionalObject(toArray(syntheticOpenAIResponse.choices)[0]);
   const message = toOptionalObject(firstChoice?.message);
@@ -2511,6 +2641,14 @@ function processResponsesStreamEvent(
             model
           );
         }
+      }
+    } else if (toString(itemObj.type) === 'web_search_call') {
+      // Server-side web search (DeepSeek Responses / opencode gateway). Relay
+      // it as an Anthropic server_tool_use block once the item completes; the
+      // search marker must reach the SDK context so a search-backed answer is
+      // distinguishable from a bare training-memory answer.
+      if (eventType === 'response.output_item.done') {
+        emitResponsesWebSearchBlockOnce(res, state, context, itemObj);
       }
     }
     return;
@@ -3201,6 +3339,10 @@ async function handleRequest(
     cacheToolCallExtraContentFromOpenAIResponse(syntheticOpenAIResponse);
     cacheToolCallExtraContentFromResponsesResponse(upstreamJSON);
     const anthropicResponse = openAIToAnthropic(syntheticOpenAIResponse);
+    // Non-stream Responses responses may contain web_search_call output items;
+    // relay them as server_tool_use blocks so the SDK context still records
+    // that a web search ran (streaming path relays per output_item.done).
+    injectResponsesWebSearchBlocks(anthropicResponse, upstreamJSON);
     writeJSON(res, 200, anthropicResponse);
     return;
   }
@@ -3230,6 +3372,7 @@ export const __openAICompatProxyTestUtils = {
   hydrateDeepSeekReasoningForRequest,
   resolveEffectiveUpstreamModel,
   parseMessagesRouteSessionKey,
+  injectResponsesWebSearchBlocks,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;
     deepSeekReasoningStore.clear();
