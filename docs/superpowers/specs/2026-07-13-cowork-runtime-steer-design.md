@@ -78,8 +78,8 @@ The result returns the actual mode, such as `steer` or `continue`, so renderer s
 
 The database and UI store the user's original steer text. The runner creates a transient structured user-message envelope only when writing to the SDK input channel. Its semantics are:
 
-- this is a new correction from the human user for the task currently in progress;
-- incorporate it at the earliest safe boundary;
+- this is a new instruction from the human user that supersedes the task currently in progress;
+- stop the current task immediately and switch to this new instruction (interrupt semantics);
 - preserve completed work that remains valid;
 - adjust pending plans and future actions to follow the new direction;
 - do not pretend that an in-flight external side effect can be rolled back.

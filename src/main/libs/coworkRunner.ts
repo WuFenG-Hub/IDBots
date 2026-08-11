@@ -953,8 +953,10 @@ interface ActiveSession {
    * Steers accepted while the CLI is mid-turn. The native SDK runtime drops
    * user messages written to stdin while a tool is running (the transcript
    * records an enqueue followed by a remove), so accepted steers are held here
-   * and written into the input channel only at the next local turn boundary
-   * (end_turn / result), when the CLI is idle at the input prompt.
+   * and written into the input channel only when the CLI is idle at an input
+   * prompt: normally right after interruptLocalTurnForSteers aborts the
+   * in-flight turn, or at the next local turn boundary (end_turn / result) as
+   * the fallback when no interrupt is available.
    */
   localBufferedSteers: LocalBufferedSteer[];
   localAcceptedInputs: number;
@@ -1551,6 +1553,81 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Writes accepted-but-undelivered steers into the live input channel. The
+   * CLI must be open and idle at an input prompt for the writes to survive;
+   * callers are the local turn boundary handler (end_turn / result) and the
+   * interrupt-on-steer path, which aborts the in-flight turn first so the
+   * correction becomes the CLI's next turn instead of being dropped mid-tool.
+   */
+  private flushBufferedLocalSteers(activeSession: ActiveSession, channel: CoworkSteerChannel): void {
+    if (activeSession.localInputChannel !== channel) return;
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers.splice(0)
+      : [];
+    if (buffered.length === 0) return;
+    for (const pending of buffered) {
+      if (activeSession.localTurnState !== 'open' || !channel.isOpen) {
+        pending.reject(new Error('Cowork steer input channel closed before delivery'));
+        continue;
+      }
+      const queued = channel.enqueue(buildCoworkSteerSdkMessage(pending.text));
+      void queued.delivered.then(
+        () => {
+          activeSession.localDeliveredSteerIds.add(pending.submissionId);
+          pending.resolve();
+          activeSession.maybeCloseLocalTurn?.();
+        },
+        (error: Error) => pending.reject(error)
+      );
+    }
+    coworkLog('INFO', 'flushBufferedLocalSteers', `Flushed ${buffered.length} buffered cowork steer(s)`, {
+      sessionId: activeSession.sessionId,
+      trigger: channel.deliveredCount > activeSession.localSettledInputs ? 'interrupt' : 'boundary',
+    });
+  }
+
+  /**
+   * Interrupt-on-steer: while a delivered input is still unsettled (the CLI is
+   * mid-turn, e.g. a tool is running), ask the live SDK Query control surface
+   * to abort the current turn, then flush buffered steers immediately so the
+   * user's correction is processed as the CLI's next turn. Without the
+   * interrupt, the steer would only be delivered at the next natural turn
+   * boundary — the in-flight task (e.g. the original weather query) would
+   * finish first. If the interrupt is unavailable or fails, steers stay
+   * buffered and are delivered at the next boundary as a fallback.
+   */
+  private async interruptLocalTurnForSteers(activeSession: ActiveSession): Promise<void> {
+    const control = activeSession.sdkTaskControl as (NonNullable<ActiveSession['sdkTaskControl']> & {
+      interrupt?: () => Promise<unknown>;
+    }) | null | undefined;
+    if (!control || typeof control.interrupt !== 'function') return;
+    const channel = activeSession.localInputChannel;
+    if (!channel || !channel.isOpen || activeSession.localTurnState !== 'open') return;
+    // Never interrupt while a permission prompt is pending: the CLI is paused
+    // waiting for a human answer, there is no in-flight task to abort, and an
+    // interrupt could drop the prompt itself. The steer stays buffered and is
+    // delivered at the next boundary as the fallback.
+    if (activeSession.pendingPermission) return;
+    // Only interrupt when a delivered input is still unsettled (mid-turn).
+    // At a boundary the CLI is already idle and the steer can be written
+    // directly without aborting anything.
+    if (activeSession.localSettledInputs >= channel.deliveredCount) return;
+    try {
+      await control.interrupt();
+      coworkLog('INFO', 'interruptLocalTurnForSteers', 'Interrupted local turn for immediate cowork steer delivery', {
+        sessionId: activeSession.sessionId,
+      });
+      this.flushBufferedLocalSteers(activeSession, channel);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'interruptLocalTurnForSteers', 'Local turn interrupt for steer failed; steer stays buffered until the next turn boundary', {
+        sessionId: activeSession.sessionId,
+        error: message,
+      });
+    }
+  }
+
   trySubmitSteer(
     sessionId: string,
     submissionId: string,
@@ -1581,6 +1658,10 @@ export class CoworkRunner extends EventEmitter {
     buffered.push({ submissionId, text, resolve: resolveDelivered, reject: rejectDelivered });
     activeSession.localPendingSteerIds.push(submissionId);
     activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
+    // Interrupt-on-steer: abort the in-flight turn so the buffered correction
+    // is flushed to the CLI immediately and becomes its next turn, instead of
+    // waiting for the current task to finish (human interrupt semantics).
+    void this.interruptLocalTurnForSteers(activeSession);
     return { accepted: true, delivered };
   }
 
@@ -6337,34 +6418,16 @@ export class CoworkRunner extends EventEmitter {
           }
         }
       };
-      // Accepted steers are held in localBufferedSteers until the CLI reaches a
-      // local turn boundary. Writing them mid-turn (while a tool is running) is
-      // unreliable on the SDK 0.3.x native runtime: the CLI records an enqueue
-      // and then a queue remove when the in-flight tool result arrives, so the
-      // model never sees the correction. At the boundary the CLI is idle at the
-      // input prompt and processes the queued user message as its next turn.
+      // Accepted steers are held in localBufferedSteers while the CLI is
+      // mid-turn. Writing them mid-turn (while a tool is running) is unreliable
+      // on the SDK 0.3.x native runtime: the CLI records an enqueue and then a
+      // queue remove when the in-flight tool result arrives, so the model never
+      // sees the correction. interruptLocalTurnForSteers aborts the current
+      // turn via the SDK Query control surface and flushes the buffered steers
+      // immediately; this boundary flush remains as the fallback for steers
+      // that arrive during the interrupt or when no interrupt is available.
       const flushBufferedSteers = (): void => {
-        if (activeSession.localInputChannel !== channel) return;
-        const buffered = Array.isArray(activeSession.localBufferedSteers)
-          ? activeSession.localBufferedSteers.splice(0)
-          : [];
-        if (buffered.length === 0) return;
-        for (const pending of buffered) {
-          if (activeSession.localTurnState !== 'open' || !channel.isOpen) {
-            pending.reject(new Error('Cowork steer input channel closed before delivery'));
-            continue;
-          }
-          const queued = channel.enqueue(buildCoworkSteerSdkMessage(pending.text));
-          void queued.delivered.then(
-            () => {
-              activeSession.localDeliveredSteerIds.add(pending.submissionId);
-              pending.resolve();
-              activeSession.maybeCloseLocalTurn?.();
-            },
-            (error: Error) => pending.reject(error)
-          );
-        }
-        coworkLog('INFO', 'runClaudeCodeLocal', `Flushed ${buffered.length} buffered cowork steer(s) at local turn boundary`, { sessionId });
+        this.flushBufferedLocalSteers(activeSession, channel);
       };
       // Stall watchdog: a steered (interrupted) turn can end without any
       // terminal assistant boundary or result event, leaving a delivered input

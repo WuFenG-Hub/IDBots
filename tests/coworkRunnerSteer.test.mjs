@@ -170,6 +170,7 @@ function createFakeSdk(config = {}) {
   let finishRequested = false;
   let abortObserved = false;
   let queryError = null;
+  let interruptCalls = 0;
   let releaseFirstAck;
   const firstAckGate = new Promise((resolve) => {
     releaseFirstAck = resolve;
@@ -197,6 +198,7 @@ function createFakeSdk(config = {}) {
     get queryCalls() { return queryCalls; },
     get inputs() { return inputs; },
     get abortObserved() { return abortObserved; },
+    get interruptCalls() { return interruptCalls; },
     failQuery(error = new Error('generic provider failure')) {
       queryError = error;
       eventWaiters.shift()?.();
@@ -277,7 +279,7 @@ function createFakeSdk(config = {}) {
         eventWaiters.shift()?.();
       });
 
-      return {
+      const queryResult = {
         async *[Symbol.asyncIterator]() {
           while (true) {
             if (queryError) throw queryError;
@@ -290,6 +292,19 @@ function createFakeSdk(config = {}) {
           }
         },
       };
+      // Interrupt-on-steer control surface; only present when the test opts in
+      // via sdkOptions.interruptBehavior, so legacy tests keep exercising the
+      // boundary-flush fallback path (no Query.interrupt available).
+      if (config.interruptBehavior) {
+        queryResult.interrupt = () => {
+          interruptCalls += 1;
+          if (config.interruptBehavior === 'fail') {
+            return Promise.reject(new Error('interrupt unavailable'));
+          }
+          return Promise.resolve({ still_queued: [] });
+        };
+      }
+      return queryResult;
     },
   };
   return sdk;
@@ -419,6 +434,75 @@ test('initial input and steer share one SDK query and settle in FIFO order', { s
   assert.match(sdk.inputs[1], /change direction/);
   assert.match(sdk.inputs[2], /keep the tests/);
   assert.deepEqual(settled, ['steer-1', 'steer-2']);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('mid-turn steer interrupts the running turn and is flushed immediately', { skip: !hasSteerApi }, async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { interruptBehavior: 'success', resultAfterInputClose: true },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+
+  const steer = runner.trySubmitSteer(sessionId, 'steer-interrupt', 'switch to Zhongshan');
+  assert.equal(steer.accepted, true);
+  // No boundary event is emitted: the SDK Query interrupt aborts the
+  // in-flight turn and the buffered steer is flushed immediately as the
+  // CLI's next turn (human interrupt semantics).
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sdk.interruptCalls, 1);
+  assert.equal(sdk.inputs.length, 2);
+  await steer.delivered;
+  assert.match(sdk.inputs[1], /switch to Zhongshan/);
+  assert.equal(resolved, false);
+  assert.deepEqual(settled, []);
+
+  // The interrupted turn's boundary settles the original input; the steer's
+  // own boundary settles the steer.
+  sdk.emitTerminalStream();
+  await new Promise((resolve) => setImmediate(resolve));
+  sdk.emitTerminalStream();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.deepEqual(settled, ['steer-interrupt']);
+  assert.equal(runner.getSteerCapability(sessionId), 'inactive');
+});
+
+test('interrupt failure falls back to next turn boundary delivery', { skip: !hasSteerApi }, async () => {
+  const { runner, sdk, sessionId } = createRunnerHarness({
+    sdkOptions: { interruptBehavior: 'fail' },
+  });
+  const settled = [];
+  runner.on('steerSettled', (_sessionId, submissionId) => settled.push(submissionId));
+
+  let resolved = false;
+  const run = runner.startSession(sessionId, 'initial task').then(() => {
+    resolved = true;
+  });
+  await sdk.waitForInputCount(1);
+
+  const steer = runner.trySubmitSteer(sessionId, 'steer-fallback', 'correct direction');
+  assert.equal(steer.accepted, true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sdk.interruptCalls, 1);
+  // Interrupt failed, so the steer stays buffered until the next boundary.
+  assert.equal(sdk.inputs.length, 1);
+
+  sdk.emitTerminalStream();
+  await steer.delivered;
+  await sdk.waitForInputCount(2);
+  sdk.emitTerminalStream();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  if (!resolved) runner.stopSession(sessionId);
+  await run;
+  assert.deepEqual(settled, ['steer-fallback']);
   assert.equal(runner.getSteerCapability(sessionId), 'inactive');
 });
 
