@@ -242,8 +242,15 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> =>
 
 /**
  * Best-effort extraction of a task id from a TaskCreate tool_result. The SDK
- * returns the new task id in the result payload; shape varies by version
- * (`{ id }`, `{ taskId }`, `{ task: { id } }`, ...).
+ * returns the new task id in the result payload; shape varies by version:
+ *
+ * - JSON: `{ id }`, `{ taskId }`, `{ task: { id } }`, ...
+ * - Plain text (Claude Agent SDK 0.3.x): `Task #1 created successfully: <subject>`
+ *   (matches the SDK's own parse regex `Task #(\S+) created successfully`).
+ *
+ * The text form is the live format used by the current SDK; without it the
+ * created task keeps a null id and later TaskUpdate calls (which address the
+ * task by `taskId`) can never be paired, leaving the UI panel stuck at 0/N.
  */
 export const extractTaskIdFromResult = (content: string): string | null => {
   if (!content || !content.trim()) return null;
@@ -252,7 +259,10 @@ export const extractTaskIdFromResult = (content: string): string | null => {
   try {
     parsed = JSON.parse(content);
   } catch {
-    // Not JSON — try to find `id`/`taskId` in plain text.
+    // Not JSON. First try the SDK's TaskCreate success text, then the legacy
+    // key/value lookups (`id:`/`taskId=`) for older transcripts.
+    const sdkTaskMatch = content.match(/Task\s*#(\S+)\s+created\s+successfully/i);
+    if (sdkTaskMatch) return sdkTaskMatch[1];
     const match = content.match(/(?:taskId|task_id|"id")\s*[:=]\s*"?([A-Za-z0-9_.-]+)"?/i);
     return match ? match[1] : null;
   }
