@@ -54,6 +54,88 @@ interface ApiResponse {
   error?: string;
 }
 
+/** Traffic account snapshot (balance/usage are byte counts). */
+interface TrafficAccountInfo {
+  accountId: string;
+  identityAddress: string;
+  balanceBytes: number;
+  reservedBytes: number;
+  grantedBytesTotal: number;
+  spentBytesTotal: number;
+  status: number;
+}
+
+interface TrafficLedgerEntryInfo {
+  id: number;
+  direction: number;
+  amountBytes: number;
+  balanceAfter: number;
+  sourceType: string;
+  sourceId: string;
+  remark: string;
+  timestamp: number;
+}
+
+interface TrafficDailyUsageRowInfo {
+  date: string;
+  botAddress: string;
+  bytes: number;
+  txCount: number;
+}
+
+interface TrafficBindSummaryInfo {
+  accountId: string;
+  results: Array<{ botAddress: string; status: 'bound' | 'conflict' | 'failed'; error?: string }>;
+  boundCount: number;
+  conflictCount: number;
+  failedCount: number;
+}
+
+interface TrafficSpendJournalEntryInfo {
+  id: number;
+  txId: string;
+  botAddress: string;
+  orderId: string;
+  txSize: number;
+  sponsoredMinerFee: number;
+  savedFee: number;
+  billedBy: 'traffic' | 'quota';
+  createdAt: number;
+}
+
+interface TrafficPricingPlanInfo {
+  planId: string;
+  chain: string;
+  payCurrency: string;
+  payAmount: number;
+  trafficBytes: number;
+  status: number;
+  remark: string;
+}
+
+interface TrafficRechargeOrderInfo {
+  orderId: string;
+  payAmount: number;
+  payCurrency: string;
+  trafficBytes: number;
+  gatewayParams: unknown;
+}
+
+/** status: 1=created, 2=paid, 3=credited, 4=closed. */
+interface TrafficRechargeOrderStatusInfo {
+  orderId: string;
+  status: number;
+  paidAt?: number;
+  creditedAt?: number;
+}
+
+interface TrafficSettingsInfo {
+  mode: 'traffic' | 'selfpay';
+  fallbackPolicy: 'selfpay' | 'strict';
+  /** Configured assist-service base URL override; '' = production default. */
+  apiBase: string;
+}
+
 interface ApiStreamResponse {
   ok: boolean;
   status: number;
@@ -926,6 +1008,22 @@ interface IElectronAPI {
     getSelected: () => Promise<Record<string, string>>;
     select: (chain: string, tierTitle: string) => Promise<{ success: boolean }>;
     refresh: () => Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>;
+  };
+  traffic: {
+    ensureAccount: () => Promise<{ success: boolean; account?: TrafficAccountInfo; error?: string }>;
+    getAccount: () => Promise<{ success: boolean; account?: TrafficAccountInfo | null; error?: string }>;
+    getBalance: (input?: { forceRefresh?: boolean }) => Promise<{ success: boolean; balance?: TrafficAccountInfo; error?: string }>;
+    getLedger: (input?: { cursor?: number; limit?: number; direction?: number }) => Promise<{ success: boolean; entries?: TrafficLedgerEntryInfo[]; nextCursor?: number; error?: string }>;
+    getDailyUsage: (input?: { from?: number; to?: number; botAddress?: string }) => Promise<{ success: boolean; rows?: TrafficDailyUsageRowInfo[]; error?: string }>;
+    getUsageSummary: () => Promise<{ success: boolean; summary?: { todayBytes: number; weekBytes: number; monthBytes: number }; error?: string }>;
+    bindAllBots: () => Promise<{ success: boolean; summary?: TrafficBindSummaryInfo; error?: string }>;
+    getLocalJournal: (input?: { limit?: number; botAddress?: string }) => Promise<{ success: boolean; entries?: TrafficSpendJournalEntryInfo[]; error?: string }>;
+    getPricing: () => Promise<{ success: boolean; plans?: TrafficPricingPlanInfo[]; error?: string }>;
+    createRechargeOrder: (input: { planId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderInfo; error?: string }>;
+    getRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
+    mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
+    getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };
   appInfo: {
     getVersion: () => Promise<string>;

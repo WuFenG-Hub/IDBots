@@ -5,13 +5,13 @@ const {
   buildMvcCreatePinSessionSnapshot,
   parseCreatePinWorkerResultForTests,
   runMvcCreatePinWorkerWithSessionRecovery,
-} = await import('../dist-electron/services/metaidCore.js');
+} = await import('../dist-electron/main/services/metaidCore.js');
 
 const {
   getMvcSpendSessionSnapshot,
   recordMvcSpentOutpoints,
   resetMvcSpendSessionStateForTests,
-} = await import('../dist-electron/services/mvcSpendSessionState.js');
+} = await import('../dist-electron/main/services/mvcSpendSessionState.js');
 
 test('buildMvcCreatePinSessionSnapshot does not recover pin funding when there are no stale exclusions', async () => {
   assert.equal(typeof buildMvcCreatePinSessionSnapshot, 'function');

@@ -221,7 +221,10 @@ function unwrapEnvelope(body: unknown, stage: SponsorStage): Record<string, unkn
     pickText(record, 'message', 'msg', 'error') || `Sponsor service returned code ${normalizeText(record.code) || 'unknown'}.`,
     {
       data: record.data,
-      reason: normalizeErrorCodeReason(record.code),
+      // Backend sends TRAFFIC_INSUFFICIENT as data.errorCode (envelope code stays
+      // numeric 1) — same pattern as SPONSOR_BROADCAST_PENDING.
+      reason: normalizeErrorCodeReason(record.code)
+        ?? normalizeErrorCodeReason(readObject(record.data)?.errorCode),
       retryable: normalizeBoolean(readObject(record.data)?.retryable) === true,
     },
   );
@@ -261,7 +264,8 @@ async function requestJson(
           {
             status: response.status,
             data: record?.data,
-            reason: normalizeErrorCodeReason(record?.code),
+            reason: normalizeErrorCodeReason(record?.code)
+              ?? normalizeErrorCodeReason(record ? readObject(record.data)?.errorCode : undefined),
             retryable: isRetryableHttpStatus(response.status),
           },
         );
@@ -340,8 +344,10 @@ function normalizeUserInputIndexes(value: unknown): number[] {
 
 function normalizeAddressInfo(record: Record<string, unknown>): MvcSponsorAddressInfo {
   const exists = normalizeBoolean(record.exists);
+  // status is optional: the backend serializes it with omitempty and drops the
+  // field for addresses without an explicit status (e.g. fresh auto-grant ones).
   const status = pickText(record, 'status');
-  if (exists === null || !status) {
+  if (exists === null) {
     throw createSponsorError('address_info', 'Sponsor address info response is missing required fields.', {
       data: record,
     });
@@ -779,6 +785,15 @@ export function estimateDraftMinerFee(input: { unsignedTxHex: string; userInputT
   const tx = new mvc.Transaction(input.unsignedTxHex);
   const outputTotal = tx.outputs.reduce((sum: number, output: { satoshis?: number }) => sum + Number(output.satoshis || 0), 0);
   return Math.max(0, input.userInputTotal - outputTotal);
+}
+
+/**
+ * Commit proof message signed by the user key for commitSponsor:
+ * `assist-sponsor-commit:<orderId>:<signedTxHash>`.
+ */
+export function getMvcSponsorCommitMessage(input: { orderId: string; signedTxHex: string }): string {
+  const signedTxHash = new mvc.Transaction(input.signedTxHex).id;
+  return `assist-sponsor-commit:${input.orderId}:${signedTxHash}`;
 }
 
 export async function signMvcPreparedUserInputs(input: {

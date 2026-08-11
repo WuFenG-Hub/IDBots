@@ -394,3 +394,25 @@ internal users only, no polish requirements.
 3. ~~Admin tooling for plans/grants~~ — resolved: included as Admin Console, §10.
 4. Timezone convention for `usage/daily` bucketing (recommend UTC, client
    renders local).
+
+## 12. Errata (found during client integration, 2026-08-10)
+
+Discrepancies between this spec and the delivered backend implementation.
+**Implementation is authoritative** for items 1–3 (client already compatible);
+item 4 is informational. Spec text left as originally delivered for history.
+
+1. `TRAFFIC_INSUFFICIENT` is carried as `code=1` + `data.errorCode`
+   (same pattern as `SPONSOR_BROADCAST_PENDING`), not as an envelope `code`
+   string. See their `docs/traffic-deployment.md` §5.8.
+2. Binding conflict returns HTTP 200 + error envelope
+   (`message='traffic address already bound to another account'`), not HTTP 409.
+   Re-binding the same account returns success (naturally idempotent).
+3. Traffic API error envelope field is `message`; sponsor v2 uses `msg`.
+   Clients should accept both.
+4. Canonical signature strings implemented by backend
+   (`service/traffic_service/message.go`): account create
+   `traffic-account:<accountId>:<ts>`; bind `traffic-bind:<botAddress>:<accountId>:<ts>`
+   (both identity and bot sign the same message; header `X-Timestamp` is unix
+   **seconds**, ±300s); pre auth `traffic-pre:<accountId>:<challengeId>`.
+5. Bind rate limit (50/day/account) does not consume quota on repeated
+   re-binds (existing binding returned before the limit check).

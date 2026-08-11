@@ -107,6 +107,7 @@ import {
   getTokenTransferChain,
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
+import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -211,7 +212,7 @@ import {
   CoworkTurnSubmissionController,
   type CoworkSubmitInput,
 } from './services/coworkTurnSubmission';
-import { createPin, getPinData } from './services/metaidCore';
+import { createPin, getPinData, resolveCreatePinNetwork } from './services/metaidCore';
 import {
   listOwnerMetaApps,
   publishMetaApp,
@@ -901,7 +902,7 @@ const publishSkillServiceOrderPin = async (input: {
     version: '1.0.0',
     contentType: 'application/json',
     payload: JSON.stringify(payload),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
 
   const pinId = toSafeString(result.pinId).trim();
   if (!pinId) {
@@ -2702,7 +2703,10 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
 
   const service = createBotBrowserBridgeService({
     metabotStore: getMetabotStore(),
-    createPin,
+    createPin: (metabotStore, metabotId, metaidPayload, options) => createPin(metabotStore, metabotId, metaidPayload, {
+      network: options?.network,
+      feeRate: getGlobalFeeRate(resolveCreatePinNetwork(options?.network)),
+    }),
     uploadMetaFile: async (...args) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);
@@ -3281,7 +3285,7 @@ const startSqliteDaemons = (): void => {
     getCoworkStore(),
     getMetabotStore(),
     getCoworkRunner(),
-    createPin,
+    (metabotStore, metabot_id, payload) => createPin(metabotStore, metabot_id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     (msg) => console.log(msg),
     getServiceOrderLifecycleService(),
     async ({ skillId, skillName, allowedSkillNames, strictScope }) => {
@@ -3415,7 +3419,7 @@ const startSqliteDaemons = (): void => {
       peerGlobalMetaId,
       peerChatPubkey,
       plaintext: text,
-      createPin: async (id, payload) => createPin(metabotStore, id, payload),
+      createPin: async (id, payload) => createPin(metabotStore, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     });
 
     let sessionId: string | null = null;
@@ -3589,7 +3593,7 @@ const startSqliteDaemons = (): void => {
     joinGroupChat: (metabotId, groupId) => joinGroupChat(metabotId, groupId),
     sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
       ...input,
-      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     }),
     // Invite hardening: the guest verifies the invited group exists on-chain
     // and that the inviter is its creator before spending any join pin.
@@ -3666,7 +3670,7 @@ const startSqliteDaemons = (): void => {
     waitForMemberJoined,
     sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
       ...input,
-      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     }),
     sendOwnerPrivateReport: (params) => sendGroupTaskOwnerPrivateReport(params),
     emitLog: (msg) => console.log(msg),
@@ -4475,7 +4479,7 @@ const executeDelegationPipeline = async (
       version: '1.0.0',
       contentType: 'application/json',
       payload: payloadStr,
-    });
+    }, { feeRate: getGlobalFeeRate('mvc') });
 
     orderMessagePinId = result.pinId ?? null;
     orderMessageTxid = resolvePrimarySimplemsgTxid({
@@ -5875,7 +5879,7 @@ function getProviderPingService(): ProviderPingService {
           version: '1.0.0',
           contentType: 'application/json',
           payload,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
       },
       listPendingMessages: () => listPendingPrivateMessages(),
       listRecentMessages: () => listRecentPrivateMessages(),
@@ -6023,7 +6027,7 @@ async function sendServiceOrderSimplemsg(order: ServiceOrderRecord, plaintext: s
     version: '1.0.0',
     contentType: 'application/json',
     payload,
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
 }
 
 async function sendRatingTimeoutOrderEndPin(input: {
@@ -6107,7 +6111,7 @@ const getServiceOrderLifecycleService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          });
+          }, { feeRate: getGlobalFeeRate('mvc') });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -6285,7 +6289,7 @@ const getServiceRefundSettlementService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          });
+          }, { feeRate: getGlobalFeeRate('mvc') });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -7053,7 +7057,7 @@ if (!gotTheLock) {
         peerChatPubkey: chatPubkey,
         plaintext: content,
         replyPin: replyPin || null,
-        createPin: async (id, payload) => createPin(metabotStoreInst, id, payload),
+        createPin: async (id, payload) => createPin(metabotStoreInst, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
       });
 
       // Make the sent message visible in the local A2A session right away.
@@ -7968,7 +7972,7 @@ if (!gotTheLock) {
             peerChatPubkey: chatPubkey,
             plaintext: replyText,
             replyPin,
-            createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload),
+            createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload, { feeRate: getGlobalFeeRate('mvc') }),
           });
 
           coworkStoreInst.updateConversationMappingMetadata(
@@ -8095,7 +8099,7 @@ if (!gotTheLock) {
                 version: '1.0.0',
                 contentType: 'application/json',
                 payload: payloadStr,
-              });
+              }, { feeRate: getGlobalFeeRate('mvc') });
               attachSimplemsgMetadataToCoworkMessage(
                 coworkStoreInst,
                 sessionId,
@@ -8260,7 +8264,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: 'application/json',
           payload: failurePayloadStr,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         const failureMessage = coworkStoreInst.addMessage(sessionId, {
           type: 'assistant',
           content: manualResendFailureReply,
@@ -8315,7 +8319,7 @@ if (!gotTheLock) {
         version: '1.0.0',
         contentType: 'application/json',
         payload: payloadStr,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
 
       const deliveryMessage = coworkStoreInst.addMessage(sessionId, {
         type: 'assistant',
@@ -11271,7 +11275,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: parsed.mime,
           payload: parsed.buffer,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
@@ -11294,7 +11298,7 @@ if (!gotTheLock) {
         version: '1.1.0',
         contentType: 'application/json',
         payload: payloadJson,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
 
       const localServiceRecord = {
         id: result.pinId,
@@ -11384,6 +11388,7 @@ if (!gotTheLock) {
         getMetabotStore(),
         validation.creatorMetabotId,
         buildGigSquareRevokeMetaidPayload(currentService.currentPinId),
+        { feeRate: getGlobalFeeRate('mvc') },
       );
       markGigSquareLocalServiceRevoked(currentService);
 
@@ -11528,7 +11533,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: parsed.mime,
           payload: parsed.buffer,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
@@ -11546,7 +11551,7 @@ if (!gotTheLock) {
       const result = await createPin(store, validation.creatorMetabotId, buildGigSquareModifyMetaidPayload({
         targetPinId: currentService.currentPinId,
         payloadJson,
-      }));
+      }), { feeRate: getGlobalFeeRate('mvc') });
       updateGigSquareLocalServiceAfterModify({
         targetService: currentService,
         currentPinId: toSafeString(result.pinId).trim() || currentService.currentPinId,
@@ -11796,7 +11801,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         version: '1.0.0',
         contentType: 'application/json',
         payload: payloadStr,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
       const orderMessageTxid = resolvePrimarySimplemsgTxid({
         txids: result.txids,
         pinId: result.pinId,
@@ -12072,6 +12077,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     buildTokenTransferPreview: buildTokenTransferPreviewService,
     executeTokenTransfer: executeTokenTransferService,
   });
+
+  // Traffic-ized gas fee (Phase D): account/binding/balance/usage APIs plus the
+  // local spend journal. The service stays inert (self-pay defaults) until
+  // traffic.mode is switched on in settings.
+  initTrafficAccountService({
+    getStore,
+    getMetabotStore,
+    getUserIdentityStore,
+  });
+  registerTrafficAccountIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {

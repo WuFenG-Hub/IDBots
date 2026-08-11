@@ -27,6 +27,7 @@ import {
   parseDataUrlAvatar,
   type MvcCreatePinSessionSnapshot,
 } from './metaidCore';
+import { getRate as getGlobalFeeRate } from './feeRateStore';
 
 export type UserInfoSyncStep = 'name' | 'avatar' | 'chatpubkey';
 
@@ -200,6 +201,7 @@ export async function syncUserIdentityToChain(
           payload: step.payload,
           encoding: step.encoding,
         },
+        options: { feeRate: getGlobalFeeRate('mvc') },
         sessionSnapshot,
       });
       const txid = result.txids[0];
@@ -552,6 +554,7 @@ export async function updateUserIdentityName(
         contentType: 'text/plain',
         payload: name,
       },
+      options: { feeRate: getGlobalFeeRate('mvc') },
     });
   } catch (error) {
     return { success: false, error: error instanceof Error ? error.message : String(error) };

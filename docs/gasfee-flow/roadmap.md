@@ -30,15 +30,20 @@ by `txSize`, recharge orders (mock payment), and usage-statistics APIs.
 
 **Milestones**:
 
-- `[ ]` M1.1 Spec reviewed & accepted by backend team (we deliver `backend-spec.md`)
-- `[ ]` M1.2 Traffic account + address binding + ledger implemented
-- `[ ]` M1.3 Sponsor flow integration: `pre` resolves traffic account, reserve by
+- `[x]` M1.1 Spec reviewed & accepted by backend team (we deliver `backend-spec.md`)
+- `[x]` M1.2 Traffic account + address binding + ledger implemented
+- `[x]` M1.3 Sponsor flow integration: `pre` resolves traffic account, reserve by
   estimated bytes; `commit` success deducts actual `txSize`; expiry/failure releases
-- `[ ]` M1.4 Recharge orders + mock payment confirm + pricing table API
-- `[ ]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
-- `[ ]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
+- `[x]` M1.4 Recharge orders + mock payment confirm + pricing table API
+- `[x]` M1.5 Usage APIs (balance, ledger paged, per-address per-day aggregation)
+- `[x]` M1.6 Admin console: pricing plans, dynamic fee rate, usage dashboard,
   account lookup, manual grants (backend-spec §10)
-- `[ ]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
+- `[x]` M1.7 Deployed to testnet/staging, verified end-to-end with IDBots
+  (code review passed 2026-08-09; 2 must-fix items returned to backend; 10/13
+  acceptance criteria need the integration env)
+  → done 2026-08-10: backend instance at http://47.76.58.120:7882; all 13
+  acceptance criteria verified live (§9.1-9.13) via `scripts/traffic-e2e/`;
+  §9.9 (enabled=false) covered by backend unit tests (config-side).
 
 **Acceptance**: against `backend-spec.md` acceptance criteria; an IDBots client
 can bind, recharge (mock), spend traffic on real on-chain pins, and read usage.
@@ -53,11 +58,11 @@ fallback. Fee-rate injection unified.
 
 **Milestones**:
 
-- `[ ]` M2.1 Reusable sponsor protocol client extracted (challenge/pre/sign/commit)
-- `[ ]` M2.2 `createPinWorker` supports "build unsigned draft" mode
-- `[ ]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
+- `[x]` M2.1 Reusable sponsor protocol client extracted (challenge/pre/sign/commit)
+- `[x]` M2.2 `createPinWorker` supports "build unsigned draft" mode
+- `[x]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
 - `[ ]` M2.4 Fee rate explicitly threaded through all createPin call sites
-- `[ ]` M2.5 Tests: sponsor path for chat pins; fallback matrix
+- `[x]` M2.5 Tests: sponsor path for chat pins; fallback matrix
 
 **Acceptance**: with traffic mode on and a funded pool, a bot can chat/buzz/upload
 with zero wallet balance; with traffic exhausted it cleanly falls back or errors
@@ -72,11 +77,11 @@ traffic balance, and per-bot/day usage views.
 
 **Milestones**:
 
-- `[ ]` M3.1 Traffic account service client (ensure account, bind bots, balance/usage)
-- `[ ]` M3.2 Settings "Traffic" tab: pricing table + recharge flow (mock pay)
-- `[ ]` M3.3 Traffic center: balance, ledger, per-bot daily usage
-- `[ ]` M3.4 Traffic/self-pay toggle UI; low-balance & insufficient-traffic UX
-- `[ ]` M3.5 Account binding automation: bind all local bot addresses to the user account
+- `[x]` M3.1 Traffic account service client (ensure account, bind bots, balance/usage)
+- `[x]` M3.2 Settings "Traffic" tab: pricing table + recharge flow (mock pay)
+- `[x]` M3.3 Traffic center: balance, ledger, per-bot daily usage
+- `[x]` M3.4 Traffic/self-pay toggle UI; low-balance & insufficient-traffic UX
+- `[x]` M3.5 Account binding automation: bind all local bot addresses to the user account
 
 **Acceptance**: a fresh user can complete: see pricing → recharge ¥10 (mock) →
 see 100 MB balance → send messages → watch per-bot usage update.

@@ -15,6 +15,7 @@ import type { UserIdentityStore } from '../userIdentityStore';
 import type { UserIdentity } from '../types/userIdentity';
 import { createPin, createPinForIdentity } from './metaidCore';
 import { encryptGroupMessageECB } from './metaWebCrypto';
+import { getRate as getGlobalFeeRate } from './feeRateStore';
 
 export interface CreateGroupChatOptions {
   groupName: string;
@@ -145,7 +146,7 @@ export async function createGroupChat(
     path: '/protocols/simplegroupcreate',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { groupId: result.pinId, pinId: result.pinId };
 }
 
@@ -169,7 +170,7 @@ export async function joinGroupChat(
     path: '/protocols/simplegroupjoin',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { pinId: result.pinId };
 }
 
@@ -198,7 +199,7 @@ export async function removeGroupChatMember(
     contentType: 'application/json',
     encryption: '0',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { pinId: result.pinId };
 }
 
@@ -224,6 +225,7 @@ export async function joinGroupChatAsIdentity(groupId: string): Promise<{ pinId:
       contentType: 'application/json',
       payload: JSON.stringify(body),
     },
+    options: { feeRate: getGlobalFeeRate('mvc') },
   });
   return { pinId: result.pinId };
 }
@@ -258,6 +260,7 @@ export async function sendGroupChatMessageAsIdentity(
       contentType: 'application/json',
       payload: JSON.stringify(body),
     },
+    options: { feeRate: getGlobalFeeRate('mvc') },
   });
   return { pinId: result.pinId };
 }
@@ -287,7 +290,7 @@ export async function sendGroupChatMessage(
     path: '/protocols/simplegroupchat',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { pinId: result.pinId };
 }
 

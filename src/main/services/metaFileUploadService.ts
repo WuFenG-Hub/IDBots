@@ -12,6 +12,7 @@ import {
   uploadMvcSponsorDirectFile,
   type MvcSponsorFeeAssistMetadata,
 } from './mvcSponsorUpload';
+import { getConfiguredTrafficApiBase } from './trafficAccountService';
 import { resolveMetaFileUploadSharedModulePath } from './metaFileUploadSharedResolver';
 import { getMainWorkerCandidatePaths, resolveMainWorkerPath } from './workerPathResolver';
 
@@ -331,6 +332,7 @@ export async function uploadMetaFile(
             walletPath: (sponsorWallet.path || DEFAULT_PATH).trim(),
             mvcAddress: metabot.mvc_address.trim(),
             globalMetaId: metabot.metaid?.trim() || undefined,
+            baseUrl: getConfiguredTrafficApiBase(),
             selfPaidUpload: async (feeAssist) => selfPaidDirect(feeAssist),
           }),
           params,
