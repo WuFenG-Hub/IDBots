@@ -16,6 +16,7 @@ import { themeService } from '../../services/theme';
 import { createBrowserEndpointShim, type BrowserEndpointShimResponse } from './browserEndpointShim';
 import { createIdbotsBrowserHostAdapter } from './idbotsBrowserHostAdapter';
 import { injectBrowserIframeBridge, relaxMetaAppIframeSandbox } from './browserIframeBridge';
+import { useBotBrowserCapture } from './useBotBrowserCapture';
 import type {
   BotBrowserConversationRequest,
   BotBrowserOpenUriInput,
@@ -146,6 +147,9 @@ export const BotBrowserSurface = forwardRef<BotBrowserSurfaceHandle, BotBrowserS
       onError,
       onReady,
     };
+
+    // Handle screenshot capture requests from the main-process capture bridge.
+    useBotBrowserCapture({ iframeRef, visible });
 
     if (!endpointShimRef.current) {
       const adapter = createIdbotsBrowserHostAdapter({
