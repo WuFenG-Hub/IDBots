@@ -150,28 +150,6 @@ const REALTIME_SIGNAL_TERMS: ReadonlyArray<string> = [
   'appointed', 'release', 'launch', 'breaking', 'updated',
 ];
 
-/**
- * Assertion terms that make an answer look like a confident real-time claim
- * (champion/score/election/price/record...). Gated by a recent-year match:
- * only answers that reference the recent year window AND assert a fact are
- * downgraded when no web_search_call happened (layer 2). Historical years
- * (2010 World Cup) are inside training data and never flagged.
- */
-const REALTIME_ASSERTION_TERMS: ReadonlyArray<string> = [
-  '冠军', '亚军', '季军', '比分', '夺冠', '击败', '战胜', '当选', '任命', '就任',
-  '就职', '发布', '上市', '推出', '夺得', '捧起', '获胜', '打破', '纪录', '新高',
-  '新低', '价格', '市值', '涨停', '跌停', '气温', '摄氏度', '官方宣布', '证实',
-  'champion', 'winner', 'score', 'beat', 'defeated', 'elected', 'appointed',
-  'price', 'record', 'announced',
-];
-
-/**
- * Layer-2 downgrade note appended to an answer that asserts time-sensitive
- * facts without any web_search_call in the same response. Constant text.
- */
-const DEEPSEEK_UNVERIFIED_REALTIME_NOTE =
-  '\n\n（注：以上回答包含时间敏感信息，但本次会话未执行 web 搜索验证，具体人名、日期或数字可能不准确，无法确认，请以官方信源核实。）';
-
 /** Recent-year window: [currentYear-1, currentYear+1], so 2026 questions
  * trigger while 2010 history questions stay on auto. */
 function recentYearWindow(now: Date): [number, number] {
@@ -234,19 +212,6 @@ function extractUserTextForSignalScan(text: string): string {
     return text.slice(openIndex + IDBOTS_USER_MESSAGE_OPEN.length, closeIndex);
   }
   return text;
-}
-
-/**
- * True when the text confidently asserts a time-sensitive fact (recent year
- * AND an assertion term) — the pattern that layer 2 downgrades when no
- * web_search_call backed it. `now` injectable for deterministic tests.
- */
-function hasUnverifiedRealtimeAssertion(text: string, now: Date = new Date()): boolean {
-  if (!hasRecentYearInText(text, now)) {
-    return false;
-  }
-  const normalized = text.toLowerCase();
-  return REALTIME_ASSERTION_TERMS.some((term) => normalized.includes(term.toLowerCase()));
 }
 
 /** Concatenated final answer text of a Responses output (message/output_text). */
@@ -2619,65 +2584,6 @@ function emitResponsesCompletedFunctionCalls(
   }
 }
 
-/**
- * Layer-2 downgrade gate (streaming path): when the completed response
- * contains a confident time-sensitive assertion (recent year + assertion
- * term) but NO web_search_call was relayed, append the unverified note so a
- * confident fabrication can't masquerade as a fact. Runs right before the
- * finish chunk so the note is part of the assistant turn. No-op when any
- * web search ran (search is the evidence; the note would be noise).
- */
-function emitResponsesUnverifiedRealtimeNoteIfNeeded(
-  res: http.ServerResponse,
-  state: StreamState,
-  context: ResponsesStreamContext,
-  responseObj: Record<string, unknown>
-): void {
-  if (context.emittedWebSearchItemIds.size > 0) {
-    return;
-  }
-  const answerText = context.accumulatedText || extractResponsesOutputText(responseObj);
-  if (!hasUnverifiedRealtimeAssertion(answerText)) {
-    return;
-  }
-  processOpenAIChunk(res, state, {
-    id: toString(responseObj.id),
-    model: toString(responseObj.model),
-    choices: [{ delta: { content: DEEPSEEK_UNVERIFIED_REALTIME_NOTE } }],
-  });
-  context.hasAnyDelta = true;
-}
-
-/**
- * Layer-2 downgrade gate (non-streaming path): appends the same unverified
- * note as an extra text block when the response asserted time-sensitive
- * facts without any web_search_call output item.
- */
-function appendUnverifiedRealtimeNoteIfNeeded(
-  anthropicResponse: Record<string, unknown>,
-  upstreamJSON: unknown
-): void {
-  const responseObj = resolveResponsesObject(upstreamJSON);
-  const hadWebSearch = toArray(responseObj.output).some(
-    (item) => toString(toOptionalObject(item)?.type) === 'web_search_call'
-  );
-  if (hadWebSearch) {
-    return;
-  }
-  const answerText = extractResponsesOutputText(responseObj);
-  if (!hasUnverifiedRealtimeAssertion(answerText)) {
-    return;
-  }
-  const content = Array.isArray(anthropicResponse.content)
-    ? anthropicResponse.content
-    : [];
-  content.push({
-    type: 'text',
-    text: DEEPSEEK_UNVERIFIED_REALTIME_NOTE.trim(),
-  });
-  anthropicResponse.content = content;
-}
-
 function emitResponsesFallbackContent(
   res: http.ServerResponse,
   state: StreamState,
@@ -2925,9 +2831,6 @@ function processResponsesStreamEvent(
     if (!context.hasAnyDelta) {
       emitResponsesFallbackContent(res, state, responseObj, context);
     }
-    // Layer-2 downgrade: the turn asserted time-sensitive facts without any
-    // web_search_call; tag the answer as unverified BEFORE the finish chunk.
-    emitResponsesUnverifiedRealtimeNoteIfNeeded(res, state, context, responseObj);
     emitResponsesCompletedFunctionCalls(res, state, context, responseObj);
 
     const usage = toOptionalObject(responseObj.usage);
@@ -3584,9 +3487,6 @@ async function handleRequest(
     // relay them as server_tool_use blocks so the SDK context still records
     // that a web search ran (streaming path relays per output_item.done).
     injectResponsesWebSearchBlocks(anthropicResponse, upstreamJSON);
-    // Layer-2 downgrade: assert time-sensitive facts without any search →
-    // append the unverified note (no-op when web_search_call existed).
-    appendUnverifiedRealtimeNoteIfNeeded(anthropicResponse, upstreamJSON);
     writeJSON(res, 200, anthropicResponse);
     return;
   }
@@ -3617,10 +3517,8 @@ export const __openAICompatProxyTestUtils = {
   resolveEffectiveUpstreamModel,
   parseMessagesRouteSessionKey,
   injectResponsesWebSearchBlocks,
-  appendUnverifiedRealtimeNoteIfNeeded,
   hasRealtimeSearchSignal,
   extractUserTextForSignalScan,
-  hasUnverifiedRealtimeAssertion,
   extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
     deepSeekReasoningStoreLoaded = false;
