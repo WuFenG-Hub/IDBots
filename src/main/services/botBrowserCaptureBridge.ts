@@ -5,22 +5,44 @@
  * the renderer that hosts the BotBrowserSurface to capture the active tab's
  * pixels. The renderer owns the only copy of the surface's on-screen geometry
  * (the iframe rect, and — because the ABC shell is a same-origin srcDoc iframe
- * — the nested MetaApp frame rect), so it computes the capture rect and calls
- * the existing cowork captureImageChunk IPC (main-side webContents.capturePage)
- * to produce the PNG. This bridge only orchestrates the request/response round
- * trip and resolves with the base64 image.
+ * — the nested MetaApp frame rect), so it computes the capture rect (optionally
+ * narrowed by a clip region) and calls the botBrowser:capturePage IPC
+ * (main-side webContents.capturePage) to produce the image in the requested
+ * format. This bridge only orchestrates the request/response round trip and
+ * resolves with the base64 image.
  *
  * Unlike tab commands, capture never steals focus: a minimized window is
  * restored (so the compositor has fresh pixels) but never focused.
  */
+export type BotBrowserCaptureClip = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+export type BotBrowserCaptureFormat = 'png' | 'jpeg';
+
 export type BotBrowserCaptureRequest = {
   tabId?: number;
   /** When true, capture the whole Bot Browser surface (including the ABC chrome). */
   fullSurface?: boolean;
+  /**
+   * Optional region (CSS px) relative to the resolved capture target's top-left
+   * (the content area by default, the whole surface when fullSurface is set).
+   * Clamped to the target bounds by the renderer.
+   */
+  clip?: BotBrowserCaptureClip;
+  /** Output format; defaults to png. jpeg is smaller for sending to the model. */
+  format?: BotBrowserCaptureFormat;
+  /** JPEG quality 0–100 (ignored for png). Defaults to 80. */
+  quality?: number;
 };
 
 export type BotBrowserCaptureResult = {
-  pngBase64: string;
+  /** Base64-encoded image bytes (PNG or JPEG, see mimeType). */
+  data: string;
+  mimeType: string;
   width: number;
   height: number;
 };

@@ -6949,6 +6949,54 @@ if (!gotTheLock) {
     getBotBrowserCaptureBridge().handleResponse(event.sender, response);
   });
 
+  // Format-aware pixel capture for the Bot Browser screenshot tool. Mirrors the
+  // cowork captureImageChunk handler but supports PNG/JPEG and reports the
+  // mimeType, so the screenshot tool can request a smaller JPEG when sending the
+  // image to the model. The renderer resolves the rect (content area / whole
+  // surface / clip); this handler only does the capturePage + encode.
+  ipcMain.handle('botBrowser:capturePage', async (
+    event,
+    options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    },
+  ) => {
+    try {
+      const captureRect = normalizeCaptureRect(options?.rect);
+      if (!captureRect) {
+        return { success: false, error: 'Capture rect is required' };
+      }
+      const image = await event.sender.capturePage(captureRect);
+      const format: 'png' | 'jpeg' = options?.format === 'jpeg' ? 'jpeg' : 'png';
+      let buffer: Buffer;
+      let mimeType: string;
+      if (format === 'jpeg') {
+        const quality = typeof options?.quality === 'number'
+          && options.quality >= 0 && options.quality <= 100
+          ? Math.round(options.quality)
+          : 80;
+        buffer = image.toJPEG(quality);
+        mimeType = 'image/jpeg';
+      } else {
+        buffer = image.toPNG();
+        mimeType = 'image/png';
+      }
+      return {
+        success: true,
+        mimeType,
+        width: captureRect.width,
+        height: captureRect.height,
+        data: buffer.toString('base64'),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to capture Bot Browser page',
+      };
+    }
+  });
+
   ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
     return getBotBrowserHostService().resolveResource(
       botBrowserHostInput<{ actorId?: string; uri?: string }>(input) as { actorId?: string; uri: string },

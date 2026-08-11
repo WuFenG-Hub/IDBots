@@ -9,15 +9,19 @@ import { useEffect } from 'react';
  * because the ABC shell is a same-origin srcDoc iframe — the nested MetaApp
  * frame rect, read from the ABC document without modifying ABC.
  *
- * The actual pixel capture happens via the existing cowork captureImageChunk IPC
- * (main-side webContents.capturePage); this hook only resolves the rect and
- * forwards the resulting base64 PNG back to the capture bridge.
+ * The actual pixel capture happens via the botBrowser:capturePage IPC
+ * (main-side webContents.capturePage, PNG or JPEG); this hook only resolves the
+ * rect (optionally narrowed to a clip region), requests the format, and forwards
+ * the resulting base64 image back to the capture bridge.
  */
 
 type CaptureRequestInput = {
   requestId: string;
   tabId?: number;
   fullSurface?: boolean;
+  clip?: { x: number; y: number; width: number; height: number };
+  format?: 'png' | 'jpeg';
+  quality?: number;
 };
 
 type CaptureRect = { x: number; y: number; width: number; height: number };
@@ -71,16 +75,15 @@ export function useBotBrowserCapture(options: {
 
   useEffect(() => {
     const botBrowser = window.electron?.botBrowser;
-    const cowork = window.electron?.cowork;
-    if (!botBrowser?.onCaptureRequest || !botBrowser.respondToCaptureRequest || !cowork?.captureImageChunk) {
+    if (!botBrowser?.onCaptureRequest || !botBrowser.respondToCaptureRequest || !botBrowser.capturePage) {
       return;
     }
 
     const unsubscribe = botBrowser.onCaptureRequest(async (input: CaptureRequestInput) => {
-      const { requestId, fullSurface } = input;
+      const { requestId, fullSurface, clip, format, quality } = input;
       const respond = (payload: {
         success: boolean;
-        result?: { pngBase64: string; width: number; height: number };
+        result?: { data: string; mimeType: string; width: number; height: number };
         error?: string;
       }) => {
         botBrowser.respondToCaptureRequest({ requestId, ...payload });
@@ -104,20 +107,41 @@ export function useBotBrowserCapture(options: {
         width: outerRect.width,
         height: outerRect.height,
       };
-      const rect = fullSurface
+      const target = fullSurface
         ? wholeSurface
         : (resolveContentFrameRect(iframe, outerRect) ?? wholeSurface);
 
+      // Narrow the resolved target to the clip region (CSS px, relative to the
+      // target's top-left), clamped to the target bounds so capturePage never
+      // receives an out-of-range rect.
+      let rect = target;
+      if (clip) {
+        const cx = Math.max(0, clip.x);
+        const cy = Math.max(0, clip.y);
+        const cw = Math.max(0, Math.min(clip.width, target.width - cx));
+        const ch = Math.max(0, Math.min(clip.height, target.height - cy));
+        if (cw <= 1 || ch <= 1) {
+          respond({ success: false, error: 'clip region is outside the capture target bounds.' });
+          return;
+        }
+        rect = { x: target.x + cx, y: target.y + cy, width: cw, height: ch };
+      }
+
       try {
-        const result = await cowork.captureImageChunk({ rect });
-        if (!result?.success || !result.pngBase64) {
+        const result = await botBrowser.capturePage({
+          rect,
+          ...(format ? { format } : {}),
+          ...(typeof quality === 'number' ? { quality } : {}),
+        });
+        if (!result?.success || !result.data) {
           respond({ success: false, error: result?.error || 'Failed to capture the Bot Browser surface.' });
           return;
         }
         respond({
           success: true,
           result: {
-            pngBase64: result.pngBase64,
+            data: result.data,
+            mimeType: result.mimeType ?? 'image/png',
             width: result.width ?? Math.round(rect.width),
             height: result.height ?? Math.round(rect.height),
           },

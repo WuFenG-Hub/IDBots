@@ -112,9 +112,14 @@ contextBridge.exposeInMainWorld('electron', {
     respondToCaptureRequest: (response: {
       requestId: string;
       success: boolean;
-      result?: { pngBase64: string; width: number; height: number };
+      result?: { data: string; mimeType: string; width: number; height: number };
       error?: string;
     }) => ipcRenderer.send('botBrowser:capture-request:response', response),
+    capturePage: (options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    }) => ipcRenderer.invoke('botBrowser:capturePage', options),
     resolveResource: (input: { actorId?: string; uri: string }) =>
       ipcRenderer.invoke('botBrowser:resolveResource', input),
     getProfile: (input: { actorId?: string; globalMetaId: string }) =>

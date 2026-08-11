@@ -23,10 +23,18 @@ export type BotBrowserScreenshotInput = {
   tabId?: number;
   /** Capture the whole Bot Browser surface (including the ABC chrome) instead of just the content pane. */
   fullSurface?: boolean;
+  /** Region (CSS px) relative to the resolved capture target's top-left; clamped to the target bounds. */
+  clip?: { x: number; y: number; width: number; height: number };
+  /** Output format; defaults to png. */
+  format?: 'png' | 'jpeg';
+  /** JPEG quality 0–100 (ignored for png). */
+  quality?: number;
 };
 
 export type BotBrowserScreenshotResult = {
-  pngBase64: string;
+  /** Base64-encoded image bytes (PNG or JPEG, see mimeType). */
+  data: string;
+  mimeType: string;
   width: number;
   height: number;
 };
@@ -35,9 +43,9 @@ export type BotBrowserControl = {
   openUri(input: { uri: string; actorId?: string | null }): Promise<void> | void;
   execute(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult>;
   /**
-   * Capture the active (or a specified) Bot Browser tab as a PNG. Resolves with
-   * the base64 image and its dimensions. Rejects (or the renderer reports an
-   * error) when the Bot Browser surface is not visible.
+   * Capture the active (or a specified) Bot Browser tab as an image. Resolves
+   * with the base64 image bytes, mimeType, and dimensions. Rejects (or the
+   * renderer reports an error) when the Bot Browser surface is not visible.
    */
   screenshot(input?: BotBrowserScreenshotInput): Promise<BotBrowserScreenshotResult>;
   forkMetaApp?(input: { sessionId: string; uri?: string | null }): Promise<{
@@ -492,9 +500,10 @@ function sleep(ms: number): Promise<void> {
  * Pixel capture happens in the renderer via the existing webContents.capturePage
  * primitive; the renderer crops to the MetaApp content frame when possible.
  *
- * The result is an MCP image content block (base64 PNG) so the model can SEE the
- * rendered page, mirroring Playwright's browser_take_screenshot. An optional
- * savePath writes the PNG to disk as well. No ABC runtime changes are needed.
+ * The result is an MCP image content block (base64 image, PNG or JPEG) so the
+ * model can SEE the rendered page, mirroring Playwright's browser_take_screenshot.
+ * An optional savePath writes the image to disk as well. No ABC runtime changes
+ * are needed.
  */
 export function buildBotBrowserScreenshotTool(deps: {
   tool: SdkToolFactory;
@@ -507,19 +516,29 @@ export function buildBotBrowserScreenshotTool(deps: {
     tool(
       'bot_browser_screenshot',
       [
-        'Capture a screenshot of the active Bot Browser tab as a PNG image you can see.',
+        'Capture a screenshot of the active Bot Browser tab as an image you can see.',
         'The Bot Browser is the built-in on-chain browser shown on the right of the app; a MetaApp renders inside it.',
-        'By default the ACTIVE tab is captured; pass `uri` to navigate first (metaapp://<pinId>, metaid://<globalMetaId>, or preview-metaapp:// for a local app you are building) or `tabId` to switch tabs first.',
+        'By default the ACTIVE tab is captured (cropped to the MetaApp content area); pass `uri` to navigate first (metaapp://<pinId>, metaid://<globalMetaId>, or preview-metaapp:// for a local app you are building) or `tabId` to switch tabs first.',
         'Use this to SEE how a MetaApp renders — verify layout, debug visual issues, or confirm an app looks right before/after publishing — instead of guessing from source files.',
         'After navigation the tool waits briefly for the page to paint; pass `waitMs` (0–10000) to override the default.',
+        '`clip` ({x,y,width,height} in CSS px) narrows the capture to a region within the resolved target (the content area by default, or the whole surface when fullSurface=true); it is clamped to the target bounds.',
+        '`format` defaults to "png"; pass "jpeg" for a smaller image (better when sending to the model), with optional `quality` 0–100 (default 80, png ignores quality).',
         'The Bot Browser surface must be open and visible; if it is hidden the tool returns an error asking the user to switch to Bot Browser mode.',
-        'Pass `savePath` (absolute) to also write the PNG to disk (e.g. into the workspace); otherwise the image is returned inline only.',
+        'Pass `savePath` (absolute) to also write the image to disk (e.g. into the workspace); otherwise the image is returned inline only.',
       ].join(' '),
       {
         uri: z.string().optional(),
         newTab: z.boolean().optional(),
         tabId: z.number().optional(),
         fullSurface: z.boolean().optional(),
+        clip: z.object({
+          x: z.number(),
+          y: z.number(),
+          width: z.number(),
+          height: z.number(),
+        }).optional(),
+        format: z.enum(['png', 'jpeg']).optional(),
+        quality: z.number().optional(),
         savePath: z.string().optional(),
         waitMs: z.number().optional(),
       },
@@ -528,13 +547,24 @@ export function buildBotBrowserScreenshotTool(deps: {
         newTab?: boolean;
         tabId?: number;
         fullSurface?: boolean;
+        clip?: { x: number; y: number; width: number; height: number };
+        format?: 'png' | 'jpeg';
+        quality?: number;
         savePath?: string;
         waitMs?: number;
       }) => {
-        // Validate savePath up front so we never capture just to throw it away.
+        // Validate savePath and clip up front so we never capture just to throw it away.
         const savePath = args.savePath?.trim();
         if (savePath && !savePath.startsWith('/')) {
           return textResult(`savePath must be an absolute path, got: ${savePath}`, true);
+        }
+        const clip = args.clip;
+        if (clip && (clip.x < 0 || clip.y < 0 || clip.width <= 0 || clip.height <= 0)) {
+          return textResult('clip must have non-negative x/y and positive width/height.', true);
+        }
+        const format = args.format === 'jpeg' ? 'jpeg' : 'png';
+        if (args.quality !== undefined && (args.quality < 0 || args.quality > 100)) {
+          return textResult('quality must be between 0 and 100.', true);
         }
 
         try {
@@ -562,16 +592,24 @@ export function buildBotBrowserScreenshotTool(deps: {
             await sleep(waitMs);
           }
 
-          const shot = await controlBotBrowser.screenshot({ fullSurface: args.fullSurface });
+          const shot = await controlBotBrowser.screenshot({
+            fullSurface: args.fullSurface,
+            clip,
+            format,
+            quality: args.quality,
+          });
 
+          const regionLabel = clip
+            ? ` clipped to ${shot.width}x${shot.height}`
+            : (args.fullSurface ? ' (full surface)' : ' (content area)');
           const summaryLines: string[] = [
-            `Captured Bot Browser tab — ${shot.width}x${shot.height} px${args.fullSurface ? ' (full surface)' : ' (content area)'}.`,
+            `Captured Bot Browser tab — ${shot.width}x${shot.height} px${regionLabel}, ${format.toUpperCase()}.`,
           ];
 
           if (savePath) {
             try {
               await fs.promises.mkdir(path.dirname(savePath), { recursive: true });
-              await fs.promises.writeFile(savePath, Buffer.from(shot.pngBase64, 'base64'));
+              await fs.promises.writeFile(savePath, Buffer.from(shot.data, 'base64'));
               summaryLines.push(`Saved to ${savePath}.`);
             } catch (error) {
               return textResult(
@@ -583,7 +621,7 @@ export function buildBotBrowserScreenshotTool(deps: {
 
           return {
             content: [
-              { type: 'image' as const, data: shot.pngBase64, mimeType: 'image/png' },
+              { type: 'image' as const, data: shot.data, mimeType: shot.mimeType },
               { type: 'text' as const, text: summaryLines.join('\n') },
             ],
           };

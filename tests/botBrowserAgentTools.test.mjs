@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Module from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const require = Module.createRequire(import.meta.url);
-const { buildBotBrowserAgentTools, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
+const { buildBotBrowserAgentTools, buildBotBrowserScreenshotTool, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
 
 function makeHarness(overrides = {}) {
   const calls = { execute: [], openUri: [], forkMetaApp: [], search: [] };
@@ -383,4 +386,113 @@ test('search_metaapps forks mode requires a valid pinId', async () => {
 test('search_metaapps is not registered when the host has no search support', () => {
   const { byName } = makeHarness({ withoutSearch: true });
   assert.equal(byName.search_metaapps, undefined);
+});
+
+// --- bot_browser_screenshot (Phase 2: clip + format) ---
+
+function makeScreenshotHarness(overrides = {}) {
+  const calls = { execute: [], openUri: [], screenshot: [] };
+  const control = {
+    execute: async (command) => {
+      calls.execute.push(command);
+      return { action: command.action, tabs: [], activeTab: null, ...(overrides.executeResult ?? {}) };
+    },
+    openUri: async (input) => { calls.openUri.push(input); },
+    screenshot: async (input) => {
+      calls.screenshot.push(input ?? {});
+      return overrides.screenshotResult ?? {
+        data: 'Zm9v', // base64 of "foo"
+        mimeType: input?.format === 'jpeg' ? 'image/jpeg' : 'image/png',
+        width: 800,
+        height: 600,
+      };
+    },
+    ...overrides.control,
+  };
+  const tools = buildBotBrowserScreenshotTool({
+    tool: (name, description, schema, handler) => ({ name, description, handler }),
+    controlBotBrowser: control,
+    sessionId: 'session-1',
+  });
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  return { calls, tools, byName };
+}
+
+test('bot_browser_screenshot returns an image content block and calls screenshot once', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  assert.ok(byName.bot_browser_screenshot);
+  const result = await byName.bot_browser_screenshot.handler({});
+  assert.equal(calls.screenshot.length, 1);
+  assert.deepEqual(calls.screenshot[0], { fullSurface: undefined, clip: undefined, format: 'png', quality: undefined });
+  const image = result.content.find((b) => b.type === 'image');
+  assert.ok(image, 'expected an image content block');
+  assert.equal(image.mimeType, 'image/png');
+  assert.equal(typeof image.data, 'string');
+  const text = result.content.find((b) => b.type === 'text').text;
+  assert.match(text, /800x600/);
+  assert.match(text, /PNG/);
+});
+
+test('bot_browser_screenshot forwards clip to screenshot', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  await byName.bot_browser_screenshot.handler({ clip: { x: 10, y: 20, width: 100, height: 80 } });
+  assert.deepEqual(calls.screenshot[0].clip, { x: 10, y: 20, width: 100, height: 80 });
+});
+
+test('bot_browser_screenshot forwards format jpeg + quality and returns image/jpeg', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  const result = await byName.bot_browser_screenshot.handler({ format: 'jpeg', quality: 60 });
+  assert.equal(calls.screenshot[0].format, 'jpeg');
+  assert.equal(calls.screenshot[0].quality, 60);
+  const image = result.content.find((b) => b.type === 'image');
+  assert.equal(image.mimeType, 'image/jpeg');
+});
+
+test('bot_browser_screenshot rejects an invalid clip before capturing', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  const result = await byName.bot_browser_screenshot.handler({ clip: { x: -1, y: 0, width: 10, height: 10 } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /clip must have/);
+  assert.equal(calls.screenshot.length, 0);
+});
+
+test('bot_browser_screenshot rejects out-of-range quality before capturing', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  const result = await byName.bot_browser_screenshot.handler({ quality: 150 });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /quality must be between 0 and 100/);
+  assert.equal(calls.screenshot.length, 0);
+});
+
+test('bot_browser_screenshot navigates by uri then captures', async () => {
+  const { calls, byName } = makeScreenshotHarness();
+  await byName.bot_browser_screenshot.handler({ uri: 'metaapp://xyz', waitMs: 0 });
+  assert.deepEqual(calls.openUri, [{ uri: 'metaapp://xyz' }]);
+  assert.equal(calls.screenshot.length, 1);
+});
+
+test('bot_browser_screenshot savePath writes the image bytes to disk', async () => {
+  const file = path.join(os.tmpdir(), `bot-browser-shot-${Date.now()}.png`);
+  try {
+    const { byName } = makeScreenshotHarness();
+    const result = await byName.bot_browser_screenshot.handler({ savePath: file });
+    const text = result.content.find((b) => b.type === 'text').text;
+    assert.match(text, /Saved to/);
+    const written = await fs.promises.readFile(file, 'utf8');
+    assert.equal(written, 'foo');
+  } finally {
+    await fs.promises.rm(file, { force: true });
+  }
+});
+
+test('bot_browser_screenshot surfaces bridge errors with the surface hint', async () => {
+  const { byName } = makeScreenshotHarness({
+    control: {
+      screenshot: async () => { throw new Error('Bot Browser capture request timed out'); },
+    },
+  });
+  const result = await byName.bot_browser_screenshot.handler({});
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /timed out/);
+  assert.match(result.content[0].text, /switch to Bot Browser mode/);
 });
