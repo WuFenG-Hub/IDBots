@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import fs from 'fs';
+import path from 'path';
 import { parseMetaAppPinIdFromUri } from '../services/botBrowserMetaAppForkService';
 import { readRendererFromEnvelope } from '../services/botBrowserSourceLocator';
 import type { MetaAppSearchItem } from '../services/metaAppSearchService';
@@ -476,4 +477,121 @@ export function buildBotBrowserAgentTools(deps: {
   }
 
   return [botBrowserTabs, botBrowserOpenUri, botBrowserPreviewLocal, botBrowserReadPage, ...extraTools];
+}
+
+const DEFAULT_SCREENSHOT_NAV_WAIT_MS = 1200;
+const MAX_SCREENSHOT_NAV_WAIT_MS = 10_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Always-on screenshot tool. Registered for EVERY cowork session type (not only
+ * browser sessions) so any MetaBot can capture the Bot Browser's active tab.
+ * Pixel capture happens in the renderer via the existing webContents.capturePage
+ * primitive; the renderer crops to the MetaApp content frame when possible.
+ *
+ * The result is an MCP image content block (base64 PNG) so the model can SEE the
+ * rendered page, mirroring Playwright's browser_take_screenshot. An optional
+ * savePath writes the PNG to disk as well. No ABC runtime changes are needed.
+ */
+export function buildBotBrowserScreenshotTool(deps: {
+  tool: SdkToolFactory;
+  controlBotBrowser: BotBrowserControl;
+  sessionId: string;
+}): unknown[] {
+  const { tool, controlBotBrowser } = deps;
+
+  return [
+    tool(
+      'bot_browser_screenshot',
+      [
+        'Capture a screenshot of the active Bot Browser tab as a PNG image you can see.',
+        'The Bot Browser is the built-in on-chain browser shown on the right of the app; a MetaApp renders inside it.',
+        'By default the ACTIVE tab is captured; pass `uri` to navigate first (metaapp://<pinId>, metaid://<globalMetaId>, or preview-metaapp:// for a local app you are building) or `tabId` to switch tabs first.',
+        'Use this to SEE how a MetaApp renders — verify layout, debug visual issues, or confirm an app looks right before/after publishing — instead of guessing from source files.',
+        'After navigation the tool waits briefly for the page to paint; pass `waitMs` (0–10000) to override the default.',
+        'The Bot Browser surface must be open and visible; if it is hidden the tool returns an error asking the user to switch to Bot Browser mode.',
+        'Pass `savePath` (absolute) to also write the PNG to disk (e.g. into the workspace); otherwise the image is returned inline only.',
+      ].join(' '),
+      {
+        uri: z.string().optional(),
+        newTab: z.boolean().optional(),
+        tabId: z.number().optional(),
+        fullSurface: z.boolean().optional(),
+        savePath: z.string().optional(),
+        waitMs: z.number().optional(),
+      },
+      async (args: {
+        uri?: string;
+        newTab?: boolean;
+        tabId?: number;
+        fullSurface?: boolean;
+        savePath?: string;
+        waitMs?: number;
+      }) => {
+        // Validate savePath up front so we never capture just to throw it away.
+        const savePath = args.savePath?.trim();
+        if (savePath && !savePath.startsWith('/')) {
+          return textResult(`savePath must be an absolute path, got: ${savePath}`, true);
+        }
+
+        try {
+          let navigated = false;
+          const uri = args.uri?.trim();
+          if (uri) {
+            if (args.newTab) {
+              await controlBotBrowser.execute({ action: 'open-tab', uri });
+            } else {
+              await controlBotBrowser.openUri({ uri });
+            }
+            navigated = true;
+          } else if (typeof args.tabId === 'number') {
+            await controlBotBrowser.execute({ action: 'switch-tab', tabId: args.tabId });
+            navigated = true;
+          }
+
+          // Give the page a moment to paint after a navigation/switch. There is
+          // no load-complete signal from the sandboxed MetaApp frame, so this is
+          // a pragmatic approximation of Playwright's auto-waiting.
+          if (navigated) {
+            const waitMs = typeof args.waitMs === 'number' && args.waitMs >= 0
+              ? Math.min(Math.round(args.waitMs), MAX_SCREENSHOT_NAV_WAIT_MS)
+              : DEFAULT_SCREENSHOT_NAV_WAIT_MS;
+            await sleep(waitMs);
+          }
+
+          const shot = await controlBotBrowser.screenshot({ fullSurface: args.fullSurface });
+
+          const summaryLines: string[] = [
+            `Captured Bot Browser tab — ${shot.width}x${shot.height} px${args.fullSurface ? ' (full surface)' : ' (content area)'}.`,
+          ];
+
+          if (savePath) {
+            try {
+              await fs.promises.mkdir(path.dirname(savePath), { recursive: true });
+              await fs.promises.writeFile(savePath, Buffer.from(shot.pngBase64, 'base64'));
+              summaryLines.push(`Saved to ${savePath}.`);
+            } catch (error) {
+              return textResult(
+                `Captured the screenshot but failed to save to ${savePath}: ${error instanceof Error ? error.message : String(error)}`,
+                true,
+              );
+            }
+          }
+
+          return {
+            content: [
+              { type: 'image' as const, data: shot.pngBase64, mimeType: 'image/png' },
+              { type: 'text' as const, text: summaryLines.join('\n') },
+            ],
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return textResult(`Failed to capture Bot Browser screenshot: ${message}. ${SURFACE_HINT}`, true);
+        }
+      },
+    ),
+  ];
 }
