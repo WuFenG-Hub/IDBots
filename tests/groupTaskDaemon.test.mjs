@@ -1357,6 +1357,32 @@ test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playb
   assert.ok(!workerPrompt.includes('Capability check before recruiting'), 'chair-only recruiting rules stay out of the worker playbook');
 });
 
+test('prompts: chair playbook gates member kicks behind explicit owner confirmation', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker' },
+  ];
+  const chairPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'chair',
+  });
+  // R3: a chat-initiated kick must be restated and explicitly confirmed by the
+  // owner first; the Tasks-UI modal already counts as that confirmation.
+  assert.match(chairPrompt, /Removing a member \(kick\) is owner-confirmed, never casual/);
+  assert.match(chairPrompt, /explicit confirmation in the same conversation/);
+  assert.match(chairPrompt, /Tasks-UI modal already IS the owner's confirmation/);
+
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+  });
+  assert.ok(!workerPrompt.includes('Removing a member (kick)'), 'kick governance stays out of the worker playbook');
+});
+
 // ---------------------------------------------------------------------------
 // Worldview/time/experience prompts, deliverable verification, owner report
 // ---------------------------------------------------------------------------
