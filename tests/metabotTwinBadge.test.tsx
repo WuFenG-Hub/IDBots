@@ -89,7 +89,6 @@ test('MetaBotListCard shows the Twin badge only on the Twin bot', () => {
         metabot={metabot}
         onEdit={() => {}}
         onToggleEnabled={() => {}}
-        onDelete={() => {}}
         isChainSynced
         onSyncToChain={() => {}}
       />,

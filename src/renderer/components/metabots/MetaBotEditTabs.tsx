@@ -17,6 +17,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PhotoIcon, PlusIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
 import type { SyncStepKey } from './MetaBotCreateSuccessModal';
 import {
@@ -24,6 +25,7 @@ import {
   normalizeAllowChatSkills,
   removeAllowChatSkill,
 } from './allowChatSkills.ts';
+import MetaBotAdvancedActionsSection from './MetaBotAdvancedActionsSection';
 import MetaBotHomepageSection, { composeHomepageForSave } from './MetaBotHomepageSection';
 import { buildMetaBotToggleViewModel } from './metaBotCardPresentation.js';
 
@@ -180,6 +182,14 @@ interface MetaBotEditTabsProps {
   onPreviewMetaAppHomepage?: (pin: string) => Promise<boolean> | boolean;
   /** Open the MetaApps surface so the user can publish a MetaApp for this Bot. */
   onRequestMetaApps?: () => void;
+  /**
+   * Full Metabot row for the Advanced-tab Wallet / Backup / Delete actions.
+   * Optional so SSR/unit renders can mount the editor without a live row; when
+   * absent the Advanced actions section is hidden.
+   */
+  metabot?: Metabot | null;
+  /** Open the manager-level safe-delete flow from the Advanced tab. */
+  onDelete?: () => void;
 }
 
 const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
@@ -196,6 +206,8 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   onOpenDefaultHomepage,
   onPreviewMetaAppHomepage,
   onRequestMetaApps,
+  metabot,
+  onDelete,
 }) => {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const [values, setValues] = useState<MetaBotEditValues>(() => buildInitialValues(initialValues));
@@ -994,6 +1006,12 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         />
 
         {renderPanelSaveRow('advanced')}
+
+        {/* Wallet / Backup / Delete — OAC-aligned Advanced actions. Immediate
+            effects (panels / delete flow), kept out of the homepage save above. */}
+        {metabot && onDelete && (
+          <MetaBotAdvancedActionsSection metabot={metabot} onDelete={onDelete} />
+        )}
       </div>
 
       {/* Global footer */}

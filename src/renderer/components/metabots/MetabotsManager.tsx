@@ -589,8 +589,11 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
           onOpenDefaultHomepage={onOpenMetabotInBrowser ? () => onOpenMetabotInBrowser(editMetabot) : undefined}
           onPreviewMetaAppHomepage={onPreviewMetaAppHomepage}
           onRequestMetaApps={onRequestMetaApps}
+          metabot={editMetabot}
+          onDelete={() => handleDeleteRequest(editMetabot)}
         />
         {renderSuccessModal()}
+        {renderDeleteModal()}
       </div>
     );
   }
@@ -632,13 +635,31 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       />
     );
   }
+  // Shared by the list view and the edit view: the Advanced-tab Danger Zone can
+  // trigger delete while editing, so the confirm modal must render in both.
+  function renderDeleteModal() {
+    if (!deleteTarget) return null;
+    return (
+      <MetaBotDeleteConfirmModal
+        metabot={deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={handleDeleteConfirm}
+      />
+    );
+  }
   const handleDeleteRequest = (metabot: Metabot) => setDeleteTarget(metabot);
   const handleDeleteConfirm = async () => {
     if (!deleteTarget) return;
-    const result = await window.electron.idbots.deleteMetaBot(deleteTarget.id);
+    const deletedId = deleteTarget.id;
+    const result = await window.electron.idbots.deleteMetaBot(deletedId);
     if (result.success) {
-      setList((prev) => prev.filter((m) => m.id !== deleteTarget.id));
+      setList((prev) => prev.filter((m) => m.id !== deletedId));
       setDeleteTarget(null);
+      // If the deleted bot was open in the edit view, fall back to the list.
+      if (editId === deletedId) {
+        setEditId(null);
+        setViewMode('list');
+      }
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotDeleteSuccess') }));
     } else {
       setActionError(result.error || i18nService.t('metabotUpdateFailed'));
@@ -823,7 +844,6 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
                 metabot={m}
                 onEdit={() => handleEdit(m.id)}
                 onToggleEnabled={(enabled) => handleToggleEnabled(m.id, enabled)}
-                onDelete={() => handleDeleteRequest(m)}
                 isChainSynced={!!(m.metabot_info_pinid && m.metabot_info_pinid.trim())}
                 onSyncToChain={() => handleSyncUnsyncedMetabot(m)}
                 onOpenMetabotInBrowser={onOpenMetabotInBrowser}
@@ -831,13 +851,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
             ))}
           </div>
           {renderSuccessModal()}
-          {deleteTarget && (
-            <MetaBotDeleteConfirmModal
-              metabot={deleteTarget}
-              onClose={() => setDeleteTarget(null)}
-              onConfirm={handleDeleteConfirm}
-            />
-          )}
+          {renderDeleteModal()}
           {showRestoreModal && (
             <MetaBotRestoreMnemonicModal
               onClose={() => setShowRestoreModal(false)}
