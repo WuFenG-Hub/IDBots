@@ -21,3 +21,22 @@ export function isNonAnswerAssistantReply(text: string): boolean {
   const trimmed = String(text ?? '').trim();
   return trimmed.length === 0 || NON_ANSWER_PLACEHOLDERS.has(trimmed);
 }
+
+/**
+ * True when an SDK `result` event (already known to be a success — callers
+ * gate on `subtype === 'success'`) carries no usable final reply text.
+ *
+ * `payload.result` is the SDK's authoritative final-answer string for the
+ * turn. When it is missing/empty/whitespace, the terminal assistant message
+ * had no text — the DeepSeek thinking-placeholder truncation signature (the
+ * model emitted only `[reasoning unavailable]` reasoning, then `end_turn`).
+ * Intermediate progress notes do NOT count: they precede further tool work,
+ * and the SDK still populates `result` with the real final answer when one
+ * exists. Used by the empty-terminal-turn guard in CoworkRunner so such turns
+ * are not falsely reported as `completed`.
+ */
+export function isEmptyTerminalSdkResult(payload: unknown): boolean {
+  if (!payload || typeof payload !== 'object') return true;
+  const result = (payload as Record<string, unknown>).result;
+  return !(typeof result === 'string' && result.trim().length > 0);
+}

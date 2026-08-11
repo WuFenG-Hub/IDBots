@@ -2092,6 +2092,10 @@ const AssistantTurnBlock: React.FC<{
     } else if (meta.sdkConversationReset === true) {
       sdkIcon = '🔄';
       sdkContent = i18nService.t('coworkSdkConversationReset');
+    } else if (meta.emptyTerminalTurn === true) {
+      sdkIcon = '⚠️';
+      sdkTint = 'text-amber-600 dark:text-amber-400';
+      sdkContent = i18nService.t('coworkEmptyTerminalTurn');
     }
 
     const rawContent = hasText(message.content)

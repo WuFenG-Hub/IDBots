@@ -233,15 +233,24 @@ class CoworkService {
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));
       store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'completed' }));
-      // Refresh the current session so usageStats (token/cost chip) reflects
-      // the just-finished turn.
-      if (store.getState().cowork.currentSessionId === sessionId) {
-        void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
-          if (refreshed?.success && refreshed.session) {
-            store.dispatch(setCurrentSession(refreshed.session));
-          }
-        }).catch(() => {});
-      }
+      // Correct the status from the backend if it did NOT actually mark the
+      // turn completed. An "empty terminal turn" (DeepSeek thinking-placeholder
+      // truncation — the model ended with only reasoning and no final reply)
+      // is left `idle` by the backend; without this correction the task list
+      // would falsely show "completed" while the final handoff is missing.
+      // Also refreshes the current session so usageStats (token/cost chip)
+      // reflects the just-finished turn.
+      void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
+        if (!refreshed?.success || !refreshed.session) return;
+        const backendStatus = refreshed.session.status;
+        if (backendStatus && backendStatus !== 'completed') {
+          store.dispatch(updateSessionStatus({ sessionId, status: backendStatus }));
+          store.dispatch(updateBrowserSessionStatus({ sessionId, status: backendStatus }));
+        }
+        if (store.getState().cowork.currentSessionId === sessionId) {
+          store.dispatch(setCurrentSession(refreshed.session));
+        }
+      }).catch(() => {});
     });
     this.streamListenerCleanups.push(completeCleanup);
 
