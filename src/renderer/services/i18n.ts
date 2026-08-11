@@ -1881,6 +1881,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     trafficErrCreditTimeout: '等待到账超时。请刷新余额以再次确认。',
     trafficErrFriendly: '无法连接服务。请检查“高级”中的端点配置，或稍后重试。',
     trafficUnitMb: 'MB',
+    trafficUnitKb: 'KB',
     trafficUnitBytes: 'bytes',
   },
   en: {
@@ -3760,6 +3761,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     trafficErrCreditTimeout: 'Timed out waiting for the credit. Refresh the balance to check again.',
     trafficErrFriendly: 'Cannot reach the service. Check the endpoint in Advanced or try again.',
     trafficUnitMb: 'MB',
+    trafficUnitKb: 'KB',
     trafficUnitBytes: 'bytes',
   }
 };

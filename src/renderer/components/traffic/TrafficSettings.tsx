@@ -102,7 +102,16 @@ const ghostButtonClass = 'px-3 py-2 text-sm rounded-xl border dark:border-claude
 // those so users get the friendly copy instead.
 const NETWORK_ERROR_PATTERN = /fetch failed|failed to fetch|networkerror|network request failed|econnrefused|enotfound|etimedout|econnreset|socket hang up/i;
 
-const formatMb = (bytes: number): string => {
+// Adaptive traffic formatter: single-pin spends are KB-level, so a flat MB
+// view rounds them to "0.0 MB". Show B below 1 KB, KB below 1 MB, else MB.
+const formatTraffic = (bytes: number): string => {
+  const abs = Math.abs(bytes);
+  if (abs < 1024) {
+    return `${bytes} ${i18nService.t('trafficUnitBytes')}`;
+  }
+  if (abs < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} ${i18nService.t('trafficUnitKb')}`;
+  }
   const mb = bytes / (1024 * 1024);
   const value = mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1);
   return `${value} ${i18nService.t('trafficUnitMb')}`;
@@ -118,7 +127,7 @@ const shortAddress = (address: string): string => {
 
 const formatAmountWithSign = (direction: number, amountBytes: number): string => {
   const sign = direction === 1 || direction === 4 ? '+' : '-';
-  return `${sign}${formatMb(amountBytes)}`;
+  return `${sign}${formatTraffic(amountBytes)}`;
 };
 
 // Single funnel for error text shown in this panel: network-level failures get
@@ -605,15 +614,15 @@ const TrafficSettings: React.FC = () => {
                 className="text-2xl font-bold tabular-nums dark:text-claude-darkText text-claude-text"
                 title={balance ? formatBytesExact(balance.balanceBytes) : undefined}
               >
-                {balance ? formatMb(balance.balanceBytes) : '—'}
+                {balance ? formatTraffic(balance.balanceBytes) : '—'}
               </span>
               {balanceLoading && <ArrowPathIcon className="h-4 w-4 animate-spin dark:text-claude-darkTextSecondary text-claude-textSecondary" />}
             </div>
             {balance && (
               <p className={`${hintClass} mt-1`}>
                 {i18nService.t('trafficBalanceStats')
-                  .replace('{reserved}', formatMb(balance.reservedBytes))
-                  .replace('{spent}', formatMb(balance.spentBytesTotal))}
+                  .replace('{reserved}', formatTraffic(balance.reservedBytes))
+                  .replace('{spent}', formatTraffic(balance.spentBytesTotal))}
               </p>
             )}
           </div>
@@ -697,7 +706,7 @@ const TrafficSettings: React.FC = () => {
                           ¥{plan.payAmount}
                         </span>
                         <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {formatMb(plan.trafficBytes)}
+                          {formatTraffic(plan.trafficBytes)}
                         </span>
                       </button>
                     );
@@ -730,7 +739,7 @@ const TrafficSettings: React.FC = () => {
               <p className="text-sm dark:text-claude-darkText text-claude-text">
                 {i18nService.t('trafficMockPayPrompt')
                   .replace('{amount}', String(activeOrder.payAmount))
-                  .replace('{traffic}', formatMb(activeOrder.trafficBytes))}
+                  .replace('{traffic}', formatTraffic(activeOrder.trafficBytes))}
               </p>
               <p className={`${hintClass} mt-1`}>
                 {i18nService.t('trafficOrderLabel').replace('{orderId}', activeOrder.orderId)}
@@ -768,11 +777,11 @@ const TrafficSettings: React.FC = () => {
               <CheckCircleIcon className="h-5 w-5 text-claude-accent shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                  {i18nService.t('trafficSuccessCredited').replace('{traffic}', formatMb(activeOrder.trafficBytes))}
+                  {i18nService.t('trafficSuccessCredited').replace('{traffic}', formatTraffic(activeOrder.trafficBytes))}
                 </p>
                 {balance && (
                   <p className={`${hintClass} mt-1`}>
-                    {i18nService.t('trafficNewBalance').replace('{balance}', formatMb(balance.balanceBytes))}
+                    {i18nService.t('trafficNewBalance').replace('{balance}', formatTraffic(balance.balanceBytes))}
                   </p>
                 )}
                 <div className="flex justify-end mt-2">
@@ -820,7 +829,7 @@ const TrafficSettings: React.FC = () => {
             ]).map((item) => (
               <div key={item.label} className={`${cardClass} text-center`}>
                 <div className="text-sm font-bold tabular-nums dark:text-claude-darkText text-claude-text">
-                  {formatMb(item.bytes)}
+                  {formatTraffic(item.bytes)}
                 </div>
                 <div className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
                   {item.label}
@@ -848,7 +857,7 @@ const TrafficSettings: React.FC = () => {
                     <td className="py-1 pr-3 tabular-nums">{row.date}</td>
                     <td className="py-1 pr-3">{resolveBotLabel(row.botAddress)}</td>
                     <td className="py-1 pr-3 text-right tabular-nums" title={formatBytesExact(row.bytes)}>
-                      {formatMb(row.bytes)}
+                      {formatTraffic(row.bytes)}
                     </td>
                     <td className="py-1 text-right tabular-nums">{row.txCount}</td>
                   </tr>
