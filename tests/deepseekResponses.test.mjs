@@ -189,6 +189,51 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   assert.equal(result.input[0].role, 'user');
 });
 
+test('signal scan is scoped to the marked user text, not prepended volatile context', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // The runner prepends volatile context (Local Time Context always carries
+  // the current year) ahead of the user's own text, which is wrapped in
+  // <idbots_user_message> markers. A neutral question inside the markers must
+  // NOT be forced into web_search by the injected context — that previously
+  // fired on every turn and confined short sessions to the server-side
+  // search tools only (search/open_page/find_in_page), breaking all agent
+  // tool use.
+  const volatileHead = [
+    '## Local Time Context',
+    '- Current local datetime: 2026-08-11 20:31:04 (timezone: Asia/Shanghai, UTC+08:00)',
+    '',
+    '<ownerMemories>',
+    '- 用户在 2026 年重点关注 MetaID 项目进展和最新动态',
+    '</ownerMemories>',
+  ].join('\n');
+  const marked = (question) => `${volatileHead}\n\n<idbots_user_message>\n${question}\n</idbots_user_message>`;
+
+  const neutral = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: marked('帮我读一下这个会话的内容') }] },
+    'deepseek',
+  );
+  assert.equal(neutral.tool_choice, 'auto');
+  // The full tool list still goes upstream on the neutral turn.
+  assert.ok(neutral.tools.some((t) => t.type === 'web_search'));
+
+  // A genuinely time-sensitive question inside the markers still forces.
+  const timeSensitive = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: marked('2026 温网男单冠军是谁？') }] },
+    'deepseek',
+  );
+  assert.deepEqual(timeSensitive.tool_choice, { type: 'web_search' });
+
+  // Unmarked payloads (legacy sessions, non-cowork clients) keep the old
+  // full-text scan behavior: a signal anywhere in the text still forces.
+  const legacy = convertChatCompletionsRequestToResponsesRequest(
+    { model: 'deepseek-v4-flash', messages: [{ role: 'user', content: `${volatileHead}\n\n随便聊聊` }] },
+    'deepseek',
+  );
+  assert.deepEqual(legacy.tool_choice, { type: 'web_search' });
+});
+
 test('convertChatCompletionsRequestToResponsesRequest disables thinking via effort none', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
