@@ -23,9 +23,9 @@ export function buildCoworkSteerSdkMessage(text: string): SDKUserMessage {
   const escaped = text.trim();
   return buildCoworkSdkUserMessage([
     '<operator_steer>',
-    'This is a new correction from the human user for the task currently in progress.',
-    'Incorporate it at the earliest safe boundary. Preserve completed work that remains valid,',
-    'and adjust pending plans and future actions. Do not claim an in-flight side effect was rolled back.',
+    'This is a new instruction from the human user that supersedes the task currently in progress.',
+    'Stop the current task immediately and switch to this new instruction.',
+    'Preserve completed work that remains valid. Do not claim an in-flight side effect was rolled back.',
     '',
     escaped,
     '</operator_steer>',
