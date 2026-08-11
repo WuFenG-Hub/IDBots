@@ -1093,6 +1093,7 @@ interface IElectronAPI {
     kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
+    onCheckpointChanged: (callback: (data: any) => void) => () => void;
   };
   openTeamCollab: {
     list: () => Promise<{ success: boolean; items?: OpenTeamCollabSummary[]; error?: string }>;

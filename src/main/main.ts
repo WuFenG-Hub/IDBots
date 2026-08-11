@@ -3392,7 +3392,7 @@ const startSqliteDaemons = (): void => {
   // Owner private-report channel (encrypted simplemsg from the chair bot +
   // A2A display record), shared by the group-task daemon and the OpenTeam
   // inviter service wired below.
-  const sendGroupTaskOwnerPrivateReport: GroupTaskDaemonSendOwnerReportFn = async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
+  const sendGroupTaskOwnerPrivateReport: GroupTaskDaemonSendOwnerReportFn = async ({ taskId, metabotId, ownerGlobalMetaId, text, kind, checkpointId }) => {
     const metabotStore = getMetabotStore();
     const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
     if (!wallet?.mnemonic?.trim()) {
@@ -3439,6 +3439,11 @@ const startSqliteDaemons = (): void => {
           suppressRunningStatus: true,
           groupTaskOwnerReport: true,
           groupTaskId: taskId,
+          // HITL: checkpoint requests are distinguished from the final review
+          // report so the UI/consumers can treat them differently if needed.
+          ...(kind === 'checkpoint'
+            ? { groupTaskCheckpoint: true, groupTaskCheckpointId: checkpointId ?? null }
+            : {}),
         },
       });
       if (recorded) {

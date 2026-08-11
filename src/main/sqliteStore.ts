@@ -895,6 +895,31 @@ export class SqliteStore {
         ON group_task_status_events(task_id, id);
     `);
 
+    // Group Task human-in-the-loop checkpoints: a mid-task pause point opened
+    // by the chair (`[CHECKPOINT: <topic>]`) so the owner can review a draft or
+    // decision before work continues; resolved by `[CHECKPOINT_RESOLVED: ...]`.
+    // Multiple checkpoints per task are allowed over its lifetime, but at most
+    // one is 'open' at any moment (enforced by GroupTaskStore.openCheckpoint).
+    // CREATE TABLE IF NOT EXISTS is the idempotent first-run migration; the
+    // task status state machine itself is untouched by this feature.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        topic TEXT,
+        opened_msg_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','cancelled')),
+        resolution TEXT,
+        resolved_msg_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_checkpoints_task
+        ON group_task_checkpoints(task_id, id);
+    `);
+
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_memberships (

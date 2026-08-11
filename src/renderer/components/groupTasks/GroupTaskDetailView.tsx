@@ -157,6 +157,18 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     });
   }, [taskId, refreshDetail, loadMessages]);
 
+  // HITL: a checkpoint opening/resolving refreshes the detail (banner) and the
+  // transcript (pause/resume ceremony lines).
+  useEffect(() => {
+    const api = window.electron?.groupTask;
+    if (!api) return undefined;
+    return api.onCheckpointChanged((event) => {
+      if (event?.taskId !== taskId) return;
+      void refreshDetail();
+      void loadMessages();
+    });
+  }, [taskId, refreshDetail, loadMessages]);
+
   // Auto-scroll to bottom on new messages unless the user scrolled up.
   useEffect(() => {
     const el = scrollRef.current;
@@ -294,6 +306,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   }
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
+  // HITL: the currently open human checkpoint, if any (drives the pause banner).
+  const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   const chairMember = detail.members.find((member) => member.role === 'chair');
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
@@ -415,6 +429,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             {detail.status === 'review' && (
               <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
                 {i18nService.t('groupTasksReviewSilenceHint')}
+              </div>
+            )}
+            {openCheckpoint && (
+              <div className="mt-2 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-900/20 px-3 py-2 text-xs dark:text-sky-200 text-sky-800">
+                {i18nService
+                  .t('groupTasksCheckpointBanner')
+                  .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
               </div>
             )}
             {detail.acceptanceCriteria && (

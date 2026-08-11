@@ -53,6 +53,38 @@ export interface UpdateGroupTaskStatusOptions {
   actor?: GroupTaskStatusEventActor;
 }
 
+/**
+ * Human-in-the-loop checkpoint status. 'open' = the task is paused waiting for
+ * the owner's decision; 'resolved' = the chair closed it with a decision and
+ * work continued (or it was superseded, e.g. by review entry); 'cancelled' =
+ * the task closed while the checkpoint was still open.
+ */
+export type GroupTaskCheckpointStatus = 'open' | 'resolved' | 'cancelled';
+
+/**
+ * One mid-task human-in-the-loop pause point. The chair opens it with a
+ * `[CHECKPOINT: <topic>]` group message and resolves it with
+ * `[CHECKPOINT_RESOLVED: <decision>]`; multiple checkpoints may exist per task
+ * over its lifetime, but at most one is 'open' at a time. The task status
+ * state machine is deliberately NOT extended for this — a checkpoint pauses
+ * the daemon's responder gating, not the lifecycle.
+ */
+export interface GroupTaskCheckpoint {
+  id: number;
+  taskId: number;
+  /** What the owner is asked to review/confirm (from the tag). */
+  topic: string | null;
+  /** Pin of the chair message that opened the checkpoint. */
+  openedMsgPinId: string | null;
+  status: GroupTaskCheckpointStatus;
+  /** The owner's decision as summarized by the chair on resolution. */
+  resolution: string | null;
+  /** Pin of the chair message that resolved the checkpoint. */
+  resolvedMsgPinId: string | null;
+  createdAt: string | null;
+  resolvedAt: string | null;
+}
+
 export interface GroupTask {
   id: number;
   orchestrationTaskId: string | null;
@@ -292,6 +324,18 @@ interface GroupTaskStatusEventRow {
   created_at: string | null;
 }
 
+interface GroupTaskCheckpointRow {
+  id: number;
+  task_id: number;
+  topic: string | null;
+  opened_msg_pin_id: string | null;
+  status: string;
+  resolution: string | null;
+  resolved_msg_pin_id: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+}
+
 interface GroupChatTranscriptRow {
   id: number;
   pin_id: string | null;
@@ -363,6 +407,24 @@ function isGroupTaskMemberStatus(value: string): value is GroupTaskMemberStatus 
 function isGroupTaskStatus(value: string): value is GroupTaskStatus {
   return value === 'planning' || value === 'executing' || value === 'review'
     || value === 'done' || value === 'cancelled';
+}
+
+function isGroupTaskCheckpointStatus(value: string): value is GroupTaskCheckpointStatus {
+  return value === 'open' || value === 'resolved' || value === 'cancelled';
+}
+
+function rowToGroupTaskCheckpoint(row: GroupTaskCheckpointRow): GroupTaskCheckpoint {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    topic: row.topic ?? null,
+    openedMsgPinId: row.opened_msg_pin_id ?? null,
+    status: isGroupTaskCheckpointStatus(row.status) ? row.status : 'open',
+    resolution: row.resolution ?? null,
+    resolvedMsgPinId: row.resolved_msg_pin_id ?? null,
+    createdAt: row.created_at ?? null,
+    resolvedAt: row.resolved_at ?? null,
+  };
 }
 
 function rowToGroupTask(row: GroupTaskRow): GroupTask {
@@ -660,6 +722,102 @@ export class GroupTaskStore {
 
   isTerminalStatus(status: GroupTaskStatus): boolean {
     return TERMINAL_STATUSES.has(status);
+  }
+
+  // --- group_task_checkpoints (human-in-the-loop) ---
+
+  /**
+   * Open a HITL checkpoint for a task. At most ONE checkpoint may be open per
+   * task at any moment — throws when one is already open (the daemon checks
+   * getOpenCheckpoint first; this is the defensive backstop).
+   */
+  openCheckpoint(input: { taskId: number; topic?: string | null; msgPinId?: string | null }): GroupTaskCheckpoint {
+    const existing = this.getOpenCheckpoint(input.taskId);
+    if (existing) {
+      throw new Error(
+        `Group task ${input.taskId} already has an open checkpoint (#${existing.id}); resolve it before opening another`,
+      );
+    }
+    this.db.run(
+      `INSERT INTO group_task_checkpoints (task_id, topic, opened_msg_pin_id, status)
+       VALUES (?, ?, ?, 'open')`,
+      [input.taskId, input.topic?.trim() || null, input.msgPinId?.trim() || null],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const checkpoint = this.getCheckpointById(id);
+    if (!checkpoint) throw new Error(`openCheckpoint failed: checkpoint ${id} not found after insert`);
+    return checkpoint;
+  }
+
+  getCheckpointById(id: number): GroupTaskCheckpoint | null {
+    const row = this.getOne<GroupTaskCheckpointRow>(
+      'SELECT * FROM group_task_checkpoints WHERE id = ?',
+      [id],
+    );
+    return row ? rowToGroupTaskCheckpoint(row) : null;
+  }
+
+  /** The task's currently open checkpoint, if any (at most one by construction). */
+  getOpenCheckpoint(taskId: number): GroupTaskCheckpoint | null {
+    const row = this.getOne<GroupTaskCheckpointRow>(
+      `SELECT * FROM group_task_checkpoints
+       WHERE task_id = ? AND status = 'open'
+       ORDER BY id DESC LIMIT 1`,
+      [taskId],
+    );
+    return row ? rowToGroupTaskCheckpoint(row) : null;
+  }
+
+  /**
+   * Resolve an open checkpoint with the owner's decision (summarized by the
+   * chair). Idempotent: an already-closed checkpoint is returned unchanged.
+   */
+  resolveCheckpoint(
+    id: number,
+    input?: { resolution?: string | null; msgPinId?: string | null },
+  ): GroupTaskCheckpoint {
+    const checkpoint = this.getCheckpointById(id);
+    if (!checkpoint) throw new Error(`Group task checkpoint ${id} not found`);
+    if (checkpoint.status !== 'open') return checkpoint;
+    this.db.run(
+      `UPDATE group_task_checkpoints
+       SET status = 'resolved', resolution = ?, resolved_msg_pin_id = ?, resolved_at = datetime('now')
+       WHERE id = ? AND status = 'open'`,
+      [input?.resolution?.trim() || null, input?.msgPinId?.trim() || null, id],
+    );
+    this.saveDb();
+    return this.getCheckpointById(id)!;
+  }
+
+  /**
+   * Bulk-close every open checkpoint of a task (review entry supersedes an
+   * open checkpoint; task close cancels one). Returns the number closed.
+   */
+  closeOpenCheckpoints(
+    taskId: number,
+    status: 'resolved' | 'cancelled',
+    note?: string | null,
+  ): number {
+    const open = this.listCheckpoints(taskId).filter((checkpoint) => checkpoint.status === 'open');
+    if (open.length === 0) return 0;
+    this.db.run(
+      `UPDATE group_task_checkpoints
+       SET status = ?, resolution = COALESCE(?, resolution), resolved_at = datetime('now')
+       WHERE task_id = ? AND status = 'open'`,
+      [status, note?.trim() || null, taskId],
+    );
+    this.saveDb();
+    return open.length;
+  }
+
+  /** All checkpoints of a task, oldest first (the task's HITL audit trail). */
+  listCheckpoints(taskId: number): GroupTaskCheckpoint[] {
+    const rows = this.getAll<GroupTaskCheckpointRow>(
+      'SELECT * FROM group_task_checkpoints WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskCheckpoint);
   }
 
   /**

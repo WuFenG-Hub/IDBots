@@ -20,6 +20,7 @@ import {
   type GroupTaskStatus,
   type GroupTaskStatusEvent,
   type GroupTaskStatusEventActor,
+  type GroupTaskCheckpoint,
   type GroupChatTranscriptMessage,
 } from '../groupTaskStore';
 import {
@@ -104,6 +105,8 @@ export interface GroupTaskDetail extends GroupTask {
   statusEvents: GroupTaskStatusEvent[];
   /** P2-8: the daemon instance currently driving this task (kv heartbeat claim). */
   driver: GroupTaskDriverInfo | null;
+  /** HITL: all human checkpoints of the task, oldest first (open one included). */
+  checkpoints: GroupTaskCheckpoint[];
 }
 
 /** P2-8: who drives a task right now (multi-window/multi-session annotation). */
@@ -767,6 +770,8 @@ export async function getGroupTask(
     statusEvents: store.listStatusEvents(id),
     // P2-8: current driving daemon instance (kv heartbeat claim).
     driver: readGroupTaskDriver(getKvStore(), id),
+    // HITL: human checkpoints (open + past), oldest first.
+    checkpoints: store.listCheckpoints(id),
   };
 }
 
@@ -1365,6 +1370,16 @@ export async function closeGroupTask(
     }
     return getGroupTaskStore().updateTaskStatus(taskId, opts.status, { actor: opts.actor });
   })();
+  // HITL: a task closing with a checkpoint still open cancels that checkpoint
+  // (the wait is over either way). Best-effort: never block the close itself.
+  try {
+    getGroupTaskStore().closeOpenCheckpoints(taskId, 'cancelled', `task closed as ${opts.status}`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to cancel open checkpoints on close of task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (closed.status === 'done' && opts.rating != null) {
     return getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
   }

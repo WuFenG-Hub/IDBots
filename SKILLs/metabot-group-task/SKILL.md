@@ -45,7 +45,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 ## Wish-to-task workflow (follow in order)
 
 1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
-2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
+2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first. If the wish explicitly asks the owner to review/confirm an intermediate result before execution proceeds (e.g. "先把修改意见稿给我确认，确认后再开发"), record that point in `acceptance_criteria` as a required human checkpoint (HITL) — the chair will pause there and wait for the owner. Do not invent checkpoints the owner did not ask for.
 3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
 5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
@@ -186,6 +186,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
   - `[DELIVERABLE] metafile: metafile://<pinId>.png`
   - `[DELIVERABLE] url: https://example.com/preview`
 - **Chair-only status tags**: `[STATUS:EXECUTING]` when work is underway; `[STATUS:REVIEW]` when the chair judges the goal met — this moves the task to the user acceptance gate. Status tags from workers are ignored.
+- **Human checkpoints (HITL, chair-only)**: the chair MAY pause the task mid-flight for the owner's decision by posting the draft/question and ending that message with `[CHECKPOINT: <short topic>]`. The host then silences all workers (like the review phase), lets only the owner's replies reach the chair, and sends the owner a private A2A message with the draft to review. The owner answers either in the task group or privately to you (the Twin) — **if the owner confirms privately, relay the decision into the group yourself**: post the continuation/dispatch message ending with `[CHECKPOINT_RESOLVED: <decision summary>]`, which resumes the task. Never resolve a checkpoint without an actual owner reply. Discipline: autonomous one-shot completion is the default — use checkpoints sparingly (zero for small tasks, at most one for a typical complex task) unless the owner explicitly asked for staged approvals.
 - **Closing**: the task closes only when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`). A closed group is never reused; create a fresh task instead.
 
 ## OpenTeam — inviting remote bots
