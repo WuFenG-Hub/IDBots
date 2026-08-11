@@ -9,7 +9,7 @@ const require = createRequire(import.meta.url);
 
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
-const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { GroupTaskStore, setGroupTaskStoreStatusBroadcaster } = require('../dist-electron/main/groupTaskStore.js');
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-store-'));
 
@@ -179,6 +179,36 @@ test('state machine: legal transitions, illegal transitions throw, terminal lock
     // updating a missing task throws
     assert.throws(() => groupTaskStore.updateTaskStatus(9999, 'executing'), /not found/);
   } finally {
+    store.close();
+  }
+});
+
+test('status broadcast: real transitions emit once, no-op/illegal stay silent, emitter failure is safe', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore } = await openStores(tempDir);
+  const events = [];
+  setGroupTaskStoreStatusBroadcaster((event) => events.push(event));
+  try {
+    const task = groupTaskStore.createTask({
+      groupId: 'group-broadcast', title: 'Broadcast', goal: 'Goal', chairMetabotId: 1, createdBy: 'user',
+    });
+
+    groupTaskStore.updateTaskStatus(task.id, 'executing');
+    groupTaskStore.updateTaskStatus(task.id, 'executing'); // no-op: same status returns early
+    assert.throws(() => groupTaskStore.updateTaskStatus(task.id, 'planning'), /Illegal/);
+    groupTaskStore.updateTaskStatus(task.id, 'review');
+
+    assert.deepEqual(
+      events.map((event) => [event.taskId, event.status]),
+      [[task.id, 'executing'], [task.id, 'review']],
+    );
+    assert.ok(events.every((event) => event.type === 'groupTask:statusChanged' && typeof event.at === 'number'));
+
+    // A throwing broadcaster must never break the transition itself.
+    setGroupTaskStoreStatusBroadcaster(() => { throw new Error('boom'); });
+    assert.equal(groupTaskStore.updateTaskStatus(task.id, 'done').status, 'done');
+  } finally {
+    setGroupTaskStoreStatusBroadcaster(null);
     store.close();
   }
 });

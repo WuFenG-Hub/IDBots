@@ -61,7 +61,7 @@ import {
 } from './sdkCronBridge';
 import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
-import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { GroupTaskStore, setGroupTaskStoreStatusBroadcaster, type GroupTaskStatus } from './groupTaskStore';
 import { OpenTeamMembershipStore } from './openTeamMembershipStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
@@ -3165,6 +3165,10 @@ const startSqliteDaemons = (): void => {
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  // Every real status transition (daemon tag round-trip, UI IPC, Twin RPC)
+  // broadcasts groupTask:statusChanged from inside the store — callers can no
+  // longer forget to notify the renderer (the RPC path previously never did).
+  setGroupTaskStoreStatusBroadcaster((payload) => broadcastGroupTaskEvent(payload));
   // P1-1: wire the OpenTeam invite store into member summaries so remote
   // members expose inviteStatus (invite_pending / invite_accepted /
   // invite_declined / invite_expired / joined) instead of an opaque row.

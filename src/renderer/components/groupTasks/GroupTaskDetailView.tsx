@@ -79,12 +79,19 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const stickToBottomRef = useRef(true);
   const sentHintTimerRef = useRef<number | null>(null);
 
-  const refreshDetail = useCallback(async () => {
+  const refreshDetail = useCallback(async (opts?: { quiet?: boolean }) => {
     try {
       const task = await groupTaskService.getTask(taskId);
       setDetail(task);
       setDetailError(null);
     } catch (err) {
+      // Background (poll/event) refreshes must never blank a healthy view on a
+      // transient IPC hiccup — only the foreground mount load surfaces the
+      // error screen. A later successful refresh clears the error anyway.
+      if (opts?.quiet) {
+        console.warn('GroupTaskDetailView: background detail refresh failed', err);
+        return;
+      }
       setDetailError(err instanceof Error ? err.message : String(err));
     }
   }, [taskId]);
@@ -130,7 +137,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setMessagesError(null);
   }, [taskId]);
 
-  // Transcript: initial load + 5s poll while mounted.
+  // Transcript: initial load + 5s poll while mounted. The poll also refreshes
+  // the task detail so a missed/lost groupTask:statusChanged push can never
+  // leave the header badge stale (R1 self-heal).
   useEffect(() => {
     let cancelled = false;
     setLoadingMessages(true);
@@ -139,12 +148,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     });
     const timer = window.setInterval(() => {
       void loadMessages();
+      void refreshDetail({ quiet: true });
     }, 5000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [loadMessages]);
+  }, [loadMessages, refreshDetail]);
 
   // Immediate refresh on task status changes (also keeps the header badge live).
   useEffect(() => {
@@ -152,7 +162,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     if (!api) return undefined;
     return api.onStatusChanged((event) => {
       if (event?.taskId !== taskId) return;
-      void refreshDetail();
+      void refreshDetail({ quiet: true });
       void loadMessages();
     });
   }, [taskId, refreshDetail, loadMessages]);
