@@ -74,6 +74,7 @@ import type {
 } from '../services/twinOrchestrationService';
 import {
   buildBotBrowserAgentTools,
+  buildBotBrowserScreenshotTool,
   type BotBrowserControl,
 } from './botBrowserAgentTools';
 import {
@@ -6362,6 +6363,15 @@ export class CoworkRunner extends EventEmitter {
       if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
         memoryTools.push(
           ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+        );
+      }
+      // Bot Browser screenshot is registered for EVERY cowork surface (not only
+      // browser sessions) so any MetaBot can capture the active tab. When the
+      // surface is not visible the tool returns a graceful hint instead of
+      // erroring — matching the posture of the other browser tools.
+      if (this.controlBotBrowser) {
+        memoryTools.push(
+          ...buildBotBrowserScreenshotTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
         );
       }
       // MetaID search is registered for every cowork surface: browser sessions

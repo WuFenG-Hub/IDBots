@@ -269,6 +269,11 @@ import {
   type BotBrowserTabBridge,
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
+import {
+  createBotBrowserCaptureBridge,
+  type BotBrowserCaptureBridge,
+  type BotBrowserCaptureResponse,
+} from './services/botBrowserCaptureBridge';
 import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
 import {
   forkMetaAppToWorkspace,
@@ -2557,6 +2562,7 @@ let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
 let botBrowserHostService: BotBrowserHostService | null = null;
 let botBrowserTabBridge: BotBrowserTabBridge | null = null;
+let botBrowserCaptureBridge: BotBrowserCaptureBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
@@ -4806,6 +4812,7 @@ const getCoworkRunner = () => {
       controlBotBrowser: {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),
+        screenshot: (input) => getBotBrowserCaptureBridge().capture(input ?? {}),
         forkMetaApp: async ({ sessionId, uri }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
@@ -5240,6 +5247,15 @@ const getBotBrowserTabBridge = () => {
     });
   }
   return botBrowserTabBridge;
+};
+
+const getBotBrowserCaptureBridge = () => {
+  if (!botBrowserCaptureBridge) {
+    botBrowserCaptureBridge = createBotBrowserCaptureBridge({
+      getWindows: () => BrowserWindow.getAllWindows(),
+    });
+  }
+  return botBrowserCaptureBridge;
 };
 
 const getIMGatewayManager = () => {
@@ -6927,6 +6943,58 @@ if (!gotTheLock) {
 
   ipcMain.on('botBrowser:tab-command:response', (event, response: BotBrowserTabCommandResponse) => {
     getBotBrowserTabBridge().handleResponse(event.sender, response);
+  });
+
+  ipcMain.on('botBrowser:capture-request:response', (event, response: BotBrowserCaptureResponse) => {
+    getBotBrowserCaptureBridge().handleResponse(event.sender, response);
+  });
+
+  // Format-aware pixel capture for the Bot Browser screenshot tool. Mirrors the
+  // cowork captureImageChunk handler but supports PNG/JPEG and reports the
+  // mimeType, so the screenshot tool can request a smaller JPEG when sending the
+  // image to the model. The renderer resolves the rect (content area / whole
+  // surface / clip); this handler only does the capturePage + encode.
+  ipcMain.handle('botBrowser:capturePage', async (
+    event,
+    options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    },
+  ) => {
+    try {
+      const captureRect = normalizeCaptureRect(options?.rect);
+      if (!captureRect) {
+        return { success: false, error: 'Capture rect is required' };
+      }
+      const image = await event.sender.capturePage(captureRect);
+      const format: 'png' | 'jpeg' = options?.format === 'jpeg' ? 'jpeg' : 'png';
+      let buffer: Buffer;
+      let mimeType: string;
+      if (format === 'jpeg') {
+        const quality = typeof options?.quality === 'number'
+          && options.quality >= 0 && options.quality <= 100
+          ? Math.round(options.quality)
+          : 80;
+        buffer = image.toJPEG(quality);
+        mimeType = 'image/jpeg';
+      } else {
+        buffer = image.toPNG();
+        mimeType = 'image/png';
+      }
+      return {
+        success: true,
+        mimeType,
+        width: captureRect.width,
+        height: captureRect.height,
+        data: buffer.toString('base64'),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to capture Bot Browser page',
+      };
+    }
   });
 
   ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
