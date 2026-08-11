@@ -12,6 +12,7 @@ import {
 } from './coworkFormatTransform';
 import { DeepSeekReasoningStore } from './deepseekReasoningStore';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply';
+import { coworkLog } from './coworkLogger';
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import { foldLowValueToolResults } from './coworkToolResultFold';
@@ -97,6 +98,12 @@ type ResponsesStreamContext = {
   emittedWebSearchItemIds: Set<string>;
   /** Text deltas relayed to the client this stream (layer-2 assertion gate). */
   accumulatedText: string;
+  /**
+   * Distinct Responses SSE event types observed this stream. Only populated
+   * when DEEPSEEK_REASONING_DIAGNOSTIC is on; empty otherwise. Lets the
+   * diagnostic reveal event names the proxy may not be handling.
+   */
+  observedEventTypes: Set<string>;
 };
 
 const PROXY_BIND_HOST = '0.0.0.0';
@@ -113,6 +120,22 @@ const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // constant and accepted by the API. Mirrors Reasonix openai.go which sends a
 // pointer to the (possibly empty) ReasoningContent field.
 const DEEPSEEK_REASONING_PLACEHOLDER = '';
+
+/**
+ * Optional diagnostic for the DeepSeek reasoning_content capture pipeline.
+ * Default OFF. Enable by setting `IDBOTS_DEBUG_DEEPSEEK_REASONING=1` before
+ * launching the app. When OFF the only cost is a single boolean check per
+ * streamed event/response (no string building, no I/O), so leaving it in the
+ * codebase is zero-impact. When ON it writes one compact summary line per
+ * upstream response to cowork.log: the distinct SSE event types observed,
+ * whether reasoning deltas arrived, the captured reasoning length, and the
+ * per-tool-call cache hit/miss — enough to tell whether reasoning never
+ * arrived from the upstream (e.g. opencode relay omitting it) vs. arrived but
+ * was not cached (a code bug).
+ */
+const DEEPSEEK_REASONING_DIAGNOSTIC =
+  process.env.IDBOTS_DEBUG_DEEPSEEK_REASONING === '1'
+  || process.env.IDBOTS_DEBUG_DEEPSEEK_REASONING === 'true';
 
 /**
  * Anti-hallucination guard appended to the instructions of DeepSeek Responses
@@ -1843,6 +1866,7 @@ function createResponsesStreamContext(): ResponsesStreamContext {
     hasReasoningDeltas: false,
     emittedWebSearchItemIds: new Set<string>(),
     accumulatedText: '',
+    observedEventTypes: new Set<string>(),
   };
 }
 
@@ -2815,6 +2839,47 @@ function emitResponsesFallbackContent(
   }
 }
 
+/**
+ * Emit a one-line per-response summary of the DeepSeek reasoning_content
+ * capture pipeline. Gated by DEEPSEEK_REASONING_DIAGNOSTIC (default OFF) so it
+ * is free when disabled — the entire body (Set iteration, store lookups,
+ * string/array building, log I/O) only runs with the flag on. Reveals, per
+ * upstream response:
+ *   - the distinct SSE event types seen (Responses path) — surfaces event
+ *     names the proxy may not handle, or confirms reasoning events were absent;
+ *   - whether any reasoning delta arrived and how many chars were captured;
+ *   - per tool-call id whether its reasoning ended up in the persistent cache.
+ */
+function emitDeepSeekReasoningDiagnostic(
+  tag: string,
+  state: StreamState,
+  context: ResponsesStreamContext | null,
+  details?: { finishReason?: string | null | undefined }
+): void {
+  if (!DEEPSEEK_REASONING_DIAGNOSTIC) return;
+  if (!state.preserveDeepSeekReasoning) return;
+  const toolCallIds: string[] = [];
+  const cachedIds: string[] = [];
+  const missedIds: string[] = [];
+  for (const tc of Object.values(state.toolCalls)) {
+    if (!tc.id) continue;
+    toolCallIds.push(tc.id);
+    if (deepSeekReasoningStore.get(tc.id)) cachedIds.push(tc.id);
+    else missedIds.push(tc.id);
+  }
+  coworkLog('DEBUG', 'deepseek-reasoning-diag', 'per-response reasoning capture summary', {
+    path: tag,
+    observedEventTypes: context ? [...context.observedEventTypes].sort() : null,
+    hasReasoningDeltas: context ? context.hasReasoningDeltas : null,
+    reasoningContentLen: state.currentDeepSeekReasoningContent.length,
+    toolCallCount: toolCallIds.length,
+    cachedCount: cachedIds.length,
+    missedCount: missedIds.length,
+    missedIds,
+    finishReason: details?.finishReason ?? null,
+  });
+}
+
 function processResponsesStreamEvent(
   res: http.ServerResponse,
   state: StreamState,
@@ -2823,6 +2888,9 @@ function processResponsesStreamEvent(
   payloadObj: Record<string, unknown>
 ): void {
   const eventType = event || toString(payloadObj.type);
+  if (DEEPSEEK_REASONING_DIAGNOSTIC && eventType) {
+    context.observedEventTypes.add(eventType);
+  }
 
   const responseObjFromPayload = toOptionalObject(payloadObj.response);
   if (responseObjFromPayload) {
@@ -3001,6 +3069,11 @@ function processResponsesStreamEvent(
         reasoning_tokens: toNumber(outputTokensDetails?.reasoning_tokens) ?? 0,
       },
     });
+    if (DEEPSEEK_REASONING_DIAGNOSTIC) {
+      emitDeepSeekReasoningDiagnostic('responses', state, context, {
+        finishReason: detectResponsesFinishReason(responseObj),
+      });
+    }
   }
 }
 
@@ -3482,6 +3555,16 @@ async function handleRequest(
   );
   if (deepSeekReasoningHydrateResult.hydratedCount > 0 || deepSeekReasoningHydrateResult.placeholderCount > 0) {
     console.info('[cowork-openai-compat-proxy] Hydrated DeepSeek reasoning_content for assistant tool-call history', {
+      hydratedCount: deepSeekReasoningHydrateResult.hydratedCount,
+      placeholderCount: deepSeekReasoningHydrateResult.placeholderCount,
+    });
+  }
+  if (DEEPSEEK_REASONING_DIAGNOSTIC) {
+    coworkLog('DEBUG', 'deepseek-reasoning-diag', 'per-request reasoning hydration', {
+      path: upstreamAPIType,
+      model: toString(openAIRequest.model),
+      provider: upstreamConfig.provider ?? null,
+      baseURL: upstreamConfig.baseURL ?? null,
       hydratedCount: deepSeekReasoningHydrateResult.hydratedCount,
       placeholderCount: deepSeekReasoningHydrateResult.placeholderCount,
     });
