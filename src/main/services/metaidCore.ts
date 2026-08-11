@@ -801,6 +801,7 @@ export async function createPin(
             baseUrl: options?.sponsorBaseUrl ?? getConfiguredTrafficApiBase(),
             fetchImpl: options?.sponsorFetchImpl,
             trafficAccount: options?.sponsorTrafficAccount,
+            journalKind: metaidData.path || undefined,
           },
           {
             runDraftWorker: async () => {

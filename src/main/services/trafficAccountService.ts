@@ -114,6 +114,15 @@ export interface TrafficLedgerEntry {
   sourceId: string;
   remark: string;
   timestamp: number;
+  /**
+   * Local-journal enrichment, present only when this device committed the
+   * sponsor order referenced by sourceId (cross-device spends and expired
+   * reservations stay empty).
+   */
+  txId?: string;
+  botAddress?: string;
+  /** Pin protocol path or purpose tag recorded locally (e.g. /protocols/simplemsg, /file). */
+  kind?: string;
 }
 
 export interface TrafficDailyUsageRow {
@@ -139,6 +148,8 @@ export interface TrafficSpendJournalEntry {
   savedFee: number;
   /** 'traffic' = billed to the traffic account; 'quota' = legacy sponsor quota. */
   billedBy: 'traffic' | 'quota';
+  /** Pin protocol path or purpose tag (e.g. /protocols/simplemsg, /file); '' for legacy rows. */
+  kind: string;
   createdAt: number;
 }
 
@@ -610,7 +621,7 @@ export async function getTrafficLedger(input: {
   const record = data as Record<string, unknown>;
   const entries = Array.isArray(record.entries) ? record.entries : [];
   return {
-    entries: entries.flatMap((item) => {
+    entries: enrichLedgerEntriesFromLocalJournal(entries.flatMap((item) => {
       const entry = readObject(item);
       if (!entry) return [];
       return [{
@@ -623,9 +634,40 @@ export async function getTrafficLedger(input: {
         remark: pickText(entry, 'remark'),
         timestamp: toNumber(entry.timestamp),
       }];
-    }),
+    })),
     nextCursor: toNumber(record.nextCursor ?? record.next_cursor),
   };
+}
+
+/**
+ * Best-effort local enrichment: sponsor ledger entries carry the sponsor
+ * orderId as sourceId, which the local spend journal also records at commit
+ * time — so entries for commits made on this device get their txId, bot
+ * address, and pin kind attached. Entries from other devices, recharge
+ * credits, and expired reservations have no local match and stay untouched.
+ * Never throws: the raw ledger must keep rendering without the journal.
+ */
+function enrichLedgerEntriesFromLocalJournal(entries: TrafficLedgerEntry[]): TrafficLedgerEntry[] {
+  try {
+    if (!depsRef || entries.length === 0) return entries;
+    const byOrderId = new Map<string, TrafficSpendJournalEntry>();
+    for (const journalEntry of listLocalTrafficJournal({ limit: 1000 })) {
+      // listLocalTrafficJournal is id-DESC: the first row per orderId is the latest.
+      if (journalEntry.orderId && !byOrderId.has(journalEntry.orderId)) {
+        byOrderId.set(journalEntry.orderId, journalEntry);
+      }
+    }
+    if (byOrderId.size === 0) return entries;
+    return entries.map((entry) => {
+      const match = entry.sourceId ? byOrderId.get(entry.sourceId) : undefined;
+      if (!match) return entry;
+      const enriched: TrafficLedgerEntry = { ...entry, txId: match.txId, botAddress: match.botAddress };
+      if (match.kind) enriched.kind = match.kind;
+      return enriched;
+    });
+  } catch {
+    return entries;
+  }
 }
 
 export async function getTrafficDailyUsage(input: {
@@ -845,7 +887,8 @@ export function setTrafficSettingsSnapshot(input: {
 function ensureJournalTable(): void {
   const store = getDeps().getStore();
   if (!store) return;
-  store.getDatabase().run(`
+  const db = store.getDatabase();
+  db.run(`
     CREATE TABLE IF NOT EXISTS traffic_spend_journal (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tx_id TEXT NOT NULL,
@@ -855,9 +898,19 @@ function ensureJournalTable(): void {
       sponsored_miner_fee INTEGER NOT NULL DEFAULT 0,
       saved_fee INTEGER NOT NULL DEFAULT 0,
       billed_by TEXT NOT NULL DEFAULT 'quota',
+      kind TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL
     );
   `);
+  // Idempotent migration for databases created before the kind column existed:
+  // CREATE TABLE IF NOT EXISTS is a no-op there, so ALTER the old shape in place.
+  const tableInfo = db.exec('PRAGMA table_info(traffic_spend_journal)');
+  const columns = new Set(
+    (tableInfo[0]?.values ?? []).map((row) => normalizeText(row[1])),
+  );
+  if (!columns.has('kind')) {
+    db.run(`ALTER TABLE traffic_spend_journal ADD COLUMN kind TEXT NOT NULL DEFAULT ''`);
+  }
 }
 
 /**
@@ -874,6 +927,8 @@ export function recordLocalTrafficSpend(entry: {
   sponsoredMinerFee?: number;
   savedFee?: number;
   billedBy?: 'traffic' | 'quota';
+  /** Pin protocol path or purpose tag (e.g. /protocols/simplemsg, /file). */
+  kind?: string;
 }): void {
   try {
     if (!depsRef) return;
@@ -886,8 +941,8 @@ export function recordLocalTrafficSpend(entry: {
     if (!store) return;
     store.getDatabase().run(
       `INSERT INTO traffic_spend_journal
-        (tx_id, bot_address, order_id, tx_size, sponsored_miner_fee, saved_fee, billed_by, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (tx_id, bot_address, order_id, tx_size, sponsored_miner_fee, saved_fee, billed_by, kind, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         txId,
         botAddress,
@@ -896,6 +951,7 @@ export function recordLocalTrafficSpend(entry: {
         Math.max(0, Math.trunc(toNumber(entry.sponsoredMinerFee))),
         Math.max(0, Math.trunc(toNumber(entry.savedFee))),
         entry.billedBy === 'traffic' ? 'traffic' : 'quota',
+        normalizeText(entry.kind),
         Date.now(),
       ],
     );
@@ -945,6 +1001,7 @@ export function listLocalTrafficJournal(input: {
       sponsoredMinerFee: toNumber(values[columnIndex.get('sponsored_miner_fee') as number]),
       savedFee: toNumber(values[columnIndex.get('saved_fee') as number]),
       billedBy: normalizeText(values[columnIndex.get('billed_by') as number]) === 'traffic' ? 'traffic' : 'quota',
+      kind: columnIndex.has('kind') ? normalizeText(values[columnIndex.get('kind') as number]) : '',
       createdAt: toNumber(values[columnIndex.get('created_at') as number]),
     }));
   } catch {

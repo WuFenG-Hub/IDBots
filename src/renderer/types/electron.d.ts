@@ -74,6 +74,10 @@ interface TrafficLedgerEntryInfo {
   sourceId: string;
   remark: string;
   timestamp: number;
+  /** Local-journal enrichment (this-device sponsored commits only). */
+  txId?: string;
+  botAddress?: string;
+  kind?: string;
 }
 
 interface TrafficDailyUsageRowInfo {
@@ -100,6 +104,8 @@ interface TrafficSpendJournalEntryInfo {
   sponsoredMinerFee: number;
   savedFee: number;
   billedBy: 'traffic' | 'quota';
+  /** Pin protocol path or purpose tag (e.g. /protocols/simplemsg, /file); '' for legacy rows. */
+  kind: string;
   createdAt: number;
 }
 
