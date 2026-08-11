@@ -269,6 +269,11 @@ import {
   type BotBrowserTabBridge,
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
+import {
+  createBotBrowserCaptureBridge,
+  type BotBrowserCaptureBridge,
+  type BotBrowserCaptureResponse,
+} from './services/botBrowserCaptureBridge';
 import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
 import {
   forkMetaAppToWorkspace,
@@ -2557,6 +2562,7 @@ let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
 let botBrowserHostService: BotBrowserHostService | null = null;
 let botBrowserTabBridge: BotBrowserTabBridge | null = null;
+let botBrowserCaptureBridge: BotBrowserCaptureBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
 let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
@@ -4806,6 +4812,7 @@ const getCoworkRunner = () => {
       controlBotBrowser: {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),
+        screenshot: (input) => getBotBrowserCaptureBridge().capture(input ?? {}),
         forkMetaApp: async ({ sessionId, uri }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
@@ -5240,6 +5247,15 @@ const getBotBrowserTabBridge = () => {
     });
   }
   return botBrowserTabBridge;
+};
+
+const getBotBrowserCaptureBridge = () => {
+  if (!botBrowserCaptureBridge) {
+    botBrowserCaptureBridge = createBotBrowserCaptureBridge({
+      getWindows: () => BrowserWindow.getAllWindows(),
+    });
+  }
+  return botBrowserCaptureBridge;
 };
 
 const getIMGatewayManager = () => {
@@ -6927,6 +6943,10 @@ if (!gotTheLock) {
 
   ipcMain.on('botBrowser:tab-command:response', (event, response: BotBrowserTabCommandResponse) => {
     getBotBrowserTabBridge().handleResponse(event.sender, response);
+  });
+
+  ipcMain.on('botBrowser:capture-request:response', (event, response: BotBrowserCaptureResponse) => {
+    getBotBrowserCaptureBridge().handleResponse(event.sender, response);
   });
 
   ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {

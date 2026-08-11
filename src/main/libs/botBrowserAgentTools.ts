@@ -18,9 +18,27 @@ export type MetaAppSearchCandidate = MetaAppSearchItem & { isOwn?: boolean };
  * session workspace; `publishMetaApp` (when present) publishes a workspace
  * directory on-chain after explicit user confirmation.
  */
+export type BotBrowserScreenshotInput = {
+  tabId?: number;
+  /** Capture the whole Bot Browser surface (including the ABC chrome) instead of just the content pane. */
+  fullSurface?: boolean;
+};
+
+export type BotBrowserScreenshotResult = {
+  pngBase64: string;
+  width: number;
+  height: number;
+};
+
 export type BotBrowserControl = {
   openUri(input: { uri: string; actorId?: string | null }): Promise<void> | void;
   execute(command: BotBrowserTabCommand): Promise<BotBrowserTabCommandResult>;
+  /**
+   * Capture the active (or a specified) Bot Browser tab as a PNG. Resolves with
+   * the base64 image and its dimensions. Rejects (or the renderer reports an
+   * error) when the Bot Browser surface is not visible.
+   */
+  screenshot(input?: BotBrowserScreenshotInput): Promise<BotBrowserScreenshotResult>;
   forkMetaApp?(input: { sessionId: string; uri?: string | null }): Promise<{
     dir: string;
     indexFile: string;

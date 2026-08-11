@@ -681,6 +681,17 @@ interface IElectronAPI {
       result?: BotBrowserTabCommandResult;
       error?: string;
     }) => void;
+    onCaptureRequest: (callback: (input: {
+      requestId: string;
+      tabId?: number;
+      fullSurface?: boolean;
+    }) => void) => () => void;
+    respondToCaptureRequest: (response: {
+      requestId: string;
+      success: boolean;
+      result?: { pngBase64: string; width: number; height: number };
+      error?: string;
+    }) => void;
     resolveResource: (input: BrowserResolveInput) => Promise<HostBrowserCommandResult<BrowserResolveResult>>;
     getProfile: (input: { actorId?: string; globalMetaId: string }) => Promise<HostBrowserCommandResult<Record<string, unknown>>>;
     getSettings: (input?: BrowserSettingsInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;

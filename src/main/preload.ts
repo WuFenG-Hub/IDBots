@@ -100,6 +100,21 @@ contextBridge.exposeInMainWorld('electron', {
       result?: unknown;
       error?: string;
     }) => ipcRenderer.send('botBrowser:tab-command:response', response),
+    onCaptureRequest: (callback: (input: {
+      requestId: string;
+      tabId?: number;
+      fullSurface?: boolean;
+    }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, input: Parameters<typeof callback>[0]) => callback(input);
+      ipcRenderer.on('botBrowser:capture-request', handler);
+      return () => ipcRenderer.removeListener('botBrowser:capture-request', handler);
+    },
+    respondToCaptureRequest: (response: {
+      requestId: string;
+      success: boolean;
+      result?: { pngBase64: string; width: number; height: number };
+      error?: string;
+    }) => ipcRenderer.send('botBrowser:capture-request:response', response),
     resolveResource: (input: { actorId?: string; uri: string }) =>
       ipcRenderer.invoke('botBrowser:resolveResource', input),
     getProfile: (input: { actorId?: string; globalMetaId: string }) =>
