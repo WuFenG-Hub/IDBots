@@ -189,6 +189,98 @@ test('convertChatCompletionsRequestToResponsesRequest injects web_search + reaso
   assert.equal(result.input[0].role, 'user');
 });
 
+test('convertChatCompletionsRequestToResponsesRequest rebuilds a forced turn as a clean search turn (round-3)', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // SDK-shaped history: earlier turns + tool calls (Tavily/Bash bait) + a
+  // trailing realtime question. This is the shape that made the upstream
+  // ignore the forced tool_choice — the model mimicked the history's tool
+  // calls (Tavily/Bash) instead of searching. Round 3 rebuilds the forced
+  // turn as a CLEAN search turn: web_search is the only callable tool and
+  // only the last user message survives as input.
+  const chatRequest = {
+    model: 'deepseek-v4-flash',
+    messages: [
+      { role: 'system', content: 'You are a helpful assistant.' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi! how can I help?' },
+      { role: 'user', content: 'please run a search for me' },
+      {
+        role: 'assistant',
+        content: 'sure, searching',
+        tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'mcp__Tavily__tavily_search', arguments: '{"query":"x"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'call_1', content: '{"result":"x"}' },
+      { role: 'assistant', content: 'done' },
+      { role: 'user', content: '你搜索一下 2026 年温网男单冠军是谁？' },
+    ],
+    tools: [
+      { type: 'function', function: { name: 'mcp__Tavily__tavily_search', parameters: { type: 'object', properties: { query: { type: 'string' } } } } },
+      { type: 'function', function: { name: 'Bash', parameters: { type: 'object', properties: { command: { type: 'string' } } } } },
+    ],
+  };
+
+  const result = convertChatCompletionsRequestToResponsesRequest(chatRequest, 'deepseek');
+
+  // The signal turn still forces web_search.
+  assert.deepEqual(result.tool_choice, { type: 'web_search' });
+  // Round-3: other tools are stripped so the model cannot call Tavily/Bash.
+  assert.deepEqual(result.tools, [{ type: 'web_search' }]);
+  // Round-3: the replayed history is dropped — only the last user message
+  // (the question) survives as input, plus the system instructions.
+  assert.equal(result.input.length, 1);
+  assert.equal(result.input[0].role, 'user');
+  assert.ok(result.input[0].content[0].text.includes('2026 年温网男单冠军是谁'));
+  assert.ok(result.instructions.startsWith('You are a helpful assistant.'));
+});
+
+test('convertChatCompletionsRequestToResponsesRequest clean turn keeps the LAST user message with text (round-3)', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  // A trailing tool_result-only user message (from an in-flight tool call)
+  // must not displace the question: the clean turn keeps the last user
+  // message that actually has text.
+  const chatRequest = {
+    model: 'deepseek-v4-flash',
+    messages: [
+      { role: 'user', content: '你搜索一下 2026 年温网男单冠军是谁？' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'Bash', arguments: '{}' } }] },
+      { role: 'tool', tool_call_id: 'call_1', content: '[]' },
+    ],
+  };
+  const result = convertChatCompletionsRequestToResponsesRequest(chatRequest, 'deepseek');
+  assert.deepEqual(result.tool_choice, { type: 'web_search' });
+  assert.equal(result.input.length, 1);
+  assert.ok(result.input[0].content[0].text.includes('温网男单冠军'));
+});
+
+test('convertChatCompletionsRequestToResponsesRequest non-signal turns keep full history and tools (round-3 no-regression)', async () => {
+  const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
+  const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
+
+  const chatRequest = {
+    model: 'deepseek-v4-flash',
+    messages: [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'hi' },
+      { role: 'user', content: '继续' },
+    ],
+    tools: [{ type: 'function', function: { name: 'Bash', parameters: { type: 'object' } } }],
+  };
+  const result = convertChatCompletionsRequestToResponsesRequest(chatRequest, 'deepseek');
+  // No realtime signal: default auto, untouched.
+  assert.equal(result.tool_choice, 'auto');
+  // Full history survives as input (system -> instructions).
+  assert.equal(result.input.length, 3);
+  // Function tools survive alongside the injected web_search.
+  assert.equal(result.tools.length, 2);
+  assert.equal(result.tools[0].type, 'web_search');
+  assert.equal(result.tools[1].type, 'function');
+});
+
 test('convertChatCompletionsRequestToResponsesRequest disables thinking via effort none', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { convertChatCompletionsRequestToResponsesRequest } = __openAICompatProxyTestUtils;
