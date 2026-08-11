@@ -77,7 +77,7 @@ const DEFAULT_ONBOARDING_API_FORMAT: 'anthropic' | 'openai' | 'responses' = 'ope
 const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
   const [step, setStep] = useState<OnboardingStep>(1);
   const [provider, setProvider] = useState<ProviderKey>(
-    () => getDefaultOnboardingProvider(i18nService.getLanguage()) as ProviderKey
+    () => getDefaultOnboardingProvider(i18nService.getLanguage(), getProvidersForOnboarding()) as ProviderKey
   );
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');

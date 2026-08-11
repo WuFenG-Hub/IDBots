@@ -15,6 +15,7 @@ import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import CoworkQuestionWizard from './components/cowork/CoworkQuestionWizard';
 import { configService } from './services/config';
+import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
 import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
@@ -25,6 +26,7 @@ import { groupTaskService } from './services/groupTaskService';
 import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
+import { setPreferredMetabotId } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
@@ -203,7 +205,14 @@ const App: React.FC = () => {
 
         // 初始化配置
         await configService.init();
-        
+
+        // First-run free-quota bootstrap: provisions the built-in metaid-free
+        // provider (identity-signed relay key) and the welcome bot before the
+        // model list / onboarding decision, so a fresh install lands directly
+        // in the welcome chat. Never throws; any failure keeps the classic
+        // onboarding path as fallback.
+        const freeQuotaProvision = await ensureFreeQuotaProvisioning();
+
         // 初始化主题
         themeService.initialize();
 
@@ -272,6 +281,11 @@ const App: React.FC = () => {
           metabotCount = 0;
         }
         setShowOnboarding(shouldShowInitialOnboarding(metabotCount));
+        // Deep-link into the welcome chat only on the run that actually
+        // provisioned it; later launches leave the user's bot selection alone.
+        if (freeQuotaProvision.justProvisioned && freeQuotaProvision.welcomeBotId != null) {
+          dispatch(setPreferredMetabotId(freeQuotaProvision.welcomeBotId));
+        }
         setIsInitialized(true);
         void reportRendererStartupComplete();
       } catch (error) {
