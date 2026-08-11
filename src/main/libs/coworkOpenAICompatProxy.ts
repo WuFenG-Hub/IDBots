@@ -1012,40 +1012,6 @@ function extractTextFromChatContent(content: unknown): string {
   return chunks.join('');
 }
 
-/**
- * Compact shape description of one chat message for diagnostics: role, content
- * type, block kinds (Anthropic/OpenAI part types), and a short text preview.
- * Used by the layer-1 diagnostics to surface what the SDK actually sent.
- */
-function describeChatMessageShape(message: unknown): Record<string, unknown> {
-  const messageObj = toOptionalObject(message);
-  if (!messageObj) {
-    return { role: '', malformed: true };
-  }
-  const content = messageObj.content;
-  let contentType: string;
-  const blocks: string[] = [];
-  if (typeof content === 'string') {
-    contentType = 'string';
-  } else if (content === null || content === undefined) {
-    contentType = 'null';
-  } else if (Array.isArray(content)) {
-    contentType = 'array';
-    for (const part of content) {
-      const partObj = toOptionalObject(part);
-      blocks.push(partObj ? (toString(partObj.type) || 'no-type') : typeof part);
-    }
-  } else {
-    contentType = 'object';
-  }
-  return {
-    role: toString(messageObj.role),
-    contentType,
-    blocks,
-    textPreview: extractTextFromChatContent(content).slice(0, 120),
-  };
-}
-
 /** Text placeholder replacing an image block for non-vision models (GT#12 N1). */
 function imageBlockPlaceholderForNonVisionModel(imageURL: string): string {
   if (/^data:image\//i.test(imageURL)) {
@@ -1224,19 +1190,14 @@ function convertChatCompletionsRequestToResponsesRequest(
   // the tool_choice decision (below) can see it. Decides whether this turn is
   // time-sensitive enough to force web_search.
   let lastUserText = '';
-  let lastUserTextIndex = -1;
-  {
-    const probeMessages = toArray(chatRequest.messages);
-    for (let probeIndex = 0; probeIndex < probeMessages.length; probeIndex += 1) {
-      const probeObj = toOptionalObject(probeMessages[probeIndex]);
-      if (!probeObj || toString(probeObj.role) !== 'user') {
-        continue;
-      }
-      const probeText = extractTextFromChatContent(probeObj.content);
-      if (probeText) {
-        lastUserText = probeText;
-        lastUserTextIndex = probeIndex;
-      }
+  for (const probeMessage of toArray(chatRequest.messages)) {
+    const probeObj = toOptionalObject(probeMessage);
+    if (!probeObj || toString(probeObj.role) !== 'user') {
+      continue;
+    }
+    const probeText = extractTextFromChatContent(probeObj.content);
+    if (probeText) {
+      lastUserText = probeText;
     }
   }
   // N1 scheme-B: whether the effective model can consume image blocks. Unknown
@@ -1293,34 +1254,6 @@ function convertChatCompletionsRequestToResponsesRequest(
     request.tool_choice = 'auto';
   }
 
-  if (forceWebSearch) {
-    // Round-3 hardening: the forced tool_choice={type:'web_search'} is treated
-    // as advisory by the upstream when the replayed history is long and full
-    // of tool-call patterns — the model mimics those calls (Tavily/Bash)
-    // instead of searching (verified empirically on api.deepseek.com
-    // /responses with the real 213-message SDK history). To make the force
-    // effective, rebuild the turn as a CLEAN search turn: web_search becomes
-    // the ONLY callable tool, and the message loop below keeps only the last
-    // user message (the question, which carries the injected memories). The
-    // SDK's own session store is untouched — only this request copy changes,
-    // and the next turn re-sends the full history.
-    request.tools = [{ type: 'web_search' }];
-  }
-  // Round-3 diagnostic: surface the layer-1 decision inputs (post
-  // Anthropic->OpenAI conversion, exactly what the extraction loop saw) so a
-  // missed trigger on the real device can be tied to the message structure.
-  console.info('[cowork-openai-compat-proxy] layer-1 diag: signal scan', {
-    userTextLength: lastUserText.length,
-    userTextPreview: lastUserText.slice(0, 160),
-    hasSignal: hasRealtimeSearchSignal(lastUserText),
-    isDeepSeek,
-    toolCount: responseTools.length,
-    choiceAllowsOverride,
-    forceWebSearch,
-    messageCount: toArray(chatRequest.messages).length,
-    lastThree: toArray(chatRequest.messages).slice(-3).map(describeChatMessageShape),
-  });
-
   // DeepSeek Responses API controls reasoning depth via `reasoning.effort`,
   // distinct from chat/completions' top-level reasoning_effort / thinking. Map
   // the chat-style controls into the Responses reasoning object so effort set
@@ -1348,21 +1281,13 @@ function convertChatCompletionsRequestToResponsesRequest(
     request.max_output_tokens = maxOutputTokens;
   }
 
-  const forceCleanTurn = forceWebSearch && lastUserTextIndex >= 0;
-  const probeMessages = toArray(chatRequest.messages);
-  for (let messageIndex = 0; messageIndex < probeMessages.length; messageIndex += 1) {
-    const messageObj = toOptionalObject(probeMessages[messageIndex]);
+  for (const message of toArray(chatRequest.messages)) {
+    const messageObj = toOptionalObject(message);
     if (!messageObj) {
       continue;
     }
 
     const role = toString(messageObj.role);
-    if (forceCleanTurn && role !== 'system' && messageIndex !== lastUserTextIndex) {
-      // Clean search turn: drop the entire replayed history (assistant tool
-      // calls, tool results, older turns) so the model has no pattern to
-      // mimic — the question is the only context it sees.
-      continue;
-    }
     if (role === 'system') {
       const text = extractTextFromChatContent(messageObj.content);
       if (text) {
@@ -3074,17 +2999,7 @@ async function handleResponsesStreamResponse(
 
       try {
         const parsed = JSON.parse(payload) as Record<string, unknown>;
-        const parsedEvent = parsedPacket.event || toString(parsed.type);
-        const parsedItem = toOptionalObject(parsed.item);
-        if (parsedEvent === 'response.output_item.done') {
-          const itemType = toString(parsedItem?.type);
-          console.info('[cowork-openai-compat-proxy] layer-1 diag: response item', {
-            itemType,
-            name: toString(parsedItem?.name),
-            hasWebSearchCall: itemType === 'web_search_call',
-          });
-        }
-        processResponsesStreamEvent(res, state, context, parsedEvent, parsed);
+        processResponsesStreamEvent(res, state, context, parsedPacket.event, parsed);
       } catch {
         // Ignore malformed stream chunks.
       }
@@ -3400,20 +3315,6 @@ async function handleRequest(
     return;
   }
 
-  if (messagesRouteSessionKey !== undefined) {
-    // Round-3 diagnostic: dump the shape of the RAW request as the SDK sent
-    // it (Anthropic message format), so a layer-1 signal miss can be tied to
-    // a concrete message structure instead of guessed at.
-    const rawRequestObj = toOptionalObject(parsedRequestBody);
-    const rawMessages = toArray(rawRequestObj?.messages);
-    console.info('[cowork-openai-compat-proxy] layer-1 diag: raw request shape', {
-      sessionKey: messagesRouteSessionKey,
-      model: toString(rawRequestObj?.model),
-      messageCount: rawMessages.length,
-      lastThree: rawMessages.slice(-3).map(describeChatMessageShape),
-    });
-  }
-
   let anthropicRequestBody = parsedRequestBody;
   let requestMessages = toOptionalObject(parsedRequestBody)?.messages;
   if (messagesRouteSessionKey) {
@@ -3511,15 +3412,6 @@ async function handleRequest(
     targetURL: string
   ): Promise<Response> => {
     currentTargetURL = targetURL;
-    // Round-3 diagnostic: what the proxy actually sent upstream — whether the
-    // forced tool_choice survived the conversion and reached the provider.
-    console.info('[cowork-openai-compat-proxy] layer-1 diag: upstream request', {
-      targetURL,
-      toolChoice: payload.tool_choice,
-      toolCount: toArray(payload.tools).length,
-      inputMessageCount: toArray(payload.input).length,
-      payloadBytes: JSON.stringify(payload).length,
-    });
     return session.defaultSession.fetch(targetURL, {
       method: 'POST',
       headers,
