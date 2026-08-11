@@ -396,6 +396,7 @@ export class IMCoworkHandler extends EventEmitter {
       '- The current reply still flows back through this session; subsequent inbound',
       '  messages from the user will automatically land in a freshly created session.',
       '- After calling the tool, briefly confirm to the user in the same reply.',
+      '- Reply in plain user language: lead with the conclusion, avoid internal jargon, and never leave the user with homework.',
       '</im_session_tools>',
     ].join('\n');
   }
