@@ -46,6 +46,24 @@ export interface FreeQuotaProvisionResult {
   justProvisioned: boolean;
 }
 
+/**
+ * Manual opt-in path (Settings card): bootstrap and provision the provider
+ * without creating any bot. Used by existing installs that never went through
+ * the first-run flow.
+ */
+export async function enableFreeQuotaManually(): Promise<{ success: boolean; error?: string }> {
+  try {
+    const response = await window.electron.llmRelay.bootstrap();
+    if (!response?.success || !response.result?.apiKey || !response.result?.baseUrl) {
+      return { success: false, error: response?.error ?? 'empty bootstrap result' };
+    }
+    await provisionProviderConfig(response.result);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 type LlmRelayBootstrapResult = NonNullable<Awaited<ReturnType<typeof window.electron.llmRelay.bootstrap>>['result']>;
 
 async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise<void> {
