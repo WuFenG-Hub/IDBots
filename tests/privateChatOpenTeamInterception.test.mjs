@@ -270,3 +270,94 @@ test('a kick envelope without from_chat_pubkey is still dispatched (no reply nee
   await flushMicrotasks();
   assert.equal(handled.length, 1, 'kick handling does not depend on from_chat_pubkey');
 });
+
+// ---------------------------------------------------------------------------
+// 改进清单 #15: an incoming invite must become a VISIBLE message in the
+// invitee's A2A private-chat stream (not a silent protocol consume).
+// ---------------------------------------------------------------------------
+
+test('invite interception calls recordInviteDisplay (with the row display fields) before handling', async () => {
+  const displays = [];
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: invitePlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 48,
+    emitLog: () => {},
+    coworkStore: {},
+    senderName: 'Twin Bot',
+    senderAvatar: 'avatar-1',
+    rowPinId: INVITE_ID,
+    emitToRenderer: () => {},
+    deps: {
+      handleInvite: async () => {},
+      handleResponse: () => {},
+      schedule: (task) => { scheduled = task; },
+      recordInviteDisplay: (input) => { displays.push(input); },
+    },
+  });
+  assert.equal(intercepted, true);
+  assert.equal(displays.length, 0, 'display must not run synchronously on the processOne stack');
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(displays.length, 1);
+  assert.equal(displays[0].metabot.id, 7);
+  assert.equal(displays[0].invite.inviteId, INVITE_ID);
+  assert.equal(displays[0].senderGlobalMetaId, 'gmid-inviter', 'the row sender is the A2A peer');
+  assert.equal(displays[0].senderName, 'Twin Bot');
+  assert.equal(displays[0].envelopePinId, INVITE_ID, 'envelope pin id is the dedup identity');
+});
+
+test('a failing recordInviteDisplay logs but never blocks invite handling', async () => {
+  const logs = [];
+  let handled = 0;
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: invitePlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 49,
+    emitLog: (line) => logs.push(String(line)),
+    coworkStore: {},
+    deps: {
+      handleInvite: async () => { handled += 1; },
+      handleResponse: () => {},
+      schedule: (task) => { scheduled = task; },
+      recordInviteDisplay: () => { throw new Error('display exploded'); },
+    },
+  });
+  assert.equal(intercepted, true);
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(handled, 1, 'invite handling must proceed despite the display failure');
+  assert.ok(
+    logs.some((line) => line.includes('Invite A2A display failed') && line.includes('display exploded')),
+    `expected a display-failure log, got: ${JSON.stringify(logs)}`,
+  );
+});
+
+test('invite interception without a coworkStore does not call recordInviteDisplay', async () => {
+  const displays = [];
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: invitePlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 50,
+    emitLog: () => {},
+    deps: {
+      handleInvite: async () => {},
+      handleResponse: () => {},
+      schedule: (task) => { scheduled = task; },
+      recordInviteDisplay: (input) => { displays.push(input); },
+    },
+  });
+  assert.equal(intercepted, true);
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(displays.length, 0, 'no cowork store -> no A2A display');
+});
