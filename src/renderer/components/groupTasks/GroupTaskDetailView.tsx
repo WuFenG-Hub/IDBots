@@ -359,6 +359,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           >
             <ArrowLeftIcon className="h-5 w-5" />
           </button>
+          <span className="shrink-0 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            #{detail.id}
+          </span>
           <h1 className="text-lg font-semibold dark:text-claude-darkText text-claude-text truncate">
             {detail.title}
           </h1>
