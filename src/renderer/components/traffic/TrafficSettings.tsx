@@ -4,7 +4,7 @@
  * balance with the recharge entry, the recharge flow (mock payment during
  * development), and usage (per-bot daily table, 30-day summary, ledger).
  * Chain writes stay on the self-paid path until the user switches the mode
- * here. UI copy is English per project convention (same as P2PConfigPanel).
+ * here. UI copy goes through i18nService (zh/en), same as Settings/UserSettings.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -15,6 +15,7 @@ import {
   ExclamationTriangleIcon,
   UserCircleIcon,
 } from '@heroicons/react/24/outline';
+import { i18nService } from '../../services/i18n';
 
 type TrafficSettingsInfo = {
   mode: 'traffic' | 'selfpay';
@@ -83,11 +84,11 @@ const RECHARGE_STATUS_CREDITED = 3;
 const RECHARGE_STATUS_CLOSED = 4;
 
 // Ledger direction values delivered by the backend (models/traffic_ledger_model.go).
-const LEDGER_DIRECTION_LABELS: Record<number, string> = {
-  1: 'Credit',
-  2: 'Spend',
-  3: 'Reserve',
-  4: 'Release',
+const LEDGER_DIRECTION_KEYS: Record<number, string> = {
+  1: 'trafficLedgerCredit',
+  2: 'trafficLedgerSpend',
+  3: 'trafficLedgerReserve',
+  4: 'trafficLedgerRelease',
 };
 
 const cardClass = 'rounded-xl dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted px-4 py-3';
@@ -96,12 +97,19 @@ const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSe
 const primaryButtonClass = 'px-3 py-2 text-sm rounded-xl bg-claude-accent text-white hover:bg-claude-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 const ghostButtonClass = 'px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 
+// Renderer-side network failures (assistant-service unreachable, bad endpoint
+// override, ...) surface as raw TypeError text such as "fetch failed"; match
+// those so users get the friendly copy instead.
+const NETWORK_ERROR_PATTERN = /fetch failed|failed to fetch|networkerror|network request failed|econnrefused|enotfound|etimedout|econnreset|socket hang up/i;
+
 const formatMb = (bytes: number): string => {
   const mb = bytes / (1024 * 1024);
-  return `${mb >= 100 ? Math.round(mb) : mb.toFixed(1)} MB`;
+  const value = mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1);
+  return `${value} ${i18nService.t('trafficUnitMb')}`;
 };
 
-const formatBytesExact = (bytes: number): string => `${bytes.toLocaleString()} bytes`;
+const formatBytesExact = (bytes: number): string =>
+  `${bytes.toLocaleString()} ${i18nService.t('trafficUnitBytes')}`;
 
 const shortAddress = (address: string): string => {
   const text = String(address || '');
@@ -113,7 +121,20 @@ const formatAmountWithSign = (direction: number, amountBytes: number): string =>
   return `${sign}${formatMb(amountBytes)}`;
 };
 
+// Single funnel for error text shown in this panel: network-level failures get
+// the friendly copy with the raw message appended; everything else (backend
+// error strings, translated fallbacks) passes through unchanged.
+const describeTrafficError = (raw: string, fallbackKey: string): string => {
+  const text = String(raw || '').trim();
+  if (!text) return i18nService.t(fallbackKey);
+  if (NETWORK_ERROR_PATTERN.test(text)) {
+    return `${i18nService.t('trafficErrFriendly')} (${text})`;
+  }
+  return text;
+};
+
 const TrafficSettings: React.FC = () => {
+  const [, setLanguage] = useState(i18nService.getLanguage());
   const [identityChecked, setIdentityChecked] = useState(false);
   const [identityAddress, setIdentityAddress] = useState<string>('');
   const [settings, setSettings] = useState<TrafficSettingsInfo | null>(null);
@@ -150,6 +171,14 @@ const TrafficSettings: React.FC = () => {
 
   const trafficApi = window.electron.traffic;
 
+  // Re-render on language switches (same pattern as UserSettings/Settings).
+  useEffect(() => {
+    const unsubscribe = i18nService.subscribe(() => {
+      setLanguage(i18nService.getLanguage());
+    });
+    return unsubscribe;
+  }, []);
+
   const stopPolling = useCallback(() => {
     if (pollTimerRef.current !== null) {
       window.clearTimeout(pollTimerRef.current);
@@ -167,10 +196,10 @@ const TrafficSettings: React.FC = () => {
       if (res.success && res.balance) {
         setBalance(res.balance);
       } else {
-        setBalanceError(res.error || 'Failed to load traffic balance.');
+        setBalanceError(describeTrafficError(res.error || '', 'trafficErrLoadBalance'));
       }
     } catch (error) {
-      setBalanceError(error instanceof Error ? error.message : 'Failed to load traffic balance.');
+      setBalanceError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrLoadBalance'));
     } finally {
       setBalanceLoading(false);
     }
@@ -190,7 +219,7 @@ const TrafficSettings: React.FC = () => {
     }
     // Backend unreachable: fall back to the local spend journal aggregated by
     // UTC day + bot address so the table stays useful offline.
-    setUsageError(dailyRes?.error || 'Usage service unavailable; showing locally recorded spends.');
+    setUsageError(describeTrafficError(dailyRes?.error || '', 'trafficUsageUnavailable'));
     const journalRes = await trafficApi.getLocalJournal({ limit: 200 }).catch(() => null);
     if (journalRes?.success && journalRes.entries) {
       const buckets = new Map<string, TrafficDailyUsageRowInfo>();
@@ -218,10 +247,10 @@ const TrafficSettings: React.FC = () => {
         setLedgerCursor(nextCursor);
         setLedgerDone(!nextCursor || res.entries.length === 0);
       } else {
-        setLedgerError(res.error || 'Failed to load the ledger.');
+        setLedgerError(describeTrafficError(res.error || '', 'trafficErrLoadLedger'));
       }
     } catch (error) {
-      setLedgerError(error instanceof Error ? error.message : 'Failed to load the ledger.');
+      setLedgerError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrLoadLedger'));
     } finally {
       setLedgerLoading(false);
     }
@@ -264,11 +293,18 @@ const TrafficSettings: React.FC = () => {
     const normalized = String(address || '').toLowerCase();
     if (!normalized) return '—';
     if (identityAddress && normalized === identityAddress.toLowerCase()) {
-      return `You (identity) · ${shortAddress(address)}`;
+      return `${i18nService.t('trafficYouIdentity')} · ${shortAddress(address)}`;
     }
     const name = botNames[normalized];
     return name ? `${name} · ${shortAddress(address)}` : shortAddress(address);
   }, [botNames, identityAddress]);
+
+  const ledgerDirectionLabel = (direction: number): string => {
+    const key = LEDGER_DIRECTION_KEYS[direction];
+    return key
+      ? i18nService.t(key)
+      : i18nService.t('trafficLedgerTypeUnknown').replace('{direction}', String(direction));
+  };
 
   const handleSelectMode = async (mode: 'traffic' | 'selfpay') => {
     if (!settings || settingsSaving || settings.mode === mode) return;
@@ -289,13 +325,13 @@ const TrafficSettings: React.FC = () => {
     const ensureRes = await trafficApi.ensureAccount().catch(() => null);
     if (!ensureRes?.success) {
       setBindState('error');
-      setBindError(ensureRes?.error || 'Failed to create the traffic account.');
+      setBindError(describeTrafficError(ensureRes?.error || '', 'trafficEnsureAccountFailed'));
       return;
     }
     const bindRes = await trafficApi.bindAllBots().catch(() => null);
     if (!bindRes?.success || !bindRes.summary) {
       setBindState('error');
-      setBindError(bindRes?.error || 'Failed to bind local MetaBot addresses.');
+      setBindError(describeTrafficError(bindRes?.error || '', 'trafficBindBotsFailed'));
       return;
     }
     setBindSummary(bindRes.summary);
@@ -326,13 +362,13 @@ const TrafficSettings: React.FC = () => {
       if (res.success && res.settings) {
         setSettings(res.settings);
         setApiBaseInput('');
-        setApiBaseNotice('Saved. New requests use this endpoint from now on.');
+        setApiBaseNotice(i18nService.t('trafficApiBaseSaved'));
         refreshBalance(true);
       } else {
-        setApiBaseError(res.error || 'Failed to save the API base URL.');
+        setApiBaseError(describeTrafficError(res.error || '', 'trafficErrSaveApiBase'));
       }
     } catch (error) {
-      setApiBaseError(error instanceof Error ? error.message : 'Failed to save the API base URL.');
+      setApiBaseError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrSaveApiBase'));
     } finally {
       setApiBaseSaving(false);
     }
@@ -346,10 +382,10 @@ const TrafficSettings: React.FC = () => {
       if (res.success && res.plans) {
         setPlans(res.plans);
       } else {
-        setPlansError(res.error || 'Failed to load pricing plans.');
+        setPlansError(describeTrafficError(res.error || '', 'trafficErrLoadPlans'));
       }
     } catch (error) {
-      setPlansError(error instanceof Error ? error.message : 'Failed to load pricing plans.');
+      setPlansError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrLoadPlans'));
     } finally {
       setPlansLoading(false);
     }
@@ -370,7 +406,7 @@ const TrafficSettings: React.FC = () => {
     setRechargeError('');
     const res = await trafficApi.createRechargeOrder({ planId: selectedPlanId }).catch(() => null);
     if (!res?.success || !res.order) {
-      setRechargeError(res?.error || 'Failed to create the recharge order.');
+      setRechargeError(describeTrafficError(res?.error || '', 'trafficErrCreateOrder'));
       setRechargeStage('failed');
       return;
     }
@@ -393,13 +429,13 @@ const TrafficSettings: React.FC = () => {
           return;
         }
         if (res.order.status === RECHARGE_STATUS_CLOSED) {
-          setRechargeError('The recharge order was closed before crediting.');
+          setRechargeError(i18nService.t('trafficErrOrderClosed'));
           setRechargeStage('failed');
           return;
         }
       }
       if (attempts >= RECHARGE_POLL_MAX_ATTEMPTS) {
-        setRechargeError('Timed out waiting for the credit. Refresh the balance to check again.');
+        setRechargeError(i18nService.t('trafficErrCreditTimeout'));
         setRechargeStage('failed');
         return;
       }
@@ -416,7 +452,7 @@ const TrafficSettings: React.FC = () => {
     setRechargeStage('confirming');
     const res = await trafficApi.mockConfirmRechargeOrder({ orderId: activeOrder.orderId }).catch(() => null);
     if (!res?.success || !res.order) {
-      setRechargeError(res?.error || 'Mock payment confirmation failed.');
+      setRechargeError(describeTrafficError(res?.error || '', 'trafficErrMockConfirm'));
       setRechargeStage('failed');
       return;
     }
@@ -447,7 +483,7 @@ const TrafficSettings: React.FC = () => {
   const isTrafficMode = settings?.mode === 'traffic';
 
   if (!identityChecked) {
-    return <p className={hintClass}>Loading traffic settings…</p>;
+    return <p className={hintClass}>{i18nService.t('trafficLoading')}</p>;
   }
 
   if (!identityAddress) {
@@ -457,11 +493,10 @@ const TrafficSettings: React.FC = () => {
           <UserCircleIcon className="h-6 w-6 dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0 mt-0.5" />
           <div>
             <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
-              Create your identity first
+              {i18nService.t('trafficCreateIdentityFirst')}
             </h4>
             <p className={hintClass}>
-              Traffic accounts are bound to your local user identity. Create or import an identity
-              in the User tab, then come back to enable traffic mode and recharge.
+              {i18nService.t('trafficCreateIdentityDesc')}
             </p>
           </div>
         </div>
@@ -474,16 +509,15 @@ const TrafficSettings: React.FC = () => {
       {/* Mode */}
       <div>
         <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
-          Gas fee payment mode
+          {i18nService.t('trafficModeTitle')}
         </h4>
         <p className={`${hintClass} mb-3`}>
-          Choose how on-chain writes are paid. Traffic mode lets the sponsor service pay gas from
-          your traffic balance; self-pay spends each MetaBot&apos;s own SPACE.
+          {i18nService.t('trafficModeDesc')}
         </p>
         <div className="grid grid-cols-2 gap-2">
           {([
-            { value: 'selfpay', title: 'Self-pay', desc: 'Each MetaBot pays its own gas' },
-            { value: 'traffic', title: 'Traffic', desc: 'Sponsor pays from your traffic balance' },
+            { value: 'selfpay', title: i18nService.t('trafficModeSelfpayTitle'), desc: i18nService.t('trafficModeSelfpayDesc') },
+            { value: 'traffic', title: i18nService.t('trafficModeTrafficTitle'), desc: i18nService.t('trafficModeTrafficDesc') },
           ] as const).map((option) => {
             const selected = (settings?.mode ?? 'selfpay') === option.value;
             return (
@@ -511,11 +545,11 @@ const TrafficSettings: React.FC = () => {
 
         {isTrafficMode && (
           <div className="mt-3">
-            <span className={labelClass}>When traffic is unavailable or insufficient</span>
+            <span className={labelClass}>{i18nService.t('trafficFallbackLabel')}</span>
             <div className="grid grid-cols-2 gap-2 mt-1.5">
               {([
-                { value: 'selfpay', title: 'Fall back to self-pay', desc: 'Writes keep going, paid by the MetaBot' },
-                { value: 'strict', title: 'Strict mode', desc: 'Fail the write with an error instead' },
+                { value: 'selfpay', title: i18nService.t('trafficFallbackSelfpayTitle'), desc: i18nService.t('trafficFallbackSelfpayDesc') },
+                { value: 'strict', title: i18nService.t('trafficFallbackStrictTitle'), desc: i18nService.t('trafficFallbackStrictDesc') },
               ] as const).map((option) => {
                 const selected = settings?.fallbackPolicy === option.value;
                 return (
@@ -544,16 +578,20 @@ const TrafficSettings: React.FC = () => {
         )}
 
         {bindState === 'running' && (
-          <p className={`${hintClass} mt-2`}>Creating the traffic account and binding local MetaBot addresses…</p>
+          <p className={`${hintClass} mt-2`}>{i18nService.t('trafficBindingRunning')}</p>
         )}
         {bindState === 'done' && bindSummary && (
           <p className="text-xs text-claude-accent mt-2">
-            Bound {bindSummary.boundCount} address{bindSummary.boundCount === 1 ? '' : 'es'} to your traffic account
-            {bindSummary.conflictCount > 0 ? ` (${bindSummary.conflictCount} already bound elsewhere)` : ''}.
+            {i18nService.t('trafficBindSummary')
+              .replace('{bound}', String(bindSummary.boundCount))
+              .replace('{boundPlural}', bindSummary.boundCount === 1 ? '' : 'es')
+              .replace('{conflictClause}', bindSummary.conflictCount > 0
+                ? i18nService.t('trafficBindSummaryConflict').replace('{count}', String(bindSummary.conflictCount))
+                : '')}
           </p>
         )}
         {bindState === 'error' && (
-          <p className="text-xs text-red-500 mt-2">{bindError || 'Account setup failed.'}</p>
+          <p className="text-xs text-red-500 mt-2">{bindError || i18nService.t('trafficBindFailed')}</p>
         )}
       </div>
 
@@ -561,7 +599,7 @@ const TrafficSettings: React.FC = () => {
       <div className={cardClass}>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <span className={labelClass}>Traffic balance</span>
+            <span className={labelClass}>{i18nService.t('trafficBalanceTitle')}</span>
             <div className="flex items-baseline gap-2 mt-1">
               <span
                 className="text-2xl font-bold tabular-nums dark:text-claude-darkText text-claude-text"
@@ -573,7 +611,9 @@ const TrafficSettings: React.FC = () => {
             </div>
             {balance && (
               <p className={`${hintClass} mt-1`}>
-                Reserved {formatMb(balance.reservedBytes)} · Lifetime used {formatMb(balance.spentBytesTotal)}
+                {i18nService.t('trafficBalanceStats')
+                  .replace('{reserved}', formatMb(balance.reservedBytes))
+                  .replace('{spent}', formatMb(balance.spentBytesTotal))}
               </p>
             )}
           </div>
@@ -584,7 +624,7 @@ const TrafficSettings: React.FC = () => {
               onClick={() => refreshBalance(true)}
               disabled={balanceLoading}
             >
-              Refresh
+              {i18nService.t('trafficRefresh')}
             </button>
             <button
               type="button"
@@ -594,7 +634,7 @@ const TrafficSettings: React.FC = () => {
             >
               <span className="inline-flex items-center gap-1">
                 <BoltIcon className="h-4 w-4" />
-                Recharge
+                {i18nService.t('trafficRecharge')}
               </span>
             </button>
           </div>
@@ -603,7 +643,7 @@ const TrafficSettings: React.FC = () => {
           <div className="flex items-center gap-2 mt-3">
             <p className="text-xs text-red-500 flex-1">{balanceError}</p>
             <button type="button" className={ghostButtonClass} onClick={() => refreshBalance(true)}>
-              Retry
+              {i18nService.t('trafficRetry')}
             </button>
           </div>
         )}
@@ -611,7 +651,7 @@ const TrafficSettings: React.FC = () => {
           <div className="flex items-center gap-2 mt-3 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
             <ExclamationTriangleIcon className="h-4 w-4 text-amber-500 shrink-0" />
             <p className="text-xs text-amber-600 dark:text-amber-400">
-              Traffic balance is below 5 MB. Recharge soon to keep traffic-mode writes flowing.
+              {i18nService.t('trafficLowBalanceWarning')}
             </p>
           </div>
         )}
@@ -621,20 +661,20 @@ const TrafficSettings: React.FC = () => {
       {rechargeStage !== 'hidden' && (
         <div className={cardClass}>
           <div className="flex items-center justify-between mb-3">
-            <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">Recharge traffic</h4>
+            <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('trafficRechargeTitle')}</h4>
             <button type="button" className={ghostButtonClass} onClick={closeRecharge}>
-              Close
+              {i18nService.t('trafficClose')}
             </button>
           </div>
 
           {(rechargeStage === 'plans' || rechargeStage === 'creating') && (
             <div>
-              {plansLoading && <p className={hintClass}>Loading pricing plans…</p>}
+              {plansLoading && <p className={hintClass}>{i18nService.t('trafficPlansLoading')}</p>}
               {plansError && (
                 <div className="flex items-center gap-2">
                   <p className="text-xs text-red-500 flex-1">{plansError}</p>
                   <button type="button" className={ghostButtonClass} onClick={loadPlans}>
-                    Retry
+                    {i18nService.t('trafficRetry')}
                   </button>
                 </div>
               )}
@@ -671,7 +711,7 @@ const TrafficSettings: React.FC = () => {
                   onClick={handleCreateOrder}
                   disabled={!selectedPlan || rechargeStage === 'creating'}
                 >
-                  {rechargeStage === 'creating' ? 'Creating order…' : 'Create order'}
+                  {rechargeStage === 'creating' ? i18nService.t('trafficCreatingOrder') : i18nService.t('trafficCreateOrder')}
                 </button>
               </div>
             </div>
@@ -681,18 +721,22 @@ const TrafficSettings: React.FC = () => {
             <div>
               <div className="rounded-lg border border-dashed border-amber-500/50 bg-amber-500/5 px-3 py-2 mb-3">
                 <p className="text-xs font-semibold text-amber-600 dark:text-amber-400">
-                  Mock payment (development)
+                  {i18nService.t('trafficMockPayBadge')}
                 </p>
                 <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary mt-0.5">
-                  No real charge. Real payment gateways replace this step in Phase 4.
+                  {i18nService.t('trafficMockPayDesc')}
                 </p>
               </div>
               <p className="text-sm dark:text-claude-darkText text-claude-text">
-                Pay ¥{activeOrder.payAmount} for {formatMb(activeOrder.trafficBytes)} of traffic?
+                {i18nService.t('trafficMockPayPrompt')
+                  .replace('{amount}', String(activeOrder.payAmount))
+                  .replace('{traffic}', formatMb(activeOrder.trafficBytes))}
               </p>
-              <p className={`${hintClass} mt-1`}>Order {activeOrder.orderId}</p>
+              <p className={`${hintClass} mt-1`}>
+                {i18nService.t('trafficOrderLabel').replace('{orderId}', activeOrder.orderId)}
+              </p>
               {rechargeStage === 'polling' && (
-                <p className={`${hintClass} mt-2`}>Waiting for the credit to land…</p>
+                <p className={`${hintClass} mt-2`}>{i18nService.t('trafficPolling')}</p>
               )}
               <div className="flex justify-end gap-2 mt-3">
                 <button
@@ -705,7 +749,7 @@ const TrafficSettings: React.FC = () => {
                   }}
                   disabled={rechargeStage !== 'mockPay'}
                 >
-                  Cancel
+                  {i18nService.t('trafficCancel')}
                 </button>
                 <button
                   type="button"
@@ -713,7 +757,7 @@ const TrafficSettings: React.FC = () => {
                   onClick={handleMockConfirm}
                   disabled={rechargeStage !== 'mockPay'}
                 >
-                  {rechargeStage === 'mockPay' ? 'Confirm mock payment' : 'Processing…'}
+                  {rechargeStage === 'mockPay' ? i18nService.t('trafficConfirmMockPay') : i18nService.t('trafficProcessing')}
                 </button>
               </div>
             </div>
@@ -724,14 +768,16 @@ const TrafficSettings: React.FC = () => {
               <CheckCircleIcon className="h-5 w-5 text-claude-accent shrink-0 mt-0.5" />
               <div>
                 <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                  {formatMb(activeOrder.trafficBytes)} credited to your traffic balance.
+                  {i18nService.t('trafficSuccessCredited').replace('{traffic}', formatMb(activeOrder.trafficBytes))}
                 </p>
                 {balance && (
-                  <p className={`${hintClass} mt-1`}>New balance: {formatMb(balance.balanceBytes)}</p>
+                  <p className={`${hintClass} mt-1`}>
+                    {i18nService.t('trafficNewBalance').replace('{balance}', formatMb(balance.balanceBytes))}
+                  </p>
                 )}
                 <div className="flex justify-end mt-2">
                   <button type="button" className={primaryButtonClass} onClick={closeRecharge}>
-                    Done
+                    {i18nService.t('trafficDone')}
                   </button>
                 </div>
               </div>
@@ -740,10 +786,10 @@ const TrafficSettings: React.FC = () => {
 
           {rechargeStage === 'failed' && (
             <div>
-              <p className="text-xs text-red-500">{rechargeError || 'Recharge failed.'}</p>
+              <p className="text-xs text-red-500">{rechargeError || i18nService.t('trafficRechargeFailed')}</p>
               <div className="flex justify-end gap-2 mt-3">
                 <button type="button" className={ghostButtonClass} onClick={closeRecharge}>
-                  Close
+                  {i18nService.t('trafficClose')}
                 </button>
                 <button
                   type="button"
@@ -754,7 +800,7 @@ const TrafficSettings: React.FC = () => {
                     setRechargeStage('plans');
                   }}
                 >
-                  Try again
+                  {i18nService.t('trafficTryAgain')}
                 </button>
               </div>
             </div>
@@ -764,13 +810,13 @@ const TrafficSettings: React.FC = () => {
 
       {/* Usage */}
       <div>
-        <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-2">Usage</h4>
+        <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-2">{i18nService.t('trafficUsageTitle')}</h4>
         {summary && (
           <div className="grid grid-cols-3 gap-2 mb-3">
             {([
-              { label: 'Today', bytes: summary.todayBytes },
-              { label: 'Last 7 days', bytes: summary.weekBytes },
-              { label: 'Last 30 days', bytes: summary.monthBytes },
+              { label: i18nService.t('trafficSummaryToday'), bytes: summary.todayBytes },
+              { label: i18nService.t('trafficSummaryWeek'), bytes: summary.weekBytes },
+              { label: i18nService.t('trafficSummaryMonth'), bytes: summary.monthBytes },
             ]).map((item) => (
               <div key={item.label} className={`${cardClass} text-center`}>
                 <div className="text-sm font-bold tabular-nums dark:text-claude-darkText text-claude-text">
@@ -790,10 +836,10 @@ const TrafficSettings: React.FC = () => {
             <table className="w-full text-xs">
               <thead>
                 <tr className="text-left dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  <th className="py-1 pr-3 font-medium">Date (UTC)</th>
-                  <th className="py-1 pr-3 font-medium">MetaBot</th>
-                  <th className="py-1 pr-3 font-medium text-right">Traffic</th>
-                  <th className="py-1 font-medium text-right">Writes</th>
+                  <th className="py-1 pr-3 font-medium">{i18nService.t('trafficTableDate')}</th>
+                  <th className="py-1 pr-3 font-medium">{i18nService.t('trafficTableBot')}</th>
+                  <th className="py-1 pr-3 font-medium text-right">{i18nService.t('trafficTableTraffic')}</th>
+                  <th className="py-1 font-medium text-right">{i18nService.t('trafficTableWrites')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -811,10 +857,10 @@ const TrafficSettings: React.FC = () => {
             </table>
           </div>
         ) : (
-          !usageError && <p className={hintClass}>No traffic usage recorded yet.</p>
+          !usageError && <p className={hintClass}>{i18nService.t('trafficUsageEmpty')}</p>
         )}
 
-        <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mt-4 mb-2">Ledger</h4>
+        <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mt-4 mb-2">{i18nService.t('trafficLedgerTitle')}</h4>
         {ledgerEntries.length > 0 ? (
           <div className={`${cardClass} space-y-1.5`}>
             {ledgerEntries.map((entry) => (
@@ -823,7 +869,7 @@ const TrafficSettings: React.FC = () => {
                   {entry.timestamp ? new Date(entry.timestamp).toISOString().slice(0, 10) : '—'}
                 </span>
                 <span className="dark:text-claude-darkText text-claude-text">
-                  {LEDGER_DIRECTION_LABELS[entry.direction] ?? `Type ${entry.direction}`}
+                  {ledgerDirectionLabel(entry.direction)}
                 </span>
                 <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary truncate flex-1">
                   {entry.sourceType}{entry.remark ? ` · ${entry.remark}` : ''}
@@ -835,13 +881,13 @@ const TrafficSettings: React.FC = () => {
             ))}
           </div>
         ) : (
-          !ledgerError && <p className={hintClass}>No ledger entries yet.</p>
+          !ledgerError && <p className={hintClass}>{i18nService.t('trafficLedgerEmpty')}</p>
         )}
         {ledgerError && (
           <div className="flex items-center gap-2 mt-2">
             <p className="text-xs text-red-500 flex-1">{ledgerError}</p>
             <button type="button" className={ghostButtonClass} onClick={() => loadLedger(0)}>
-              Retry
+              {i18nService.t('trafficRetry')}
             </button>
           </div>
         )}
@@ -853,7 +899,7 @@ const TrafficSettings: React.FC = () => {
               onClick={() => loadLedger(ledgerCursor)}
               disabled={ledgerLoading}
             >
-              {ledgerLoading ? 'Loading…' : 'Load more'}
+              {ledgerLoading ? i18nService.t('trafficLedgerLoading') : i18nService.t('trafficLedgerLoadMore')}
             </button>
           </div>
         )}
@@ -866,19 +912,19 @@ const TrafficSettings: React.FC = () => {
           className="flex items-center justify-between w-full text-left"
           onClick={() => setAdvancedOpen((open) => !open)}
         >
-          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">Advanced</span>
+          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('trafficAdvanced')}</span>
           <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {advancedOpen ? 'Hide' : 'Show'}
+            {advancedOpen ? i18nService.t('trafficAdvancedHide') : i18nService.t('trafficAdvancedShow')}
           </span>
         </button>
         {advancedOpen && (
           <div className="mt-3">
-            <span className={labelClass}>Assist service API base</span>
+            <span className={labelClass}>{i18nService.t('trafficApiBaseLabel')}</span>
             <p className={`${hintClass} mt-1`}>
-              Current: {settings?.apiBase ? settings.apiBase : 'production default (www.metaso.network)'}
+              {i18nService.t('trafficApiBaseCurrent').replace('{value}', settings?.apiBase ? settings.apiBase : i18nService.t('trafficApiBaseDefault'))}
             </p>
             <p className={`${hintClass} mt-1`}>
-              Points the app at a different assist-service instance (used for integration testing).
+              {i18nService.t('trafficApiBaseDesc')}
             </p>
             <div className="flex items-center gap-2 mt-2">
               <input
@@ -889,7 +935,7 @@ const TrafficSettings: React.FC = () => {
                   setApiBaseError('');
                   setApiBaseNotice('');
                 }}
-                placeholder="http://host:port or https://host/assist-open-api"
+                placeholder={i18nService.t('trafficApiBasePlaceholder')}
                 className="flex-1 min-w-0 rounded-lg dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
               />
               <button
@@ -898,7 +944,7 @@ const TrafficSettings: React.FC = () => {
                 onClick={() => handleSaveApiBase(apiBaseInput)}
                 disabled={apiBaseSaving || !apiBaseInput.trim()}
               >
-                {apiBaseSaving ? 'Saving…' : 'Save'}
+                {apiBaseSaving ? i18nService.t('trafficApiBaseSaving') : i18nService.t('trafficApiBaseSave')}
               </button>
               {settings?.apiBase ? (
                 <button
@@ -907,7 +953,7 @@ const TrafficSettings: React.FC = () => {
                   onClick={() => handleSaveApiBase('')}
                   disabled={apiBaseSaving}
                 >
-                  Reset
+                  {i18nService.t('trafficApiBaseReset')}
                 </button>
               ) : null}
             </div>
