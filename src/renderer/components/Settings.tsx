@@ -59,6 +59,7 @@ const formatLocalDateInput = (date: Date): string => {
 };
 
 const providerKeys = [
+  'metaid-free',
   'openai',
   'gemini',
   'anthropic',
@@ -143,6 +144,12 @@ interface ProvidersImportPayload {
 }
 
 const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode }> = {
+  'metaid-free': {
+    label: 'MetaID Free',
+    icon: (
+      <svg height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>MetaID Free</title><path fill="currentColor" d="M12 1.5l2.1 6.4 6.4 2.1-6.4 2.1L12 18.5l-2.1-6.4-6.4-2.1 6.4-2.1L12 1.5zM19.2 14.8l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9.9-2.7z"></path></svg>
+    ),
+  },
   openai: {
     label: 'OpenAI',
     icon: (

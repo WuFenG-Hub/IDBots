@@ -416,6 +416,16 @@ export const defaultConfig: AppConfig = {
     defaultModel: DEEPSEEK_DEFAULT_MODEL_ID,
   },
   providers: {
+    // Built-in free-quota relay provider (assist-base-service llm relay).
+    // Stays inert until the first-run bootstrap provisions baseUrl+apiKey+models.
+    'metaid-free': {
+      enabled: false,
+      apiKey: '',
+      baseUrl: '',
+      apiFormat: 'openai',
+      models: [],
+      name: 'MetaID Free',
+    },
     openai: {
       enabled: false,
       apiKey: '',
@@ -580,7 +590,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
+  'metaid-free', 'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
 ] as const;
 
 /**

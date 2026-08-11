@@ -33,6 +33,7 @@ const STEP_LABELS = [
 
 /** Display labels for provider keys (aligned with Settings provider list). */
 const PROVIDER_LABELS: Record<string, string> = {
+  'metaid-free': 'MetaID Free',
   openai: 'OpenAI',
   gemini: 'Gemini',
   anthropic: 'Anthropic',
