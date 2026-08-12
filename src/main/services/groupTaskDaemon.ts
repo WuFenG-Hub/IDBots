@@ -172,6 +172,14 @@ const ACK_SEEN_PREFIX = 'group_task_ack_seen:';
 const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
+/**
+ * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
+ * closing ceremony (so the last group message is a worker's, not the host's),
+ * the chair re-posts the closing line. This kv stores the straggler message id
+ * the re-assert already covered, so each straggler triggers exactly one re-post
+ * (and a second tick with no new straggler stays quiet).
+ */
+const GROUP_TASK_REVIEW_REASSERT_KV_PREFIX = 'group_task_review_reassert:';
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
 /**
@@ -1019,6 +1027,16 @@ export function buildMemberJoinWelcomeText(input: {
   }
   return lines.join('\n');
 }
+
+/**
+ * #14: the system closing line the chair posts when a task enters review (and
+ * re-posts when a worker straggler buries it). It is the message that must rest
+ * last while the task awaits human acceptance — never a worker's [WORKING].
+ * Wording is de-#id (no task number in user-visible text), matching the
+ * chair-lifecycle autonomy pass.
+ */
+const buildReviewClosingLine = (task: { title: string }): string =>
+  `📦 任务「${task.title}」所有步骤已完成,进入验收阶段,等待人类评审。`;
 
 export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskDaemonLoop {
   const intervalMs = Math.max(1_000, Math.trunc(deps.intervalMs ?? DEFAULT_INTERVAL_MS));
@@ -2391,8 +2409,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               at: now(),
             });
             if (updated.status === 'executing' && beforeStatus === 'review') {
-              // Rework hatch: the next review must report to the owner again.
+              // Rework hatch: the next review must report to the owner again,
+              // and the re-assert straggler guard must reset so the fresh
+              // review entry can re-assert cleanly.
               deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
+              deps.getStore().delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {
               // HITL: review entry is itself the final human gate — an open
@@ -2434,8 +2455,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // (the chair's own final summary may precede it). No mentions:
               // review-phase silence + self-skip keep it reply-free.
               try {
-                const closing =
-                  `📦 任务「${task.title}」所有步骤已完成,进入验收阶段,等待人类评审。`;
+                const closing = buildReviewClosingLine(task);
                 const sent = await postGroupMessage(task.id, chairMember.metabotId!, closing);
                 emitLog(
                   `[GroupTaskDaemon] Task ${task.id}: closing ceremony posted on review entry (pin ${sent.pinId})`,
@@ -3953,6 +3973,39 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         // failed one — otherwise their success would advance the cursor past
         // it and silently strand the pending retry forever.
         break;
+      }
+    }
+
+    // #14 follow-up: a worker turn already in flight when the task entered
+    // review can land AFTER the chair's closing ceremony, leaving a worker's
+    // [WORKING]/[DELIVERABLE] as the last group message. While the task awaits
+    // human acceptance the host — not a straggler — must be the last speaker,
+    // so re-assert the closing line. One re-assert per distinct straggler
+    // (kv-guard on the straggler's message id); the chair post then becomes
+    // last and this gate stays quiet until another straggler arrives.
+    if (task.status === 'review' && task.groupId) {
+      const chair = members.find((member) => member.role === 'chair');
+      const chairGlobalMetaId = chair?.globalmetaid?.trim() || null;
+      if (chair?.metabotId != null && chairGlobalMetaId) {
+        const lastRow = queryRecentMessages(db, task.groupId, 1)[0];
+        const lastSender = (lastRow?.sender_global_metaid ?? '').trim();
+        if (lastRow && lastSender && lastSender !== chairGlobalMetaId) {
+          const reassertKey = `${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`;
+          if (String(sqlite.get(reassertKey) ?? '') !== String(lastRow.id)) {
+            sqlite.set(reassertKey, String(lastRow.id));
+            try {
+              const sent = await postGroupMessage(task.id, chair.metabotId, buildReviewClosingLine(task));
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: re-asserted chair closing after straggler msg ${lastRow.id} (pin ${sent.pinId})`,
+              );
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: review closing re-assert failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
+        }
       }
     }
   };

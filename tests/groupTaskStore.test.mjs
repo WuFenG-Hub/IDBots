@@ -602,3 +602,56 @@ test('P0-8: integrity events table + add/list/dedupe-by-pin', async () => {
     store.close();
   }
 });
+
+test('listDeliverables joins the producing message body for folded text display', async () => {
+  const tempDir = makeTempDir();
+  const { store, groupTaskStore, db } = await openStores(tempDir);
+  try {
+    const task = groupTaskStore.createTask({
+      groupId: 'group-join', title: 'Join', goal: 'G',
+      chairMetabotId: 1, createdBy: 'user', createPinId: 'pin-join',
+    });
+    // A text deliverable (no uri) — its message body must be joined in.
+    db.run(
+      `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_name, content, protocol)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['msg-pin-1', 'group-join', 'metaid-x', 'loop', '[DELIVERABLE] final review: passed', 'im'],
+    );
+    groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'msg-pin-1', authorGlobalmetaid: 'gmid-loop', kind: 'text', uri: null,
+    });
+    // A metafile deliverable — source message joined too (for context).
+    const metafilePin = `${'a'.repeat(64)}i0`;
+    db.run(
+      `INSERT INTO group_chat_messages (pin_id, group_id, sender_metaid, sender_name, content, protocol)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      ['msg-pin-2', 'group-join', 'metaid-y', 'Builder', `[DELIVERABLE] metafile://${metafilePin}`, 'im'],
+    );
+    groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'msg-pin-2', authorGlobalmetaid: 'gmid-builder', kind: 'metafile', uri: `metafile://${metafilePin}`,
+    });
+    // An orphan deliverable (source message gone) — join must yield nulls, not error.
+    groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'msg-pin-gone', authorGlobalmetaid: 'gmid-orphan', kind: 'text', uri: null,
+    });
+
+    const list = groupTaskStore.listDeliverables(task.id);
+    assert.equal(list.length, 3);
+
+    const text = list.find((d) => d.msgPinId === 'msg-pin-1');
+    assert.equal(text.kind, 'text');
+    assert.equal(text.sourceContent, '[DELIVERABLE] final review: passed');
+    assert.equal(text.sourceSenderName, 'loop');
+
+    const metafile = list.find((d) => d.msgPinId === 'msg-pin-2');
+    assert.equal(metafile.kind, 'metafile');
+    assert.equal(metafile.uri, `metafile://${metafilePin}`);
+    assert.equal(metafile.sourceSenderName, 'Builder');
+
+    const orphan = list.find((d) => d.msgPinId === 'msg-pin-gone');
+    assert.equal(orphan.sourceContent, null);
+    assert.equal(orphan.sourceSenderName, null);
+  } finally {
+    store.close();
+  }
+});

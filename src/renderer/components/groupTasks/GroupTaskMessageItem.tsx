@@ -125,6 +125,8 @@ interface GroupTaskMessageItemProps {
   isRemoteSender?: boolean;
   /** Sender is one of this machine's own bots (OpenTeam invitee transcript). */
   isOwnBotSender?: boolean;
+  /** Briefly highlight this row (e.g. when jumped to from an integrity event). */
+  highlight?: boolean;
 }
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
@@ -133,6 +135,7 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   isOwnerSender,
   isRemoteSender,
   isOwnBotSender,
+  highlight,
 }) => {
   // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
   // source. A message whose sender is neither a task member nor the owner is
@@ -148,7 +151,12 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
 
 
   return (
-    <div className="flex items-start gap-2.5 px-4 py-2.5">
+    <div
+      data-pin-id={message.pinId ?? undefined}
+      className={`flex items-start gap-2.5 px-4 py-2.5 transition-colors ${
+        highlight ? 'ring-2 ring-claude-accent/60 rounded-lg bg-claude-accent/5' : ''
+      }`}
+    >
       {/* Avatar */}
       <img
         src={avatarSrc}

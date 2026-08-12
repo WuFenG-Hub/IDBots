@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { groupTaskService } from '../../services/groupTaskService';
 import type {
@@ -12,6 +12,7 @@ import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
+  deliverableKindBadge,
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
   formatGroupTaskTime,
@@ -21,15 +22,50 @@ import {
   groupTaskWorkStatusLabelKey,
   isActiveGroupTaskStatus,
   mergeTranscriptMessages,
+  shortGroupId,
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 
 const MESSAGE_PAGE_LIMIT = 50;
+// Distance from the top (px) at which one older transcript page is fetched.
+const LOAD_OLDER_THRESHOLD = 48;
+
+/**
+ * Copyable group/room id pill. The group_id is the room id (stored locally on
+ * the task) — copying it lets the owner paste it when referring a local MetaBot
+ * to a specific group task. Shows a short form; copies the FULL id.
+ */
+const RoomIdBadge: React.FC<{ groupId: string }> = ({ groupId }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(groupId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable (permissions) — the title tooltip still shows the full id
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={() => void handleCopy()}
+      title={i18nService.t(copied ? 'groupTasksRoomIdCopied' : 'groupTasksCopyRoomId')}
+      aria-label={i18nService.t(copied ? 'groupTasksRoomIdCopied' : 'groupTasksCopyRoomId')}
+      className="non-draggable inline-flex shrink-0 items-center gap-1 rounded-full border dark:border-claude-darkBorder border-claude-border px-2 py-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+    >
+      <span className="font-mono">{shortGroupId(groupId)}</span>
+      {copied
+        ? <CheckIcon className="h-3 w-3 text-emerald-500" />
+        : <ClipboardDocumentIcon className="h-3 w-3" />}
+    </button>
+  );
+};
 
 interface GroupTaskDetailViewProps {
   taskId: number;
@@ -78,6 +114,20 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const sentHintTimerRef = useRef<number | null>(null);
+  // Scroll-up pagination: oldestLoadedId is the backwards cursor (beforeId),
+  // hasMore whether an older page may exist, plus in-flight + scroll-restore
+  // state. Refs back the scroll handler so it never reads a stale closure.
+  const oldestLoadedIdRef = useRef<number | null>(null);
+  const hasMoreRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const pendingScrollRestoreRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+  // Integrity-event → message anchor: messagesRef mirrors the loaded transcript
+  // for the async jump loop; highlightPinId briefly rings the target row.
+  const messagesRef = useRef<GroupChatTranscriptMessage[]>([]);
+  const [highlightPinId, setHighlightPinId] = useState<string | null>(null);
+  const [jumpHint, setJumpHint] = useState<string | null>(null);
 
   const refreshDetail = useCallback(async (opts?: { quiet?: boolean }) => {
     try {
@@ -100,9 +150,56 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     try {
       const page = await groupTaskService.listMessages(taskId, { limit: MESSAGE_PAGE_LIMIT });
       setMessages((current) => mergeTranscriptMessages(current, page));
+      // The first successful page seeds the backwards-paging cursor. Later 5s
+      // polls only refresh the latest window and must NOT move a cursor the
+      // user may have already advanced by loading older messages.
+      if (oldestLoadedIdRef.current === null && page.length > 0) {
+        oldestLoadedIdRef.current = page.reduce(
+          (min, message) => (message.id < min ? message.id : min),
+          page[0].id,
+        );
+        const more = page.length >= MESSAGE_PAGE_LIMIT;
+        hasMoreRef.current = more;
+        setHasMore(more);
+      }
       setMessagesError(null);
     } catch (err) {
       setMessagesError(err instanceof Error ? err.message : String(err));
+    }
+  }, [taskId]);
+
+  // Fetch one older page (before the oldest loaded id) and prepend it. The
+  // user's viewport is preserved by nudging scrollTop by the added height.
+  const loadOlder = useCallback(async () => {
+    if (loadingOlderRef.current) return;
+    const beforeId = oldestLoadedIdRef.current;
+    if (beforeId == null) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const el = scrollRef.current;
+    const prevScrollHeight = el?.scrollHeight ?? 0;
+    const prevScrollTop = el?.scrollTop ?? 0;
+    try {
+      const page = await groupTaskService.listMessages(taskId, { beforeId, limit: MESSAGE_PAGE_LIMIT });
+      if (page.length > 0) {
+        setMessages((current) => mergeTranscriptMessages(current, page));
+        oldestLoadedIdRef.current = page.reduce(
+          (min, message) => (message.id < min ? message.id : min),
+          page[0].id,
+        );
+        const more = page.length >= MESSAGE_PAGE_LIMIT;
+        hasMoreRef.current = more;
+        setHasMore(more);
+        pendingScrollRestoreRef.current = { prevScrollHeight, prevScrollTop };
+      } else {
+        hasMoreRef.current = false;
+        setHasMore(false);
+      }
+    } catch (err) {
+      setMessagesError(err instanceof Error ? err.message : String(err));
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
     }
   }, [taskId]);
 
@@ -135,6 +232,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   useEffect(() => {
     setMessages([]);
     setMessagesError(null);
+    oldestLoadedIdRef.current = null;
+    hasMoreRef.current = true;
+    loadingOlderRef.current = false;
+    pendingScrollRestoreRef.current = null;
+    setHasMore(true);
+    setLoadingOlder(false);
   }, [taskId]);
 
   // Transcript: initial load + 5s poll while mounted. The poll also refreshes
@@ -187,6 +290,25 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   }, [messages]);
 
+  // Mirror the loaded transcript into a ref so the async jump loop reads the
+  // latest rows instead of a stale closure snapshot.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // After an older page is prepended, keep the user's viewport anchored on the
+  // same message instead of jumping to the new (older) top. Runs before paint
+  // so there is no flicker; a no-op when no restore is pending.
+  useLayoutEffect(() => {
+    const restore = pendingScrollRestoreRef.current;
+    if (!restore) return;
+    pendingScrollRestoreRef.current = null;
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = restore.prevScrollTop + (el.scrollHeight - restore.prevScrollHeight);
+    }
+  }, [messages]);
+
   useEffect(() => () => {
     if (sentHintTimerRef.current != null) {
       window.clearTimeout(sentHintTimerRef.current);
@@ -197,7 +319,51 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     const el = scrollRef.current;
     if (!el) return;
     stickToBottomRef.current = shouldStickToBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+    // Load one older page when the user reaches the top (chat-style infinite
+    // scroll upwards); the backend already pages backwards via beforeId.
+    if (
+      el.scrollTop <= LOAD_OLDER_THRESHOLD
+      && hasMoreRef.current
+      && !loadingOlderRef.current
+      && oldestLoadedIdRef.current != null
+    ) {
+      void loadOlder();
+    }
   };
+
+  // Integrity-event → message anchor: ensure the target message is loaded
+  // (paging back via the existing beforeId path if it is older than the window),
+  // then scroll it into view and briefly highlight it.
+  const jumpToMessage = useCallback(async (pinId: string) => {
+    if (!pinId) return;
+    let guard = 0;
+    while (
+      messagesRef.current.every((message) => message.pinId !== pinId)
+      && hasMoreRef.current
+      && oldestLoadedIdRef.current != null
+      && guard < 12
+    ) {
+      guard += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await loadOlder();
+    }
+    const present = messagesRef.current.some((message) => message.pinId === pinId);
+    if (!present) {
+      setJumpHint(i18nService.t('groupTasksAnchorNotFound'));
+      window.setTimeout(() => setJumpHint(null), 2500);
+      return;
+    }
+    // Let React commit any prepended rows before querying the DOM node.
+    window.setTimeout(() => {
+      const target = scrollRef.current?.querySelector(`[data-pin-id="${pinId}"]`) as HTMLElement | null;
+      if (!target) return;
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setHighlightPinId(pinId);
+      window.setTimeout(() => setHighlightPinId((current) => (current === pinId ? null : current)), 1800);
+      // A jump up means we are no longer tracking the bottom.
+      stickToBottomRef.current = false;
+    }, 60);
+  }, [loadOlder]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -382,6 +548,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${groupTaskStatusBadgeClass(detail.status)}`}>
             {i18nService.t(groupTaskStatusLabelKey(detail.status))}
           </span>
+          {detail.groupId && <RoomIdBadge groupId={detail.groupId} />}
         </div>
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (
@@ -504,6 +671,14 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             onScroll={handleTranscriptScroll}
             className="flex-1 overflow-y-auto py-2"
           >
+            {/* Scroll-up pagination status (top of the transcript window). */}
+            {messages.length > 0 && (loadingOlder || !hasMore) && (
+              <div className="flex items-center justify-center py-1.5 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                {loadingOlder
+                  ? i18nService.t('groupTasksLoadingOlder')
+                  : i18nService.t('groupTasksNoMoreMessages')}
+              </div>
+            )}
             {loadingMessages && messages.length === 0 ? (
               <div className="flex items-center justify-center py-16">
                 <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -533,6 +708,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     message.senderGlobalMetaId
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
+                  highlight={highlightPinId != null && message.pinId === highlightPinId}
                 />
               ))
             )}
@@ -708,13 +884,24 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             ) : (
               <div className="space-y-1.5">
                 {(detail.integrityEvents ?? []).map((event) => (
-                  <div key={event.id} className="text-[11px] leading-tight dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
+                  <button
+                    type="button"
+                    key={event.id}
+                    disabled={!event.msgPinId}
+                    onClick={() => event.msgPinId && void jumpToMessage(event.msgPinId)}
+                    title={event.msgPinId ? i18nService.t('groupTasksJumpToMessage') : undefined}
+                    className={`block w-full text-left rounded-md px-1.5 py-1 text-[11px] leading-tight transition-colors dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 ${
+                      event.msgPinId
+                        ? 'hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover cursor-pointer'
+                        : 'cursor-default'
+                    }`}
+                  >
                     <span className={`font-medium ${event.eventType === 'correction' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                       {event.eventType === 'correction' ? 'correction' : 'honest report'}
                     </span>
                     <div className="text-[10px] opacity-80 line-clamp-2">{event.detail ?? ''}</div>
                     <div className="text-[10px] opacity-70">{formatGroupTaskTime(event.createdAt)}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -729,28 +916,32 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               </p>
             ) : (
               <div className="space-y-2">
-                {detail.deliverables.map((deliverable) => (
+                {detail.deliverables.map((deliverable) => {
+                  const kindBadge = deliverableKindBadge(deliverable.kind);
+                  const statusKey = deliverable.status === 'accepted'
+                    ? 'groupTasksDeliverableStatusAccepted'
+                    : deliverable.status === 'rejected'
+                      ? 'groupTasksDeliverableStatusRejected'
+                      : 'groupTasksDeliverableStatusPending';
+                  const statusHintKey = deliverable.status === 'accepted'
+                    ? 'groupTasksDeliverableStatusAcceptedHint'
+                    : deliverable.status === 'rejected'
+                      ? 'groupTasksDeliverableStatusRejectedHint'
+                      : 'groupTasksDeliverableStatusPendingHint';
+                  return (
                   <div
                     key={deliverable.id}
                     className="rounded-lg border dark:border-claude-darkBorder/60 border-claude-border/60 px-2.5 py-2"
                   >
                     <div className="flex items-center gap-2">
-                      {deliverable.kind && (
-                        <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {deliverable.kind}
-                        </span>
-                      )}
+                      <span className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${kindBadge.className}`}>
+                        {i18nService.t(kindBadge.labelKey)}
+                      </span>
                       <span
                         className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70"
-                        title={
-                          deliverable.status === 'pending'
-                            ? 'pending = 已提交，待 owner 验收（与链上确认是两个独立维度）'
-                            : deliverable.status === 'accepted'
-                              ? 'accepted = 已通过 owner 验收'
-                              : 'rejected = 已被拒绝'
-                        }
+                        title={i18nService.t(statusHintKey)}
                       >
-                        {deliverable.status === 'pending' ? '待验收' : deliverable.status === 'accepted' ? '已验收' : '已拒绝'}
+                        {i18nService.t(statusKey)}
                       </span>
                       {(() => {
                         // Issue #8: on-chain confirmation is a ledger state
@@ -762,9 +953,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           return (
                             <span
                               className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                              title={deliverable.verification ?? '链上多源验证通过'}
+                              title={deliverable.verification ?? i18nService.t('groupTasksDeliverableConfirmedHint')}
                             >
-                              链上已确认
+                              {i18nService.t('groupTasksDeliverableConfirmed')}
                             </span>
                           );
                         }
@@ -780,7 +971,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                         );
                       })()}
                     </div>
-                    {deliverable.uri && (
+                    {deliverable.uri ? (
                       /^https?:\/\//i.test(deliverable.uri) ? (
                         <a
                           href={deliverable.uri}
@@ -795,12 +986,25 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           {deliverable.uri}
                         </code>
                       )
+                    ) : (
+                      // Text deliverable (no uri): fold the producing message
+                      // body so the panel reads as content, not an empty card.
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-[11px] text-claude-accent hover:underline">
+                          {i18nService.t('groupTasksDeliverableViewSource')}
+                        </summary>
+                        <div className="mt-1 max-h-40 overflow-y-auto rounded p-2 text-[11px] whitespace-pre-wrap break-words dark:bg-claude-darkSurfaceHover/60 bg-claude-surfaceHover/60 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          {deliverable.sourceContent?.trim()
+                            || i18nService.t('groupTasksDeliverableNoSource')}
+                        </div>
+                      </details>
                     )}
                     <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                       {deliverableAuthorName(deliverable.authorGlobalmetaid)}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -848,6 +1052,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       {closeError && !confirmAction && (
         <div className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-red-500 text-white text-sm px-4 py-2 shadow-lg">
           {closeError}
+        </div>
+      )}
+      {jumpHint && (
+        <div className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-claude-textSecondary text-white text-sm px-4 py-2 shadow-lg">
+          {jumpHint}
         </div>
       )}
     </div>

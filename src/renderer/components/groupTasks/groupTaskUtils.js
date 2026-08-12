@@ -16,6 +16,19 @@ export function canAcceptGroupTask(status) {
 }
 
 /**
+ * Short display form for a group/room id (the on-chain group_id, a 64-hex pinid
+ * with an `i0` output suffix). Long ids are elided to `first8…last6` (keeping
+ * the `i0` suffix visible so the room stays recognizable); short values and
+ * junk pass through unchanged. The FULL id is what gets copied to the clipboard.
+ */
+export function shortGroupId(groupId) {
+  const id = String(groupId ?? '').trim();
+  if (!id) return '';
+  if (id.length <= 16) return id;
+  return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
+/**
  * P0-1: a review task can be pulled back to executing (Back to work) — the
  * owner/chair reopens it to assign supplementary subtasks.
  */
@@ -137,6 +150,47 @@ export function groupTaskMemberStatusLabel(status) {
     case 'unreachable': return 'unreachable';
     case 'assigned':
     default: return 'assigned';
+  }
+}
+
+/**
+ * Group Task deliverable kinds and their badge styling. kind comes from the
+ * [DELIVERABLE] line's URI scheme (groupTaskDeliverableParser):
+ *   metafile://  -> metafile (on-chain file)
+ *   metaapp://   -> metaapp  (on-chain app)
+ *   https?://    -> url
+ *   <pinid>i0    -> pinid
+ *   (no uri)     -> text
+ * Returns { labelKey, className } so the component can localize the label.
+ */
+export function deliverableKindBadge(kind) {
+  switch (kind) {
+    case 'metafile':
+      return {
+        labelKey: 'groupTasksDeliverableKindMetafile',
+        className: 'bg-sky-500/15 text-sky-600 dark:text-sky-400',
+      };
+    case 'metaapp':
+      return {
+        labelKey: 'groupTasksDeliverableKindMetaapp',
+        className: 'bg-violet-500/15 text-violet-600 dark:text-violet-400',
+      };
+    case 'url':
+      return {
+        labelKey: 'groupTasksDeliverableKindUrl',
+        className: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+      };
+    case 'pinid':
+      return {
+        labelKey: 'groupTasksDeliverableKindPinid',
+        className: 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-400',
+      };
+    case 'text':
+    default:
+      return {
+        labelKey: 'groupTasksDeliverableKindText',
+        className: 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary',
+      };
   }
 }
 

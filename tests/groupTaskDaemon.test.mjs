@@ -851,6 +851,56 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
   }
 });
 
+test('#14 closing re-assert: a worker straggler landing after review entry is followed by the chair closing line again', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing (planning->review is illegal)
+    // Worker [WORKING] then chair [STATUS:REVIEW] -> review + closing ceremony.
+    insertGroupMessage(h.db, {
+      pinId: 'working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] finishing up', chainTimestamp: 100,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const firstClosingCount = h.sends.filter(
+      (s) => s.metabotId === 1 && /进入验收阶段/.test(s.content),
+    ).length;
+    assert.ok(firstClosingCount >= 1, 'closing ceremony posted on review entry');
+
+    // The chair closing line lands on-chain, then a worker turn that was in
+    // flight when review began finishes AFTER it — the group would now rest on
+    // a worker's message instead of the host's.
+    insertGroupMessage(h.db, {
+      pinId: 'closing-landed-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'chair closing landed on chain', chainTimestamp: 102,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'straggler-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'final build passed, uploading', chainTimestamp: 103,
+    });
+    await h.loop.runTick();
+
+    const closings = h.sends.filter((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(
+      closings.length > firstClosingCount,
+      'chair re-asserted the closing line after the straggler',
+    );
+    assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
+    assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
+
+    // Idempotent: a second tick with no NEW straggler does not re-assert again.
+    const countAfter = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, countAfter, 're-assert fires once per straggler (kv-guarded)');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('skill path: routing hit runs the skill turn in the existing session, plain path untouched', async () => {
   const h = await createHarness({
     coderChatSkills: ['web-search'],

@@ -9,6 +9,7 @@ import {
   groupTaskStatusBadgeClass,
   formatGroupTaskTime,
   mergeTranscriptMessages,
+  shortGroupId,
   shouldStickToBottom,
 } from '../src/renderer/components/groupTasks/groupTaskUtils.js';
 
@@ -96,6 +97,31 @@ test('mergeTranscriptMessages: dedupe by id, ascending, tolerates junk', () => {
   );
   assert.deepEqual(mergeTranscriptMessages(null, incoming).map((m) => m.id), [3, 5]);
   assert.deepEqual(mergeTranscriptMessages(existing, null).map((m) => m.id), [1, 3]);
+});
+
+test('shortGroupId: elides long room ids, keeps i0 suffix visible, passes short/junk through', () => {
+  const longId = '198206ac14f950dbfc25fad73992b6091232623987f1ab0251de1c7825de6ca5i0';
+  assert.equal(shortGroupId(longId), '198206ac…6ca5i0');
+  assert.equal(shortGroupId('abcd1234ef90i0'), 'abcd1234ef90i0');
+  assert.equal(shortGroupId(null), '');
+  assert.equal(shortGroupId('   '), '');
+});
+
+test('deliverableKindBadge: distinct label + class per kind, unknown falls back to text', async () => {
+  const { deliverableKindBadge } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(deliverableKindBadge('metafile').labelKey, 'groupTasksDeliverableKindMetafile');
+  assert.equal(deliverableKindBadge('metaapp').labelKey, 'groupTasksDeliverableKindMetaapp');
+  assert.equal(deliverableKindBadge('url').labelKey, 'groupTasksDeliverableKindUrl');
+  assert.equal(deliverableKindBadge('pinid').labelKey, 'groupTasksDeliverableKindPinid');
+  assert.equal(deliverableKindBadge('text').labelKey, 'groupTasksDeliverableKindText');
+  // unknown / null kinds resolve to the text badge so every row gets a label
+  assert.equal(deliverableKindBadge(null).labelKey, 'groupTasksDeliverableKindText');
+  assert.equal(deliverableKindBadge('weird').labelKey, 'groupTasksDeliverableKindText');
+  for (const kind of ['metafile', 'metaapp', 'url', 'pinid', 'text', null]) {
+    const badge = deliverableKindBadge(kind);
+    assert.equal(typeof badge.className, 'string');
+    assert.ok(badge.className.length > 0, `${kind} should have a class`);
+  }
 });
 
 test('shouldStickToBottom: threshold semantics', () => {
