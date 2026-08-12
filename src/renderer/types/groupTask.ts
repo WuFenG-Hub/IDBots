@@ -28,6 +28,12 @@ export interface GroupTask {
   /** Optional free-text review from the owner alongside the star rating. */
   ratingComment: string | null;
   ratedAt: string | null;
+  /** Local-only display name overriding the on-chain title; null = chain title. */
+  displayName: string | null;
+  /** Local-only pinned flag; pinned tasks sort first in the list. */
+  pinned: boolean;
+  /** Local-only archive marker (epoch ms; null = active). */
+  archivedAt: number | null;
 }
 
 export interface GroupTaskMember {

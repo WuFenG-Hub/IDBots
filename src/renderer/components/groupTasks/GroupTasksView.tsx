@@ -13,8 +13,10 @@ import {
   filterGroupTasksByTab,
   formatGroupTaskTime,
   groupTaskStatusBadgeClass,
+  shortGroupId,
 } from './groupTaskUtils';
-import { UserGroupIcon } from '@heroicons/react/24/outline';
+import GroupTaskItemMenu, { PushPinIcon } from './GroupTaskItemMenu';
+import { UserGroupIcon, EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -46,36 +48,127 @@ const FILTER_TABS: Array<{ id: GroupTaskListTab; labelKey: string }> = [
   { id: 'all', labelKey: 'groupTasksFilterAll' },
 ];
 
-const GroupTaskListItem: React.FC<{ task: GroupTaskSummary; onClick: () => void }> = ({ task, onClick }) => (
-  <div
-    className="px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 hover:bg-claude-surfaceHover/50 dark:hover:bg-claude-darkSurfaceHover/50 cursor-pointer transition-colors"
-    onClick={onClick}
-  >
-    <div className="flex items-center gap-3">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-2">
-          <span className="shrink-0 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            #{task.id}
-          </span>
-          <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
-            {task.title}
-          </span>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}>
-            {i18nService.t(groupTaskStatusLabelKey(task.status))}
-          </span>
+interface GroupTaskListItemProps {
+  task: GroupTaskSummary;
+  onClick: () => void;
+  onTogglePin: (pinned: boolean) => void;
+  onRename: (title: string) => void;
+  onArchive: () => void;
+}
+
+const GroupTaskListItem: React.FC<GroupTaskListItemProps> = ({
+  task,
+  onClick,
+  onTogglePin,
+  onRename,
+  onArchive,
+}) => {
+  const displayTitle = task.displayName?.trim() || task.title;
+  const actionLabel = i18nService.t('coworkSessionActions');
+
+  const handleCopyGroupId = () => {
+    const value = task.groupId?.trim() || `#${task.id}`;
+    try {
+      const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+      if (clipboard) void clipboard.writeText(value);
+    } catch {
+      // Ignore clipboard failures; the menu should still close.
+    }
+  };
+
+  return (
+    <GroupTaskItemMenu
+      task={task}
+      onTogglePin={onTogglePin}
+      onRename={onRename}
+      onArchive={onArchive}
+      onCopyGroupId={handleCopyGroupId}
+    >
+      {(api) => (
+        <div
+          className="group relative px-4 py-3 border-b dark:border-claude-darkBorder/50 border-claude-border/50 hover:bg-claude-surfaceHover/50 dark:hover:bg-claude-darkSurfaceHover/50 cursor-pointer transition-colors"
+          onClick={() => {
+            if (api.isRenaming) return;
+            api.closeMenu();
+            onClick();
+          }}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            api.openMenuAt(event.clientX, event.clientY);
+          }}
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="shrink-0 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  #{task.id}
+                </span>
+                {api.isRenaming ? (
+                  <input
+                    ref={api.renameInputRef}
+                    value={api.renameValue}
+                    onChange={(event) => api.onRenameInputChange(event.target.value)}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={api.onRenameInputKeyDown}
+                    onBlur={api.onRenameInputBlur}
+                    className="flex-1 min-w-0 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg px-2 py-1 text-sm font-medium dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent"
+                  />
+                ) : (
+                  <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
+                    {displayTitle}
+                  </span>
+                )}
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}>
+                  {i18nService.t(groupTaskStatusLabelKey(task.status))}
+                </span>
+              </div>
+              <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
+                {task.chairName ? `${task.chairName} (${i18nService.t('groupTasksChairBadge')})` : ''}
+                {task.memberNames.length > 0 ? ` · ${task.memberNames.join(', ')}` : ''}
+                {task.groupId ? ` · ${shortGroupId(task.groupId)}` : ''}
+              </div>
+            </div>
+            <div className="shrink-0 text-right text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              <div>{task.memberCount} {i18nService.t('groupTasksMembers')}</div>
+              <div className="mt-0.5">{formatGroupTaskTime(task.updatedAt ?? task.createdAt)}</div>
+            </div>
+          </div>
+
+          {/* Actions - absolutely positioned overlay */}
+          <div
+            className={`absolute right-3 top-3 transition-opacity ${
+              api.isRenaming
+                ? 'opacity-0 pointer-events-none'
+                : task.pinned
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100'
+            }`}
+          >
+            <button
+              ref={api.actionButtonRef}
+              onClick={api.openMenu}
+              className="p-1.5 rounded-lg bg-claude-surfaceMuted dark:bg-claude-darkSurfaceMuted dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurface hover:bg-claude-surface transition-colors"
+              aria-label={actionLabel}
+            >
+              {task.pinned ? (
+                <span className="relative block h-4 w-4">
+                  <PushPinIcon className="h-4 w-4 transition-opacity duration-150 group-hover:opacity-0" />
+                  <EllipsisHorizontalIcon className="absolute inset-0 h-4 w-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
+                </span>
+              ) : (
+                <EllipsisHorizontalIcon className="h-4 w-4" />
+              )}
+            </button>
+          </div>
+
+          {api.renderMenu()}
+          {api.renderArchiveConfirm()}
         </div>
-        <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
-          {task.chairName ? `${task.chairName} (${i18nService.t('groupTasksChairBadge')})` : ''}
-          {task.memberNames.length > 0 ? ` · ${task.memberNames.join(', ')}` : ''}
-        </div>
-      </div>
-      <div className="shrink-0 text-right text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-        <div>{task.memberCount} {i18nService.t('groupTasksMembers')}</div>
-        <div className="mt-0.5">{formatGroupTaskTime(task.updatedAt ?? task.createdAt)}</div>
-      </div>
-    </div>
-  </div>
-);
+      )}
+    </GroupTaskItemMenu>
+  );
+};
 
 const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   isSidebarCollapsed,
@@ -213,6 +306,9 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
               key={task.id}
               task={task}
               onClick={() => dispatch(selectTask(task.id))}
+              onTogglePin={(pinned) => void groupTaskService.setTaskPinned(task.id, pinned)}
+              onRename={(title) => void groupTaskService.renameTask(task.id, title)}
+              onArchive={() => void groupTaskService.archiveTask(task.id)}
             />
           ))
         )}

@@ -46,6 +46,30 @@ const groupTasksSlice = createSlice({
         task.status = action.payload.status;
       }
     },
+    updateTaskPinned(
+      state,
+      action: PayloadAction<{ taskId: number; pinned: boolean }>
+    ) {
+      const task = state.tasks.find((t) => t.id === action.payload.taskId);
+      if (task) {
+        task.pinned = action.payload.pinned;
+      }
+    },
+    updateTaskDisplayName(
+      state,
+      action: PayloadAction<{ taskId: number; displayName: string | null }>
+    ) {
+      const task = state.tasks.find((t) => t.id === action.payload.taskId);
+      if (task) {
+        task.displayName = action.payload.displayName;
+      }
+    },
+    removeTask(state, action: PayloadAction<number>) {
+      state.tasks = state.tasks.filter((t) => t.id !== action.payload);
+      if (state.selectedTaskId === action.payload) {
+        state.selectedTaskId = null;
+      }
+    },
     selectTask(state, action: PayloadAction<number | null>) {
       state.selectedTaskId = action.payload;
     },
@@ -58,6 +82,9 @@ export const {
   setTasks,
   upsertTask,
   updateTaskStatus,
+  updateTaskPinned,
+  updateTaskDisplayName,
+  removeTask,
   selectTask,
 } = groupTasksSlice.actions;
 

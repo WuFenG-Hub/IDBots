@@ -138,6 +138,18 @@ export interface GroupTask {
   ratingComment: string | null;
   /** datetime('now') of the rating; null for unrated tasks. */
   ratedAt: string | null;
+  /**
+   * Local-only user-chosen display name overriding the on-chain title.
+   * NULL = the chain title is shown as-is.
+   */
+  displayName: string | null;
+  /** Local-only pinned flag (0/1); pinned tasks sort first in the list. */
+  pinned: boolean;
+  /**
+   * Local-only archive marker (epoch ms; NULL = active). Archived tasks are
+   * hidden from the UI list but fully preserved; restoring clears it.
+   */
+  archivedAt: number | null;
 }
 
 export interface GroupTaskMember {
@@ -300,6 +312,9 @@ interface GroupTaskRow {
   rating: number | null;
   rating_comment: string | null;
   rated_at: string | null;
+  display_name: string | null;
+  pinned: number | null;
+  archived_at: number | null;
 }
 
 interface GroupTaskMemberRow {
@@ -489,6 +504,9 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     rating: row.rating ?? null,
     ratingComment: row.rating_comment ?? null,
     ratedAt: row.rated_at ?? null,
+    displayName: row.display_name ?? null,
+    pinned: Boolean(row.pinned),
+    archivedAt: row.archived_at ?? null,
   };
 }
 
@@ -672,14 +690,91 @@ export class GroupTaskStore {
     return linked;
   }
 
-  listTasks(filter?: { status?: GroupTaskStatus }): GroupTask[] {
-    const rows = filter?.status
-      ? this.getAll<GroupTaskRow>(
-          'SELECT * FROM group_tasks WHERE status = ? ORDER BY id DESC',
-          [filter.status],
-        )
-      : this.getAll<GroupTaskRow>('SELECT * FROM group_tasks ORDER BY id DESC');
+  /**
+   * List tasks. `includeArchived` defaults to TRUE so internal callers
+   * (daemon drive, experience backfill) keep seeing every task — archiving is
+   * a UI-hiding concept, not a lifecycle one. The IPC list surface passes
+   * includeArchived: false to exclude archived tasks and sort pinned first.
+   */
+  listTasks(filter?: { status?: GroupTaskStatus; includeArchived?: boolean }): GroupTask[] {
+    const includeArchived = filter?.includeArchived !== false;
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+    if (filter?.status) {
+      clauses.push('status = ?');
+      params.push(filter.status);
+    }
+    if (!includeArchived) {
+      clauses.push('archived_at IS NULL');
+    }
+    const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    const orderSql = includeArchived ? 'ORDER BY id DESC' : 'ORDER BY pinned DESC, id DESC';
+    const rows = this.getAll<GroupTaskRow>(
+      `SELECT * FROM group_tasks ${whereSql} ${orderSql}`,
+      params,
+    );
     return rows.map(rowToGroupTask);
+  }
+
+  /** Set the local pinned flag (pinned tasks sort first in the UI list). */
+  setTaskPinned(id: number, pinned: boolean): void {
+    this.db.run('UPDATE group_tasks SET pinned = ?, updated_at = datetime(\'now\') WHERE id = ?', [
+      pinned ? 1 : 0,
+      id,
+    ]);
+    this.saveDb();
+  }
+
+  /**
+   * Set the local display name (overrides the on-chain title in the UI).
+   * Empty input clears the override back to the chain title.
+   */
+  renameTask(id: number, displayName: string): void {
+    const normalized = displayName.trim() || null;
+    this.db.run('UPDATE group_tasks SET display_name = ?, updated_at = datetime(\'now\') WHERE id = ?', [
+      normalized,
+      id,
+    ]);
+    this.saveDb();
+  }
+
+  /**
+   * Archive a task: it disappears from the UI list, but the task and all its
+   * records are preserved (messages, members, deliverables) and the daemon
+   * keeps driving it. Archiving — not deletion — is the user-facing way to
+   * put a task away, matching cowork session archiving.
+   */
+  archiveTask(id: number): void {
+    this.db.run('UPDATE group_tasks SET archived_at = ?, updated_at = datetime(\'now\') WHERE id = ?', [
+      Date.now(),
+      id,
+    ]);
+    this.saveDb();
+  }
+
+  unarchiveTask(id: number): void {
+    this.db.run('UPDATE group_tasks SET archived_at = NULL, updated_at = datetime(\'now\') WHERE id = ?', [
+      id,
+    ]);
+    this.saveDb();
+  }
+
+  /** Archived tasks, newest archive first (Settings restore panel). */
+  listArchivedTasks(options?: { offset?: number; limit?: number }): GroupTask[] {
+    const offset = Math.max(0, Math.floor(options?.offset ?? 0));
+    const limit = Math.max(1, Math.floor(options?.limit ?? 50));
+    const rows = this.getAll<GroupTaskRow>(
+      'SELECT * FROM group_tasks WHERE archived_at IS NOT NULL ORDER BY archived_at DESC LIMIT ? OFFSET ?',
+      [limit, offset],
+    );
+    return rows.map(rowToGroupTask);
+  }
+
+  countArchivedTasks(): number {
+    const row = this.getOne<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM group_tasks WHERE archived_at IS NOT NULL',
+    );
+    return row?.n ?? 0;
   }
 
   /**

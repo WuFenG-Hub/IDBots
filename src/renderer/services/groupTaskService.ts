@@ -6,6 +6,9 @@ import {
   setTasks,
   upsertTask,
   updateTaskStatus,
+  updateTaskPinned,
+  updateTaskDisplayName,
+  removeTask,
 } from '../store/slices/groupTasksSlice';
 import type {
   GroupTaskCreateInput,
@@ -202,6 +205,71 @@ class GroupTaskService {
       throw new Error(result.error ?? 'Failed to send message');
     }
     return result.pinId as string;
+  }
+
+  /** Set the local pinned flag; the list re-sorts pinned tasks first. */
+  async setTaskPinned(taskId: number, pinned: boolean): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api) return;
+
+    const result = await api.pin({ taskId, pinned });
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to pin group task');
+    }
+    store.dispatch(updateTaskPinned({ taskId, pinned }));
+  }
+
+  /** Set the local display name (empty clears it back to the chain title). */
+  async renameTask(taskId: number, title: string): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api) return;
+
+    const result = await api.rename({ taskId, title });
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to rename group task');
+    }
+    const displayName = title.trim() || null;
+    store.dispatch(updateTaskDisplayName({ taskId, displayName }));
+  }
+
+  /** Archive the task: hidden from the list, records preserved. */
+  async archiveTask(taskId: number): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api) return;
+
+    const result = await api.archive({ taskId });
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to archive group task');
+    }
+    store.dispatch(removeTask(taskId));
+  }
+
+  /** Restore an archived task (Settings panel). */
+  async unarchiveTask(taskId: number): Promise<void> {
+    const api = window.electron?.groupTask;
+    if (!api) return;
+
+    const result = await api.unarchive({ taskId });
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to restore group task');
+    }
+  }
+
+  async listArchivedTasks(options?: { offset?: number; limit?: number }): Promise<{
+    tasks: GroupTaskSummary[];
+    total: number;
+  }> {
+    const api = window.electron?.groupTask;
+    if (!api) return { tasks: [], total: 0 };
+
+    const result = await api.listArchived(options);
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to load archived group tasks');
+    }
+    return {
+      tasks: (result.tasks ?? []) as GroupTaskSummary[],
+      total: Number(result.total ?? 0),
+    };
   }
 
   private toSummary(task: GroupTaskDetail): GroupTaskSummary {

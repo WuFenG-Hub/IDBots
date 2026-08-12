@@ -736,6 +736,16 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:sendUserMessage', input),
     kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) =>
       ipcRenderer.invoke('groupTask:kickMember', input),
+    rename: (input: { taskId: number; title: string }) =>
+      ipcRenderer.invoke('groupTask:rename', input),
+    pin: (input: { taskId: number; pinned: boolean }) =>
+      ipcRenderer.invoke('groupTask:pin', input),
+    archive: (input: { taskId: number }) =>
+      ipcRenderer.invoke('groupTask:archive', input),
+    unarchive: (input: { taskId: number }) =>
+      ipcRenderer.invoke('groupTask:unarchive', input),
+    listArchived: (options?: { offset?: number; limit?: number }) =>
+      ipcRenderer.invoke('groupTask:listArchived', options),
     onStatusChanged: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:statusChanged', handler);

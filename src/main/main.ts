@@ -164,6 +164,12 @@ import {
   reworkGroupTask,
   kickGroupTaskMember,
   postGroupTaskMessageAsOwner,
+  listArchivedGroupTasks,
+  countArchivedGroupTasks,
+  setGroupTaskPinned,
+  renameGroupTask,
+  archiveGroupTask,
+  unarchiveGroupTask,
 } from './services/groupTaskService';
 import {
   startGroupTaskDaemon,
@@ -9551,6 +9557,74 @@ if (!gotTheLock) {
       return { success: true, member };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to remove the member' };
+    }
+  });
+
+  // Local-only UI state: rename (display name), pin, archive/unarchive.
+  ipcMain.handle('groupTask:rename', async (_event, input: { taskId?: number; title?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:rename', () =>
+        renameGroupTask(taskId, String(input?.title ?? '').trim()));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to rename group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:pin', async (_event, input: { taskId?: number; pinned?: boolean }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:pin', () =>
+        setGroupTaskPinned(taskId, Boolean(input?.pinned)));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to pin group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:archive', async (_event, input: { taskId?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:archive', () => archiveGroupTask(taskId));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to archive group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:unarchive', async (_event, input: { taskId?: number }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:unarchive', () => unarchiveGroupTask(taskId));
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to restore group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:listArchived', async (_event, options?: { offset?: number; limit?: number }) => {
+    try {
+      const offset = typeof options?.offset === 'number' ? options.offset : 0;
+      const limit = typeof options?.limit === 'number' ? options.limit : 50;
+      const tasks = await withSqliteRecovery('groupTask:listArchived', () =>
+        listArchivedGroupTasks({ offset, limit }));
+      const total = await withSqliteRecovery('groupTask:listArchived', () => countArchivedGroupTasks());
+      return { success: true, tasks, total };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list archived group tasks' };
     }
   });
 

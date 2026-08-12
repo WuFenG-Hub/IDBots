@@ -1113,6 +1113,11 @@ interface IElectronAPI {
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
     kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;
+    rename: (input: { taskId: number; title: string }) => Promise<any>;
+    pin: (input: { taskId: number; pinned: boolean }) => Promise<any>;
+    archive: (input: { taskId: number }) => Promise<any>;
+    unarchive: (input: { taskId: number }) => Promise<any>;
+    listArchived: (options?: { offset?: number; limit?: number }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
     onCheckpointChanged: (callback: (data: any) => void) => () => void;

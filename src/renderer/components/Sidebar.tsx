@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { RootState } from '../store';
 import { coworkService } from '../services/cowork';
+import { groupTaskService } from '../services/groupTaskService';
 import { i18nService } from '../services/i18n';
 import CoworkSessionList from './cowork/CoworkSessionList';
 import CoworkSearchModal from './cowork/CoworkSearchModal';
@@ -191,6 +192,18 @@ const Sidebar: React.FC<SidebarProps> = ({
   const handleSelectGroupTask = (taskId: number) => {
     onShowGroupTasks();
     dispatch(selectGroupTask(taskId));
+  };
+
+  const handleToggleGroupTaskPin = async (taskId: number, pinned: boolean) => {
+    await groupTaskService.setTaskPinned(taskId, pinned);
+  };
+
+  const handleRenameGroupTask = async (taskId: number, title: string) => {
+    await groupTaskService.renameTask(taskId, title);
+  };
+
+  const handleArchiveGroupTask = async (taskId: number) => {
+    await groupTaskService.archiveTask(taskId);
   };
 
   const handlePrimaryNavClick = (itemId: string) => {
@@ -420,6 +433,9 @@ const Sidebar: React.FC<SidebarProps> = ({
               <GroupTaskSidebarList
                 tasks={groupTasks}
                 onSelectTask={handleSelectGroupTask}
+                onTogglePin={handleToggleGroupTaskPin}
+                onRename={handleRenameGroupTask}
+                onArchive={handleArchiveGroupTask}
                 emptyText={i18nService.t(activeTaskRecordTab.emptyKey)}
               />
             ) : (

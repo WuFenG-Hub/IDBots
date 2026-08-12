@@ -998,3 +998,98 @@ test('P1-4: computeGroupTaskMemberWorkStatus error-degrade priority', () => {
   assert.equal(status({ lastSpeakAt: NOW - 30 * MIN }), 'idle');
   assert.equal(status({}), 'unknown');
 });
+
+// --- Local-only UI state: display name, pin, archive/unarchive ---
+
+const insertTaskRow = (h, overrides = {}) => h.groupTaskStore.createTask({
+  groupId: overrides.groupId ?? `task-group-${Math.random().toString(36).slice(2, 10)}i0`,
+  title: overrides.title ?? 'Chain Title',
+  goal: overrides.goal ?? 'G',
+  chairMetabotId: 1,
+  createdBy: 'user',
+  createPinId: null,
+});
+
+test('local state: rename sets display_name, leaves the chain title untouched, empty clears it', async () => {
+  const h = await createHarness();
+  try {
+    const created = insertTaskRow(h);
+    assert.equal(created.displayName, null);
+
+    h.groupTaskStore.renameTask(created.id, 'My Display Name');
+    const renamed = h.groupTaskStore.getTaskById(created.id);
+    assert.equal(renamed.displayName, 'My Display Name');
+    assert.equal(renamed.title, 'Chain Title');
+
+    // empty/whitespace clears the override back to the chain title
+    h.groupTaskStore.renameTask(created.id, '   ');
+    assert.equal(h.groupTaskStore.getTaskById(created.id).displayName, null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('local state: pinned tasks sort first in the UI list', async () => {
+  const h = await createHarness();
+  try {
+    const older = insertTaskRow(h);
+    const newer = insertTaskRow(h);
+    h.groupTaskStore.setTaskPinned(older.id, true);
+
+    const tasks = h.groupTaskStore.listTasks({ includeArchived: false });
+    assert.equal(tasks.length, 2);
+    assert.equal(tasks[0].id, older.id, 'pinned task sorts first');
+    assert.equal(tasks[0].pinned, true);
+    assert.equal(tasks[1].pinned, false);
+
+    h.groupTaskStore.setTaskPinned(older.id, false);
+    const afterUnpin = h.groupTaskStore.listTasks({ includeArchived: false });
+    assert.equal(afterUnpin[0].pinned, false);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('local state: archive hides from the UI list but not from internal callers; restore brings it back', async () => {
+  const h = await createHarness();
+  try {
+    const task = insertTaskRow(h);
+    assert.equal(h.groupTaskStore.listTasks({ includeArchived: false }).length, 1);
+    assert.equal(h.groupTaskStore.listTasks().length, 1);
+
+    h.groupTaskStore.archiveTask(task.id);
+    assert.equal(h.groupTaskStore.listTasks({ includeArchived: false }).length, 0, 'UI list hides archived');
+    assert.equal(h.groupTaskStore.listTasks().length, 1, 'internal callers still see the task');
+    assert.equal(h.groupTaskStore.countArchivedTasks(), 1);
+
+    const archived = h.groupTaskStore.listArchivedTasks();
+    assert.equal(archived.length, 1);
+    assert.equal(archived[0].id, task.id);
+    assert.ok(archived[0].archivedAt > 0, 'archive timestamp recorded');
+    assert.ok(archived[0].archivedAt <= Date.now());
+
+    h.groupTaskStore.unarchiveTask(task.id);
+    assert.equal(h.groupTaskStore.listTasks({ includeArchived: false }).length, 1);
+    assert.equal(h.groupTaskStore.countArchivedTasks(), 0);
+    assert.equal(h.groupTaskStore.getTaskById(task.id).archivedAt, null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('local state: listGroupTaskSummaries (IPC surface) excludes archived tasks', async () => {
+  const h = await createHarness();
+  try {
+    const a = insertTaskRow(h, { title: 'A' });
+    insertTaskRow(h, { title: 'B' });
+    h.groupTaskStore.archiveTask(a.id);
+
+    const summaries = await listGroupTaskSummaries();
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].id, a.id + 1);
+    assert.equal(summaries[0].title, 'B');
+    assert.equal(summaries[0].archivedAt, null);
+  } finally {
+    h.cleanup();
+  }
+});
