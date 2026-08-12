@@ -38,6 +38,26 @@ test('listArchivedSessions returns only archived sessions, newest archive first'
   }
 });
 
+test('setSessionModel stores a per-session model without touching other sessions', async () => {
+  const { db, cleanup, store, arch1, arch2 } = await seed();
+  try {
+    // Fresh sessions inherit the global default (model = null).
+    assert.equal(store.getSession(arch1.id).model, null);
+    assert.equal(store.getSession(arch2.id).model, null);
+
+    // Setting a model on one session must not affect the other.
+    store.setSessionModel(arch1.id, 'deepseek-v4-pro');
+    assert.equal(store.getSession(arch1.id).model, 'deepseek-v4-pro');
+    assert.equal(store.getSession(arch2.id).model, null, 'other session untouched');
+
+    // Clearing the override falls back to the global default again.
+    store.setSessionModel(arch1.id, null);
+    assert.equal(store.getSession(arch1.id).model, null, 'cleared override');
+  } finally {
+    cleanup();
+  }
+});
+
 test('listArchivedSessions filters by sessionType a2a, and unarchive restores it out of the list', async () => {
   const { db, cleanup, store, arch1, arch2, arch3 } = await seed();
   try {

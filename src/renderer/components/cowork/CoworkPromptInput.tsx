@@ -14,6 +14,7 @@ import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice'
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
 import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
+import type { Model } from '../../store/slices/modelSlice';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -155,6 +156,9 @@ interface CoworkPromptInputProps {
   showAttachmentButton?: boolean;
   /** When set, restrict model choices to this LLM provider (e.g. from MetaBot llm_id). */
   restrictToLlmId?: string | null;
+  /** Controlled per-session model: display value (null = fall back to the global default) + change handler. */
+  modelValue?: Model | null;
+  onModelChange?: (model: Model) => void;
   /** Estimated context-window usage of the current conversation; shows a ring indicator when provided. */
   contextUsage?: CoworkContextUsage | null;
   onManageSkills?: () => void;
@@ -185,6 +189,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       showModelSelector = false,
       showAttachmentButton = true,
       restrictToLlmId,
+      modelValue = null,
+      onModelChange,
       contextUsage,
       onManageSkills,
       suggestedPrompts,
@@ -840,7 +846,14 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                     />
                   </>
                 )}
-                {showModelSelector && <ModelSelector dropdownDirection="up" restrictToLlmId={restrictToLlmId} />}
+                {showModelSelector && (
+                  <ModelSelector
+                    dropdownDirection="up"
+                    restrictToLlmId={restrictToLlmId}
+                    value={onModelChange ? modelValue : null}
+                    onChange={onModelChange}
+                  />
+                )}
                 {showAttachmentButton ? (
                   <button
                     type="button"

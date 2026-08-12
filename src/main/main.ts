@@ -8520,6 +8520,23 @@ if (!gotTheLock) {
     });
   });
 
+  ipcMain.handle('cowork:session:setModel', async (_event, options: { sessionId: string; model: string | null }) => {
+    return withSqliteRecovery('cowork:session:setModel', async () => {
+      try {
+        const model = options.model?.trim() || null;
+        const coworkStoreInstance = getCoworkStore();
+        coworkStoreInstance.setSessionModel(options.sessionId, model);
+        return { success: true, model };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set session model',
+        };
+      }
+    });
+  });
+
   ipcMain.handle('cowork:session:rename', async (_event, options: { sessionId: string; title: string }) => {
     return withSqliteRecovery('cowork:session:rename', async () => {
       try {
