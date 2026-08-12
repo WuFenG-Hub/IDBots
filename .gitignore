@@ -218,3 +218,4 @@ man_base_data_pebble/
 !tests/coworkReadImageGuard.test.mjs
 !tests/coworkToolResultFold.test.mjs
 !tests/messageFeedback.test.mjs
+!tests/metaAppOwnerIdempotency.test.mjs
