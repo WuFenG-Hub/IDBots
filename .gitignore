@@ -14,6 +14,10 @@ release/
 .env
 .env.local
 
+# Local logs and TypeScript incremental build cache (regenerated on each build)
+logs/
+*.tsbuildinfo
+
 
 # ZCode worktrees (do not publish)
 .zcode/
