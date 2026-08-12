@@ -7,9 +7,11 @@
  *
  * Flow: address info -> unsigned /file inscription draft -> quota check ->
  * challenge -> pre (sponsor prepares tx) -> sign user-owned inputs ->
- * commit (sponsor broadcasts). Self-paid fallback semantics preserved:
- * service_unavailable / no_user_utxo / insufficient_quota fall back to a
- * regular self-paid direct upload; pre_rejected / commit_failed are hard
+ * commit (sponsor broadcasts). Self-paid fallback semantics preserved and
+ * aligned with mvcSponsorCreatePin: service_unavailable / no_user_utxo /
+ * insufficient_quota / insufficient_traffic all fall back to a regular
+ * self-paid direct upload (sponsor link down OR balance/traffic exhausted ->
+ * switch to the bot's own wallet); pre_rejected / commit_failed are hard
  * failures carrying feeAssist diagnostics.
  *
  * The sponsor protocol itself (API client, message signing, UTXO fetch,
@@ -205,6 +207,22 @@ function normalizeSponsorReason(value: unknown, fallback: MvcSponsorFeeAssistRea
     : fallback;
 }
 
+/**
+ * Reasons that mean the sponsor cannot/will not cover the fee and the upload
+ * should transparently fall back to the bot's own wallet. Mirrors
+ * mvcSponsorCreatePin.isFallbackReason so the file-upload and create-pin paths
+ * share the same fallback policy: service_unavailable (link down) and the
+ * insufficient_quota/insufficient_traffic (balance/traffic exhausted) cases all
+ * switch to self-paid instead of hard-failing. pre_rejected / commit_failed
+ * remain hard failures because the sponsor has already engaged the tx.
+ */
+function isFallbackReason(reason: MvcSponsorFeeAssistReason | undefined): boolean {
+  return reason === 'service_unavailable'
+    || reason === 'no_user_utxo'
+    || reason === 'insufficient_quota'
+    || reason === 'insufficient_traffic';
+}
+
 function attachFeeAssistError(input: {
   error: unknown;
   fallbackCode: string;
@@ -339,11 +357,12 @@ export async function uploadMvcSponsorDirectFile(
   try {
     challenge = await sponsorClient.getChallenge();
   } catch (error) {
-    if (normalizeSponsorReason((error as { reason?: unknown })?.reason, 'service_unavailable') === 'service_unavailable') {
+    const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'service_unavailable');
+    if (isFallbackReason(reason)) {
       return fallbackSelfPaidForSponsorError({
         error,
         selfPaidUpload: input.selfPaidUpload,
-        fallbackReason: 'service_unavailable',
+        fallbackReason: reason,
         stage: 'challenge',
         quotaBefore,
         advisoryFeeEstimate: estimatedMinerFee,
@@ -393,11 +412,11 @@ export async function uploadMvcSponsorDirectFile(
     });
   } catch (error) {
     const reason = normalizeSponsorReason((error as { reason?: unknown })?.reason, 'pre_rejected');
-    if (reason === 'service_unavailable') {
+    if (isFallbackReason(reason)) {
       return fallbackSelfPaidForSponsorError({
         error,
         selfPaidUpload: input.selfPaidUpload,
-        fallbackReason: 'service_unavailable',
+        fallbackReason: reason,
         stage: 'pre',
         quotaBefore,
         advisoryFeeEstimate: estimatedMinerFee,
@@ -406,7 +425,7 @@ export async function uploadMvcSponsorDirectFile(
     attachFeeAssistError({
       error,
       fallbackCode: 'mvc_fee_assist_pre_failed',
-      fallbackReason: reason === 'insufficient_quota' || reason === 'insufficient_traffic' ? reason : 'pre_rejected',
+      fallbackReason: 'pre_rejected',
       stage: 'pre',
       quotaBefore,
       advisoryFeeEstimate: estimatedMinerFee,

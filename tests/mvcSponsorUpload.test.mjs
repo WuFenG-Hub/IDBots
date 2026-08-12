@@ -162,9 +162,8 @@ test('uploadMvcSponsorDirectFile falls back to self-paid when sponsor service is
   assert.equal(selfPaidFeeAssist.stage, 'address_info');
 });
 
-test('uploadMvcSponsorDirectFile hard-fails with insufficient_quota when the sponsor pre rejects quota', async () => {
+test('uploadMvcSponsorDirectFile falls back to self-paid when sponsor pre rejects with insufficient quota', async () => {
   const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
-  const draft = await buildTestDraft(mvcAddress);
   const fetchImpl = createFetchStub([
     ['/v2/assist/gas/address/info', {
       exists: true,
@@ -180,30 +179,80 @@ test('uploadMvcSponsorDirectFile hard-fails with insufficient_quota when the spo
   ]);
   const { filePath } = await makeTestFile();
 
-  await assert.rejects(
-    uploadMvcSponsorDirectFile({
-      filePath,
-      fileName: 'sponsor-test.bin',
-      contentType: 'application/octet-stream;binary',
-      bytes: 16,
-      extension: '.bin',
-      mnemonic: MNEMONIC,
-      walletPath: WALLET_PATH,
-      mvcAddress,
-      selfPaidUpload: async () => ({ success: true, pinId: 'selfpaid-i0' }),
-      fetchImpl,
-      fetchUtxos: async () => [
-        { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
-      ],
-    }),
-    (error) => {
-      assert.equal(error.code, 'mvc_fee_assist_pre_failed');
-      assert.equal(error.data.feeAssist.used, false);
-      assert.equal(error.data.feeAssist.reason, 'insufficient_quota');
-      assert.equal(error.data.feeAssist.stage, 'pre');
-      return true;
+  let selfPaidFeeAssist = null;
+  const result = await uploadMvcSponsorDirectFile({
+    filePath,
+    fileName: 'sponsor-test.bin',
+    contentType: 'application/octet-stream;binary',
+    bytes: 16,
+    extension: '.bin',
+    mnemonic: MNEMONIC,
+    walletPath: WALLET_PATH,
+    mvcAddress,
+    selfPaidUpload: async (feeAssist) => {
+      selfPaidFeeAssist = feeAssist;
+      return { success: true, pinId: 'selfpaid-i0' };
     },
-  );
+    fetchImpl,
+    fetchUtxos: async () => [
+      { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
+    ],
+  });
+
+  // Insufficient balance at pre must switch to the bot's own wallet (used to
+  // hard-fail), carrying the reason so callers can surface it.
+  assert.equal(result.pinId, 'selfpaid-i0');
+  assert.ok(selfPaidFeeAssist);
+  assert.equal(selfPaidFeeAssist.attempted, true);
+  assert.equal(selfPaidFeeAssist.used, false);
+  assert.equal(selfPaidFeeAssist.mode, 'self_paid');
+  assert.equal(selfPaidFeeAssist.reason, 'insufficient_quota');
+  assert.equal(selfPaidFeeAssist.stage, 'pre');
+});
+
+test('uploadMvcSponsorDirectFile falls back to self-paid on insufficient traffic at pre', async () => {
+  const mvcAddress = '1K9eUW4vED3qfWmr4Fcre64sU7D38QM1tX';
+  const fetchImpl = createFetchStub([
+    ['/v2/assist/gas/address/info', {
+      exists: true,
+      balance: 5000,
+      grantedAmount: 5000,
+      reservedAmount: 0,
+      spentAmount: 0,
+      availableAmount: 5000,
+      status: 'active',
+    }],
+    ['/v2/assist/gas/mvc/challenge', { challengeId: 'challenge-1', message: 'sign this message' }],
+    ['/v2/assist/gas/mvc/pre', () => ({ code: 1, msg: 'TRAFFIC_INSUFFICIENT' })],
+  ]);
+  const { filePath } = await makeTestFile();
+
+  let selfPaidFeeAssist = null;
+  const result = await uploadMvcSponsorDirectFile({
+    filePath,
+    fileName: 'sponsor-test.bin',
+    contentType: 'application/octet-stream;binary',
+    bytes: 16,
+    extension: '.bin',
+    mnemonic: MNEMONIC,
+    walletPath: WALLET_PATH,
+    mvcAddress,
+    selfPaidUpload: async (feeAssist) => {
+      selfPaidFeeAssist = feeAssist;
+      return { success: true, pinId: 'selfpaid-i0' };
+    },
+    fetchImpl,
+    fetchUtxos: async () => [
+      { txId: TEST_TXID, outputIndex: 0, satoshis: 50000, address: mvcAddress, height: 1 },
+    ],
+  });
+
+  assert.equal(result.pinId, 'selfpaid-i0');
+  assert.ok(selfPaidFeeAssist);
+  assert.equal(selfPaidFeeAssist.used, false);
+  assert.equal(selfPaidFeeAssist.mode, 'self_paid');
+  assert.equal(selfPaidFeeAssist.reason, 'insufficient_traffic');
+  assert.equal(selfPaidFeeAssist.stage, 'pre');
 });
 
 test('uploadMvcSponsorDirectFile hard-fails with feeAssist diagnostics on commit failure', async () => {
