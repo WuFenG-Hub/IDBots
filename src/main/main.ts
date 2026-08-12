@@ -68,6 +68,7 @@ import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
 import { MetaIDExperienceStore } from './metaidExperienceStore';
 import { MetaIDImpressionStore } from './metaidImpressionStore';
+import { MetaIDKnowledgeStore } from './metaidKnowledgeStore';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
 import { MetaIDContactViewService } from './services/metaidContactViewService';
@@ -2575,6 +2576,7 @@ let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
 let metaidImpressionStore: MetaIDImpressionStore | null = null;
+let metaidKnowledgeStore: MetaIDKnowledgeStore | null = null;
 let serviceOrderLifecycleService: ServiceOrderLifecycleService | null = null;
 let serviceRefundSyncService: ServiceRefundSyncService | null = null;
 let serviceRefundSettlementService: ServiceRefundSettlementService | null = null;
@@ -3006,6 +3008,7 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   serviceOrderStore = null;
   metaidExperienceStore = null;
   metaidImpressionStore = null;
+  metaidKnowledgeStore = null;
   serviceOrderLifecycleService = null;
   serviceRefundSyncService = null;
   serviceRefundSettlementService = null;
@@ -3699,9 +3702,11 @@ const startSqliteDaemons = (): void => {
   // day's experiences with its own LLM (summaries, dream memories, identity).
   let dreamExperienceStore: MetaIDExperienceStore | undefined;
   let dreamImpressionStore: MetaIDImpressionStore | undefined;
+  let dreamKnowledgeStore: MetaIDKnowledgeStore | undefined;
   try {
     dreamExperienceStore = getMetaIDExperienceStore();
     dreamImpressionStore = getMetaIDImpressionStore();
+    dreamKnowledgeStore = getMetaIDKnowledgeStore();
   } catch (error) {
     console.warn(
       `[DreamService] MetaID impression layer unavailable; continuing without dream impression updates: ${error instanceof Error ? error.message : String(error)}`,
@@ -3713,6 +3718,7 @@ const startSqliteDaemons = (): void => {
     dreamStore: getDreamStore(),
     metaidExperienceStore: dreamExperienceStore,
     metaidImpressionStore: dreamImpressionStore,
+    metaidKnowledgeStore: dreamKnowledgeStore,
     emitToRenderer: (channel, data) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (!win.isDestroyed()) {
@@ -4745,6 +4751,7 @@ const getCoworkRunner = () => {
         } catch { return null; }
       },
       experienceStore: getDreamStore(),
+      knowledgeStore: getMetaIDKnowledgeStore(),
       mcpServerProvider: () => getMcpStore().getEnabledServers(),
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);
@@ -5992,6 +5999,17 @@ const getMetaIDImpressionStore = (): MetaIDImpressionStore => {
     );
   }
   return metaidImpressionStore;
+};
+
+const getMetaIDKnowledgeStore = (): MetaIDKnowledgeStore => {
+  if (!metaidKnowledgeStore) {
+    const sqliteStore = getStore();
+    metaidKnowledgeStore = new MetaIDKnowledgeStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return metaidKnowledgeStore;
 };
 
 const captureServiceOrderExperience = (
