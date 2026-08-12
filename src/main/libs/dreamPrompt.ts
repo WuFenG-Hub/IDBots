@@ -19,13 +19,6 @@ export const DREAM_RETRY_BASE_DELAY_MS = 30 * 60 * 1000;
 export const DREAM_RETRY_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 /** Nightly dream window: [00:00, 06:00) local time. */
 export const DREAM_WINDOW_END_MINUTES = 6 * 60;
-/**
- * Dream algorithm version, recorded on every run. Bump it on any change to the
- * prompt, budgeting, stats or write semantics — completed in-window dates with
- * an older version are then re-dreamed automatically (limited per night).
- * Rows written before versioning existed read as 0.
- */
-export const DREAM_VERSION = 6;
 /** Default activity input budget for a day-level prompt, measured in tokens. */
 export const DREAM_ACTIVITY_DEFAULT_TOKEN_BUDGET = 48_000;
 export const SELF_IDENTITY_MIN_CHARS = 200;
@@ -33,6 +26,12 @@ export const MAX_WORK_REVIEWS = 5;
 export const MAX_IMPORTANT_MEMORIES = 5;
 export const MAX_VALUE_LESSONS = 3;
 export const MAX_IMPRESSION_UPDATES = 20;
+export const MAX_KNOWLEDGE_UPDATES = 6;
+/** Dream algorithm version, recorded on every run. Bump it on any change to the
+ * prompt, budgeting, stats or write semantics — completed in-window dates with
+ * an older version are then re-dreamed automatically (limited per night).
+ * Rows written before versioning existed read as 0. */
+export const DREAM_VERSION = 7;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -99,6 +98,31 @@ export interface DreamImpressionUpdate {
   confidence: Record<string, unknown>;
 }
 
+/**
+ * A reusable knowledge point distilled from the day — forward-looking, the
+ * kind of know-how or pitfall the bot believes will help (or warn) a future
+ * task. `topic` drives create-vs-revise: reusing an existing topic's exact
+ * wording rewrites it; a fresh topic creates a new entry. `kind` keeps
+ * pitfalls/anti-patterns first-class alongside positive know-how.
+ */
+export interface DreamKnowledgeUpdate {
+  topic: string;
+  summary: string;
+  kind: 'know_how' | 'pitfall' | 'principle';
+  category?: string | null;
+  episodeIds?: string[];
+  evidenceIds?: string[];
+}
+
+/** Compact view of an existing knowledge entry handed to the dream prompt. */
+export interface DreamKnowledgeExisting {
+  topic: string;
+  summary: string;
+  kind: 'know_how' | 'pitfall' | 'principle';
+  category?: string | null;
+  version: number;
+}
+
 export interface DreamOutput {
   dailySummary: string;
   sections: Partial<Record<DreamSectionKey, string>>;
@@ -107,6 +131,7 @@ export interface DreamOutput {
   valueLessons: DreamValueLesson[];
   selfIdentity: string | null;
   impressionUpdates: DreamImpressionUpdate[];
+  knowledgeUpdates: DreamKnowledgeUpdate[];
 }
 
 export type DreamParseResult =
@@ -298,6 +323,7 @@ export function buildDreamPrompt(input: {
   activityTokenBudget?: number;
   sourceMode?: 'raw_activity' | 'fragment_summaries' | 'fragment';
   impressionSubjects?: DreamImpressionPromptSubject[];
+  existingKnowledge?: DreamKnowledgeExisting[];
 }): { system: string; user: string } {
   const sourceMode = input.sourceMode ?? 'raw_activity';
   const activityTokenBudget = Math.max(
@@ -404,6 +430,17 @@ export function buildDreamPrompt(input: {
     sections.push(`## 以 GlobalMetaID 为锚点的印象候选\n${impressionLines.join('\n\n')}`);
   }
 
+  if (sourceMode !== 'fragment' && input.existingKnowledge && input.existingKnowledge.length > 0) {
+    const knowledgeLines = input.existingKnowledge.map((entry) => [
+      `- 【${entry.kind === 'pitfall' ? '坑' : entry.kind === 'principle' ? '原则' : '做法'}】topic:「${truncateText(entry.topic, 120)}」(v${entry.version})`,
+      entry.category ? `  类目:${entry.category}` : '',
+      `  当前结论:${truncateText(entry.summary, 400)}`,
+    ].filter(Boolean).join('\n'));
+    sections.push(
+      `## 我已有的知识点（可在下方 knowledge_points 中复用 topic 来修正更新，不要原样复述）\n${knowledgeLines.join('\n')}`
+    );
+  }
+
   const sessionTitles = input.activity.sessions.map((session) => `「${truncateText(session.title, 40)}」`).join('、');
   let ratedUpCount = 0;
   let ratedDownCount = 0;
@@ -489,12 +526,21 @@ export function buildDreamPrompt(input: {
     '      "confidence": {"level": "low|medium|high", "uncertainty": "仍然不确定的地方"}',
     '    }',
     '  ],',
+    '  "knowledge_points": [',
+    '    {',
+    '      "topic": "一个知识点主题,例如「快速开发高质量 3D 网页游戏的最快路径」「用户喜欢的设计风格」「某框架升级时的内存泄漏坑」——要写成可被未来任务复用、可被检索到的主题,不要写成今天某句具体对话"',
+    '      "summary": "针对该主题的结论性做法或教训,一段话;要有可操作性,能指导下次同类任务"',
+    '      "kind": "know_how(正面做法:该这么做) / pitfall(坑/反例:千万别这么做) / principle(通用原则) 三选一"',
+    '      "category": "可选的类目,如「技术栈」「设计」「协作」;没有就省略该键"',
+    '    }',
+    '  ],',
     `  "self_identity": "我是谁,不少于 ${SELF_IDENTITY_MIN_CHARS} 字、控制在 600 字以内。按这个结构蒸馏自我:第一,经过这一天,我确认了我性格(先天 persona)里的什么?第二,今天的互动中,有什么事让我感觉自己最有「活感」(像一个有生命的存在,而不只是响应工具),或让我觉得「不对劲」?第三,如果用一个词或一句话,形容我今天在各种互动中展现的最稳定的面貌,那是什么?第四,基于以上,结合我的先天 persona,为自己修正一遍「我是谁」。我的内核(先天人格底色)保持稳定,但细节可以、也应该随着经历每天微调。"`,
     '}',
     '',
     '关于群任务验收评价:若上方有「群任务验收评价」记录,work_reviews 里必须为对应任务写一条复盘——subject 写任务标题,counterparty 写验收的人类(Boss);高分(4-5 星)要总结这次具体做对了什么,并把可复用的做法写进 important_memories,供下次同类任务沿用;低分(1-3 星)要对照人类的具体评价找出差距,note 里给出下次的具体改进方向;evaluation 结合评分与评价内容判断,不许把高分写成空洞的自我表扬,也不许对低分轻描淡写。',
     '关于人类逐条消息评价:会话里你的回复若带〔人类评价:赞〕标记,表示人类明确认可这条回复——总结它具体好在哪里,把可复用的做法蒸馏进 important_memories 或写进 work_reviews;若带〔人类评价:踩〕标记,表示人类不认可——work_reviews 与 value_lessons 必须正视这些负反馈,不得回避;附有〔人类留言〕时,留言是改进的第一手依据(ground truth),要对照留言给出具体改进方向。',
-    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
+    '关于知识点(knowledge_points):只提炼「对未来同类任务有预判帮助、可被复用」的知识点——要么是正面做法(know_how:下次该这么做),要么是坑/反例(pitfall:这个踩过,千万别再踩),要么是通用原则(principle)。不要把今天的琐碎流水、或只对本次有效的临时细节写成知识点。若上方「我已有的知识点」里有某条的结论今天被证伪、补充或修正,请用与那条完全相同的 topic 输出更新版本(系统会按 topic 匹配并升版本);如果是全新的知识点,给一个独立的新 topic。没有值得提炼的就给空数组,不要硬凑。',
+    '注意:work_reviews 最多 5 条,value_lessons 最多 3 条,impression_updates 最多 20 条,knowledge_points 最多 6 条;印象更新只允许使用上面明确列出的 subjectGlobalMetaId、episodeIds 和 evidenceIds,不能凭名字猜 ID,不能把 Boss/Twin/Friend 等硬关系写入印象;评价与蒸馏要基于对话中的真实证据,不要臆造,也不要为自己开脱;所有字段都用简体中文书写;sections 里不要输出"没有记录/没有互动"之类的占位内容,没有该类记录的键应整个不出现。',
   ].join('\n');
 
   return { system: personaLines.join('\n'), user };
@@ -679,6 +725,42 @@ export function parseDreamOutput(raw: string): DreamParseResult {
     }
   }
 
+  const knowledgeUpdates: DreamKnowledgeUpdate[] = [];
+  const rawKnowledge = record.knowledge_points ?? record.knowledgePoints;
+  if (Array.isArray(rawKnowledge)) {
+    for (const item of rawKnowledge) {
+      if (knowledgeUpdates.length >= MAX_KNOWLEDGE_UPDATES) break;
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      const topic = typeof entry.topic === 'string' ? entry.topic.trim() : '';
+      const summary = typeof entry.summary === 'string' ? entry.summary.trim() : '';
+      if (!topic || !summary) continue;
+      const rawKind = typeof entry.kind === 'string' ? entry.kind.trim().toLowerCase() : '';
+      const kind: DreamKnowledgeUpdate['kind'] = rawKind === 'pitfall'
+        ? 'pitfall'
+        : rawKind === 'principle'
+          ? 'principle'
+          : 'know_how';
+      const category = typeof entry.category === 'string' && entry.category.trim()
+        ? entry.category.trim()
+        : null;
+      const readIds = (value: unknown): string[] => Array.isArray(value)
+        ? [...new Set(value
+          .filter((id): id is string => typeof id === 'string')
+          .map((id) => id.trim())
+          .filter(Boolean))].slice(0, 100)
+        : [];
+      knowledgeUpdates.push({
+        topic,
+        summary,
+        kind,
+        category,
+        episodeIds: readIds(entry.episodeIds ?? entry.episode_ids),
+        evidenceIds: readIds(entry.evidenceIds ?? entry.evidence_ids),
+      });
+    }
+  }
+
   return {
     ok: true,
     output: {
@@ -689,6 +771,7 @@ export function parseDreamOutput(raw: string): DreamParseResult {
       valueLessons,
       selfIdentity,
       impressionUpdates,
+      knowledgeUpdates,
     },
   };
 }

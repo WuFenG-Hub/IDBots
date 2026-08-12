@@ -3,6 +3,7 @@ import type { CoworkStore } from '../coworkStore';
 import type { DreamDayActivity, DreamStore } from '../dreamStore';
 import type { MetaIDExperienceStore } from '../metaidExperienceStore';
 import type { MetaIDImpressionStore } from '../metaidImpressionStore';
+import type { MetaIDKnowledgeStore } from '../metaidKnowledgeStore';
 import {
   DREAM_LOOKBACK_DAYS,
   DREAM_VERSION,
@@ -12,6 +13,7 @@ import {
   getDayBoundsMs,
   parseDreamOutput,
   validateSelfIdentity,
+  type DreamKnowledgeExisting,
   type DreamOutput,
 } from '../libs/dreamPrompt';
 import {
@@ -99,6 +101,7 @@ export interface DreamServiceDeps {
   emitToRenderer?: (channel: string, payload: unknown) => void;
   metaidExperienceStore?: MetaIDExperienceStore;
   metaidImpressionStore?: MetaIDImpressionStore;
+  metaidKnowledgeStore?: MetaIDKnowledgeStore;
   tickIntervalMs?: number;
   llmTimeoutMs?: number;
   now?: () => Date;
@@ -309,6 +312,28 @@ export class DreamService {
     });
   }
 
+  /**
+   * Compact view of the bot's current knowledge points, handed to the dream
+   * prompt so the model can decide create-vs-revise: reusing an existing topic
+   * rewrites it (version bump), a fresh topic creates a new entry. Failure here
+   * never blocks the dream run — the prompt simply proceeds without the list.
+   */
+  private buildExistingKnowledge(metabot: DreamMetabotLike): DreamKnowledgeExisting[] {
+    if (!this.deps.metaidKnowledgeStore) return [];
+    try {
+      return this.deps.metaidKnowledgeStore.listKnowledgeForDream(metabot.id).map((entry) => ({
+        topic: entry.topic,
+        summary: entry.summary,
+        kind: entry.kind,
+        category: entry.category,
+        version: entry.version,
+      }));
+    } catch (error) {
+      console.warn(`[DreamService] Failed to load existing knowledge for metabot ${metabot.id}:`, error);
+      return [];
+    }
+  }
+
   private emitDreaming(metabotId: number, dreaming: boolean): void {
     try {
       this.deps.emitToRenderer?.(DREAM_STATUS_CHANNEL, { metabotId, dreaming });
@@ -468,6 +493,7 @@ export class DreamService {
     llmId: string | null,
     fallbackLlmId: string | null,
     impressionSubjects: ReturnType<DreamService['buildDreamImpressionSubjects']>,
+    existingKnowledge: DreamKnowledgeExisting[],
   ): Promise<{ prompt: { system: string; user: string }; output: DreamOutput }> {
     const budgets = this.resolveDreamBudgets(llmId);
     const estimatedTokens = estimateDreamActivityTokens(activity);
@@ -480,6 +506,7 @@ export class DreamService {
         activity,
         activityTokenBudget: budgets.fastPathInputTokens,
         impressionSubjects,
+        existingKnowledge,
       });
       const output = await this.generateAndParse(
         prompt.system,
@@ -501,6 +528,7 @@ export class DreamService {
         activity,
         activityTokenBudget: budgets.fastPathInputTokens,
         impressionSubjects,
+        existingKnowledge,
       });
       const output = await this.generateAndParse(prompt.system, prompt.user, llmId, fallbackLlmId, budgets.maxOutputTokens);
       return { prompt, output };
@@ -528,6 +556,7 @@ export class DreamService {
       activityTokenBudget: budgets.fastPathInputTokens,
       sourceMode: 'fragment_summaries',
       impressionSubjects,
+      existingKnowledge,
     });
     const output = await this.generateAndParse(
       prompt.system,
@@ -556,6 +585,7 @@ export class DreamService {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
+      const existingKnowledge = this.buildExistingKnowledge(metabot);
       if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && activity.groupTasks.length === 0 && impressionSubjects.length === 0) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
@@ -569,6 +599,7 @@ export class DreamService {
         llmId,
         fallbackLlmId,
         impressionSubjects,
+        existingKnowledge,
       );
       let output = prepared.output;
       // Repair runs discard selfIdentity in writeDreamResults, so skip the
@@ -814,6 +845,42 @@ export class DreamService {
         console.warn(
           `[DreamService] MetaID impression consolidation failed for metabot ${metabotId} date ${date}: ` +
           `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    const knowledgeUpdates = Array.isArray(output.knowledgeUpdates) ? output.knowledgeUpdates : [];
+    if (this.deps.metaidKnowledgeStore && knowledgeUpdates.length > 0) {
+      let created = 0;
+      let revised = 0;
+      for (const update of knowledgeUpdates) {
+        try {
+          const result = this.deps.metaidKnowledgeStore.upsertKnowledge({
+            metabotId,
+            topic: update.topic,
+            summary: update.summary,
+            kind: update.kind,
+            category: update.category ?? null,
+            origin: 'dream',
+            sourceDreamDate: date,
+            sources: [
+              ...(update.episodeIds ?? []).map((episodeId) => ({ episodeId, sourceChannel: 'experience' })),
+              ...(update.evidenceIds ?? []).map((evidenceId) => ({ evidenceId, sourceChannel: 'experience' })),
+            ],
+          });
+          if (result.created) created += 1;
+          if (result.revised) revised += 1;
+        } catch (error) {
+          // A single bad entry never aborts the rest of the batch.
+          console.warn(
+            `[DreamService] Knowledge upsert failed for metabot ${metabotId} date ${date} topic "${update.topic}": ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      if (created > 0 || revised > 0) {
+        console.log(
+          `[DreamService] Knowledge updates for metabot ${metabotId}: created=${created}, revised=${revised}`,
         );
       }
     }
