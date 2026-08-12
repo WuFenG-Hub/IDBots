@@ -23,9 +23,11 @@ import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkM
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   formatExperienceRecallResults,
+  formatExperienceTimelineFallback,
   resolveExperienceRecallQuery,
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
+  type ExperienceRecallGranularity,
 } from './experiencePromptBlocks';
 import {
   buildKnowledgeBlock,
@@ -1333,6 +1335,21 @@ export interface CoworkKnowledgeStore {
 }
 
 /**
+ * Read-only episode timeline (the shared fact source behind the dream
+ * summaries) used as a time-anchor fallback: when a pinned date range has no
+ * consolidated dream summary yet, the recall tool surfaces raw episodes so the
+ * time-anchored view is never blind for un-dreamed days.
+ */
+export interface CoworkEpisodeTimeline {
+  listEpisodes(options: {
+    ownerGlobalMetaID: string;
+    fromTime?: number;
+    toTime?: number;
+    limit?: number;
+  }): Array<{ startedAt: number; sourceChannel: string; episodeType: string; sessionId?: string | null }>;
+}
+
+/**
  * R1：SDK 定时任务宿主侧镜像桥（方案 C）。
  * 宿主（main.ts）实现并注入：Stop hook 的 session_crons 采集 + 会话结束对账。
  * 用接口而非直接依赖 SdkCronMirrorStore，避免 coworkRunner 与 sqlite 存储耦合、便于测试。
@@ -1409,6 +1426,8 @@ export interface CoworkRunnerOptions {
   experienceStore?: CoworkExperienceStore;
   /** Knowledge-point anchored memory (经验/知识点): hot block + recall/upsert tools. */
   knowledgeStore?: CoworkKnowledgeStore;
+  /** Raw episode timeline for the time-anchor fallback in experience_recall. */
+  episodeTimelineProvider?: CoworkEpisodeTimeline;
   /**
    * When set, every cowork session gets MetaID search tools (search_metaids +
    * metaid_profile) backed by the metaso-p2p MetaID aggregation API. Browser
@@ -1468,6 +1487,7 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private knowledgeStore?: CoworkKnowledgeStore;
+  private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
@@ -1529,6 +1549,7 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.knowledgeStore = options?.knowledgeStore;
+    this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
@@ -2539,12 +2560,53 @@ export class CoworkRunner extends EventEmitter {
         dateTo: resolved.dateTo,
         limit: resolved.limit,
       });
-      return { text: formatExperienceRecallResults(results), isError: false };
+      // Time-anchor fallback: when a pinned range has no consolidated dream
+      // summary yet (bot was off, or dreaming was enabled late), surface the
+      // raw episode timeline for that window so recall is never blind. Only
+      // triggers for an explicit date range with zero summaries — keyword
+      // searches and the warm default stay on the summarized path.
+      if (
+        results.length === 0
+        && resolved.dateFrom
+        && this.episodeTimelineProvider
+      ) {
+        const fallback = this.buildExperienceTimelineFallback(metabotId, resolved.dateFrom, resolved.dateTo);
+        if (fallback) return { text: fallback, isError: false };
+      }
+      return { text: formatExperienceRecallResults(results, resolved.granularity), isError: false };
     } catch (error) {
       return {
         text: `experience_recall failed: ${error instanceof Error ? error.message : String(error)}`,
         isError: true,
       };
+    }
+  }
+
+  /** Resolve the bot's GlobalMetaID and fetch raw episodes for the fallback. */
+  private buildExperienceTimelineFallback(
+    metabotId: number,
+    dateFrom: string,
+    dateTo?: string,
+  ): string | null {
+    const metabot = this.getMetabotById?.(metabotId);
+    const ownerGlobalMetaID = typeof metabot?.globalmetaid === 'string' ? metabot.globalmetaid.trim() : '';
+    if (!ownerGlobalMetaID || !this.episodeTimelineProvider) return null;
+    const fromTime = Date.parse(`${dateFrom}T00:00:00.000Z`);
+    if (!Number.isFinite(fromTime)) return null;
+    // Inclusive upper bound: end of the date_to day, or date_from + 1 day when unset.
+    const upperDay = dateTo ?? dateFrom;
+    const toTime = Date.parse(`${upperDay}T23:59:59.999Z`);
+    const safeToTime = Number.isFinite(toTime) ? toTime : fromTime + 86_400_000;
+    try {
+      const episodes = this.episodeTimelineProvider.listEpisodes({
+        ownerGlobalMetaID,
+        fromTime,
+        toTime: safeToTime,
+        limit: 50,
+      });
+      return formatExperienceTimelineFallback({ dateFrom, dateTo, episodes });
+    } catch {
+      return null;
     }
   }
 
@@ -5336,10 +5398,15 @@ export class CoworkRunner extends EventEmitter {
       }
 
       if (toolName === 'experience_recall') {
+        const granularityRaw = typeof toolInput.granularity === 'string' ? toolInput.granularity : undefined;
+        const granularity: ExperienceRecallGranularity | undefined = granularityRaw === 'week' || granularityRaw === 'month' || granularityRaw === 'day'
+          ? granularityRaw
+          : undefined;
         const result = this.runExperienceRecallTool({
           query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
           date_from: typeof toolInput.date_from === 'string' ? toolInput.date_from : undefined,
           date_to: typeof toolInput.date_to === 'string' ? toolInput.date_to : undefined,
+          granularity,
           limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
         }, sessionId);
         return {
@@ -6443,11 +6510,12 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'experience_recall',
-            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks; an empty result means nothing was recorded for the range/query.',
+            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
             {
               query: z.string().optional(),
               date_from: z.string().optional(),
               date_to: z.string().optional(),
+              granularity: z.enum(['day', 'week', 'month']).optional(),
               limit: z.number().int().min(1).max(30).optional(),
             },
             async (args: ExperienceRecallArgs) => {

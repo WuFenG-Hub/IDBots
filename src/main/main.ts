@@ -4752,6 +4752,7 @@ const getCoworkRunner = () => {
       },
       experienceStore: getDreamStore(),
       knowledgeStore: getMetaIDKnowledgeStore(),
+      episodeTimelineProvider: getMetaIDExperienceStore(),
       mcpServerProvider: () => getMcpStore().getEnabledServers(),
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);

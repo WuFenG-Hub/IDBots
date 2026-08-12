@@ -152,10 +152,14 @@ export function buildExperiencePromptBlocksXml(input: {
     .join('\n\n');
 }
 
+export type ExperienceRecallGranularity = 'day' | 'week' | 'month';
+
 export interface ExperienceRecallArgs {
   query?: string;
   date_from?: string;
   date_to?: string;
+  /** Group results by day (default), ISO week, or month — compresses long ranges. */
+  granularity?: ExperienceRecallGranularity;
   limit?: number;
 }
 
@@ -166,6 +170,30 @@ const normalizeDateArg = (value?: string): string | undefined => {
   return trimmed && DATE_RE.test(trimmed) ? trimmed : undefined;
 };
 
+const normalizeGranularity = (value?: string): ExperienceRecallGranularity => {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return normalized === 'week' || normalized === 'month' ? normalized : 'day';
+};
+
+/** Monday-based YYYY-MM-DD key for the week containing the given YYYY-MM-DD date. */
+function weekKeyOf(dateStr: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  if (!match) return dateStr;
+  const [, y, m, d] = match;
+  const date = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
+  const dow = date.getUTCDay(); // 0=Sun..6=Sat
+  const diff = (dow === 0 ? -6 : 1) - dow; // shift to Monday
+  const monday = new Date(date);
+  monday.setUTCDate(date.getUTCDate() + diff);
+  return `${monday.getUTCFullYear()}-${String(monday.getUTCMonth() + 1).padStart(2, '0')}-${String(monday.getUTCDate()).padStart(2, '0')}`;
+}
+
+function groupKeyOf(dateStr: string, granularity: ExperienceRecallGranularity): string {
+  if (granularity === 'month') return dateStr.slice(0, 7); // YYYY-MM
+  if (granularity === 'week') return weekKeyOf(dateStr);
+  return dateStr;
+}
+
 /**
  * Warm/cold defaults for the recall tool: a bare call looks back
  * RECALL_WARM_DAYS (warm); a keyword query searches the full history (cold),
@@ -175,7 +203,7 @@ const normalizeDateArg = (value?: string): string | undefined => {
 export function resolveExperienceRecallQuery(
   args: ExperienceRecallArgs,
   today: Date = new Date()
-): { query?: string; dateFrom?: string; dateTo?: string; limit: number } {
+): { query?: string; dateFrom?: string; dateTo?: string; granularity: ExperienceRecallGranularity; limit: number } {
   const limit = Math.max(1, Math.min(RECALL_MAX_LIMIT, Math.floor(args.limit ?? 10)));
   const query = args.query?.trim() || undefined;
   let dateFrom = normalizeDateArg(args.date_from);
@@ -185,14 +213,24 @@ export function resolveExperienceRecallQuery(
       new Date(today.getFullYear(), today.getMonth(), today.getDate() - RECALL_WARM_DAYS)
     );
   }
-  return { query, dateFrom, dateTo, limit };
+  return { query, dateFrom, dateTo, granularity: normalizeGranularity(args.granularity), limit };
 }
 
 /** Plain-text rendering of recall results for the tool response. */
-export function formatExperienceRecallResults(summaries: ExperienceSummaryLike[]): string {
+export function formatExperienceRecallResults(
+  summaries: ExperienceSummaryLike[],
+  granularity: ExperienceRecallGranularity = 'day',
+): string {
   if (!summaries.length) {
-    return 'No experience summaries found for the given range or query. Days before your first dream run have no summary; recent days may not have been consolidated yet.';
+    return 'No experience summaries found for the given range or query. Days before your first dream run have no summary; recent days may not have been consolidated yet — try granularity=day, or widen the range.';
   }
+  if (granularity === 'day') {
+    return formatDailyRecall(summaries);
+  }
+  return formatGroupedRecall(summaries, granularity);
+}
+
+function formatDailyRecall(summaries: ExperienceSummaryLike[]): string {
   const lines: string[] = [];
   for (const summary of summaries) {
     const text = summary.summaryText.replace(/\s+/g, ' ').trim();
@@ -207,5 +245,63 @@ export function formatExperienceRecallResults(summaries: ExperienceSummaryLike[]
     ...lines,
     '',
     'These daily summaries index your full experience records, and the IDBots:// links above point at the complete conversations behind them. When a task resembles something you did before, read the relevant session with idbots_session_read_all first: reuse the approaches that worked, and avoid the pitfalls you already stepped into.',
+  ].join('\n');
+}
+
+function formatGroupedRecall(summaries: ExperienceSummaryLike[], granularity: ExperienceRecallGranularity): string {
+  // Preserve first-seen order of groups (summaries arrive newest-first).
+  const groupOrder: string[] = [];
+  const byGroup = new Map<string, ExperienceSummaryLike[]>();
+  for (const summary of summaries) {
+    const key = groupKeyOf(summary.summaryDate, granularity);
+    if (!byGroup.has(key)) {
+      groupOrder.push(key);
+      byGroup.set(key, []);
+    }
+    byGroup.get(key)!.push(summary);
+  }
+  const label = granularity === 'week' ? 'Week of' : 'Month';
+  const lines: string[] = [];
+  for (const key of groupOrder) {
+    const group = byGroup.get(key)!;
+    const dates = group.map((item) => item.summaryDate).sort();
+    const span = dates.length > 1 ? `${dates[dates.length - 1]}..${dates[0]}` : dates[0];
+    lines.push(`${label} ${key} (${group.length} day${group.length > 1 ? 's' : ''}, ${span}):`);
+    for (const summary of group) {
+      const text = summary.summaryText.replace(/\s+/g, ' ').trim();
+      const truncated = text.length > RECALL_ENTRY_MAX_CHARS ? `${text.slice(0, RECALL_ENTRY_MAX_CHARS)}…` : text;
+      lines.push(`  - ${summary.summaryDate}: ${truncated}`);
+    }
+  }
+  return [
+    ...lines,
+    '',
+    `Summaries above are grouped by ${granularity} to compress a long range. For a specific day's full detail (and the IDBots:// session links), re-call with granularity=day and a tight date_from/date_to. When a task resembles something you did before, read the relevant session with idbots_session_read_all.`,
+  ].join('\n');
+}
+
+/**
+ * Raw-episode fallback for date ranges that have no dream summary yet (the bot
+ * was off, or dreaming was enabled late). Rendered as a compact timeline of
+ * episode titles so the time-anchored recall is never blind for un-dreamed
+ * days. Episodes are the shared fact source, so this adds no duplication.
+ */
+export function formatExperienceTimelineFallback(input: {
+  dateFrom?: string;
+  dateTo?: string;
+  episodes: Array<{ startedAt: number; sourceChannel: string; episodeType: string; title?: string | null }>;
+}): string {
+  if (!input.episodes.length) {
+    return `No raw episodes found for ${input.dateFrom ?? 'the range'}${input.dateTo ? `..${input.dateTo}` : ''} either — there may genuinely be no activity in that window.`;
+  }
+  const lines = input.episodes.map((episode) => {
+    const when = new Date(episode.startedAt).toISOString().slice(0, 10);
+    const title = typeof episode.title === 'string' && episode.title.trim() ? episode.title.trim() : `${episode.sourceChannel}/${episode.episodeType}`;
+    return `- ${when} [${episode.episodeType}]: ${title}`;
+  });
+  return [
+    `No dream summaries were consolidated for ${input.dateFrom ?? 'this range'}${input.dateTo ? `..${input.dateTo}` : ''}, but the raw activity timeline shows ${input.episodes.length} episode(s):`,
+    ...lines,
+    'These episodes were not yet distilled into a daily summary; re-call later (after the nightly dream) or with granularity=day for a summarized view.',
   ].join('\n');
 }
