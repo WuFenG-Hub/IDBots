@@ -8487,7 +8487,7 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) => {
+  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => {
     return withSqliteRecovery('cowork:session:listArchived', async () => {
       try {
         const coworkStoreInstance = getCoworkStore();

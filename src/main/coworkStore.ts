@@ -3228,9 +3228,22 @@ export class CoworkStore implements MemoryBackend {
     query?: string;
     /** When true, also match archived conversations whose message bodies contain the query. */
     searchContent?: boolean;
+    /** Restrict to one session type ('a2a' = MetaBot↔MetaBot). */
+    sessionType?: CoworkSessionType;
   }): { clauses: string[]; params: Array<string | number> } {
     const clauses: string[] = ['s.archived_at IS NOT NULL'];
     const params: Array<string | number> = [];
+
+    const sessionType = options?.sessionType;
+    if (sessionType) {
+      if (sessionType === 'a2a') {
+        // A2A sessions are stored as 'a2a'; legacy rows may hold 'agent_agent'.
+        clauses.push("s.session_type IN ('a2a', 'agent_agent')");
+      } else {
+        clauses.push('s.session_type = ?');
+        params.push(sessionType);
+      }
+    }
 
     const metabotId = options?.metabotId;
     if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
@@ -3262,6 +3275,7 @@ export class CoworkStore implements MemoryBackend {
     metabotId?: number | null;
     query?: string;
     searchContent?: boolean;
+    sessionType?: CoworkSessionType;
   }): number {
     const { clauses, params } = this.buildArchivedSessionFilter(options);
     const row = this.getOne<{ count: number }>(`
@@ -3281,6 +3295,7 @@ export class CoworkStore implements MemoryBackend {
     metabotId?: number | null;
     query?: string;
     searchContent?: boolean;
+    sessionType?: CoworkSessionType;
     limit?: number;
     offset?: number;
   }): CoworkSessionSummary[] {
