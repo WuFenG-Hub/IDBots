@@ -403,6 +403,71 @@ export const validateGigSquareModifyDraft = (draft: GigSquareModifyDraft): GigSq
   return { ok: true };
 };
 
+export interface GigSquareInstalledSkillSnapshot {
+  id: string;
+  name: string;
+}
+
+/**
+ * Cross-checks the self-declared providerSkills against the host's installed
+ * skills (snapshot of skillManager.listSkills()). A declared skill counts as
+ * available when it resolves to an installed skill by id or name, mirroring the
+ * order-side resolution semantics (case-insensitive name match, and id match
+ * tolerant of underscore/hyphen variants via resolveSkillById candidates).
+ *
+ * Missing skills reject the publish/modify draft with an error that lists the
+ * missing skill names (e.g. "seedance").
+ *
+ * NOTE: availability here is installation-level (skill directory present on the
+ * host). It does not probe runtime executability (e.g. ARK_API_KEY for
+ * seedance), which skillManager.listSkills() cannot verify.
+ */
+export const validateGigSquareProviderSkillAvailability = (input: {
+  providerSkills: string[];
+  installedSkills: GigSquareInstalledSkillSnapshot[];
+}): GigSquareMutationValidationResult => {
+  const declaredSkills = normalizeProviderSkillList(input.providerSkills);
+  if (declaredSkills.length === 0) {
+    // Empty allow-list is not this validator's concern; draft validation
+    // already enforces provider_skill_required. Keep it a pass-through so the
+    // two validators stay composable.
+    return { ok: true };
+  }
+
+  const installedKeys = new Set<string>();
+  for (const skill of input.installedSkills || []) {
+    const skillId = toSafeString(skill.id).trim();
+    const skillName = toSafeString(skill.name).trim();
+    if (skillId) {
+      const lowered = skillId.toLowerCase();
+      installedKeys.add(lowered);
+      installedKeys.add(lowered.replace(/_/g, '-'));
+      installedKeys.add(lowered.replace(/-/g, '_'));
+    }
+    if (skillName) {
+      installedKeys.add(skillName.trim().toLowerCase());
+    }
+  }
+
+  const missingSkills = declaredSkills.filter((declared) => {
+    const lowered = declared.toLowerCase();
+    if (installedKeys.has(lowered)) return false;
+    if (installedKeys.has(lowered.replace(/_/g, '-'))) return false;
+    if (installedKeys.has(lowered.replace(/-/g, '_'))) return false;
+    return true;
+  });
+
+  if (missingSkills.length === 0) return { ok: true };
+
+  return {
+    ok: false,
+    error: missingSkills.length === 1
+      ? `Skill not installed on this host: ${missingSkills[0]}`
+      : `Skills not installed on this host: ${missingSkills.join(', ')}`,
+    errorCode: 'provider_skill_not_installed',
+  };
+};
+
 export const buildGigSquareServicePayload = (input: {
   draft: GigSquareModifyDraft;
   providerGlobalMetaId: string;

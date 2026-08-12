@@ -408,6 +408,7 @@ import {
   buildGigSquareServicePayload,
   normalizeGigSquareModifyDraft,
   validateGigSquareModifyDraft,
+  validateGigSquareProviderSkillAvailability,
   validateGigSquareServiceMutation,
   type GigSquareModifyDraft,
 } from './services/gigSquareServiceMutationService';
@@ -11309,6 +11310,14 @@ if (!gotTheLock) {
       }
       const normalizedDraft = normalizeGigSquareModifyDraft(draft);
 
+      const skillAvailabilityValidation = validateGigSquareProviderSkillAvailability({
+        providerSkills: normalizedDraft.providerSkills,
+        installedSkills: getSkillManager().listSkills(),
+      });
+      if (!skillAvailabilityValidation.ok) {
+        return { success: false, error: skillAvailabilityValidation.error, errorCode: skillAvailabilityValidation.errorCode };
+      }
+
       let settlement;
       try {
         settlement = normalizeGigSquareSettlementDraft({
@@ -11566,6 +11575,14 @@ if (!gotTheLock) {
         return { success: false, error: draftValidation.error, errorCode: draftValidation.errorCode };
       }
       const normalizedDraft = normalizeGigSquareModifyDraft(draft);
+
+      const skillAvailabilityValidation = validateGigSquareProviderSkillAvailability({
+        providerSkills: normalizedDraft.providerSkills,
+        installedSkills: getSkillManager().listSkills(),
+      });
+      if (!skillAvailabilityValidation.ok) {
+        return { success: false, error: skillAvailabilityValidation.error, errorCode: skillAvailabilityValidation.errorCode };
+      }
 
       const store = getMetabotStore();
       const creatorMetabot = store.getMetabotById(validation.creatorMetabotId);

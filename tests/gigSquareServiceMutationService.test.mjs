@@ -10,14 +10,15 @@ const {
   validateGigSquareServiceMutation,
   normalizeGigSquareModifyDraft,
   validateGigSquareModifyDraft,
+  validateGigSquareProviderSkillAvailability,
   buildGigSquareServicePayload,
   resolveGigSquareSettlementPaymentAddress,
   buildGigSquareRevokeMetaidPayload,
   buildGigSquareModifyMetaidPayload,
-} = require('../dist-electron/services/gigSquareServiceMutationService.js');
+} = require('../dist-electron/main/services/gigSquareServiceMutationService.js');
 const {
   normalizeGigSquareSettlementDraft,
-} = require('../dist-electron/shared/gigSquareSettlementAsset.js');
+} = require('../dist-electron/main/shared/gigSquareSettlementAsset.js');
 
 test('validateGigSquareServiceMutation rejects missing target service', () => {
   const result = validateGigSquareServiceMutation({
@@ -594,4 +595,97 @@ test('buildGigSquareLocalServiceRecordForModify creates a local overlay row when
   assert.equal(record.displayName, 'Weather Pro');
   assert.equal(record.outputType, 'image');
   assert.equal(record.revokedAt, null);
+});
+
+test('validateGigSquareProviderSkillAvailability rejects declared skills absent from the host and lists them', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: ['seedance', 'video-pro'],
+    installedSkills: [],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, 'provider_skill_not_installed');
+  assert.match(result.error || '', /seedance/);
+  assert.match(result.error || '', /video-pro/);
+});
+
+test('validateGigSquareProviderSkillAvailability rejects when only some declared skills are missing', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: ['seedance', 'ghost-skill'],
+    installedSkills: [
+      { id: 'seedance', name: 'Seedance 视频生成' },
+      { id: 'local-tools', name: 'local-tools' },
+    ],
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.errorCode, 'provider_skill_not_installed');
+  assert.match(result.error || '', /ghost-skill/);
+  assert.doesNotMatch(result.error || '', /seedance/);
+});
+
+test('validateGigSquareProviderSkillAvailability accepts declared skills installed on the host by id', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: ['seedance'],
+    installedSkills: [{ id: 'seedance', name: 'Seedance 视频生成' }],
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('validateGigSquareProviderSkillAvailability accepts declared skills installed by name (case-insensitive)', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: ['Seedance'],
+    installedSkills: [{ id: 'seedance', name: 'seedance' }],
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('validateGigSquareProviderSkillAvailability accepts underscore/hyphen id variants like the order side', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: ['report_writer'],
+    installedSkills: [{ id: 'report-writer', name: 'report-writer' }],
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('validateGigSquareProviderSkillAvailability passes through an empty declared list without false rejection', () => {
+  const result = validateGigSquareProviderSkillAvailability({
+    providerSkills: [],
+    installedSkills: [],
+  });
+
+  assert.equal(result.ok, true);
+});
+
+test('publish-side draft flow: installed skills pass, missing skills are rejected with the skill name listed', () => {
+  const installed = [{ id: 'seedance', name: 'seedance' }];
+  const draft = {
+    serviceName: 'svc',
+    displayName: 'SVC',
+    description: 'desc',
+    providerSkill: 'seedance',
+    price: '0',
+    currency: 'SPACE',
+    outputType: 'text',
+  };
+
+  const draftValidation = validateGigSquareModifyDraft(draft);
+  assert.equal(draftValidation.ok, true);
+  const normalized = normalizeGigSquareModifyDraft(draft);
+  const available = validateGigSquareProviderSkillAvailability({
+    providerSkills: normalized.providerSkills,
+    installedSkills: installed,
+  });
+  assert.equal(available.ok, true);
+
+  const missing = validateGigSquareProviderSkillAvailability({
+    providerSkills: normalized.providerSkills,
+    installedSkills: [],
+  });
+  assert.equal(missing.ok, false);
+  assert.equal(missing.errorCode, 'provider_skill_not_installed');
+  assert.match(missing.error || '', /seedance/);
 });
