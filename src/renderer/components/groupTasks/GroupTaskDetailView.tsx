@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { groupTaskService } from '../../services/groupTaskService';
 import type {
@@ -31,6 +31,8 @@ import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 
 const MESSAGE_PAGE_LIMIT = 50;
+// Distance from the top (px) at which one older transcript page is fetched.
+const LOAD_OLDER_THRESHOLD = 48;
 
 /**
  * Copyable group/room id pill. The group_id is the room id (stored locally on
@@ -111,6 +113,15 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const sentHintTimerRef = useRef<number | null>(null);
+  // Scroll-up pagination: oldestLoadedId is the backwards cursor (beforeId),
+  // hasMore whether an older page may exist, plus in-flight + scroll-restore
+  // state. Refs back the scroll handler so it never reads a stale closure.
+  const oldestLoadedIdRef = useRef<number | null>(null);
+  const hasMoreRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const pendingScrollRestoreRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
 
   const refreshDetail = useCallback(async () => {
     try {
@@ -126,9 +137,56 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     try {
       const page = await groupTaskService.listMessages(taskId, { limit: MESSAGE_PAGE_LIMIT });
       setMessages((current) => mergeTranscriptMessages(current, page));
+      // The first successful page seeds the backwards-paging cursor. Later 5s
+      // polls only refresh the latest window and must NOT move a cursor the
+      // user may have already advanced by loading older messages.
+      if (oldestLoadedIdRef.current === null && page.length > 0) {
+        oldestLoadedIdRef.current = page.reduce(
+          (min, message) => (message.id < min ? message.id : min),
+          page[0].id,
+        );
+        const more = page.length >= MESSAGE_PAGE_LIMIT;
+        hasMoreRef.current = more;
+        setHasMore(more);
+      }
       setMessagesError(null);
     } catch (err) {
       setMessagesError(err instanceof Error ? err.message : String(err));
+    }
+  }, [taskId]);
+
+  // Fetch one older page (before the oldest loaded id) and prepend it. The
+  // user's viewport is preserved by nudging scrollTop by the added height.
+  const loadOlder = useCallback(async () => {
+    if (loadingOlderRef.current) return;
+    const beforeId = oldestLoadedIdRef.current;
+    if (beforeId == null) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const el = scrollRef.current;
+    const prevScrollHeight = el?.scrollHeight ?? 0;
+    const prevScrollTop = el?.scrollTop ?? 0;
+    try {
+      const page = await groupTaskService.listMessages(taskId, { beforeId, limit: MESSAGE_PAGE_LIMIT });
+      if (page.length > 0) {
+        setMessages((current) => mergeTranscriptMessages(current, page));
+        oldestLoadedIdRef.current = page.reduce(
+          (min, message) => (message.id < min ? message.id : min),
+          page[0].id,
+        );
+        const more = page.length >= MESSAGE_PAGE_LIMIT;
+        hasMoreRef.current = more;
+        setHasMore(more);
+        pendingScrollRestoreRef.current = { prevScrollHeight, prevScrollTop };
+      } else {
+        hasMoreRef.current = false;
+        setHasMore(false);
+      }
+    } catch (err) {
+      setMessagesError(err instanceof Error ? err.message : String(err));
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
     }
   }, [taskId]);
 
@@ -161,6 +219,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   useEffect(() => {
     setMessages([]);
     setMessagesError(null);
+    oldestLoadedIdRef.current = null;
+    hasMoreRef.current = true;
+    loadingOlderRef.current = false;
+    pendingScrollRestoreRef.current = null;
+    setHasMore(true);
+    setLoadingOlder(false);
   }, [taskId]);
 
   // Transcript: initial load + 5s poll while mounted.
@@ -198,6 +262,19 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   }, [messages]);
 
+  // After an older page is prepended, keep the user's viewport anchored on the
+  // same message instead of jumping to the new (older) top. Runs before paint
+  // so there is no flicker; a no-op when no restore is pending.
+  useLayoutEffect(() => {
+    const restore = pendingScrollRestoreRef.current;
+    if (!restore) return;
+    pendingScrollRestoreRef.current = null;
+    const el = scrollRef.current;
+    if (el) {
+      el.scrollTop = restore.prevScrollTop + (el.scrollHeight - restore.prevScrollHeight);
+    }
+  }, [messages]);
+
   useEffect(() => () => {
     if (sentHintTimerRef.current != null) {
       window.clearTimeout(sentHintTimerRef.current);
@@ -208,6 +285,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     const el = scrollRef.current;
     if (!el) return;
     stickToBottomRef.current = shouldStickToBottom(el.scrollTop, el.clientHeight, el.scrollHeight);
+    // Load one older page when the user reaches the top (chat-style infinite
+    // scroll upwards); the backend already pages backwards via beforeId.
+    if (
+      el.scrollTop <= LOAD_OLDER_THRESHOLD
+      && hasMoreRef.current
+      && !loadingOlderRef.current
+      && oldestLoadedIdRef.current != null
+    ) {
+      void loadOlder();
+    }
   };
 
   const handleSend = async () => {
@@ -504,6 +591,14 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             onScroll={handleTranscriptScroll}
             className="flex-1 overflow-y-auto py-2"
           >
+            {/* Scroll-up pagination status (top of the transcript window). */}
+            {messages.length > 0 && (loadingOlder || !hasMore) && (
+              <div className="flex items-center justify-center py-1.5 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                {loadingOlder
+                  ? i18nService.t('groupTasksLoadingOlder')
+                  : i18nService.t('groupTasksNoMoreMessages')}
+              </div>
+            )}
             {loadingMessages && messages.length === 0 ? (
               <div className="flex items-center justify-center py-16">
                 <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
