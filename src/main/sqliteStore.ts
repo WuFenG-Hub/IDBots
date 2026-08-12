@@ -14,6 +14,7 @@ import type { SqliteDatabase } from './sqliteTypes';
 import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
 import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
 import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
+import { ensureMetaIDKnowledgeSchema } from './metaidKnowledgeStore';
 
 type ChangePayload<T = unknown> = {
   key: string;
@@ -1937,6 +1938,9 @@ export class SqliteStore {
     ensureMetaIDImpressionSchema(this.db);
     // Explicit shared-memory grants and the append-only access audit trail.
     ensureMetaIDMemoryGrantSchema(this.db);
+    // Knowledge-point anchored memory ("经验/知识点"): forward-looking, updatable,
+    // KV-shaped know-how/pitfalls keyed by topic. Same idempotent pattern.
+    ensureMetaIDKnowledgeSchema(this.db);
 
     this.save();
   }

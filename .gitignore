@@ -96,6 +96,7 @@ tests/*
 !tests/localFileLinkIntegration.test.mjs
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs
+!tests/metaidKnowledgeStore.test.mjs
 !tests/metabotPostBuzzSkill.test.mjs
 !tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
