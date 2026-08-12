@@ -805,12 +805,16 @@ export class SqliteStore {
         closed_at TEXT,
         rating INTEGER,
         rating_comment TEXT,
-        rated_at TEXT
+        rated_at TEXT,
+        display_name TEXT,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        archived_at INTEGER
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
+    this.migrateGroupTasksLocalState();
     // P0-5: state-transition audit log (who/from/to/reason + timestamp).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_transitions (
@@ -2370,6 +2374,40 @@ export class SqliteStore {
       }
     } catch (e) {
       console.warn('migrateGroupTasksRatingColumns:', e);
+    }
+  }
+
+  /**
+   * Migration: local-only group task UI state — display_name (user-chosen
+   * local display name overriding the on-chain title), pinned (0/1) and
+   * archived_at (epoch ms; NULL = active). Archive hides the task from the
+   * list without deleting it; existing tasks keep NULL (active, unpinned,
+   * chain title) until the user changes them.
+   */
+  private migrateGroupTasksLocalState(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('display_name')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN display_name TEXT');
+        columns = [...columns, 'display_name'];
+        changed = true;
+      }
+      if (!columns.includes('pinned')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0');
+        columns = [...columns, 'pinned'];
+        changed = true;
+      }
+      if (!columns.includes('archived_at')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN archived_at INTEGER');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (e) {
+      console.warn('migrateGroupTasksLocalState:', e);
     }
   }
 

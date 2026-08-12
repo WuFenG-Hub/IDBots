@@ -581,7 +581,9 @@ export async function listGroupTaskSummaries(
   filter?: { status?: GroupTaskStatus },
 ): Promise<GroupTaskSummary[]> {
   const store = getGroupTaskStore();
-  return store.listTasks(filter).map((task) => {
+  // The UI list hides archived tasks and sorts pinned ones first; internal
+  // callers (listGroupTasks) still see the full set.
+  return store.listTasks({ ...filter, includeArchived: false }).map((task) => {
     const members = store.listMembers(task.id);
     return {
       ...task,
@@ -590,6 +592,62 @@ export async function listGroupTaskSummaries(
       memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
     };
   });
+}
+
+/** Archived tasks (Settings restore panel), newest archive first. */
+export async function listArchivedGroupTasks(
+  options?: { offset?: number; limit?: number },
+): Promise<GroupTaskSummary[]> {
+  const store = getGroupTaskStore();
+  return store.listArchivedTasks(options).map((task) => {
+    const members = store.listMembers(task.id);
+    return {
+      ...task,
+      memberCount: members.length,
+      chairName: members.find((member) => member.role === 'chair')?.name ?? null,
+      memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
+    };
+  });
+}
+
+export async function countArchivedGroupTasks(): Promise<number> {
+  return getGroupTaskStore().countArchivedTasks();
+}
+
+/** Set the local pinned flag; resolves with the updated task. */
+export async function setGroupTaskPinned(taskId: number, pinned: boolean): Promise<GroupTask> {
+  const store = getGroupTaskStore();
+  store.setTaskPinned(taskId, pinned);
+  const task = store.getTaskById(taskId);
+  if (!task) throw new Error(`Group task ${taskId} not found`);
+  return task;
+}
+
+/** Set the local display name (empty clears it back to the chain title). */
+export async function renameGroupTask(taskId: number, displayName: string): Promise<GroupTask> {
+  const store = getGroupTaskStore();
+  store.renameTask(taskId, displayName);
+  const task = store.getTaskById(taskId);
+  if (!task) throw new Error(`Group task ${taskId} not found`);
+  return task;
+}
+
+/** Archive (hide from the UI list; records and daemon driving are preserved). */
+export async function archiveGroupTask(taskId: number): Promise<GroupTask> {
+  const store = getGroupTaskStore();
+  store.archiveTask(taskId);
+  const task = store.getTaskById(taskId);
+  if (!task) throw new Error(`Group task ${taskId} not found`);
+  return task;
+}
+
+/** Restore an archived task back into the UI list. */
+export async function unarchiveGroupTask(taskId: number): Promise<GroupTask> {
+  const store = getGroupTaskStore();
+  store.unarchiveTask(taskId);
+  const task = store.getTaskById(taskId);
+  if (!task) throw new Error(`Group task ${taskId} not found`);
+  return task;
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {
