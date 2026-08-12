@@ -49,6 +49,7 @@ const {
   setGroupTaskServiceTransport,
   resetGroupTaskServiceTransport,
   deriveGroupTaskMemberInviteStatus,
+  computeGroupTaskMemberWorkStatus,
 } = groupTaskService;
 
 const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
@@ -910,4 +911,90 @@ test('P1-1: getGroupTask exposes inviteStatus per remote member', async () => {
     setGroupTaskServiceOpenTeamMembershipStoreGetter(null);
     h.cleanup();
   }
+});
+
+// ---------------------------------------------------------------------------
+// P1-4: member workStatus — a failed-attempt residual must degrade when a
+// newer success record exists (the panel must not keep reporting 'error'
+// after the member visibly recovered)
+// ---------------------------------------------------------------------------
+
+test('P1-4: computeGroupTaskMemberWorkStatus error-degrade priority', () => {
+  const NOW = 1_800_000_000_000;
+  const MIN = 60_000;
+  const status = (overrides) => computeGroupTaskMemberWorkStatus({
+    metabotId: null,
+    lastSpeakAt: null,
+    lastWorkingAt: null,
+    attemptStatus: null,
+    attemptAtMs: null,
+    nowMs: NOW,
+    ...overrides,
+  });
+
+  // Priority 1: running attempt => working.
+  assert.equal(status({ attemptStatus: 'running' }), 'working');
+
+  // Priority 2: fresh [WORKING] tag inside the working window => working.
+  assert.equal(status({ lastWorkingAt: NOW - 5 * MIN }), 'working');
+
+  // Priority 4: failed inside the error window WITHOUT newer records => error
+  // (last speech predates the failed attempt).
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSpeakAt: NOW - 40 * MIN }),
+    'error',
+    'failure residual without newer success record stays error',
+  );
+
+  // Priority 3: failed + speech strictly AFTER the failure => degraded to idle.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSpeakAt: NOW - 8 * MIN }),
+    'idle',
+    'speech strictly after the failed attempt downgrades off error',
+  );
+
+  // Priority 3: failed + newer speech already outside the working window
+  // (failure 50min ago, speech 40min ago) => still idle, never error.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 50 * MIN, lastSpeakAt: NOW - 40 * MIN }),
+    'idle',
+    'older post-failure speech still degrades off error (idle)',
+  );
+
+  // Priority 3 fallback: failed + working record after the failure inside the
+  // working window => working.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastWorkingAt: NOW - 5 * MIN }),
+    'working',
+    'working record after the failure inside the working window => working',
+  );
+
+  // Priority 3 fallback: failed + working record after the failure but stale
+  // (30min ago) => idle, not error.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 50 * MIN, lastWorkingAt: NOW - 30 * MIN }),
+    'idle',
+    'stale working record after the failure, no fresh work => idle',
+  );
+
+  // Boundary: lastSpeakAt EXACTLY equals attemptAtMs is NOT a newer record —
+  // a record coinciding with the failed attempt is not post-failure recovery
+  // evidence, so the failure residual stays error (self-consistent semantics).
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, lastSpeakAt: NOW - 10 * MIN }),
+    'error',
+    'speech exactly at the failed attempt does not degrade error',
+  );
+
+  // Priority 4 window: failure outside the error window => residual gone,
+  // no speech => unknown.
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 70 * MIN }),
+    'unknown',
+    'failed attempt outside the error window is not error',
+  );
+
+  // Regression: no failure, speech => idle; nothing at all => unknown.
+  assert.equal(status({ lastSpeakAt: NOW - 30 * MIN }), 'idle');
+  assert.equal(status({}), 'unknown');
 });

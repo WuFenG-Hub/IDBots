@@ -637,9 +637,16 @@ export function deriveGroupTaskMemberInviteStatus(input: {
 }
 
 /**
- * P1-4: pure workStatus derivation. Priority: a RUNNING canonical attempt, a
- * fresh `[WORKING]` tag (working window), a recent FAILED attempt (error
- * window), any speech (idle), otherwise unknown.
+ * P1-4: pure workStatus derivation. Priority:
+ *  1. a RUNNING canonical attempt => working;
+ *  2. a fresh `[WORKING]` tag (working window) => working;
+ *  3. a recent FAILED attempt (error window) with a NEWER success record
+ *     (lastSpeakAt / lastWorkingAt strictly AFTER attemptAtMs) => degraded off
+ *     'error': working when lastWorkingAt is inside the working window,
+ *     otherwise idle — the member has visibly recovered since the failure;
+ *  4. a recent FAILED attempt without newer records => error;
+ *  5. any speech => idle;
+ *  6. otherwise => unknown.
  */
 export function computeGroupTaskMemberWorkStatus(input: {
   metabotId: number | null;
@@ -664,6 +671,25 @@ export function computeGroupTaskMemberWorkStatus(input: {
     && Number.isFinite(input.attemptAtMs)
     && nowMs - input.attemptAtMs <= GROUP_TASK_ERROR_WINDOW_MINUTES * 60_000
   ) {
+    // Error-degrade: a failed attempt is only a stale residual marker when no
+    // NEWER success record exists. Any speech/working record strictly AFTER
+    // the failed attempt (attemptAtMs = the attempt's finishedAt) downgrades
+    // the panel off 'error'. A record at exactly attemptAtMs is NOT treated as
+    // post-failure recovery evidence — it coincides with the failure itself.
+    const hasNewerSuccessRecord =
+      (input.lastSpeakAt != null && Number.isFinite(input.lastSpeakAt) && input.lastSpeakAt > input.attemptAtMs)
+      || (input.lastWorkingAt != null && Number.isFinite(input.lastWorkingAt) && input.lastWorkingAt > input.attemptAtMs);
+    if (hasNewerSuccessRecord) {
+      // lastWorkingAt inside the working window => working, otherwise idle.
+      if (
+        input.lastWorkingAt != null
+        && Number.isFinite(input.lastWorkingAt)
+        && nowMs - input.lastWorkingAt <= GROUP_TASK_WORKING_WINDOW_MINUTES * 60_000
+      ) {
+        return 'working';
+      }
+      return 'idle';
+    }
     return 'error';
   }
   if (input.lastSpeakAt != null) return 'idle';
