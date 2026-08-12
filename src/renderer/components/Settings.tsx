@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon, BriefcaseIcon, BoltIcon, UserGroupIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
@@ -27,6 +27,10 @@ import type {
   CoworkSandboxStatus,
   CoworkSessionSummary,
 } from '../types/cowork';
+import type { GroupTaskSummary } from '../types/groupTask';
+import { groupTaskService } from '../services/groupTaskService';
+import { groupTaskStatusBadgeClass } from './groupTasks/groupTaskUtils';
+import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
 import MetaIDContactPanel from './settings/MetaIDContactPanel';
@@ -37,7 +41,7 @@ import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 
-type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'archivedGroupTasks' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -563,6 +567,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [archivedChatsPage, setArchivedChatsPage] = useState<number>(0);
   const [archivedChatsTotal, setArchivedChatsTotal] = useState<number>(0);
   const [archivedChatsNotice, setArchivedChatsNotice] = useState<string | null>(null);
+  // Archived Group Tasks panel: archived group tasks with pagination + restore.
+  const [archivedGroupTasks, setArchivedGroupTasks] = useState<GroupTaskSummary[]>([]);
+  const [archivedGroupTasksLoading, setArchivedGroupTasksLoading] = useState<boolean>(false);
+  const [archivedGroupTasksTotal, setArchivedGroupTasksTotal] = useState<number>(0);
+  const [archivedGroupTasksPage, setArchivedGroupTasksPage] = useState<number>(0);
+  const [archivedGroupTasksNotice, setArchivedGroupTasksNotice] = useState<string | null>(null);
 
   // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
   type DreamDiarySummary = {
@@ -1295,6 +1305,48 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       }
     } catch (unarchiveError) {
       console.error('Failed to unarchive session:', unarchiveError);
+    }
+  };
+
+  const loadArchivedGroupTasks = useCallback(async () => {
+    setArchivedGroupTasksLoading(true);
+    try {
+      const { tasks, total } = await groupTaskService.listArchivedTasks({
+        limit: ARCHIVED_CHATS_PAGE_SIZE,
+        offset: archivedGroupTasksPage * ARCHIVED_CHATS_PAGE_SIZE,
+      });
+      setArchivedGroupTasks(tasks);
+      setArchivedGroupTasksTotal(total);
+    } catch (loadError) {
+      console.error('Failed to load archived group tasks:', loadError);
+      setArchivedGroupTasks([]);
+    } finally {
+      setArchivedGroupTasksLoading(false);
+    }
+  }, [archivedGroupTasksPage]);
+
+  useEffect(() => {
+    if (activeTab !== 'archivedGroupTasks') return;
+    void loadArchivedGroupTasks();
+  }, [activeTab, loadArchivedGroupTasks]);
+
+  useEffect(() => {
+    if (archivedGroupTasksNotice == null) return;
+    const timer = setTimeout(() => setArchivedGroupTasksNotice(null), 3000);
+    return () => clearTimeout(timer);
+  }, [archivedGroupTasksNotice]);
+
+  const handleUnarchiveGroupTask = async (taskId: number) => {
+    try {
+      await groupTaskService.unarchiveTask(taskId);
+      const remaining = archivedGroupTasks.filter((task) => task.id !== taskId);
+      setArchivedGroupTasks(remaining);
+      if (remaining.length === 0 && archivedGroupTasksPage > 0) {
+        setArchivedGroupTasksPage((page) => Math.max(0, page - 1));
+      }
+      setArchivedGroupTasksNotice(i18nService.t('archivedGroupTasksRestored'));
+    } catch (unarchiveError) {
+      console.error('Failed to unarchive group task:', unarchiveError);
     }
   };
 
@@ -2289,6 +2341,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
+    { key: 'archivedGroupTasks', label: i18nService.t('archivedGroupTasksTab'), icon: <UserGroupIcon className="h-5 w-5" /> },
     { key: 'dreamDiary',     label: i18nService.t('dreamDiaryTab'),     icon: <MoonIcon className="h-5 w-5" /> },
     { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
@@ -3085,6 +3138,102 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       type="button"
                       disabled={archivedChatsPage + 1 >= totalArchivedChatPages}
                       onClick={() => setArchivedChatsPage((page) => page + 1)}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsNextPage')}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      case 'archivedGroupTasks': {
+        const totalArchivedGroupTaskPages = Math.max(1, Math.ceil(archivedGroupTasksTotal / ARCHIVED_CHATS_PAGE_SIZE));
+        return (
+          <div className="space-y-6">
+            <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
+              <div>
+                <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('archivedGroupTasksTab')}
+                </div>
+                <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('archivedGroupTasksHint')}
+                </div>
+              </div>
+
+              {archivedGroupTasksNotice && (
+                <div className="text-xs text-green-600 dark:text-green-400">{archivedGroupTasksNotice}</div>
+              )}
+
+              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                {archivedGroupTasksLoading ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('loading')}
+                  </div>
+                ) : archivedGroupTasks.length === 0 ? (
+                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('archivedGroupTasksEmpty')}
+                  </div>
+                ) : (
+                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                    {archivedGroupTasks.map((task) => (
+                      <div key={task.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex-1 space-y-1 min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                                #{task.id} {task.displayName?.trim() || task.title}
+                              </span>
+                              <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}>
+                                {i18nService.t(groupTaskStatusLabelKey(task.status))}
+                              </span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                              <span>{`${i18nService.t('archivedChatsArchivedAt')}: ${formatMemoryUpdatedAt(task.archivedAt ?? 0)}`}</span>
+                              {task.chairName && (
+                                <span>{`${task.chairName} (${i18nService.t('groupTasksChairBadge')})`}</span>
+                              )}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => { void handleUnarchiveGroupTask(task.id); }}
+                            className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex-shrink-0"
+                          >
+                            {i18nService.t('archivedChatsRestore')}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {!archivedGroupTasksLoading && archivedGroupTasksTotal > 0 && (
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService
+                      .t('archivedChatsPageInfo')
+                      .replace('{page}', String(archivedGroupTasksPage + 1))
+                      .replace('{totalPages}', String(totalArchivedGroupTaskPages))
+                      .replace('{total}', String(archivedGroupTasksTotal))}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={archivedGroupTasksPage === 0}
+                      onClick={() => setArchivedGroupTasksPage((page) => Math.max(0, page - 1))}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsPrevPage')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={archivedGroupTasksPage + 1 >= totalArchivedGroupTaskPages}
+                      onClick={() => setArchivedGroupTasksPage((page) => page + 1)}
                       className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
                       {i18nService.t('archivedChatsNextPage')}

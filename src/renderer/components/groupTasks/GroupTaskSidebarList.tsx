@@ -2,11 +2,16 @@ import React from 'react';
 import { i18nService } from '../../services/i18n';
 import { groupTaskStatusBadgeClass, formatGroupTaskTime } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
+import GroupTaskItemMenu, { PushPinIcon } from './GroupTaskItemMenu';
+import { EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import type { GroupTaskSummary } from '../../types/groupTask';
 
 interface GroupTaskSidebarListProps {
   tasks: GroupTaskSummary[];
   onSelectTask: (taskId: number) => void;
+  onTogglePin?: (taskId: number, pinned: boolean) => void;
+  onRename?: (taskId: number, title: string) => void;
+  onArchive?: (taskId: number) => void;
   /** Empty-state message; defaults to the group-task empty text. */
   emptyText?: string;
 }
@@ -15,11 +20,15 @@ interface GroupTaskSidebarListProps {
  * Group-task entity list for the sidebar "Group Tasks" tab. Unlike the
  * co-work/A2A tabs (which show cowork sessions), this tab shows the real
  * group-task records — title, status badge, chair/members, update time —
- * and opens the full Group Tasks detail view on click.
+ * and opens the full Group Tasks detail view on click. Each item carries the
+ * same context menu as the main list (copy group ID / rename / pin / archive).
  */
 const GroupTaskSidebarList: React.FC<GroupTaskSidebarListProps> = ({
   tasks,
   onSelectTask,
+  onTogglePin,
+  onRename,
+  onArchive,
   emptyText,
 }) => {
   if (tasks.length === 0) {
@@ -34,44 +43,121 @@ const GroupTaskSidebarList: React.FC<GroupTaskSidebarListProps> = ({
 
   return (
     <div className="space-y-1">
-      {tasks.map((task) => (
-        <div
-          key={task.id}
-          role="button"
-          tabIndex={0}
-          onClick={() => onSelectTask(task.id)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' || event.key === ' ') {
-              event.preventDefault();
-              onSelectTask(task.id);
-            }
-          }}
-          className="group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
-        >
-          <div className="flex items-center gap-2 mb-0.5">
-            <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              #{task.id}
-            </span>
-            <span className="flex-1 min-w-0 truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
-              {task.title}
-            </span>
-            <span
-              className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}
-            >
-              {i18nService.t(groupTaskStatusLabelKey(task.status))}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary leading-tight">
-            <span className="flex-1 min-w-0 truncate">
-              {task.chairName ? `${task.chairName} (${i18nService.t('groupTasksChairBadge')})` : ''}
-              {task.memberNames.length > 0 ? ` · ${task.memberNames.join(', ')}` : ''}
-            </span>
-            <span className="shrink-0 whitespace-nowrap">
-              {formatGroupTaskTime(task.updatedAt ?? task.createdAt)}
-            </span>
-          </div>
-        </div>
-      ))}
+      {tasks.map((task) => {
+        const displayTitle = task.displayName?.trim() || task.title;
+        const actionLabel = i18nService.t('coworkSessionActions');
+
+        const handleCopyGroupId = () => {
+          const value = task.groupId?.trim() || `#${task.id}`;
+          try {
+            const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+            if (clipboard) void clipboard.writeText(value);
+          } catch {
+            // Ignore clipboard failures; the menu should still close.
+          }
+        };
+
+        return (
+          <GroupTaskItemMenu
+            key={task.id}
+            task={task}
+            onTogglePin={(pinned) => onTogglePin?.(task.id, pinned)}
+            onRename={(title) => onRename?.(task.id, title)}
+            onArchive={() => onArchive?.(task.id)}
+            onCopyGroupId={handleCopyGroupId}
+          >
+            {(api) => (
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  if (api.isRenaming) return;
+                  api.closeMenu();
+                  onSelectTask(task.id);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    if (api.isRenaming) return;
+                    onSelectTask(task.id);
+                  }
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  api.openMenuAt(event.clientX, event.clientY);
+                }}
+                className="group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+              >
+                <div className="flex items-center gap-2 mb-0.5">
+                  <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    #{task.id}
+                  </span>
+                  {api.isRenaming ? (
+                    <input
+                      ref={api.renameInputRef}
+                      value={api.renameValue}
+                      onChange={(event) => api.onRenameInputChange(event.target.value)}
+                      onClick={(event) => event.stopPropagation()}
+                      onKeyDown={api.onRenameInputKeyDown}
+                      onBlur={api.onRenameInputBlur}
+                      className="flex-1 min-w-0 rounded-lg border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg px-2 py-0.5 text-sm font-medium dark:text-claude-darkText text-claude-text focus:outline-none focus:ring-2 focus:ring-claude-accent"
+                    />
+                  ) : (
+                    <span className="flex-1 min-w-0 truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
+                      {displayTitle}
+                    </span>
+                  )}
+                  <span
+                    className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${groupTaskStatusBadgeClass(task.status)}`}
+                  >
+                    {i18nService.t(groupTaskStatusLabelKey(task.status))}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary leading-tight">
+                  <span className="flex-1 min-w-0 truncate">
+                    {task.chairName ? `${task.chairName} (${i18nService.t('groupTasksChairBadge')})` : ''}
+                    {task.memberNames.length > 0 ? ` · ${task.memberNames.join(', ')}` : ''}
+                  </span>
+                  <span className="shrink-0 whitespace-nowrap">
+                    {formatGroupTaskTime(task.updatedAt ?? task.createdAt)}
+                  </span>
+                </div>
+
+                {/* Actions - absolutely positioned overlay */}
+                <div
+                  className={`absolute right-1.5 top-1.5 transition-opacity ${
+                    api.isRenaming
+                      ? 'opacity-0 pointer-events-none'
+                      : task.pinned
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover:opacity-100'
+                  }`}
+                >
+                  <button
+                    ref={api.actionButtonRef}
+                    onClick={api.openMenu}
+                    className="p-1 rounded-md bg-claude-surfaceMuted dark:bg-claude-darkSurfaceMuted dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurface hover:bg-claude-surface transition-colors"
+                    aria-label={actionLabel}
+                  >
+                    {task.pinned ? (
+                      <span className="relative block h-3.5 w-3.5">
+                        <PushPinIcon className="h-3.5 w-3.5 transition-opacity duration-150 group-hover:opacity-0" />
+                        <EllipsisHorizontalIcon className="absolute inset-0 h-3.5 w-3.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100" />
+                      </span>
+                    ) : (
+                      <EllipsisHorizontalIcon className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {api.renderMenu()}
+                {api.renderArchiveConfirm()}
+              </div>
+            )}
+          </GroupTaskItemMenu>
+        );
+      })}
     </div>
   );
 };
