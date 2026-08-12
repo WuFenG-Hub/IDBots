@@ -38,6 +38,22 @@ test('listArchivedSessions returns only archived sessions, newest archive first'
   }
 });
 
+test('listArchivedSessions filters by sessionType a2a, and unarchive restores it out of the list', async () => {
+  const { db, cleanup, store, arch1, arch2, arch3 } = await seed();
+  try {
+    // Only the archived A2A session matches the filter.
+    assert.deepEqual(store.listArchivedSessions({ sessionType: 'a2a' }).map((s) => s.id), [arch2.id]);
+    assert.equal(store.countArchivedSessions({ sessionType: 'a2a' }), 1);
+
+    // Unarchive clears archived_at: the session leaves the archived list again.
+    store.unarchiveSession(arch2.id);
+    assert.equal(store.isSessionArchived(arch2.id), false);
+    assert.deepEqual(store.listArchivedSessions({ sessionType: 'a2a' }).map((s) => s.id), []);
+  } finally {
+    cleanup();
+  }
+});
+
 test('listArchivedSessions filters by metabot and by title/peer query', async () => {
   const { db, cleanup, store, arch1, arch2, arch3 } = await seed();
   try {

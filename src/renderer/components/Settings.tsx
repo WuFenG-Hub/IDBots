@@ -567,14 +567,20 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [archivedChatsPage, setArchivedChatsPage] = useState<number>(0);
   const [archivedChatsTotal, setArchivedChatsTotal] = useState<number>(0);
   const [archivedChatsNotice, setArchivedChatsNotice] = useState<string | null>(null);
-  // Archived panel sub-tab: 'chats' (local chats, default) or 'groupTasks'.
-  const [archivedSubTab, setArchivedSubTab] = useState<'chats' | 'groupTasks'>('chats');
+  // Archived panel sub-tab: 'chats' (local chats, default), 'groupTasks' or 'a2a' (online A2A chats).
+  const [archivedSubTab, setArchivedSubTab] = useState<'chats' | 'groupTasks' | 'a2a'>('chats');
   // Archived Group Tasks panel: archived group tasks with pagination + restore.
   const [archivedGroupTasks, setArchivedGroupTasks] = useState<GroupTaskSummary[]>([]);
   const [archivedGroupTasksLoading, setArchivedGroupTasksLoading] = useState<boolean>(false);
   const [archivedGroupTasksTotal, setArchivedGroupTasksTotal] = useState<number>(0);
   const [archivedGroupTasksPage, setArchivedGroupTasksPage] = useState<number>(0);
   const [archivedGroupTasksNotice, setArchivedGroupTasksNotice] = useState<string | null>(null);
+  // Archived A2A chats panel (Settings): archived online (A2A) sessions, paginated + restore.
+  const [archivedA2AChats, setArchivedA2AChats] = useState<CoworkSessionSummary[]>([]);
+  const [archivedA2AChatsLoading, setArchivedA2AChatsLoading] = useState<boolean>(false);
+  const [archivedA2AChatsTotal, setArchivedA2AChatsTotal] = useState<number>(0);
+  const [archivedA2AChatsPage, setArchivedA2AChatsPage] = useState<number>(0);
+  const [archivedA2AChatsNotice, setArchivedA2AChatsNotice] = useState<string | null>(null);
 
   // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
   type DreamDiarySummary = {
@@ -1349,6 +1355,51 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       setArchivedGroupTasksNotice(i18nService.t('archivedGroupTasksRestored'));
     } catch (unarchiveError) {
       console.error('Failed to unarchive group task:', unarchiveError);
+    }
+  };
+
+  const loadArchivedA2AChats = useCallback(async () => {
+    setArchivedA2AChatsLoading(true);
+    try {
+      const result = await window.electron?.cowork?.listArchivedSessions({
+        sessionType: 'a2a',
+        limit: ARCHIVED_CHATS_PAGE_SIZE,
+        offset: archivedA2AChatsPage * ARCHIVED_CHATS_PAGE_SIZE,
+      });
+      setArchivedA2AChats(result?.success && Array.isArray(result.sessions) ? result.sessions : []);
+      setArchivedA2AChatsTotal(result?.success && typeof result.total === 'number' ? result.total : 0);
+    } catch (loadError) {
+      console.error('Failed to load archived A2A chats:', loadError);
+      setArchivedA2AChats([]);
+    } finally {
+      setArchivedA2AChatsLoading(false);
+    }
+  }, [archivedA2AChatsPage]);
+
+  useEffect(() => {
+    if (activeTab !== 'archivedChats' || archivedSubTab !== 'a2a') return;
+    void loadArchivedA2AChats();
+  }, [activeTab, archivedSubTab, loadArchivedA2AChats]);
+
+  useEffect(() => {
+    if (archivedA2AChatsNotice == null) return;
+    const timer = setTimeout(() => setArchivedA2AChatsNotice(null), 3000);
+    return () => clearTimeout(timer);
+  }, [archivedA2AChatsNotice]);
+
+  const handleUnarchiveA2AChat = async (sessionId: string) => {
+    try {
+      const result = await window.electron?.cowork?.unarchiveSession(sessionId);
+      if (result?.success) {
+        const remaining = archivedA2AChats.filter((session) => session.id !== sessionId);
+        setArchivedA2AChats(remaining);
+        if (remaining.length === 0 && archivedA2AChatsPage > 0) {
+          setArchivedA2AChatsPage((page) => Math.max(0, page - 1));
+        }
+        setArchivedA2AChatsNotice(i18nService.t('archivedChatsRestored'));
+      }
+    } catch (unarchiveError) {
+      console.error('Failed to unarchive A2A session:', unarchiveError);
     }
   };
 
@@ -3020,6 +3071,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       case 'archivedChats': {
         const totalArchivedChatPages = Math.max(1, Math.ceil(archivedChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));
         const totalArchivedGroupTaskPages = Math.max(1, Math.ceil(archivedGroupTasksTotal / ARCHIVED_CHATS_PAGE_SIZE));
+        const totalArchivedA2AChatPages = Math.max(1, Math.ceil(archivedA2AChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));
         const archivedTabButtonClass = (active: boolean) =>
           `rounded-lg border px-3 py-1.5 text-xs transition-colors ${
             active
@@ -3052,6 +3104,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   className={archivedTabButtonClass(archivedSubTab === 'groupTasks')}
                 >
                   {i18nService.t('archivedGroupTasksTab')}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setArchivedSubTab('a2a')}
+                  className={archivedTabButtonClass(archivedSubTab === 'a2a')}
+                >
+                  {i18nService.t('archivedA2AChatsTab')}
                 </button>
               </div>
 
@@ -3174,7 +3233,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               )}
                 </>
-              ) : (
+              ) : archivedSubTab === 'groupTasks' ? (
                 <>
                   {archivedGroupTasksNotice && (
                     <div className="text-xs text-green-600 dark:text-green-400">{archivedGroupTasksNotice}</div>
@@ -3246,6 +3305,84 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           type="button"
                           disabled={archivedGroupTasksPage + 1 >= totalArchivedGroupTaskPages}
                           onClick={() => setArchivedGroupTasksPage((page) => page + 1)}
+                          className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {i18nService.t('archivedChatsNextPage')}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  {archivedA2AChatsNotice && (
+                    <div className="text-xs text-green-600 dark:text-green-400">{archivedA2AChatsNotice}</div>
+                  )}
+
+                  <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                    {archivedA2AChatsLoading ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('loading')}
+                      </div>
+                    ) : archivedA2AChats.length === 0 ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('archivedChatsEmpty')}
+                      </div>
+                    ) : (
+                      <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                        {archivedA2AChats.map((session) => (
+                          <div key={session.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 space-y-1 min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                                    {session.title?.trim() || session.peerName || i18nService.t('coworkNewSession')}
+                                  </span>
+                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                    {i18nService.t('archivedChatsTypeA2A')}
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  {session.peerName && <span>{session.peerName}</span>}
+                                  <span>{`${i18nService.t('archivedChatsArchivedAt')}: ${formatMemoryUpdatedAt(session.archivedAt ?? 0)}`}</span>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => { void handleUnarchiveA2AChat(session.id); }}
+                                className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex-shrink-0"
+                              >
+                                {i18nService.t('archivedChatsRestore')}
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {!archivedA2AChatsLoading && archivedA2AChatsTotal > 0 && (
+                    <div className="flex items-center justify-between gap-3 pt-1">
+                      <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService
+                          .t('archivedChatsPageInfo')
+                          .replace('{page}', String(archivedA2AChatsPage + 1))
+                          .replace('{totalPages}', String(totalArchivedA2AChatPages))
+                          .replace('{total}', String(archivedA2AChatsTotal))}
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={archivedA2AChatsPage === 0}
+                          onClick={() => setArchivedA2AChatsPage((page) => Math.max(0, page - 1))}
+                          className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                          {i18nService.t('archivedChatsPrevPage')}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={archivedA2AChatsPage + 1 >= totalArchivedA2AChatPages}
+                          onClick={() => setArchivedA2AChatsPage((page) => page + 1)}
                           className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                           {i18nService.t('archivedChatsNextPage')}
