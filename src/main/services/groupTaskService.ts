@@ -50,6 +50,7 @@ import {
   GROUP_TASK_CONVERSATION_CHANNEL,
 } from './groupTaskSession';
 import {
+  extractCheckpointDecisionSummary,
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
 } from './groupTaskDaemon';
@@ -107,6 +108,13 @@ export interface GroupTaskDetail extends GroupTask {
   driver: GroupTaskDriverInfo | null;
   /** HITL: all human checkpoints of the task, oldest first (open one included). */
   checkpoints: GroupTaskCheckpoint[];
+  /**
+   * HITL: what the owner must decide right now — the tag-free body of the
+   * chair's [CHECKPOINT] message that opened the currently open checkpoint
+   * (null when no open checkpoint, the message is unavailable, or it held
+   * nothing but the tag). Document links inside it survive untouched.
+   */
+  openCheckpointSummary: string | null;
 }
 
 /** P2-8: who drives a task right now (multi-window/multi-session annotation). */
@@ -753,6 +761,9 @@ export async function getGroupTask(
       });
     }
   }
+  // HITL: all human checkpoints (open + past), oldest first — loaded once and
+  // reused for the detail payload and the open-checkpoint decision summary.
+  const checkpoints = store.listCheckpoints(id);
   const membersWithStatus: GroupTaskMemberSummary[] = members.map((member) => {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
     const lastSpeakAt = gmid ? (speakMap.get(gmid) ?? null) : null;
@@ -797,8 +808,31 @@ export async function getGroupTask(
     // P2-8: current driving daemon instance (kv heartbeat claim).
     driver: readGroupTaskDriver(getKvStore(), id),
     // HITL: human checkpoints (open + past), oldest first.
-    checkpoints: store.listCheckpoints(id),
+    checkpoints,
+    // HITL: what the owner must decide — the tag-free body of the chair's
+    // [CHECKPOINT] message that opened the open checkpoint (by pin id), so the
+    // detail banner can show it without the owner paging the transcript.
+    openCheckpointSummary: resolveOpenCheckpointSummary(store, task, checkpoints),
   };
+}
+
+/**
+ * HITL: resolve the decision summary for the task's open checkpoint (if any).
+ * The summary is the chair's [CHECKPOINT] message body minus its tags — the
+ * draft/decision content the owner must review. Returns null when there is no
+ * open checkpoint, the opening message cannot be found, or it held nothing
+ * but the tag (the UI then falls back to the checkpoint topic).
+ */
+function resolveOpenCheckpointSummary(
+  store: GroupTaskStore,
+  task: GroupTask,
+  checkpoints: GroupTaskCheckpoint[],
+): string | null {
+  const openCheckpoint = checkpoints.find((checkpoint) => checkpoint.status === 'open') ?? null;
+  if (!openCheckpoint?.openedMsgPinId || !task.groupId) return null;
+  const openedMessage = store.getGroupChatMessageByPinId(openCheckpoint.openedMsgPinId);
+  if (!openedMessage) return null;
+  return extractCheckpointDecisionSummary(openedMessage.content);
 }
 
 /**

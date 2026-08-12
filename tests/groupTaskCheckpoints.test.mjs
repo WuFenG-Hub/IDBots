@@ -40,6 +40,8 @@ const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services
 const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
+  extractCheckpointDecisionSummary,
+  truncateCheckpointSummary,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const groupTaskService = require('../dist-electron/main/services/groupTaskService.js');
 
@@ -47,6 +49,7 @@ Module._load = originalLoad;
 
 const {
   closeGroupTask,
+  getGroupTask,
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
@@ -357,6 +360,11 @@ test('loop: chair [CHECKPOINT] opens a checkpoint (pause line + event + private 
     const pauseLine = h.sends.find((send) => send.metabotId === 1 && send.content.includes('人工确认点'));
     assert.ok(pauseLine, 'pause ceremony line posted as the chair');
     assert.match(pauseLine.content, /官网修改意见稿确认/);
+    // The pause line carries the decision summary: the chair's [CHECKPOINT]
+    // message body with the tag itself stripped — the owner sees at a glance
+    // what needs a decision, without paging the transcript.
+    assert.match(pauseLine.content, /需要你拍板：各位，修改意见稿已整理好，先请主人过目。/);
+    assert.doesNotMatch(pauseLine.content, /\[CHECKPOINT/);
 
     const changedEvents = h.events.filter((e) => e.type === 'groupTask:checkpointChanged');
     assert.equal(changedEvents.length, 1);
@@ -366,6 +374,26 @@ test('loop: chair [CHECKPOINT] opens a checkpoint (pause line + event + private 
     assert.equal(h.ownerReportCalls.length, 1, 'private checkpoint request sent to the owner');
     assert.equal(h.ownerReportCalls[0].kind, 'checkpoint');
     assert.equal(h.ownerReportCalls[0].checkpointId, checkpoint.id);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('loop: pause line falls back to topic-only when the chair body holds only the tag', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'cp-open-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[CHECKPOINT: 意见稿确认]',
+    });
+    await h.loop.runTick();
+
+    assert.ok(h.groupTaskStore.getOpenCheckpoint(task.id), 'checkpoint opened');
+    const pauseLine = h.sends.find((send) => send.metabotId === 1 && send.content.includes('人工确认点'));
+    assert.ok(pauseLine, 'pause ceremony line posted as the chair');
+    assert.doesNotMatch(pauseLine.content, /需要你拍板/, 'no summary clause when nothing but the tag');
+    assert.match(pauseLine.content, /意见稿确认/, 'topic still shown');
   } finally {
     h.cleanup();
   }
@@ -522,4 +550,80 @@ test('service: closeGroupTask cancels an open checkpoint', async () => {
     resetGroupTaskServiceTransport();
     h.cleanup();
   }
+});
+
+test('service: getGroupTask detail carries the open checkpoint decision summary', async () => {
+  const h = await createHarness();
+  setGroupTaskServiceMetabotStoreGetter(() => h.metabotStore);
+  setGroupTaskServiceGroupTaskStoreGetter(() => h.groupTaskStore);
+  setGroupTaskServiceOrchestrationBridgeGetter(() => h.orchestrationBridge);
+  setGroupTaskServiceKvStoreGetter(() => h.store);
+  setGroupTaskServiceCoworkStoreGetter(() => h.coworkStore);
+  try {
+    const task = h.createTask([2]);
+    // The chair's opening message: body + [CHECKPOINT: topic] tag.
+    insertGroupMessage(h.db, {
+      pinId: 'cp-open-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，修改意见稿已整理好，先请主人过目。 [CHECKPOINT: 官网修改意见稿确认]',
+    });
+    const opened = h.groupTaskStore.openCheckpoint({
+      taskId: task.id, topic: '官网修改意见稿确认', msgPinId: 'cp-open-i0',
+    });
+
+    // While open, the detail exposes the tag-free chair body as the decision
+    // summary — the banner shows what the owner must decide.
+    const detail = await getGroupTask(task.id);
+    assert.equal(
+      detail.openCheckpointSummary,
+      '各位，修改意见稿已整理好，先请主人过目。',
+      'openCheckpointSummary is the tag-free [CHECKPOINT] message body',
+    );
+    assert.equal(detail.checkpoints.find((c) => c.id === opened.id)?.status, 'open');
+
+    // Opening message missing from the transcript -> summary falls back to null.
+    h.groupTaskStore.resolveCheckpoint(opened.id, { resolution: '主人已确认', msgPinId: 'cp-res-i0' });
+    const orphan = h.groupTaskStore.openCheckpoint({ taskId: task.id, topic: '意见稿确认', msgPinId: 'no-such-pin-i0' });
+    const detailOrphan = await getGroupTask(task.id);
+    assert.equal(detailOrphan.openCheckpointSummary, null, 'no summary when the opening message is unavailable');
+
+    // Resolved -> nothing left to decide -> summary is null.
+    h.groupTaskStore.resolveCheckpoint(orphan.id, { resolution: '主人已确认' });
+    const after = await getGroupTask(task.id);
+    assert.equal(after.openCheckpointSummary, null, 'summary cleared once the checkpoint resolves');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Decision summary derivation (pause line / banner payload)
+// ---------------------------------------------------------------------------
+
+test('util: extractCheckpointDecisionSummary strips tags from the chair body', () => {
+  // Body + tag -> tag-free body (this is what the owner must decide).
+  assert.equal(
+    extractCheckpointDecisionSummary('各位，修改意见稿已整理好，先请主人过目。 [CHECKPOINT: 官网修改意见稿确认]'),
+    '各位，修改意见稿已整理好，先请主人过目。',
+  );
+  // Document links inside the body survive untouched.
+  assert.equal(
+    extractCheckpointDecisionSummary('修改意见稿见文档：https://manapi.metaid.io/x/abc [CHECKPOINT: 意见稿确认]'),
+    '修改意见稿见文档：https://manapi.metaid.io/x/abc',
+  );
+  // Tag-only body -> null (callers fall back to the topic).
+  assert.equal(extractCheckpointDecisionSummary('[CHECKPOINT: 意见稿确认]'), null);
+  assert.equal(extractCheckpointDecisionSummary('  [CHECKPOINT_RESOLVED: 通过]  '), null);
+  assert.equal(extractCheckpointDecisionSummary(null), null);
+  assert.equal(extractCheckpointDecisionSummary(''), null);
+  assert.equal(extractCheckpointDecisionSummary('   '), null);
+});
+
+test('util: truncateCheckpointSummary keeps short summaries and cuts long ones', () => {
+  assert.equal(truncateCheckpointSummary('short summary'), 'short summary');
+  const long = 'a'.repeat(300);
+  const cut = truncateCheckpointSummary(long);
+  assert.ok(cut.endsWith('…'), 'long summary ends with an ellipsis');
+  assert.ok(cut.length <= 121, `cut length ${cut.length} <= 121`);
+  assert.equal(truncateCheckpointSummary(long, 20).length, 21, 'custom maxLength respected');
+  assert.equal(truncateCheckpointSummary('  padded  '), 'padded');
 });

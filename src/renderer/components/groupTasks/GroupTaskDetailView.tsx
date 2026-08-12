@@ -34,6 +34,9 @@ import WindowTitleBar from '../window/WindowTitleBar';
 const MESSAGE_PAGE_LIMIT = 50;
 // Distance from the top (px) at which one older transcript page is fetched.
 const LOAD_OLDER_THRESHOLD = 48;
+// HITL: the pause-banner decision summary is truncated at this length; the
+// "expand" toggle reveals the full body (the transcript holds it anyway).
+const CHECKPOINT_SUMMARY_MAX_LEN = 120;
 
 /**
  * Copyable group/room id pill. The group_id is the room id (stored locally on
@@ -86,6 +89,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
 }) => {
   const isMac = window.electron.platform === 'darwin';
   const [detail, setDetail] = useState<GroupTaskDetail | null>(null);
+  // HITL: id of the currently open checkpoint (null when none) — drives the
+  // pause banner and the summary collapse-on-change effect below.
+  const openCheckpointId = detail?.checkpoints?.find((checkpoint) => checkpoint.status === 'open')?.id ?? null;
   const [loadingDetail, setLoadingDetail] = useState(true);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [messages, setMessages] = useState<GroupChatTranscriptMessage[]>([]);
@@ -96,6 +102,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sentHint, setSentHint] = useState(false);
+  // HITL: whether the pause-banner decision summary shows in full (expand).
+  const [checkpointSummaryExpanded, setCheckpointSummaryExpanded] = useState(false);
   const [confirmAction, setConfirmAction] = useState<'done' | 'cancelled' | null>(null);
   const [closing, setClosing] = useState(false);
   const [closeError, setCloseError] = useState<string | null>(null);
@@ -281,6 +289,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       void loadMessages();
     });
   }, [taskId, refreshDetail, loadMessages]);
+
+  // HITL: collapse the pause-banner decision summary when the open checkpoint
+  // changes (a fresh pause always starts truncated).
+  useEffect(() => {
+    setCheckpointSummaryExpanded(false);
+  }, [openCheckpointId]);
 
   // Auto-scroll to bottom on new messages unless the user scrolled up.
   useEffect(() => {
@@ -484,6 +498,14 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
   // HITL: the currently open human checkpoint, if any (drives the pause banner).
   const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
+  // HITL: what the owner must decide, shown under the banner topic — the
+  // chair's tag-free [CHECKPOINT] message body. Truncated until expanded.
+  const openCheckpointSummary = detail.openCheckpointSummary?.trim() || null;
+  const checkpointSummaryShown = openCheckpointSummary
+    && !checkpointSummaryExpanded
+    && openCheckpointSummary.length > CHECKPOINT_SUMMARY_MAX_LEN
+    ? `${openCheckpointSummary.slice(0, CHECKPOINT_SUMMARY_MAX_LEN).trimEnd()}…`
+    : openCheckpointSummary;
   const chairMember = detail.members.find((member) => member.role === 'chair');
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
@@ -613,9 +635,26 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             )}
             {openCheckpoint && (
               <div className="mt-2 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-900/20 px-3 py-2 text-xs dark:text-sky-200 text-sky-800">
-                {i18nService
-                  .t('groupTasksCheckpointBanner')
-                  .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
+                <div>
+                  {i18nService
+                    .t('groupTasksCheckpointBanner')
+                    .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
+                </div>
+                {openCheckpointSummary && (
+                  <div className="mt-1">
+                    <span className="font-medium">{i18nService.t('groupTasksCheckpointDecisionPrefix')}</span>
+                    <span className="whitespace-pre-wrap">{checkpointSummaryShown}</span>
+                    {openCheckpointSummary.length > CHECKPOINT_SUMMARY_MAX_LEN && (
+                      <button
+                        type="button"
+                        className="ml-1 underline cursor-pointer"
+                        onClick={() => setCheckpointSummaryExpanded((expanded) => !expanded)}
+                      >
+                        {i18nService.t(checkpointSummaryExpanded ? 'groupTasksCheckpointCollapse' : 'groupTasksCheckpointExpand')}
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {detail.acceptanceCriteria && (

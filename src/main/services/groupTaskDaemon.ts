@@ -68,6 +68,13 @@ const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
  */
 const CHECKPOINT_OPEN_TAG = /\[CHECKPOINT:\s*([^\]\n]+?)\s*\]/i;
 const CHECKPOINT_RESOLVED_TAG = /\[CHECKPOINT_RESOLVED(?::\s*([^\]\n]+?)\s*)?\]/i;
+/**
+ * HITL: any checkpoint tag form, used to strip the tag(s) out of the chair's
+ * message body when deriving the "what the owner must decide" summary.
+ * Matches `[CHECKPOINT]`, `[CHECKPOINT: topic]`, `[CHECKPOINT_RESOLVED]` and
+ * `[CHECKPOINT_RESOLVED: decision]`.
+ */
+const CHECKPOINT_ANY_TAG = /\[CHECKPOINT(?:_[A-Z]+)?(?::[^\]]*)?\]/gi;
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 /**
@@ -127,6 +134,37 @@ function readTaskSessionActivityMessages(
  */
 const deliverableTagLines = (content: string): string[] =>
   content.split('\n').filter((line) => DELIVERABLE_TAG.test(line));
+
+/**
+ * HITL: derive the "what the owner must decide" summary from the chair's
+ * [CHECKPOINT] message body — the body minus any checkpoint tags themselves.
+ * The chair typically posts the draft/decision content in the same message
+ * (e.g. "意见稿已整理好，见链接。 [CHECKPOINT: 意见稿确认]"), so the tag-free
+ * remainder IS the decision summary; document links inside it survive
+ * untouched. Returns null when only tags (or nothing) remain so callers can
+ * fall back to the checkpoint topic.
+ */
+export function extractCheckpointDecisionSummary(content: string | null | undefined): string | null {
+  const text = (content ?? '')
+    .replace(CHECKPOINT_ANY_TAG, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text.length > 0 ? text : null;
+}
+
+/**
+ * HITL: one-line truncation of a decision summary for the pause ceremony line
+ * and the detail banner. Cuts on a whitespace boundary when possible; the
+ * full body always stays available in the group transcript.
+ */
+export function truncateCheckpointSummary(summary: string, maxLength = 120): string {
+  const text = summary.trim();
+  if (text.length <= maxLength) return text;
+  const cut = text.slice(0, maxLength);
+  const lastSpace = cut.lastIndexOf(' ');
+  const end = lastSpace > maxLength * 0.6 ? lastSpace : maxLength;
+  return `${cut.slice(0, end).trimEnd()}…`;
+}
 
 const CHAIR_PLANNED_KV_PREFIX = 'group_task_chair_planned:';
 const CHAIR_PLAN_ATTEMPTS_KV_PREFIX = 'group_task_chair_plan_attempts:';
@@ -2514,9 +2552,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               `(${checkpoint.topic ?? 'no topic'})`,
             );
             try {
+              // HITL: the pause line carries the decision summary so the owner
+              // sees what to decide at a glance (the chair's tag-free message
+              // body; document links inside it survive). Falls back to the
+              // topic-only form when the body holds nothing but tags.
+              const decisionSummary = extractCheckpointDecisionSummary(message.content);
+              const summaryClause = decisionSummary
+                ? ` 需要你拍板：${truncateCheckpointSummary(decisionSummary)}`
+                : '';
               const pauseLine =
                 `⏸️ 任务 #${task.id}「${task.title}」进入人工确认点（${checkpoint.topic ?? '等待主人决策'}）：` +
-                '任务暂停推进，等待主人反馈。主人可直接在本群留言，或与 Twinbot 私聊给出意见。';
+                `任务暂停推进，等待主人反馈。${summaryClause}` +
+                '主人可直接在本群留言，或与 Twinbot 私聊给出意见。';
               const sent = await postGroupMessage(task.id, chairMember.metabotId!, pauseLine);
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: checkpoint pause line posted (pin ${sent.pinId})`,

@@ -965,6 +965,24 @@ export class GroupTaskStore {
   }
 
   /**
+   * One transcript message by its on-chain pin id (latest row wins when the
+   * pin is somehow not unique). HITL: the detail view uses this to fetch the
+   * chair's [CHECKPOINT] message body that opened an open checkpoint, so the
+   * banner can show what the owner must decide without paging the transcript.
+   */
+  getGroupChatMessageByPinId(pinId: string): GroupChatTranscriptMessage | null {
+    const pin = (pinId ?? '').trim();
+    if (!pin) return null;
+    const columns = `id, pin_id, tx_id, sender_name, sender_global_metaid, sender_avatar,
+      content, content_type, chain_timestamp, msg_index, reply_pin, sender_suspect`;
+    const row = this.getOne<GroupChatTranscriptRow>(
+      `SELECT ${columns} FROM group_chat_messages WHERE pin_id = ? ORDER BY id DESC LIMIT 1`,
+      [pin],
+    );
+    return row ? rowToGroupChatTranscriptMessage(row) : null;
+  }
+
+  /**
    * Round-4 attribution: persist the GlobalMetaID resolved from the message's
    * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
    * chain signature is the ONLY identity source; sender_name is never used
