@@ -83,6 +83,12 @@ export interface GroupTaskDeliverable {
   createdAt: string | null;
   /** P0-4: JSON verification report (multi-source outcomes). */
   verification?: string | null;
+  /**
+   * Issue #8: on-chain confirmation state driven by multi-source verification,
+   * ORTHOGONAL to `status` (owner acceptance): a deliverable can be
+   * on-chain-confirmed while still pending acceptance.
+   */
+  confirmation?: 'unconfirmed' | 'confirmed';
 }
 
 export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';

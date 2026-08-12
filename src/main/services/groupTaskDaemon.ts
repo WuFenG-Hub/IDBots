@@ -2103,6 +2103,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             try {
               const report = await verifyPinSources(pinid);
               store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+              // Issue #8: drive the ledger's on-chain confirmation state from
+              // the multi-source verification result (orthogonal to owner
+              // acceptance in `status`).
+              store.updateDeliverableConfirmation(
+                deliverable.id,
+                report.verified ? 'confirmed' : 'unconfirmed',
+              );
               const lagging = report.sources.some((entry) => entry.outcome === 'not_found')
                 && report.sources.some((entry) => entry.outcome === 'found');
               if (!report.verified) {
@@ -3042,6 +3049,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       try {
         const fresh = await verifyPinSources(pinid);
         store.updateDeliverableVerification(deliverable.id, JSON.stringify(fresh));
+        // Issue #8: the re-verification pass is the chain-confirmation-driven
+        // update path — a pin that becomes verifiable on-chain (indexer lag
+        // caught up) flips the ledger's confirmation state.
+        store.updateDeliverableConfirmation(
+          deliverable.id,
+          fresh.verified ? 'confirmed' : 'unconfirmed',
+        );
         const lagging = fresh.sources.some((entry) => entry.outcome === 'not_found')
           && fresh.sources.some((entry) => entry.outcome === 'found');
         emitLog(

@@ -152,6 +152,8 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.autoAckWorkerDispatch != null ? { autoAckWorkerDispatch: overrides.autoAckWorkerDispatch } : {}),
     ...(overrides.dependencyWaitMaxMs != null ? { dependencyWaitMaxMs: overrides.dependencyWaitMaxMs } : {}),
     ...(overrides.driverGraceMs != null ? { driverGraceMs: overrides.driverGraceMs } : {}),
+    ...(overrides.readPinForVerification != null ? { readPinForVerification: overrides.readPinForVerification } : {}),
+    ...(overrides.readPinSecondaryForVerification != null ? { readPinSecondaryForVerification: overrides.readPinSecondaryForVerification } : {}),
   };
 
   const loop = createGroupTaskDaemonLoop(loopDeps);
@@ -461,6 +463,66 @@ test('F2: worker sends always pass the driving gate (no mutex for non-chair)', a
       driverId: 'worker-session', graceMs: 20_000, nowMs: h.state.nowMs + 3_000,
     });
     assert.deepEqual(workerGate, { ok: true }, 'worker send passes the gate');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #8: deliverable ledger on-chain confirmation, driven by multi-source
+// verification — the record-time path and the monitor re-verification path.
+// ---------------------------------------------------------------------------
+
+test('Issue #8: [DELIVERABLE] with an on-chain-found pin records confirmation=confirmed (pending acceptance)', async () => {
+  const foundPin = 'b'.repeat(64) + 'i0';
+  const h = await createHarness({
+    readPinForVerification: async (pinId) => (pinId === foundPin ? 'found' : 'not_found'),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'deli-confirmed-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] metaapp: metaapp://${foundPin}`,
+    });
+    await h.loop.runTick();
+
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'one deliverable row recorded');
+    // The pin is verifiably on-chain, so the ledger says confirmed — while the
+    // acceptance status stays pending until the owner accepts (Issue #8 root).
+    assert.equal(deliverables[0].confirmation, 'confirmed');
+    assert.equal(deliverables[0].status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Issue #8: monitor re-verification drives unconfirmed -> confirmed once the pin lands on-chain', async () => {
+  const foundPin = 'c'.repeat(64) + 'i0';
+  let outcome = 'not_found';
+  const h = await createHarness({
+    readPinForVerification: async (pinId) => (pinId === foundPin ? outcome : 'not_found'),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'deli-lagging-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] metaapp: metaapp://${foundPin}`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id)[0].confirmation, 'unconfirmed',
+      'pin not found on-chain yet => unconfirmed');
+
+    // The pin lands on-chain; the next monitor pass (retry window elapsed)
+    // re-verifies and drives the ledger to confirmed.
+    outcome = 'found';
+    h.state.nowMs += 11 * 60 * 1000; // past the 10-minute verification retry window
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(deliverable.confirmation, 'confirmed', 'monitor pass flips the ledger');
+    assert.equal(deliverable.status, 'pending', 'acceptance status unchanged');
   } finally {
     h.cleanup();
   }

@@ -848,6 +848,8 @@ export class SqliteStore {
         kind TEXT,
         uri TEXT,
         status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),
+        confirmation TEXT NOT NULL DEFAULT 'unconfirmed'
+          CHECK(confirmation IN ('unconfirmed','confirmed')),
         created_at TEXT DEFAULT (datetime('now'))
       );
     `);
@@ -855,6 +857,7 @@ export class SqliteStore {
     this.migrateGroupTaskMembersOpenTeamColumns();
     this.migrateGroupTaskMembersStatusColumns();
     this.migrateGroupTaskDeliverablesVerification();
+    this.migrateGroupTaskDeliverablesConfirmation();
     // P0-8: public integrity declarations (honest corrections/reports).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_integrity_events (
@@ -2117,6 +2120,27 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskDeliverablesVerification:', error);
+    }
+  }
+
+  /**
+   * Migration (Issue #8): deliverable on-chain confirmation state column.
+   * Idempotent PRAGMA-guarded; existing rows default to 'unconfirmed' and get
+   * flipped by the daemon's next verification pass (record-time or monitor).
+   */
+  private migrateGroupTaskDeliverablesConfirmation(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_deliverables)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('confirmation')) {
+        this.db.run(
+          `ALTER TABLE group_task_deliverables ADD COLUMN confirmation TEXT
+           NOT NULL DEFAULT 'unconfirmed'`,
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesConfirmation:', error);
     }
   }
 

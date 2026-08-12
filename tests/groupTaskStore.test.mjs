@@ -473,6 +473,46 @@ test('P0-4: deliverable verification column + updateDeliverableVerification', as
   }
 });
 
+test('Issue #8: deliverable confirmation column — default unconfirmed, chain-driven flip, orthogonal to status', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(db, 'group_task_deliverables').includes('confirmation'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-i8', title: 'Issue #8', goal: 'ledger', chairMetabotId: 1, createdBy: 'user',
+    });
+    const deliverable = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      kind: 'metaapp',
+      uri: 'metaapp://ab'.repeat(32) + 'i0',
+      authorGlobalmetaid: 'gmid-x',
+    });
+    // A fresh row defaults to 'unconfirmed' regardless of the column default
+    // being relied on.
+    assert.equal(deliverable.confirmation, 'unconfirmed');
+    assert.equal(groupTaskStore.listDeliverables(task.id)[0].confirmation, 'unconfirmed');
+
+    // The daemon's verification pass flips it (chain-confirmation-driven path).
+    groupTaskStore.updateDeliverableConfirmation(deliverable.id, 'confirmed');
+    assert.equal(groupTaskStore.listDeliverables(task.id)[0].confirmation, 'confirmed');
+
+    // Confirmation is ORTHOGONAL to acceptance status: flipping the status to
+    // accepted must not erase the on-chain confirmation, and vice versa.
+    groupTaskStore.updateDeliverableStatus(deliverable.id, 'accepted');
+    const accepted = groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(accepted.status, 'accepted');
+    assert.equal(accepted.confirmation, 'confirmed');
+
+    // Revert to unconfirmed (e.g. verification later failed) keeps status.
+    groupTaskStore.updateDeliverableConfirmation(deliverable.id, 'unconfirmed');
+    const reverted = groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(reverted.status, 'accepted');
+    assert.equal(reverted.confirmation, 'unconfirmed');
+  } finally {
+    store.close();
+  }
+});
+
 test('P0-5: transition log table + updateTaskStatusWithLog records who/from/to/reason', async () => {
   const tempDir = makeTempDir();
   const { store, db, groupTaskStore } = await openStores(tempDir);
