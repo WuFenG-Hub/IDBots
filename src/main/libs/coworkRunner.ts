@@ -91,6 +91,10 @@ import {
   type SocialRecallControl,
 } from './socialRecallAgentTools';
 import {
+  buildMetaFileUploadAgentTools,
+  type MetaFileUploadControl,
+} from './metaFileUploadAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -1370,6 +1374,14 @@ export interface CoworkRunnerOptions {
    */
   socialRecall?: SocialRecallControl;
   /**
+   * When set, every cowork session gets the upload_file tool backed by
+   * uploadMetaFile() (services/metaFileUploadService.ts). The service owns the
+   * on-chain semantics: direct vs chunked mode, MVC sponsor-first direct upload
+   * with a self-paid fallback, network/contentType resolution, and optional
+   * post-upload verification. Replaces the external metabot-upload-file skill.
+   */
+  metaFileUpload?: MetaFileUploadControl;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -1400,6 +1412,7 @@ export class CoworkRunner extends EventEmitter {
   private metaIdSearch?: MetaIdSearchControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
+  private metaFileUpload?: MetaFileUploadControl;
   private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
@@ -1459,6 +1472,7 @@ export class CoworkRunner extends EventEmitter {
     this.metaIdSearch = options?.metaIdSearch;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
+    this.metaFileUpload = options?.metaFileUpload;
     this.sdkCronMirror = options?.sdkCronMirror;
     this.localTurnStallTimeoutMs = Math.max(
       0,
@@ -6406,6 +6420,21 @@ export class CoworkRunner extends EventEmitter {
             tool,
             socialRecall: this.socialRecall,
             openBestMatchInBrowser: isBrowserSession,
+          })
+        );
+      }
+      // Local file upload to MetaWeb is registered for every cowork surface so
+      // any MetaBot can publish a local file on-chain via uploadMetaFile()
+      // (direct vs chunked, MVC sponsor-first with self-paid fallback). The
+      // acting MetaBot is resolved from the session so the right wallet/identity
+      // pays; replaces the external metabot-upload-file skill.
+      if (this.metaFileUpload) {
+        memoryTools.push(
+          ...buildMetaFileUploadAgentTools({
+            tool,
+            upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
+            sessionId,
+            resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
           })
         );
       }
