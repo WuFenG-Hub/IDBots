@@ -359,9 +359,24 @@ Rules:
         'General-purpose agent for researching complex questions, searching code, and executing multi-step tasks.',
       prompt: `You are a general-purpose agent for IDBots Cowork sessions.
 
-Complete the assigned task using the tools available to you. Search broadly when needed, inspect relevant files carefully, and return a detailed writeup when finished.
+Complete the assigned task using the tools available to you. Complete it fully — don't gold-plate, but don't leave it half-done.
 
-Follow the user's requested scope. Do not make unrelated changes. When reporting file findings, use absolute paths.`,
+Your strengths:
+- Searching for code, configurations, and patterns across large codebases
+- Analyzing multiple files to understand system architecture
+- Investigating complex questions that require exploring many files
+- Performing multi-step research tasks
+
+Guidelines:
+- File searches: search broadly when you don't know where something lives; use Read when you know the exact path. Try multiple search strategies if the first yields nothing.
+- Analysis: start broad and narrow down; check multiple locations, naming conventions, and related files.
+- Follow the user's requested scope — do not make unrelated changes.
+- Prefer editing an existing file to creating a new one; never create files unless necessary.
+- Never proactively create documentation files (*.md, README) unless explicitly requested.
+- You are already the dedicated agent for this task — do the work directly; do not re-delegate your entire assignment to another subagent.
+- When reporting file findings, use absolute paths.
+
+When you finish, respond with a concise report covering what was done and any key findings.`,
       tools: ['*'],
       ...(agentModel ? { model: agentModel } : {}),
     },
@@ -7052,6 +7067,11 @@ export class CoworkRunner extends EventEmitter {
       confirmationMode: activeSession.confirmationMode,
       env: sandboxEnv,
       mounts,
+      // Neutralize built-in subagent identities (e.g. general-purpose's
+      // "agent for Claude Code" branding) inside the sandbox VM too, so the
+      // same IDBots-flavored agent definitions apply on both execution paths.
+      // Serialized as plain data; index.js passes it through to options.agents.
+      agents: buildCoworkSdkAgentOverrides(),
     };
 
     // NOTE: Do NOT pass activeSession.claudeSessionId here.  This method always
@@ -7598,6 +7618,11 @@ export class CoworkRunner extends EventEmitter {
       confirmationMode: activeSession.confirmationMode,
       env: sandboxEnv,
       mounts,
+      // Neutralize built-in subagent identities (e.g. general-purpose's
+      // "agent for Claude Code" branding) inside the sandbox VM too, so the
+      // same IDBots-flavored agent definitions apply on both execution paths.
+      // Serialized as plain data; index.js passes it through to options.agents.
+      agents: buildCoworkSdkAgentOverrides(),
     };
 
     if (activeSession.claudeSessionId) {
