@@ -35,6 +35,13 @@ const DEFAULT_TIERS: Record<ChainKey, FeeRateTier[]> = {
   ],
 };
 
+/**
+ * Last-resort fee rates for createPin when neither an explicit value nor a
+ * store tier rate is available (e.g. chains without Metalet fee tiers, such as
+ * opcat). Values mirror the historical metaidCore FALLBACK_FEE_RATES constant.
+ */
+const CREATE_PIN_FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
+
 const STORAGE_KEY = 'fee_rate_selection';
 
 const tiers: Record<ChainKey, FeeRateTier[]> = { ...DEFAULT_TIERS };
@@ -84,6 +91,30 @@ export function getRate(chain: string): number {
   if (found) return found.feeRate;
   const fast = list.find((t) => t.title === 'Fast');
   return fast?.feeRate ?? list[0]?.feeRate ?? 1;
+}
+
+/**
+ * Single resolution point for the createPin fee rate.
+ * Precedence: explicit value (finite, > 0) → user's selected tier via getRate
+ * (chains with Metalet fee tiers) → hard-coded last-resort fallback (warned,
+ * so hidden defaults stay visible).
+ */
+export function resolveCreatePinFeeRate(network: string, explicit?: number | null): number {
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+  const chain = String(network || '').toLowerCase();
+  if (chain === 'btc' || chain === 'mvc' || chain === 'doge') {
+    const storeRate = getRate(chain);
+    if (Number.isFinite(storeRate) && storeRate > 0) {
+      return storeRate;
+    }
+  }
+  const fallback = CREATE_PIN_FALLBACK_FEE_RATES[chain] ?? 1;
+  console.warn(
+    `[feeRateStore] resolveCreatePinFeeRate: no selected-tier rate for chain "${chain}", using hard-coded fallback ${fallback}`
+  );
+  return fallback;
 }
 
 /** Get all tiers for all chains. */

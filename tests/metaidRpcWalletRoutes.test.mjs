@@ -63,6 +63,7 @@ async function startRpcServerForTestWithOverrides({
   transferService = null,
   utxoWalletService = null,
   mrc20Service = null,
+  metaidCore = null,
   onBotBrowserOpen = null,
   onBotBrowserTabCommand = null,
 } = {}) {
@@ -105,6 +106,9 @@ async function startRpcServerForTestWithOverrides({
     }
     if (mrc20Service && (request === './mrc20Service' || request.endsWith('/mrc20Service'))) {
       return mrc20Service;
+    }
+    if (metaidCore && (request === './metaidCore' || request.endsWith('/metaidCore'))) {
+      return metaidCore;
     }
     return originalLoad(request, parent, isMain);
   };
@@ -958,6 +962,118 @@ test('rpc raw-tx bundle route forwards ordered steps to the wallet raw-tx servic
     assert.equal(bundleJson.steps.length, 2);
     assert.equal(bundleJson.steps[0].change_outpoint, 'mvc-txid:1');
     assert.equal(bundleJson.steps[1].amount_check_raw_tx, 'amount-check-raw');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+function createPinCapturingMetaidCoreStub(captured) {
+  return {
+    async createPin(_store, metabotId, metaidData, options) {
+      captured.push({ metabotId, metaidData, options });
+      const txid = 'ab'.repeat(32);
+      return { txids: [txid], pinId: `${txid}i0`, totalCost: 0 };
+    },
+    async getPinData() {
+      return null;
+    },
+    setMetaidCoreStore() {},
+    async syncMetaBotEditChangesToChain() {
+      return {};
+    },
+  };
+}
+
+const CREATE_PIN_TEST_METAID_DATA = {
+  operation: 'create',
+  path: '/protocols/test',
+  contentType: 'text/plain',
+  payload: 'hello',
+};
+
+test('rpc create-pin route resolves an omitted fee_rate through the store tier, not a hidden constant', async () => {
+  const captured = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    metaidCore: createPinCapturingMetaidCoreStub(captured),
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        metabot_id: 1,
+        metaidData: CREATE_PIN_TEST_METAID_DATA,
+        network: 'doge',
+      }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(captured.length, 1);
+    // No fee_rate in the request: the route must resolve the user's selected
+    // tier via resolveCreatePinFeeRate (doge default Fast tier = 7500000),
+    // which differs from the hard-coded last-resort fallback (5000000).
+    assert.equal(captured[0].options.feeRate, 7500000);
+    assert.equal(captured[0].options.network, 'doge');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc create-pin route forwards an explicit fee_rate unchanged', async () => {
+  const captured = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    metaidCore: createPinCapturingMetaidCoreStub(captured),
+  });
+
+  try {
+    const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        metabot_id: 1,
+        metaidData: CREATE_PIN_TEST_METAID_DATA,
+        fee_rate: 3,
+      }),
+    });
+    const json = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(json.success, true);
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].options.feeRate, 3);
+    assert.equal(captured[0].options.network, 'mvc');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc create-pin route rejects a non-positive fee_rate with 400 and never calls createPin', async () => {
+  const captured = [];
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    metaidCore: createPinCapturingMetaidCoreStub(captured),
+  });
+
+  try {
+    for (const feeRate of [0, -2]) {
+      const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          metabot_id: 1,
+          metaidData: CREATE_PIN_TEST_METAID_DATA,
+          fee_rate: feeRate,
+        }),
+      });
+      const json = await response.json();
+
+      assert.equal(response.status, 400);
+      assert.equal(json.success, false);
+      assert.match(json.error, /fee_rate must be positive/);
+    }
+    assert.equal(captured.length, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
