@@ -4986,6 +4986,17 @@ const getCoworkRunner = () => {
           };
         },
       },
+      // upload_file tool backend. Delegates to the shared uploadMetaFile()
+      // service so the tool, the RPC endpoint, and the IPC handlers all share
+      // one on-chain path (direct/chunked, MVC sponsor-first with self-paid
+      // fallback, network selection, verification). Lazy-imported to keep the
+      // main-process startup graph unchanged.
+      metaFileUpload: {
+        upload: async (params) => {
+          const { uploadMetaFile } = await import('./services/metaFileUploadService');
+          return uploadMetaFile(getMetabotStore(), params);
+        },
+      },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);

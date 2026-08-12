@@ -51,13 +51,6 @@
       "installedAt": 1740969600000,
       "enabled": true
     },
-    "metabot-upload-file": {
-      "order": 16,
-      "version": "1.1.0",
-      "creator-metaid": "",
-      "installedAt": 1740969600000,
-      "enabled": true
-    },
     "metabot-trade-metaidmarket": {
       "order": 17,
       "version": "1.0.1",
