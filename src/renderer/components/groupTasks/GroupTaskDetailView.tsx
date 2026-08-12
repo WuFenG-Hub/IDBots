@@ -706,10 +706,34 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           {deliverable.kind}
                         </span>
                       )}
-                      <span className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-                        {deliverable.status}
+                      <span
+                        className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70"
+                        title={
+                          deliverable.status === 'pending'
+                            ? 'pending = 已提交，待 owner 验收（与链上确认是两个独立维度）'
+                            : deliverable.status === 'accepted'
+                              ? 'accepted = 已通过 owner 验收'
+                              : 'rejected = 已被拒绝'
+                        }
+                      >
+                        {deliverable.status === 'pending' ? '待验收' : deliverable.status === 'accepted' ? '已验收' : '已拒绝'}
                       </span>
                       {(() => {
+                        // Issue #8: on-chain confirmation is a ledger state
+                        // driven by multi-source verification, shown
+                        // separately from the acceptance status above. For
+                        // legacy rows still awaiting a verification pass,
+                        // fall back to the verification-report detail.
+                        if (deliverable.confirmation === 'confirmed') {
+                          return (
+                            <span
+                              className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                              title={deliverable.verification ?? '链上多源验证通过'}
+                            >
+                              链上已确认
+                            </span>
+                          );
+                        }
                         const state = deliverableVerificationState(deliverable.verification);
                         if (state === 'unknown') return null;
                         return (

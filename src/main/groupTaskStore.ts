@@ -119,6 +119,13 @@ export interface GroupTaskDeliverable {
   createdAt: string | null;
   /** P0-4: JSON verification report (sources + outcomes) for a deliverable. */
   verification: string | null;
+  /**
+   * Issue #8: on-chain confirmation of the deliverable's pin, driven by the
+   * daemon's multi-source verification (verified=true => 'confirmed'). This is
+   * ORTHOGONAL to `status`: a pin can be on-chain confirmed while still
+   * pending owner acceptance (status='pending', confirmation='confirmed').
+   */
+  confirmation: 'unconfirmed' | 'confirmed';
 }
 
 /** One transcript row for the Group Task chat view (content already decrypted). */
@@ -259,6 +266,7 @@ interface GroupTaskDeliverableRow {
   status: string;
   created_at: string | null;
   verification: string | null;
+  confirmation: string | null;
 }
 
 interface GroupTaskTransitionRow {
@@ -452,6 +460,7 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     status: status === 'accepted' || status === 'rejected' ? status : 'pending',
     createdAt: row.created_at ?? null,
     verification: row.verification ?? null,
+    confirmation: row.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed',
   };
 }
 
@@ -1169,9 +1178,13 @@ export class GroupTaskStore {
   // --- group_task_deliverables ---
 
   addDeliverable(input: AddGroupTaskDeliverableInput): GroupTaskDeliverable {
+    // confirmation is written explicitly ('unconfirmed') even though the
+    // schema defaults to it, so the ledger's semantics never depend on the
+    // column default; the daemon flips it to 'confirmed' once multi-source
+    // on-chain verification succeeds (Issue #8).
     this.db.run(
-      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO group_task_deliverables (task_id, msg_pin_id, author_globalmetaid, kind, uri, confirmation)
+       VALUES (?, ?, ?, ?, ?, 'unconfirmed')`,
       [
         input.taskId,
         input.msgPinId ?? null,
@@ -1320,6 +1333,21 @@ export class GroupTaskStore {
 
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
+    this.saveDb();
+  }
+
+  /**
+   * Issue #8: the ledger's on-chain confirmation state, driven by the daemon's
+   * multi-source verification (verifyPinSources). 'confirmed' means the
+   * deliverable's pin is verifiably present on-chain; it is ORTHOGONAL to
+   * `status` (owner acceptance). This is the chain-confirmation-driven update
+   * path that keeps the ledger in sync with on-chain reality.
+   */
+  updateDeliverableConfirmation(id: number, confirmation: 'unconfirmed' | 'confirmed'): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET confirmation = ? WHERE id = ?',
+      [confirmation, id],
+    );
     this.saveDb();
   }
 
