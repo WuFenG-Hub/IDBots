@@ -746,6 +746,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('groupTask:ownerReportDelivery', handler);
       return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
     },
+    // HITL: fired when a human checkpoint opens/resolves so the detail view refreshes.
+    onCheckpointChanged: (callback: (data: any) => void) => {
+      const handler = (_event: any, data: any) => callback(data);
+      ipcRenderer.on('groupTask:checkpointChanged', handler);
+      return () => ipcRenderer.removeListener('groupTask:checkpointChanged', handler);
+    },
   },
   openTeamCollab: {
     list: () => ipcRenderer.invoke('openTeamCollab:list'),

@@ -19,6 +19,7 @@ import type {
   GroupTask,
   GroupTaskMember,
   GroupTaskDeliverable,
+  GroupTaskCheckpoint,
 } from '../groupTaskStore';
 import type {
   OpenTeamInvite,
@@ -58,6 +59,15 @@ import {
 const CONVERSATION_CHANNEL = GROUP_TASK_CONVERSATION_CHANNEL;
 const DELIVERABLE_TAG = /\[DELIVERABLE\]/i;
 const STATUS_TAG = /\[STATUS:\s*(EXECUTING|REVIEW)\s*\]/i;
+/**
+ * HITL checkpoint tags (chair-only, same trust rule as STATUS tags):
+ * `[CHECKPOINT: <topic>]` pauses the task for the owner's decision;
+ * `[CHECKPOINT_RESOLVED: <decision>]` resumes work. While a checkpoint is
+ * open the daemon gates responders exactly like the review phase — workers
+ * stay silent and only the owner's messages reach the chair.
+ */
+const CHECKPOINT_OPEN_TAG = /\[CHECKPOINT:\s*([^\]\n]+?)\s*\]/i;
+const CHECKPOINT_RESOLVED_TAG = /\[CHECKPOINT_RESOLVED(?::\s*([^\]\n]+?)\s*)?\]/i;
 /** Escape hatch: a reply starting with the [NO_REPLY] tag is suppressed (not sent on-chain). */
 const NO_REPLY_PATTERN = /^\[NO_REPLY\]/i;
 /**
@@ -144,6 +154,11 @@ const DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS = 10 * 60_000;
  * Exported so the reopen service path clears the same guard.
  */
 export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
+/**
+ * HITL checkpoint-report guard: one private A2A checkpoint request per
+ * checkpoint (`group_task_checkpoint_reported:<taskId>:<checkpointId>`).
+ */
+const GROUP_TASK_CHECKPOINT_REPORTED_KV_PREFIX = 'group_task_checkpoint_reported:';
 const ACK_PENDING_PREFIX = 'group_task_ack_pending:';
 const ACK_REMINDED_PREFIX = 'group_task_ack_reminded:';
 /**
@@ -241,6 +256,12 @@ export interface GroupTaskDaemonMessage {
 export interface GroupTaskDaemonTask {
   id: number;
   status: string;
+  /**
+   * HITL: true while the task has an open human checkpoint. Responder gating
+   * treats this exactly like the review phase (workers silent, chair talks to
+   * the owner only). Populated by the daemon loop per message.
+   */
+  hasOpenCheckpoint?: boolean;
 }
 
 export interface GroupTaskDaemonMember {
@@ -298,9 +319,10 @@ type DaemonPromptMember = {
 /**
  * Decide which local member bots respond to one group message.
  * - Never: the author itself (by sender_global_metaid), empty content, terminal tasks.
- * - Review phase (status === 'review'): workers NEVER respond (even when mentioned);
- *   the chair responds ONLY to owner messages. No floor-control, deliverable, or
- *   mention triggers in review (hard silence against gratitude loops).
+ * - Human-gate phases (status === 'review' OR an open HITL checkpoint): workers
+ *   NEVER respond (even when mentioned); the chair responds ONLY to owner
+ *   messages. No floor-control, deliverable, or mention triggers in a human-gate
+ *   phase (hard silence against gratitude loops).
  * - Worker: only when @-mentioned (mention array hit or display name in content).
  * - Chair: when (a) @-mentioned, (b) the message is from the owner (sender matches the
  *   chair bot's boss_global_metaid), (c) a [DELIVERABLE] tag appears, or (d) the
@@ -322,7 +344,9 @@ export function decideGroupTaskResponders(
   // member nor the owner) never triggers replies. The owner is exempt from the
   // suspect flag, so owner messages still reach the chair.
   if (message.senderSuspect) return decisions;
-  const isReviewPhase = task.status === 'review';
+  // HITL: an open human checkpoint pauses the task exactly like the review
+  // phase — the group waits for the owner's decision, not for more work.
+  const isHumanGatePhase = task.status === 'review' || task.hasOpenCheckpoint === true;
 
   const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
   const isSelf = (bot: GroupTaskDaemonBot): boolean =>
@@ -358,8 +382,9 @@ export function decideGroupTaskResponders(
     const mentioned = hits.get(member.metabotId) === true;
 
     if (member.role === 'worker') {
-      // Review phase: workers never respond, even when @-mentioned.
-      if (!isReviewPhase && mentioned) {
+      // Human-gate phases (review / open HITL checkpoint): workers never
+      // respond, even when @-mentioned.
+      if (!isHumanGatePhase && mentioned) {
         decisions.push({ metabotId: member.metabotId, reason: 'worker_mentioned' });
       }
       continue;
@@ -370,8 +395,9 @@ export function decideGroupTaskResponders(
     const isOwnerMessage = Boolean(
       senderGlobalMetaId && bossGlobalMetaId && senderGlobalMetaId === bossGlobalMetaId,
     );
-    if (isReviewPhase) {
-      // Review phase: the chair responds only to the owner (acceptance dialogue).
+    if (isHumanGatePhase) {
+      // Human-gate phases: the chair responds only to the owner (acceptance /
+      // checkpoint dialogue).
       if (isOwnerMessage) {
         decisions.push({ metabotId: member.metabotId, reason: 'chair_owner_message' });
       }
@@ -615,6 +641,17 @@ export type GroupTaskDaemonTaskEvent =
     sessionId?: string | null;
     displayError?: string | null;
     error?: string | null;
+    /** 'review' (default) = the acceptance report; 'checkpoint' = a HITL checkpoint request. */
+    kind?: 'review' | 'checkpoint';
+    checkpointId?: number | null;
+    at: number;
+  }
+  | {
+    /** HITL: a checkpoint was opened/resolved so the UI can refresh the detail view. */
+    type: 'groupTask:checkpointChanged';
+    taskId: number;
+    checkpointId: number;
+    status: 'open' | 'resolved';
     at: number;
   };
 
@@ -635,6 +672,9 @@ export type GroupTaskDaemonSendOwnerReportFn = (params: {
   metabotId: number;
   ownerGlobalMetaId: string;
   text: string;
+  /** 'review' (default) = acceptance report; 'checkpoint' = HITL checkpoint request. */
+  kind?: 'review' | 'checkpoint';
+  checkpointId?: number;
 }) => Promise<GroupTaskOwnerReportDeliveryResult>;
 
 /** Narrow memory read (owner scope, created status) for the A2A experience block. */
@@ -1943,6 +1983,125 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * System-generated checkpoint-report directive: the chair composes a PRIVATE
+   * message to the owner presenting the draft/decision the checkpoint is about
+   * and asking for the owner's call (confirm, or request changes).
+   */
+  const buildCheckpointReportDirective = (
+    store: GroupTaskStore,
+    task: GroupTask,
+    checkpoint: GroupTaskCheckpoint,
+  ): string => {
+    const deliverables = store.listDeliverables(task.id);
+    const deliverableLines = deliverables.map(
+      (deliverable) =>
+        `- [${deliverable.kind ?? 'text'}] ${deliverable.uri ?? '(no uri)'} (status: ${deliverable.status})`,
+    );
+    return [
+      '[SYSTEM checkpoint directive — generated by the host, not by a group participant]',
+      `The group task "${task.title}" is PAUSED at a human checkpoint you opened${checkpoint.topic ? ` ("${checkpoint.topic}")` : ''}. Compose a concise PRIVATE message to the owner covering:`,
+      '- What is ready for the owner to review NOW (the draft, plan, or decision point — include the actual content or a clear summary, not just a mention of it).',
+      '- The specific decision you need from the owner before work continues.',
+      '- How the owner can answer: reply in the task group, or tell you privately in this chat (you then relay the decision into the group).',
+      '',
+      `Task goal: ${task.goal}`,
+      ...(deliverableLines.length > 0
+        ? ['Deliverables recorded so far:', ...deliverableLines]
+        : []),
+    ].join('\n');
+  };
+
+  /**
+   * Checkpoint owner notification: one private A2A message from the chair to
+   * the owner per checkpoint (kv guard group_task_checkpoint_reported:<taskId>:
+   * <checkpointId>). Mirrors maybeSendOwnerReport; the message is never posted
+   * to the group and failures only log, never block the tick.
+   */
+  const maybeSendCheckpointReport = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    botsById: Map<number, GroupTaskDaemonBotFull>,
+    promptMembers: DaemonPromptMember[],
+    checkpoint: GroupTaskCheckpoint,
+  ): Promise<void> => {
+    if (!deps.sendOwnerPrivateReport) {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: checkpoint report skipped (transport unavailable)`);
+      return;
+    }
+    const sqlite = deps.getStore();
+    const guardKey = `${GROUP_TASK_CHECKPOINT_REPORTED_KV_PREFIX}${task.id}:${checkpoint.id}`;
+    if (sqlite.get<string>(guardKey) === '1') return;
+
+    const chairMember = members.find((member) => member.role === 'chair');
+    const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
+    const ownerGlobalMetaId = (bot?.boss_global_metaid ?? '').trim();
+    if (!chairMember || !bot || !ownerGlobalMetaId) {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: checkpoint report skipped (chair bot or owner GlobalMetaID unavailable)`);
+      return;
+    }
+
+    try {
+      const store = deps.getGroupTaskStore();
+      const coworkStore = deps.getCoworkStore();
+      const systemPromptParts = await buildTurnSystemPrompt(bot, task, promptMembers, 'chair', ownerGlobalMetaId);
+      const systemPrompt = systemPromptParts.systemPrompt;
+      // Volatile context (time + experience/cognition) rides the user turn.
+      const directive = [systemPromptParts.volatileContext, buildCheckpointReportDirective(store, task, checkpoint)]
+        .filter(Boolean)
+        .join('\n\n');
+      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
+      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
+      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      if (!report || NO_REPLY_PATTERN.test(report)) {
+        throw new Error('checkpoint report turn produced no message');
+      }
+      const delivery = await deps.sendOwnerPrivateReport({
+        taskId: task.id,
+        metabotId: bot.id,
+        ownerGlobalMetaId,
+        text: report,
+        kind: 'checkpoint',
+        checkpointId: checkpoint.id,
+      });
+      sqlite.set(guardKey, '1');
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'sent',
+        pinId: delivery.pinId ?? null,
+        sessionId: delivery.sessionId ?? null,
+        displayError: delivery.displayError ?? null,
+        kind: 'checkpoint',
+        checkpointId: checkpoint.id,
+        at: now(),
+      });
+      // Record the private checkpoint message in the chair's own group-task
+      // session (context continuity), clearly marked as private.
+      const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
+      coworkStore.addMessage(session.id, {
+        type: 'assistant',
+        content: `[Private checkpoint request sent to the owner — not posted to the group]\n${report}`,
+      });
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: checkpoint #${checkpoint.id} reported privately to the owner`);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      emitLog(
+        `[GroupTaskDaemon] Task ${task.id}: checkpoint report failed (tick continues): ` +
+        errorMessage,
+      );
+      deps.emitTaskEvent?.({
+        type: 'groupTask:ownerReportDelivery',
+        taskId: task.id,
+        outcome: 'failed',
+        error: errorMessage,
+        kind: 'checkpoint',
+        checkpointId: checkpoint.id,
+        at: now(),
+      });
+    }
+  };
+
+  /**
    * Round-4 correction-first matching: find the deliverable row a correction
    * message supersedes. The correction must come from the same author as the
    * original and reference the same object — matched by a shared 64-hex+i0
@@ -2236,6 +2395,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {
+              // HITL: review entry is itself the final human gate — an open
+              // checkpoint still pending at this point is superseded by it.
+              try {
+                const superseded = store.closeOpenCheckpoints(
+                  task.id,
+                  'resolved',
+                  'superseded by review entry',
+                );
+                if (superseded > 0) {
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: ${superseded} open checkpoint(s) superseded by review entry`,
+                  );
+                }
+              } catch (error) {
+                emitLog(
+                  `[GroupTaskDaemon] Task ${task.id}: failed to supersede open checkpoints: ` +
+                  `${error instanceof Error ? error.message : String(error)}`,
+                );
+              }
               // P0-1: failed noise steps (mistaken mentions whose skill routing
               // failed) are auto-ignored on review entry so they never block the
               // owner's acceptance, and the acceptance UI sees them as ignored.
@@ -2273,6 +2451,117 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           }
         } catch {
           // Illegal transition (e.g. backwards or from terminal): silently ignored.
+        }
+      }
+    }
+
+    // HITL checkpoint tags — chair-only authority, same trust rule as STATUS
+    // tags: tags from any other sender are ignored. Opening pauses the task
+    // (responder gating treats it like the review phase), posts a pause line,
+    // and notifies the owner privately; resolving resumes the work.
+    const checkpointOpenMatch = CHECKPOINT_OPEN_TAG.exec(content);
+    const checkpointResolvedMatch = CHECKPOINT_RESOLVED_TAG.exec(content);
+    if (checkpointOpenMatch || checkpointResolvedMatch) {
+      const chairMember = members.find((member) => member.role === 'chair');
+      const chairGlobalMetaId = (chairMember?.globalmetaid ?? '').trim();
+      const senderGlobalMetaId = (message.senderGlobalMetaId ?? '').trim();
+      if (!chairGlobalMetaId || !senderGlobalMetaId || senderGlobalMetaId !== chairGlobalMetaId) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: checkpoint tag from non-chair sender ` +
+          `${message.senderName ?? 'unknown'} ignored`,
+        );
+      } else if (checkpointOpenMatch) {
+        try {
+          const freshTask = store.getTaskById(task.id);
+          const openAlready = store.getOpenCheckpoint(task.id);
+          const canOpen = Boolean(freshTask)
+            && freshTask!.status !== 'review'
+            && !store.isTerminalStatus(freshTask!.status)
+            && !openAlready;
+          if (!canOpen) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: checkpoint open tag ignored ` +
+              `(status=${freshTask?.status ?? 'unknown'}, openCheckpoint=${openAlready?.id ?? 'none'})`,
+            );
+          } else {
+            const checkpoint = store.openCheckpoint({
+              taskId: task.id,
+              topic: checkpointOpenMatch[1],
+              msgPinId: message.pinId,
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: HITL checkpoint #${checkpoint.id} opened ` +
+              `(${checkpoint.topic ?? 'no topic'})`,
+            );
+            try {
+              const pauseLine =
+                `⏸️ 任务 #${task.id}「${task.title}」进入人工确认点（${checkpoint.topic ?? '等待主人决策'}）：` +
+                '任务暂停推进，等待主人反馈。主人可直接在本群留言，或与 Twinbot 私聊给出意见。';
+              const sent = await postGroupMessage(task.id, chairMember.metabotId!, pauseLine);
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: checkpoint pause line posted (pin ${sent.pinId})`,
+              );
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: checkpoint pause line post failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            deps.emitTaskEvent?.({
+              type: 'groupTask:checkpointChanged',
+              taskId: task.id,
+              checkpointId: checkpoint.id,
+              status: 'open',
+              at: now(),
+            });
+            await maybeSendCheckpointReport(task, members, botsById, promptMembers, checkpoint);
+          }
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: checkpoint open handling failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      } else if (checkpointResolvedMatch) {
+        try {
+          const open = store.getOpenCheckpoint(task.id);
+          if (!open) {
+            emitLog(`[GroupTaskDaemon] Task ${task.id}: checkpoint resolved tag ignored (no open checkpoint)`);
+          } else {
+            const resolved = store.resolveCheckpoint(open.id, {
+              resolution: checkpointResolvedMatch[1] ?? null,
+              msgPinId: message.pinId,
+            });
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: HITL checkpoint #${resolved.id} resolved ` +
+              `(${resolved.resolution ?? 'no summary'})`,
+            );
+            try {
+              const resumeLine =
+                `▶️ 任务 #${task.id}「${task.title}」人工确认点已通过（${resolved.resolution ?? '主人已确认'}），任务继续推进。`;
+              const sent = await postGroupMessage(task.id, chairMember.metabotId!, resumeLine);
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: checkpoint resume line posted (pin ${sent.pinId})`,
+              );
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: checkpoint resume line post failed: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+            deps.emitTaskEvent?.({
+              type: 'groupTask:checkpointChanged',
+              taskId: task.id,
+              checkpointId: resolved.id,
+              status: 'resolved',
+              at: now(),
+            });
+          }
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: checkpoint resolve handling failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
     }
@@ -2325,6 +2614,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '(d) End the message with [STATUS:EXECUTING].',
       '(e) The chair NEVER executes task work — no assembly, no publishing, no writing deliverables; assign execution subtasks to WORKERS and keep the chair to coordination, verification and reporting.',
       '(f) Match each subtask to capability: use the roster profiles (bio/role/goal). NEVER assign a step to a member whose profile obviously mismatches it (e.g. do not assign assembly or publishing to a designer-only profile). If no roster member fits a step, state the gap in the plan instead of misassigning it.',
+      '(g) HUMAN CHECKPOINTS: if (and only if) the goal or acceptance criteria explicitly ask the owner to review/confirm an intermediate result (e.g. "show me the draft and wait for my OK"), plan that step as a checkpoint — when the draft is ready, post it with a `[CHECKPOINT: <topic>]` tag and wait for the owner. Do NOT invent checkpoints the owner did not ask for.',
       '',
       'Full member roster (assign only to these members, by exact name):',
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
@@ -3333,16 +3623,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       );
     }
 
+    // HITL: while a human checkpoint is open the group is paused waiting for
+    // the owner's decision — skip member nudging (unreachable marking, ACK and
+    // delivery-deadline reminders) that would punish the enforced silence.
+    const checkpointOpenAtTick = store.getOpenCheckpoint(task.id) != null;
+
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
-    if (task.status === 'executing') {
+    if (task.status === 'executing' && !checkpointOpenAtTick) {
       monitorMemberUnreachable(task, members);
     }
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
-    await monitorAcksAndReminders(task, members);
+    if (!checkpointOpenAtTick) {
+      await monitorAcksAndReminders(task, members);
+    }
     // P0-4: re-verify lagging deliverables + missed delivery deadlines.
     await monitorDeliverableVerification(task);
-    await monitorDeliveryDeadlines(task, members);
+    if (!checkpointOpenAtTick) {
+      await monitorDeliveryDeadlines(task, members);
+    }
 
     // #13: welcome broadcast + one-round handshake for members joining after
     // the initial roster (esp. remote OpenTeam members). Runs before the
@@ -3393,6 +3692,12 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         }
         const key = keyOf(task.id, entry.metabotId);
         const isChair = member.role === 'chair';
+        // HITL: worker replies deferred before the checkpoint opened keep
+        // waiting — workers are silenced while the owner decides.
+        if (checkpointOpenAtTick && !isChair) {
+          deferReply(entry);
+          continue;
+        }
         const lastReplyAt = lastReplyAtByKey.get(key) ?? 0;
         const cooldownMs = isChair ? chairCooldownMs : workerCooldownMs;
         if (now() - lastReplyAt < cooldownMs) {
@@ -3478,15 +3783,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         handleMemberProtocolMarkers(task, message, members, botsById);
         // A [STATUS:...] tag on THIS message may have flipped the task status
         // (e.g. chair posted [STATUS:REVIEW]); gate with the fresh status, not
-        // the tick-start snapshot.
+        // the tick-start snapshot. A [CHECKPOINT...] tag may likewise have
+        // opened/resolved a HITL checkpoint — gate with the fresh state too.
         const freshStatus = store.getTaskById(task.id)?.status ?? task.status;
-        const gatingTask = freshStatus === task.status ? task : { ...task, status: freshStatus };
+        const hasOpenCheckpoint = store.getOpenCheckpoint(task.id) != null;
+        const gatingTask: GroupTaskDaemonTask = { ...task, status: freshStatus, hasOpenCheckpoint };
         const decisions = decideGroupTaskResponders(message, gatingTask, members, botsById);
         // P0-1: review-phase silence hint — a chair dispatch to workers during
         // review is intentionally unanswered (workers are gated silent); log
         // it so the operator/chair reopens the task instead of assuming the
-        // dispatch failed or the worker is broken.
-        if (freshStatus === 'review') {
+        // dispatch failed or the worker is broken. Same for an open HITL
+        // checkpoint: resume with [CHECKPOINT_RESOLVED: ...].
+        if (freshStatus === 'review' || hasOpenCheckpoint) {
           const silencedWorkers = members.filter((candidate) =>
             candidate.role === 'worker'
             && candidate.metabotId != null
@@ -3494,10 +3802,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             && isMentioned(message, botsById.get(candidate.metabotId)!),
           );
           if (silencedWorkers.length > 0) {
+            const gatePrefix = freshStatus === 'review' ? 'review-phase silence' : 'checkpoint silence';
+            const gateHint = freshStatus === 'review'
+              ? 'task in REVIEW; reopen with [STATUS:EXECUTING] or the UI Back-to-work action'
+              : 'HITL checkpoint open; resume with [CHECKPOINT_RESOLVED: <decision>] after the owner replies';
             emitLog(
-              `[GroupTaskDaemon] Task ${task.id}: review-phase silence — dispatch to ` +
+              `[GroupTaskDaemon] Task ${task.id}: ${gatePrefix} — dispatch to ` +
               `${silencedWorkers.map((candidate) => candidate.name ?? candidate.metabotId).join(', ')} ` +
-              'ignored (task in REVIEW); reopen with [STATUS:EXECUTING] or the UI Back-to-work action',
+              `ignored (${gateHint})`,
             );
           }
         }
