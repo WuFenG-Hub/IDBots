@@ -1568,7 +1568,14 @@ async function handleRequest(requestId, request, requestPath) {
       options.resume = request.sessionId;
     }
     if (request.systemPrompt) {
-      options.systemPrompt = request.systemPrompt;
+      // Append IDBots' custom identity/safety prompt to Claude Code's default
+      // system prompt instead of replacing it, so the SDK's coding-quality
+      // behavioral layer is preserved. See host coworkRunner.ts for rationale.
+      options.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: request.systemPrompt,
+      };
     }
 
     const result = await query({ prompt: request.prompt || '', options });

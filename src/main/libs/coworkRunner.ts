@@ -5927,7 +5927,21 @@ export class CoworkRunner extends EventEmitter {
     let contextOverflowExceptionRetryAllowed = !isRetry && usedResumeForThisRun;
 
     if (systemPrompt) {
-      options.systemPrompt = systemPrompt;
+      // Use Claude Code's battle-tested default system prompt and APPEND
+      // IDBots' custom identity/safety/response-style prompt, instead of
+      // fully replacing the default. Passing a plain string replaces the
+      // SDK's preset prompt, which drops the entire coding-quality behavioral
+      // layer that the default carries (prefer editing existing files,
+      // proactive TodoWrite for complex tasks, parallel tool calls, minimal
+      // edits, run tests before reporting done, file_path:line refs). Appended
+      // text comes last, so IDBots' identity/safety rules still take
+      // precedence over any conflicting default guidance. See SDK option docs:
+      // systemPrompt string = custom (replace); preset+append = keep default.
+      options.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: systemPrompt,
+      };
     }
 
     const retryWithCompactedContext = async (
