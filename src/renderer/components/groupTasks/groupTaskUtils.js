@@ -154,6 +154,47 @@ export function groupTaskMemberStatusLabel(status) {
 }
 
 /**
+ * Group Task deliverable kinds and their badge styling. kind comes from the
+ * [DELIVERABLE] line's URI scheme (groupTaskDeliverableParser):
+ *   metafile://  -> metafile (on-chain file)
+ *   metaapp://   -> metaapp  (on-chain app)
+ *   https?://    -> url
+ *   <pinid>i0    -> pinid
+ *   (no uri)     -> text
+ * Returns { labelKey, className } so the component can localize the label.
+ */
+export function deliverableKindBadge(kind) {
+  switch (kind) {
+    case 'metafile':
+      return {
+        labelKey: 'groupTasksDeliverableKindMetafile',
+        className: 'bg-sky-500/15 text-sky-600 dark:text-sky-400',
+      };
+    case 'metaapp':
+      return {
+        labelKey: 'groupTasksDeliverableKindMetaapp',
+        className: 'bg-violet-500/15 text-violet-600 dark:text-violet-400',
+      };
+    case 'url':
+      return {
+        labelKey: 'groupTasksDeliverableKindUrl',
+        className: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+      };
+    case 'pinid':
+      return {
+        labelKey: 'groupTasksDeliverableKindPinid',
+        className: 'bg-cyan-500/15 text-cyan-600 dark:text-cyan-400',
+      };
+    case 'text':
+    default:
+      return {
+        labelKey: 'groupTasksDeliverableKindText',
+        className: 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary',
+      };
+  }
+}
+
+/**
  * P0-4: summarize a deliverable's stored verification report (JSON string).
  * Returns one of 'verified' | 'pending-sync' | 'unverified' | 'unknown'.
  */

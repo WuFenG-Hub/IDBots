@@ -126,6 +126,15 @@ export interface GroupTaskDeliverable {
    * pending owner acceptance (status='pending', confirmation='confirmed').
    */
   confirmation: 'unconfirmed' | 'confirmed';
+  /**
+   * The body of the [DELIVERABLE] message that produced this row, plus its
+   * sender name — joined from group_chat_messages by msg_pin_id so the UI can
+   * show folded text for `text` deliverables (which carry no uri). Only
+   * populated by listDeliverables (the list/detail views); other callers get
+   * null because their queries do not join the message table.
+   */
+  sourceContent?: string | null;
+  sourceSenderName?: string | null;
 }
 
 /** One transcript row for the Group Task chat view (content already decrypted). */
@@ -267,6 +276,9 @@ interface GroupTaskDeliverableRow {
   created_at: string | null;
   verification: string | null;
   confirmation: string | null;
+  /** Joined from group_chat_messages by listDeliverables only. */
+  source_content?: string | null;
+  source_sender_name?: string | null;
 }
 
 interface GroupTaskTransitionRow {
@@ -461,6 +473,8 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     createdAt: row.created_at ?? null,
     verification: row.verification ?? null,
     confirmation: row.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed',
+    sourceContent: row.source_content ?? null,
+    sourceSenderName: row.source_sender_name ?? null,
   };
 }
 
@@ -1204,8 +1218,14 @@ export class GroupTaskStore {
   }
 
   listDeliverables(taskId: number): GroupTaskDeliverable[] {
+    // LEFT JOIN the producing message (by msg_pin_id) so the UI can render the
+    // folded body of text deliverables, which carry no uri of their own.
     const rows = this.getAll<GroupTaskDeliverableRow>(
-      'SELECT * FROM group_task_deliverables WHERE task_id = ? ORDER BY id ASC',
+      `SELECT d.*, m.content AS source_content, m.sender_name AS source_sender_name
+       FROM group_task_deliverables AS d
+       LEFT JOIN group_chat_messages AS m ON m.pin_id = d.msg_pin_id
+       WHERE d.task_id = ?
+       ORDER BY d.id ASC`,
       [taskId],
     );
     return rows.map(rowToGroupTaskDeliverable);

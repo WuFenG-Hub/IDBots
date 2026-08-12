@@ -12,6 +12,7 @@ import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
 import {
   canAcceptGroupTask,
   canReopenGroupTask,
+  deliverableKindBadge,
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
   formatGroupTaskTime,
@@ -824,28 +825,32 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               </p>
             ) : (
               <div className="space-y-2">
-                {detail.deliverables.map((deliverable) => (
+                {detail.deliverables.map((deliverable) => {
+                  const kindBadge = deliverableKindBadge(deliverable.kind);
+                  const statusKey = deliverable.status === 'accepted'
+                    ? 'groupTasksDeliverableStatusAccepted'
+                    : deliverable.status === 'rejected'
+                      ? 'groupTasksDeliverableStatusRejected'
+                      : 'groupTasksDeliverableStatusPending';
+                  const statusHintKey = deliverable.status === 'accepted'
+                    ? 'groupTasksDeliverableStatusAcceptedHint'
+                    : deliverable.status === 'rejected'
+                      ? 'groupTasksDeliverableStatusRejectedHint'
+                      : 'groupTasksDeliverableStatusPendingHint';
+                  return (
                   <div
                     key={deliverable.id}
                     className="rounded-lg border dark:border-claude-darkBorder/60 border-claude-border/60 px-2.5 py-2"
                   >
                     <div className="flex items-center gap-2">
-                      {deliverable.kind && (
-                        <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {deliverable.kind}
-                        </span>
-                      )}
+                      <span className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${kindBadge.className}`}>
+                        {i18nService.t(kindBadge.labelKey)}
+                      </span>
                       <span
                         className="text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70"
-                        title={
-                          deliverable.status === 'pending'
-                            ? 'pending = 已提交，待 owner 验收（与链上确认是两个独立维度）'
-                            : deliverable.status === 'accepted'
-                              ? 'accepted = 已通过 owner 验收'
-                              : 'rejected = 已被拒绝'
-                        }
+                        title={i18nService.t(statusHintKey)}
                       >
-                        {deliverable.status === 'pending' ? '待验收' : deliverable.status === 'accepted' ? '已验收' : '已拒绝'}
+                        {i18nService.t(statusKey)}
                       </span>
                       {(() => {
                         // Issue #8: on-chain confirmation is a ledger state
@@ -857,9 +862,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           return (
                             <span
                               className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-                              title={deliverable.verification ?? '链上多源验证通过'}
+                              title={deliverable.verification ?? i18nService.t('groupTasksDeliverableConfirmedHint')}
                             >
-                              链上已确认
+                              {i18nService.t('groupTasksDeliverableConfirmed')}
                             </span>
                           );
                         }
@@ -875,7 +880,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                         );
                       })()}
                     </div>
-                    {deliverable.uri && (
+                    {deliverable.uri ? (
                       /^https?:\/\//i.test(deliverable.uri) ? (
                         <a
                           href={deliverable.uri}
@@ -890,12 +895,25 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                           {deliverable.uri}
                         </code>
                       )
+                    ) : (
+                      // Text deliverable (no uri): fold the producing message
+                      // body so the panel reads as content, not an empty card.
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-[11px] text-claude-accent hover:underline">
+                          {i18nService.t('groupTasksDeliverableViewSource')}
+                        </summary>
+                        <div className="mt-1 max-h-40 overflow-y-auto rounded p-2 text-[11px] whitespace-pre-wrap break-words dark:bg-claude-darkSurfaceHover/60 bg-claude-surfaceHover/60 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          {deliverable.sourceContent?.trim()
+                            || i18nService.t('groupTasksDeliverableNoSource')}
+                        </div>
+                      </details>
                     )}
                     <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                       {deliverableAuthorName(deliverable.authorGlobalmetaid)}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

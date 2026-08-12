@@ -107,6 +107,23 @@ test('shortGroupId: elides long room ids, keeps i0 suffix visible, passes short/
   assert.equal(shortGroupId('   '), '');
 });
 
+test('deliverableKindBadge: distinct label + class per kind, unknown falls back to text', async () => {
+  const { deliverableKindBadge } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(deliverableKindBadge('metafile').labelKey, 'groupTasksDeliverableKindMetafile');
+  assert.equal(deliverableKindBadge('metaapp').labelKey, 'groupTasksDeliverableKindMetaapp');
+  assert.equal(deliverableKindBadge('url').labelKey, 'groupTasksDeliverableKindUrl');
+  assert.equal(deliverableKindBadge('pinid').labelKey, 'groupTasksDeliverableKindPinid');
+  assert.equal(deliverableKindBadge('text').labelKey, 'groupTasksDeliverableKindText');
+  // unknown / null kinds resolve to the text badge so every row gets a label
+  assert.equal(deliverableKindBadge(null).labelKey, 'groupTasksDeliverableKindText');
+  assert.equal(deliverableKindBadge('weird').labelKey, 'groupTasksDeliverableKindText');
+  for (const kind of ['metafile', 'metaapp', 'url', 'pinid', 'text', null]) {
+    const badge = deliverableKindBadge(kind);
+    assert.equal(typeof badge.className, 'string');
+    assert.ok(badge.className.length > 0, `${kind} should have a class`);
+  }
+});
+
 test('shouldStickToBottom: threshold semantics', () => {
   // scrollHeight 1000, viewport 200: bottom means scrollTop 800
   assert.equal(shouldStickToBottom(800, 200, 1000), true);

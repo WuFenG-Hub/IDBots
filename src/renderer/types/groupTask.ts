@@ -89,6 +89,13 @@ export interface GroupTaskDeliverable {
    * on-chain-confirmed while still pending acceptance.
    */
   confirmation?: 'unconfirmed' | 'confirmed';
+  /**
+   * Body + sender of the [DELIVERABLE] message that produced this row (joined
+   * by msg_pin_id on the main side). Lets the UI fold text deliverables (which
+   * carry no uri). Absent for callers that do not join the message table.
+   */
+  sourceContent?: string | null;
+  sourceSenderName?: string | null;
 }
 
 export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
