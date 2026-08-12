@@ -2097,6 +2097,14 @@ const AssistantTurnBlock: React.FC<{
       sdkIcon = '⚠️';
       sdkTint = 'text-amber-600 dark:text-amber-400';
       sdkContent = i18nService.t('coworkEmptyTerminalTurn');
+    } else if (meta.steerInterruptAcknowledged === true) {
+      // The CLI reported the interrupted turn via an internal diagnostic; the
+      // steer was delivered and the task continues toward it.
+      sdkIcon = '🧭';
+      sdkContent = i18nService.t('coworkSteerInterruptAcknowledged').replace(
+        '{text}',
+        typeof meta.steerText === 'string' ? meta.steerText : ''
+      );
     }
 
     const rawContent = hasText(message.content)
