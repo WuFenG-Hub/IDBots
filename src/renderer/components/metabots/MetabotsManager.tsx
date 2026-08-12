@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useDispatch } from 'react-redux';
-import { MagnifyingGlassIcon, PlusCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, MagnifyingGlassIcon, PlusCircleIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
 import { setPreferredMetabotId } from '../../store/slices/coworkSlice';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
@@ -572,9 +572,21 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   if (viewMode === 'edit' && editMetabot) {
     return (
       <div className="space-y-4">
-        <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-          {i18nService.t('metabotEditTitle')}
-        </h2>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleCancelForm}
+            aria-label={i18nService.t('back')}
+            title={i18nService.t('back')}
+            data-slot="metabot-edit-back"
+            className="p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+          >
+            <ArrowLeftIcon className="h-4 w-4" />
+          </button>
+          <h2 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
+            {i18nService.t('metabotEditTitle')}
+          </h2>
+        </div>
         <MetaBotEditTabs
           initialValues={buildEditFormValues(editMetabot)}
           metabotId={editMetabot.id}

@@ -480,6 +480,14 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
       <div className="flex items-center justify-end gap-2 pt-2">
         <button
           type="button"
+          onClick={onCancel}
+          disabled={savingTab !== null}
+          className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50"
+        >
+          {i18nService.t('cancel')}
+        </button>
+        <button
+          type="button"
           data-slot={`metabot-edit-save-${tab}`}
           onClick={() => void handleSaveTab(tab)}
           disabled={savingTab !== null}
@@ -1014,17 +1022,6 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
         )}
       </div>
 
-      {/* Global footer */}
-      <div className="flex items-center justify-end gap-2 pt-2 border-t dark:border-claude-darkBorder border-claude-border">
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={savingTab !== null}
-          className="px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50"
-        >
-          {i18nService.t('cancel')}
-        </button>
-      </div>
     </div>
   );
 };
