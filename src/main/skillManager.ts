@@ -908,7 +908,10 @@ export class SkillManager {
   }
 
   private retireLegacySkillsFromUserData(userRoot: string): void {
-    const retiredSkillIds = ['metabot-upload-largefile'];
+    // metabot-upload-file was converted to the built-in upload_file tool; its
+    // on-chain logic now lives in services/metaFileUploadService.ts. Retire the
+    // external skill so existing installs drop it (dir + skills.config entry).
+    const retiredSkillIds = ['metabot-upload-largefile', 'metabot-upload-file'];
     for (const retiredId of retiredSkillIds) {
       const legacyDir = path.join(userRoot, retiredId);
       try {

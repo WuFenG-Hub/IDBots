@@ -2574,38 +2574,49 @@ async function actionBundleZip(input, paths, state) {
   };
 }
 
-function findUploadSkillScript() {
-  const roots = [];
-  const skillsRoot = safeTrim(process.env.SKILLS_ROOT) || safeTrim(process.env.IDBOTS_SKILLS_ROOT);
-  if (skillsRoot) roots.push(path.resolve(skillsRoot));
-  roots.push(path.resolve(process.cwd()));
-  roots.push(path.resolve(process.cwd(), '..'));
-
-  for (const root of roots) {
-    const candidate = path.join(root, 'metabot-upload-file', 'scripts', 'upload-file.js');
-    if (fs.existsSync(candidate)) return candidate;
-    const candidate2 = path.join(root, 'SKILLs', 'metabot-upload-file', 'scripts', 'upload-file.js');
-    if (fs.existsSync(candidate2)) return candidate2;
+async function uploadZipViaRpc(input, zipPath) {
+  // Uploads the wiki bundle via the local IDBots RPC (the same
+  // /api/idbots/files/upload-largefile endpoint metabot-post-buzz and the
+  // upload_file tool use) instead of spawning the retired metabot-upload-file
+  // CLI script. The endpoint resolves direct vs chunked mode and MVC sponsor.
+  const rpcBase = safeTrim(process.env.IDBOTS_RPC_URL) || 'http://127.0.0.1:31200';
+  const metabotIdRaw = safeTrim(process.env.IDBOTS_METABOT_ID);
+  if (!metabotIdRaw) {
+    throw new SkillError('invalid_payload', 'IDBOTS_METABOT_ID env is required for publish_zip upload.');
   }
-  return null;
+  const metabotId = Number(metabotIdRaw);
+  if (!Number.isFinite(metabotId) || metabotId <= 0) {
+    throw new SkillError('invalid_payload', 'IDBOTS_METABOT_ID must be a positive integer.');
+  }
+
+  const url = `${rpcBase.replace(/\/+$/, '')}/api/idbots/files/upload-largefile`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      metabot_id: metabotId,
+      file_path: zipPath,
+      content_type: 'application/zip',
+      network: safeTrim(input.payload.network) || 'mvc',
+    }),
+  });
+  const rawText = await response.text();
+  if (!response.ok) {
+    throw new SkillError('publish_failed', `Upload RPC ${response.status}: ${rawText}`, true);
+  }
+  let parsed = null;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || parsed.success === false) {
+    throw new SkillError('publish_failed', safeTrim(parsed && parsed.error) || rawText || 'Upload RPC failed', true);
+  }
+  return parsed;
 }
 
-function parseLastJsonLine(stdoutText) {
-  const lines = String(stdoutText || '')
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    try {
-      return JSON.parse(lines[i]);
-    } catch {
-      // continue
-    }
-  }
-  return null;
-}
-
-function actionPublishZip(input, paths, state) {
+async function actionPublishZip(input, paths, state) {
   ensureKbStructure(paths);
   const startedAt = nowTs();
   const pinUriInput = safeTrim(input.payload.pinUri) || safeTrim(input.payload.zipUri);
@@ -2634,25 +2645,9 @@ function actionPublishZip(input, paths, state) {
   let uploadResult = null;
 
   if (shouldUpload) {
-    const uploadScript = findUploadSkillScript();
-    if (!uploadScript) {
-      throw new SkillError(
-        'dependency_missing',
-        'metabot-upload-file skill not found. Provide payload.pinUri/payload.zipUri or install metabot-upload-file.'
-      );
-    }
-    const result = spawnSync(
-      process.execPath,
-      [uploadScript, '--file', zipPath, '--content-type', 'application/zip', '--network', safeTrim(input.payload.network) || 'mvc'],
-      { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }
-    );
-    if (result.status !== 0) {
-      const errorDetail = safeTrim(result.stderr) || safeTrim(result.stdout) || 'Upload script failed';
-      throw new SkillError('publish_failed', errorDetail, true);
-    }
-    uploadResult = parseLastJsonLine(result.stdout);
-    if (!uploadResult || !uploadResult.success || !safeTrim(uploadResult.pinId)) {
-      throw new SkillError('publish_failed', 'Upload script did not return valid pinId.', true);
+    uploadResult = await uploadZipViaRpc(input, zipPath);
+    if (!uploadResult || !safeTrim(uploadResult.pinId)) {
+      throw new SkillError('publish_failed', 'Upload RPC did not return a valid pinId.', true);
     }
     zipUri = buildMetafileUri(safeTrim(uploadResult.metafileUri) || safeTrim(uploadResult.pinId), {
       fileName: safeTrim(uploadResult.fileName) || path.basename(zipPath),
@@ -2892,7 +2887,7 @@ async function actionPublishAll(input, paths, state) {
   const shouldRunPublishZip = uploadZipFlag !== false || Boolean(requestedZipUri);
   let publishZipResult = null;
   if (shouldRunPublishZip) {
-    publishZipResult = actionPublishZip({
+    publishZipResult = await actionPublishZip({
       ...input,
       payload: {
         ...input.payload,
