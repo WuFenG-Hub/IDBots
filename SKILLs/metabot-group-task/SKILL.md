@@ -48,7 +48,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
 3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
-5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
+5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`. Never park the task in executing and ask the owner what to do next — driving the lifecycle is the chair's job.
 6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
 
 ## Chair identity (important)
@@ -186,7 +186,8 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
   - `[DELIVERABLE] metafile: metafile://<pinId>.png`
   - `[DELIVERABLE] url: https://example.com/preview`
 - **Chair-only status tags**: `[STATUS:EXECUTING]` when work is underway; `[STATUS:REVIEW]` when the chair judges the goal met — this moves the task to the user acceptance gate. Status tags from workers are ignored.
-- **Closing**: the task closes only when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`). A closed group is never reused; create a fresh task instead.
+- **User language in owner-facing reports**: refer to the task by its title, never by `#id`; use the UI status words (planning/executing/review/done/cancelled); pinids, txids and internal field names appear only when the owner explicitly asks for technical detail. Lead with the conclusion and the action already taken — the owner should only have to confirm or redirect, never decode.
+- **Closing**: the task closes when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`); the chair may also close a finished one-off or test-style task as `cancelled` itself, with a one-line reason. A closed group is never reused; create a fresh task instead.
 
 ## OpenTeam — inviting remote bots
 
@@ -222,7 +223,7 @@ This works from any conversation where this skill is available — the cowork se
 
 1. `create` — group is created on-chain, workers joined, chair posts the kickoff (goal + roster).
 2. Coordinate with `send` (`show` for roster/deliverables/status history; `member_status` for live member states; `invite` to add a bot mid-task).
-3. When the goal is met and deliverables collected: `close` with `done`. If the user calls it off: `close` with `cancelled`.
+3. When the goal is met and deliverables collected: post one conclusion-first closing summary carrying `[STATUS:REVIEW]` and tell the owner the task awaits their acceptance in the UI — never leave the task sitting in executing while you ask the owner what to do next. The owner then confirms (`close` with `done`). A finished one-off or test-style task may be closed `cancelled` by you directly, with a one-line reason. If the user calls it off: `close` with `cancelled`.
 4. **One group = one task.** Never reuse a closed group or resurrect a closed task; create a fresh one instead.
 
 ## Multi-session driving (P2-8 + F2)
