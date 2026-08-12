@@ -9,6 +9,7 @@ import type {
   CoworkServiceOrderSummary,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
+import type { Model } from '../../store/slices/modelSlice';
 import CoworkPromptInput from './CoworkPromptInput';
 import PermissionModeSelector from './PermissionModeSelector';
 import EffortSelector from './EffortSelector';
@@ -2355,6 +2356,28 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const currentModelId = useSelector((state: RootState) => state.model.selectedModel?.id);
+  const availableModels = useSelector((state: RootState) => state.model.availableModels);
+  // Per-session model override (picked in this conversation's model selector).
+  // Optimistic local state on top of the persisted currentSession.model; reset
+  // when switching sessions.
+  const [sessionModelOverride, setSessionModelOverride] = useState<string | null>(null);
+  useEffect(() => {
+    setSessionModelOverride(null);
+  }, [currentSession?.id]);
+  const sessionModelId = sessionModelOverride ?? currentSession?.model ?? null;
+  const sessionModelObject = sessionModelId
+    ? availableModels.find((model) => model.id === sessionModelId) ?? null
+    : null;
+  const handleSessionModelChange = async (model: Model) => {
+    if (!currentSession) return;
+    setSessionModelOverride(model.id);
+    try {
+      await window.electron?.cowork?.setSessionModel({ sessionId: currentSession.id, model: model.id });
+    } catch (modelError) {
+      console.error('Failed to set session model:', modelError);
+      setSessionModelOverride(null);
+    }
+  };
   // Effort is a global preference persisted in app_config; initialize from the
   // persisted value so every session/Bot shows the same selection.
   const [effortOverride, setEffortOverride] = useState<string | null>(
@@ -3702,6 +3725,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               size="large"
               showModelSelector={true}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
+              modelValue={sessionModelObject}
+              onModelChange={handleSessionModelChange}
               contextUsage={currentSession.contextUsage}
               suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
             />

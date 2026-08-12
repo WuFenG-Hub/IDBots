@@ -316,6 +316,8 @@ export interface CoworkSession {
   contextUsage?: CoworkContextUsage | null;
   /** Permission mode for tool gating. Defaults to 'default'. Can change mid-session. */
   permissionMode?: CoworkPermissionMode;
+  /** Per-session model override (null = inherit the global default model). */
+  model?: string | null;
   /** Accumulated token/cost usage (computed by the main process, not persisted). */
   usageStats?: CoworkUsageStats | null;
 }
@@ -580,6 +582,8 @@ export interface CoworkSessionSummary {
   browserUri?: string | null;
   /** Bot Browser context: title of the tab this session is about (browser sessions only) */
   browserTitle?: string | null;
+  /** Per-session model override (null = inherit the global default model). */
+  model?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 

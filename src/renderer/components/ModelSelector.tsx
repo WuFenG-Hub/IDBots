@@ -16,9 +16,16 @@ interface ModelSelectorProps {
    * name is still surfaced via the tooltip and stays selected in the dropdown.
    */
   compact?: boolean;
+  /**
+   * Controlled mode: overrides the displayed model and routes selections to
+   * onChange instead of the global model slice. Use for per-session models.
+   * Pass null to fall back to the global selected model for display.
+   */
+  value?: Model | null;
+  onChange?: (model: Model) => void;
 }
 
-const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down', restrictToLlmId, compact = false }) => {
+const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down', restrictToLlmId, compact = false, value = null, onChange }) => {
   const dispatch = useDispatch();
   const [isOpen, setIsOpen] = React.useState(false);
   // When the trigger is a compact icon button in a narrow surface (e.g. the Bot
@@ -31,6 +38,10 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
   const triggerRef = React.useRef<HTMLButtonElement>(null);
   const selectedModel = useSelector((state: RootState) => state.model.selectedModel);
   const availableModels = useSelector((state: RootState) => state.model.availableModels);
+  // Controlled mode is engaged when the parent supplies an onChange handler.
+  const controlled = typeof onChange === 'function';
+  // Effective displayed model: explicit value wins, otherwise the global one.
+  const effectiveSelectedModel = value ?? selectedModel;
 
   const displayModels = React.useMemo((): Model[] => {
     if (!restrictToLlmId?.trim()) return availableModels;
@@ -41,12 +52,13 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
   }, [availableModels, restrictToLlmId]);
 
   useEffect(() => {
+    if (controlled) return;
     if (!restrictToLlmId?.trim() || displayModels.length === 0) return;
     const inList = displayModels.some((m) => m.id === selectedModel.id);
     if (!inList) {
       dispatch(setSelectedModel(displayModels[0]));
     }
-  }, [restrictToLlmId, displayModels, selectedModel.id, dispatch]);
+  }, [controlled, restrictToLlmId, displayModels, selectedModel.id, dispatch]);
 
   // 点击外部区域关闭下拉框
   React.useEffect(() => {
@@ -118,7 +130,11 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
   }, [isOpen, compact, updateMenuPos]);
 
   const handleModelSelect = (model: Model) => {
-    dispatch(setSelectedModel(model));
+    if (controlled) {
+      onChange(model);
+    } else {
+      dispatch(setSelectedModel(model));
+    }
     setIsOpen(false);
   };
 
@@ -142,9 +158,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
     ? 'bottom-full mb-1'
     : 'top-full mt-1';
 
-  const currentModelName = displayModels.some((m) => m.id === selectedModel.id)
-    ? selectedModel.name
-    : displayModels[0]?.name ?? selectedModel.name;
+  const currentModelName = displayModels.some((m) => m.id === effectiveSelectedModel.id)
+    ? effectiveSelectedModel.name
+    : displayModels[0]?.name ?? effectiveSelectedModel.name;
 
   return (
     <div ref={containerRef} className="relative cursor-pointer">
@@ -177,7 +193,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
               key={model.id}
               onClick={() => handleModelSelect(model)}
               className={`w-full px-4 py-2.5 text-left dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover flex items-center justify-between transition-colors ${
-                model.id === (displayModels.some((m) => m.id === selectedModel.id) ? selectedModel.id : displayModels[0]?.id) ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''
+                model.id === (displayModels.some((m) => m.id === effectiveSelectedModel.id) ? effectiveSelectedModel.id : displayModels[0]?.id) ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''
               }`}
             >
               <div className="flex flex-col">
@@ -186,7 +202,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({ dropdownDirection = 'down
                   <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{model.provider}</span>
                 )}
               </div>
-              {model.id === (displayModels.some((m) => m.id === selectedModel.id) ? selectedModel.id : displayModels[0]?.id) && (
+              {model.id === (displayModels.some((m) => m.id === effectiveSelectedModel.id) ? effectiveSelectedModel.id : displayModels[0]?.id) && (
                 <CheckIcon className="h-4 w-4 text-claude-accent" />
               )}
             </button>

@@ -416,6 +416,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:listArchived', options),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
+    setSessionModel: (options: { sessionId: string; model: string | null }) =>
+      ipcRenderer.invoke('cowork:session:setModel', options),
     renameSession: (options: { sessionId: string; title: string }) =>
       ipcRenderer.invoke('cowork:session:rename', options),
     getSession: (sessionId: string) =>

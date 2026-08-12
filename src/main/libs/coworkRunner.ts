@@ -5524,7 +5524,11 @@ export class CoworkRunner extends EventEmitter {
     activeSession.contextOverflowRetryAllowed = false;
     activeSession.emptyTerminalTurnDetected = false;
 
-    const automationModelOverride = this.getSessionAutomationModelOverride(sessionId);
+    // Per-session model override (chosen in the session's own model selector)
+    // takes precedence; then the metabot's llm_id; otherwise the global
+    // default config. The session override only affects this conversation.
+    const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null;
+    const automationModelOverride = sessionModel || this.getSessionAutomationModelOverride(sessionId);
     let apiConfigResolution = automationModelOverride
       ? resolveApiConfigForModel(automationModelOverride, 'local')
       : { config: getCurrentApiConfig('local') };
