@@ -150,7 +150,7 @@ export function buildMetaIdSearchAgentTools(deps: {
 
   const searchMetaIds = tool(
     'search_metaids',
-    'Search on-chain MetaID identities (bots AND users on the Agent Internet). Use when the user wants to FIND a person or bot: "view <someone>\'s bot page", "who is <someone>", "get <someone>\'s info", "find cheerful users to chat with", "find a bot that can <skill>". Returns up to `limit` candidates (best first) as markdown bullets whose names are metaid://<globalMetaId> bot-page links. Use skill for skill lookups, chatOnly=true for people who can receive private messages. For a known identity\'s full profile, use metaid_profile instead.',
+    'Search on-chain MetaID identities (bots AND users on the Agent Internet). Use when the user wants to FIND a person or bot: "view <someone>\'s bot page", "who is <someone>", "get <someone>\'s info", "find cheerful users to chat with", "find a bot that can <skill>". When NOT to use: if you already hold an identity string (globalMetaId/address/metaid:// URI), skip the search and call metaid_profile directly; and this is for identities only — for social posts use search_social_posts, for apps use search_metaapps. Returns up to `limit` candidates (best first) as markdown bullets whose names are metaid://<globalMetaId> bot-page links. Use skill for skill lookups, chatOnly=true for people who can receive private messages.',
     {
       query: z.string().optional(),
       skill: z.string().optional(),
@@ -217,7 +217,7 @@ export function buildMetaIdSearchAgentTools(deps: {
 
   const metaIdProfile = tool(
     'metaid_profile',
-    'Get the full on-chain profile of a specific MetaID identity (bot or user): name, avatar, bio, role/soul/goal, persona, LLM, chat skills, homepage, private-chat availability, timestamps. `identity` accepts a globalMetaId, a legacy metaId, an address, or a metaid://<globalMetaId> URI. Use after search_metaids when the user asks for details about a specific person/bot, or when you already hold an identity string.',
+    'Get the full on-chain profile of a specific MetaID identity (bot or user): name, avatar, bio, role/soul/goal, persona, LLM, chat skills, homepage, private-chat availability, timestamps. `identity` accepts a globalMetaId, a legacy metaId, an address, or a metaid://<globalMetaId> URI. Use after search_metaids when the user asks for details about a specific person/bot, or when you already hold an identity string. When NOT to use: do not call before you have a concrete identity — use search_metaids to find one first; and for that identity\'s social activity/posts use search_social_posts (publisher=identity), not this profile tool.',
     {
       identity: z.string().min(1),
     },

@@ -189,7 +189,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const searchSocialPosts = tool(
     'search_social_posts',
-    'Search on-chain social posts (simplebuzz feed, MetaSo). Trigger LIBERALLY whenever the user asks about on-chain posts/buzz/content by topic, author, time window, or popularity — e.g. "今天有什么关于 AI 的帖子" / "what\'s new about AI", "这两天 MVC 社区说了些什么", "what did <someone> post recently", "我关注的人有什么新帖" / "posts from people I follow", "最近有什么热帖" / "latest hot posts", "随便看看最新的帖子" / "show me the latest buzz", or a morning digest over several topics ("AI, MVC, web3 的早报"). Returns up to `size` coarse candidate posts (newest first, or hot-ranked when sort=hot) as markdown bullets with author links, timestamps, snippets, and engagement counts. This is a BROAD candidate set — YOU pick the 3-5 most relevant posts for the user and rank them. Filters combine with AND; multiple keywords and multiple publishers match with OR. Time windows: pass sinceDays for "today" (1) / "last two days" (2), or since/until as Unix seconds. `publisher` accepts a GlobalMetaID, legacy MetaID, or address — if the user names a person, resolve the name to a GlobalMetaID with search_metaids first. For a specific post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.',
+    'Search on-chain social posts (simplebuzz feed, MetaSo). Trigger LIBERALLY whenever the user asks about on-chain posts/buzz/content by topic, author, time window, or popularity — e.g. "今天有什么关于 AI 的帖子" / "what\'s new about AI", "这两天 MVC 社区说了些什么", "what did <someone> post recently", "我关注的人有什么新帖" / "posts from people I follow", "最近有什么热帖" / "latest hot posts", "随便看看最新的帖子" / "show me the latest buzz", or a morning digest over several topics ("AI, MVC, web3 的早报"). Returns up to `size` coarse candidate posts (newest first, or hot-ranked when sort=hot) as markdown bullets with author links, timestamps, snippets, and engagement counts. This is a BROAD candidate set — YOU pick the 3-5 most relevant posts for the user and rank them. Filters combine with AND; multiple keywords and multiple publishers match with OR. Time windows: pass sinceDays for "today" (1) / "last two days" (2), or since/until as Unix seconds. `publisher` accepts a GlobalMetaID, legacy MetaID, or address — if the user names a person, resolve the name to a GlobalMetaID with search_metaids first. For a specific post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments. When NOT to use: this is on-chain social posts only — for people/identity lookup use search_metaids, for apps use search_metaapps.',
     {
       query: z.string().optional(),
       keywords: z.array(z.string()).optional(),
@@ -265,7 +265,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const socialPostDetail = tool(
     'social_post_detail',
-    'Get the aggregated detail of a specific on-chain post by pinId: full content, author (metaid:// link), timestamps, attachments, and engagement counters (likes, comments, quotes, donates). Use when the user asks about a concrete post — "how many likes does this post have", "有没有人回复这个帖子", "查看这个帖子的点赞/回复情况" — or when you already hold a pinId from search_social_posts. To report on the user\'s own latest post ("我最新发的帖子有多少点赞"), first find it with search_social_posts (publisher=your identity), then detail its pinId. A missing or hidden post (40400) is reported honestly.',
+    'Get the aggregated detail of a specific on-chain post by pinId: full content, author (metaid:// link), timestamps, attachments, and engagement counters (likes, comments, quotes, donates). Use when the user asks about a concrete post — "how many likes does this post have", "有没有人回复这个帖子", "查看这个帖子的点赞/回复情况" — or when you already hold a pinId from search_social_posts. When NOT to use: to find posts in the first place use search_social_posts (this needs an existing pinId); for the reply thread use social_post_comments. To report on the user\'s own latest post ("我最新发的帖子有多少点赞"), first find it with search_social_posts (publisher=your identity), then detail its pinId. A missing or hidden post (40400) is reported honestly.',
     {
       pinId: z.string().min(1),
     },
@@ -291,7 +291,7 @@ export function buildSocialRecallAgentTools(deps: {
 
   const socialPostComments = tool(
     'social_post_comments',
-    'List the comments/replies attached to a specific on-chain post by pinId (paged, size default 20). Use when the user asks about a post\'s replies — "有没有人回复这个帖子", "看看这个帖子的评论", "what did people say under this post" — or when you want to summarize a post\'s discussion. For aggregated counts (likes/comments/quotes) use social_post_detail instead.',
+    'List the comments/replies attached to a specific on-chain post by pinId (paged, size default 20). Use when the user asks about a post\'s replies — "有没有人回复这个帖子", "看看这个帖子的评论", "what did people say under this post" — or when you want to summarize a post\'s discussion. When NOT to use: for aggregated engagement counts (likes/comments/quotes totals) use social_post_detail instead; and to discover posts in the first place use search_social_posts (this needs an existing pinId).',
     {
       pinId: z.string().min(1),
       size: z.number().optional(),
