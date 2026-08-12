@@ -158,6 +158,12 @@ export interface GroupTaskDetail extends GroupTask {
   driver?: GroupTaskDriverInfo | null;
   /** HITL: human checkpoints of the task, oldest first. */
   checkpoints?: GroupTaskCheckpoint[];
+  /**
+   * HITL: what the owner must decide right now — the tag-free body of the
+   * chair's [CHECKPOINT] message that opened the open checkpoint (null when
+   * unavailable; the banner then falls back to the checkpoint topic).
+   */
+  openCheckpointSummary?: string | null;
 }
 
 export interface GroupTaskSummary extends GroupTask {
