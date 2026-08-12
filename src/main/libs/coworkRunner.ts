@@ -23,10 +23,19 @@ import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkM
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   formatExperienceRecallResults,
+  formatExperienceTimelineFallback,
   resolveExperienceRecallQuery,
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
+  type ExperienceRecallGranularity,
 } from './experiencePromptBlocks';
+import {
+  buildKnowledgeBlock,
+  formatKnowledgeRecallResults,
+  formatKnowledgeUpsertResult,
+  KNOWLEDGE_PROMPT_MAX_ITEMS,
+  type KnowledgePromptEntry,
+} from './knowledgePromptBlocks';
 import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
@@ -1292,6 +1301,55 @@ export interface CoworkExperienceStore {
 }
 
 /**
+ * Structural view of MetaIDKnowledgeStore consumed by the runner (DI seam).
+ * Keeps the runner decoupled from the concrete store so it stays testable.
+ */
+export interface CoworkKnowledgeStore {
+  listKnowledge(options: {
+    metabotId: number;
+    status?: 'active' | 'superseded' | 'archived' | 'all';
+    kind?: 'know_how' | 'pitfall' | 'principle';
+    query?: string;
+    limit?: number;
+    touchLastUsed?: boolean;
+  }): Array<{
+    id: string;
+    topic: string;
+    summary: string;
+    kind: 'know_how' | 'pitfall' | 'principle';
+    category: string | null;
+    tags: string[];
+    version: number;
+    updatedAt: number;
+  }>;
+  upsertKnowledge(input: {
+    metabotId: number;
+    topic: string;
+    summary: string;
+    kind?: 'know_how' | 'pitfall' | 'principle';
+    category?: string | null;
+    tags?: string[];
+    origin?: 'agent' | 'dream' | 'user';
+    sources?: Array<{ episodeId?: string | null; evidenceId?: string | null; sessionId?: string | null; sourceChannel?: string | null; relevance?: string | null }>;
+  }): { created: boolean; revised: boolean; entry: { id: string; topic: string; version: number; kind: 'know_how' | 'pitfall' | 'principle' } };
+}
+
+/**
+ * Read-only episode timeline (the shared fact source behind the dream
+ * summaries) used as a time-anchor fallback: when a pinned date range has no
+ * consolidated dream summary yet, the recall tool surfaces raw episodes so the
+ * time-anchored view is never blind for un-dreamed days.
+ */
+export interface CoworkEpisodeTimeline {
+  listEpisodes(options: {
+    ownerGlobalMetaID: string;
+    fromTime?: number;
+    toTime?: number;
+    limit?: number;
+  }): Array<{ startedAt: number; sourceChannel: string; episodeType: string; sessionId?: string | null }>;
+}
+
+/**
  * R1：SDK 定时任务宿主侧镜像桥（方案 C）。
  * 宿主（main.ts）实现并注入：Stop hook 的 session_crons 采集 + 会话结束对账。
  * 用接口而非直接依赖 SdkCronMirrorStore，避免 coworkRunner 与 sqlite 存储耦合、便于测试。
@@ -1366,6 +1424,10 @@ export interface CoworkRunnerOptions {
    * DreamStore in main.ts; absent in tests that do not need experience data.
    */
   experienceStore?: CoworkExperienceStore;
+  /** Knowledge-point anchored memory (经验/知识点): hot block + recall/upsert tools. */
+  knowledgeStore?: CoworkKnowledgeStore;
+  /** Raw episode timeline for the time-anchor fallback in experience_recall. */
+  episodeTimelineProvider?: CoworkEpisodeTimeline;
   /**
    * When set, every cowork session gets MetaID search tools (search_metaids +
    * metaid_profile) backed by the metaso-p2p MetaID aggregation API. Browser
@@ -1424,6 +1486,8 @@ export class CoworkRunner extends EventEmitter {
   private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
+  private knowledgeStore?: CoworkKnowledgeStore;
+  private episodeTimelineProvider?: CoworkEpisodeTimeline;
   private metaIdSearch?: MetaIdSearchControl;
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
@@ -1484,6 +1548,8 @@ export class CoworkRunner extends EventEmitter {
     this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
+    this.knowledgeStore = options?.knowledgeStore;
+    this.episodeTimelineProvider = options?.episodeTimelineProvider;
     this.metaIdSearch = options?.metaIdSearch;
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
@@ -2494,10 +2560,151 @@ export class CoworkRunner extends EventEmitter {
         dateTo: resolved.dateTo,
         limit: resolved.limit,
       });
-      return { text: formatExperienceRecallResults(results), isError: false };
+      // Time-anchor fallback: when a pinned range has no consolidated dream
+      // summary yet (bot was off, or dreaming was enabled late), surface the
+      // raw episode timeline for that window so recall is never blind. Only
+      // triggers for an explicit date range with zero summaries — keyword
+      // searches and the warm default stay on the summarized path.
+      if (
+        results.length === 0
+        && resolved.dateFrom
+        && this.episodeTimelineProvider
+      ) {
+        const fallback = this.buildExperienceTimelineFallback(metabotId, resolved.dateFrom, resolved.dateTo);
+        if (fallback) return { text: fallback, isError: false };
+      }
+      return { text: formatExperienceRecallResults(results, resolved.granularity), isError: false };
     } catch (error) {
       return {
         text: `experience_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  /** Resolve the bot's GlobalMetaID and fetch raw episodes for the fallback. */
+  private buildExperienceTimelineFallback(
+    metabotId: number,
+    dateFrom: string,
+    dateTo?: string,
+  ): string | null {
+    const metabot = this.getMetabotById?.(metabotId);
+    const ownerGlobalMetaID = typeof metabot?.globalmetaid === 'string' ? metabot.globalmetaid.trim() : '';
+    if (!ownerGlobalMetaID || !this.episodeTimelineProvider) return null;
+    const fromTime = Date.parse(`${dateFrom}T00:00:00.000Z`);
+    if (!Number.isFinite(fromTime)) return null;
+    // Inclusive upper bound: end of the date_to day, or date_from + 1 day when unset.
+    const upperDay = dateTo ?? dateFrom;
+    const toTime = Date.parse(`${upperDay}T23:59:59.999Z`);
+    const safeToTime = Number.isFinite(toTime) ? toTime : fromTime + 86_400_000;
+    try {
+      const episodes = this.episodeTimelineProvider.listEpisodes({
+        ownerGlobalMetaID,
+        fromTime,
+        toTime: safeToTime,
+        limit: 50,
+      });
+      return formatExperienceTimelineFallback({ dateFrom, dateTo, episodes });
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * knowledge_recall tool: keyword/category/kind retrieval over the bot's own
+   * reusable knowledge points (经验/知识点). Use before a task to surface
+   * know-how and pitfalls that resemble the current situation.
+   */
+  private runKnowledgeRecallTool(args: {
+    query?: string;
+    kind?: 'know_how' | 'pitfall' | 'principle';
+    category?: string;
+    limit?: number;
+  }, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'knowledge_recall failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.knowledgeStore) {
+      return { text: 'knowledge_recall unavailable: knowledge store is not configured', isError: true };
+    }
+    try {
+      const limit = Math.max(1, Math.min(50, Math.floor(args.limit ?? 10)));
+      const results = this.knowledgeStore.listKnowledge({
+        metabotId,
+        status: 'active',
+        kind: args.kind,
+        query: typeof args.query === 'string' ? args.query.trim() || undefined : undefined,
+        limit,
+        touchLastUsed: true,
+      });
+      const filtered = typeof args.category === 'string' && args.category.trim()
+        ? results.filter((entry) => (entry.category ?? '') === args.category!.trim())
+        : results;
+      const entries: KnowledgePromptEntry[] = filtered.map((entry) => ({
+        topic: entry.topic,
+        summary: entry.summary,
+        kind: entry.kind,
+        category: entry.category,
+        version: entry.version,
+      }));
+      return { text: formatKnowledgeRecallResults(entries), isError: false };
+    } catch (error) {
+      return {
+        text: `knowledge_recall failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * knowledge_upsert tool: create or rewrite a reusable knowledge point at
+   * runtime (origin=agent). Same topic rewrites the existing entry (version
+   * bump + prior text archived as a revision); a fresh topic creates a new one.
+   */
+  private runKnowledgeUpsertTool(args: {
+    topic: string;
+    summary: string;
+    kind?: 'know_how' | 'pitfall' | 'principle';
+    category?: string;
+    tags?: string[];
+  }, sessionId: string): { text: string; isError: boolean } {
+    const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return { text: 'knowledge_upsert failed: could not resolve MetaBot for session', isError: true };
+    }
+    if (!this.knowledgeStore) {
+      return { text: 'knowledge_upsert unavailable: knowledge store is not configured', isError: true };
+    }
+    const topic = typeof args.topic === 'string' ? args.topic.trim() : '';
+    const summary = typeof args.summary === 'string' ? args.summary.trim() : '';
+    if (!topic || !summary) {
+      return { text: 'knowledge_upsert failed: topic and summary are required', isError: true };
+    }
+    try {
+      const result = this.knowledgeStore.upsertKnowledge({
+        metabotId,
+        topic,
+        summary,
+        kind: args.kind,
+        category: typeof args.category === 'string' ? args.category.trim() || null : null,
+        tags: Array.isArray(args.tags) ? args.tags : undefined,
+        origin: 'agent',
+        sources: [{ sessionId, sourceChannel: 'cowork', relevance: 'agent runtime upsert' }],
+      });
+      return {
+        text: formatKnowledgeUpsertResult({
+          topic,
+          created: result.created,
+          revised: result.revised,
+          version: result.entry.version,
+          kind: result.entry.kind,
+        }),
+        isError: false,
+      };
+    } catch (error) {
+      return {
+        text: `knowledge_upsert failed: ${error instanceof Error ? error.message : String(error)}`,
         isError: true,
       };
     }
@@ -3994,11 +4201,25 @@ export class CoworkRunner extends EventEmitter {
       offset: 0,
     });
     const summaries = this.experienceStore?.listDailySummaries(metabotId, RECENT_SUMMARIES_PROMPT_DAYS) ?? [];
-    return composeExperiencePromptBlocks({
+    const experienceBlock = composeExperiencePromptBlocks({
       identityText: identityEntry?.text ?? null,
       valueBoundaries: valueBoundaryEntries,
       summaries,
     });
+    // Knowledge hot-layer: surface the bot's most relevant reusable knowledge
+    // points (know-how + pitfalls) so they proactively guide new work. Co-located
+    // with the experience blocks rather than injected separately, to keep the
+    // memory prompt cohesive.
+    let knowledgeBlock = '';
+    if (this.knowledgeStore) {
+      const knowledgeEntries = this.knowledgeStore.listKnowledge({
+        metabotId,
+        status: 'active',
+        limit: KNOWLEDGE_PROMPT_MAX_ITEMS,
+      });
+      knowledgeBlock = buildKnowledgeBlock(knowledgeEntries);
+    }
+    return [experienceBlock, knowledgeBlock].filter((block) => block.trim()).join('\n\n');
   }
 
   /**
@@ -5177,16 +5398,46 @@ export class CoworkRunner extends EventEmitter {
       }
 
       if (toolName === 'experience_recall') {
+        const granularityRaw = typeof toolInput.granularity === 'string' ? toolInput.granularity : undefined;
+        const granularity: ExperienceRecallGranularity | undefined = granularityRaw === 'week' || granularityRaw === 'month' || granularityRaw === 'day'
+          ? granularityRaw
+          : undefined;
         const result = this.runExperienceRecallTool({
           query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
           date_from: typeof toolInput.date_from === 'string' ? toolInput.date_from : undefined,
           date_to: typeof toolInput.date_to === 'string' ? toolInput.date_to : undefined,
+          granularity,
           limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
         }, sessionId);
         return {
           success: !result.isError,
           text: result.text,
         };
+      }
+
+      if (toolName === 'knowledge_recall') {
+        const kindRaw = typeof toolInput.kind === 'string' ? toolInput.kind : undefined;
+        const kind = kindRaw === 'know_how' || kindRaw === 'pitfall' || kindRaw === 'principle' ? kindRaw : undefined;
+        const result = this.runKnowledgeRecallTool({
+          query: typeof toolInput.query === 'string' ? toolInput.query : undefined,
+          kind,
+          category: typeof toolInput.category === 'string' ? toolInput.category : undefined,
+          limit: typeof toolInput.limit === 'number' ? toolInput.limit : undefined,
+        }, sessionId);
+        return { success: !result.isError, text: result.text };
+      }
+
+      if (toolName === 'knowledge_upsert') {
+        const kindRaw = typeof toolInput.kind === 'string' ? toolInput.kind : undefined;
+        const kind = kindRaw === 'know_how' || kindRaw === 'pitfall' || kindRaw === 'principle' ? kindRaw : undefined;
+        const result = this.runKnowledgeUpsertTool({
+          topic: typeof toolInput.topic === 'string' ? toolInput.topic : '',
+          summary: typeof toolInput.summary === 'string' ? toolInput.summary : '',
+          kind,
+          category: typeof toolInput.category === 'string' ? toolInput.category : undefined,
+          tags: Array.isArray(toolInput.tags) ? toolInput.tags.filter((tag): tag is string => typeof tag === 'string') : undefined,
+        }, sessionId);
+        return { success: !result.isError, text: result.text };
       }
 
       return { success: false, text: `Unsupported host tool: ${toolName || '(empty)'}` };
@@ -6259,15 +6510,57 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'experience_recall',
-            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks; an empty result means nothing was recorded for the range/query.',
+            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
             {
               query: z.string().optional(),
               date_from: z.string().optional(),
               date_to: z.string().optional(),
+              granularity: z.enum(['day', 'week', 'month']).optional(),
               limit: z.number().int().min(1).max(30).optional(),
             },
             async (args: ExperienceRecallArgs) => {
               const result = this.runExperienceRecallTool(args, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: result.isError,
+              } as any;
+            }
+          )
+        );
+      }
+      if (sessionMemoryEnabled && this.knowledgeStore) {
+        memoryTools.push(
+          tool(
+            'knowledge_recall',
+            'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work that will help the current task. A query does a keyword search over topic+summary; kind filters to know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles something you have done before, to reuse what worked and avoid traps you already hit. When NOT to use: this is your reusable TASK know-how, not facts about the user (use memory_user_edits) and not a log of past days (use experience_recall). Returns labeled knowledge entries; an empty result means you have not distilled a point about this yet.',
+            {
+              query: z.string().optional(),
+              kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
+              category: z.string().optional(),
+              limit: z.number().int().min(1).max(50).optional(),
+            },
+            async (args: { query?: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; limit?: number }) => {
+              const result = this.runKnowledgeRecallTool(args, sessionId);
+              return {
+                content: [{ type: 'text', text: result.text }],
+                isError: result.isError,
+              } as any;
+            }
+          )
+        );
+        memoryTools.push(
+          tool(
+            'knowledge_upsert',
+            'Save or update ONE reusable knowledge point (经验/知识点) you want to apply to future tasks. topic is a reusable theme written so it can be found again (e.g. "fastest path to a high-quality web 3D game", "design style this user likes", "SSR build crashes on window access"); summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — so update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. When NOT to use: do not save one-off ephemeral facts, user-profile facts (use memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
+            {
+              topic: z.string().min(1),
+              summary: z.string().min(1),
+              kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
+              category: z.string().optional(),
+              tags: z.array(z.string()).optional(),
+            },
+            async (args: { topic: string; summary: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; tags?: string[] }) => {
+              const result = this.runKnowledgeUpsertTool(args, sessionId);
               return {
                 content: [{ type: 'text', text: result.text }],
                 isError: result.isError,
