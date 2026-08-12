@@ -1917,14 +1917,45 @@ export class CoworkRunner extends EventEmitter {
     const usage = payload.usage && typeof payload.usage === 'object'
       ? payload.usage as Record<string, unknown>
       : null;
-    const inputTokens = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
-    const outputTokens = usage && typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
-    const cacheReadTokens = usage && typeof usage.cache_read_input_tokens === 'number'
-      ? usage.cache_read_input_tokens
-      : 0;
-    const cacheCreationTokens = usage && typeof usage.cache_creation_input_tokens === 'number'
-      ? usage.cache_creation_input_tokens
-      : 0;
+    // SDK semantics (verified against the bundled 0.3.x agent SDK): the
+    // top-level result `usage` holds ONLY the LAST request of the turn
+    // (message_delta overwrites per chunk), while `modelUsage` ACCUMULATES
+    // every request of the turn. A tool loop issues several requests per turn;
+    // relying on top-level usage alone drops all but the final request —
+    // understating totals and skewing the cache-hit rate low (the final
+    // request appends the most new content and therefore has the worst hit
+    // ratio of the turn). Aggregate modelUsage as the authoritative per-turn
+    // numbers, falling back to top-level usage for SDK builds that do not
+    // report modelUsage.
+    const modelUsage = payload.modelUsage && typeof payload.modelUsage === 'object'
+      ? payload.modelUsage as Record<string, Record<string, unknown>>
+      : null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
+    if (modelUsage && Object.keys(modelUsage).length > 0) {
+      for (const entry of Object.values(modelUsage)) {
+        if (!entry || typeof entry !== 'object') continue;
+        inputTokens += typeof entry.inputTokens === 'number' ? entry.inputTokens : 0;
+        outputTokens += typeof entry.outputTokens === 'number' ? entry.outputTokens : 0;
+        cacheReadTokens += typeof entry.cacheReadInputTokens === 'number'
+          ? entry.cacheReadInputTokens
+          : 0;
+        cacheCreationTokens += typeof entry.cacheCreationInputTokens === 'number'
+          ? entry.cacheCreationInputTokens
+          : 0;
+      }
+    } else {
+      inputTokens = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+      outputTokens = usage && typeof usage.output_tokens === 'number' ? usage.output_tokens : 0;
+      cacheReadTokens = usage && typeof usage.cache_read_input_tokens === 'number'
+        ? usage.cache_read_input_tokens
+        : 0;
+      cacheCreationTokens = usage && typeof usage.cache_creation_input_tokens === 'number'
+        ? usage.cache_creation_input_tokens
+        : 0;
+    }
 
     if (inputTokens <= 0 && outputTokens <= 0 && cacheReadTokens <= 0 && cacheCreationTokens <= 0) {
       return;
@@ -2027,9 +2058,6 @@ export class CoworkRunner extends EventEmitter {
     const perModelUsage: NonNullable<UsageStatsShape['perModelUsage']> = {
       ...(prev.perModelUsage ?? {}),
     };
-    const modelUsage = payload.modelUsage && typeof payload.modelUsage === 'object'
-      ? payload.modelUsage as Record<string, Record<string, unknown>>
-      : null;
     if (modelUsage) {
       for (const [model, entry] of Object.entries(modelUsage)) {
         if (!entry || typeof entry !== 'object') continue;
@@ -2055,9 +2083,20 @@ export class CoworkRunner extends EventEmitter {
     // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
     // fresh-only with cache partitioned into the cache_* fields.
     const cacheIncludedInInput = billingSource !== 'anthropic';
+    // lastTurnInputTokens feeds the compaction budget as the REAL context
+    // size of the most recent REQUEST. Only the top-level usage carries that
+    // (modelUsage is the turn aggregate); keep the top-level values here even
+    // though the accumulating counters above use the modelUsage aggregate.
+    const lastTurnInputRaw = usage && typeof usage.input_tokens === 'number' ? usage.input_tokens : 0;
+    const lastTurnCacheReadRaw = usage && typeof usage.cache_read_input_tokens === 'number'
+      ? usage.cache_read_input_tokens
+      : 0;
+    const lastTurnCacheCreationRaw = usage && typeof usage.cache_creation_input_tokens === 'number'
+      ? usage.cache_creation_input_tokens
+      : 0;
     const lastTurnContextTokens = cacheIncludedInInput
-      ? inputTokens
-      : inputTokens + cacheReadTokens + cacheCreationTokens;
+      ? lastTurnInputRaw
+      : lastTurnInputRaw + lastTurnCacheReadRaw + lastTurnCacheCreationRaw;
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
