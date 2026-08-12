@@ -917,6 +917,8 @@ export class SqliteStore {
     this.migrateOpenTeamMembershipsCursorColumn();
     // Migration: add activated_at to openteam_memberships (guest self-check grace anchor).
     this.migrateOpenTeamMembershipsActivatedColumn();
+    // Migration: add left_at/left_cause/left_reason to openteam_memberships (guest "removed" notice).
+    this.migrateOpenTeamMembershipsLeftColumns();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2218,6 +2220,37 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamMembershipsActivatedColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: left_at / left_cause / left_reason on openteam_memberships (the
+   * guest-side "you were removed" notice, R4). PRAGMA-guarded and idempotent;
+   * rows that already left before this migration keep NULL cause/reason and
+   * simply render as a plain "Left" in the collab view.
+   */
+  private migrateOpenTeamMembershipsLeftColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('left_at')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_at TEXT');
+        changed = true;
+      }
+      if (!columns.includes('left_cause')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_cause TEXT');
+        changed = true;
+      }
+      if (!columns.includes('left_reason')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_reason TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsLeftColumns:', error);
     }
   }
 

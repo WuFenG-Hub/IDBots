@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { i18nService } from '../../services/i18n';
 import { openTeamCollabService } from '../../services/openTeamCollabService';
 import type { OpenTeamCollabSummary, OpenTeamGuestInvite, OpenTeamGuestInviteStatus } from '../../types/openTeamCollab';
@@ -104,6 +104,20 @@ export const OpenTeamCollabCard: React.FC<{ collab: OpenTeamCollabSummary; onCli
   const botLabel = collab.botName?.trim() || `bot-${collab.metabotId}`;
   const joinedAt = formatGroupTaskTime(collab.createdAt);
   const lastActivity = formatGroupTaskTime(collab.lastMessageAt);
+  const leftAt = formatGroupTaskTime(collab.leftAt);
+  // R4: why/how the membership ended — a kicked collab must read as "removed",
+  // not as an unexplained gray "Left" badge. Legacy rows (pre left_* columns)
+  // carry no cause and simply keep the plain badge.
+  const leftCauseLabel = collab.status !== 'left'
+    ? ''
+    : collab.leftCause === 'kick'
+      ? i18nService.t('openTeamCollabLeftCauseKick')
+      : collab.leftCause === 'self_check'
+        ? i18nService.t('openTeamCollabLeftCauseSelfCheck')
+        : collab.leftCause === 'opt_out'
+          ? i18nService.t('openTeamCollabLeftCauseOptOut')
+          : '';
+  const leftReason = collab.leftReason?.trim();
 
   return (
     <div
@@ -125,6 +139,13 @@ export const OpenTeamCollabCard: React.FC<{ collab: OpenTeamCollabSummary; onCli
             {inviter ? ` · ${i18nService.t('openTeamCollabInvitedBy')} ${inviter}` : ''}
             {joinedAt ? ` · ${i18nService.t('openTeamCollabJoined')} ${joinedAt}` : ''}
           </div>
+          {collab.status === 'left' && (leftCauseLabel || leftAt) && (
+            <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
+              {leftCauseLabel}
+              {leftAt ? `${leftCauseLabel ? ' · ' : ''}${i18nService.t('openTeamCollabLeftAt')} ${leftAt}` : ''}
+              {leftReason ? ` · ${i18nService.t('openTeamCollabLeftReason')}: ${leftReason}` : ''}
+            </div>
+          )}
         </div>
         <div className="shrink-0 text-right text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
           <div>
@@ -155,6 +176,12 @@ export const OPEN_TEAM_COLLAB_POLL_INTERVAL_MS = 15_000;
 const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenCollab }) => {
   const [items, setItems] = useState<OpenTeamCollabSummary[]>([]);
   const [guestInvites, setGuestInvites] = useState<OpenTeamGuestInvite[]>([]);
+  // R4: one-time dismissible notice when a poll observes an active -> left
+  // flip (kick / self-check) — the user must SEE the removal, not just find a
+  // grayed badge on the next visit.
+  const [removedNotices, setRemovedNotices] = useState<OpenTeamCollabSummary[]>([]);
+  const prevStatusRef = useRef<Map<number, OpenTeamCollabSummary['status']>>(new Map());
+  const dismissedNoticeIdsRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -162,7 +189,17 @@ const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenC
       openTeamCollabService
         .list()
         .then((list) => {
-          if (!cancelled) setItems(list);
+          if (cancelled) return;
+          const prev = prevStatusRef.current;
+          const newlyLeft = list.filter(
+            (collab) => prev.get(collab.id) === 'active' && collab.status === 'left'
+              && !dismissedNoticeIdsRef.current.has(collab.id),
+          );
+          if (newlyLeft.length > 0) {
+            setRemovedNotices((current) => [...current, ...newlyLeft]);
+          }
+          prevStatusRef.current = new Map(list.map((collab) => [collab.id, collab.status]));
+          setItems(list);
         })
         .catch(() => {
           // Traceability data must never break the Group Tasks view.
@@ -186,10 +223,41 @@ const OpenTeamCollabsSection: React.FC<OpenTeamCollabsSectionProps> = ({ onOpenC
     };
   }, []);
 
+  const dismissRemovedNotice = (id: number) => {
+    dismissedNoticeIdsRef.current.add(id);
+    setRemovedNotices((current) => current.filter((notice) => notice.id !== id));
+  };
+
   if (items.length === 0 && guestInvites.length === 0) return null;
 
   return (
     <div className="shrink-0">
+      {removedNotices.map((notice) => {
+        const reasonText = notice.leftReason?.trim()
+          ? ` — ${i18nService.t('openTeamCollabLeftReason')}: ${notice.leftReason.trim()}`
+          : '';
+        return (
+          <div
+            key={notice.id}
+            className="mx-4 mt-3 flex items-start gap-2 rounded-lg border dark:border-amber-500/40 border-amber-300/70 dark:bg-amber-900/20 bg-amber-50 px-3 py-2"
+          >
+            <span className="flex-1 min-w-0 text-xs dark:text-amber-200 text-amber-800">
+              {i18nService.t('openTeamCollabRemovedNotice')
+                .replace('{bot}', notice.botName?.trim() || `bot-${notice.metabotId}`)
+                .replace('{title}', openTeamCollabTitle(notice))
+                .replace('{reason}', reasonText)}
+            </span>
+            <button
+              type="button"
+              className="shrink-0 text-xs dark:text-amber-300/80 text-amber-700 hover:underline"
+              aria-label={i18nService.t('close')}
+              onClick={() => dismissRemovedNotice(notice.id)}
+            >
+              {i18nService.t('close')}
+            </button>
+          </div>
+        );
+      })}
       {items.length > 0 && (
         <>
           <div className="px-4 pt-4 pb-2">

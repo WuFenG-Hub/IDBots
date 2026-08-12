@@ -271,6 +271,75 @@ test('a kick envelope without from_chat_pubkey is still dispatched (no reply nee
   assert.equal(handled.length, 1, 'kick handling does not depend on from_chat_pubkey');
 });
 
+test('kick interception calls recordKickDisplay (with the row display fields) before handling (R4)', async () => {
+  const displays = [];
+  const handled = [];
+  let scheduled = null;
+  const emitToRenderer = () => {};
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: kickPlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 48,
+    emitLog: () => {},
+    coworkStore: {},
+    senderName: 'Twin Bot',
+    senderAvatar: 'avatar-1',
+    rowPinId: 'kick-pin-1',
+    emitToRenderer,
+    deps: {
+      handleInvite: async () => { throw new Error('not an invite'); },
+      handleResponse: () => { throw new Error('not a response'); },
+      handleKick: (input) => { handled.push(input); },
+      schedule: (task) => { scheduled = task; },
+      recordKickDisplay: (input) => { displays.push(input); },
+    },
+  });
+  assert.equal(intercepted, true);
+  assert.equal(displays.length, 0, 'display must not run synchronously on the processOne stack');
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(displays.length, 1);
+  assert.equal(displays[0].metabot.id, 7);
+  assert.equal(displays[0].kick.groupId, GROUP_ID);
+  assert.equal(displays[0].senderGlobalMetaId, 'gmid-inviter', 'the row sender is the A2A peer');
+  assert.equal(displays[0].senderName, 'Twin Bot');
+  assert.equal(displays[0].envelopePinId, 'kick-pin-1', 'envelope pin id is the dedup identity');
+  assert.equal(displays[0].emitToRenderer, emitToRenderer);
+  assert.equal(handled.length, 1, 'kick handling still runs after the display');
+});
+
+test('a failing recordKickDisplay logs but never blocks kick handling (R4)', async () => {
+  const logs = [];
+  const handled = [];
+  let scheduled = null;
+  const intercepted = interceptOpenTeamEnvelope({
+    plaintext: kickPlaintext,
+    metabot,
+    fromGlobalMetaId: 'gmid-inviter',
+    fromChatPubkey: CHAT_PUBKEY,
+    messageId: 49,
+    emitLog: (line) => logs.push(String(line)),
+    coworkStore: {},
+    deps: {
+      handleInvite: async () => { throw new Error('not an invite'); },
+      handleResponse: () => { throw new Error('not a response'); },
+      handleKick: (input) => { handled.push(input); },
+      schedule: (task) => { scheduled = task; },
+      recordKickDisplay: () => { throw new Error('display exploded'); },
+    },
+  });
+  assert.equal(intercepted, true);
+  scheduled();
+  await flushMicrotasks();
+  assert.equal(handled.length, 1, 'kick handling must proceed despite the display failure');
+  assert.ok(
+    logs.some((line) => line.includes('Kick A2A display failed') && line.includes('display exploded')),
+    `expected a display-failure log, got: ${JSON.stringify(logs)}`,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // 改进清单 #15: an incoming invite must become a VISIBLE message in the
 // invitee's A2A private-chat stream (not a silent protocol consume).
