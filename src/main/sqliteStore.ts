@@ -898,6 +898,31 @@ export class SqliteStore {
         ON group_task_status_events(task_id, id);
     `);
 
+    // Group Task human-in-the-loop checkpoints: a mid-task pause point opened
+    // by the chair (`[CHECKPOINT: <topic>]`) so the owner can review a draft or
+    // decision before work continues; resolved by `[CHECKPOINT_RESOLVED: ...]`.
+    // Multiple checkpoints per task are allowed over its lifetime, but at most
+    // one is 'open' at any moment (enforced by GroupTaskStore.openCheckpoint).
+    // CREATE TABLE IF NOT EXISTS is the idempotent first-run migration; the
+    // task status state machine itself is untouched by this feature.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        topic TEXT,
+        opened_msg_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','resolved','cancelled')),
+        resolution TEXT,
+        resolved_msg_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        resolved_at TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_checkpoints_task
+        ON group_task_checkpoints(task_id, id);
+    `);
+
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_memberships (
@@ -920,6 +945,8 @@ export class SqliteStore {
     this.migrateOpenTeamMembershipsCursorColumn();
     // Migration: add activated_at to openteam_memberships (guest self-check grace anchor).
     this.migrateOpenTeamMembershipsActivatedColumn();
+    // Migration: add left_at/left_cause/left_reason to openteam_memberships (guest "removed" notice).
+    this.migrateOpenTeamMembershipsLeftColumns();
     this.db.run(`
       CREATE TABLE IF NOT EXISTS openteam_invites (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2242,6 +2269,37 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateOpenTeamMembershipsActivatedColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: left_at / left_cause / left_reason on openteam_memberships (the
+   * guest-side "you were removed" notice, R4). PRAGMA-guarded and idempotent;
+   * rows that already left before this migration keep NULL cause/reason and
+   * simply render as a plain "Left" in the collab view.
+   */
+  private migrateOpenTeamMembershipsLeftColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('left_at')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_at TEXT');
+        changed = true;
+      }
+      if (!columns.includes('left_cause')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_cause TEXT');
+        changed = true;
+      }
+      if (!columns.includes('left_reason')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN left_reason TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsLeftColumns:', error);
     }
   }
 

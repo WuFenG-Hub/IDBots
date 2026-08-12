@@ -54,6 +54,9 @@ const GroupTaskListItem: React.FC<{ task: GroupTaskSummary; onClick: () => void 
     <div className="flex items-center gap-3">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
+          <span className="shrink-0 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            #{task.id}
+          </span>
           <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
             {task.title}
           </span>

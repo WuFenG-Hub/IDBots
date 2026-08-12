@@ -263,7 +263,8 @@ test('remote presence: offline + silent beyond window — chair hint injected, o
     assert.equal(brief.taskId, 1);
     assert.equal(brief.metabotId, 1);
     assert.equal(brief.ownerGlobalMetaId, BOSS_GMID);
-    assert.ok(brief.text.includes('Group task #1 "Build MetaApp"'));
+    assert.ok(brief.text.includes('Group task "Build MetaApp"'), 'R5: owner brief names the task by title, not #id');
+    assert.ok(!brief.text.includes('#1'), 'R5: no #id in the owner brief text');
     assert.ok(brief.text.includes(`"${REMOTE_NAME}"`));
     assert.ok(brief.text.includes('offline for ~25 min, no message for 20 min'));
 

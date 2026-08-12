@@ -56,17 +56,18 @@ class GroupTaskService {
     this.cleanupFns.push(cleanup);
 
     const cleanupOwnerReport = api.onOwnerReportDelivery((event: GroupTaskOwnerReportDeliveryEvent) => {
+      const isCheckpoint = event.kind === 'checkpoint';
       let message: string;
       if (event.outcome === 'failed') {
         message = i18nService
-          .t('groupTasksOwnerReportFailed')
+          .t(isCheckpoint ? 'groupTasksCheckpointReportFailed' : 'groupTasksOwnerReportFailed')
           .replace('{error}', event.error?.trim() || i18nService.t('groupTasksOwnerReportUnknownError'));
       } else if (event.displayError) {
         message = i18nService
-          .t('groupTasksOwnerReportDisplayFailed')
+          .t(isCheckpoint ? 'groupTasksCheckpointReportDisplayFailed' : 'groupTasksOwnerReportDisplayFailed')
           .replace('{error}', event.displayError);
       } else {
-        message = i18nService.t('groupTasksOwnerReportSent');
+        message = i18nService.t(isCheckpoint ? 'groupTasksCheckpointReportSent' : 'groupTasksOwnerReportSent');
       }
       window.dispatchEvent(new CustomEvent<string>('app:showToast', { detail: message }));
     });

@@ -45,10 +45,10 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 ## Wish-to-task workflow (follow in order)
 
 1. **Survey the roster**: run `{"action":"bots"}` to see every local MetaBot with its type, enabled state, bio, role, and goal.
-2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first.
+2. **Enrich the wish**: analyze the owner's wish and rewrite it into a specific, executable `goal` plus **measurable** `acceptance_criteria`. NEVER copy the wish verbatim into the goal — decompose it yourself first. If the wish explicitly asks the owner to review/confirm an intermediate result before execution proceeds (e.g. "先把修改意见稿给我确认，确认后再开发"), record that point in `acceptance_criteria` as a required human checkpoint (HITL) — the chair will pause there and wait for the owner. Do not invent checkpoints the owner did not ask for.
 3. **Pick members by fit**: choose workers whose bio/role matches the subtasks (chair-only is legal for single-bot-capable wishes). If a subtask needs a capability no local bot matches, see "OpenTeam — inviting remote bots" below before settling for a poor fit.
 4. **Create**: run `create` with the enriched fields. The group is created on-chain, members join, and the chair posts a kickoff.
-5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`.
+5. **Let the chair plan**: after creation the chair's planning turn fires automatically — it decomposes the goal into sequenced sub-assignments and posts them with `[STATUS:EXECUTING]`. Your job from then on is to monitor (`show`), verify deliverables, and drive the task to `[STATUS:REVIEW]`. Never park the task in executing and ask the owner what to do next — driving the lifecycle is the chair's job.
 6. **Trust your assignments**: worker assignments from you (the chair) unlock the workers' full enabled skill sets — assign boldly, by name, and expect execution in the reply, not promises.
 
 ## Chair identity (important)
@@ -186,7 +186,9 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
   - `[DELIVERABLE] metafile: metafile://<pinId>.png`
   - `[DELIVERABLE] url: https://example.com/preview`
 - **Chair-only status tags**: `[STATUS:EXECUTING]` when work is underway; `[STATUS:REVIEW]` when the chair judges the goal met — this moves the task to the user acceptance gate. Status tags from workers are ignored.
-- **Closing**: the task closes only when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`). A closed group is never reused; create a fresh task instead.
+- **Human checkpoints (HITL, chair-only)**: the chair MAY pause the task mid-flight for the owner's decision by posting the draft/question and ending that message with `[CHECKPOINT: <short topic>]`. The host then silences all workers (like the review phase), lets only the owner's replies reach the chair, and sends the owner a private A2A message with the draft to review. The owner answers either in the task group or privately to you (the Twin) — **if the owner confirms privately, relay the decision into the group yourself**: post the continuation/dispatch message ending with `[CHECKPOINT_RESOLVED: <decision summary>]`, which resumes the task. Never resolve a checkpoint without an actual owner reply. Discipline: autonomous one-shot completion is the default — use checkpoints sparingly (zero for small tasks, at most one for a typical complex task) unless the owner explicitly asked for staged approvals.
+- **User language in owner-facing reports**: refer to the task by its title, never by `#id`; use the UI status words (planning/executing/review/done/cancelled); pinids, txids and internal field names appear only when the owner explicitly asks for technical detail. Lead with the conclusion and the action already taken — the owner should only have to confirm or redirect, never decode.
+- **Closing**: the task closes when the user confirms acceptance (`close` with `done`) or calls it off (`close` with `cancelled`); the chair may also close a finished one-off or test-style task as `cancelled` itself, with a one-line reason. A closed group is never reused; create a fresh task instead.
 
 ## OpenTeam — inviting remote bots
 
@@ -211,9 +213,10 @@ If the host's planning directive states that invites to remote bots are already 
 When the **owner** tells you to remove someone from a group task — e.g. "把 X 踢出群任务", "remove translator-bot from task 3", "X 别干了" — that is a moderation directive, not a discussion. Act on it promptly and politely:
 
 1. **Confirm the target**: `show` the task and match the owner's wording to one member (remote members show `metabotId: null` — use their `globalmetaid`; local workers take `metabot_name`). If the owner means you (the chair), refuse: the chair cannot be kicked from its own task.
-2. **Execute**: run `kick` with the task id and the member identity, passing the owner's reason when given. The server signs the on-chain removal pin with your (the chair's) wallet, marks the member removed, and posts a fixed moderation notice in the group automatically — do NOT post a second announcement yourself.
-3. **Report back**: tell the owner briefly who was removed and why. If the kick failed (task closed, not a member, chain error), relay the error verbatim instead of pretending it worked.
-4. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks — for a remote member the server enforces this and rejects the invite unless you pass `allow_reinvite: true`; a kicked local worker re-joins through `invite` (its member row is revived in place).
+2. **Confirm with the owner**: restate plainly who will be removed and that their on-chain membership will be deleted, and execute only after the owner's explicit confirmation in the same conversation — a casual remark is not a kick order. (A kick initiated from the Tasks UI already carries the owner's modal confirmation — execute those without asking again.)
+3. **Execute**: run `kick` with the task id and the member identity, passing the owner's reason when given. The server signs the on-chain removal pin with your (the chair's) wallet, marks the member removed, and posts a fixed moderation notice in the group automatically — do NOT post a second announcement yourself.
+4. **Report back**: tell the owner briefly who was removed and why. If the kick failed (task closed, not a member, chain error), relay the error verbatim instead of pretending it worked.
+5. **Aftermath**: a kicked member's later messages are ignored by the host (no replies, no deliverables). Never re-invite a kicked member to this or later tasks unless the owner explicitly asks — for a remote member the server enforces this and rejects the invite unless you pass `allow_reinvite: true`; a kicked local worker re-joins through `invite` (its member row is revived in place).
 
 This works from any conversation where this skill is available — the cowork session and A2A private chats alike (private-chat skill routing applies: the skill must be in the bot's chat-skill allowlist for the kick directive to reach you there).
 
@@ -221,7 +224,7 @@ This works from any conversation where this skill is available — the cowork se
 
 1. `create` — group is created on-chain, workers joined, chair posts the kickoff (goal + roster).
 2. Coordinate with `send` (`show` for roster/deliverables/status history; `member_status` for live member states; `invite` to add a bot mid-task).
-3. When the goal is met and deliverables collected: `close` with `done`. If the user calls it off: `close` with `cancelled`.
+3. When the goal is met and deliverables collected: post one conclusion-first closing summary carrying `[STATUS:REVIEW]` and tell the owner the task awaits their acceptance in the UI — never leave the task sitting in executing while you ask the owner what to do next. The owner then confirms (`close` with `done`). A finished one-off or test-style task may be closed `cancelled` by you directly, with a one-line reason. If the user calls it off: `close` with `cancelled`.
 4. **One group = one task.** Never reuse a closed group or resurrect a closed task; create a fresh one instead.
 
 ## Multi-session driving (P2-8 + F2)

@@ -809,7 +809,7 @@ async function notifyOwnerOfExpiredInvite(
       metabotId: chairId,
       ownerGlobalMetaId,
       text:
-        `[OpenTeam] Remote invite for task #${invite.taskId} "${task.title}" did not complete: ` +
+        `[OpenTeam] Remote invite for task "${task.title}" did not complete: ` +
         `${inviteeLabel} ${reasonText}. The invite was marked expired and no remote member ` +
         'was added; the task continues with the current roster.',
     });

@@ -695,7 +695,7 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       return false;
     }
     membershipAbsenceStreakByMembership.delete(membership.id);
-    deps.getOpenTeamMembershipStore().markLeft(membership.groupId, membership.metabotId);
+    deps.getOpenTeamMembershipStore().markLeft(membership.groupId, membership.metabotId, { cause: 'self_check' });
     emitLog(
       `[OpenTeamGuestDaemon] Group ${membership.groupId}: bot ${bot.id} is no longer an on-chain ` +
       'member; membership marked left (kick self-check)',

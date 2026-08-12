@@ -100,6 +100,25 @@ export interface GroupTaskDeliverable {
 
 export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
 
+export type GroupTaskCheckpointStatus = 'open' | 'resolved' | 'cancelled';
+
+/**
+ * HITL checkpoint: a mid-task pause point opened by the chair
+ * (`[CHECKPOINT: <topic>]`) for the owner's decision, resolved by
+ * `[CHECKPOINT_RESOLVED: <decision>]`. At most one is 'open' per task.
+ */
+export interface GroupTaskCheckpoint {
+  id: number;
+  taskId: number;
+  topic: string | null;
+  openedMsgPinId: string | null;
+  status: GroupTaskCheckpointStatus;
+  resolution: string | null;
+  resolvedMsgPinId: string | null;
+  createdAt: string | null;
+  resolvedAt: string | null;
+}
+
 export interface GroupTaskMemberSummary extends GroupTaskMember {
   /** Epoch seconds of the member's last chain speech (round-4). */
   lastSpeakAt?: number | null;
@@ -137,6 +156,8 @@ export interface GroupTaskDetail extends GroupTask {
   statusEvents?: GroupTaskStatusEvent[];
   /** P2-8: the daemon instance currently driving this task. */
   driver?: GroupTaskDriverInfo | null;
+  /** HITL: human checkpoints of the task, oldest first. */
+  checkpoints?: GroupTaskCheckpoint[];
 }
 
 export interface GroupTaskSummary extends GroupTask {
@@ -176,6 +197,18 @@ export interface GroupTaskOwnerReportDeliveryEvent {
   sessionId?: string | null;
   displayError?: string | null;
   error?: string | null;
+  /** 'review' (default) = acceptance report; 'checkpoint' = HITL checkpoint request. */
+  kind?: 'review' | 'checkpoint';
+  checkpointId?: number | null;
+  at: number;
+}
+
+/** HITL: a checkpoint opened/resolved — the detail view should refetch. */
+export interface GroupTaskCheckpointChangedEvent {
+  type: 'groupTask:checkpointChanged';
+  taskId: number;
+  checkpointId: number;
+  status: 'open' | 'resolved';
   at: number;
 }
 

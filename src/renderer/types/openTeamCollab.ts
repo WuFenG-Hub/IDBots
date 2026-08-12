@@ -6,6 +6,9 @@
 
 export type OpenTeamCollabStatus = 'active' | 'left';
 
+/** How a guest membership ended (mirrors OpenTeamMembershipLeftCause in main). */
+export type OpenTeamCollabLeftCause = 'kick' | 'self_check' | 'opt_out';
+
 export interface OpenTeamCollabSummary {
   id: number;
   groupId: string;
@@ -23,6 +26,10 @@ export interface OpenTeamCollabSummary {
   messageCount: number;
   /** chain_timestamp of the newest indexed message; null when none. */
   lastMessageAt: number | null;
+  /** When/why the membership ended (R4 "removed" notice); null while active. */
+  leftAt: string | null;
+  leftCause: OpenTeamCollabLeftCause | null;
+  leftReason: string | null;
 }
 
 /** P0-1: one received [OPENTEAM_INVITE] on this machine, whatever its outcome. */

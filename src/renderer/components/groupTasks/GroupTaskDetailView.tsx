@@ -129,12 +129,19 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const [highlightPinId, setHighlightPinId] = useState<string | null>(null);
   const [jumpHint, setJumpHint] = useState<string | null>(null);
 
-  const refreshDetail = useCallback(async () => {
+  const refreshDetail = useCallback(async (opts?: { quiet?: boolean }) => {
     try {
       const task = await groupTaskService.getTask(taskId);
       setDetail(task);
       setDetailError(null);
     } catch (err) {
+      // Background (poll/event) refreshes must never blank a healthy view on a
+      // transient IPC hiccup — only the foreground mount load surfaces the
+      // error screen. A later successful refresh clears the error anyway.
+      if (opts?.quiet) {
+        console.warn('GroupTaskDetailView: background detail refresh failed', err);
+        return;
+      }
       setDetailError(err instanceof Error ? err.message : String(err));
     }
   }, [taskId]);
@@ -233,7 +240,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     setLoadingOlder(false);
   }, [taskId]);
 
-  // Transcript: initial load + 5s poll while mounted.
+  // Transcript: initial load + 5s poll while mounted. The poll also refreshes
+  // the task detail so a missed/lost groupTask:statusChanged push can never
+  // leave the header badge stale (R1 self-heal).
   useEffect(() => {
     let cancelled = false;
     setLoadingMessages(true);
@@ -242,18 +251,31 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     });
     const timer = window.setInterval(() => {
       void loadMessages();
+      void refreshDetail({ quiet: true });
     }, 5000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [loadMessages]);
+  }, [loadMessages, refreshDetail]);
 
   // Immediate refresh on task status changes (also keeps the header badge live).
   useEffect(() => {
     const api = window.electron?.groupTask;
     if (!api) return undefined;
     return api.onStatusChanged((event) => {
+      if (event?.taskId !== taskId) return;
+      void refreshDetail({ quiet: true });
+      void loadMessages();
+    });
+  }, [taskId, refreshDetail, loadMessages]);
+
+  // HITL: a checkpoint opening/resolving refreshes the detail (banner) and the
+  // transcript (pause/resume ceremony lines).
+  useEffect(() => {
+    const api = window.electron?.groupTask;
+    if (!api) return undefined;
+    return api.onCheckpointChanged((event) => {
       if (event?.taskId !== taskId) return;
       void refreshDetail();
       void loadMessages();
@@ -460,6 +482,8 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   }
 
   const isTerminal = !isActiveGroupTaskStatus(detail.status);
+  // HITL: the currently open human checkpoint, if any (drives the pause banner).
+  const openCheckpoint = detail.checkpoints?.find((checkpoint) => checkpoint.status === 'open') ?? null;
   const chairMember = detail.members.find((member) => member.role === 'chair');
   const memberDisplayName = (member: GroupTaskDetail['members'][number]): string =>
     member.name ?? (member.metabotId != null
@@ -515,6 +539,9 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           >
             <ArrowLeftIcon className="h-5 w-5" />
           </button>
+          <span className="shrink-0 text-sm font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            #{detail.id}
+          </span>
           <h1 className="text-lg font-semibold dark:text-claude-darkText text-claude-text truncate">
             {detail.title}
           </h1>
@@ -582,6 +609,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             {detail.status === 'review' && (
               <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
                 {i18nService.t('groupTasksReviewSilenceHint')}
+              </div>
+            )}
+            {openCheckpoint && (
+              <div className="mt-2 rounded-lg border border-sky-300 dark:border-sky-500/40 bg-sky-50 dark:bg-sky-900/20 px-3 py-2 text-xs dark:text-sky-200 text-sky-800">
+                {i18nService
+                  .t('groupTasksCheckpointBanner')
+                  .replace('{topic}', openCheckpoint.topic?.trim() || i18nService.t('groupTasksCheckpointNoTopic'))}
               </div>
             )}
             {detail.acceptanceCriteria && (
