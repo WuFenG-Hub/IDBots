@@ -3210,7 +3210,18 @@ export class CoworkStore implements MemoryBackend {
         s.model,
         s.created_at,
         s.updated_at,
+        -- Sort by the LAST USER MESSAGE time (fixed once a turn is sent), not
+        -- the newest assistant stream message: while tasks run, stream updates
+        -- no longer reshuffle the session list top (no more flickering).
+        -- Sessions without a user message fall back to newest message, then
+        -- updated_at. Stable tie-breakers keep the order deterministic.
         COALESCE((
+          SELECT m.created_at
+          FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
+          WHERE m.session_id = s.id AND m.type = 'user'
+          ORDER BY m.created_at DESC
+          LIMIT 1
+        ), (
           SELECT m.created_at
           FROM cowork_messages m INDEXED BY idx_cowork_messages_session_created_at
           WHERE m.session_id = s.id
@@ -3222,7 +3233,7 @@ export class CoworkStore implements MemoryBackend {
       WHERE COALESCE(s.hidden_from_session_list, 0) = 0
       AND s.archived_at IS NULL
       ${filterByMetabot ? 'AND s.metabot_id = ?' : ''}
-      ORDER BY s.pinned DESC, activity_at DESC, s.updated_at DESC
+      ORDER BY s.pinned DESC, activity_at DESC, s.updated_at DESC, s.created_at DESC, s.id DESC
     `, filterByMetabot ? [metabotId] : []);
 
     return rows.map(row => ({
