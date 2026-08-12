@@ -79,6 +79,10 @@ test('Twin sessions receive a host-owned orchestration overlay', () => {
   assert.match(prompt, /fresh machine with only the Twin Bot/);
   assert.match(prompt, /Worker handoff as evidence/);
   assert.match(prompt, /Do not disclose private owner memory/);
+  // R5: lifecycle ownership + user-language principles condensed into the overlay.
+  assert.match(prompt, /Own the task lifecycle/);
+  assert.match(prompt, /refer to tasks by title \(never #id\)/);
+  assert.match(prompt, /source of truth/);
 });
 
 test('Worker sessions do not receive the Twin orchestration overlay', () => {

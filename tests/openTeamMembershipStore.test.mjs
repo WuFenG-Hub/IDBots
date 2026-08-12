@@ -131,6 +131,50 @@ test('memberships: list/get/listActiveGroupIds and markLeft lifecycle', async ()
   }
 });
 
+test('memberships: markLeft records cause/reason/left_at; a reviving upsert clears them (R4)', async () => {
+  const tempDir = makeTempDir();
+  const { store, openTeamStore, db } = await openStores(tempDir);
+  try {
+    // Migration: the left_* columns exist on a fresh open.
+    const cols = getColumns(db, 'openteam_memberships');
+    for (const col of ['left_at', 'left_cause', 'left_reason']) {
+      assert.ok(cols.includes(col), `openteam_memberships.${col} should exist`);
+    }
+
+    openTeamStore.upsertActiveMembership({ groupId: 'group-r4', metabotId: 7, taskTitle: 'External Task' });
+    assert.equal(openTeamStore.markLeft('group-r4', 7, { cause: 'kick', reason: 'off-topic output' }), true);
+    const left = openTeamStore.getMembership('group-r4', 7);
+    assert.ok(left);
+    assert.equal(left.status, 'left');
+    assert.ok(left.leftAt, 'left_at is stamped');
+    assert.equal(left.leftCause, 'kick');
+    assert.equal(left.leftReason, 'off-topic output');
+
+    // listCollabSummaries surfaces the left_* fields to the renderer.
+    const summary = openTeamStore.listCollabSummaries().find((row) => row.groupId === 'group-r4');
+    assert.ok(summary);
+    assert.equal(summary.leftCause, 'kick');
+    assert.equal(summary.leftReason, 'off-topic output');
+    assert.ok(summary.leftAt);
+
+    // The self-check path stores its own cause without a reason.
+    openTeamStore.upsertActiveMembership({ groupId: 'group-r4b', metabotId: 7 });
+    openTeamStore.markLeft('group-r4b', 7, { cause: 'self_check' });
+    const selfChecked = openTeamStore.getMembership('group-r4b', 7);
+    assert.equal(selfChecked.leftCause, 'self_check');
+    assert.equal(selfChecked.leftReason, null);
+
+    // A reviving re-invite clears the left_* fields again.
+    const revived = openTeamStore.upsertActiveMembership({ groupId: 'group-r4', metabotId: 7, invitePinId: 'pin-new' });
+    assert.equal(revived.status, 'active');
+    assert.equal(revived.leftAt, null);
+    assert.equal(revived.leftCause, null);
+    assert.equal(revived.leftReason, null);
+  } finally {
+    store.close();
+  }
+});
+
 test('memberships: a reviving upsert restamps activated_at (self-check grace anchor)', async () => {
   const tempDir = makeTempDir();
   const { store, openTeamStore, db } = await openStores(tempDir);

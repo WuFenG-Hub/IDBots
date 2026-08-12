@@ -1009,7 +1009,7 @@ export function buildMemberJoinWelcomeText(input: {
     ? `受邀参与:${input.invitedFor.trim()}`
     : '受邀参与本任务协作';
   const lines = [
-    `🎉 欢迎 @${input.joinerName} 加入任务 #${input.taskId}「${input.taskTitle}」!`,
+    `🎉 欢迎 @${input.joinerName} 加入任务「${input.taskTitle}」!`,
     `${input.joinerName} ${why}。`,
     `@${input.joinerName}:请先向群内打个招呼确认就位,再开始工作。`,
   ];
@@ -1565,7 +1565,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             metabotId: chairBot.id,
             ownerGlobalMetaId,
             text:
-              `[OpenTeam] Group task #${task.id} "${task.title}": remote teammate "${info.name}" ` +
+              `[OpenTeam] Group task "${task.title}": remote teammate "${info.name}" ` +
               `appears unreachable (${formatRemoteUnreachableFacts(info)}). I have this fact in my ` +
               'context and will re-assign their part if the silence continues.',
           });
@@ -1653,7 +1653,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         : line;
     });
     return [
-      `[Group Task #${task.id} "${task.title}" — recent group log (last ${contextMessageCount} messages)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
       ...lines,
     ].join('\n');
   };
@@ -1876,7 +1876,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       '- The task goal (restated briefly).',
       '- What each member did (by name).',
       '- Deliverables with pinids/URLs and any verification outcomes you are aware of.',
-      '- What the owner should decide now: accept & close, or request rework (and of what).',
+      '- Lead with your conclusion and the action you recommend (accept & close, or request rework — of what). The owner only needs to confirm acceptance in the Tasks UI or send the task back for rework; never end with an open-ended "what would you like to do next?".',
       '',
       `Goal: ${task.goal}`,
       `Acceptance criteria: ${task.acceptanceCriteria?.trim() || '(none specified)'}`,
@@ -2435,7 +2435,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // review-phase silence + self-skip keep it reply-free.
               try {
                 const closing =
-                  `📦 任务 #${task.id}「${task.title}」所有步骤已完成,进入验收阶段,等待人类评审。`;
+                  `📦 任务「${task.title}」所有步骤已完成,进入验收阶段,等待人类评审。`;
                 const sent = await postGroupMessage(task.id, chairMember.metabotId!, closing);
                 emitLog(
                   `[GroupTaskDaemon] Task ${task.id}: closing ceremony posted on review entry (pin ${sent.pinId})`,
@@ -2620,7 +2620,7 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       ...(rosterLines.length > 0 ? rosterLines : ['(no members yet besides the chair)']),
       ...(openTeamStatusBlock ? ['', openTeamStatusBlock] : []),
       '',
-      `[Group Task #${task.id} "${task.title}" — recent group log (last ${contextMessageCount} messages)]`,
+      `[Group Task "${task.title}" (#${task.id}) — recent group log (last ${contextMessageCount} messages)]`,
       ...(logLines.length > 0 ? logLines : ['(no messages yet)']),
     ].join('\n');
   };
@@ -3251,8 +3251,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
       if (sqlite.get<string>(remindedKey) === '1') continue;
       const text =
-        `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned ` +
-        `(message #${entry.messageId}) but has not sent a [WORKING] ACK within ` +
+        `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned work ` +
+        `but has not sent a [WORKING] ACK within ` +
         `${Math.round(ackTimeoutMs / 60_000)} min. Check whether the assignment ` +
         `was received; do not auto-fail.`;
       try {

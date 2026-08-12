@@ -37,7 +37,16 @@ export interface OpenTeamMembership {
   activatedAt: string | null;
   /** Guest-daemon cursor: group_chat_messages.id up to which this bot processed. */
   lastProcessedMsgId: number;
+  /** When this membership ended (sqlite datetime 'now', UTC); null while active. */
+  leftAt: string | null;
+  /** Why the membership ended: 'kick' | 'self_check' | 'opt_out'; null while active. */
+  leftCause: OpenTeamMembershipLeftCause | null;
+  /** Kick reason carried by the [OPENTEAM_KICK] envelope; null otherwise. */
+  leftReason: string | null;
 }
+
+/** How a guest membership ended (drives the guest-side "removed" notice). */
+export type OpenTeamMembershipLeftCause = 'kick' | 'self_check' | 'opt_out';
 
 export interface OpenTeamInvite {
   id: number;
@@ -140,6 +149,9 @@ interface OpenTeamMembershipRow {
   created_at: string | null;
   activated_at: string | null;
   last_processed_msg_id: number | null;
+  left_at: string | null;
+  left_cause: string | null;
+  left_reason: string | null;
 }
 
 interface OpenTeamInviteRow {
@@ -172,6 +184,11 @@ function rowToOpenTeamMembership(row: OpenTeamMembershipRow): OpenTeamMembership
     createdAt: row.created_at ?? null,
     activatedAt: row.activated_at ?? null,
     lastProcessedMsgId: Number(row.last_processed_msg_id) || 0,
+    leftAt: row.left_at ?? null,
+    leftCause: row.left_cause === 'kick' || row.left_cause === 'self_check' || row.left_cause === 'opt_out'
+      ? row.left_cause
+      : null,
+    leftReason: row.left_reason ?? null,
   };
 }
 
@@ -326,7 +343,10 @@ export class OpenTeamMembershipStore {
            task_title = COALESCE(?, task_title),
            invite_pin_id = COALESCE(?, invite_pin_id),
            joined_pin_id = COALESCE(?, joined_pin_id),
-           activated_at = datetime('now')
+           activated_at = datetime('now'),
+           left_at = NULL,
+           left_cause = NULL,
+           left_reason = NULL
          WHERE group_id = ? AND metabot_id = ?`,
         [
           input.globalmetaid ?? null,
@@ -439,13 +459,23 @@ export class OpenTeamMembershipStore {
     return Boolean(row);
   }
 
-  /** Mark a membership as left (kick / owner opt-out). Returns false when absent. */
-  markLeft(groupId: string, metabotId: number): boolean {
+  /**
+   * Mark a membership as left (kick / self-check / owner opt-out). Records when
+   * and why so the guest UI can surface a visible "removed" notice instead of
+   * silently flipping a badge. Returns false when absent.
+   */
+  markLeft(
+    groupId: string,
+    metabotId: number,
+    opts?: { cause?: OpenTeamMembershipLeftCause; reason?: string | null },
+  ): boolean {
     const existing = this.getMembership(groupId, metabotId);
     if (!existing) return false;
     this.db.run(
-      `UPDATE openteam_memberships SET status = 'left' WHERE group_id = ? AND metabot_id = ?`,
-      [groupId, metabotId],
+      `UPDATE openteam_memberships
+       SET status = 'left', left_at = datetime('now'), left_cause = ?, left_reason = ?
+       WHERE group_id = ? AND metabot_id = ?`,
+      [opts?.cause ?? null, opts?.reason?.trim() || null, groupId, metabotId],
     );
     this.saveDb();
     return true;

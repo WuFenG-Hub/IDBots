@@ -840,7 +840,8 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
     const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
     assert.ok(closing, 'review entry posts the system closing line as the chair');
-    assert.match(closing.content, /任务 #\d+「Build MetaApp」/);
+    assert.match(closing.content, /任务「Build MetaApp」/);
+    assert.doesNotMatch(closing.content, /#\d+/, 'R5: the ceremony refers to the task by title, not #id');
     assert.match(closing.content, /所有步骤已完成/);
     assert.match(closing.content, /等待人类评审/);
     // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
@@ -1355,6 +1356,60 @@ test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playb
   assert.match(workerPrompt, /treat them as equal teammates and be polite/);
   assert.ok(!workerPrompt.includes('OpenTeam remote teammates (marked'), 'chair-only etiquette stays out of the worker playbook');
   assert.ok(!workerPrompt.includes('Capability check before recruiting'), 'chair-only recruiting rules stay out of the worker playbook');
+});
+
+test('prompts: chair playbook gates member kicks behind explicit owner confirmation', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker' },
+  ];
+  const chairPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'chair',
+  });
+  // R3: a chat-initiated kick must be restated and explicitly confirmed by the
+  // owner first; the Tasks-UI modal already counts as that confirmation.
+  assert.match(chairPrompt, /Removing a member \(kick\) is owner-confirmed, never casual/);
+  assert.match(chairPrompt, /explicit confirmation in the same conversation/);
+  assert.match(chairPrompt, /Tasks-UI modal already IS the owner's confirmation/);
+
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+  });
+  assert.ok(!workerPrompt.includes('Removing a member (kick)'), 'kick governance stays out of the worker playbook');
+});
+
+test('prompts: chair playbook carries lifecycle-autonomy and user-language rules (R5)', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker' },
+  ];
+  const chairPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'chair',
+  });
+  // R5: the chair drives the lifecycle itself and speaks user language.
+  assert.match(chairPrompt, /Lifecycle autonomy: you drive the task through its states/);
+  assert.match(chairPrompt, /awaits their acceptance in the Tasks UI/);
+  assert.match(chairPrompt, /NEVER sit in executing asking the owner "what next\?"/);
+  assert.match(chairPrompt, /User language: refer to the task by its title, never by `#id`/);
+  assert.match(chairPrompt, /Lead every report with the conclusion/);
+
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+  });
+  assert.ok(!workerPrompt.includes('Lifecycle autonomy'), 'lifecycle ownership stays out of the worker playbook');
+  assert.ok(!workerPrompt.includes('User language: refer to the task by its title'), 'user-language rule stays out of the worker playbook');
 });
 
 // ---------------------------------------------------------------------------

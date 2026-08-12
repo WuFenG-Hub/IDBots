@@ -45,7 +45,7 @@ import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
-import { parseOpenTeamEnvelope, type OpenTeamInvitePayload } from './openTeamProtocols';
+import { parseOpenTeamEnvelope, type OpenTeamInvitePayload, type OpenTeamKickPayload } from './openTeamProtocols';
 import {
   handleIncomingOpenTeamInvite,
   handleIncomingOpenTeamKick,
@@ -2714,6 +2714,100 @@ export function buildOpenTeamInviteDisplayText(
 }
 
 /**
+ * Make an incoming [OPENTEAM_KICK] visible in the guest's A2A private-chat
+ * stream — the symmetric counterpart of recordOpenTeamInviteA2ADisplay (R4).
+ * Without it the guest host exits the group silently and the Boss never sees
+ * that their bot was removed. Deduped by the envelope pinId so the socket push
+ * and the history backfill of the same envelope produce a single bubble.
+ */
+export function buildOpenTeamKickDisplayText(
+  kick: OpenTeamKickPayload,
+  botName: string,
+): string {
+  const task = kick.taskTitle?.trim() || `group task ${kick.groupId}`;
+  const lines = [
+    `[OpenTeam Kick] ${botName} was removed from the group task "${task}" by the owner.`,
+    `Group: ${kick.groupId}`,
+    `Reason: ${kick.reason?.trim() || '(none given)'}`,
+    'The bot has left the group and will no longer process its messages.',
+  ];
+  return lines.join('\n');
+}
+
+export function recordOpenTeamKickA2ADisplay(params: {
+  coworkStore: CoworkStore;
+  /** Local bot that was kicked (its session owns the message). */
+  metabot: Pick<Metabot, 'id' | 'name' | 'globalmetaid'>;
+  kick: OpenTeamKickPayload;
+  /** Actual sender of the kick simplemsg row (the inviting/chair bot). */
+  senderGlobalMetaId: string;
+  senderName?: string | null;
+  senderAvatar?: string | null;
+  /** PinId of the kick envelope message; the dedup identity. */
+  envelopePinId?: string;
+  emitToRenderer?: RendererEmitter;
+}): { sessionId: string; message: CoworkMessage | null; duplicate: boolean } | null {
+  const peerGlobalMetaId = String(params.senderGlobalMetaId ?? '').trim();
+  if (!peerGlobalMetaId) return null;
+  const botName = params.metabot.name?.trim() || `bot-${params.metabot.id}`;
+
+  const ensured = ensureCoworkA2ASession({
+    coworkStore: params.coworkStore,
+    getMetabotById: () => ({
+      id: params.metabot.id,
+      name: params.metabot.name,
+      globalmetaid: params.metabot.globalmetaid,
+    }),
+    input: {
+      localMetabotId: params.metabot.id,
+      peerGlobalMetaId,
+      peerName: params.senderName,
+      peerAvatar: params.senderAvatar,
+    },
+  });
+
+  const chainPinId = normalizePrivateChatPinId(params.envelopePinId);
+  if (chainPinId) {
+    const dedupRow = { pin_id: chainPinId } as PrivateChatMessageRow;
+    const alreadyTracked = params.coworkStore.getSessionMessagesMatchingMetadataValues(
+      ensured.session.id,
+      [chainPinId],
+    ).some((message) => (
+      message.type === 'user'
+      && message.metadata?.sourceChannel === 'metaweb_private'
+      && message.metadata?.openTeamKick === true
+      && metadataHasPrivateChatChainIdentity(message.metadata, dedupRow)
+    ));
+    if (alreadyTracked) {
+      return { sessionId: ensured.session.id, message: null, duplicate: true };
+    }
+  }
+
+  const message = appendPrivateChatA2AMessage({
+    coworkStore: params.coworkStore,
+    sessionId: ensured.session.id,
+    externalConversationId: ensured.externalConversationId,
+    type: 'user',
+    content: buildOpenTeamKickDisplayText(params.kick, botName),
+    senderGlobalMetaId: peerGlobalMetaId,
+    senderName: params.senderName,
+    senderAvatar: params.senderAvatar,
+    extraMetadata: {
+      simplemsgKind: 'private_chat',
+      openTeamKick: true,
+      ...buildPrivateChatA2AChainMetadata({ pinId: chainPinId }),
+    },
+    emitToRenderer: params.emitToRenderer,
+  });
+  params.coworkStore.touchConversationMapping(
+    'metaweb_private',
+    ensured.externalConversationId,
+    params.metabot.id,
+  );
+  return { sessionId: ensured.session.id, message, duplicate: false };
+}
+
+/**
  * Make an incoming [OPENTEAM_INVITE] visible in the guest's A2A private-chat
  * stream (改进清单 #15): ensure the canonical metaweb_private session with the
  * INVITER exists and append the invitation as a user message. Runs at
@@ -2807,6 +2901,8 @@ export interface PrivateChatOpenTeamInterceptionDeps {
   schedule: (task: () => void) => void;
   /** 改进清单 #15: surface an incoming invite in the invitee's A2A stream. */
   recordInviteDisplay?: typeof recordOpenTeamInviteA2ADisplay;
+  /** R4: surface an incoming kick in the kicked bot's A2A stream. */
+  recordKickDisplay?: typeof recordOpenTeamKickA2ADisplay;
 }
 
 const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
@@ -2815,6 +2911,7 @@ const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
   handleKick: (input) => handleIncomingOpenTeamKick(input),
   schedule: (task) => setImmediate(task),
   recordInviteDisplay: (input) => recordOpenTeamInviteA2ADisplay(input),
+  recordKickDisplay: (input) => recordOpenTeamKickA2ADisplay(input),
 };
 
 /**
@@ -2903,6 +3000,28 @@ export function interceptOpenTeamEnvelope(params: {
         },
       });
     } else if (envelope.kind === 'kick') {
+      // R4: surface the kick in the kicked bot's A2A stream BEFORE the
+      // membership flip — the Boss must see "my bot was removed", not just a
+      // silently grayed collab card. Best effort, mirroring the invite path.
+      if (params.coworkStore && params.fromGlobalMetaId && handlers.recordKickDisplay) {
+        try {
+          handlers.recordKickDisplay({
+            coworkStore: params.coworkStore,
+            metabot: params.metabot,
+            kick: envelope.kick,
+            senderGlobalMetaId: params.fromGlobalMetaId,
+            senderName: params.senderName,
+            senderAvatar: params.senderAvatar,
+            envelopePinId: params.rowPinId,
+            emitToRenderer: params.emitToRenderer,
+          });
+        } catch (error) {
+          emitLog(
+            `[OpenTeam] Kick A2A display failed for message ${params.messageId}: ` +
+            `${error instanceof Error ? error.message : error}`,
+          );
+        }
+      }
       handlers.handleKick({
         metabot: params.metabot,
         kick: envelope.kick,

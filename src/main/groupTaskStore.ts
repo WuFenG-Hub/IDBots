@@ -85,6 +85,28 @@ export interface GroupTaskCheckpoint {
   resolvedAt: string | null;
 }
 
+/** Renderer-bound broadcast payload for one real status transition. */
+export interface GroupTaskStatusChangedBroadcast {
+  type: 'groupTask:statusChanged';
+  taskId: number;
+  status: GroupTaskStatus;
+  at: number;
+}
+
+/**
+ * Optional renderer broadcast hook. Injected once from main.ts at startup so
+ * EVERY status write (daemon tag round-trip, UI IPC, Twin RPC close/rework)
+ * emits groupTask:statusChanged — previously each caller had to remember to
+ * broadcast and the RPC path never did, leaving the UI stale until reload.
+ */
+let statusChangedBroadcaster: ((event: GroupTaskStatusChangedBroadcast) => void) | null = null;
+
+export function setGroupTaskStoreStatusBroadcaster(
+  broadcaster: ((event: GroupTaskStatusChangedBroadcast) => void) | null,
+): void {
+  statusChangedBroadcaster = broadcaster;
+}
+
 export interface GroupTask {
   id: number;
   orchestrationTaskId: string | null;
@@ -683,7 +705,22 @@ export class GroupTaskStore {
     const updated = this.getTaskById(id);
     if (!updated) throw new Error(`Group task ${id} not found after status update`);
     this.recordStatusEvent(id, beforeStatus, nextStatus, opts?.actor);
+    this.emitStatusChanged(id, nextStatus);
     return updated;
+  }
+
+  /** Broadcast one real transition to the renderer; a broadcast failure never breaks the transition. */
+  private emitStatusChanged(id: number, nextStatus: GroupTaskStatus): void {
+    try {
+      statusChangedBroadcaster?.({
+        type: 'groupTask:statusChanged',
+        taskId: id,
+        status: nextStatus,
+        at: Date.now(),
+      });
+    } catch (error) {
+      console.warn('GroupTaskStore.emitStatusChanged:', error);
+    }
   }
 
   /** Insert one status-transition event row (best-effort, never throws). */

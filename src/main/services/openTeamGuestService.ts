@@ -606,7 +606,7 @@ export function handleOpenTeamKick(
       );
       return { action: 'ignored', reason: 'sender_not_inviter' };
     }
-    membershipStore.markLeft(groupId, input.metabot.id);
+    membershipStore.markLeft(groupId, input.metabot.id, { cause: 'kick', reason: input.kick.reason });
     emitLog(
       `[OpenTeam] MetaBot ${input.metabot.id}: KICK received for group ${groupId} ` +
       `("${input.kick.taskTitle || 'untitled'}")` +

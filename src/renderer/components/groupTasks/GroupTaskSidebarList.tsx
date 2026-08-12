@@ -49,6 +49,9 @@ const GroupTaskSidebarList: React.FC<GroupTaskSidebarListProps> = ({
           className="group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
         >
           <div className="flex items-center gap-2 mb-0.5">
+            <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              #{task.id}
+            </span>
             <span className="flex-1 min-w-0 truncate text-sm font-medium dark:text-claude-darkText text-claude-text">
               {task.title}
             </span>
