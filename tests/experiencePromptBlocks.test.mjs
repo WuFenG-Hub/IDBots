@@ -176,7 +176,8 @@ test('formatExperienceRecallResults renders entries, session refs and the reuse 
   const empty = formatExperienceRecallResults([]);
   assert.ok(empty.includes('No experience summaries found'));
 
-  const longText = '长'.repeat(1000);
+  // Truncation still kicks in past the raised per-entry cap (1500 chars).
+  const longText = '长'.repeat(2000);
   const truncated = formatExperienceRecallResults([{ summaryDate: '2026-08-03', summaryText: longText }]);
   assert.ok(truncated.includes('…'));
 });

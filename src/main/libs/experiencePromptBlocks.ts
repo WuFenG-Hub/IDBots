@@ -14,7 +14,9 @@ export const RECENT_SUMMARIES_PROMPT_DAYS = 7;
 export const RECENT_SUMMARIES_MAX_CHARS = 2000;
 export const RECALL_WARM_DAYS = 30;
 export const RECALL_MAX_LIMIT = 30;
-const RECALL_ENTRY_MAX_CHARS = 600;
+// Dream diaries now scale with the day's activity, so recall must not clip a
+// rich day back to a fixed blurb. 1500 chars still keeps a 30-day recall bounded.
+const RECALL_ENTRY_MAX_CHARS = 1500;
 
 export interface ExperienceSummarySessionRef {
   sessionId: string;

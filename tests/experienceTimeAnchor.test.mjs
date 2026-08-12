@@ -82,6 +82,13 @@ test('empty result still returns the no-summaries message regardless of granular
   assert.ok(monthEmpty.includes('No experience summaries found'));
 });
 
+test('a busy day\u2019s longer diary survives day-granularity recall (not clipped to the old 600 cap)', () => {
+  const longText = '充实的一天:'.repeat(200); // ~1400 chars, well past the old 600 cap
+  const text = formatExperienceRecallResults([{ summaryDate: '2026-08-13', summaryText: longText }], 'day');
+  assert.ok(text.includes('充实的一天'), 'full-length diary content preserved, not truncated at 600');
+  assert.ok(text.length > 1000, 'recall output is substantial for a rich day');
+});
+
 test('formatExperienceTimelineFallback lists raw episodes when no summary exists', () => {
   const text = formatExperienceTimelineFallback({
     dateFrom: '2026-06-01',
