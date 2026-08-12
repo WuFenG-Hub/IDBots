@@ -21,15 +21,48 @@ import {
   groupTaskWorkStatusLabelKey,
   isActiveGroupTaskStatus,
   mergeTranscriptMessages,
+  shortGroupId,
   shouldStickToBottom,
 } from './groupTaskUtils';
 import { groupTaskStatusLabelKey } from './GroupTasksView';
-import { ArrowLeftIcon, ChatBubbleLeftRightIcon, XMarkIcon } from '@heroicons/react/24/outline';
+import { ArrowLeftIcon, ChatBubbleLeftRightIcon, ClipboardDocumentIcon, CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
 
 const MESSAGE_PAGE_LIMIT = 50;
+
+/**
+ * Copyable group/room id pill. The group_id is the room id (stored locally on
+ * the task) — copying it lets the owner paste it when referring a local MetaBot
+ * to a specific group task. Shows a short form; copies the FULL id.
+ */
+const RoomIdBadge: React.FC<{ groupId: string }> = ({ groupId }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(groupId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard unavailable (permissions) — the title tooltip still shows the full id
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={() => void handleCopy()}
+      title={i18nService.t(copied ? 'groupTasksRoomIdCopied' : 'groupTasksCopyRoomId')}
+      aria-label={i18nService.t(copied ? 'groupTasksRoomIdCopied' : 'groupTasksCopyRoomId')}
+      className="non-draggable inline-flex shrink-0 items-center gap-1 rounded-full border dark:border-claude-darkBorder border-claude-border px-2 py-0.5 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+    >
+      <span className="font-mono">{shortGroupId(groupId)}</span>
+      {copied
+        ? <CheckIcon className="h-3 w-3 text-emerald-500" />
+        : <ClipboardDocumentIcon className="h-3 w-3" />}
+    </button>
+  );
+};
 
 interface GroupTaskDetailViewProps {
   taskId: number;
@@ -355,6 +388,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${groupTaskStatusBadgeClass(detail.status)}`}>
             {i18nService.t(groupTaskStatusLabelKey(detail.status))}
           </span>
+          {detail.groupId && <RoomIdBadge groupId={detail.groupId} />}
         </div>
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (

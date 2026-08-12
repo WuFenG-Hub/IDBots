@@ -16,6 +16,19 @@ export function canAcceptGroupTask(status) {
 }
 
 /**
+ * Short display form for a group/room id (the on-chain group_id, a 64-hex pinid
+ * with an `i0` output suffix). Long ids are elided to `first8…last6` (keeping
+ * the `i0` suffix visible so the room stays recognizable); short values and
+ * junk pass through unchanged. The FULL id is what gets copied to the clipboard.
+ */
+export function shortGroupId(groupId) {
+  const id = String(groupId ?? '').trim();
+  if (!id) return '';
+  if (id.length <= 16) return id;
+  return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
+/**
  * P0-1: a review task can be pulled back to executing (Back to work) — the
  * owner/chair reopens it to assign supplementary subtasks.
  */

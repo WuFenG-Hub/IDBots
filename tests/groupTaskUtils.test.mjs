@@ -9,6 +9,7 @@ import {
   groupTaskStatusBadgeClass,
   formatGroupTaskTime,
   mergeTranscriptMessages,
+  shortGroupId,
   shouldStickToBottom,
 } from '../src/renderer/components/groupTasks/groupTaskUtils.js';
 
@@ -96,6 +97,14 @@ test('mergeTranscriptMessages: dedupe by id, ascending, tolerates junk', () => {
   );
   assert.deepEqual(mergeTranscriptMessages(null, incoming).map((m) => m.id), [3, 5]);
   assert.deepEqual(mergeTranscriptMessages(existing, null).map((m) => m.id), [1, 3]);
+});
+
+test('shortGroupId: elides long room ids, keeps i0 suffix visible, passes short/junk through', () => {
+  const longId = '198206ac14f950dbfc25fad73992b6091232623987f1ab0251de1c7825de6ca5i0';
+  assert.equal(shortGroupId(longId), '198206ac…6ca5i0');
+  assert.equal(shortGroupId('abcd1234ef90i0'), 'abcd1234ef90i0');
+  assert.equal(shortGroupId(null), '');
+  assert.equal(shortGroupId('   '), '');
 });
 
 test('shouldStickToBottom: threshold semantics', () => {
