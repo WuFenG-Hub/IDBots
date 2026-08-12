@@ -2,53 +2,76 @@
 
 > Read this after a restart / in a fresh session. It is the short version;
 > the durable long version is the whole `docs/gasfee-flow/` directory.
+> Last refreshed: 2026-08-11 (post R1/R2 merge).
 
 ## Where everything lives
 
-- **Branch / worktree**: `feat/gasfee-flow` at `.worktrees/gasfee-flow`
-  (persists on disk across reboots; nothing is only in memory)
+- **All traffic work is merged into `main`** (latest merge: `65e9eff5`,
+  R1 ledger detail). There is no long-lived feature branch anymore.
 - **Docs (read in this order)**:
   1. `README.md` — background, vision, confirmed decisions, progress log
-  2. `roadmap.md` — phases & milestone status (M1.x, M2.x, M3.x all done)
+  2. `roadmap.md` — phases & milestone status (M1.x, M2.x except M2.4, M3.x done)
   3. `architecture.md` — system design
   4. `backend-spec.md` — backend contract (+ §12 errata)
   5. `idbots-implementation-plan.md` — client plan
-  6. `manual-qa-checklist.md` — the pending on-device walkthrough
+  6. `m2-4-fee-rate-threading.md` — **next client task**, ready to start
+  7. `phase4-payment-plan.md` — real payment plan (blocked on company credentials)
+  8. `backend-request-ledger-txid.md` — pending backend change request
+  9. `manual-qa-checklist.md` — on-device walkthrough
 - **Backend repo (do NOT modify)**: `/Users/tusm/Documents/MetaID_Projects/assist-base-service`,
   their branch `feat/traffic-account` (worktree `.worktrees/traffic-account`)
 
-## Current state (2026-08-10)
+## Current state (2026-08-11)
 
-- Client Phases A–E **complete**; backend Phase 1 **complete**; joint
-  integration (M1.7) **PASSED** — all 13 acceptance criteria verified live
-  against the test instance. Latest commit: `d57f0f98`.
-- Test instance: `http://47.76.58.120:7882` (mainnet chain, isolated test keys).
-  Admin token: **not stored in the repo** — copy it from the backend team's
-  handoff message in chat history / ask ops.
-- E2E evidence & scripts: `scripts/traffic-e2e/` (`run-traffic-e2e.mjs`,
-  `run-acceptance-extended.mjs`, `run-acceptance-feerate.mjs`), runnable with
+- Phase 1 (backend traffic account) **done**, 13/13 acceptance criteria verified
+  live. Phase 2 (sponsor for all writes) done **except M2.4**. Phase 3 (recharge
+  UI + traffic center) **done**.
+- Two rounds of real-device QA feedback were addressed and merged:
+  i18n coverage + friendly network errors, missing EN keys, adaptive B/KB/MB
+  units (R2), ledger detail with full timestamp + TXID + business kind (R1).
+- Product-owner decisions on record:
+  - Source labels stay at business-kind level (chat / buzz / file).
+    **Group/task-level source labels were explicitly rejected** (2026-08-11).
+  - Mock payment is acceptable until company qualifications are ready.
+  - Multi-chain recharge (Phase 6) comes after single-ISP (MVC) is proven.
+- Test instance: `http://47.76.58.120:7882` (mainnet chain, isolated test keys;
+  use the bare URL, **no** `/assist-open-api` suffix). Admin token: **not stored
+  in the repo** — ask ops / copy from the backend team's handoff message.
+- E2E scripts: `scripts/traffic-e2e/`, run with
   `ASSIST_ADMIN_TOKEN=... node scripts/traffic-e2e/run-traffic-e2e.mjs`.
 
 ## What remains (in order)
 
-1. **On-device QA of the Traffic panel** — follow `manual-qa-checklist.md`:
-   `cd .worktrees/gasfee-flow && npm run dev`, then Settings → Traffic →
-   Advanced → `http://47.76.58.120:7882` (no path suffix) → the checklist steps.
-2. **Merge decision** — deferred by product owner ("version has big changes,
-   accept on the branch first"). Our branch is merge-ready (default self-pay =
-   zero behavior change); backend's `feat/traffic-account` is also accepted.
-   Merge only on explicit instruction, with `git merge --no-ff`.
-3. **Phase 4 real payment** — Stripe + Alipay together, after company
-   qualifications; replace the clearly-marked mock-pay points
-   (`TrafficSettings.tsx` handleMockConfirm + backend MockGateway).
-4. Known follow-ups: 3 pre-existing test failures on main (unrelated, logged in
-   README progress); backend nits already forwarded (order response lacks
-   `networkFeeRate`; rate-limit retry guidance for their docs).
+1. **M2.4 — fee-rate threading audit** (client, see `m2-4-fee-rate-threading.md`).
+   This is the next development task; follow the branch+worktree rhythm.
+2. **Backend request: ledger API returns `txId`** — prompt handed to the
+   backend team (see `backend-request-ledger-txid.md`); verify on their next
+   delivery, then remove the client-side journal join fallback if desired.
+3. **P2-03 — switch default apiBase to production** before release
+   (currently defaults to the test instance path via `backend-spec`; check
+   `trafficSettings` / `getConfiguredTrafficApiBase`).
+4. **Phase 4 real payment** (see `phase4-payment-plan.md`) — blocked on
+   company qualifications (Stripe/Alipay merchant accounts).
+5. Known non-blockers: 3 pre-existing test failures on main (mvcSpend pickUtxo
+   ordering, two metaidCoreMvcRecovery) proven unrelated to this project —
+   do not chase them as regressions.
+
+## Gotchas (cost us real time — read before testing)
+
+- **Main-process tests import the compiled bundle** (`dist-electron/main/...`),
+  not `src/`. After any merge or main-process edit, run
+  `npm run compile:electron` first, or tests silently exercise stale code.
+- Run traffic tests with `npx tsx --test tests/trafficAccountService.test.mjs`
+  (plain `node --test` fails); renderer tests: `npx tsx --test tests/<file>.tsx`.
+- `tests/*` is gitignored → new test files need `git add -f`.
+- If the user reports "fetch failed" in the Traffic panel, first check the test
+  instance is up: `curl -m 10 http://47.76.58.120:7882/v1/traffic/pricing`.
 
 ## Working agreements (must keep)
 
-- Every change: small commit (`<type>: <desc>`) + on-chain dev journal via the
-  `metabot-post-buzz` skill (user scope, not the repo's SKILLs copy).
+- Rhythm: new branch + same-named worktree (`.worktrees/<name>`, symlink
+  `node_modules`), small commits, report, **wait for explicit confirmation**,
+  then `git merge --no-ff` into main, delete branch + worktree.
+- Every commit gets an on-chain dev journal via the `metabot-post-buzz` skill
+  (user scope, not the repo's SKILLs copy). Docs/commits/comments in English.
 - Never modify the assist-base-service repo; feedback goes to their team.
-- All code changes stay inside the worktree; never commit on main directly.
-- tests/* is gitignored → new test files need `git add -f`.

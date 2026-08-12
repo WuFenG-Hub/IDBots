@@ -62,6 +62,7 @@ fallback. Fee-rate injection unified.
 - `[x]` M2.2 `createPinWorker` supports "build unsigned draft" mode
 - `[x]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
 - `[ ]` M2.4 Fee rate explicitly threaded through all createPin call sites
+  → ready to start; work items in `m2-4-fee-rate-threading.md`
 - `[x]` M2.5 Tests: sponsor path for chat pins; fallback matrix
 
 **Acceptance**: with traffic mode on and a funded pool, a bot can chat/buzz/upload
@@ -91,7 +92,7 @@ see 100 MB balance → send messages → watch per-bot usage update.
 ## Phase 4 — Real Payment Integration
 
 **Goal**: replace mock gateway with Stripe + Alipay (both together), after company
-qualifications are ready.
+qualifications are ready. Detailed plan: `phase4-payment-plan.md`.
 
 - `[ ]` M4.1 PaymentGateway adapter interface finalized (backend)
 - `[ ]` M4.2 Stripe adapter + webhook verification
@@ -134,6 +135,10 @@ selected ISP.
 
 ## Current Focus
 
-Phase 0 complete. Next: deliver `backend-spec.md` to the backend team for review
-(Phase 1 M1.1), and start Phase 2 prep (sponsor client extraction can proceed in
-parallel — it is purely client-side and useful regardless of backend timeline).
+Phases 0–3 complete and merged to `main` (through R1/R2 QA fixes, 2026-08-11).
+Next, in order: M2.4 fee-rate threading (client, see
+`m2-4-fee-rate-threading.md`); backend ledger `txId` request (sent, see
+`backend-request-ledger-txid.md`); P2-03 production apiBase switch before
+release; Phase 4 real payment once company qualifications land (see
+`phase4-payment-plan.md`). Product-owner decision on record: no
+group/task-level source labels in the ledger.
