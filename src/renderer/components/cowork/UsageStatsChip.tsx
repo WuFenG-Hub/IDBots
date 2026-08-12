@@ -19,10 +19,13 @@ const DEEPSEEK_DEFAULT_RATE = DEEPSEEK_RATES['deepseek-v4-flash'];
 
 function estimateDeepSeekCostCNY(model: string | undefined, stats: CoworkUsageStats): number {
   const rate = (model && DEEPSEEK_RATES[model]) || DEEPSEEK_DEFAULT_RATE;
+  // The proxy maps DeepSeek usage so input_tokens is the TOTAL input
+  // (cached + uncached) and cacheRead/cacheCreation partition it — do NOT add
+  // inputTokens on top, or the input side is billed twice (the estimate came
+  // out ~7x the real charge: hit*0.02 + miss*1 + output*2 only).
   return (
     (stats.cacheReadTokens / 1_000_000) * rate.cacheHitPerM
     + (stats.cacheCreationTokens / 1_000_000) * rate.cacheMissPerM
-    + (stats.inputTokens / 1_000_000) * rate.cacheMissPerM
     + (stats.outputTokens / 1_000_000) * rate.outputPerM
   );
 }
@@ -57,10 +60,14 @@ interface UsageStatsChipProps {
 }
 
 /**
- * Per-session token/cost indicator (DeepSeek-first). Shows a compact chip in
- * the session header with token total; hover reveals the breakdown: input /
- * output / cache hit / cache miss tokens, an estimated USD cost at DeepSeek
- * rates (for proxy sessions), or the SDK-priced cost (Anthropic direct).
+ * Per-session token/cost indicator. Shows a compact chip in the session
+ * header with token total; hover reveals the breakdown: input / output /
+ * cache hit / cache miss tokens, cache-hit rates, and — matching the ACTUAL
+ * billing account — a CNY estimate at DeepSeek rates (DeepSeek-billed proxy
+ * sessions), the SDK-priced USD cost (Anthropic direct), or no cost at all
+ * (plan/subscription/per-request providers like opencode, where a fabricated
+ * cost estimate would be misleading). The DeepSeek wallet balance row is
+ * shown ONLY for DeepSeek-billed sessions.
  */
 const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -93,15 +100,31 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isOpen, fetchBalance]);
 
-  const totalTokens = usageStats.inputTokens + usageStats.outputTokens
-    + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
+  // Total token display. For anything except Anthropic-native sessions (i.e.
+  // DeepSeek via the proxy AND OpenAI-compat gateways like opencode) the
+  // upstream reports input_tokens as the TOTAL input — it already includes
+  // the cache hit/miss tokens, so adding them again would double the number.
+  // Only direct Anthropic sessions exclude cache tokens from input_tokens
+  // (Anthropic semantics), so all four counters are summed there.
+  const isDeepSeek = usageStats.source === 'deepseek';
+  const cacheIncludedInInput = usageStats.source !== 'anthropic';
+  const totalTokens = cacheIncludedInInput
+    ? usageStats.inputTokens + usageStats.outputTokens
+    : usageStats.inputTokens + usageStats.outputTokens
+      + usageStats.cacheReadTokens + usageStats.cacheCreationTokens;
 
   if (totalTokens <= 0) return null;
 
-  const isDeepSeek = usageStats.source === 'deepseek';
+  // Cost display follows the actual billing account:
+  // - deepseek: CNY estimate at DeepSeek standard rates (wallet is billed in CNY).
+  // - anthropic: SDK-priced USD cost (real Anthropic pricing).
+  // - other (opencode plans, openrouter, custom gateways, ollama, ...): these
+  //   are billed per request or by subscription — no cost estimate is shown.
   const estimatedCost = isDeepSeek
     ? estimateDeepSeekCostCNY(modelId, usageStats)
-    : (usageStats.totalCostUsd ?? 0);
+    : usageStats.source === 'anthropic'
+      ? (usageStats.totalCostUsd ?? 0)
+      : 0;
   const showCost = estimatedCost > 0;
   // Session cache-hit rate. Two numbers with different meaning:
   // - cacheHitRate: cumulative over ALL turns (diluted by the T1 cold start,
@@ -151,11 +174,41 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               </span>
             )}
           </div>
+          {(() => {
+            // The REAL upstream this session is hitting — the provider key
+            // resolved at run start (metabot llm_id / defaultProvider /
+            // config-order). This is the honest answer to "am I on OpenCode
+            // or DeepSeek right now?".
+            const provider = usageStats.upstreamProvider?.trim();
+            const upstreamHost = usageStats.upstreamBaseURL
+              ? usageStats.upstreamBaseURL.replace(/^https?:\/\//, '').replace(/\/+$/, '')
+              : '';
+            if (!provider && !upstreamHost) return null;
+            const label = provider
+              ? provider.charAt(0).toUpperCase() + provider.slice(1)
+              : upstreamHost;
+            return (
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
+                <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('coworkUsageUpstream')}
+                </span>
+                <span className="font-mono truncate pl-2 dark:text-claude-darkText text-claude-text" title={upstreamHost || label}>
+                  {upstreamHost ? `${label} · ${upstreamHost}` : label}
+                </span>
+              </div>
+            );
+          })()}
           <div className="mt-2 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageInput')}</span><span className="font-mono">{formatTokens(usageStats.inputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheMiss')}</span><span className="font-mono">{formatTokens(usageStats.cacheCreationTokens)}</span></div>
+            {typeof usageStats.thinkingTokensEstimate === 'number' && usageStats.thinkingTokensEstimate > 0 && (
+              <div className="flex justify-between">
+                <span>{i18nService.t('coworkUsageThinking')}</span>
+                <span className="font-mono">{formatTokens(usageStats.thinkingTokensEstimate)}</span>
+              </div>
+            )}
           </div>
           {(() => {
             // Cache-hit rates, three meanings:
@@ -209,6 +262,36 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               </span>
             </div>
           )}
+          {(() => {
+            // Per-model breakdown from the SDK's modelUsage: the top-level
+            // counters only cover the main loop, while Task subagents and CLI
+            // side jobs (prompt suggestions, progress summaries) are billed to
+            // the provider but only appear here.
+            const perModelEntries = Object.entries(usageStats.perModelUsage ?? {})
+              .filter(([, u]) => u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheCreationTokens > 0);
+            if (perModelEntries.length === 0) return null;
+            return (
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <div className="opacity-70">{i18nService.t('coworkUsagePerModelTitle')}</div>
+                {perModelEntries.map(([model, u]) => {
+                  // Same input_tokens semantics as the top counters: non-
+                  // Anthropic entries already include cache tokens in
+                  // inputTokens.
+                  const modelInput = cacheIncludedInInput
+                    ? u.inputTokens
+                    : u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens;
+                  return (
+                    <div key={model} className="flex justify-between gap-2">
+                      <span className="truncate" title={model}>{model}</span>
+                      <span className="font-mono whitespace-nowrap">
+                        {formatTokens(modelInput)} / {formatTokens(u.outputTokens)}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
           {isDeepSeek && (
             <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
               <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">

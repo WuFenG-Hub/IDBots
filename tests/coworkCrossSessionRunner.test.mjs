@@ -76,6 +76,13 @@ class FakeCoworkStore {
     return session?.messages.at(-1) ?? null;
   }
 
+  // GT#12 N3: readLatest now queries the latest EXTERNALLY VISIBLE message
+  // (skipping isThinking/isStreaming drafts). This fake's messages are all
+  // visible, so it matches getSessionLatestMessage.
+  getSessionLatestVisibleMessage(id) {
+    return this.getSessionLatestMessage(id);
+  }
+
   addMessage(id, message) {
     const session = this.getSession(id);
     if (!session) {
@@ -431,4 +438,110 @@ test('stopped target drops queued cross-session continuation and does not restar
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(runCalls.length, 0);
   assert.equal(store.getSession(target.id).messages[0].content, `来自${source.id} 的信息：do not auto-run after stop`);
+});
+
+
+// ---------------------------------------------------------------------------
+// P1-5b: insertCrossSessionMessageAndQueue is the shared host seam for the
+// MCP write tool AND internal orchestrators (TwinOrchestrationService
+// ORCH-NOTIFY). Inserting a message must also queue (and drain → continue)
+// the target session, i.e. activate it — verified here by observing
+// runClaudeCode on the target session, the same activation the MCP tool path
+// performs.
+// ---------------------------------------------------------------------------
+test('insertCrossSessionMessageAndQueue inserts, emits once, and drains to activate the target session (runClaudeCode)', async () => {
+  const { store, runner, runCalls, emittedMessages } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+
+  const combined = runner.insertCrossSessionMessageAndQueue({
+    sourceSessionId: source.id,
+    targetSessionId: target.id,
+    message: 'wake up twin session',
+  });
+
+  assert.equal(combined.insert.ok, true);
+  assert.equal(combined.runQueued, true);
+  assert.equal(combined.queueDepth, 1);
+  assert.equal(combined.insert.targetSessionId, target.id);
+  assert.deepEqual(emittedMessages.map((event) => event.sessionId), [target.id]);
+  assert.equal(emittedMessages[0].message.id, combined.insert.message.id);
+
+  // The queued continuation drains and calls continueSession → runClaudeCode
+  // on the TARGET session: this is the activation the MCP channel provides.
+  await waitFor(() => assert.equal(runCalls.length, 1));
+  assert.equal(runCalls[0].sessionId, target.id);
+  assert.match(runCalls[0].prompt, /wake up twin session/);
+  assert.deepEqual(store.getSession(target.id).messages.map((message) => message.content), [
+    `来自${source.id} 的信息：wake up twin session`,
+  ]);
+});
+
+test('insertCrossSessionMessageAndQueue reports unqueued when target was already stopped, message still inserted', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('stopped-target');
+
+  runner.stopSession(target.id);
+
+  const combined = runner.insertCrossSessionMessageAndQueue({
+    sourceSessionId: source.id,
+    targetSessionId: target.id,
+    message: 'insert without restart',
+  });
+
+  assert.equal(combined.insert.ok, true);
+  assert.equal(combined.runQueued, false);
+  assert.equal(combined.warning, 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED');
+  assert.equal(combined.reason, 'TARGET_SESSION_STOPPED');
+  assert.match(combined.error, /TARGET_SESSION_STOPPED/);
+  assert.equal(store.getSession(target.id).messages.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runCalls.length, 0, 'stopped target must not be restarted');
+});
+
+test('insertCrossSessionMessageAndQueue rejects A2A targets without inserting or queueing', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('a2a-target', {
+    sessionType: 'a2a',
+    peerGlobalMetaId: 'peer-global',
+    peerName: 'Peer',
+  });
+
+  const combined = runner.insertCrossSessionMessageAndQueue({
+    sourceSessionId: source.id,
+    targetSessionId: target.id,
+    message: 'hello peer',
+  });
+
+  assert.equal(combined.insert.ok, false);
+  assert.equal(combined.insert.code, 'WRITE_NOT_ALLOWED_FOR_A2A');
+  assert.equal(combined.runQueued, false);
+  assert.equal(store.getSession(target.id).messages.length, 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runCalls.length, 0);
+});
+
+test('insertCrossSessionMessageAndQueue reports partial success if queue acceptance throws after insert', async () => {
+  const { store, runner, runCalls } = createHarness();
+  const source = store.createSession('source-session');
+  const target = store.createSession('target-session');
+  runner.enqueueCrossSessionContinuation = () => {
+    throw new Error('queue unavailable');
+  };
+
+  const combined = runner.insertCrossSessionMessageAndQueue({
+    sourceSessionId: source.id,
+    targetSessionId: target.id,
+    message: 'queued later',
+  });
+
+  assert.equal(combined.insert.ok, true);
+  assert.equal(combined.runQueued, false);
+  assert.equal(combined.warning, 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED');
+  assert.match(combined.error, /queue unavailable/);
+  assert.equal(store.getSession(target.id).messages.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(runCalls.length, 0);
 });

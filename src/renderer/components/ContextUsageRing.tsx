@@ -41,11 +41,15 @@ const ContextUsageRing: React.FC<ContextUsageRingProps> = ({
   const dashOffset = circumference * (1 - ratio);
   const percent = Math.round(ratio * 100);
 
+  // Arc color: normal = the bright brand yellow (#FFDC51), same as the main
+  // send button and as dark mode; warning = amber; critical = deep amber. The
+  // earlier accent token read as a muddy gold in light mode, so the ring now
+  // uses the literal brand yellow in both themes.
   const arcColorClass = ratio >= CRITICAL_RATIO
-    ? 'text-red-500'
+    ? 'text-amber-700 dark:text-amber-500'
     : ratio >= WARNING_RATIO
       ? 'text-amber-500'
-      : 'text-claude-accent';
+      : 'text-[#FFDC51]';
 
   return (
     <div className={`relative group inline-flex items-center ${className ?? ''}`}>

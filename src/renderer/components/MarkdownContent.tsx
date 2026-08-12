@@ -6,8 +6,9 @@ import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 // @ts-ignore
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { ClipboardDocumentIcon, CheckIcon, DocumentIcon, FolderIcon } from '@heroicons/react/24/outline';
+import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
+import LocalFileLink from './ui/LocalFileLink';
 
 const CODE_BLOCK_LINE_LIMIT = 200;
 const CODE_BLOCK_CHAR_LIMIT = 20000;
@@ -542,9 +543,9 @@ const createMarkdownComponents = (
       const decodedPath = safeDecodeURIComponent(rawPath);
       const filePath = decodedPath || rawPath;
 
-      const handleClick = async (e: React.MouseEvent<HTMLAnchorElement>) => {
+      const handleClick = async (e: React.MouseEvent) => {
         e.preventDefault();
-        const anchor = e.currentTarget;
+        const anchor = e.currentTarget as HTMLAnchorElement;
         try {
           const result = await window.electron.shell.openPath(filePath);
           if (result?.success) {
@@ -570,20 +571,16 @@ const createMarkdownComponents = (
       };
 
       return (
-        <a
-          href={toFileHref(filePath)}
-          onClick={handleClick}
+        <LocalFileLink
+          filePath={filePath}
+          isDirectory={looksLikeDirectory(filePath)}
           className="text-claude-accent hover:text-claude-accentHover underline decoration-claude-accent/50 hover:decoration-claude-accent transition-colors cursor-pointer inline-flex items-center gap-1"
           title={filePath}
-          {...props}
+          href={toFileHref(filePath)}
+          onOpen={(_path, event) => handleClick(event)}
         >
           {children}
-          {looksLikeDirectory(filePath) ? (
-            <FolderIcon className="h-3.5 w-3.5 inline" />
-          ) : (
-            <DocumentIcon className="h-3.5 w-3.5 inline" />
-          )}
-        </a>
+        </LocalFileLink>
       );
     }
 

@@ -18,6 +18,7 @@ import {
   type CoworkMessageMetadata,
 } from './coworkStore';
 import { McpStore, type McpServerFormData } from './mcpStore';
+import { ProjectStore, type ProjectFormData } from './projectStore';
 import type { MemoryBackend } from './memory/memoryBackend';
 import { createOwnerMemoryScope } from './memory/memoryScope';
 import {
@@ -45,7 +46,23 @@ import { getSkillServiceManager } from './skillServices';
 import { createTray, destroyTray, updateTrayMenu } from './trayManager';
 import { isAutoLaunched, getAutoLaunchEnabled, setAutoLaunchEnabled } from './autoLaunchManager';
 import { ScheduledTaskStore } from './scheduledTaskStore';
+import { SdkCronMirrorStore, SdkCronScheduleSpec, parseScheduledTasksFile } from './sdkCronMirrorStore';
+import { planTaskMigration, extractMigrationTaskId } from './sdkCronMigration';
+import {
+  buildCronDeleteInstruction,
+  buildCronCreateInstruction,
+  buildCronCreateUiInstruction,
+  buildCronRunNowInstruction,
+  buildCronMarker,
+  buildCronPromptWithMarker,
+  extractCronNonce,
+  computeSdkCronFromSpec,
+  deriveScheduleSpecFromCron,
+} from './sdkCronBridge';
+import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
+import type { SdkCronMirrorBridge } from './libs/coworkRunner';
 import { GroupTaskStore, type GroupTaskStatus } from './groupTaskStore';
+import { OpenTeamMembershipStore } from './openTeamMembershipStore';
 import { OrchestrationStore } from './orchestrationStore';
 import { MetabotStore } from './metabotStore';
 import { ServiceOrderStore, type ServiceOrderRecord } from './serviceOrderStore';
@@ -54,6 +71,7 @@ import { MetaIDImpressionStore } from './metaidImpressionStore';
 import { getPositions } from './positions';
 import { MetaIDCognitionContextService } from './services/metaidCognitionContext';
 import { MetaIDRelationshipResolver } from './services/metaidRelationshipResolver';
+import { MetaIDContactViewService } from './services/metaidContactViewService';
 import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
@@ -66,7 +84,8 @@ import {
   createUserIdentity,
   importUserIdentity,
   logoutUserIdentity,
-  syncUserIdentityToChain,
+  resumeUserIdentitySetup,
+  retryUserIdentitySubsidy,
   updateUserIdentityName,
 } from './services/userIdentityService';
 import { signOwnerBinding } from './services/ownerBindingService';
@@ -89,6 +108,7 @@ import {
   getTokenTransferChain,
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
+import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -131,19 +151,42 @@ import {
 import {
   setGroupTaskServiceMetabotStoreGetter,
   setGroupTaskServiceGroupTaskStoreGetter,
+  setGroupTaskServiceOpenTeamMembershipStoreGetter,
   setGroupTaskServiceOrchestrationBridgeGetter,
   setGroupTaskServiceKvStoreGetter,
+  setGroupTaskServiceCoworkStoreGetter,
+  setGroupTaskServiceTransport,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
   getGroupTask,
   closeGroupTask,
+  reopenGroupTask,
+  reworkGroupTask,
+  kickGroupTaskMember,
   postGroupTaskMessageAsOwner,
 } from './services/groupTaskService';
 import {
   startGroupTaskDaemon,
   stopGroupTaskDaemon,
+  type GroupTaskDaemonSendOwnerReportFn,
 } from './services/groupTaskDaemon';
+import {
+  startOpenTeamGuestDaemon,
+  stopOpenTeamGuestDaemon,
+} from './services/openTeamGuestDaemon';
+import { setOpenTeamGuestServiceDeps } from './services/openTeamGuestService';
+import { setOpenTeamImpressionServiceDepsGetter } from './services/openTeamImpressionService';
+import {
+  getRendererMetabotSetting,
+  setRendererMetabotSetting,
+} from './services/metabotSettingsService';
+import {
+  resumeOpenTeamInviteWatchers,
+  setOpenTeamServiceDeps,
+  stopOpenTeamInviteWatchers,
+} from './services/openTeamService';
+import { getMetaIdDetail, searchMetaIds } from './services/metaIdSearchService';
 import { a2aGuidanceQueue, normalizeA2AGuidanceText } from './services/a2aGuidance';
 import {
   buildA2AGuidanceRestartPrompt,
@@ -159,6 +202,8 @@ import {
 import { normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
+import { MessageFeedbackStore } from './messageFeedbackStore';
+import { computeDreamRetryDelayMs } from './libs/dreamPrompt';
 import { runOrchestratorSkillTurn, runSkillTurnInExistingSession } from './services/orchestratorCoworkBridge';
 import { buildTwinWorkerDirectory } from './services/twinWorkerDirectoryService';
 import { TwinOrchestrationService } from './services/twinOrchestrationService';
@@ -168,7 +213,7 @@ import {
   CoworkTurnSubmissionController,
   type CoworkSubmitInput,
 } from './services/coworkTurnSubmission';
-import { createPin, getPinData } from './services/metaidCore';
+import { createPin, getPinData, resolveCreatePinNetwork } from './services/metaidCore';
 import {
   listOwnerMetaApps,
   publishMetaApp,
@@ -190,7 +235,7 @@ import {
 } from './services/privateChatHistorySyncService';
 import { syncP2PRuntimeConfig } from './services/p2pRuntimeConfigSync';
 import { computeEcdhSharedSecretSha256, computeEcdhSharedSecret, ecdhEncrypt, ecdhDecrypt } from './services/metaWebCrypto';
-import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
+import { sendGroupChatMessage, sendGroupChatMessageAsIdentity, joinGroupChat, waitForMemberJoined, fetchGroupInfo, fetchGroupMembers, setGroupChatTransportMetabotStoreGetter, setGroupChatTransportUserIdentityStoreGetter } from './services/groupChatTransport';
 import { createAgentGameHost, type AgentGameHost } from './agentGame';
 import type { GameManifest, GameSession } from './agentGame/abi';
 import { toSessionView as toPublicSessionView } from './agentGame/abi';
@@ -225,6 +270,11 @@ import {
   type BotBrowserTabBridge,
   type BotBrowserTabCommandResponse,
 } from './services/botBrowserTabBridge';
+import {
+  createBotBrowserCaptureBridge,
+  type BotBrowserCaptureBridge,
+  type BotBrowserCaptureResponse,
+} from './services/botBrowserCaptureBridge';
 import { sendBotBrowserOpenUri } from './services/botBrowserOpenUriService';
 import {
   forkMetaAppToWorkspace,
@@ -239,6 +289,11 @@ import {
   searchMetaIds as searchMetaIdsRemote,
   getMetaIdDetail as getMetaIdDetailRemote,
 } from './services/metaIdSearchService';
+import {
+  getSocialFeed as getSocialFeedRemote,
+  getSocialPost as getSocialPostRemote,
+  getSocialPostComments as getSocialPostCommentsRemote,
+} from './services/socialRecallService';
 import {
   readRendererFromEnvelope,
   resolveMetaAppSourceByRenderUrl,
@@ -401,6 +456,8 @@ const SERVICE_ORDER_TIMEOUT_SCAN_INTERVAL_MS = 60_000;
 const SERVICE_ORDER_REFUND_SYNC_INTERVAL_MS = 60_000;
 const GIG_SQUARE_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 const SQLITE_MAINTENANCE_INTERVAL_MS = 30 * 60 * 1000;
+/** R1：durable 任务落盘文件（.claude/scheduled_tasks.json）周期扫描间隔。 */
+const SDK_CRON_MIRROR_SCAN_INTERVAL_MS = 30 * 60 * 1000;
 const SERVICE_REFUND_REQUEST_PATH = '/protocols/service-refund-request';
 const SERVICE_REFUND_FINALIZE_PATH = '/protocols/service-refund-finalize';
 const SERVICE_REFUND_SYNC_SIZE = 200;
@@ -851,7 +908,7 @@ const publishSkillServiceOrderPin = async (input: {
     version: '1.0.0',
     contentType: 'application/json',
     payload: JSON.stringify(payload),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
 
   const pinId = toSafeString(result.pinId).trim();
   if (!pinId) {
@@ -2494,9 +2551,11 @@ process.on('unhandledRejection', (error) => {
 let store: SqliteStore | null = null;
 let coworkStore: CoworkStore | null = null;
 let dreamStore: DreamStore | null = null;
+let messageFeedbackStore: MessageFeedbackStore | null = null;
 let coworkStoreHeavyMaintenanceScheduled = false;
 let coworkStoreHeavyMaintenanceFinished = false;
 let mcpStore: McpStore | null = null;
+let projectStore: ProjectStore | null = null;
 let coworkRunner: CoworkRunner | null = null;
 let coworkTurnSubmissionController: CoworkTurnSubmissionController | null = null;
 let skillManager: SkillManager | null = null;
@@ -2504,8 +2563,15 @@ let metaAppManager: MetaAppManager | null = null;
 let botBrowserMetaAppCacheService: BotBrowserMetaAppCacheService | null = null;
 let botBrowserHostService: BotBrowserHostService | null = null;
 let botBrowserTabBridge: BotBrowserTabBridge | null = null;
+let botBrowserCaptureBridge: BotBrowserCaptureBridge | null = null;
 let imGatewayManager: IMGatewayManager | null = null;
 let scheduledTaskStore: ScheduledTaskStore | null = null;
+let sdkCronMirrorStore: SdkCronMirrorStore | null = null;
+/** R1：各会话最后已知的 SDK cron 全量信息（会话结束对账 + 宿主触发状态推进依据），由 Stop hook 采集维护。 */
+const sdkCronMirrorLastKnownCrons: Map<string, { id: string; schedule: string; recurring: boolean; prompt: string }[]> = new Map();
+let sdkCronMirrorScanInterval: ReturnType<typeof setInterval> | null = null;
+let sdkCronHostTriggerLogStore: SdkCronHostTriggerLogStore | null = null;
+let sdkCronHostTriggerBridge: SdkCronHostTriggerBridge | null = null;
 let metabotStore: MetabotStore | null = null;
 let serviceOrderStore: ServiceOrderStore | null = null;
 let metaidExperienceStore: MetaIDExperienceStore | null = null;
@@ -2644,7 +2710,10 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
 
   const service = createBotBrowserBridgeService({
     metabotStore: getMetabotStore(),
-    createPin,
+    createPin: (metabotStore, metabotId, metaidPayload, options) => createPin(metabotStore, metabotId, metaidPayload, {
+      network: options?.network,
+      feeRate: getGlobalFeeRate(resolveCreatePinNetwork(options?.network)),
+    }),
     uploadMetaFile: async (...args) => {
       const { uploadMetaFile } = await import('./services/metaFileUploadService');
       return uploadMetaFile(...args);
@@ -2927,7 +2996,9 @@ const resetSqliteBackedSingletons = async (): Promise<void> => {
   }
   coworkStore = null;
   dreamStore = null;
+  messageFeedbackStore = null;
   mcpStore = null;
+  projectStore = null;
   coworkRunner = null;
   imGatewayManager = null;
   scheduledTaskStore = null;
@@ -2972,6 +3043,10 @@ const stopSqliteBackgroundJobs = async (options?: { waitForActiveJobs?: boolean 
   if (sqliteMaintenanceInterval) {
     clearInterval(sqliteMaintenanceInterval);
     sqliteMaintenanceInterval = null;
+  }
+  if (sdkCronMirrorScanInterval) {
+    clearInterval(sdkCronMirrorScanInterval);
+    sdkCronMirrorScanInterval = null;
   }
   if (providerDiscoveryService) {
     providerDiscoveryService.stopPolling();
@@ -3065,6 +3140,24 @@ const startSqliteBackgroundJobs = async (): Promise<void> => {
       },
     );
   }, SQLITE_MAINTENANCE_INTERVAL_MS);
+
+  // 镜像扫描 + 宿主触发桥串行执行（同一 job 内，避免与触发桥并发读写同一落盘文件）。
+  const runSdkCronBridgeScan = (): Promise<void> => {
+    scanDurableCronFiles();
+    return hostTriggerDueSdkCrons();
+  };
+  runSqliteBackgroundJob(
+    'sdkCronMirror:initialFileScan',
+    '[SdkCronBridge] Initial durable scan/trigger failed',
+    runSdkCronBridgeScan,
+  );
+  sdkCronMirrorScanInterval = setInterval(() => {
+    runSqliteBackgroundJob(
+      'sdkCronMirror:periodicFileScan',
+      '[SdkCronBridge] Periodic durable scan/trigger failed',
+      runSdkCronBridgeScan,
+    );
+  }, SDK_CRON_MIRROR_SCAN_INTERVAL_MS);
 };
 
 const startSqliteDaemons = (): void => {
@@ -3073,15 +3166,39 @@ const startSqliteDaemons = (): void => {
   setGroupChatTransportUserIdentityStoreGetter(getUserIdentityStore);
   setGroupTaskServiceMetabotStoreGetter(getMetabotStore);
   setGroupTaskServiceGroupTaskStoreGetter(getGroupTaskStore);
+  // P1-1: wire the OpenTeam invite store into member summaries so remote
+  // members expose inviteStatus (invite_pending / invite_accepted /
+  // invite_declined / invite_expired / joined) instead of an opaque row.
+  setGroupTaskServiceOpenTeamMembershipStoreGetter(getOpenTeamMembershipStore);
   setGroupTaskServiceOrchestrationBridgeGetter(getGroupTaskOrchestrationBridge);
   setGroupTaskServiceKvStoreGetter(() => getStore());
+  setGroupTaskServiceCoworkStoreGetter(getCoworkStore);
+  // OpenTeam M3 kick loop closure: the member-list read feeds the post-kick
+  // on-chain removal re-check (R2P1-2); the simplemsg sender (createPin bound
+  // here) delivers the [OPENTEAM_KICK] notification to a kicked remote guest.
+  setGroupTaskServiceTransport({
+    fetchGroupMembers,
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+    }),
+  });
+  // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
+  setOpenTeamImpressionServiceDepsGetter(() => ({
+    groupTaskStore: getGroupTaskStore(),
+    experienceStore: getMetaIDExperienceStore(),
+    impressionStore: getMetaIDImpressionStore(),
+    getMetabotById: (id) => getMetabotStore().getMetabotById(id),
+  }));
   setGroupChatBackfillActiveGroupIdsGetter(() => {
-    // Union of group-task groups and active agent-game session groups so both
-    // receive history gap-fill from the same single backfill loop.
+    // Union of group-task groups, active OpenTeam membership groups, and active
+    // agent-game session groups so all receive history gap-fill from the same
+    // single backfill loop.
     const taskGroups = getGroupTaskStore().getActiveGroupIds();
+    const openTeamGroups = getOpenTeamMembershipStore().listActiveGroupIds();
     const host = getAgentGameHost();
     const gameGroups = host ? host.activeGroupIds() : [];
-    return Array.from(new Set([...taskGroups, ...gameGroups]));
+    return Array.from(new Set([...taskGroups, ...openTeamGroups, ...gameGroups]));
   });
 
   // One-time, versioned historical cognition migration. It is deliberately
@@ -3175,7 +3292,7 @@ const startSqliteDaemons = (): void => {
     getCoworkStore(),
     getMetabotStore(),
     getCoworkRunner(),
-    createPin,
+    (metabotStore, metabot_id, payload) => createPin(metabotStore, metabot_id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     (msg) => console.log(msg),
     getServiceOrderLifecycleService(),
     async ({ skillId, skillName, allowedSkillNames, strictScope }) => {
@@ -3278,11 +3395,88 @@ const startSqliteDaemons = (): void => {
   // Group Task daemon: group messages trigger member/chair replies under the
   // strict chair-controlled protocol (own cursor on group_tasks, own session
   // channel; fully separate from the cognitive orchestrator).
+  //
+  // Owner private-report channel (encrypted simplemsg from the chair bot +
+  // A2A display record), shared by the group-task daemon and the OpenTeam
+  // inviter service wired below.
+  const sendGroupTaskOwnerPrivateReport: GroupTaskDaemonSendOwnerReportFn = async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
+    const metabotStore = getMetabotStore();
+    const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
+    if (!wallet?.mnemonic?.trim()) {
+      throw new Error('chair wallet unavailable');
+    }
+    const identity = getUserIdentityStore().get();
+    if (!identity) {
+      throw new Error('owner identity unavailable');
+    }
+    const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
+    if (!peerGlobalMetaId) {
+      throw new Error('owner GlobalMetaID unavailable');
+    }
+    if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
+      throw new Error('task owner does not match the current user identity');
+    }
+    const peerChatPubkey = identity.chat_public_key.trim();
+    if (!peerChatPubkey) {
+      throw new Error('owner chat public key unavailable');
+    }
+    const sent = await sendEncryptedSimplemsg({
+      metabotId,
+      wallet,
+      peerGlobalMetaId,
+      peerChatPubkey,
+      plaintext: text,
+      createPin: async (id, payload) => createPin(metabotStore, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+    });
+
+    let sessionId: string | null = null;
+    let displayError: string | null = null;
+    try {
+      const recorded = recordOutgoingPrivateChatA2ADisplay({
+        coworkStore: getCoworkStore(),
+        getMetabotById: (id) => metabotStore.getMetabotById(id),
+        metabotId,
+        peerGlobalMetaId,
+        peerName: identity.name,
+        peerAvatar: identity.avatar,
+        content: text,
+        chain: { txids: sent.txids, pinId: sent.pinId },
+        extraMetadata: {
+          privateChatDeliveryStatus: 'sent',
+          suppressRunningStatus: true,
+          groupTaskOwnerReport: true,
+          groupTaskId: taskId,
+        },
+      });
+      if (recorded) {
+        sessionId = recorded.sessionId;
+        if (recorded.message) {
+          emitCoworkStreamMessage(recorded.sessionId, recorded.message);
+        }
+      }
+    } catch (error) {
+      displayError = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
+        error,
+      );
+    }
+
+    return {
+      pinId: sent.pinId,
+      sessionId,
+      displayError,
+    };
+  };
   startGroupTaskDaemon({
     getStore,
     getGroupTaskStore,
     getMetabotStore,
     getCoworkStore,
+    // P1-3: the chair planning directive carries the task's pending OpenTeam
+    // invites / unconfirmed remote placeholders, so the plan never re-decomposes
+    // "search + invite a remote bot" as a subtask after the chair invited.
+    getOpenTeamMembershipStore,
     orchestrationBridge: getGroupTaskOrchestrationBridge(),
     performChat: performChatCompletionForOrchestrator,
     postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
@@ -3310,74 +3504,65 @@ const startSqliteDaemons = (): void => {
         return message.includes('404') ? 'not_found' : 'unavailable';
       }
     },
-    sendOwnerPrivateReport: async ({ taskId, metabotId, ownerGlobalMetaId, text }) => {
-      const metabotStore = getMetabotStore();
-      const wallet = metabotStore.getMetabotWalletByMetabotId(metabotId);
-      if (!wallet?.mnemonic?.trim()) {
-        throw new Error('chair wallet unavailable');
-      }
-      const identity = getUserIdentityStore().get();
-      if (!identity) {
-        throw new Error('owner identity unavailable');
-      }
-      const peerGlobalMetaId = (identity.globalmetaid ?? '').trim();
-      if (!peerGlobalMetaId) {
-        throw new Error('owner GlobalMetaID unavailable');
-      }
-      if (peerGlobalMetaId.toLowerCase() !== ownerGlobalMetaId.trim().toLowerCase()) {
-        throw new Error('task owner does not match the current user identity');
-      }
-      const peerChatPubkey = identity.chat_public_key.trim();
-      if (!peerChatPubkey) {
-        throw new Error('owner chat public key unavailable');
-      }
-      const sent = await sendEncryptedSimplemsg({
-        metabotId,
-        wallet,
-        peerGlobalMetaId,
-        peerChatPubkey,
-        plaintext: text,
-        createPin: async (id, payload) => createPin(metabotStore, id, payload),
-      });
-
-      let sessionId: string | null = null;
-      let displayError: string | null = null;
+    // P0-4: secondary indexer (metafile-indexer) so deliverable pinids are
+    // verified against MULTIPLE index sources; a 404 on one source with a hit
+    // on another is reported as indexer lag, never a hard failure.
+    readPinSecondaryForVerification: async (pinId) => {
       try {
-        const recorded = recordOutgoingPrivateChatA2ADisplay({
-          coworkStore: getCoworkStore(),
-          getMetabotById: (id) => metabotStore.getMetabotById(id),
-          metabotId,
-          peerGlobalMetaId,
-          peerName: identity.name,
-          peerAvatar: identity.avatar,
-          content: text,
-          chain: { txids: sent.txids, pinId: sent.pinId },
-          extraMetadata: {
-            privateChatDeliveryStatus: 'sent',
-            suppressRunningStatus: true,
-            groupTaskOwnerReport: true,
-            groupTaskId: taskId,
-          },
-        });
-        if (recorded) {
-          sessionId = recorded.sessionId;
-          if (recorded.message) {
-            emitCoworkStreamMessage(recorded.sessionId, recorded.message);
-          }
-        }
-      } catch (error) {
-        displayError = error instanceof Error ? error.message : String(error);
-        console.warn(
-          `[GroupTaskDaemon] Task ${taskId}: owner report sent but A2A display failed:`,
-          error,
+        const response = await fetch(
+          `https://file.metaid.io/metafile-indexer/api/v1/pins/${encodeURIComponent(pinId)}`,
+          { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8_000) },
         );
+        if (response.ok) return 'found';
+        return response.status === 404 ? 'not_found' : 'unavailable';
+      } catch {
+        return 'unavailable';
       }
-
-      return {
-        pinId: sent.pinId,
-        sessionId,
-        displayError,
+    },
+    // Round-4 attribution: resolve a chain-signature legacy metaid to its
+    // GlobalMetaID (manapi /api/info/metaid/{metaid}). Process-lifetime cache;
+    // resolved values are also persisted onto the message rows, so restarts do
+    // not re-hit the API. R2P1-4: a DEFINITIVE miss (HTTP 404, or a successful
+    // answer without a GlobalMetaID) returns null and is cached -> the message
+    // is marked SUSPECT; a TRANSIENT failure (network error, non-404 HTTP
+    // status) throws uncached so the daemon's bounded retry path re-evaluates
+    // the message on a later tick instead of permanently suspecting a
+    // legitimate member.
+    resolveGlobalMetaId: (() => {
+      const cache = new Map<string, string | null>();
+      return async (legacyMetaId) => {
+        const key = legacyMetaId.trim().toLowerCase();
+        if (!key) return null;
+        if (cache.has(key)) return cache.get(key) ?? null;
+        const response = await fetch(
+          `https://manapi.metaid.io/api/info/metaid/${encodeURIComponent(key)}`,
+          { headers: { Accept: 'application/json' } },
+        );
+        if (!response.ok) {
+          if (response.status === 404) {
+            cache.set(key, null);
+            return null;
+          }
+          throw new Error(`manapi metaid resolution failed with HTTP ${response.status}`);
+        }
+        const json = await response.json() as { data?: { globalMetaId?: unknown } };
+        const resolved = typeof json?.data?.globalMetaId === 'string'
+          ? json.data.globalMetaId.trim()
+          : '';
+        cache.set(key, resolved || null);
+        return resolved || null;
       };
+    })(),
+    sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
+    // OpenTeam M2: presence probe for remote-teammate unreachable detection
+    // (idchat online-status API, shared lazy singleton).
+    fetchRemotePresence: async (globalMetaIds) => {
+      const result = await getIdchatPresenceService().fetchOnlineStatus(globalMetaIds);
+      return result.list.map((entry) => ({
+        globalMetaId: entry.globalMetaId,
+        isOnline: entry.isOnline,
+        lastSeenAgoSeconds: entry.lastSeenAgoSeconds,
+      }));
     },
     listUserMemories: (metabotId, input) =>
       getCoworkStore().getMemoryBackend().listUserMemories({
@@ -3403,6 +3588,104 @@ const startSqliteDaemons = (): void => {
       : {}),
     emitLog: (msg) => console.log(msg),
   });
+
+  // OpenTeam (M1): guest-side wiring. The guest service answers OpenTeam
+  // invite envelopes intercepted by the private-chat daemon (join the external
+  // group + ACCEPT/DECLINE reply); the guest daemon then lets the invited bot
+  // participate in those external groups under the same mention gating as
+  // local group-task workers.
+  setOpenTeamGuestServiceDeps({
+    getMetabotStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    joinGroupChat: (metabotId, groupId) => joinGroupChat(metabotId, groupId),
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+    }),
+    // Invite hardening: the guest verifies the invited group exists on-chain
+    // and that the inviter is its creator before spending any join pin.
+    fetchGroupInfo: async (groupId) => {
+      const result = await fetchGroupInfo(groupId);
+      return result.status === 'found'
+        ? {
+            status: 'found' as const,
+            createUserMetaId: result.info.createUserMetaId,
+            createUserGlobalMetaId: result.info.createUserGlobalMetaId,
+          }
+        : result;
+    },
+    emitLog: (msg) => console.log(msg),
+    // P1-3 (invitee-side immediate wake-up): eagerly create the invited bot's
+    // session with the group context injected as soon as the ACCEPT lands.
+    getCoworkStore,
+    listRecentGroupMessages: (groupId, limit) =>
+      getGroupTaskStore().listGroupChatMessages(groupId, { limit }),
+  });
+  startOpenTeamGuestDaemon({
+    getStore,
+    getMetabotStore,
+    getOpenTeamMembershipStore,
+    performChat: performChatCompletionForOrchestrator,
+    sendGroupMessage: (metabotId, groupId, opts) => sendGroupChatMessage(metabotId, groupId, opts),
+    // P1-2 self-check fallback: periodic on-chain membership verification so a
+    // kicked guest marks its membership left even when the KICK simplemsg
+    // never arrives.
+    fetchGroupMembers,
+    // OpenTeam M3: same chat-skill routing + skill-turn seams as the
+    // group-task daemon, scoped to the guest bot's own allow_chat_skills
+    // (allowAllEnabled stays false inside the daemon — external members are
+    // never the owner).
+    getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
+    runSkillTurn: async (params) => {
+      // Run inside the guest session's own per-bot workspace instead of the
+      // shared skills root: generated files stay isolated per session, and the
+      // deliverable collection allowlists exactly this directory.
+      const sessionCwd = (getCoworkStore().getSession(params.sessionId)?.cwd ?? '').trim();
+      const roots = skillMgr.getAllSkillRoots();
+      const cwd = sessionCwd || (roots.length > 0 ? roots[roots.length - 1]! : skillMgr.getSkillsRoot());
+      const result = await runSkillTurnInExistingSession(getCoworkRunner(), getCoworkStore(), {
+        sessionId: params.sessionId,
+        systemPrompt: params.systemPrompt,
+        userMessage: params.userMessage,
+        cwd,
+        activeSkillIds: params.activeSkillIds,
+      });
+      return { ...result, cwd };
+    },
+    // File artifacts upload on-chain as metafiles paid by the GUEST bot's own
+    // wallet — the same metaFileUploadService path private-chat order
+    // delivery uses.
+    uploadDeliverableFile: async ({ metabotId, filePath, contentType }) => {
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
+    },
+    emitLog: (msg) => console.log(msg),
+    getCoworkStore,
+  });
+
+  // OpenTeam (M1): inviter-side wiring. The service searches on-chain online
+  // bots, sends [OPENTEAM_INVITE] envelopes from the twin wallet and runs
+  // per-invite watchers that turn the guest's ACCEPT into a remote task member.
+  // Pending invites resume their watchers here after every (re)start.
+  setOpenTeamServiceDeps({
+    getMetabotStore,
+    getGroupTaskStore,
+    getMembershipStore: getOpenTeamMembershipStore,
+    searchMetaIds,
+    getMetaIdDetail,
+    fetchOnlineStatus: (globalMetaIds) => getIdchatPresenceService().fetchOnlineStatus(globalMetaIds),
+    waitForMemberJoined,
+    sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
+      ...input,
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
+    }),
+    sendOwnerPrivateReport: (params) => sendGroupTaskOwnerPrivateReport(params),
+    emitLog: (msg) => console.log(msg),
+  });
+  const resumedInviteWatchers = resumeOpenTeamInviteWatchers();
+  if (resumedInviteWatchers > 0) {
+    console.log(`[OpenTeam] Resumed ${resumedInviteWatchers} pending invite watcher(s)`);
+  }
 
   // Nightly dream consolidation: each enabled MetaBot reviews its previous
   // day's experiences with its own LLM (summaries, dream memories, identity).
@@ -3456,6 +3739,8 @@ const stopSqliteBackedServicesForRecovery = async (): Promise<SqliteBackedRestar
   stopPrivateChatBackfill();
   stopGroupChatBackfill();
   stopGroupTaskDaemon();
+  stopOpenTeamGuestDaemon();
+  stopOpenTeamInviteWatchers();
   await resetSqliteBackedSingletons();
   return restartState;
 };
@@ -3650,6 +3935,17 @@ const getDreamStore = (): DreamStore => {
   return dreamStore;
 };
 
+const getMessageFeedbackStore = (): MessageFeedbackStore => {
+  if (!messageFeedbackStore) {
+    const sqliteStore = getStore();
+    messageFeedbackStore = new MessageFeedbackStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return messageFeedbackStore;
+};
+
 const scheduleCoworkStoreHeavyMaintenance = (): void => {
   if (coworkStoreHeavyMaintenanceScheduled || coworkStoreHeavyMaintenanceFinished) {
     return;
@@ -3681,6 +3977,14 @@ const getMcpStore = () => {
     mcpStore = new McpStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return mcpStore;
+};
+
+const getProjectStore = () => {
+  if (!projectStore) {
+    const sqliteStore = getStore();
+    projectStore = new ProjectStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return projectStore;
 };
 
 // ---------------------------------------------------------------------------
@@ -4182,7 +4486,7 @@ const executeDelegationPipeline = async (
       version: '1.0.0',
       contentType: 'application/json',
       payload: payloadStr,
-    });
+    }, { feeRate: getGlobalFeeRate('mvc') });
 
     orderMessagePinId = result.pinId ?? null;
     orderMessageTxid = resolvePrimarySimplemsgTxid({
@@ -4344,10 +4648,21 @@ const getCoworkRunner = () => {
       getSkillSessionEnvOverrides: async (sessionId: string): Promise<Record<string, string>> => {
         const session = getCoworkStore().getSession(sessionId);
         const overrides: Record<string, string> = {};
-        if (session?.title === '[Orchestrator] skill-turn' && session.cwd) {
-          overrides.SKILLS_ROOT = session.cwd;
-          overrides.IDBOTS_SKILLS_ROOT = session.cwd;
-        }
+        // NOTE: SKILLS_ROOT / IDBOTS_SKILLS_ROOT are intentionally NOT derived
+        // from session.cwd here. The legacy exact-title match against
+        // '[Orchestrator] skill-turn' died on 2026-03-14 (58ab6d57) when
+        // delegated session titles gained a timestamp suffix, and the
+        // 2026-08-10 title refactor (8dd66c1a) moved them to
+        // '[编排任务] <summary>' / '[Orchestration Task] <summary>' /
+        // 'Group-<id>-<ts>'. Reviving cwd-based injection would also be wrong:
+        // worker skills resolve from the app-global skill roots
+        // (getSkillsRoot / getSkillRoots), not the worker workspace, while
+        // getEnhancedEnv()/getEnhancedEnvWithTmpdir() already inject
+        // SKILLS_ROOT/IDBOTS_SKILLS_ROOT = getSkillsRoot() for every execution
+        // path, and the sandbox paths additionally discover workspace-relative
+        // SKILLs via collectHostSkillsRoots(). Keep this method free of
+        // title-based matching; the overrides below are image-skill and
+        // metabot-identity only.
         const skillIds = session?.activeSkillIds ?? [];
         const metabotStore = getMetabotStore();
         const metabotId = session?.metabotId;
@@ -4449,6 +4764,17 @@ const getCoworkRunner = () => {
         listCapabilityEvidence: (metabotId) => getDreamStore().listDailySummaries(metabotId, 3),
         getActiveWorkload: (metabotId) => getOrchestrationStore().getActiveWorkload(metabotId),
       }),
+      listTwinImpressions: (observerGlobalMetaID: string) => {
+        try {
+          return getMetaIDImpressionStore().listSnapshots(observerGlobalMetaID, 100).map((snapshot) => ({
+            subjectGlobalMetaID: snapshot.subjectGlobalMetaID,
+            summaryText: snapshot.summaryText,
+            updatedAt: snapshot.updatedAt,
+          }));
+        } catch {
+          return [];
+        }
+      },
       delegateLocalWorker: (sessionId, input) => getTwinOrchestrationService().delegateLocalWorker(sessionId, input),
       twinTaskStatus: (sessionId, taskId) => getTwinOrchestrationService().getTaskStatus(sessionId, taskId),
       twinTaskCancel: (sessionId, taskId) => getTwinOrchestrationService().cancelTask(sessionId, taskId),
@@ -4487,6 +4813,7 @@ const getCoworkRunner = () => {
       controlBotBrowser: {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),
+        screenshot: (input) => getBotBrowserCaptureBridge().capture(input ?? {}),
         forkMetaApp: async ({ sessionId, uri }) => {
           const session = getCoworkStore().getSession(sessionId);
           if (!session?.cwd) throw new Error('Session workspace is not available.');
@@ -4595,6 +4922,62 @@ const getCoworkRunner = () => {
           return { ...profile, isOwn };
         },
       },
+      projects: {
+        list: () => getProjectStore().listProjects(),
+      },
+      socialRecall: {
+        feed: async ({ keywords, publisher, publishers, since, until, sort, scope, user, chainName, size, cursor }) => {
+          // scope=following needs a subject; fall back to the identity the
+          // user acts as (default MetaBot) when the Agent did not pass one.
+          let resolvedUser = user;
+          if (scope === 'following' && !resolvedUser) {
+            const defaultMetabotId = getCoworkStore().getDefaultMetabotId();
+            resolvedUser = defaultMetabotId != null
+              ? (getMetabotStore().getMetabotById(defaultMetabotId)?.globalmetaid?.trim() || undefined)
+              : undefined;
+          }
+          const ownGlobalMetaIds = new Set(
+            getMetabotStore().listMetabots()
+              .map((metabot) => metabot.globalmetaid?.trim())
+              .filter((id): id is string => Boolean(id))
+          );
+          const page = await getSocialFeedRemote({
+            keywords,
+            publisher,
+            publishers,
+            since,
+            until,
+            sort,
+            scope,
+            user: resolvedUser,
+            chainName,
+            size,
+            cursor,
+          });
+          return {
+            items: page.items.map((item) => ({
+              ...item,
+              isOwn: ownGlobalMetaIds.has(item.author.globalMetaId),
+            })),
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
+        },
+        post: async (pinId) => {
+          const post = await getSocialPostRemote(pinId);
+          const isOwn = getMetabotStore().listMetabots()
+            .some((metabot) => metabot.globalmetaid?.trim() === post.author.globalMetaId);
+          return { ...post, isOwn };
+        },
+        comments: async ({ pinId, size, cursor }) => {
+          const page = await getSocialPostCommentsRemote({ pinId, size, cursor });
+          return {
+            items: page.items,
+            hasMore: page.hasMore,
+            nextCursor: page.nextCursor,
+          };
+        },
+      },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
@@ -4674,6 +5057,7 @@ const getCoworkRunner = () => {
           return '<browser_context>Bot Browser is not open or did not respond right now. If the user asks you to control the browser, ask them to switch to Bot Browser mode first.</browser_context>';
         }
       },
+      sdkCronMirror: getSdkCronMirrorBridge(),
     });
 
     // Set up event listeners to forward to renderer
@@ -4866,6 +5250,15 @@ const getBotBrowserTabBridge = () => {
   return botBrowserTabBridge;
 };
 
+const getBotBrowserCaptureBridge = () => {
+  if (!botBrowserCaptureBridge) {
+    botBrowserCaptureBridge = createBotBrowserCaptureBridge({
+      getWindows: () => BrowserWindow.getAllWindows(),
+    });
+  }
+  return botBrowserCaptureBridge;
+};
+
 const getIMGatewayManager = () => {
   if (!imGatewayManager) {
     const sqliteStore = getStore();
@@ -4953,6 +5346,317 @@ const getScheduledTaskStore = () => {
   return scheduledTaskStore;
 };
 
+/** R1：SDK cron 镜像存储（只展示不调度；镜像表随主 sqlite 持久化）。 */
+const getSdkCronMirrorStore = () => {
+  if (!sdkCronMirrorStore) {
+    const sqliteStore = getStore();
+    sdkCronMirrorStore = new SdkCronMirrorStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
+  }
+  return sdkCronMirrorStore;
+};
+
+/**
+ * R1：Stop hook 采集与会话结束对账的宿主侧适配器。
+ * - collectSessionCrons：upsert 镜像 + 用当次列表对账该会话非 durable 行（CronDelete 后立即生效）。
+ * - reconcileSessionEnd：会话结束兜底对账（用最后已知列表），并清理内存；
+ *   同时把宿主触发状态推进到会话结束前最近一次 cron 匹配（会话内 SDK 已触发的实例
+ *   宿主不再重复触发，见 SdkCronHostTriggerBridge.advanceSessionCoverage）。
+ */
+const getSdkCronMirrorBridge = (): SdkCronMirrorBridge => ({
+  collectSessionCrons(sessionId: string, crons: { id: string; schedule: string; recurring: boolean; prompt: string }[]): void {
+    try {
+      const store = getSdkCronMirrorStore();
+      const ids = crons.map((c) => c.id);
+      for (const cron of crons) {
+        store.upsert({ ...cron, durable: false }, sessionId, 'stop_hook');
+      }
+      sdkCronMirrorLastKnownCrons.set(sessionId, crons);
+      // 轻量对账：本次 session_crons 未包含的非 durable 行 → deleted（幂等，无变化不写盘）。
+      store.reconcileSession(sessionId, ids);
+      // 管理会话（新建/重新启用）结束后对账：nonce 匹配的镜像回写 schedule_spec。
+      // 挂在 Stop hook 上，使「提交即返回」的异步创建最终能回填 spec（可编辑/可重建）。
+      reconcileCronCreateResults();
+    } catch (error) {
+      console.warn('[SdkCronMirror] Failed to collect session crons:', error);
+    }
+  },
+  reconcileSessionEnd(sessionId: string): void {
+    try {
+      const store = getSdkCronMirrorStore();
+      const lastKnown = sdkCronMirrorLastKnownCrons.get(sessionId) ?? [];
+      store.reconcileSession(sessionId, lastKnown.map((c) => c.id));
+      // 宿主触发状态推进：会话存活期间 SDK 会触发每个 cron 匹配点，推进后宿主不重复触发。
+      getSdkCronHostTriggerBridge().advanceSessionCoverage(lastKnown, Date.now());
+      sdkCronMirrorLastKnownCrons.delete(sessionId);
+    } catch (error) {
+      console.warn('[SdkCronMirror] Failed to reconcile session end:', error);
+    }
+  },
+});
+
+/**
+ * R1：durable 文件扫描——把落盘的 SDK durable cron 镜像进宿主存储并做 durable 对账。
+ * 会话结束后跨重启的补充数据源（Stop hook 在会话结束后不再触发）。
+ * （递归查找逻辑统一由 sdkCronHostTrigger.findScheduledTasksJsonFiles 提供。）
+ */
+const scanDurableCronFiles = (): void => {
+  try {
+    const coworkConfig = getCoworkStore().getConfig();
+    const rootDir = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+    const files = findScheduledTasksJsonFiles(rootDir);
+    const store = getSdkCronMirrorStore();
+    // 先按文件归属会话分组（createdBySessionId 缺失时以文件路径为归属），全部 upsert。
+    const bySession = new Map<string, { id: string }[]>();
+    for (const file of files) {
+      let content: string;
+      try {
+        content = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const cron of parseScheduledTasksFile(content)) {
+        const sessionKey = cron.createdBySessionId ?? `file:${file}`;
+        const ids = bySession.get(sessionKey) ?? [];
+        ids.push({ id: cron.id });
+        bySession.set(sessionKey, ids);
+        store.upsert(
+          { id: cron.id, schedule: cron.schedule, recurring: cron.recurring, prompt: cron.prompt, durable: true },
+          sessionKey,
+          'file_scan'
+        );
+      }
+    }
+    // durable 对账：文件里已消失的 durable 行标记 deleted。
+    for (const [sessionKey, ids] of bySession) {
+      store.reconcileDurableFile(sessionKey, ids);
+    }
+    if (files.length > 0) {
+      console.log(`[SdkCronMirror] Durable file scan: ${files.length} file(s), ${bySession.size} session(s)`);
+    }
+  } catch (error) {
+    console.warn('[SdkCronMirror] Durable file scan failed:', error);
+  }
+};
+
+/** 方案 C 补充：宿主触发状态存储（触发审计 + 防重复拉起，随主 sqlite 持久化）。 */
+const getSdkCronHostTriggerLogStore = () => {
+  if (!sdkCronHostTriggerLogStore) {
+    const sqliteStore = getStore();
+    sdkCronHostTriggerLogStore = new SdkCronHostTriggerLogStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction()
+    );
+  }
+  return sdkCronHostTriggerLogStore;
+};
+
+/** 该 cwd 下是否存在 running 会话（存在则 SDK 会自行触发该文件的 durable cron，宿主整体跳过）。 */
+const isSessionRunningInCwd = (cwd: string): boolean => {
+  const target = path.resolve(cwd);
+  try {
+    const sessions = getCoworkStore().listSessions();
+    for (const session of sessions) {
+      if (session.status !== 'running') continue;
+      const full = getCoworkStore().getSessionWithoutMessages(session.id);
+      if (full && path.resolve(full.cwd) === target) return true;
+    }
+  } catch (error) {
+    console.warn('[SdkCronHostTrigger] Failed to query running sessions:', error);
+  }
+  return false;
+};
+
+/** 方案 C 补充：宿主触发桥（复用旧 Scheduler 的会话拉起逻辑，见 deps.launchSession）。 */
+const getSdkCronHostTriggerBridge = (): SdkCronHostTriggerBridge => {
+  if (!sdkCronHostTriggerBridge) {
+    sdkCronHostTriggerBridge = new SdkCronHostTriggerBridge({
+      logStore: getSdkCronHostTriggerLogStore(),
+      getConfig: () => getCoworkStore().getConfig(),
+      getSkillsPrompt: async () => {
+        try {
+          return await getSkillManager().buildAutoRoutingPrompt();
+        } catch {
+          return null;
+        }
+      },
+      getSession: (id) => getCoworkStore().getSessionWithoutMessages(id),
+      isSessionRunningInCwd,
+      isCronEnabled: (cronId) => {
+        const mirror = getSdkCronMirrorStore().getById(cronId);
+        return mirror ? mirror.enabled : true;
+      },
+      launchSession: async (spec) => {
+        // 与旧 Scheduler.startCoworkSession 同构：createSession → addMessage → startSession。
+        const coworkStore = getCoworkStore();
+        const session = coworkStore.createSession(
+          spec.title,
+          spec.cwd,
+          spec.systemPrompt,
+          spec.executionMode,
+          [],
+          spec.metabotId ?? null
+        );
+        const sessionId = session.id;
+        coworkStore.updateSession(sessionId, { status: 'running' });
+        coworkStore.addMessage(sessionId, { type: 'user', content: spec.prompt });
+        await getCoworkRunner().startSession(sessionId, spec.prompt, {
+          skipInitialUserMessage: true,
+          disableMemoryUpdates: true,
+          confirmationMode: 'text',
+        });
+        return sessionId;
+      },
+      markMirrorDeleted: (cronId) => {
+        getSdkCronMirrorStore().markDeleted(cronId);
+      },
+    });
+  }
+  return sdkCronHostTriggerBridge;
+};
+
+/**
+ * 方案 C 补充：宿主触发扫描——对到点且无活跃会话的 durable SDK cron 拉起 bot 会话执行 prompt。
+ * 复用镜像扫描的 30 分钟周期与同一 rootDir（与 scanDurableCronFiles 串行，避免并发读写落盘文件）。
+ */
+const hostTriggerDueSdkCrons = async (): Promise<void> => {
+  try {
+    const coworkConfig = getCoworkStore().getConfig();
+    const rootDir = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+    await getSdkCronHostTriggerBridge().scanAndTrigger(rootDir);
+  } catch (error) {
+    console.warn('[SdkCronHostTrigger] Scan failed:', error);
+  }
+};
+
+/**
+ * R2：迁移对账（幂等）——把镜像中带 [SDK_MIGRATE:<taskId>] 标记的 SDK cron 与原任务
+ * 建立映射并标记 migrated（原任务禁用，历史 run 保留）。重复执行安全：
+ * 已标记 migrated / migrated_task_id 非空的任务跳过。
+ * @returns 本次新完成迁移的任务数。
+ */
+const reconcileMigrationResults = (): number => {
+  const mirrorStore = getSdkCronMirrorStore();
+  const taskStore = getScheduledTaskStore();
+  const mirrors = mirrorStore.listMirrors(false);
+  let count = 0;
+  for (const mirror of mirrors) {
+    if (mirror.migratedTaskId) continue;
+    const taskId = extractMigrationTaskId(mirror.prompt);
+    if (!taskId) continue;
+    const task = taskStore.getTask(taskId);
+    if (!task || task.migrationStatus === 'migrated' || task.migratedTaskId) continue;
+    taskStore.markMigrated(taskId, mirror.id);
+    mirrorStore.setMigrationMapping(mirror.id, taskId);
+    count += 1;
+  }
+  return count;
+};
+
+/**
+ * UI 新建/重新启用对账（幂等）：镜像中带 [SDK_CRON:<nonce>] 标记的 cron → 回写完整 schedule_spec，
+ * 并把 nonce↔spec 映射从内存 pending 表取出。重复执行安全：已带 scheduleSpec 的跳过。
+ *
+ * nonce→spec 的映射仅在创建 IPC 调用进程内有效（pendingCronSpecByNonce），对账匹配后即清除，
+ * 避免内存泄漏；SDK 创建会话结束后若仍未匹配（极少见：CronCreate 失败或 Stop hook 未采集到），
+ * 该 nonce 自然过期，不影响后续。
+ */
+const pendingCronSpecByNonce = new Map<string, SdkCronScheduleSpec>();
+
+/** 管理会话通用选项（与 migrateExecute 一致：跳过初始用户消息、不写记忆、文本确认）。 */
+const MANAGEMENT_SESSION_OPTIONS = {
+  skipInitialUserMessage: true,
+  disableMemoryUpdates: true,
+  confirmationMode: 'text',
+} as const;
+
+/**
+ * 启动一个一次性管理会话执行 CronCreate（fire-and-forget，不等待会话结束）。
+ * 会话内 bot 创建 durable cron 后，Stop hook 采集 → upsert 镜像 → reconcileCronCreateResults
+ * 回写 spec（挂在 collectSessionCrons）。立即返回，结果经对账异步可见。
+ * @returns 创建会话的 sessionId（调用方/渲染层轮询对账结果）。
+ */
+function launchCronCreateSession(params: {
+  cronExpression: string;
+  prompt: string;
+  recurring: boolean;
+  nonce: string;
+  spec: SdkCronScheduleSpec;
+  title: string;
+}): string {
+  const { cronExpression, prompt, recurring, nonce, spec, title } = params;
+  const marker = buildCronMarker(nonce);
+  const promptWithMarker = buildCronPromptWithMarker(marker, prompt);
+  pendingCronSpecByNonce.set(nonce, spec);
+
+  const coworkConfig = getCoworkStore().getConfig();
+  const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+  const instruction = buildCronCreateUiInstruction({ cronExpression, prompt: promptWithMarker, recurring });
+
+  const session = getCoworkStore().createSession(title, cwd, coworkConfig.systemPrompt, 'local', [], spec.metabotId ?? null);
+  const sessionId = session.id;
+  getCoworkStore().updateSession(sessionId, { status: 'running' });
+  getCoworkStore().addMessage(sessionId, { type: 'user', content: instruction });
+  getCoworkRunner().startSession(sessionId, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
+    // 会话失败不阻断：部分结果仍会经 Stop hook 对账。
+    console.warn('[SdkCronMirror] Create session failed (partial results still reconciled):', error);
+  });
+  return sessionId;
+}
+
+/**
+ * 启动一个一次性管理会话执行 CronDelete（fire-and-forget，不等待会话结束）。
+ *
+ * 关键架构修正：durable cron 是文件级（`.claude/scheduled_tasks.json`），同 cwd 的任意新会话
+ * 都能 CronList/CronDelete——不再依赖「所属会话」活跃（原 trySubmitSteer 注入在会话不活跃时
+ * 直接失败，导致删除/停用不生效、任务照常执行、镜像卡「删除中」）。
+ * @returns 删除会话的 sessionId。
+ */
+function launchCronDeleteSession(params: { cronId: string; name: string; metabotId?: number | null }): string {
+  const { cronId, name, metabotId } = params;
+  const coworkConfig = getCoworkStore().getConfig();
+  const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+  const instruction = buildCronDeleteInstruction({ id: cronId, name });
+
+  const session = getCoworkStore().createSession(
+    `[删除定时任务] ${name}`,
+    cwd,
+    coworkConfig.systemPrompt,
+    'local',
+    [],
+    metabotId ?? null
+  );
+  const sessionId = session.id;
+  getCoworkStore().updateSession(sessionId, { status: 'running' });
+  getCoworkStore().addMessage(sessionId, { type: 'user', content: instruction });
+  getCoworkRunner().startSession(sessionId, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
+    // 删除会话失败不阻断：镜像经文件扫描对账自愈（SDK 侧还在 → 恢复 active；没了 → deleted）。
+    console.warn('[SdkCronMirror] Delete session failed:', error);
+  });
+  return sessionId;
+}
+
+/**
+ * 对账：把镜像中带 [SDK_CRON:<nonce>] 标记、且 pending 表里有对应 spec 的 cron 回写 schedule_spec。
+ * @returns 本次回写 spec 的条数。
+ */
+function reconcileCronCreateResults(): number {
+  if (pendingCronSpecByNonce.size === 0) return 0;
+  const mirrorStore = getSdkCronMirrorStore();
+  const mirrors = mirrorStore.listMirrors(false);
+  let count = 0;
+  for (const mirror of mirrors) {
+    if (mirror.scheduleSpec) continue;
+    const nonce = extractCronNonce(mirror.prompt);
+    if (!nonce) continue;
+    const spec = pendingCronSpecByNonce.get(nonce);
+    if (!spec) continue;
+    mirrorStore.setScheduleSpec(mirror.id, spec);
+    pendingCronSpecByNonce.delete(nonce);
+    count += 1;
+  }
+  return count;
+}
+
 let groupTaskStore: GroupTaskStore | null = null;
 const getGroupTaskStore = () => {
   if (!groupTaskStore) {
@@ -4960,6 +5664,18 @@ const getGroupTaskStore = () => {
     groupTaskStore = new GroupTaskStore(sqliteStore.getDatabase(), sqliteStore.getSaveFunction());
   }
   return groupTaskStore;
+};
+
+let openTeamMembershipStore: OpenTeamMembershipStore | null = null;
+const getOpenTeamMembershipStore = () => {
+  if (!openTeamMembershipStore) {
+    const sqliteStore = getStore();
+    openTeamMembershipStore = new OpenTeamMembershipStore(
+      sqliteStore.getDatabase(),
+      sqliteStore.getSaveFunction(),
+    );
+  }
+  return openTeamMembershipStore;
 };
 
 let orchestrationStore: OrchestrationStore | null = null;
@@ -5004,6 +5720,10 @@ const getTwinOrchestrationService = () => new TwinOrchestrationService({
     fs.mkdirSync(workspace, { recursive: true });
     return workspace;
   },
+  // Round-4 r6: persistent idempotency guard for [ORCH-NOTIFY] terminal-state
+  // messages to the Twin session (kv key orch_notify:<taskId>:<attemptId>:<status>,
+  // per attempt so retried failures still notify — 清单 #3).
+  kv: getStore(),
 });
 
 const getMetabotStore = () => {
@@ -5176,7 +5896,7 @@ function getProviderPingService(): ProviderPingService {
           version: '1.0.0',
           contentType: 'application/json',
           payload,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
       },
       listPendingMessages: () => listPendingPrivateMessages(),
       listRecentMessages: () => listRecentPrivateMessages(),
@@ -5324,7 +6044,7 @@ async function sendServiceOrderSimplemsg(order: ServiceOrderRecord, plaintext: s
     version: '1.0.0',
     contentType: 'application/json',
     payload,
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
 }
 
 async function sendRatingTimeoutOrderEndPin(input: {
@@ -5408,7 +6128,7 @@ const getServiceOrderLifecycleService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          });
+          }, { feeRate: getGlobalFeeRate('mvc') });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -5586,7 +6306,7 @@ const getServiceRefundSettlementService = () => {
             version: '1.0.0',
             contentType: 'application/json',
             payload: JSON.stringify(payload),
-          });
+          }, { feeRate: getGlobalFeeRate('mvc') });
           return {
             pinId: result.pinId ?? result.txids?.[0] ?? null,
             txid: result.txids?.[0] ?? null,
@@ -5907,8 +6627,11 @@ const getAppIconPath = (): string | undefined => {
     : path.join(basePath, 'tray-icon.png');
 };
 
-// 保存对主窗口的引用
+// 保存对主窗口的引用（首个创建的窗口；关闭后自动移交到剩余窗口）
 let mainWindow: BrowserWindow | null = null;
+
+// 进程级单次初始化标记：重维护任务/托盘/调度器只在首个窗口就绪时执行一次
+let didInitAppOnce = false;
 
 onSandboxProgress((progress) => {
   const windows = BrowserWindow.getAllWindows();
@@ -5949,41 +6672,47 @@ const getTitleBarOverlayOptions = () => {
 };
 
 const updateTitleBarOverlay = () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!isMac && !isWindows) {
-    mainWindow.setTitleBarOverlay(getTitleBarOverlayOptions());
-  }
-  // Also update the window background color to match the theme
+  const windows = BrowserWindow.getAllWindows();
   const config = getStore().get('app_config') as { theme?: string } | undefined;
   const theme = resolveThemeFromConfig(config);
-  mainWindow.setBackgroundColor(theme === 'dark' ? '#0F1117' : '#F8F9FB');
+  const backgroundColor = theme === 'dark' ? '#0F1117' : '#F8F9FB';
+  for (const win of windows) {
+    if (win.isDestroyed()) continue;
+    if (!isMac && !isWindows) {
+      win.setTitleBarOverlay(getTitleBarOverlayOptions());
+    }
+    // Also update the window background color to match the theme
+    win.setBackgroundColor(backgroundColor);
+  }
 };
 
-const emitWindowState = () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.webContents.isDestroyed()) return;
-  mainWindow.webContents.send('window:state-changed', {
-    isMaximized: mainWindow.isMaximized(),
-    isFullscreen: mainWindow.isFullScreen(),
-    isFocused: mainWindow.isFocused(),
+const emitWindowState = (win?: BrowserWindow | null) => {
+  const target = win ?? mainWindow;
+  if (!target || target.isDestroyed()) return;
+  if (target.webContents.isDestroyed()) return;
+  target.webContents.send('window:state-changed', {
+    isMaximized: target.isMaximized(),
+    isFullscreen: target.isFullScreen(),
+    isFocused: target.isFocused(),
   });
 };
 
-const showSystemMenu = (position?: { x?: number; y?: number }) => {
+const showSystemMenu = (position?: { x?: number; y?: number }, win?: BrowserWindow | null) => {
   if (!isWindows) return;
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const target = win ?? mainWindow;
+  if (!target || target.isDestroyed()) return;
 
-  const isMaximized = mainWindow.isMaximized();
+  const isMaximized = target.isMaximized();
   const menu = Menu.buildFromTemplate([
-    { label: 'Restore', enabled: isMaximized, click: () => mainWindow.restore() },
+    { label: 'Restore', enabled: isMaximized, click: () => target.restore() },
     { role: 'minimize' },
-    { label: 'Maximize', enabled: !isMaximized, click: () => mainWindow.maximize() },
+    { label: 'Maximize', enabled: !isMaximized, click: () => target.maximize() },
     { type: 'separator' },
     { role: 'close' },
   ]);
 
   menu.popup({
-    window: mainWindow,
+    window: target,
     x: Math.max(0, Math.round(position?.x ?? 0)),
     y: Math.max(0, Math.round(position?.y ?? 0)),
   });
@@ -6031,12 +6760,26 @@ if (!gotTheLock) {
     return getStore().get(key);
   });
 
+  // 广播 store 键变更到所有窗口，供多窗口之间实时同步（配置机器人信息等场景）
+  const broadcastStoreChanged = (key: string): void => {
+    BrowserWindow.getAllWindows().forEach((win) => {
+      if (win.isDestroyed()) return;
+      try {
+        win.webContents.send('store:changed', { key });
+      } catch (error) {
+        console.error('Failed to broadcast store:changed:', error);
+      }
+    });
+  };
+
   ipcMain.handle('store:set', (_event, key, value) => {
     getStore().set(key, value);
+    broadcastStoreChanged(key);
   });
 
   ipcMain.handle('store:remove', (_event, key) => {
     getStore().delete(key);
+    broadcastStoreChanged(key);
   });
 
   // Network status change handler
@@ -6083,40 +6826,46 @@ if (!gotTheLock) {
     }
   });
 
-  // Window control IPC handlers
-  ipcMain.on('window-minimize', () => {
-    mainWindow?.minimize();
+  // Window control IPC handlers（按消息来源窗口定位，支持多窗口）
+  const windowFromEvent = (event: { sender: Electron.WebContents }): BrowserWindow | null =>
+    BrowserWindow.fromWebContents(event.sender);
+
+  ipcMain.on('window-minimize', (event) => {
+    windowFromEvent(event)?.minimize();
   });
 
-  ipcMain.on('window-maximize', () => {
-    if (mainWindow?.isMaximized()) {
-      mainWindow.unmaximize();
+  ipcMain.on('window-maximize', (event) => {
+    const win = windowFromEvent(event);
+    if (!win) return;
+    if (win.isMaximized()) {
+      win.unmaximize();
     } else {
-      mainWindow?.maximize();
+      win.maximize();
     }
   });
 
-  ipcMain.on('window-close', () => {
-    mainWindow?.close();
+  ipcMain.on('window-close', (event) => {
+    windowFromEvent(event)?.close();
   });
 
-  ipcMain.handle('window:isMaximized', () => {
-    return mainWindow?.isMaximized() ?? false;
+  ipcMain.handle('window:isMaximized', (event) => {
+    return windowFromEvent(event)?.isMaximized() ?? false;
   });
 
   // Emulated drag from the Bot Browser iframe (CSS app-region can't reach it).
-  ipcMain.on('window:move-by', (_event, input: { dx?: unknown; dy?: unknown } | undefined) => {
+  ipcMain.on('window:move-by', (event, input: { dx?: unknown; dy?: unknown } | undefined) => {
+    const win = windowFromEvent(event);
+    if (!win || win.isDestroyed()) return;
     const dx = Math.round(Number(input?.dx) || 0);
     const dy = Math.round(Number(input?.dy) || 0);
     if (!dx && !dy) return;
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMaximized() || mainWindow.isFullScreen()) return;
-    const [x, y] = mainWindow.getPosition();
-    mainWindow.setPosition(x + dx, y + dy);
+    if (win.isMaximized() || win.isFullScreen()) return;
+    const [x, y] = win.getPosition();
+    win.setPosition(x + dx, y + dy);
   });
 
-  ipcMain.on('window:showSystemMenu', (_event, position: { x?: number; y?: number } | undefined) => {
-    showSystemMenu(position);
+  ipcMain.on('window:showSystemMenu', (event, position: { x?: number; y?: number } | undefined) => {
+    showSystemMenu(position, windowFromEvent(event));
   });
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
@@ -6195,6 +6944,58 @@ if (!gotTheLock) {
 
   ipcMain.on('botBrowser:tab-command:response', (event, response: BotBrowserTabCommandResponse) => {
     getBotBrowserTabBridge().handleResponse(event.sender, response);
+  });
+
+  ipcMain.on('botBrowser:capture-request:response', (event, response: BotBrowserCaptureResponse) => {
+    getBotBrowserCaptureBridge().handleResponse(event.sender, response);
+  });
+
+  // Format-aware pixel capture for the Bot Browser screenshot tool. Mirrors the
+  // cowork captureImageChunk handler but supports PNG/JPEG and reports the
+  // mimeType, so the screenshot tool can request a smaller JPEG when sending the
+  // image to the model. The renderer resolves the rect (content area / whole
+  // surface / clip); this handler only does the capturePage + encode.
+  ipcMain.handle('botBrowser:capturePage', async (
+    event,
+    options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    },
+  ) => {
+    try {
+      const captureRect = normalizeCaptureRect(options?.rect);
+      if (!captureRect) {
+        return { success: false, error: 'Capture rect is required' };
+      }
+      const image = await event.sender.capturePage(captureRect);
+      const format: 'png' | 'jpeg' = options?.format === 'jpeg' ? 'jpeg' : 'png';
+      let buffer: Buffer;
+      let mimeType: string;
+      if (format === 'jpeg') {
+        const quality = typeof options?.quality === 'number'
+          && options.quality >= 0 && options.quality <= 100
+          ? Math.round(options.quality)
+          : 80;
+        buffer = image.toJPEG(quality);
+        mimeType = 'image/jpeg';
+      } else {
+        buffer = image.toPNG();
+        mimeType = 'image/png';
+      }
+      return {
+        success: true,
+        mimeType,
+        width: captureRect.width,
+        height: captureRect.height,
+        data: buffer.toString('base64'),
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to capture Bot Browser page',
+      };
+    }
   });
 
   ipcMain.handle('botBrowser:resolveResource', async (_event, input: unknown) => {
@@ -6325,7 +7126,7 @@ if (!gotTheLock) {
         peerChatPubkey: chatPubkey,
         plaintext: content,
         replyPin: replyPin || null,
-        createPin: async (id, payload) => createPin(metabotStoreInst, id, payload),
+        createPin: async (id, payload) => createPin(metabotStoreInst, id, payload, { feeRate: getGlobalFeeRate('mvc') }),
       });
 
       // Make the sent message visible in the local A2A session right away.
@@ -6868,6 +7669,17 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('cowork:session:compact', async (_event, sessionId: string) => {
+    try {
+      return await getCoworkRunner().requestManualCompaction(sessionId);
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to compact session',
+      };
+    }
+  });
+
   ipcMain.handle('cowork:session:setPermissionMode', async (_event, payload: {
     sessionId: string;
     permissionMode: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
@@ -6885,6 +7697,45 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to set permission mode',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:stopTask', async (_event, payload: {
+    sessionId: string;
+    taskId: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:stopTask', async () => {
+      try {
+        const { sessionId, taskId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        if (!taskId || !taskId.trim()) throw new Error('Task id is required');
+        return await getCoworkRunner().stopSubagentTask(sessionId, taskId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to stop task',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:backgroundTask', async (_event, payload: {
+    sessionId: string;
+    toolUseId?: string;
+  }) => {
+    return withSqliteRecovery('cowork:session:backgroundTask', async () => {
+      try {
+        const { sessionId, toolUseId } = payload;
+        if (!sessionId) throw new Error('Session id is required');
+        return await getCoworkRunner().backgroundSubagentTask(sessionId, toolUseId);
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to background task',
         };
       }
     });
@@ -7190,7 +8041,7 @@ if (!gotTheLock) {
             peerChatPubkey: chatPubkey,
             plaintext: replyText,
             replyPin,
-            createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload),
+            createPin: async (metabotId, payload) => createPin(metabotStoreInst, metabotId, payload, { feeRate: getGlobalFeeRate('mvc') }),
           });
 
           coworkStoreInst.updateConversationMappingMetadata(
@@ -7317,7 +8168,7 @@ if (!gotTheLock) {
                 version: '1.0.0',
                 contentType: 'application/json',
                 payload: payloadStr,
-              });
+              }, { feeRate: getGlobalFeeRate('mvc') });
               attachSimplemsgMetadataToCoworkMessage(
                 coworkStoreInst,
                 sessionId,
@@ -7482,7 +8333,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: 'application/json',
           payload: failurePayloadStr,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         const failureMessage = coworkStoreInst.addMessage(sessionId, {
           type: 'assistant',
           content: manualResendFailureReply,
@@ -7537,7 +8388,7 @@ if (!gotTheLock) {
         version: '1.0.0',
         contentType: 'application/json',
         payload: payloadStr,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
 
       const deliveryMessage = coworkStoreInst.addMessage(sessionId, {
         type: 'assistant',
@@ -7611,11 +8462,13 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) => {
+  ipcMain.handle('cowork:session:listArchived', async (_event, options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) => {
     return withSqliteRecovery('cowork:session:listArchived', async () => {
       try {
-        const sessions = getCoworkStore().listArchivedSessions(options);
-        return { success: true, sessions };
+        const coworkStoreInstance = getCoworkStore();
+        const sessions = coworkStoreInstance.listArchivedSessions(options);
+        const total = coworkStoreInstance.countArchivedSessions(options);
+        return { success: true, sessions, total };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {
@@ -7690,6 +8543,9 @@ if (!gotTheLock) {
               messages: session.messages ?? [],
               systemPrompt: session.systemPrompt,
               modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
+              // Real provider-reported context size from the last turn (Phase 2):
+              // keeps the fallback ring consistent with the compaction trigger.
+              realUsageTokens: getCoworkRunner().getSessionLastTurnInputTokens(sessionId),
               // A2A private chats rebuild the model context every turn from only
               // the latest segment messages; cap the estimate the same way so the
               // ring reflects real per-turn usage instead of full history.
@@ -7754,6 +8610,80 @@ if (!gotTheLock) {
         return {
           success: false,
           error: error instanceof Error ? error.message : 'Failed to get session messages',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:message:setFeedback', async (_event, input: {
+    messageId?: unknown;
+    rating?: unknown;
+    comment?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:message:setFeedback', async () => {
+      try {
+        const messageId = typeof input?.messageId === 'string' ? input.messageId.trim() : '';
+        if (!messageId) {
+          return { success: false, error: 'messageId is required' };
+        }
+        const coworkStore = getCoworkStore();
+        const ownerSessionId = coworkStore.getMessageOwnerSessionId(messageId);
+        const message = ownerSessionId ? coworkStore.getMessageById(ownerSessionId, messageId) : null;
+        if (!ownerSessionId || !message) {
+          return { success: false, error: 'Message not found' };
+        }
+        if (message.type !== 'assistant') {
+          return { success: false, error: 'Only assistant messages can be rated' };
+        }
+        const rating = input?.rating;
+        if (rating !== null && rating !== 'up' && rating !== 'down') {
+          return { success: false, error: 'Invalid rating' };
+        }
+        let comment: string | null | undefined;
+        if (input?.comment !== undefined) {
+          if (input.comment !== null && typeof input.comment !== 'string') {
+            return { success: false, error: 'comment must be a string' };
+          }
+          comment = typeof input.comment === 'string' ? input.comment.slice(0, 2000) : null;
+        }
+        const feedbackStore = getMessageFeedbackStore();
+        if (rating === null) {
+          feedbackStore.clearFeedback(messageId);
+          return { success: true, feedback: null };
+        }
+        const feedback = feedbackStore.upsertFeedback({
+          messageId,
+          sessionId: ownerSessionId,
+          rating: rating as 'up' | 'down',
+          ...(comment !== undefined ? { comment } : {}),
+        });
+        return { success: true, feedback };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to set message feedback',
+        };
+      }
+    });
+  });
+
+  ipcMain.handle('cowork:session:listFeedback', async (_event, input: {
+    sessionId?: unknown;
+  }) => {
+    return withSqliteRecovery('cowork:session:listFeedback', async () => {
+      try {
+        const sessionId = typeof input?.sessionId === 'string' ? input.sessionId.trim() : '';
+        if (!sessionId || !getCoworkStore().getSessionMetadata(sessionId)) {
+          return { success: false, error: 'Session not found' };
+        }
+        const feedback = getMessageFeedbackStore().listFeedbackForSession(sessionId);
+        return { success: true, feedback };
+      } catch (error) {
+        if (isSqliteWasmBoundsError(error)) throw error;
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Failed to list session feedback',
         };
       }
     });
@@ -8045,6 +8975,21 @@ if (!gotTheLock) {
     }
     return backend.resolveMetabotIdForMemory(input?.sessionId);
   };
+  const resolveMemoryScopeInputFromSession = (
+    store: CoworkStore,
+    input?: { sessionId?: string; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }
+  ): { scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string } => {
+    if (input?.scopeKind && input?.scopeKey) {
+      return { scopeKind: input.scopeKind, scopeKey: input.scopeKey };
+    }
+    if (input?.sessionId) {
+      const resolved = store.resolveMemoryScopeForSession(input.sessionId);
+      if (resolved) {
+        return { scopeKind: resolved.scope.kind, scopeKey: resolved.scope.key };
+      }
+    }
+    return {};
+  };
 
   ipcMain.handle('cowork:memory:listEntries', async (_event, input: {
     sessionId?: string;
@@ -8064,10 +9009,11 @@ if (!gotTheLock) {
       if (metabotId == null) {
         return { success: false, error: 'No MetaBot available for memory' };
       }
+      const resolvedScope = resolveMemoryScopeInputFromSession(store, input);
       const entries = memoryBackend.listUserMemories({
         metabotId,
-        scopeKind: input?.scopeKind,
-        scopeKey: input?.scopeKey,
+        scopeKind: resolvedScope.scopeKind,
+        scopeKey: resolvedScope.scopeKey,
         query: input?.query?.trim() || undefined,
         status: input?.status || 'all',
         includeDeleted: Boolean(input?.includeDeleted),
@@ -8087,6 +9033,8 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     text: string;
     confidence?: number;
     isExplicit?: boolean;
@@ -8105,6 +9053,8 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        usageClass: input?.usageClass,
+        visibility: input?.visibility,
       });
       return { success: true, entry };
     } catch (error) {
@@ -8119,6 +9069,8 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     id: string;
     text?: string;
     confidence?: number;
@@ -8137,6 +9089,8 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: input?.scopeKind,
         scopeKey: input?.scopeKey,
+        usageClass: input?.usageClass,
+        visibility: input?.visibility,
         text: input.text,
         confidence: input.confidence,
         status: input.status,
@@ -8196,16 +9150,71 @@ if (!gotTheLock) {
       if (metabotId == null) {
         return { success: false, error: 'No MetaBot available for memory' };
       }
+      const resolvedScope = resolveMemoryScopeInputFromSession(store, input);
       const stats = memoryBackend.getUserMemoryStats({
         metabotId,
-        scopeKind: input?.scopeKind,
-        scopeKey: input?.scopeKey,
+        scopeKind: resolvedScope.scopeKind,
+        scopeKey: resolvedScope.scopeKey,
       });
       return { success: true, stats };
     } catch (error) {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to get memory stats',
+      };
+    }
+  });
+  ipcMain.handle('cowork:memory:listScopes', async (_event, input: {
+    metabotId?: number;
+  }) => {
+    try {
+      const store = getCoworkStore();
+      const memoryBackend = store.getMemoryBackend();
+      const metabotId = typeof input?.metabotId === 'number' && Number.isFinite(input.metabotId) && input.metabotId > 0
+        ? Math.floor(input.metabotId)
+        : null;
+      if (metabotId == null) {
+        return { success: false, error: 'No MetaBot available for memory' };
+      }
+      const overview = memoryBackend.listMemoryScopes(metabotId);
+      return { success: true, overview };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list memory scopes',
+      };
+    }
+  });
+  ipcMain.handle('cowork:memory:getSessionScope', async (_event, input: {
+    sessionId?: string;
+  }) => {
+    try {
+      const store = getCoworkStore();
+      const resolved = input?.sessionId
+        ? store.resolveMemoryScopeForSession(input.sessionId)
+        : null;
+      if (!resolved) {
+        return { success: false, error: 'No session scope available for memory' };
+      }
+      const stats = store.getUserMemoryStats({
+        metabotId: resolved.metabotId,
+        scopeKind: resolved.scope.kind,
+        scopeKey: resolved.scope.key,
+      });
+      return {
+        success: true,
+        sessionScope: {
+          scopeKind: resolved.scope.kind,
+          scopeKey: resolved.scope.key,
+          peerName: resolved.peerName ?? null,
+          peerAvatar: resolved.peerAvatar ?? null,
+          stats,
+        },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get session memory scope',
       };
     }
   });
@@ -8383,7 +9392,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string }) => {
+  ipcMain.handle('groupTask:close', async (_event, input: { taskId?: number; status?: string; reason?: string; rating?: number; ratingComment?: string }) => {
     try {
       const taskId = Number(input?.taskId);
       if (!Number.isInteger(taskId) || taskId <= 0) {
@@ -8393,12 +9402,64 @@ if (!gotTheLock) {
       if (status !== 'done' && status !== 'cancelled') {
         throw new Error("status must be 'done' or 'cancelled'");
       }
+      // Owner acceptance requires the human rating (1-5 stars); 'cancelled' never carries one.
+      let rating: number | undefined;
+      if (status === 'done') {
+        const raw = Number(input?.rating);
+        if (!Number.isInteger(raw) || raw < 1 || raw > 5) {
+          throw new Error('rating (1-5) is required when accepting a group task');
+        }
+        rating = raw;
+      }
+      const ratingComment = typeof input?.ratingComment === 'string' ? input.ratingComment : undefined;
       const task = await withSqliteRecovery('groupTask:close', () =>
-        closeGroupTask(taskId, { status, reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+        closeGroupTask(taskId, {
+          status,
+          reason: typeof input?.reason === 'string' ? input.reason : undefined,
+          rating,
+          ratingComment,
+          // The UI close action is the owner's — recorded on the status event.
+          actor: { kind: 'owner' },
+        }));
       broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
       return { success: true, task };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to close group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:reopen', async (_event, input: { taskId?: number; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      // P0-1: review -> executing 补充执行通道 (Back to work). Owner-only UI
+      // action; the chair reopens via the on-chain [STATUS:EXECUTING] tag.
+      const task = await withSqliteRecovery('groupTask:reopen', () =>
+        reopenGroupTask(taskId, {
+          reason: typeof input?.reason === 'string' ? input.reason : undefined,
+          actor: { kind: 'owner' },
+        }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to reopen group task' };
+    }
+  });
+
+  ipcMain.handle('groupTask:rework', async (_event, input: { taskId?: number; reason?: string }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const task = await withSqliteRecovery('groupTask:rework', () =>
+        reworkGroupTask(taskId, { reason: typeof input?.reason === 'string' ? input.reason : undefined }));
+      broadcastGroupTaskEvent({ type: 'groupTask:statusChanged', taskId, status: task.status, at: Date.now() });
+      return { success: true, task };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to rework group task' };
     }
   });
 
@@ -8438,6 +9499,89 @@ if (!gotTheLock) {
       return { success: true, pinId: result.pinId };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to send group task message' };
+    }
+  });
+
+  // OpenTeam M3: owner removes a member (local worker or remote bot) from a task.
+  ipcMain.handle('groupTask:kickMember', async (_event, input: {
+    taskId?: number;
+    metabotId?: number;
+    globalmetaid?: string;
+    reason?: string;
+  }) => {
+    try {
+      const taskId = Number(input?.taskId);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        throw new Error('taskId is required');
+      }
+      const metabotId = input?.metabotId != null ? Number(input.metabotId) : undefined;
+      if (metabotId != null && (!Number.isInteger(metabotId) || metabotId <= 0)) {
+        throw new Error('metabotId must be a positive integer');
+      }
+      const globalmetaid = typeof input?.globalmetaid === 'string' ? input.globalmetaid.trim() : '';
+      if (metabotId == null && !globalmetaid) {
+        throw new Error('metabotId or globalmetaid is required');
+      }
+      const member = await withSqliteRecovery('groupTask:kickMember', () =>
+        kickGroupTaskMember({
+          taskId,
+          metabotId,
+          globalmetaid: metabotId == null ? globalmetaid : undefined,
+          reason: typeof input?.reason === 'string' && input.reason.trim() ? input.reason.trim() : undefined,
+        }));
+      return { success: true, member };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to remove the member' };
+    }
+  });
+
+  // ==================== OpenTeam Collab (invitee-side) IPC Handlers ====================
+  // Owner traceability for auto-accepted OpenTeam invites: every external group
+  // task this machine's bots joined (or left), with a message-activity digest.
+  ipcMain.handle('openTeamCollab:list', async () => {
+    try {
+      const items = await withSqliteRecovery('openTeamCollab:list', () =>
+        getOpenTeamMembershipStore().listCollabSummaries());
+      return { success: true, items };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaborations' };
+    }
+  });
+
+  // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
+  // bots received, regardless of outcome, newest first. Records exist even for
+  // declined/skipped/expired invites, so the collab UI shows the full flow.
+  ipcMain.handle('openTeamCollab:listGuestInvites', async () => {
+    try {
+      const items = await withSqliteRecovery('openTeamCollab:listGuestInvites', () =>
+        getOpenTeamMembershipStore().listGuestInvites());
+      return { success: true, items };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list received OpenTeam invites' };
+    }
+  });
+
+  // Read-only transcript for one external group. Content is already decrypted
+  // at insert time; reuse the group-task transcript query as-is. Membership
+  // gate: only groups this machine's bots actually joined (or left) may be
+  // read through this endpoint.
+  ipcMain.handle('openTeamCollab:listMessages', async (_event, input: { groupId?: string; beforeId?: number; limit?: number }) => {
+    try {
+      const groupId = String(input?.groupId ?? '').trim();
+      if (!groupId) {
+        throw new Error('groupId is required');
+      }
+      if (!getOpenTeamMembershipStore().hasMembershipForGroup(groupId)) {
+        throw new Error('No OpenTeam membership for this group on this machine');
+      }
+      const messages = await withSqliteRecovery('openTeamCollab:listMessages', () =>
+        getGroupTaskStore().listGroupChatMessages(groupId, {
+          beforeId: typeof input?.beforeId === 'number' ? input.beforeId : undefined,
+          limit: typeof input?.limit === 'number' ? input.limit : undefined,
+        }));
+      return { success: true, messages };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list external collaboration messages' };
     }
   });
 
@@ -8580,6 +9724,330 @@ if (!gotTheLock) {
     }
   });
 
+  // ==================== SDK Cron Mirror IPC Handlers (方案 C R1/R2) ====================
+
+  ipcMain.handle('sdkCronMirror:list', async () => {
+    try {
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirrors = mirrorStore.listMirrors(false);
+      const coworkStoreInstance = getCoworkStore();
+      const activeSessionIds = getCoworkRunner().getActiveSessionIds();
+      // 回填：会话采集/迁移来源的镜像没有 scheduleSpec，导致开关/编辑失效。
+      // 从 5 字段 cron 表达式派生 spec 并持久化（幂等，已有 spec 的不动），让所有任务都可编辑/可重建。
+      const backfilled = mirrors.map((mirror) => {
+        if (!mirror.scheduleSpec && mirror.schedule) {
+          const derived = deriveScheduleSpecFromCron(mirror);
+          if (derived) {
+            mirrorStore.setScheduleSpec(mirror.id, derived);
+            return { ...mirror, scheduleSpec: derived };
+          }
+        }
+        return mirror;
+      });
+      const enriched = backfilled.map((mirror) => {
+        const session = coworkStoreInstance.getSession(mirror.sessionId);
+        return {
+          ...mirror,
+          sessionTitle: session?.title ?? null,
+          sessionActive: activeSessionIds.includes(mirror.sessionId),
+        };
+      });
+      return { success: true, mirrors: enriched };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list sdk cron mirrors' };
+    }
+  });
+
+  /**
+   * R1 管理桥：UI 删除/停用 SDK cron。
+   * 宿主不能直接调 CronDelete（Agent 工具）——两步走：
+   * 1) 镜像标记 deletion_requested（UI 显示「删除中」，防重复操作）；
+   * 2) 所属会话活跃 → 注入指令由会话内 bot 执行 CronDelete（路径 A）；
+   *    不活跃 → 返回提示，用户到原会话内操作；删除后镜像经 Stop hook/文件扫描对账自动转 deleted（路径 B）。
+   */
+  ipcMain.handle('sdkCronMirror:requestDelete', async (_event, cronId: string) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) {
+        return { success: false, error: 'cronId is required' };
+      }
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirror = mirrorStore.getById(normalizedId);
+      if (!mirror) {
+        return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      }
+      if (mirror.status === 'deleted') {
+        return { success: true, status: 'deleted', hint: '该任务已删除' };
+      }
+
+      // 提交即返回：启动一次性管理会话执行 CronDelete（不再依赖所属会话活跃的 steer 注入）。
+      // 镜像标 deletion_requested（UI「删除中」），SDK 侧删除后经文件扫描对账转 deleted；
+      // 若删除失败，upsert 自愈恢复 active（SDK 侧还活着）。
+      mirrorStore.markDeletionRequested(normalizedId);
+      const sessionId = launchCronDeleteSession({
+        cronId: normalizedId,
+        name: mirror.name,
+        metabotId: mirror.scheduleSpec?.metabotId ?? null,
+      });
+      return {
+        success: true,
+        status: 'deletion_requested',
+        submitted: true,
+        sessionId,
+        hint: '已提交删除，正在后台会话执行…',
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to request cron delete' };
+    }
+  });
+
+  /**
+   * UI 新建/编辑：启动一次性管理会话执行 CronCreate(durable=true)，对账后镜像写入 schedule_spec。
+   * 与 migrateExecute 同构。编辑场景传入 replacesId：先经 requestDelete 删旧 cron，再创建新的。
+   */
+  ipcMain.handle('sdkCronMirror:create', async (_event, input: {
+    spec: SdkCronScheduleSpec;
+    /** 编辑时旧 cron id：先删除再创建（cron 变了 id 必然变）。 */
+    replacesId?: string | null;
+  }) => {
+    try {
+      const spec = input?.spec;
+      if (!spec || typeof spec !== 'object') {
+        return { success: false, error: 'spec is required' };
+      }
+      if (!spec.name?.trim() || !spec.prompt?.trim()) {
+        return { success: false, error: 'name and prompt are required' };
+      }
+
+      // 编辑：先删旧 cron（走专用删除管理会话，不再依赖所属会话活跃的 steer）。
+      if (input.replacesId) {
+        const oldMirror = getSdkCronMirrorStore().getById(String(input.replacesId));
+        if (oldMirror && oldMirror.status !== 'deleted') {
+          getSdkCronMirrorStore().markDeletionRequested(String(input.replacesId));
+          launchCronDeleteSession({
+            cronId: String(input.replacesId),
+            name: oldMirror.name,
+            metabotId: oldMirror.scheduleSpec?.metabotId ?? null,
+          });
+        }
+      }
+
+      // 用主进程镜像的同一份纯函数计算 cron 表达式（与渲染层 specToSdkCron 等价）。
+      const cron = computeSdkCronFromSpec(spec);
+      if (!cron.expression) {
+        return { success: false, error: '无法从计划生成有效的 cron 表达式，请检查表单输入' };
+      }
+
+      // 提交即返回：管理会话 fire-and-forget，spec 经 Stop hook 对账回写（nonce 匹配）。
+      const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = launchCronCreateSession({
+        cronExpression: cron.expression,
+        prompt: spec.prompt,
+        recurring: cron.recurring,
+        nonce,
+        spec,
+        title: `[定时任务] ${spec.name}`,
+      });
+      return { success: true, submitted: true, sessionId, nonce, hint: '已提交，正在后台会话执行…' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create sdk cron' };
+    }
+  });
+
+  /**
+   * 开关（删→重建）：enable=false → 镜像置 enabled=0 保留 spec + 专用管理会话删 SDK 侧 cron；
+   * enable=true → 用存档 spec 经 CronCreate 重建（新 id），旧镜像标记 deleted。
+   * 提交即返回（fire-and-forget），结果经对账异步可见。
+   */
+  ipcMain.handle('sdkCronMirror:toggle', async (_event, cronId: string, enabled: boolean) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) return { success: false, error: 'cronId is required' };
+      const mirrorStore = getSdkCronMirrorStore();
+      const mirror = mirrorStore.getById(normalizedId);
+      if (!mirror) return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      if (mirror.status === 'deleted') return { success: true, status: 'deleted' };
+
+      if (!enabled) {
+        // 停用：镜像置 enabled=0（保留 spec 待重建）+ 专用管理会话删 SDK 侧 cron。
+        // 对账兜底：删除成功 → 文件里没了，停用行因 enabled=0 被对账跳过（保留待重建）；
+        // 删除失败 → upsert 自愈恢复 active（SDK 侧还活着），且 host trigger 已跳过停用任务。
+        mirrorStore.setEnabled(normalizedId, false);
+        const sessionId = launchCronDeleteSession({
+          cronId: normalizedId,
+          name: mirror.name,
+          metabotId: mirror.scheduleSpec?.metabotId ?? null,
+        });
+        return {
+          success: true,
+          submitted: true,
+          sessionId,
+          hint: '已停用，正在后台删除任务…',
+        };
+      }
+
+      // 启用：必须有存档 spec 才能重建。
+      if (!mirror.scheduleSpec) {
+        return {
+          success: false,
+          error: '该任务没有可用的调度快照（scheduleSpec 缺失），无法重建。仅支持删除后重新新建。',
+        };
+      }
+      const cron = computeSdkCronFromSpec(mirror.scheduleSpec);
+      if (!cron.expression) {
+        return { success: false, error: '存档的调度快照无法生成有效 cron 表达式' };
+      }
+      // 旧镜像标记 deleted（重建会得到新 id），新 nonce 建立映射。
+      mirrorStore.markDeleted(normalizedId);
+      const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const sessionId = launchCronCreateSession({
+        cronExpression: cron.expression,
+        prompt: mirror.scheduleSpec.prompt,
+        recurring: cron.recurring,
+        nonce,
+        spec: mirror.scheduleSpec,
+        title: `[定时任务] ${mirror.scheduleSpec.name || mirror.name}`,
+      });
+      return { success: true, submitted: true, sessionId, nonce, hint: '已提交重新启用，正在后台会话执行…' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to toggle sdk cron' };
+    }
+  });
+
+  /**
+   * 立即运行：SDK 无「立即触发 cron」工具 → 当场执行该 cron 的 prompt。
+   * 所属会话活跃且 local 开放 → trySubmitSteer 注入；否则启动一次性管理会话执行。
+   * 均 fire-and-forget：立即返回（runNow 的「已在会话中执行」即用户要的结果，不等会话结束）。
+   */
+  ipcMain.handle('sdkCronMirror:runNow', async (_event, cronId: string) => {
+    try {
+      const normalizedId = String(cronId ?? '').trim();
+      if (!normalizedId) return { success: false, error: 'cronId is required' };
+      const mirror = getSdkCronMirrorStore().getById(normalizedId);
+      if (!mirror) return { success: false, error: `Mirror cron not found: ${normalizedId}` };
+      if (mirror.status === 'deleted') return { success: false, error: '该任务已删除' };
+
+      const promptText = mirror.scheduleSpec?.prompt?.trim() || mirror.prompt;
+      const instruction = buildCronRunNowInstruction(promptText);
+
+      const steer = getCoworkRunner().trySubmitSteer(
+        mirror.sessionId,
+        `host-run-now-${normalizedId}`,
+        instruction
+      );
+      if (steer.accepted) {
+        void steer.delivered.catch(() => undefined);
+        return { success: true, submitted: true, injected: true, sessionId: mirror.sessionId };
+      }
+      // 会话不活跃：启动一次性管理会话执行 prompt（不创建 cron），fire-and-forget。
+      const coworkConfig = getCoworkStore().getConfig();
+      const cwd = coworkConfig.workingDirectory?.trim() || path.join(os.homedir(), 'idbots', 'project');
+      const session = getCoworkStore().createSession(
+        `[立即运行] ${mirror.name}`,
+        cwd,
+        coworkConfig.systemPrompt,
+        'local',
+        [],
+        mirror.scheduleSpec?.metabotId ?? null
+      );
+      getCoworkStore().updateSession(session.id, { status: 'running' });
+      getCoworkStore().addMessage(session.id, { type: 'user', content: instruction });
+      getCoworkRunner().startSession(session.id, instruction, MANAGEMENT_SESSION_OPTIONS).catch((error) => {
+        console.warn('[SdkCronMirror] Run-now session failed:', error);
+      });
+      return { success: true, submitted: true, injected: false, sessionId: session.id };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to run sdk cron now' };
+    }
+  });
+
+  /**
+   * R2 迁移规划（只读）：老 scheduledTaskStore 任务 → SDK durable cron 的迁移计划。
+   * 幂等：已迁移/禁用任务自动跳过；interval 与非法表达式进 unsupported 清单。
+   */
+  ipcMain.handle('scheduledTask:migratePlan', async () => {
+    try {
+      const plan = planTaskMigration(getScheduledTaskStore().listTasks());
+      return {
+        success: true,
+        plan: {
+          migratable: plan.migratable,
+          skipped: plan.skipped.map((item) => ({ task: item.task, reason: item.reason })),
+          unsupported: plan.unsupported.map((item) => ({ task: item.task, reason: item.reason })),
+          sevenDayLimitedCount: plan.sevenDayLimitedCount,
+          truncatedCount: plan.truncatedCount,
+        },
+      };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to plan migration' };
+    }
+  });
+
+  /**
+   * R2 迁移执行（需 UI 人工确认后调用）：启动迁移会话，由会话内 bot 逐个执行
+   * CronCreate(durable=true)；会话结束后对账——镜像中带 [SDK_MIGRATE:<taskId>] 标记的
+   * cron 与原任务建立映射并标记 migrated（原任务禁用，历史 run 保留）。
+   * 幂等：对账以原 task.id 为键，重复执行不会产生重复 cron。
+   */
+  ipcMain.handle('scheduledTask:migrateExecute', async () => {
+    const taskStore = getScheduledTaskStore();
+    const plan = planTaskMigration(taskStore.listTasks());
+    if (plan.migratable.length === 0) {
+      return {
+        success: true,
+        migrated: 0,
+        skipped: plan.skipped.length + plan.unsupported.length,
+        unsupported: plan.unsupported.length,
+        sessionId: null,
+      };
+    }
+
+    const coworkConfig = getCoworkStore().getConfig();
+    const cwd = coworkConfig.workingDirectory || path.join(os.homedir(), 'idbots', 'project');
+    const lines = plan.migratable.map((item, index) => {
+      const instruction = buildCronCreateInstruction(item.spec!);
+      return `${index + 1}. ${instruction.replace(/\n/g, '\n   ')}`;
+    });
+
+    const session = getCoworkStore().createSession(
+      '[迁移] 老定时任务 → SDK cron',
+      cwd,
+      coworkConfig.systemPrompt,
+      'local',
+      [],
+      null
+    );
+    const sessionId = session.id;
+    getCoworkStore().updateSession(sessionId, { status: 'running' });
+    // 完整指令必须作为 startSession 的 prompt 传给 SDK（skipInitialUserMessage 只跳过
+    // store 的 user 消息展示，SDK 实际收到的输入是 prompt 参数本身）；
+    // addMessage 仅用于 UI 一致展示。
+    const instruction = [
+      '你是定时任务迁移执行器。请依次执行以下 CronCreate 调用（全部 durable=true），参数原样使用、不要遗漏、不要修改。',
+      '每创建一个任务都继续执行下一个；全部完成后回复「迁移完成」。',
+      '',
+      ...lines,
+    ].join('\n');
+    getCoworkStore().addMessage(sessionId, {
+      type: 'user',
+      content: instruction,
+    });
+
+    try {
+      await getCoworkRunner().startSession(sessionId, instruction, {
+        skipInitialUserMessage: true,
+        disableMemoryUpdates: true,
+        confirmationMode: 'text',
+      });
+    } catch (error) {
+      console.warn('[SdkCronMirror] Migration session failed (partial results still reconciled):', error);
+    }
+
+    // 对账：镜像中带 [SDK_MIGRATE:<taskId>] 标记的 cron → 建立映射并标记 migrated（幂等）。
+    const migrated = reconcileMigrationResults();
+    return { success: true, migrated, skipped: plan.skipped.length, unsupported: plan.unsupported.length, sessionId };
+  });
+
   // ==================== MetaBot IPC Handlers ====================
 
   ipcMain.handle('idbots:getMetaBots', async () => withSqliteRecovery('idbots:getMetaBots', async () => {
@@ -8626,6 +10094,30 @@ if (!gotTheLock) {
       } catch (error) {
         rethrowSqliteWasmBoundsError(error);
         return { success: false, error: error instanceof Error ? error.message : 'Failed to list daily summaries' };
+      }
+    });
+  });
+
+  ipcMain.handle('dream:listRuns', async (_event, options: { metabotId: number; limit?: number }) => {
+    return withSqliteRecovery('dream:listRuns', async () => {
+      try {
+        const metabotId = Number(options?.metabotId);
+        if (!Number.isInteger(metabotId) || metabotId <= 0) {
+          return { success: false, error: 'Invalid metabotId' };
+        }
+        // Read-only run rows for the dream diary failure fallback. nextRetryAt
+        // mirrors computeDueDreamDates' failed-run backoff so the UI can show
+        // when the scheduler will pick the date up again on its own.
+        const runs = getDreamStore().listRecentRuns(metabotId, options?.limit).map((run) => ({
+          ...run,
+          nextRetryAt: run.status === 'failed'
+            ? run.startedAt + computeDreamRetryDelayMs(run.attemptCount)
+            : null,
+        }));
+        return { success: true, runs };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to list dream runs' };
       }
     });
   });
@@ -8812,6 +10304,31 @@ if (!gotTheLock) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
   });
+
+  // Per-metabot kv settings (metabot_settings table) are not metabots-table
+  // columns, so they bypass metabot:update; the whitelist lives in
+  // metabotSettingsService and rejects any key the renderer may not touch.
+  ipcMain.handle('metabot:getSetting', async (_event, metabotId: number, key: string) =>
+    withSqliteRecovery('metabot:getSetting', async () => {
+      try {
+        const value = getRendererMetabotSetting(getMetabotStore(), metabotId, key);
+        return { success: true, value };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to get metabot setting' };
+      }
+    }));
+
+  ipcMain.handle('metabot:setSetting', async (_event, metabotId: number, key: string, value: unknown) =>
+    withSqliteRecovery('metabot:setSetting', async () => {
+      try {
+        const stored = setRendererMetabotSetting(getMetabotStore(), metabotId, key, value);
+        return { success: true, value: stored };
+      } catch (error) {
+        rethrowSqliteWasmBoundsError(error);
+        return { success: false, error: error instanceof Error ? error.message : 'Failed to set metabot setting' };
+      }
+    }));
 
   ipcMain.handle('idbots:addMetaBot', async (_event, input: {
     name: string;
@@ -9031,6 +10548,7 @@ if (!gotTheLock) {
         identity: toPublicUserIdentity(result.identity ?? null),
         // Returned only here so the renderer can show the one-time backup step.
         mnemonic: result.mnemonic,
+        subsidy: result.subsidy,
         chainSync: result.chainSync,
       };
     } catch (error) {
@@ -9050,6 +10568,7 @@ if (!gotTheLock) {
         success: true,
         identity: toPublicUserIdentity(result.identity ?? null),
         profileSource: result.profileSource,
+        subsidy: result.subsidy,
         chainSync: result.chainSync,
       };
     } catch (error) {
@@ -9102,14 +10621,46 @@ if (!gotTheLock) {
     }
   });
 
+  ipcMain.handle('userIdentity:retrySubsidy', async () => {
+    try {
+      const store = getUserIdentityStore();
+      if (!store.get()) {
+        return { success: false, error: 'USER_IDENTITY_MISSING' };
+      }
+      const result = await retryUserIdentitySubsidy(store);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        subsidy: result.subsidy,
+      };
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error('[UserIdentity] userIdentity:retrySubsidy failed:', errMsg);
+      return { success: false, error: errMsg };
+    }
+  });
+
+  // Resume the whole bootstrap flow: claim the subsidy when needed, then
+  // publish every /info pin that is still missing (idempotent).
   ipcMain.handle('userIdentity:retryChainSync', async () => {
     try {
       const store = getUserIdentityStore();
       if (!store.get()) {
         return { success: false, error: 'USER_IDENTITY_MISSING' };
       }
-      const chainSync = await syncUserIdentityToChain(store, { includeProfileSteps: false });
-      return { success: true, identity: toPublicUserIdentity(store.get()), chainSync };
+      const result = await resumeUserIdentitySetup(store);
+      if (!result.success) {
+        return { success: false, error: result.error };
+      }
+      return {
+        success: true,
+        identity: toPublicUserIdentity(result.identity ?? null),
+        subsidy: result.subsidy,
+        chainSync: result.chainSync,
+      };
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[UserIdentity] userIdentity:retryChainSync failed:', errMsg);
@@ -9807,7 +11358,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: parsed.mime,
           payload: parsed.buffer,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
@@ -9830,7 +11381,7 @@ if (!gotTheLock) {
         version: '1.1.0',
         contentType: 'application/json',
         payload: payloadJson,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
 
       const localServiceRecord = {
         id: result.pinId,
@@ -9920,6 +11471,7 @@ if (!gotTheLock) {
         getMetabotStore(),
         validation.creatorMetabotId,
         buildGigSquareRevokeMetaidPayload(currentService.currentPinId),
+        { feeRate: getGlobalFeeRate('mvc') },
       );
       markGigSquareLocalServiceRevoked(currentService);
 
@@ -10064,7 +11616,7 @@ if (!gotTheLock) {
           version: '1.0.0',
           contentType: parsed.mime,
           payload: parsed.buffer,
-        });
+        }, { feeRate: getGlobalFeeRate('mvc') });
         serviceIconUri = buildMetafileUri(fileResult.pinId, { contentType: parsed.mime });
       }
 
@@ -10082,7 +11634,7 @@ if (!gotTheLock) {
       const result = await createPin(store, validation.creatorMetabotId, buildGigSquareModifyMetaidPayload({
         targetPinId: currentService.currentPinId,
         payloadJson,
-      }));
+      }), { feeRate: getGlobalFeeRate('mvc') });
       updateGigSquareLocalServiceAfterModify({
         targetService: currentService,
         currentPinId: toSafeString(result.pinId).trim() || currentService.currentPinId,
@@ -10332,7 +11884,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         version: '1.0.0',
         contentType: 'application/json',
         payload: payloadStr,
-      });
+      }, { feeRate: getGlobalFeeRate('mvc') });
       const orderMessageTxid = resolvePrimarySimplemsgTxid({
         txids: result.txids,
         pinId: result.pinId,
@@ -10608,6 +12160,16 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     buildTokenTransferPreview: buildTokenTransferPreviewService,
     executeTokenTransfer: executeTokenTransferService,
   });
+
+  // Traffic-ized gas fee (Phase D): account/binding/balance/usage APIs plus the
+  // local spend journal. The service stays inert (self-pay defaults) until
+  // traffic.mode is switched on in settings.
+  initTrafficAccountService({
+    getStore,
+    getMetabotStore,
+    getUserIdentityStore,
+  });
+  registerTrafficAccountIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {
@@ -10895,6 +12457,206 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  // ---- File right-click menu support (Open with / copy content) ----
+  interface OpenWithAppCandidate {
+    id: string;
+    name: string;
+    /** Executable path (win/linux) or 'open' (macOS). */
+    exec: string;
+    /** macOS app bundle name used with `open -a`. */
+    macBundle?: string;
+  }
+
+  const MAX_TEXT_COPY_BYTES = 512 * 1024;
+
+  const macAppExists = (bundle: string): boolean => {
+    const roots = ['/Applications', '/System/Applications', path.join(os.homedir(), 'Applications')];
+    return roots.some((root) => fs.existsSync(path.join(root, `${bundle}.app`)));
+  };
+
+  const linuxCommandExists = (command: string): boolean => {
+    try {
+      const { spawnSync } = require('child_process') as typeof import('child_process');
+      const result = spawnSync('which', [command], { encoding: 'utf8' });
+      return result.status === 0;
+    } catch {
+      return false;
+    }
+  };
+
+  const buildOpenWithAppList = (): OpenWithAppCandidate[] => {
+    if (isMac) {
+      const macCandidates: OpenWithAppCandidate[] = [
+        { id: 'textedit', name: 'TextEdit', exec: 'open', macBundle: 'TextEdit' },
+        { id: 'vscode', name: 'Visual Studio Code', exec: 'open', macBundle: 'Visual Studio Code' },
+        { id: 'cursor', name: 'Cursor', exec: 'open', macBundle: 'Cursor' },
+        { id: 'windsurf', name: 'Windsurf', exec: 'open', macBundle: 'Windsurf' },
+        { id: 'sublime', name: 'Sublime Text', exec: 'open', macBundle: 'Sublime Text' },
+        { id: 'zed', name: 'Zed', exec: 'open', macBundle: 'Zed' },
+        { id: 'xcode', name: 'Xcode', exec: 'open', macBundle: 'Xcode' },
+        { id: 'bbedit', name: 'BBEdit', exec: 'open', macBundle: 'BBEdit' },
+      ];
+      return macCandidates.filter((candidate) => candidate.macBundle && macAppExists(candidate.macBundle));
+    }
+
+    if (isWindows) {
+      const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+      const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+      const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+      const windowsDir = process.env.WINDIR || 'C:\\Windows';
+      const winCandidates: OpenWithAppCandidate[] = [
+        { id: 'notepad', name: 'Notepad', exec: path.join(windowsDir, 'System32', 'notepad.exe') },
+        { id: 'vscode', name: 'Visual Studio Code', exec: path.join(localAppData, 'Programs', 'Microsoft VS Code', 'Code.exe') },
+        { id: 'cursor', name: 'Cursor', exec: path.join(localAppData, 'Programs', 'cursor', 'Cursor.exe') },
+        { id: 'notepadpp', name: 'Notepad++', exec: path.join(programFiles, 'Notepad++', 'notepad++.exe') },
+        { id: 'notepadpp-x86', name: 'Notepad++ (x86)', exec: path.join(programFilesX86, 'Notepad++', 'notepad++.exe') },
+        { id: 'sublime', name: 'Sublime Text', exec: path.join(programFiles, 'Sublime Text', 'sublime_text.exe') },
+      ];
+      return winCandidates.filter((candidate) => fs.existsSync(candidate.exec));
+    }
+
+    const linuxCandidates: OpenWithAppCandidate[] = [
+      { id: 'gedit', name: 'gedit', exec: 'gedit' },
+      { id: 'kate', name: 'Kate', exec: 'kate' },
+      { id: 'xed', name: 'Xed', exec: 'xed' },
+      { id: 'vscode', name: 'VS Code', exec: 'code' },
+      { id: 'sublime', name: 'Sublime Text', exec: 'sublime' },
+    ];
+    return linuxCandidates.filter((candidate) => linuxCommandExists(candidate.exec));
+  };
+
+  const openFileWithApp = (candidate: OpenWithAppCandidate, filePath: string): { success: boolean; error?: string } => {
+    try {
+      if (isMac && candidate.macBundle) {
+        const { spawn } = require('child_process') as typeof import('child_process');
+        spawn('open', ['-a', candidate.macBundle, filePath], { stdio: 'ignore' }).unref();
+        return { success: true };
+      }
+      const { spawn } = require('child_process') as typeof import('child_process');
+      spawn(candidate.exec, [filePath], { stdio: 'ignore' }).unref();
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  };
+
+  ipcMain.handle('shell:getOpenWithApps', async (_event, filePath: string): Promise<{ success: boolean; apps: { id: string; name: string }[]; error?: string }> => {
+    try {
+      const normalizedPath = normalizeWindowsShellPath(filePath);
+      if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+        return { success: false, apps: [], error: 'file_not_found' };
+      }
+      const apps = buildOpenWithAppList().map(({ id, name }) => ({ id, name }));
+      return { success: true, apps };
+    } catch (error) {
+      return { success: false, apps: [], error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('shell:openWith', async (_event, payload: { filePath: string; appId: string }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
+      const appId = payload?.appId ?? '';
+      if (!filePath) {
+        return { success: false, error: 'empty_path' };
+      }
+      if (!fs.existsSync(filePath)) {
+        return { success: false, error: 'file_not_found' };
+      }
+      const candidate = buildOpenWithAppList().find((item) => item.id === appId);
+      if (!candidate) {
+        return { success: false, error: 'app_not_found' };
+      }
+      return openFileWithApp(candidate, filePath);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('shell:chooseOpenWithApp', async (_event, filePath: string): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const normalizedPath = normalizeWindowsShellPath(filePath);
+      if (!normalizedPath || !fs.existsSync(normalizedPath)) {
+        return { success: false, error: 'file_not_found' };
+      }
+      const { spawn, exec } = require('child_process') as typeof import('child_process');
+
+      if (isMac) {
+        const appPath = await new Promise<string | null>((resolve) => {
+          const child = spawn('osascript', ['-e', 'POSIX path of (choose application with prompt "Choose an application to open this file")']);
+          let output = '';
+          let errorOutput = '';
+          child.stdout?.on('data', (chunk: Buffer | string) => { output += String(chunk); });
+          child.stderr?.on('data', (chunk: Buffer | string) => { errorOutput += String(chunk); });
+          child.on('error', (error: Error) => {
+            console.error('[chooseOpenWithApp] osascript failed to start:', error.message);
+            resolve(null);
+          });
+          child.on('close', (code: number | null) => {
+            const trimmed = output.trim();
+            if (code === 0 && trimmed) {
+              resolve(trimmed);
+              return;
+            }
+            // User cancel surfaces as AppleScript error -128; anything else is
+            // a real failure worth surfacing instead of a silent cancel.
+            const userCancelled = /-128|User canceled|User cancelled/i.test(errorOutput);
+            if (!userCancelled && errorOutput.trim()) {
+              console.error('[chooseOpenWithApp] osascript error:', errorOutput.trim());
+            }
+            resolve(null);
+          });
+        });
+        if (!appPath) {
+          return { success: false, error: 'cancelled' };
+        }
+        const result = openFileWithApp({ id: 'chosen', name: 'Chosen', exec: 'open', macBundle: appPath }, normalizedPath);
+        return result;
+      }
+
+      if (isWindows) {
+        // The system "Open with" dialog opens asynchronously; nothing to await.
+        exec(`rundll32 shell32.dll,OpenAs_RunDLL "${normalizedPath}"`);
+        return { success: true };
+      }
+
+      if (linuxCommandExists('mimeopen')) {
+        spawn('mimeopen', ['-a', normalizedPath], { stdio: 'ignore' }).unref();
+        return { success: true };
+      }
+      return { success: false, error: 'no_chooser_available' };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
+  ipcMain.handle('fs:readTextFile', async (_event, payload: { filePath: string; maxBytes?: number }): Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }> => {
+    try {
+      const filePath = normalizeWindowsShellPath(payload?.filePath ?? '');
+      if (!filePath) {
+        return { success: false, error: 'empty_path' };
+      }
+      const stats = await fs.promises.stat(filePath);
+      if (!stats.isFile()) {
+        return { success: false, error: 'not_a_file' };
+      }
+      const limit = typeof payload?.maxBytes === 'number' && payload.maxBytes > 0
+        ? payload.maxBytes
+        : MAX_TEXT_COPY_BYTES;
+      if (stats.size > limit) {
+        return { success: false, error: 'file_too_large', size: stats.size, limit };
+      }
+      const content = await fs.promises.readFile(filePath, 'utf8');
+      return { success: true, content };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      if (code === 'ENOENT') {
+        return { success: false, error: 'file_not_found' };
+      }
+      return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
+    }
+  });
+
   // App update download & install
   ipcMain.handle('appUpdate:download', async (event, payload: { url: string; version?: string; sha256?: string }) => {
     try {
@@ -11158,6 +12920,51 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  const getMetaIDContactViewService = (): MetaIDContactViewService => {
+    const sqliteStore = getStore();
+    return new MetaIDContactViewService({
+      db: sqliteStore.getDatabase(),
+      experienceStore: getMetaIDExperienceStore(),
+      impressionStore: getMetaIDImpressionStore(),
+    });
+  };
+
+  ipcMain.handle('metaid:contacts:list', async (_event, input: { observerGlobalMetaId?: string }) => {
+    try {
+      const observerGlobalMetaId = toSafeString(input?.observerGlobalMetaId).trim();
+      if (!observerGlobalMetaId) {
+        return { success: false, error: 'Missing observerGlobalMetaId' };
+      }
+      const contacts = getMetaIDContactViewService().listContacts(observerGlobalMetaId);
+      return { success: true, contacts };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list MetaID contacts',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:contacts:detail', async (_event, input: {
+    observerGlobalMetaId?: string;
+    subjectGlobalMetaId?: string;
+  }) => {
+    try {
+      const observerGlobalMetaId = toSafeString(input?.observerGlobalMetaId).trim();
+      const subjectGlobalMetaId = toSafeString(input?.subjectGlobalMetaId).trim();
+      if (!observerGlobalMetaId || !subjectGlobalMetaId) {
+        return { success: false, error: 'Missing observer/subject GlobalMetaId' };
+      }
+      const detail = getMetaIDContactViewService().getContactDetail(observerGlobalMetaId, subjectGlobalMetaId);
+      return { success: true, detail };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to load MetaID contact detail',
+      };
+    }
+  });
+
   ipcMain.handle('mcp:list', () => {
     try {
       return { success: true, servers: getMcpStore().listServers() };
@@ -11211,6 +13018,59 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  ipcMain.handle('projects:list', () => {
+    try {
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to list projects' };
+    }
+  });
+
+  ipcMain.handle('projects:create', (_event, data: ProjectFormData) => {
+    try {
+      getProjectStore().createProject(data);
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to create project' };
+    }
+  });
+
+  ipcMain.handle('projects:update', (_event, id: string, data: Partial<ProjectFormData>) => {
+    try {
+      const updated = getProjectStore().updateProject(id, data);
+      if (!updated) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update project' };
+    }
+  });
+
+  ipcMain.handle('projects:delete', (_event, id: string) => {
+    try {
+      const deleted = getProjectStore().deleteProject(id);
+      if (!deleted) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to delete project' };
+    }
+  });
+
+  ipcMain.handle('projects:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+    try {
+      const updated = getProjectStore().setEnabled(options.id, options.enabled);
+      if (!updated) {
+        return { success: false, error: 'Project not found' };
+      }
+      return { success: true, projects: getProjectStore().listProjects() };
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Failed to update project' };
+    }
+  });
+
   // 设置 Content Security Policy
   const setContentSecurityPolicy = () => {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
@@ -11252,9 +13112,9 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
   };
 
   // 创建主窗口
-  const createWindow = () => {
-    // 如果窗口已经存在，就不再创建新窗口
-    if (mainWindow) {
+  const createAppWindow = (options?: { focusExistingPrimary?: boolean }) => {
+    // 需要聚焦已有主窗口时（托盘/激活等场景），复用主窗口而不新建
+    if (options?.focusExistingPrimary && mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       if (!mainWindow.isVisible()) mainWindow.show();
       if (!mainWindow.isFocused()) mainWindow.focus();
@@ -11262,7 +13122,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     startupLog('createWindow begin');
-    mainWindow = new BrowserWindow({
+    const win = new BrowserWindow({
       width: 1200,
       height: 800,
       title: APP_NAME,
@@ -11301,6 +13161,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       enableLargerThanScreen: false
     });
 
+    // 第一个窗口作为主窗口引用（托盘、second-instance 聚焦等使用）
+    if (!mainWindow) {
+      mainWindow = win;
+    }
+
     // 设置 macOS Dock 图标（开发模式下 Electron 默认图标不是应用 Logo）
     if (isMac && isDev) {
       const iconPath = path.join(__dirname, '../build/icons/png/512x512.png');
@@ -11310,48 +13175,48 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
 
     // 禁用窗口菜单
-    mainWindow.setMenu(null);
+    win.setMenu(null);
 
     // 设置窗口的最小尺寸
-    mainWindow.setMinimumSize(800, 600);
+    win.setMinimumSize(800, 600);
 
     // 设置窗口加载超时
     const loadTimeout = setTimeout(() => {
-      if (mainWindow && mainWindow.webContents.isLoadingMainFrame()) {
+      if (win.webContents.isLoadingMainFrame()) {
         console.log('Window load timed out, attempting to reload...');
-        scheduleReload('load-timeout');
+        scheduleReload('load-timeout', win.webContents);
       }
     }, 30000);
 
     // 清除超时
-    mainWindow.webContents.once('did-finish-load', () => {
+    win.webContents.once('did-finish-load', () => {
       clearTimeout(loadTimeout);
     });
-    mainWindow.webContents.on('did-finish-load', () => {
+    win.webContents.on('did-finish-load', () => {
       startupLog('main frame did-finish-load');
-      emitWindowState();
+      emitWindowState(win);
     });
     if (isDev) {
-      mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+      win.webContents.on('console-message', (_event, level, message, line, sourceId) => {
         console.log(`[Renderer:${level}] ${sourceId}:${line} ${message}`);
       });
     }
 
     // [关键代码] 显式告诉 Electron 使用系统的代理配置
     // 这会涵盖绝大多数 VPN（如 Clash, V2Ray 等开启了"系统代理"模式的情况）
-    void applySystemProxyWithLoopbackBypass(mainWindow.webContents.session, 'window session').catch((error) => {
+    void applySystemProxyWithLoopbackBypass(win.webContents.session, 'window session').catch((error) => {
       console.error('Failed to apply system proxy to window session:', error);
     });
 
     // Block unexpected window popups/navigation; only allow explicit external links.
-    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    win.webContents.setWindowOpenHandler(({ url }) => {
       if (isAllowedExternalUrl(url)) {
         void shell.openExternal(url);
       }
       return { action: 'deny' };
     });
 
-    mainWindow.webContents.on('will-navigate', (event, url) => {
+    win.webContents.on('will-navigate', (event, url) => {
       if (url === 'about:blank') {
         return;
       }
@@ -11373,20 +13238,18 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       }
     });
 
-    // 处理窗口关闭
-    mainWindow.on('close', (e) => {
-      // In development, close should actually quit so `npm run electron:dev`
-      // restarts from a clean process. In production we keep tray behavior.
-      if (mainWindow && !isQuitting && !isDev) {
+    // 处理窗口关闭：生产环境隐藏到托盘，开发环境真正关闭
+    win.on('close', (e) => {
+      if (!isQuitting && !isDev) {
         e.preventDefault();
-        mainWindow.hide();
+        win.hide();
       }
     });
 
     // 处理渲染进程崩溃或退出
-    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    win.webContents.on('render-process-gone', (_event, details) => {
       console.error('Window render process gone:', details);
-      scheduleReload('webContents-crashed');
+      scheduleReload('webContents-crashed', win.webContents);
     });
 
     if (isDev) {
@@ -11395,70 +13258,150 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       let retryCount = 0;
 
       const tryLoadURL = () => {
-        mainWindow?.loadURL(DEV_SERVER_URL).catch((err) => {
+        win.loadURL(DEV_SERVER_URL).catch((err) => {
           console.error('Failed to load URL:', err);
           retryCount++;
-          
+
           if (retryCount < maxRetries) {
             console.log(`Retrying to load URL (${retryCount}/${maxRetries})...`);
             setTimeout(tryLoadURL, 3000);
           } else {
             console.error('Failed to load URL after maximum retries');
-            if (mainWindow && !mainWindow.isDestroyed()) {
-              mainWindow.loadFile(path.join(__dirname, '../resources/error.html'));
+            if (!win.isDestroyed()) {
+              win.loadFile(path.join(__dirname, '../resources/error.html'));
             }
           }
         });
       };
 
       tryLoadURL();
-      
+
       // 打开开发者工具
-      mainWindow.webContents.openDevTools();
+      win.webContents.openDevTools();
     } else {
       // 生产环境
-      mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+      win.loadFile(path.join(__dirname, '../dist/index.html'));
     }
 
     // 添加错误处理
-    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+    win.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
       console.error('Page failed to load:', errorCode, errorDescription);
       // 如果加载失败，尝试重新加载
       if (isDev) {
         setTimeout(() => {
-          scheduleReload('did-fail-load');
+          scheduleReload('did-fail-load', win.webContents);
         }, 3000);
       }
     });
 
-    // 当窗口关闭时，清除引用
-    mainWindow.on('closed', () => {
-      mainWindow = null;
+    // 当窗口关闭时，若关闭的是主窗口则把主窗口引用移交到剩余窗口
+    win.on('closed', () => {
+      if (mainWindow === win) {
+        mainWindow = BrowserWindow.getAllWindows()[0] ?? null;
+      }
     });
 
-    const forwardWindowState = () => emitWindowState();
-    mainWindow.on('maximize', forwardWindowState);
-    mainWindow.on('unmaximize', forwardWindowState);
-    mainWindow.on('enter-full-screen', forwardWindowState);
-    mainWindow.on('leave-full-screen', forwardWindowState);
-    mainWindow.on('focus', forwardWindowState);
-    mainWindow.on('blur', forwardWindowState);
+    const forwardWindowState = () => emitWindowState(win);
+    win.on('maximize', forwardWindowState);
+    win.on('unmaximize', forwardWindowState);
+    win.on('enter-full-screen', forwardWindowState);
+    win.on('leave-full-screen', forwardWindowState);
+    win.on('focus', forwardWindowState);
+    win.on('blur', forwardWindowState);
 
     // 等待内容加载完成后再显示窗口
-    mainWindow.once('ready-to-show', () => {
+    win.once('ready-to-show', () => {
       startupLog('window ready-to-show');
-      scheduleCoworkStoreHeavyMaintenance();
-      emitWindowState();
-      // 开机自启时不显示窗口，仅显示托盘图标
-      if (!isAutoLaunched()) {
-        mainWindow?.show();
+      // 进程级单次初始化：重维护任务、系统托盘与调度器只在首个窗口就绪时执行
+      if (!didInitAppOnce) {
+        didInitAppOnce = true;
+        scheduleCoworkStoreHeavyMaintenance();
+        createTray(() => mainWindow, getStore());
+        getScheduler().start();
       }
-      // 窗口就绪后创建系统托盘
-      createTray(() => mainWindow, getStore());
-
-      // Start the scheduler
-      getScheduler().start();
+      emitWindowState(win);
+      // 开机自启时不显示首个窗口，仅显示托盘图标；新窗口始终显示
+      const isPrimaryWindow = mainWindow === win;
+      if (!isAutoLaunched() || !isPrimaryWindow) {
+        win.show();
+      }
     });
+
+    return win;
+  };
+
+  // 应用菜单：File → New Window 用于多开窗口（数据同进程互通）
+  const setupApplicationMenu = (): void => {
+    const isMacMenu = process.platform === 'darwin';
+    const template: Electron.MenuItemConstructorOptions[] = [
+      ...(isMacMenu
+        ? [{
+            label: APP_NAME,
+            submenu: [
+              { role: 'about' as const },
+              { type: 'separator' as const },
+              { role: 'services' as const },
+              { type: 'separator' as const },
+              { role: 'hide' as const },
+              { role: 'hideOthers' as const },
+              { role: 'unhide' as const },
+              { type: 'separator' as const },
+              { role: 'quit' as const },
+            ],
+          } as Electron.MenuItemConstructorOptions]
+        : []),
+      {
+        label: 'File',
+        submenu: [
+          {
+            label: 'New Window',
+            accelerator: 'Shift+CmdOrCtrl+N',
+            click: () => createAppWindow(),
+          },
+          { type: 'separator' as const },
+          isMacMenu ? ({ role: 'close' } as Electron.MenuItemConstructorOptions) : ({ role: 'quit' } as Electron.MenuItemConstructorOptions),
+        ],
+      },
+      {
+        label: 'Edit',
+        submenu: [
+          { role: 'undo' as const },
+          { role: 'redo' as const },
+          { type: 'separator' as const },
+          { role: 'cut' as const },
+          { role: 'copy' as const },
+          { role: 'paste' as const },
+          { role: 'selectAll' as const },
+        ],
+      },
+      {
+        label: 'View',
+        submenu: [
+          { role: 'reload' as const },
+          { role: 'forceReload' as const },
+          ...(isDev ? [{ role: 'toggleDevTools' as const }] : []),
+          { type: 'separator' as const },
+          { role: 'resetZoom' as const },
+          { role: 'zoomIn' as const },
+          { role: 'zoomOut' as const },
+          { type: 'separator' as const },
+          { role: 'togglefullscreen' as const },
+        ],
+      },
+      { role: 'windowMenu' },
+      {
+        role: 'help',
+        submenu: [
+          {
+            label: 'IDBots on GitHub',
+            click: () => {
+              void shell.openExternal('https://github.com/metaid-developers/IDBots');
+            },
+          },
+        ],
+      },
+    ];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
   };
 
   let isCleanupFinished = false;
@@ -11688,9 +13631,12 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // 设置安全策略
     setContentSecurityPolicy();
 
+    // 安装应用菜单（File → New Window 多开窗口）
+    setupApplicationMenu();
+
     // 创建窗口
     startupLog('about to create window');
-    createWindow();
+    createAppWindow();
 
     await startSqliteBackgroundJobs();
     startSqliteDaemons();
@@ -11725,7 +13671,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
         return;
       }
       if (BrowserWindow.getAllWindows().length === 0) {
-        createWindow();
+        createAppWindow();
       }
     });
   };

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDownIcon, CpuChipIcon } from '@heroicons/react/24/outline';
+import TwinBadge from '../metabots/TwinBadge';
 
 export type MetaBotForSelector = { id: number; name: string; avatar: string | null; metabot_type: string };
 
@@ -80,6 +81,7 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
             <>
               {renderAvatar(selected)}
               <span className="truncate flex-1 text-left">{selected.name}</span>
+              {selected.metabot_type === 'twin' && <TwinBadge className="shrink-0" />}
             </>
           ) : (
             <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">{placeholder}</span>
@@ -102,9 +104,13 @@ const MetaBotSelector: React.FC<MetaBotSelectorProps> = ({
               >
                 {renderAvatar(m)}
                 <span className="truncate flex-1">{m.name}</span>
-                <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
-                  ({m.metabot_type})
-                </span>
+                {m.metabot_type === 'twin' ? (
+                  <TwinBadge className="shrink-0" />
+                ) : (
+                  <span className="text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary shrink-0">
+                    ({m.metabot_type})
+                  </span>
+                )}
               </button>
             ))}
           </div>

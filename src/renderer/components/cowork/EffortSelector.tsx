@@ -40,12 +40,16 @@ const EffortBarsIcon: React.FC<{ level: 1 | 2 | 3 | 4; className?: string }> = (
   );
 };
 
+// Accent level (max) label uses the brand yellow (#FFDC51, same as the main
+// send button) as its TEXT color in both light and dark mode — not a fill.
+const ACCENT_ITEM_TEXT = 'text-[#FFDC51]';
+
 const EFFORT_LEVELS: Array<{ value: string | null; icon: React.ReactElement; labelKey: string; descKey: string; color: string }> = [
   { value: null, icon: <Cog6ToothIcon className="h-3.5 w-3.5 flex-shrink-0" />, labelKey: 'coworkEffort_auto', descKey: 'coworkEffort_auto_desc', color: 'text-claude-textSecondary' },
   { value: 'low', icon: <EffortBarsIcon level={1} />, labelKey: 'coworkEffort_low', descKey: 'coworkEffort_low_desc', color: 'text-green-500' },
   { value: 'medium', icon: <EffortBarsIcon level={2} />, labelKey: 'coworkEffort_medium', descKey: 'coworkEffort_medium_desc', color: 'text-blue-500' },
   { value: 'high', icon: <EffortBarsIcon level={3} />, labelKey: 'coworkEffort_high', descKey: 'coworkEffort_high_desc', color: 'text-amber-500' },
-  { value: 'max', icon: <EffortBarsIcon level={4} />, labelKey: 'coworkEffort_max', descKey: 'coworkEffort_max_desc', color: 'text-claude-accent' },
+  { value: 'max', icon: <EffortBarsIcon level={4} />, labelKey: 'coworkEffort_max', descKey: 'coworkEffort_max_desc', color: ACCENT_ITEM_TEXT },
 ];
 
 /**

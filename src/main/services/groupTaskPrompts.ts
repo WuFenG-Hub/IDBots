@@ -30,6 +30,8 @@ export interface GroupTaskPromptMember {
   goal?: string | null;
   /** Structured worker position slug (dev/researcher/...); null = unset. */
   position?: string | null;
+  /** OpenTeam remote teammate: an external bot invited from the Agent Internet. */
+  remote?: boolean;
 }
 
 /** Cap one profile field so the roster section cannot blow up the prompt. */
@@ -76,10 +78,18 @@ const CHAIR_PLAYBOOK_RULES = [
   '- You are the owner\'s digital twin and chief of staff. NEVER relay the goal verbatim — decompose it into concrete subtasks. Assign different subtasks to different members by their profiles. Sequence dependent work: assign a step only when its inputs are ready (e.g. after a `[DELIVERABLE]` arrives). When a deliverable arrives, verify it against the acceptance criteria, then assign the next step.',
   '- Assign by POSITION first: workers carry a structured position (e.g. `dev`, `researcher`, `designer`, `writer`, `operator`). Match each subtask to the member whose position fits (code → dev, research/verification → researcher, design → designer, copy → writer, scheduled/ops → operator). Only when no member has a matching position (or positions are `generic`/unset) fall back to reading their role/bio/goal semantically. Never assign the same subtask to two workers.',
   '- You coordinate, assign, verify and report — you NEVER execute task work yourself (no searching, no writing deliverable content, no publishing). If a worker is stuck or incapable, re-assign to another member or escalate the blocker to the owner.',
+  '- Capability check before recruiting: when you decompose the goal, inventory the LOCAL roster first — names, profiles, skill tags, and past task experience in your context. If local members cover every step, do NOT recruit remotely; remote recruitment is the exception, not the default.',
+  '- When a step needs a capability no local member matches (no relevant skills, no similar task history) — or you are clearly unsure a local member can deliver it — say so plainly and recommend a remote OpenTeam recruit to the owner, naming the missing capability keyword to search for. One candidate at a time, best bio/chatSkills/on-chain fit first; if it declines or has not joined after ~10 minutes, treat it as no deal and move to the next candidate or explain the gap to the owner. Never @-assign work to an invitee before it appears in the roster, and never re-invite a bot that declined or was removed unless the owner explicitly asks.',
   '- When a worker reports a deliverable, VERIFY it (format, plausibility, any daemon verification notes in the context) BEFORE accepting; if it looks fabricated, reject it and demand the real tool output.',
+  '- Planning rule (C-1): enumerate the FULL member roster first (name, role, capability, load), then assign every member at least one subtask OR an explicit standby note. NEVER assign every subtask to a single member when 2+ workers are on the roster — spread the work by profile fit.',
+
+  '- Members on the roster who are NOT assigned a subtask are observers/standby: tell them explicitly in the plan what is expected (静默观察 / 待命接手 / 可退出) and invite a `[STANDBY]` confirmation — never leave listed members guessing whether they should act.',
   '- Emit `[STATUS:EXECUTING]` when work is underway and `[STATUS:REVIEW]` when you judge the goal met.',
   '- Do not acknowledge acknowledgments — when members confirm completion, emit `[STATUS:REVIEW]` once and go silent (`[NO_REPLY]` thereafter except to answer the owner).',
   '- After `[STATUS:REVIEW]`, if acceptance fails and rework is needed, re-open with `[STATUS:EXECUTING]` and new assignments.',
+  '- DEPENDENCY PROTOCOL: when a subtask depends on another member\'s output, tag the assignment with `[DEPENDS_ON: <upstream pinid>]` (the host then holds the dispatch until the upstream `[DELIVERABLE]` lands) AND tell the member to wait for the upstream deliverable before starting. Never dispatch a dependent step before its input exists.',
+  '- REVIEW-PHASE WARNING: after `[STATUS:REVIEW]` worker @-mentions are ignored — dispatching in review achieves nothing (the daemon logs the silenced dispatch). Finish assigning ALL subtasks, collect every `[DELIVERABLE]`, and only then emit `[STATUS:REVIEW]`. To reopen, emit `[STATUS:EXECUTING]`; the owner can also use the UI Back-to-work action.',
+  '- OpenTeam remote teammates (marked "remote teammate via OpenTeam" in the roster) are external collaborators from other users on the Agent Internet, not local bots. Welcome them as you would a new colleague, and @ their exact roster name when assigning work, just like any local member. Their replies come from their own machine and may arrive late or not at all — if a remote teammate stays unresponsive for a long stretch, re-assign the work and explain the change to the owner. Hold them to the same delivery standard as local members (`[DELIVERABLE]` lines, verified before acceptance).',
   '- NEVER disclose the owner\'s private data, wallet details, or anything from your private channels — the group sees only task-relevant information.',
 ];
 
@@ -99,12 +109,17 @@ export function buildGroupTaskBlock(params: {
     const key = (position ?? '').trim().toLowerCase();
     return key || 'generic';
   };
+  // Remote OpenTeam teammates are annotated in-place; the roster NAME stays
+  // exactly the display_name snapshot so @-mentions match the invitee's real
+  // bot name on its own machine.
   const rosterLines = params.members.length > 0
-    ? params.members.map((member) =>
-        member.role === 'chair'
-          ? `- ${member.name} (chair)`
-          : `- ${member.name} (worker, position: ${positionLabel(member.position)})`
-      )
+    ? params.members.map((member) => {
+        if (member.role === 'chair') return `- ${member.name} (chair)`;
+        // Remote teammates have no local position data; keep their line
+        // identical to the invite snapshot so @-mentions match their bot name.
+        if (member.remote) return `- ${member.name} (worker, remote teammate via OpenTeam)`;
+        return `- ${member.name} (worker, position: ${positionLabel(member.position)})`;
+      })
     : ['(no members)'];
   const chairName = params.members.find((member) => member.role === 'chair')?.name ?? 'the chair';
   const ownerId = (params.ownerGlobalMetaId ?? '').trim();
@@ -126,7 +141,10 @@ export function buildGroupTaskBlock(params: {
         capProfileField(member.bio) && `Bio: ${capProfileField(member.bio)}`,
         capProfileField(member.goal) && `Goal: ${capProfileField(member.goal)}`,
       ].filter(Boolean);
-      return fields.length > 0 ? `- ${member.name} (${member.role}) — ${fields.join('; ')}` : null;
+      if (fields.length > 0) return `- ${member.name} (${member.role}) — ${fields.join('; ')}`;
+      return member.remote
+        ? `- ${member.name} (${member.role}) — external teammate via OpenTeam; profile not available locally`
+        : null;
     })
     .filter((line): line is string => Boolean(line));
   const profileSection = profileLines.length > 0
@@ -138,9 +156,12 @@ export function buildGroupTaskBlock(params: {
     : [
         ...SHARED_PLAYBOOK_RULES,
         `- As a worker you respond only when @-mentioned; the chair (${chairName}) coordinates the task.`,
-        '- When the chair assigns you work, DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
+        '- Members marked "remote teammate via OpenTeam" in the roster are external collaborators from the Agent Internet — treat them as equal teammates and be polite; their replies come from their own machine.',
+        '- When the chair assigns you work, ACK it immediately with a `[WORKING]` line (e.g. `[WORKING] 已接单：<subtask>，预计 <N> 分钟`) so the chair knows you received the assignment, then DO IT NOW within this reply using your available skills (search, read, write, publish…). Report concrete results with `[DELIVERABLE]` lines. NEVER reply with only a promise to work later — if you cannot perform the assignment (missing skill/access), say so explicitly and @ the chair.',
         '- @ the chair ONLY when your output needs its action (assignment, verification, unblocking). Never @ anyone for courtesy.',
-        '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group, and no farewell is needed.',
+        '- WORK STATUS PROTOCOL (A2A-style): when you accept an assignment, your reply should START with a `[WORKING]` status line — e.g. `[WORKING] 已接单，正在做X，预计N分钟` — so the group knows you are working, not offline or crashed. If the work spans multiple stages, include `[WORKING]` progress lines as stages complete (e.g. `[WORKING] 配图 2/4 完成`). The host may also auto-post the initial `[WORKING]` ACK for you before long skill turns — still report progress for anything taking minutes.',
+        '- If you are on the roster but NOT assigned work (observer/standby), reply with `[STANDBY] 静默观察 / 待命接手 / 可退出` so the chair knows you are present and idle.',
+        '- Once the chair posts `[STATUS:REVIEW]`, the task is awaiting user acceptance — you will not speak again in this group (review-phase silence), and no farewell is needed.',
       ];
 
   return [

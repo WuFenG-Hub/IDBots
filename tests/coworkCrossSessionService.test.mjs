@@ -187,6 +187,9 @@ test('readLatest uses lightweight metadata lookup without loading full session h
       getSessionLatestMessage(sessionId) {
         return store.getSessionLatestMessage(sessionId);
       },
+      getSessionLatestVisibleMessage(sessionId) {
+        return store.getSessionLatestVisibleMessage(sessionId);
+      },
       addMessage(sessionId, message) {
         return store.addMessage(sessionId, message);
       },
@@ -324,6 +327,126 @@ test('rejects empty and too-long messages', async () => {
     assert.equal(tooLong.ok, false);
     assert.equal(tooLong.code, 'MESSAGE_TOO_LONG');
     assert.equal(store.getSession(target.id).messages.length, 0);
+  } finally {
+    sqlite.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GT#12 N3: session-history external outputs must never surface thinking
+// drafts (metadata.isThinking) or unfinished streaming placeholders
+// (metadata.isStreaming) as formal replies. Storage stays untouched.
+// ---------------------------------------------------------------------------
+
+test('readAll filters thinking drafts and streaming placeholders out of the external view', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const store = createCoworkStore(sqlite.db);
+    const service = new CoworkCrossSessionService(store);
+    const session = store.createSession('N3 readAll', process.cwd(), '', 'local', [], 1);
+
+    store.addMessage(session.id, { type: 'user', content: '正式提问' });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: '1. 列出步骤 2. 检查数据库', // thinking draft
+      metadata: { isThinking: true },
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: '正式回复内容',
+    });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: '半成品流式内容', // unfinished streaming placeholder
+      metadata: { isStreaming: true },
+    });
+
+    const result = service.readAll({ sessionId: session.id });
+    assert.equal(result.ok, true);
+
+    const contents = result.messages.map((message) => message.content);
+    assert.deepEqual(contents, ['正式提问', '正式回复内容']);
+    // The messages exist in storage (traceability) but not in the external view.
+    assert.equal(store.getSession(session.id).messages.length, 4);
+  } finally {
+    sqlite.cleanup();
+  }
+});
+
+test('readLatest skips a trailing thinking draft and returns the last visible message', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const store = createCoworkStore(sqlite.db);
+    const service = new CoworkCrossSessionService(store);
+    const session = store.createSession('N3 readLatest', process.cwd(), '', 'local', [], 1);
+
+    store.addMessage(session.id, { type: 'user', content: '问题' });
+    const formal = store.addMessage(session.id, { type: 'assistant', content: '正式回答' });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: '思考草稿冒充回复',
+      metadata: { isThinking: true },
+    });
+
+    const result = service.readLatest({ sessionId: session.id });
+    assert.equal(result.ok, true);
+    assert.equal(result.message.id, formal.id);
+    assert.equal(result.message.content, '正式回答');
+  } finally {
+    sqlite.cleanup();
+  }
+});
+
+test('readLatest returns null when every message is a thinking draft', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const store = createCoworkStore(sqlite.db);
+    const service = new CoworkCrossSessionService(store);
+    const session = store.createSession('N3 all-thinking', process.cwd(), '', 'local', [], 1);
+
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: '只有思考草稿',
+      metadata: { isThinking: true },
+    });
+
+    const result = service.readLatest({ sessionId: session.id });
+    assert.equal(result.ok, true);
+    assert.equal(result.message, null);
+  } finally {
+    sqlite.cleanup();
+  }
+});
+
+test('getSessionLatestVisibleMessage stays lightweight (single-row query, no full history load)', async () => {
+  const sqlite = await createSqliteStore();
+  try {
+    const store = createCoworkStore(sqlite.db);
+    const session = store.createSession('N3 lightweight', process.cwd(), '', 'local', [], 1);
+    store.addMessage(session.id, { type: 'user', content: 'hi' });
+    store.addMessage(session.id, {
+      type: 'assistant',
+      content: 'thinking', 
+      metadata: { isThinking: true },
+    });
+    const visible = store.addMessage(session.id, { type: 'assistant', content: 'answer' });
+
+    const execCalls = [];
+    const originalExec = sqlite.db.exec.bind(sqlite.db);
+    sqlite.db.exec = (sql, params) => {
+      execCalls.push(String(sql));
+      return originalExec(sql, params);
+    };
+    try {
+      assert.equal(store.getSessionLatestVisibleMessage(session.id)?.id, visible.id);
+    } finally {
+      sqlite.db.exec = originalExec;
+    }
+    const visibleQuery = execCalls
+      .map((sql) => sql.replace(/\s+/g, ' ').trim())
+      .find((sql) => sql.includes('FROM cowork_messages') && sql.includes('isThinking'));
+    assert.ok(visibleQuery, 'getSessionLatestVisibleMessage should filter isThinking in SQL');
+    assert.match(visibleQuery, /LIMIT 1/);
   } finally {
     sqlite.cleanup();
   }

@@ -10,7 +10,7 @@ import { SkillsButton, ActiveSkillBadge } from '../skills';
 import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
-import { setDraftPrompt } from '../../store/slices/coworkSlice';
+import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
 import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
@@ -50,6 +50,57 @@ export const deriveCoworkPromptInputState = ({
     : isSteerSubmit);
   return { hasTextInput, isSteerSubmit, showStopButton, canSubmit };
 };
+
+export interface CoworkContextMenuDerivedState {
+  canCut: boolean;
+  canCopy: boolean;
+  canSelectAll: boolean;
+}
+
+export const deriveCoworkContextMenuState = ({
+  valueLength,
+  selectionStart,
+  selectionEnd,
+  disabled,
+}: {
+  valueLength: number;
+  selectionStart: number;
+  selectionEnd: number;
+  disabled: boolean;
+}): CoworkContextMenuDerivedState => {
+  const hasSelection = selectionStart >= 0 && selectionEnd > selectionStart;
+  return {
+    canCut: !disabled && hasSelection,
+    canCopy: hasSelection,
+    canSelectAll: !disabled && valueLength > 0,
+  };
+};
+
+const CONTEXT_MENU_WIDTH = 176;
+const CONTEXT_MENU_HEIGHT = 168;
+const CONTEXT_MENU_PADDING = 8;
+
+const ContextMenuItem: React.FC<{
+  label: string;
+  shortcut?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}> = ({ label, shortcut, disabled = false, onClick }) => (
+  <button
+    type="button"
+    role="menuitem"
+    onClick={onClick}
+    disabled={disabled}
+    className="w-full flex items-center gap-2 px-3 py-2 text-left text-sm transition-colors dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-40 disabled:hover:bg-transparent disabled:dark:hover:bg-transparent disabled:cursor-not-allowed"
+  >
+    <span className="flex-1 truncate">{label}</span>
+    {shortcut && (
+      <span className="flex-shrink-0 text-xs opacity-50 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+        {shortcut}
+      </span>
+    )}
+  </button>
+);
 
 const getFileNameFromPath = (path: string): string => {
   const parts = path.split(/[/\\]/);
@@ -141,35 +192,55 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       permissionMode,
       onPermissionModeChange,
     } = props;
+    const isMac = (window as { electron?: { platform?: string } }).electron?.platform === 'darwin';
     const dispatch = useDispatch();
     const draftPrompt = useSelector((state: RootState) => state.cowork.draftPrompt);
-    const initialDraftRef = useRef(scopeKey ? '' : draftPrompt);
+    const sessionDrafts = useSelector((state: RootState) => state.cowork.sessionDrafts);
+    // Scoped composers (session steer input, Bot Browser panel) restore their
+    // draft from the per-scope store entry, so switching sessions keeps each
+    // session's typed text; the unscoped New Task composer owns the global draft.
+    const initialDraftRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.value ?? '') : draftPrompt);
+    const initialAttachmentsRef = useRef(scopeKey ? (sessionDrafts[scopeKey]?.attachments ?? []) : []);
     const [value, setValue] = useState(initialDraftRef.current);
-    const [attachments, setAttachments] = useState<CoworkAttachment[]>([]);
+    const [attachments, setAttachments] = useState<CoworkAttachment[]>(initialAttachmentsRef.current);
     const [showFolderMenu, setShowFolderMenu] = useState(false);
     const [showFolderRequiredWarning, setShowFolderRequiredWarning] = useState(false);
     const [isDraggingFiles, setIsDraggingFiles] = useState(false);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const folderButtonRef = useRef<HTMLButtonElement>(null);
     const dragDepthRef = useRef(0);
+    const contextMenuRef = useRef<HTMLDivElement>(null);
+    // Selection captured when the context menu opened; only drives the
+    // enabled/disabled state of the menu items. Actions re-read the live
+    // selection from the textarea so streaming updates cannot desync them.
+    const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(null);
+    const [contextMenuSelection, setContextMenuSelection] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
     const activeScopeKeyRef = useRef(scopeKey);
+    // Publish composer state: scoped composers write to the per-session draft
+    // store, the unscoped New Task composer keeps owning the global draft. The
+    // versioned fields call this on every change, including takeAndClear after
+    // a submit, which is what makes drafts persist across session switches.
+    const publishComposerState = useCallback((nextValue: string, nextAttachments: CoworkAttachment[]) => {
+      const scope = activeScopeKeyRef.current;
+      if (scope) {
+        dispatch(setSessionDraft({ sessionId: scope, value: nextValue, attachments: nextAttachments }));
+      } else {
+        dispatch(setDraftPrompt(nextValue));
+      }
+    }, [dispatch]);
     const draftFieldRef = useRef<VersionedComposerField<string> | null>(null);
     const attachmentFieldRef = useRef<VersionedComposerField<CoworkAttachment[]> | null>(null);
     if (!draftFieldRef.current) {
       draftFieldRef.current = createVersionedComposerField(initialDraftRef.current, () => '', (nextValue) => {
         setValue(nextValue);
-        // Only the unscoped composer (the New Task home page) owns the global
-        // draft. Scoped composers (session steer input, Bot Browser panel)
-        // are local-only: they must never overwrite or clear the New Task
-        // draft, otherwise opening a conversation wipes the text the user
-        // typed on the home page.
-        if (!activeScopeKeyRef.current) {
-          dispatch(setDraftPrompt(nextValue));
-        }
+        publishComposerState(nextValue, attachmentFieldRef.current?.get() ?? []);
       });
     }
     if (!attachmentFieldRef.current) {
-      attachmentFieldRef.current = createVersionedComposerField([], () => [], setAttachments);
+      attachmentFieldRef.current = createVersionedComposerField(initialAttachmentsRef.current, () => [], (nextAttachments) => {
+        setAttachments(nextAttachments);
+        publishComposerState(draftFieldRef.current?.get() ?? '', nextAttachments);
+      });
     }
 
   // 暴露方法给父组件
@@ -243,27 +314,30 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
 
   useEffect(() => {
     if (activeScopeKeyRef.current !== scopeKey) {
+      // The composer is reused with a different scope (normally CoworkSessionDetail
+      // remounts it per session via key, so this is defensive): invalidate any
+      // in-flight submission snapshots and load the new scope's stored draft.
+      activeScopeKeyRef.current = scopeKey;
       draftFieldRef.current?.invalidate();
       attachmentFieldRef.current?.invalidate();
-      activeScopeKeyRef.current = scopeKey;
-    }
-    if (scopeKey) {
-      draftFieldRef.current?.set('');
-      attachmentFieldRef.current?.set([]);
-    }
-  }, [scopeKey]);
-
-  useEffect(() => {
-    const handleFocusInput = (event: Event) => {
-      const detail = (event as CustomEvent<{ clear?: boolean }>).detail;
-      const shouldClear = detail?.clear ?? true;
-      // Never clear the unscoped New Task composer from navigation events;
-      // its content is the persistent home-page draft. Clearing stays
-      // available for scoped composers and after a successful submit.
-      if (shouldClear && activeScopeKeyRef.current) {
-        draftFieldRef.current?.set('');
+      if (scopeKey) {
+        const stored = sessionDrafts[scopeKey];
+        draftFieldRef.current?.set(stored?.value ?? '');
+        attachmentFieldRef.current?.set(stored?.attachments ?? []);
+      } else {
+        draftFieldRef.current?.set(draftPrompt);
         attachmentFieldRef.current?.set([]);
       }
+    }
+  }, [scopeKey, sessionDrafts, draftPrompt]);
+
+  useEffect(() => {
+    const handleFocusInput = () => {
+      // Navigation events (New Chat, session shortcuts) only focus the input;
+      // they must never clear it. Drafts are owned by their scope: the New
+      // Task composer keeps the global draft and each session keeps its own
+      // stored draft. They are cleared only by a successful submit or when
+      // the session itself is deleted.
       requestAnimationFrame(() => {
         textareaRef.current?.focus();
       });
@@ -529,6 +603,139 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
     void handleIncomingFiles(files);
   }, [disabled, handleIncomingFiles, isStreaming]);
 
+  const closeContextMenu = useCallback(() => {
+    setContextMenuPosition(null);
+  }, []);
+
+  const handleTextareaContextMenu = (event: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (disabled || (isStreaming && steerDisabled)) return;
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenuSelection({
+      start: textarea.selectionStart,
+      end: textarea.selectionEnd,
+    });
+    const x = Math.min(
+      Math.max(CONTEXT_MENU_PADDING, event.clientX),
+      window.innerWidth - CONTEXT_MENU_WIDTH - CONTEXT_MENU_PADDING
+    );
+    const y = Math.min(
+      Math.max(CONTEXT_MENU_PADDING, event.clientY),
+      window.innerHeight - CONTEXT_MENU_HEIGHT - CONTEXT_MENU_PADDING
+    );
+    setContextMenuPosition({ x, y });
+  };
+
+  const contextMenuDerived = deriveCoworkContextMenuState({
+    valueLength: value.length,
+    selectionStart: contextMenuSelection.start,
+    selectionEnd: contextMenuSelection.end,
+    disabled: disabled || (isStreaming && steerDisabled),
+  });
+
+  /** Re-read the live selection from the focused textarea (menu keeps it focused). */
+  const readLiveSelection = (): { start: number; end: number } => {
+    const textarea = textareaRef.current;
+    if (!textarea) return { start: 0, end: 0 };
+    return { start: textarea.selectionStart, end: textarea.selectionEnd };
+  };
+
+  /**
+   * Apply a text change through the DOM and let React's onChange drive the
+   * versioned composer field, keeping cursor/selection semantics intact.
+   */
+  const applyTextareaChange = (replaceFrom: number, replaceTo: number, text: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.setRangeText(text, replaceFrom, replaceTo, 'end');
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+
+  const runContextMenuSelectAll = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.select();
+  };
+
+  const runContextMenuCopy = () => {
+    closeContextMenu();
+    const { start, end } = readLiveSelection();
+    const selectedText = (draftFieldRef.current?.get() ?? '').slice(start, end);
+    if (!selectedText) return;
+    void navigator.clipboard.writeText(selectedText).catch((error) => {
+      console.error('Failed to copy from cowork input:', error);
+    });
+  };
+
+  const runContextMenuCut = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const { start, end } = readLiveSelection();
+    const selectedText = (draftFieldRef.current?.get() ?? '').slice(start, end);
+    if (!selectedText) return;
+    void (async () => {
+      try {
+        // Only remove the text after the clipboard write succeeds, otherwise
+        // a failed copy would silently delete the selection.
+        await navigator.clipboard.writeText(selectedText);
+        applyTextareaChange(start, end, '');
+      } catch (error) {
+        console.error('Failed to cut from cowork input:', error);
+      }
+    })();
+  };
+
+  const runContextMenuPaste = () => {
+    closeContextMenu();
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const { start, end } = readLiveSelection();
+    void (async () => {
+      let text: string;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch (error) {
+        console.error('Failed to read clipboard for cowork paste:', error);
+        return;
+      }
+      // Clipboard items without text (e.g. copied files) must not replace
+      // the current selection with nothing.
+      if (!text) return;
+      applyTextareaChange(start, end, text);
+    })();
+  };
+
+  useEffect(() => {
+    if (!contextMenuPosition) return;
+    const handleMouseDownOutside = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!contextMenuRef.current?.contains(target)) {
+        closeContextMenu();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeContextMenu();
+      }
+    };
+    const handleScroll = () => closeContextMenu();
+    document.addEventListener('mousedown', handleMouseDownOutside);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScroll, true);
+    window.addEventListener('resize', handleScroll);
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDownOutside);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScroll, true);
+      window.removeEventListener('resize', handleScroll);
+    };
+  }, [contextMenuPosition, closeContextMenu]);
+
   const { isSteerSubmit, showStopButton, canSubmit } = deriveCoworkPromptInputState({
     value,
     isStreaming,
@@ -591,6 +798,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onContextMenu={handleTextareaContextMenu}
               placeholder={effectivePlaceholder}
               disabled={disabled || (isStreaming && steerDisabled)}
               rows={isLarge ? 2 : 1}
@@ -670,7 +878,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   <button
                     type="button"
                     onClick={handleStopClick}
-                    className="p-2 rounded-xl bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
+                    className="p-2 rounded-xl bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
                     aria-label={i18nService.t('stop')}
                   >
                     <StopIcon className="h-5 w-5" />
@@ -697,6 +905,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               onChange={(e) => draftFieldRef.current?.set(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onContextMenu={handleTextareaContextMenu}
               placeholder={effectivePlaceholder}
               disabled={disabled || (isStreaming && steerDisabled)}
               rows={1}
@@ -722,7 +931,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               <button
                 type="button"
                 onClick={handleStopClick}
-                className="flex-shrink-0 p-2 rounded-lg bg-red-500 hover:bg-red-600 text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
+                className="flex-shrink-0 p-2 rounded-lg bg-claude-accent hover:bg-claude-accentHover text-white transition-all shadow-subtle hover:shadow-card active:scale-95"
                 aria-label={i18nService.t('stop')}
               >
                 <StopIcon className="h-4 w-4" />
@@ -762,6 +971,42 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
               <span className="truncate">{suggestion}</span>
             </button>
           ))}
+        </div>
+      )}
+      {contextMenuPosition && (
+        <div
+          ref={contextMenuRef}
+          role="menu"
+          className="fixed z-50 min-w-[176px] rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface shadow-lg overflow-hidden py-1"
+          style={{ left: contextMenuPosition.x, top: contextMenuPosition.y }}
+          onContextMenu={(event) => event.preventDefault()}
+          onMouseDown={(event) => event.preventDefault()}
+        >
+          <ContextMenuItem
+            label={i18nService.t('contextMenuCut')}
+            shortcut={isMac ? '⌘X' : 'Ctrl+X'}
+            disabled={!contextMenuDerived.canCut}
+            onClick={runContextMenuCut}
+          />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuCopy')}
+            shortcut={isMac ? '⌘C' : 'Ctrl+C'}
+            disabled={!contextMenuDerived.canCopy}
+            onClick={runContextMenuCopy}
+          />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuPaste')}
+            shortcut={isMac ? '⌘V' : 'Ctrl+V'}
+            disabled={disabled || (isStreaming && steerDisabled)}
+            onClick={runContextMenuPaste}
+          />
+          <div className="my-1 h-px dark:bg-claude-darkBorder bg-claude-border" />
+          <ContextMenuItem
+            label={i18nService.t('contextMenuSelectAll')}
+            shortcut={isMac ? '⌘A' : 'Ctrl+A'}
+            disabled={!contextMenuDerived.canSelectAll}
+            onClick={runContextMenuSelectAll}
+          />
         </div>
       )}
     </div>

@@ -95,21 +95,57 @@ const TxIdBadge: React.FC<{ txId: string }> = ({ txId }) => {
   );
 };
 
+/**
+ * P0-1: fold over-long [DELIVERABLE] lines (eleven's long delivery was
+ * truncated in the group log). Only lines carrying the protocol tag count;
+ * plain long prose is never folded.
+ */
+const DELIVERABLE_FOLD_THRESHOLD = 200;
+
+function hasLongDeliverableLine(content: string): boolean {
+  return content.split('\n').some(
+    (line) => /\[DELIVERABLE\]/i.test(line) && line.trim().length > DELIVERABLE_FOLD_THRESHOLD,
+  );
+}
+
+function longDeliverableSummary(content: string): string {
+  const lines = content.split('\n');
+  const longLines = lines.filter(
+    (line) => /\[DELIVERABLE\]/i.test(line) && line.trim().length > DELIVERABLE_FOLD_THRESHOLD,
+  );
+  const totalChars = longLines.reduce((sum, line) => sum + line.trim().length, 0);
+  return `${longLines.length} [DELIVERABLE] line(s), ${totalChars} chars`;
+}
+
 interface GroupTaskMessageItemProps {
   message: GroupChatTranscriptMessage;
   isChairSender: boolean;
   isOwnerSender: boolean;
+  /** Sender is a remote member who joined via OpenTeam (matched by globalmetaid). */
+  isRemoteSender?: boolean;
+  /** Sender is one of this machine's own bots (OpenTeam invitee transcript). */
+  isOwnBotSender?: boolean;
 }
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   message,
   isChairSender,
   isOwnerSender,
+  isRemoteSender,
+  isOwnBotSender,
 }) => {
+  // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
+  // source. A message whose sender is neither a task member nor the owner is
+  // flagged SUSPECT — never attributed by senderName.
+  const isSuspectSender = message.senderSuspect === true;
   const senderName = message.senderName?.trim() || 'Unknown';
   const timestamp = formatGroupTaskTime(message.chainTimestamp);
   const avatarSrc = useSenderAvatar(message);
   const txId = resolveTxId(message);
+  const rawContent = message.content ?? '';
+  const longDeliverable = hasLongDeliverableLine(rawContent);
+  const [deliverableExpanded, setDeliverableExpanded] = useState(false);
+
 
   return (
     <div className="flex items-start gap-2.5 px-4 py-2.5">
@@ -127,6 +163,14 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           <span className="text-sm font-medium dark:text-claude-darkText text-claude-text truncate">
             {senderName}
           </span>
+          {isSuspectSender && (
+            <span
+              className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-amber-500/15 text-amber-600 dark:text-amber-400"
+              title="Sender GlobalMetaID is not a task member — not attributed by display name"
+            >
+              SUSPECT
+            </span>
+          )}
           {isChairSender && (
             <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-claude-accent/15 text-claude-accent">
               {i18nService.t('groupTasksChairBadge')}
@@ -135,6 +179,16 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           {isOwnerSender && (
             <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
               {i18nService.t('groupTasksOwnerBadge')}
+            </span>
+          )}
+          {isRemoteSender && (
+            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-green-500/15 text-green-600 dark:text-green-400">
+              {i18nService.t('groupTasksRemoteBadge')}
+            </span>
+          )}
+          {isOwnBotSender && (
+            <span className="shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+              {i18nService.t('openTeamCollabOwnBotBadge')}
             </span>
           )}
           {timestamp && (
@@ -151,7 +205,29 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
               : 'dark:bg-claude-darkSurfaceHover/60 bg-claude-surfaceHover/60 dark:text-claude-darkText text-claude-text'
           }`}
         >
-          <MarkdownContent content={message.content ?? ''} className="text-sm" />
+          {longDeliverable && !deliverableExpanded ? (
+            <button
+              type="button"
+              onClick={() => setDeliverableExpanded(true)}
+              className="block w-full text-left text-sm dark:text-claude-darkText text-claude-text"
+              title="Click to expand the full delivery"
+            >
+              <span className="inline-flex items-center gap-1.5 rounded bg-amber-500/10 px-2 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                Folded: {longDeliverableSummary(rawContent)} — click to expand
+              </span>
+            </button>
+          ) : (
+            <MarkdownContent content={rawContent} className="text-sm" />
+          )}
+          {longDeliverable && deliverableExpanded && (
+            <button
+              type="button"
+              onClick={() => setDeliverableExpanded(false)}
+              className="mt-1 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary/70 hover:underline"
+            >
+              Collapse long delivery
+            </button>
+          )}
         </div>
       </div>
     </div>

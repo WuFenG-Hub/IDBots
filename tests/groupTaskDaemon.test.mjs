@@ -26,12 +26,16 @@ Module._load = function patchedLoad(request, ...rest) {
 const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const { MetabotStore } = require('../dist-electron/main/metabotStore.js');
 const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
+const { OpenTeamMembershipStore } = require('../dist-electron/main/openTeamMembershipStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
 const {
   decideGroupTaskResponders,
   createGroupTaskDaemonLoop,
+  resolveDerivedAssignmentUpstream,
+  buildOpenTeamPlanningStatusBlock,
+  buildMemberJoinWelcomeText,
 } = require('../dist-electron/main/services/groupTaskDaemon.js');
 const { buildGroupTaskSystemPrompt } = require('../dist-electron/main/services/groupTaskPrompts.js');
 
@@ -39,6 +43,10 @@ Module._load = originalLoad;
 
 const GROUP_ID = 'aaaaaaaabbbbbbbbccccccccddddddddeeeeeeeeffffffff00000000i0';
 const BOSS_GMID = 'gmid-boss';
+
+// Round-4: deliverable URIs must carry a full 64-hex + i0 pinid token.
+const REAL_PINID_1 = `${'ab'.repeat(32)}i0`;
+const REAL_PINID_2 = `${'cd'.repeat(32)}i0`;
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-group-task-daemon-'));
 
@@ -64,6 +72,10 @@ const gateMessage = (overrides = {}) => ({
   senderName: 'Human',
   content: 'hello group',
   mention: null,
+  // Round-4: gating tests exercise decision logic, not attribution — the
+  // speaker is a non-member non-owner human, so attribution would flag it
+  // SUSPECT; these fixtures pin senderSuspect=false explicitly.
+  senderSuspect: false,
   ...overrides,
 });
 
@@ -95,15 +107,15 @@ const insertMetabot = (db, { id, walletId, name, type = 'worker', globalmetaid =
   );
 };
 
-const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null }) => {
+const insertGroupMessage = (db, { pinId, groupId = GROUP_ID, senderMetaId, senderGlobalMetaId, senderName, content, mention = null, replyPin = '', chainTimestamp = null }) => {
   db.run(
     `INSERT INTO group_chat_messages (
       pin_id, tx_id, group_id, channel_id, sender_metaid, sender_global_metaid, sender_address,
       sender_name, sender_avatar, sender_chat_pubkey, protocol, content, content_type, encryption,
       reply_pin, mention, chain_timestamp, chain, raw_data, is_processed, msg_index
-    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, '', ?, NULL, 'mvc', '{}', 0, NULL)`,
+    ) VALUES (?, ?, ?, NULL, ?, ?, NULL, ?, '', '', '/protocols/simplegroupchat', ?, 'text/plain', NULL, ?, ?, ?, 'mvc', '{}', 0, NULL)`,
     [pinId, pinId.replace(/-i0$/, ''), groupId, senderMetaId, senderGlobalMetaId, senderName, content,
-      mention ? JSON.stringify(mention) : '[]'],
+      replyPin, mention ? JSON.stringify(mention) : '[]', chainTimestamp],
   );
 };
 
@@ -146,7 +158,7 @@ const createHarness = async (overrides = {}) => {
     getMetabotById: (id) => metabotStore.getMetabotById(id),
   });
 
-  const loop = createGroupTaskDaemonLoop({
+  const deps = {
     getStore: () => store,
     getGroupTaskStore: () => groupTaskStore,
     getMetabotStore: () => metabotStore,
@@ -196,13 +208,48 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.getMetaIDGroupCognitionPromptBlock
       ? { getMetaIDGroupCognitionPromptBlock: overrides.getMetaIDGroupCognitionPromptBlock }
       : {}),
+    ...(overrides.resolveGlobalMetaId
+      ? { resolveGlobalMetaId: overrides.resolveGlobalMetaId }
+      : {}),
+    ...(overrides.probeUrl ? { probeUrl: overrides.probeUrl } : { probeUrl: async () => null }),
+    ...(overrides.readPinSecondaryForVerification
+      ? { readPinSecondaryForVerification: overrides.readPinSecondaryForVerification }
+      : {}),
+    ...(overrides.verificationRetryMs != null
+      ? { verificationRetryMs: overrides.verificationRetryMs }
+      : {}),
     emitLog: overrides.emitLog ?? (() => {}),
     now: () => state.nowMs,
     workerCooldownMs: overrides.workerCooldownMs ?? 20_000,
     chairCooldownMs: overrides.chairCooldownMs ?? 10_000,
     replyBudget: overrides.replyBudget ?? 40,
     maxRepliesPerTaskPerTick: overrides.maxRepliesPerTaskPerTick ?? 3,
-  });
+    ...(overrides.chairTwinSuppressWindowMs != null
+      ? { chairTwinSuppressWindowMs: overrides.chairTwinSuppressWindowMs }
+      : {}),
+    ...(overrides.disableChairPlanningTurn != null
+      ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn }
+      : {}),
+    // F1 (GT#11): legacy tests add all members before the first tick, so the
+    // roster-settle gate is off by default here; dedicated F1 tests override
+    // settle/cap explicitly to exercise the mid-create race protection.
+    ...(overrides.chairPlanRosterSettleMs != null
+      ? { chairPlanRosterSettleMs: overrides.chairPlanRosterSettleMs }
+      : { chairPlanRosterSettleMs: 0 }),
+    ...(overrides.chairPlanRosterCapMs != null
+      ? { chairPlanRosterCapMs: overrides.chairPlanRosterCapMs }
+      : { chairPlanRosterCapMs: 0 }),
+    ...(overrides.memberUnreachableAfterMinutes != null
+      ? { memberUnreachableAfterMinutes: overrides.memberUnreachableAfterMinutes }
+      : {}),
+    ...(overrides.ackTimeoutMs != null
+      ? { ackTimeoutMs: overrides.ackTimeoutMs }
+      : {}),
+    // Generic dep override seam (e.g. getOpenTeamMembershipStore for the #13
+    // join-welcome tests); spreads last so tests can override anything above.
+    ...(overrides.deps ? overrides.deps : {}),
+  };
+  const loop = createGroupTaskDaemonLoop(deps);
 
   const createTask = (workerIds = [2, 3], opts = {}) => {
     const task = groupTaskStore.createTask({
@@ -220,7 +267,7 @@ const createHarness = async (overrides = {}) => {
   };
 
   return {
-    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop,
+    store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore, loop, deps,
     chatCalls, sends, routingCalls, skillTurnCalls, events, ownerReportCalls, state, createTask,
     cleanup: () => store.close(),
   };
@@ -249,19 +296,33 @@ test('gating: worker responds only when mentioned (by name or mention array)', (
   );
   assert.deepEqual(byMetaIdInArray, [{ metabotId: 3, reason: 'worker_mentioned' }]);
 
-  // name match is case-insensitive
+  // name match is case-insensitive (word-boundary @ required)
   const byNameCase = decideGroupTaskResponders(
-    gateMessage({ content: 'coder bot, take it' }),
+    gateMessage({ content: '@coder bot, take it' }),
     gateTask(), GATE_MEMBERS, GATE_BOTS,
   );
   assert.deepEqual(byNameCase, [{ metabotId: 2, reason: 'worker_mentioned' }]);
+
+  // P0-3: a bare name WITHOUT the @ prefix is NOT a mention (kickoff roster
+  // lines and recaps must not trigger replies). With nobody addressed it falls
+  // to the chair's floor-control duty instead.
+  const bareName = decideGroupTaskResponders(
+    gateMessage({ content: 'coder bot, take it' }),
+    gateTask(), GATE_MEMBERS, GATE_BOTS,
+  );
+  assert.deepEqual(bareName, [{ metabotId: 1, reason: 'chair_floor_control' }], 'bare name without @ must not trigger a worker');
 });
 
 test('gating: chair rules (a) mentioned, (b) owner message, (c) deliverable, (d) floor control', () => {
-  // (a) chair mentioned
+  // (a) chair mentioned (word-boundary @)
+  assert.deepEqual(
+    decideGroupTaskResponders(gateMessage({ content: '@Twin Bot, your call?' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
+    [{ metabotId: 1, reason: 'chair_mentioned' }],
+  );
+  // bare chair name without @ is not a mention (still may be floor control)
   assert.deepEqual(
     decideGroupTaskResponders(gateMessage({ content: 'Twin Bot, your call?' }), gateTask(), GATE_MEMBERS, GATE_BOTS),
-    [{ metabotId: 1, reason: 'chair_mentioned' }],
+    [{ metabotId: 1, reason: 'chair_floor_control' }],
   );
 
   // (b) owner message: no mention needed for the chair; workers get NO privilege
@@ -402,8 +463,9 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
   }
 });
 
-test('cursor advances on no-reply messages and on per-message failure', async () => {
-  const h = await createHarness();
+test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
+  // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
+  const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
   try {
     const task = h.createTask([2]);
 
@@ -417,21 +479,34 @@ test('cursor advances on no-reply messages and on per-message failure', async ()
     const selfId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['self-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId);
 
-    // first message blows up the LLM, second succeeds: cursor still advances past both
+    // First message blows up the LLM (one-shot error), second would succeed:
+    // fail-stop — the later message waits BEHIND the failed one so its success
+    // can never advance the cursor past the pending retry.
     h.state.chatError = 'llm exploded';
     insertGroupMessage(h.db, {
-      pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'boom-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot first attempt',
     });
     insertGroupMessage(h.db, {
-      pinId: 'ok-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'ok-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot second attempt',
     });
     await h.loop.runTick();
 
-    assert.equal(h.chatCalls.length, 2, 'both messages attempted the LLM');
-    assert.equal(h.sends.length, 1, 'only the second message produced a send');
-    assert.match(h.sends[0].content, /reply-for-llm-2/);
+    assert.equal(h.chatCalls.length, 1, 'only the first message attempted; the batch stops at the failure');
+    assert.equal(h.sends.length, 0, 'nothing sent while the first message fails');
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, selfId,
+      'cursor held before the failing message (no leapfrog by the later clean message)',
+    );
+
+    // Next tick: the failed message recovers (one-shot error spent) and both
+    // flow in order.
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 3, 'failed message retried, then the queued one');
+    assert.equal(h.sends.length, 2);
+    assert.match(h.chatCalls[1].userMessage, />>> Human: @Coder Bot first attempt <<</, 'retry keeps message order');
+    assert.match(h.chatCalls[2].userMessage, />>> Human: @Coder Bot second attempt <<</);
     const okId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['ok-i0'])[0].values[0][0];
     assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, okId);
   } finally {
@@ -446,28 +521,37 @@ test('loop prevention: cooldown and per-tick cap', async () => {
 
     // one message mentions all three workers; per-tick cap = 2
     insertGroupMessage(h.db, {
-      pinId: 'all-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'all-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot @Designer Bot @Reviewer Bot all hands',
     });
     await h.loop.runTick();
     assert.equal(h.sends.length, 2, 'per-tick cap stops the third worker');
 
-    // cooldown: a fresh mention for worker 2 within 20s is skipped
+    // P0-3c: the capped worker is DEFERRED, not dropped — the next tick
+    // compensates it (its message is already behind the cursor). Coder's fresh
+    // mention is still inside its 20s cooldown, so it stays deferred.
     insertGroupMessage(h.db, {
-      pinId: 'again-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'again-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot again',
     });
     await h.loop.runTick();
-    assert.equal(h.sends.length, 2, 'cooldown blocks the immediate follow-up');
+    assert.equal(h.sends.length, 3, 'deferred third worker gets its turn on the next tick');
+    assert.equal(h.sends.at(-1).metabotId, 4, 'compensation reply is from the capped Reviewer Bot');
+    assert.equal(
+      h.sends.filter((s) => s.metabotId === 2).length,
+      1,
+      'Coder Bot is still inside its cooldown; its mention is deferred, not dropped',
+    );
 
-    // past cooldown: a new mention flows again (the skipped one is behind the cursor)
+    // past cooldown: the deferred 'again' mention finally flows, and the fresh
+    // 'third' mention is deferred again (just replied).
     h.state.nowMs += 21_000;
     insertGroupMessage(h.db, {
-      pinId: 'third-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'third-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot third',
     });
     await h.loop.runTick();
-    assert.equal(h.sends.length, 3);
+    assert.equal(h.sends.length, 4, 'deferred Coder reply compensates after cooldown');
     assert.equal(h.sends.at(-1).metabotId, 2);
   } finally {
     h.cleanup();
@@ -479,7 +563,7 @@ test('loop prevention: reply budget per (task, bot)', async () => {
   try {
     h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'm1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'm1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot one',
     });
     await h.loop.runTick();
@@ -488,7 +572,7 @@ test('loop prevention: reply budget per (task, bot)', async () => {
     // budget exhausted (1): even after the cooldown, no more replies from this bot
     h.state.nowMs += 60_000;
     insertGroupMessage(h.db, {
-      pinId: 'm2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'm2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot two',
     });
     await h.loop.runTick();
@@ -538,7 +622,7 @@ test('send failure is logged and swallowed; cursor still advances', async () => 
       now: () => h.state.nowMs,
     });
     insertGroupMessage(h.db, {
-      pinId: 'fail-send-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'fail-send-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot say hi',
     });
     await failingLoop.runTick();
@@ -560,8 +644,8 @@ test('deliverable tags: kind inference, uri extraction, author recorded, dedupe 
   try {
     const task = h.createTask([2]);
     const cases = [
-      { pinId: 'd1-i0', content: '[DELIVERABLE] metafile: metafile://pin123.png see this', kind: 'metafile', uri: 'metafile://pin123.png' },
-      { pinId: 'd2-i0', content: '[DELIVERABLE] metaapp: metaapp://app456 is live', kind: 'metaapp', uri: 'metaapp://app456' },
+      { pinId: 'd1-i0', content: '[DELIVERABLE] metafile: metafile://ababababababababababababababababababababababababababababababababi0.png see this', kind: 'metafile', uri: 'metafile://ababababababababababababababababababababababababababababababababi0.png' },
+      { pinId: 'd2-i0', content: '[DELIVERABLE] metaapp: metaapp://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0 is live', kind: 'metaapp', uri: 'metaapp://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0' },
       { pinId: 'd3-i0', content: '[DELIVERABLE] url: https://example.com/preview', kind: 'url', uri: 'https://example.com/preview' },
       { pinId: 'd4-i0', content: '[deliverable] text summary: the work is done', kind: 'text', uri: null },
     ];
@@ -638,21 +722,155 @@ test('status tags: chair-only, transitions, same-status silent, review->executin
   }
 });
 
+// ---------------------------------------------------------------------------
+// #13 join-welcome handshake + #14 closing ceremony
+// ---------------------------------------------------------------------------
+
+test('#13 welcome: remote member joining mid-task triggers ONE welcome broadcast (who + why + handshake @s)', async () => {
+  const h = await createHarness();
+  const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+  h.deps.getOpenTeamMembershipStore = () => membershipStore;
+  try {
+    const task = h.createTask([2, 3]);
+    // First tick snapshots the create-time roster (chair has a join pin here;
+    // local workers carry none in this harness) — no welcome for it.
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'create-time roster produces no welcome');
+
+    // The invite row records WHY the remote member was invited; then the join
+    // lands (member row with joined_pin_id appears — P1-2 watcher behavior).
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-fortune',
+      inviteeName: 'Fortune Teller Master',
+      invitePinId: 'invite-fortune',
+      requiredSkills: ['占卜', '塔罗'],
+    });
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Teller Master',
+      role: 'worker',
+      joinedPinId: 'pin-join-fortune',
+    });
+
+    await h.loop.runTick();
+
+    const welcome = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(welcome, 'welcome posted as the chair');
+    assert.match(welcome.content, /欢迎 @Fortune Teller Master/);
+    assert.match(welcome.content, /受邀参与:占卜, 塔罗/, 'invite required-skills explain why');
+    assert.match(welcome.content, /先向群内打个招呼确认就位/);
+    assert.match(welcome.content, /@Coder Bot/);
+    assert.match(welcome.content, /@Designer Bot/);
+    assert.match(welcome.content, /确认在线/);
+
+    // Second tick: no duplicate welcome (kv-guarded), no new sends at all.
+    const sendCount = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, sendCount, 'welcome fires exactly once');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('#13 welcome: existing members reply once to the handshake and nothing replies back', async () => {
+  const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });
+  const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+  h.deps.getOpenTeamMembershipStore = () => membershipStore;
+  try {
+    const task = h.createTask([2, 3]);
+    await h.loop.runTick(); // snapshot tick
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-fortune',
+      displayName: 'Fortune Teller Master',
+      role: 'worker',
+      joinedPinId: 'pin-join-fortune',
+    });
+    await h.loop.runTick(); // welcome posted, @s Coder Bot + Designer Bot
+
+    const welcome = h.sends.find((s) => s.metabotId === 1);
+    assert.ok(welcome, 'welcome posted');
+    assert.equal(h.sends.length, 1, 'welcome tick posts only the welcome');
+
+    // Simulate the on-chain round-trip: the welcome enters the group log.
+    insertGroupMessage(h.db, {
+      pinId: 'welcome-pin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: welcome.content,
+    });
+    await h.loop.runTick();
+
+    const replies = h.sends.filter((s) => s.metabotId !== 1);
+    assert.deepEqual(
+      replies.map((s) => s.metabotId).sort(),
+      [2, 3],
+      'existing members confirmed once (mention-gated reply to the welcome)',
+    );
+
+    // Their confirmations carry no mentions: no further replies, no loop.
+    const count = h.sends.length;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, count, 'handshake stops after one round');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('#14 closing ceremony: review entry posts a system closing line as chair (never ends on worker [WORKING])', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]); // executing (planning->review is illegal by the state machine)
+    // A worker's [WORKING] sits last in the log; the chair posts the bare tag.
+    insertGroupMessage(h.db, {
+      pinId: 'working-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，正在收尾',
+      chainTimestamp: 100,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'review-tag-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal looks met',
+      chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(closing, 'review entry posts the system closing line as the chair');
+    assert.match(closing.content, /任务 #\d+「Build MetaApp」/);
+    assert.match(closing.content, /所有步骤已完成/);
+    assert.match(closing.content, /等待人类评审/);
+    // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
+    assert.equal(h.sends[h.sends.length - 1].metabotId, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('skill path: routing hit runs the skill turn in the existing session, plain path untouched', async () => {
   const h = await createHarness({
     coderChatSkills: ['web-search'],
     routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
   });
   try {
-    const task = h.createTask([2]);
+    const task = h.createTask([2, 3]);
+    // Round-4: a member WORKER (Designer Bot) mentions a colleague — the
+    // sender is neither boss nor chair, so allowAllEnabled stays false.
     insertGroupMessage(h.db, {
-      pinId: 'skill-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
-      senderName: 'Human', content: '@Coder Bot search for MetaID docs',
+      pinId: 'skill-i0', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '@Coder Bot search for MetaID docs',
     });
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn used');
-    assert.equal(h.chatCalls.length, 0, 'plain completion not called');
+    // P0-2 round-5: the host auto-ACK runs one fast chat call BEFORE the skill
+    // turn (the fake returns 'reply-for-llm-2' without [WORKING], so the
+    // template fallback is posted); the plain completion itself is not called.
+    assert.equal(h.chatCalls.length, 1, 'exactly one chat call (the worker ACK)');
+    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
     assert.deepEqual(h.routingCalls[0].allowChatSkills, ['web-search']);
     assert.equal(h.routingCalls[0].allowAllEnabled, false, 'human sender: no owner privilege');
 
@@ -662,10 +880,18 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     assert.equal(h.skillTurnCalls[0].sessionId, mapping.coworkSessionId);
     assert.deepEqual(h.skillTurnCalls[0].activeSkillIds, ['web-search']);
     assert.match(h.skillTurnCalls[0].systemPrompt, /available_skills/);
-    assert.match(h.skillTurnCalls[0].userMessage, />>> Human: @Coder Bot/);
+    assert.match(h.skillTurnCalls[0].userMessage, />>> Designer Bot: @Coder Bot/);
 
-    // reply went on-chain; daemon did not double-append an assistant message
-    assert.deepEqual(h.sends.map((s) => [s.metabotId, s.content]), [[2, 'skill-turn-reply']]);
+    // P0-2: the [WORKING] ACK went on-chain FIRST, then the turn reply;
+    // the daemon did not double-append an assistant message for the ACK.
+    assert.equal(h.sends.length, 2, 'ACK + turn reply posted');
+    assert.match(h.sends[0].content, /^\[WORKING\]/, 'first send is the ACK status line');
+    assert.deepEqual(
+      [h.sends[0].metabotId, h.sends[1].metabotId],
+      [2, 2],
+      'both messages posted as the worker bot',
+    );
+    assert.equal(h.sends[1].content, 'skill-turn-reply');
     const messages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
     assert.deepEqual(messages.map((m) => m.type), ['user']);
   } finally {
@@ -678,7 +904,7 @@ test('skill path: no routing hit falls back to the plain completion', async () =
   try {
     h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'plain-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'plain-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot quick question',
     });
     await h.loop.runTick();
@@ -730,7 +956,7 @@ test('gating: review phase — workers never respond, chair only answers the own
   // chair mentioned -> silent
   assert.deepEqual(
     decideGroupTaskResponders(
-      gateMessage({ content: 'Twin Bot thanks!' }),
+      gateMessage({ content: '@Twin Bot thanks!' }),
       reviewTask, GATE_MEMBERS, GATE_BOTS,
     ),
     [],
@@ -766,7 +992,7 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
   try {
     const task = h.createTask([2]); // executing
     insertGroupMessage(h.db, {
-      pinId: 'pre-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'pre-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot wrap up your part',
     });
     insertGroupMessage(h.db, {
@@ -774,17 +1000,21 @@ test('mid-batch [STATUS:REVIEW] flip gates subsequent messages with the new stat
       senderName: 'Twin Bot', content: '[STATUS:REVIEW] everything is in',
     });
     insertGroupMessage(h.db, {
-      pinId: 'post-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'post-flip-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot one more thing',
     });
     await h.loop.runTick();
 
     assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const sends = h.sends.map((s) => [s.metabotId, s.content]);
     assert.deepEqual(
-      h.sends.map((s) => [s.metabotId, s.content]),
+      sends.slice(0, 1),
       [[2, 'reply-for-llm-2']],
       'worker answered the pre-flip mention only; the post-flip mention is gated silent',
     );
+    assert.equal(sends.length, 2, 'plus the review-entry system closing line (#14)');
+    assert.equal(sends[1][0], 1, 'closing posted as the chair');
+    assert.match(sends[1][1], /进入验收阶段/, 'closing line content');
     assert.equal(
       h.chatCalls.filter((c) => c.llmId === 'llm-2').length, 1,
       'no LLM call for the post-flip message (the other call is the owner-report turn)',
@@ -800,7 +1030,7 @@ test('[NO_REPLY] plain path: suppressed on-chain, session kept, cooldown recorde
   try {
     const task = h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'nr1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'nr1-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot thanks!',
     });
     await h.loop.runTick();
@@ -816,7 +1046,7 @@ test('[NO_REPLY] plain path: suppressed on-chain, session kept, cooldown recorde
 
     // cooldown recorded: an immediate second mention never reaches the LLM
     insertGroupMessage(h.db, {
-      pinId: 'nr2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'nr2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot and this one too',
     });
     await h.loop.runTick();
@@ -832,9 +1062,11 @@ test('[NO_REPLY] matching: trailing text and case variants suppressed; normal re
   try {
     h.createTask([2]);
     const mentionAndTick = async (pinId) => {
+      // Round-4: assignments come from the chair (twin) — the chair self-skips
+      // and only the mentioned worker replies.
       insertGroupMessage(h.db, {
-        pinId, senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
-        senderName: 'Human', content: '@Coder Bot ping',
+        pinId, senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+        senderName: 'Twin Bot', content: '@Coder Bot ping',
       });
       await h.loop.runTick();
       h.state.nowMs += 21_000; // step past the worker cooldown for the next case
@@ -870,14 +1102,19 @@ test('[NO_REPLY] also applies on the skill-turn path', async () => {
   try {
     h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'nr-skill-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'nr-skill-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot run a search',
     });
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn ran');
-    assert.equal(h.chatCalls.length, 0, 'plain path untouched');
-    assert.equal(h.sends.length, 0, 'skill-turn [NO_REPLY] suppressed on-chain');
+    // P0-2 round-5: the host auto-ACK (one fast chat call) still posts the
+    // "[WORKING] 已接单" signal even when the turn itself opts out with
+    // [NO_REPLY] — the group must not see a silent worker.
+    assert.equal(h.chatCalls.length, 1, 'one chat call (the worker ACK)');
+    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
+    assert.equal(h.sends.length, 1, 'ACK posted; the [NO_REPLY] turn reply suppressed on-chain');
+    assert.match(h.sends[0].content, /^\[WORKING\]/, 'the only send is the ACK status line');
   } finally {
     h.cleanup();
   }
@@ -1006,6 +1243,56 @@ test('chair trust: worker responding to a chair-sender message gets allowAllEnab
   }
 });
 
+test('remote OpenTeam member joins the prompt roster; never produces a local reply', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-remote-alicia',
+      displayName: 'Alicia Remote',
+      role: 'worker',
+      joinedPinId: 'pin-join-alicia',
+    });
+
+    // Local worker mentioned by the chair: its prompt roster must
+    // include the remote teammate (annotated, exact name), and only the local
+    // bot replies (the chair stays silent — it is the sender itself).
+    // (Round-4 attribution: a non-member chain identity would be SUSPECT and
+    // never trigger replies, so the sender is a task member.)
+    insertGroupMessage(h.db, {
+      pinId: 'mention-coder-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please start the research',
+    });
+    await h.loop.runTick();
+
+    const coderCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
+    assert.ok(coderCall, 'local worker replied to the mention');
+    assert.match(coderCall.systemPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+    assert.match(coderCall.systemPrompt, /profile not available locally/);
+    assert.ok(
+      h.sends.every((send) => send.metabotId === 2),
+      'remote member never generates a local send',
+    );
+
+    // A deliverable posted by the remote teammate (from its own machine)
+    // still triggers the chair through the normal deliverable path.
+    insertGroupMessage(h.db, {
+      pinId: 'remote-deliverable-i0', senderMetaId: 'metaid-remote', senderGlobalMetaId: 'gmid-remote-alicia',
+      senderName: 'Alicia Remote', content: '[DELIVERABLE] doc: metaapp://abc123',
+    });
+    await h.loop.runTick();
+
+    const chairCall = h.chatCalls.find((call) => call.llmId === 'llm-1');
+    assert.ok(chairCall, 'chair responds to a remote teammate deliverable');
+    assert.match(chairCall.systemPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+    assert.match(chairCall.systemPrompt, /OpenTeam remote teammates/);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('prompts: roster profiles include bio/role/goal with the length cap', () => {
   const longBio = `bio-start ${'x'.repeat(500)} bio-end`;
   const prompt = buildGroupTaskSystemPrompt({
@@ -1028,6 +1315,46 @@ test('prompts: roster profiles include bio/role/goal with the length cap', () =>
   const bioLine = prompt.split('\n').find((line) => line.startsWith('- Coder Bot (worker) — Bio:'));
   const renderedBio = bioLine.replace('- Coder Bot (worker) — Bio: ', '');
   assert.ok(renderedBio.length <= 200, `bio capped at 200 chars (got ${renderedBio.length})`);
+});
+
+test('prompts: remote OpenTeam teammate annotated in roster, profiles, and playbooks', () => {
+  const members = [
+    { name: 'Twin Bot', role: 'chair' },
+    { name: 'Coder Bot', role: 'worker', bio: 'Search and code specialist' },
+    { name: 'Alicia Remote', role: 'worker', remote: true },
+  ];
+  const chairPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Twin Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'chair',
+  });
+
+  // Roster annotation keeps the exact name intact for @-mention matching.
+  assert.match(chairPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+  assert.match(chairPrompt, /- Alicia Remote \(worker\) — external teammate via OpenTeam; profile not available locally/);
+  assert.match(chairPrompt, /OpenTeam remote teammates \(marked "remote teammate via OpenTeam" in the roster\) are external collaborators/);
+  assert.match(chairPrompt, /Welcome them as you would a new colleague/);
+  assert.match(chairPrompt, /Their replies come from their own machine and may arrive late or not at all/);
+  assert.match(chairPrompt, /re-assign the work and explain the change to the owner/);
+  // M2: capability-gap assessment and remote-search discipline rules.
+  assert.match(chairPrompt, /Capability check before recruiting: when you decompose the goal, inventory the LOCAL roster first/);
+  assert.match(chairPrompt, /remote recruitment is the exception, not the default/);
+  assert.match(chairPrompt, /recommend a remote OpenTeam recruit to the owner/);
+  assert.match(chairPrompt, /One candidate at a time, best bio\/chatSkills\/on-chain fit first/);
+  assert.match(chairPrompt, /has not joined after ~10 minutes, treat it as no deal/);
+  assert.match(chairPrompt, /Never @-assign work to an invitee before it appears in the roster/);
+
+  const workerPrompt = buildGroupTaskSystemPrompt({
+    metabot: { name: 'Coder Bot' },
+    task: { title: 'T', goal: 'G' },
+    members,
+    botRole: 'worker',
+  });
+  assert.match(workerPrompt, /^- Alicia Remote \(worker, remote teammate via OpenTeam\)$/m);
+  assert.match(workerPrompt, /treat them as equal teammates and be polite/);
+  assert.ok(!workerPrompt.includes('OpenTeam remote teammates (marked'), 'chair-only etiquette stays out of the worker playbook');
+  assert.ok(!workerPrompt.includes('Capability check before recruiting'), 'chair-only recruiting rules stay out of the worker playbook');
 });
 
 // ---------------------------------------------------------------------------
@@ -1061,12 +1388,12 @@ test('prompts: worldview block, time line, honesty and chair boundary', () => {
   assert.match(prompt, /<self_identity>I am the twin\.<\/self_identity>/);
 });
 
-test('turn prompts include the fresh current-time line from the injected now()', async () => {
+test('turn prompts keep the system prompt stable and put the fresh current-time line in the user message', async () => {
   const h = await createHarness();
   try {
     h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'time-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'time-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
       senderName: 'Human', content: '@Coder Bot hi',
     });
     await h.loop.runTick();
@@ -1074,11 +1401,18 @@ test('turn prompts include the fresh current-time line from the injected now()',
     const date = new Date(h.state.nowMs);
     const pad = (v) => String(v).padStart(2, '0');
     const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    // Cache-prefix discipline: the minute-precision time line must NEVER sit in
+    // the system prompt (it would change every turn and reset the SDK session);
+    // it rides the user message instead.
     assert.ok(
-      h.chatCalls[0].systemPrompt.includes(`Current time: ${local} (`),
-      `prompt carries the injected-now local time (expected prefix "Current time: ${local} (")`,
+      !h.chatCalls[0].systemPrompt.includes('Current time:'),
+      'system prompt must not carry the per-turn time line',
     );
-    assert.match(h.chatCalls[0].systemPrompt, /today is \w+day, /);
+    assert.ok(
+      h.chatCalls[0].userMessage.includes(`Current time: ${local} (`),
+      `user message carries the injected-now local time (expected prefix "Current time: ${local} (")`,
+    );
+    assert.match(h.chatCalls[0].userMessage, /today is \w+day, /);
     assert.match(h.chatCalls[0].systemPrompt, /## Group task environment/);
   } finally {
     h.cleanup();
@@ -1094,12 +1428,14 @@ test('experience block: memory/dream deps feed the A2A builder; absent deps omit
   try {
     withMemory.createTask([2]);
     insertGroupMessage(withMemory.db, {
-      pinId: 'mem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'mem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
       senderName: 'Human', content: '@Coder Bot go',
     });
     await withMemory.loop.runTick();
-    assert.match(withMemory.chatCalls[0].systemPrompt, /I am the search specialist\./);
-    assert.match(withMemory.chatCalls[0].systemPrompt, /Searched the web for the owner\./);
+    assert.match(withMemory.chatCalls[0].userMessage, /I am the search specialist\./);
+    assert.match(withMemory.chatCalls[0].userMessage, /Searched the web for the owner\./);
+    assert.ok(!withMemory.chatCalls[0].systemPrompt.includes('I am the search specialist.'),
+      'experience block must not sit in the system prompt (volatile, cache-prefix breaker)');
   } finally {
     withMemory.cleanup();
   }
@@ -1108,7 +1444,7 @@ test('experience block: memory/dream deps feed the A2A builder; absent deps omit
   try {
     withoutMemory.createTask([2]);
     insertGroupMessage(withoutMemory.db, {
-      pinId: 'nomem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'nomem-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
       senderName: 'Human', content: '@Coder Bot go',
     });
     await withoutMemory.loop.runTick();
@@ -1134,17 +1470,19 @@ test('group cognition projection is observer-relative and wired into per-bot pro
   try {
     h.createTask([2]);
     insertGroupMessage(h.db, {
-      pinId: 'cog-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'cog-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
       senderName: 'Human', content: '@Coder Bot go',
     });
     await h.loop.runTick();
 
     const workerCall = h.chatCalls.find((call) => call.llmId === 'llm-2');
     assert.ok(workerCall, 'worker replied');
-    assert.match(workerCall.systemPrompt, /<metaid_group_cognition>/);
-    assert.match(workerCall.systemPrompt, /Observer: gmid-w2/);
-    assert.match(workerCall.systemPrompt, /- Twin Bot gmid-twin \(chair\)/);
-    assert.match(workerCall.systemPrompt, /- Coder Bot gmid-w2 \(worker\)/);
+    assert.match(workerCall.userMessage, /<metaid_group_cognition>/);
+    assert.match(workerCall.userMessage, /Observer: gmid-w2/);
+    assert.match(workerCall.userMessage, /- Twin Bot gmid-twin \(chair\)/);
+    assert.match(workerCall.userMessage, /- Coder Bot gmid-w2 \(worker\)/);
+    assert.ok(!workerCall.systemPrompt.includes('<metaid_group_cognition>'),
+      'cognition block must not sit in the system prompt (volatile, cache-prefix breaker)');
 
     const workerInput = cognitionCalls.find((input) => input.observerGlobalMetaID === 'gmid-w2');
     assert.ok(workerInput, 'cognition dep called for the responding worker');
@@ -1170,7 +1508,7 @@ test('group cognition projection failure or absence omits the block without bloc
   try {
     failing.createTask([2]);
     insertGroupMessage(failing.db, {
-      pinId: 'cogfail-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'cogfail-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot go',
     });
     await failing.loop.runTick();
@@ -1188,7 +1526,7 @@ test('group cognition projection failure or absence omits the block without bloc
   try {
     absent.createTask([2]);
     insertGroupMessage(absent.db, {
-      pinId: 'cogabsent-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'cogabsent-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Human', content: '@Coder Bot go',
     });
     await absent.loop.runTick();
@@ -1301,8 +1639,14 @@ test('owner report: review transition sends exactly one private report to the bo
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1, 'no duplicate on the next tick');
 
-    // the report never goes through the group send fn; only the deliverable ack did
-    assert.deepEqual(h.sends.map((s) => s.metabotId), [1], 'only the chair deliverable ack hit the group');
+    // the report never goes through the group send fn; only the chair
+    // deliverable ack and the #14 review-entry closing line hit the group
+    assert.deepEqual(
+      h.sends.map((s) => s.metabotId),
+      [1, 1],
+      'only chair-identity sends (deliverable ack + review closing) hit the group',
+    );
+    assert.match(h.sends[1].content, /进入验收阶段/, 'second chair send is the closing line');
     const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 1);
     const sessionText = h.coworkStore.getSessionMessages(mapping.coworkSessionId).map((m) => m.content).join('\n');
     assert.match(sessionText, /\[Private report sent to the owner/);
@@ -1381,7 +1725,7 @@ test('owner report: send failure is logged and does not block the tick', async (
       senderName: 'Twin Bot', content: '[STATUS:REVIEW] done',
     });
     insertGroupMessage(h.db, {
-      pinId: 'rf2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-human',
+      pinId: 'rf2-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-boss',
       senderName: 'Human', content: 'unrelated chatter',
     });
     await h.loop.runTick();
@@ -1404,6 +1748,1570 @@ test('owner report: send failure is logged and does not block the tick', async (
       h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, afterId,
       'tick processed the rest of the batch despite the send failure',
     );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: chair messages and placeholder URIs never become deliverables', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+
+    // chair message quoting the planning example -> NOT collected
+    insertGroupMessage(h.db, {
+      pinId: 'chair-example-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[DELIVERABLE] example format: metaapp://<pinId> or metaapp://[PINID]',
+    });
+    // worker message with a placeholder URI -> NOT collected
+    insertGroupMessage(h.db, {
+      pinId: 'worker-placeholder-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp://<pinId>',
+    });
+    // worker message with a real URI -> collected
+    insertGroupMessage(h.db, {
+      pinId: 'worker-real-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+    });
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 1, 'only the real worker deliverable is recorded');
+    assert.equal(rows[0].msgPinId, 'worker-real-i0');
+    assert.equal(rows[0].uri, 'metaapp://ababababababababababababababababababababababababababababababababi0');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-7: chair auto response is suppressed when the Twin already replied to that message', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // Lucy delivers; the Twin (chair) ALREADY replied on-chain to that pin
+    insertGroupMessage(h.db, {
+      pinId: 'deliver-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'chair-reply-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'thanks, verifying now', replyPin: 'deliver-i0',
+    });
+    await h.loop.runTick();
+
+    // The chair must NOT auto-respond to the deliverable (Twin already spoke).
+    // The worker mention is absent, so no worker replies either.
+    assert.equal(h.sends.length, 0, 'no duplicate chair auto response');
+    // but the deliverable is still recorded from the worker message
+    const taskId = h.groupTaskStore.listTasks()[0].id;
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P1-4 line-scoped [DELIVERABLE] parsing (new obs. 3)
+// ---------------------------------------------------------------------------
+
+test('P1-4 r2: [DELIVERABLE] parsing is line-scoped — body dir paths and truncated URIs never pollute', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    const summary = (row) => ({ kind: row.kind, uri: row.uri });
+
+    // Case ① (doc msg83): the tag line carries no URI; the BODY mentions a
+    // `metaapp/` directory path. Must be a text deliverable (uri null),
+    // never kind=metaapp.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-msg83-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '门户 MetaApp 页面已完成，本地目录 metaapp/agent-daily-portal 验收通过。\n[DELIVERABLE] ② 门户 MetaApp 页面（已开发+本地验收通过）',
+    });
+
+    // Case ② (doc msg85): a truncated `metafile://…zip（50KB，5 文件）` in the
+    // body must NOT win; the real metaapp:// URI on the tag line is collected
+    // and the kind follows that line's scheme.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-msg85-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '完成：源码已打包，content=metafile://…zip（50KB，5 文件）请查收。\n[DELIVERABLE] ④ metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+    });
+
+    // Full-width paren annotation AFTER the URI on the tag line: the URI is
+    // trimmed at the paren; the deliverable is recorded with the clean URI.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-paren-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] ⑤ 海报 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0（1.2MB，5 文件）',
+    });
+
+    // Tag line whose ONLY URI is truncated garbage: rejected as a placeholder
+    // (planning-style example, not a deliverable).
+    insertGroupMessage(h.db, {
+      pinId: 'r2-trunc-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] 示例：metafile://…zip（50KB，5 文件）',
+    });
+    await h.loop.runTick();
+
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    const byPin = (pinId) => rows.find((r) => r.msgPinId === pinId);
+    assert.equal(rows.length, 3, 'only the three real deliverables are recorded');
+
+    assert.deepEqual(
+      summary(byPin('r2-msg83-i0')),
+      { kind: 'text', uri: null },
+      'body `metaapp/` dir path must not misjudge the kind (was kind=metaapp, uri=null)',
+    );
+    assert.deepEqual(
+      summary(byPin('r2-msg85-i0')),
+      { kind: 'metaapp', uri: 'metaapp://ababababababababababababababababababababababababababababababababi0' },
+      'body ellipsis URI ignored; the tag-line metaapp:// URI is collected (was lost entirely)',
+    );
+    assert.deepEqual(
+      summary(byPin('r2-paren-i0')),
+      { kind: 'metafile', uri: 'metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0' },
+      'full-width paren annotation trimmed from the URI',
+    );
+    assert.equal(byPin('r2-trunc-i0'), undefined, 'truncated-only tag line is rejected as a placeholder');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P1-5 planning-directive distribution + opt-out (obs. 1/5)
+// ---------------------------------------------------------------------------
+
+test('P1-5 r2: planning directive demands distribution across at least 2 members when 2+ workers exist', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2, 3], { activate: false }); // planning; two workers on the roster
+    await h.loop.runTick();
+    const planningCall = h.chatCalls[0];
+    assert.match(
+      planningCall.userMessage,
+      /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members by their strengths/,
+      'with 2+ workers the directive forbids concentrating every subtask on one member',
+    );
+    assert.match(planningCall.userMessage, /never concentrate every subtask on a single member/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-5 r2: planning directive with a single worker assigns all work to that member', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.match(
+      h.chatCalls[0].userMessage,
+      /single worker on the roster — assign all subtasks to that one member/,
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-5 r2: disableChairPlanningTurn opts out of the auto planning turn (Twin leads the kickoff)', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2], { activate: false }); // planning
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no auto plan posted');
+    assert.equal(h.chatCalls.length, 0, 'no LLM planning call');
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1', 'task marked as host-planned');
+
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'guard stays quiet on later ticks');
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 iteration: P2-7 windowed Twin-activity suppression (new obs. 4)
+// ---------------------------------------------------------------------------
+
+test('P2-7 r2: Twin speech in the window suppresses chair auto replies (incl. replies without reply_pin)', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // The Twin speaks proactively (no reply_pin) at chain second 1_000_000_000.
+    insertGroupMessage(h.db, {
+      pinId: 'twin-active-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，这个任务我来主导，按计划推进。', chainTimestamp: 1_000_000_000,
+    });
+    // A worker deliverable arrives 5s later — the daemon auto verify must be
+    // suppressed while the Twin is actively speaking.
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0', chainTimestamp: 1_000_000_005,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no daemon chair auto reply while the Twin is speaking');
+    let taskId = h.groupTaskStore.listTasks()[0].id;
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 1, 'deliverable row still recorded');
+
+    // The Twin replies to the NEXT deliverable WITHOUT a reply_pin — the exact
+    // pin match cannot see this; the window check must.
+    h.state.nowMs += 10_000;
+    insertGroupMessage(h.db, {
+      pinId: 'twin-reply-nopin-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '已核实，收下。', chainTimestamp: 1_000_000_015,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0', chainTimestamp: 1_000_000_020,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'Twin reply without reply_pin also suppresses the auto verify');
+    assert.equal(h.groupTaskStore.listDeliverables(taskId).length, 2, 'deliverable rows still recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P2-7 r2: daemon auto replies resume when the Twin is quiet, and its own replies do not self-suppress', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+
+    // Twin spoke LONG ago (outside the 60s window) — the daemon auto verify runs.
+    insertGroupMessage(h.db, {
+      pinId: 'twin-old-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '旧消息：不在窗口内。', chainTimestamp: 999_000_000,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0', chainTimestamp: 1_000_000_000,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'Twin quiet: the chair auto-verifies the deliverable');
+    assert.equal(h.sends[0].metabotId, 1);
+
+    // The daemon's own reply round-trips on-chain (pin send-pin-1). Another
+    // deliverable arrives inside the window — the daemon must NOT treat its
+    // own reply as Twin activity and must verify again.
+    h.state.nowMs += 30_000;
+    insertGroupMessage(h.db, {
+      pinId: 'send-pin-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: h.sends[0].content, chainTimestamp: 1_000_000_030,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'dlv-2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[DELIVERABLE] ② 文章 metafile://cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdi0', chainTimestamp: 1_000_000_035,
+    });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, "the daemon's own reply does not suppress the next auto verify");
+    assert.equal(h.sends[1].metabotId, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-4: chain-GlobalMetaID attribution (SUSPECT) + correction-first
+// ---------------------------------------------------------------------------
+
+test('round-4 attribution: non-member sender is SUSPECT — no deliverables, no replies, row flagged', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'intruder-i0', senderMetaId: 'metaid-x', senderGlobalMetaId: 'gmid-stranger',
+      senderName: 'Some Bot',
+      content: `@Coder Bot do this\n**[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}**`,
+    });
+    await h.loop.runTick();
+    const suspect = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['intruder-i0'],
+    )[0].values[0][0];
+    assert.equal(suspect, 1, 'row flagged SUSPECT');
+    assert.equal(h.sends.length, 0, 'no replies triggered for a non-member speaker');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 0, 'no deliverables from non-members');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 attribution: owner (boss gmid) is never SUSPECT and still reaches the chair', async () => {
+  const h = await createHarness();
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'owner-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Human', content: 'status update please',
+    });
+    await h.loop.runTick();
+    const suspect = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['owner-i0'],
+    )[0].values[0][0];
+    assert.equal(suspect, 0, 'owner exempt from SUSPECT');
+    assert.equal(h.sends.length, 1, 'chair answers the owner');
+    assert.equal(h.sends[0].metabotId, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 attribution: legacy metaid resolved via injected resolver, persisted, member not SUSPECT', async () => {
+  const h = await createHarness({
+    resolveGlobalMetaId: async (legacy) => (legacy === 'metaid-2' ? 'gmid-w2' : null),
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    // Indexer push carried only the legacy chain signature, no GlobalMetaID.
+    insertGroupMessage(h.db, {
+      pinId: 'legacy-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Designer Bot hi',
+    });
+    await h.loop.runTick();
+    const row = h.db.exec(
+      'SELECT sender_global_metaid, sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['legacy-i0'],
+    )[0].values[0];
+    assert.equal(row[0], 'gmid-w2', 'resolved GlobalMetaID persisted onto the row');
+    assert.equal(row[1], 0, 'member sender is not SUSPECT');
+    assert.equal(h.sends.length, 1, 'mentioned member replies');
+    assert.equal(h.sends[0].metabotId, 3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 attribution: unresolvable legacy metaid → SUSPECT, silent', async () => {
+  const h = await createHarness({ resolveGlobalMetaId: async () => null });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'ghost-i0', senderMetaId: 'metaid-ghost', senderGlobalMetaId: null,
+      senderName: 'Ghost', content: '@Coder Bot hi',
+    });
+    await h.loop.runTick();
+    const suspect = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['ghost-i0'],
+    )[0].values[0][0];
+    assert.equal(suspect, 1, 'unresolvable signature flagged SUSPECT');
+    assert.equal(h.sends.length, 0, 'no replies for an unresolvable sender');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 kick: messages from a removed member turn SUSPECT — no replies, no deliverables', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+
+    // Pre-kick: a member deliverable is ingested and the chair verifies it.
+    insertGroupMessage(h.db, {
+      pinId: 'pre-kick-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}`,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'pre-kick deliverable recorded');
+    assert.equal(h.sends.length, 1, 'pre-kick deliverable triggers the chair');
+
+    // M3: the owner kicks the member (removeuser pin landed; row marked).
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2, removePinId: 'pin-remove-2' });
+
+    // The kicked member's daemon (or an indexer that has not enforced the
+    // removal yet) keeps posting — the host must stay silent and ingest nothing.
+    insertGroupMessage(h.db, {
+      pinId: 'post-kick-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `@Twin Bot still here\n[DELIVERABLE] metaapp: metaapp://${REAL_PINID_2}`,
+    });
+    await h.loop.runTick();
+    const suspect = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['post-kick-i0'],
+    )[0].values[0][0];
+    assert.equal(suspect, 1, 'post-kick message flagged SUSPECT (sender no longer a member)');
+    assert.equal(h.sends.length, 1, 'no replies after the kick');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'no deliverables after the kick');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 correction-first: a 更正 message supersedes the matched deliverable in place', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'd1-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] buzz: https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`,
+    });
+    await h.loop.runTick();
+    let rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].uri, `https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`);
+
+    // Same author corrects the link; the buzz pinid token ties them together.
+    insertGroupMessage(h.db, {
+      pinId: 'd2-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `链接更正：此前的 buzz 交付链接为无效路由。\n[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}（实测 HTTP 200）`,
+    });
+    await h.loop.runTick();
+    rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 1, 'correction updates in place — no duplicate row');
+    assert.equal(rows[0].uri, `https://openagentinternet.org/browser/pin/${REAL_PINID_2}`);
+    assert.equal(rows[0].msgPinId, 'd1-i0', 'original row retained, uri superseded');
+    assert.equal(rows[0].status, 'pending');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4: one message with two [DELIVERABLE] tag lines records two rows (msg94 regression)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'multi-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: [
+        `**[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}**`,
+        `**[DELIVERABLE] 分享链接: https://openagentinternet.org/browser/metaapp/${REAL_PINID_1}**`,
+      ].join('\n'),
+    });
+    await h.loop.runTick();
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(rows.length, 2, 'one row per tag line');
+    assert.deepEqual(rows.map((r) => r.kind).sort(), ['metaapp', 'url']);
+    assert.ok(rows.some((r) => r.uri === `metaapp://${REAL_PINID_1}`), 'metaapp row kept');
+    assert.ok(
+      rows.some((r) => r.uri === `https://openagentinternet.org/browser/metaapp/${REAL_PINID_1}`),
+      'share-link row kept (previously dropped by the whole-message dedupe)',
+    );
+    assert.ok(!rows.some((r) => r.uri?.endsWith('**')), 'no trailing markdown in recorded URIs');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4: HTTP probe notes on https deliverable links ride the chair verification context', async () => {
+  const probeResults = {
+    [`https://openagentinternet.org/browser/pin/${REAL_PINID_2}`]: 200,
+    [`https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`]: 404,
+  };
+  const h = await createHarness({
+    probeUrl: async (url) => probeResults[url] ?? null,
+  });
+  try {
+    h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'probe-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: [
+        `[DELIVERABLE] buzz 正确预览链接: https://openagentinternet.org/browser/pin/${REAL_PINID_2}`,
+        `[DELIVERABLE] 旧链接: https://openagentinternet.org/browser/buzz/${REAL_PINID_2}`,
+      ].join('\n'),
+    });
+    await h.loop.runTick();
+
+    // The chair was triggered by the deliverable tag; its context carries the
+    // probe notes: 200 marked reachable, 404 flagged for clarification.
+    const chairCall = h.chatCalls.find((call) => call.userMessage.includes('Host verification'));
+    assert.ok(chairCall, 'chair received verification notes');
+    assert.match(chairCall.userMessage, /HTTP probe .*\/browser\/pin\/.* → 200 \(link reachable\)/);
+    assert.match(chairCall.userMessage, /HTTP probe .*\/browser\/buzz\/.* → 404 — link may be invalid; verify before accepting/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 cursor semantics: failing message is retried, cursor advances only on success', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // one-shot LLM failure: tick 1 fails, tick 2 succeeds
+    h.state.chatError = 'transient boom';
+    insertGroupMessage(h.db, {
+      pinId: 'retry-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot go',
+    });
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['retry-i0'])[0].values[0][0];
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor does NOT advance on a failed message (retry semantics)');
+    assert.equal(h.chatCalls.length, 1, 'first attempt failed');
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advances once the message is processed successfully');
+    assert.equal(h.chatCalls.length, 2, 'message was retried');
+    assert.equal(h.sends.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4 cursor semantics: permanently failing message is dropped after the bounded retries', async () => {
+  const h = await createHarness({ chatErrorAlways: 'always boom' });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'stuck-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot do the impossible',
+    });
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['stuck-i0'])[0].values[0][0];
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      await h.loop.runTick();
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+        `tick ${tick}: cursor held until the retry budget is spent`);
+    }
+    // the 5th failure spends the budget: the message is dropped, cursor advances
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced past the permanently failing message after the bounded retries');
+    assert.equal(h.chatCalls.length, 5, 'exactly MSG_RETRY_MAX_FAILURES attempts');
+
+    // the 6th tick has nothing left to process
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 5, 'no further attempts after the drop');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    await h.loop.runTick();
+    const row = h.db.exec('SELECT last_driven_at FROM group_tasks WHERE id = ?', [task.id])[0].values[0][0];
+    assert.equal(row, 1_000_000_000, 'heartbeat = floor(now()/1000)');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// R2P1-4: a resolver THROW is transient (retry path), only a definitive null
+// resolution marks SUSPECT.
+// ---------------------------------------------------------------------------
+
+test('R2P1-4: resolver throw rides the bounded retry path — no SUSPECT, cursor held, recovered on retry', async () => {
+  let resolverCalls = 0;
+  const h = await createHarness({
+    resolveGlobalMetaId: async (legacy) => {
+      resolverCalls += 1;
+      if (resolverCalls === 1) throw new Error('manapi temporarily unreachable');
+      return legacy === 'metaid-2' ? 'gmid-w2' : null;
+    },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    insertGroupMessage(h.db, {
+      pinId: 'transient-resolve-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Designer Bot hi',
+    });
+    const msgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['transient-resolve-i0'],
+    )[0].values[0][0];
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor held while the resolver is failing');
+    assert.equal(h.sends.length, 0, 'no reply from an unattributed message');
+    const afterThrow = h.db.exec(
+      'SELECT sender_suspect, sender_global_metaid FROM group_chat_messages WHERE pin_id = ?',
+      ['transient-resolve-i0'],
+    )[0].values[0];
+    assert.equal(Number(afterThrow[0] ?? 0), 0, 'a resolver throw must NOT mark SUSPECT');
+    assert.equal(afterThrow[1], null, 'nothing persisted while unresolved');
+
+    await h.loop.runTick();
+    assert.equal(resolverCalls, 2, 'message retried on the next tick');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advances once the resolution succeeds');
+    const resolved = h.db.exec(
+      'SELECT sender_global_metaid, sender_suspect FROM group_chat_messages WHERE pin_id = ?',
+      ['transient-resolve-i0'],
+    )[0].values[0];
+    assert.equal(resolved[0], 'gmid-w2');
+    assert.equal(Number(resolved[1]), 0, 'member sender is not SUSPECT');
+    assert.equal(h.sends.length, 1, 'the legitimate member message is answered after recovery');
+    assert.equal(h.sends[0].metabotId, 3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R2P1-4: permanently throwing resolver drops the message after the bounded retries, never SUSPECT', async () => {
+  const h = await createHarness({
+    resolveGlobalMetaId: async () => { throw new Error('manapi down for good'); },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'down-resolve-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Coder Bot hi',
+    });
+    const msgId = h.db.exec(
+      'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['down-resolve-i0'],
+    )[0].values[0][0];
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      await h.loop.runTick();
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+        `tick ${tick}: cursor held while the resolver keeps failing`);
+    }
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'bounded retries spent: cursor advances past the unresolvable message');
+    const row = h.db.exec(
+      'SELECT sender_suspect FROM group_chat_messages WHERE pin_id = ?', ['down-resolve-i0'],
+    )[0].values[0];
+    assert.equal(Number(row[0] ?? 0), 0, 'never stamped SUSPECT on transient-resolution failures');
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// M3 deferred-reply re-check: a reply deferred by the cooldown is dropped when
+// the sender was kicked (or flagged SUSPECT) before the deferred turn runs.
+// ---------------------------------------------------------------------------
+
+const setupDeferredReply = async (h) => {
+  const task = h.createTask([2, 3]);
+  // First mention: Designer Bot answers (cooldown starts).
+  insertGroupMessage(h.db, {
+    pinId: 'defer-first-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+    senderName: 'Coder Bot', content: '@Designer Bot first task',
+  });
+  await h.loop.runTick();
+  assert.equal(h.sends.length, 1, 'first mention answered');
+  assert.equal(h.sends[0].metabotId, 3);
+
+  // Second mention inside the cooldown window: deferred to a later tick.
+  insertGroupMessage(h.db, {
+    pinId: 'defer-second-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+    senderName: 'Coder Bot', content: '@Designer Bot second task',
+  });
+  await h.loop.runTick();
+  assert.equal(h.sends.length, 1, 'cooldown mention deferred, not answered yet');
+  const secondMsgId = h.db.exec(
+    'SELECT id FROM group_chat_messages WHERE pin_id = ?', ['defer-second-i0'],
+  )[0].values[0][0];
+  return { task, secondMsgId };
+};
+
+test('M3 deferred re-check: sender kicked before the deferred turn — reply dropped', async () => {
+  const h = await createHarness();
+  try {
+    const { task } = await setupDeferredReply(h);
+
+    // The owner kicks the SENDER of the deferred message; the replier stays.
+    h.groupTaskStore.markMemberRemoved({ taskId: task.id, metabotId: 2, removePinId: 'pin-remove-2' });
+
+    h.state.nowMs += 30_000; // past the worker cooldown
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'no reply on a kicked sender\'s message');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 deferred re-check: sender flagged SUSPECT before the deferred turn — reply dropped', async () => {
+  const h = await createHarness();
+  try {
+    const { secondMsgId } = await setupDeferredReply(h);
+
+    // Late attribution flip (e.g. a manual/host re-evaluation) marks the row suspect.
+    h.groupTaskStore.setMessageSenderSuspect(secondMsgId, true);
+
+    h.state.nowMs += 30_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1, 'no reply on a suspect message');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('M3 deferred re-check: sender still an active member — deferred reply fires normally', async () => {
+  const h = await createHarness();
+  try {
+    await setupDeferredReply(h);
+    h.state.nowMs += 30_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'deferred reply fires once the cooldown elapsed');
+    assert.equal(h.sends[1].metabotId, 3);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R2P1-4: a resolver failure holds the whole batch — a later clean message cannot leapfrog the cursor', async () => {
+  let resolverCalls = 0;
+  const h = await createHarness({
+    resolveGlobalMetaId: async (legacy) => {
+      resolverCalls += 1;
+      if (resolverCalls === 1) throw new Error('manapi unreachable');
+      return legacy === 'metaid-2' ? 'gmid-w2' : null;
+    },
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    // N: needs resolution (throws transiently on the first tick).
+    insertGroupMessage(h.db, {
+      pinId: 'unresolved-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: null,
+      senderName: 'Coder Bot', content: '@Designer Bot from an unresolved sender',
+    });
+    // N+1: fully attributable owner message — would succeed if it were reached.
+    insertGroupMessage(h.db, {
+      pinId: 'clean-owner-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: BOSS_GMID,
+      senderName: 'Human', content: 'status update please',
+    });
+
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, 0,
+      'cursor held at the failing message');
+    assert.equal(h.chatCalls.length, 0,
+      'the later clean message was NOT processed behind the failed one (no leapfrog)');
+
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 2, 'both messages processed after recovery');
+    assert.equal(h.sends[0].metabotId, 3, 'the previously failing message answered first (in order)');
+    assert.equal(h.sends[1].metabotId, 1, 'the owner message answered after it');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-2: silent assigned/working members are auto-marked unreachable after the threshold', async () => {
+  const h = await createHarness({ memberUnreachableAfterMinutes: 5 });
+  try {
+    const task = h.createTask([2, 3]);
+    // Anchor the daemon clock to wall time so sqlite created_at baselines
+    // (real datetime('now')) compare sensibly.
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Worker 2 spoke 1 minute ago (within threshold); worker 3 never spoke.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-old-1',
+      senderMetaId: 'metaid-2',
+      senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: 'hello',
+      chainTimestamp: Math.floor((startMs - 60_000) / 1000),
+    });
+
+    // Fresh task: worker 2 spoke (implicit ACK → working); worker 3 is still
+    // within threshold → assigned (not yet unreachable).
+    await h.loop.runTick();
+    let members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'assigned');
+
+    // Advance past the threshold: both become unreachable.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'unreachable');
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'unreachable');
+
+    // Chair member is never auto-marked.
+    assert.equal(members.find((m) => m.metabotId === 1).status, 'working');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-3: [WORKING] ACK + chair reminders
+// ---------------------------------------------------------------------------
+
+test('P0-3: chair assignment records pending ACK; worker [WORKING] ACK clears it and marks working', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2') != null, true);
+
+    // Worker 2 ACKs with [WORKING] and an estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-ack-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：build metaapp，预计 5 分钟',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'working');
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'), 'expected delivery deadline recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: missing ACK past the timeout posts ONE chair reminder, never auto-fails', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-2', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    h.sends.length = 0;
+
+    // Before timeout: no reminder.
+    h.state.nowMs = startMs + 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2).status, 'assigned');
+
+    // Past timeout: one reminder as the chair.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.match(h.sends[0].content, /@chair/);
+    assert.match(h.sends[0].content, /has not sent a \[WORKING\] ACK/);
+
+    // A later tick does not re-remind.
+    h.state.nowMs = startMs + 400_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-3: [STANDBY] marker sets standby; ordinary worker speech is an implicit ACK', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+
+    // Chair assigns worker 2 and worker 3.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-assign-3', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot and @Designer Bot please work',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_ack_pending:1:2'));
+    assert.ok(h.store.get('group_task_ack_pending:1:3'));
+
+    // Worker 3 posts [STANDBY] → standby; worker 2 posts ordinary speech → working (implicit ACK).
+    insertGroupMessage(h.db, {
+      pinId: 'pin-standby-1', senderMetaId: 'metaid-3', senderGlobalMetaId: 'gmid-w3',
+      senderName: 'Designer Bot', content: '[STANDBY] 静默观察 / 待命接手 / 可退出',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-implicit-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it, will deliver soon',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const members = h.groupTaskStore.listMembers(task.id);
+    assert.equal(members.find((m) => m.metabotId === 3).status, 'standby');
+    assert.equal(members.find((m) => m.metabotId === 2).status, 'working');
+    assert.equal(h.store.get('group_task_ack_pending:1:2'), undefined);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P0-4: deliverable verification + deadline reminders
+// ---------------------------------------------------------------------------
+
+test('P0-4: pinid deliverable gets multi-source verification persisted (found+found → verified)', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_1] = 'found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_1}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    assert.ok(deliverable, 'deliverable recorded');
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, true);
+    assert.equal(report.sources.length, 2);
+    assert.deepEqual(report.sources.map((s) => s.outcome).sort(), ['found', 'found']);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: indexer lag (man not_found, secondary found) persists pending-sync, not a hard failure', async () => {
+  const h = await createHarness({
+    readPinSecondaryForVerification: async () => 'found',
+    verificationRetryMs: 60_000,
+  });
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    h.state.pinOutcomes[REAL_PINID_2] = 'not_found';
+    insertGroupMessage(h.db, {
+      pinId: 'pin-deliv-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metaapp: metaapp://${REAL_PINID_2}`,
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    const report = JSON.parse(deliverable.verification);
+    assert.equal(report.verified, false);
+    assert.equal(report.sources.some((s) => s.outcome === 'not_found'), true);
+    assert.equal(report.sources.some((s) => s.outcome === 'found'), true);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-4: missed delivery deadline posts ONE reminder; delivered members are skipped', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2, 3]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+    // Chair assigns worker 2; worker ACKs with a 5-minute estimate.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please deliver',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-a4-2', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单：deliver，预计 5 分钟',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    assert.ok(h.store.get('group_task_expected_delivery:1:2'));
+    h.sends.length = 0;
+
+    // Before deadline: no reminder.
+    h.state.nowMs = startMs + 3 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+
+    // Past deadline: one reminder.
+    h.state.nowMs = startMs + 6 * 60_000;
+    await h.loop.runTick();
+    const reminders = h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content));
+    assert.equal(reminders.length, 1);
+    assert.match(reminders[0].content, /@chair/);
+
+    // No repeat.
+    h.state.nowMs = startMs + 12 * 60_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => /no \[DELIVERABLE\] arrived/.test(s.content)).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P0-8: member correction message records an integrity event (deduped by pin)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2, 3]);
+    h.state.nowMs = Date.now();
+    insertGroupMessage(h.db, {
+      pinId: 'pin-correction-1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '更正：我此前的链接无效，正确预览如下',
+      chainTimestamp: Math.floor(h.state.nowMs / 1000),
+    });
+    await h.loop.runTick();
+    const events = h.groupTaskStore.listIntegrityEvents(task.id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].eventType, 'correction');
+    assert.equal(events[0].msgPinId, 'pin-correction-1');
+
+    // same pin re-processed (retry) → no duplicate
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listIntegrityEvents(task.id).length, 1);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// C-1: chair auto-planning must cover >= 2 members (defensive check)
+// ---------------------------------------------------------------------------
+
+test('C-1: checkPlanningCoverage — multi-worker plan must mention >= 2 workers', () => {
+  const { checkPlanningCoverage } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const tenWorkers = ['AI_小新', 'Builder', 'Lucy', 'eleven', 'loop AI', '小明同学', '10th bot', '77', 'Stephen', 'claude-bot2'];
+
+  const single = checkPlanningCoverage(
+    'Plan: @AI_小新 you are the only worker, do everything. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(single.ok, false);
+  assert.deepEqual(single.mentionedWorkers, ['AI_小新']);
+
+  const spread = checkPlanningCoverage(
+    'Plan: @AI_小新 research, @Lucy copy, @Builder assemble; others standby. [STATUS:EXECUTING]',
+    tenWorkers,
+  );
+  assert.equal(spread.ok, true);
+  assert.ok(spread.mentionedWorkers.length >= 2);
+
+  const singleWorkerRoster = checkPlanningCoverage('Plan: @Coder Bot do it', ['Coder Bot']);
+  assert.equal(singleWorkerRoster.ok, true);
+});
+
+test('C-1: single-worker plan is retried, then posted with a host warning on the final attempt', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot, you are the only worker — do everything. [STATUS:EXECUTING]',
+    disableChairPlanningTurn: false,
+  });
+  try {
+    // 3 workers: 2, 3, 4; the plan only mentions Coder Bot.
+    const task = h.createTask([2, 3, 4], { activate: false });
+    for (let i = 0; i < 4; i++) {
+      await h.loop.runTick();
+    }
+    assert.equal(h.store.get(`group_task_chair_plan_attempts:${task.id}`), 2, 'two failed coverage attempts then posted with warning');
+    assert.equal(h.sends.length, 1, 'posted on final attempt with warning');
+    assert.match(h.sends[0].content, /Host warning/);
+    assert.match(h.sends[0].content, /concentrates the work on one member/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('C-1: multi-worker plan posts immediately without warning', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+  });
+  try {
+    const task = h.createTask([2, 3, 4], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 1);
+    assert.doesNotMatch(h.sends[0].content, /Host warning/);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F1 (GT#11): the planning turn must not fire against a half-formed roster
+// ---------------------------------------------------------------------------
+
+test('F1: buildRosterSignature — stable roster => stable signature; any member change => new signature', () => {
+  const { buildRosterSignature } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const rosterA = [
+    { role: 'chair', name: 'Twin Bot', globalmetaid: 'gmid-twin', metabotId: 1 },
+    { role: 'worker', name: 'Coder Bot', globalmetaid: 'gmid-w2', metabotId: 2 },
+    { role: 'worker', name: 'Designer Bot', globalmetaid: 'gmid-w3', metabotId: 3 },
+  ];
+  const rosterAShuffled = [rosterA[2], rosterA[0], rosterA[1]];
+  assert.equal(buildRosterSignature(rosterA), buildRosterSignature(rosterAShuffled), 'order-independent');
+  const rosterMinusDesigner = rosterA.filter((m) => m.metabotId !== 3);
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterMinusDesigner), 'member removal changes the sig');
+  const rosterWithReviewer = [...rosterA, { role: 'worker', name: 'Reviewer Bot', globalmetaid: 'gmid-w4', metabotId: 4 }];
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterWithReviewer), 'member add changes the sig');
+  const rosterRoleChanged = rosterA.map((m) => (m.metabotId === 3 ? { ...m, role: 'chair' } : m));
+  assert.notEqual(buildRosterSignature(rosterA), buildRosterSignature(rosterRoleChanged), 'role change changes the sig');
+  const rosterRemote = [
+    { role: 'worker', name: null, displayName: 'Alicia Remote', globalmetaid: 'gmid-remote', metabotId: null },
+  ];
+  assert.notEqual(buildRosterSignature([]), buildRosterSignature(rosterRemote), 'remote member shows up in the sig');
+});
+
+test('F1: chair planning waits for the roster to settle — mid-create ticks never misplan', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design, @Reviewer Bot review. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 20_000,
+    chairPlanRosterCapMs: 600_000,
+  });
+  try {
+    // Simulate createGroupTask mid-flight: task row + chair + ONE worker.
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 1: roster still forming — no planning');
+    assert.equal(h.sends.length, 0);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), undefined, 'planned flag not set while waiting');
+
+    // More workers join as creation proceeds.
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 4, role: 'worker' });
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 2: roster changed again — still deferred');
+
+    // Roster now stable, but inside the settle window.
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 0, 'tick 3: roster stable but not yet settled');
+
+    // Time passes the settle window: planning fires with the FULL roster.
+    h.state.nowMs += 25_000;
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'tick 4: planning fires once the roster settled');
+    assert.match(h.chatCalls[0].userMessage, /DISTRIBUTE the subtasks across AT LEAST 2 DIFFERENT members/, 'directive sees 2+ workers');
+    assert.match(h.chatCalls[0].userMessage, /Coder Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.match(h.chatCalls[0].userMessage, /Designer Bot \[worker\]/, 'full roster embedded in the directive');
+    assert.equal(h.sends.length, 1);
+    assert.equal(h.store.get(`group_task_chair_planned:${task.id}`), '1');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('F1: planning proceeds after the absolute cap even if the roster never settles', async () => {
+  const h = await createHarness({
+    chatReply: 'Plan: @Coder Bot research, @Designer Bot design. [STATUS:EXECUTING]',
+    chairPlanRosterSettleMs: 60_000,
+    chairPlanRosterCapMs: 90_000,
+  });
+  try {
+    const task = h.createTask([2], { activate: false });
+    await h.loop.runTick(); // roster sig recorded (chair + Coder)
+    h.groupTaskStore.addMember({ taskId: task.id, metabotId: 3, role: 'worker' });
+    await h.loop.runTick(); // sig changed; re-recorded, still deferred
+    // Pin the task creation to (harness now - 2h): the cap must override the
+    // settle gate once the task is old enough.
+    h.db.run(
+      `UPDATE group_tasks SET created_at = strftime('%Y-%m-%d %H:%M:%S', 1000000000 - 7200, 'unixepoch') WHERE id = ?`,
+      [task.id],
+    );
+    h.state.nowMs += 95_000; // past the 90s cap from creation
+    await h.loop.runTick();
+    assert.equal(h.chatCalls.length, 1, 'cap overrides the settle gate');
+    assert.equal(h.sends.length, 1, 'plan posted despite an unsettled roster');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// F2 (GT#11): session-level driving mutex (pure helpers)
+// ---------------------------------------------------------------------------
+
+test('F2: tryAcquireGroupTaskDriver — acquire / own-refresh / foreign-reject / stale-takeover', () => {
+  const { tryAcquireGroupTaskDriver } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  const acquired = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 1_000);
+  assert.equal(acquired.ok, true, 'no claim -> acquire');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000');
+
+  const ownNoRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 2_000, false);
+  assert.equal(ownNoRefresh.ok, true, 'own claim with refreshOwn=false still passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|1000', 'refreshOwn=false keeps the claim age-based');
+
+  const ownRefresh = tryAcquireGroupTaskDriver(store, 7, 'rpc:1', 20_000, 3_000, true);
+  assert.equal(ownRefresh.ok, true, 'own claim with refreshOwn=true passes');
+  assert.equal(store.get('group_task_driver:7'), 'rpc:1|3000', 'refreshOwn=true extends the lease');
+
+  const foreign = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 4_000);
+  assert.equal(foreign.ok, false, 'foreign fresh claim -> rejected');
+  assert.equal(foreign.driverId, 'rpc:1');
+  assert.equal(foreign.claimAgeMs, 1_000);
+  assert.equal(foreign.retryAfterMs, 19_000);
+
+  const stale = tryAcquireGroupTaskDriver(store, 7, 'daemon-uuid', 20_000, 30_000);
+  assert.equal(stale.ok, true, 'stale claim -> takeover');
+  assert.equal(store.get('group_task_driver:7'), 'daemon-uuid|30000');
+});
+
+test('F2: gateChairDrivingSend — worker sends pass; chair sends are mutually exclusive per session', () => {
+  const { gateChairDrivingSend } = require('../dist-electron/main/services/groupTaskDaemon.js');
+  const kv = new Map();
+  const store = {
+    get: (key) => kv.get(key),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+  };
+
+  // Worker sends are never driving.
+  assert.deepEqual(
+    gateChairDrivingSend({ kv: store, taskId: 7, senderMetabotId: 2, chairMetabotId: 1, graceMs: 20_000, nowMs: 1_000 }),
+    { ok: true },
+  );
+
+  // First chair send acquires the claim under its session id.
+  const first = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 1_000,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(store.get('group_task_driver:7'), 'session-a|1000');
+
+  // A DIFFERENT session is rejected with a readable error + retry hint.
+  const second = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-b', graceMs: 20_000, nowMs: 2_000,
+  });
+  assert.equal(second.ok, false, 'second session rejected while the first drives');
+  assert.match(second.error, /being driven by another session/);
+  assert.match(second.error, /retry in 19s/);
+  assert.equal(second.retryAfterMs, 19_000);
+  assert.equal(second.driverId, 'session-a');
+
+  // The SAME session id keeps driving (refreshes instead of rejection).
+  const same = gateChairDrivingSend({
+    kv: store, taskId: 7, senderMetabotId: 1, chairMetabotId: 1,
+    driverId: 'session-a', graceMs: 20_000, nowMs: 5_000,
+  });
+  assert.equal(same.ok, true, 'same driver_id refreshes instead of being rejected');
+  assert.equal(store.get('group_task_driver:7'), 'session-a|5000');
+
+  // Omitted driver_id defaults to rpc:<chairMetabotId>.
+  const byDefault = gateChairDrivingSend({
+    kv: store, taskId: 8, senderMetabotId: 1, chairMetabotId: 1, graceMs: 20_000, nowMs: 9_000,
+  });
+  assert.equal(byDefault.ok, true);
+  assert.equal(store.get('group_task_driver:8'), 'rpc:1|9000');
+});
+
+// ---------------------------------------------------------------------------
+// F6 (GT#11): [STATUS:REVIEW] parsing chain — the P2-7 Twin-activity
+// suppression window must never swallow the chair's status switch
+// ---------------------------------------------------------------------------
+
+test('F6: chair [STATUS:REVIEW] during the Twin-activity suppression window is still parsed', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2]); // executing
+
+    // The Twin speaks proactively inside the 60s suppression window — any
+    // daemon chair AUTO reply is suppressed from this point on.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-twin-active-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '各位，这个任务我来主导。', chainTimestamp: 1_000_000_000,
+    });
+    // A worker deliverable arrives — the auto-verify reply would be suppressed.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-dlv-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] metaapp: metaapp://ababababababababababababababababababababababababababababababababi0',
+      chainTimestamp: 1_000_000_005,
+    });
+    // The chair flips the task to REVIEW while the window is still active.
+    insertGroupMessage(h.db, {
+      pinId: 'f6-review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部交付已核验', chainTimestamp: 1_000_000_010,
+    });
+    await h.loop.runTick();
+
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'review',
+      'chair status switch is parsed and applied despite the suppression window',
+    );
+    // #14: the review entry posts the deterministic system closing line (a
+    // host guarantee, NOT an LLM auto reply — still posted in the window so
+    // the group never rests on a worker [WORKING]).
+    assert.equal(h.sends.length, 1, 'no chair auto replies, only the system closing line');
+    assert.equal(h.sends[0].metabotId, 1, 'closing posted as the chair');
+    assert.match(h.sends[0].content, /进入验收阶段/, 'closing line content');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable row still recorded');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// P1-4: [DEPENDS_ON] derived assignments inherit the upstream ACK (ack-seen)
+// ---------------------------------------------------------------------------
+
+/** Minimal sqlite-like mock: kv for ack-seen + a message-pin table. */
+const makeDerivedSqlite = ({ upstreamMessageId = null, ackSeen = false } = {}) => {
+  const kv = new Map();
+  if (ackSeen) kv.set('group_task_ack_seen:7:101', '1');
+  return {
+    get: (key) => (kv.has(key) ? kv.get(key) : null),
+    set: (key, value) => kv.set(key, value),
+    delete: (key) => kv.delete(key),
+    getDatabase: () => ({
+      exec: (sql, params) => {
+        if (upstreamMessageId != null && String(params?.[1]) === REAL_PINID_1) {
+          return [{ values: [[upstreamMessageId]] }];
+        }
+        return [];
+      },
+    }),
+  };
+};
+
+test('P1-4: resolveDerivedAssignmentUpstream returns null for non-derived messages', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  const sqlite = makeDerivedSqlite();
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: 'please do step 1' }, sqlite), null);
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: '[DEPENDS_ON: ' }, sqlite), null);
+  assert.equal(resolveDerivedAssignmentUpstream(task, { content: '' }, sqlite), null);
+});
+
+test('P1-4: a descriptive [DEPENDS_ON] (no resolvable pinid) gets a normal watch (falsy)', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: '[DEPENDS_ON: the upstream design]' }, makeDerivedSqlite()),
+    '',
+    'descriptive reference -> normal watch',
+  );
+  assert.equal(
+    resolveDerivedAssignmentUpstream(
+      task,
+      { content: `[DEPENDS_ON: ${REAL_PINID_1}]` },
+      makeDerivedSqlite({ upstreamMessageId: null }),
+    ),
+    '',
+    'pinid not found in this group -> normal watch',
+  );
+});
+
+test('P1-4: derived assignment inherits the upstream ACK only when ack-seen', () => {
+  const task = { id: 7, groupId: GROUP_ID };
+  const upstreamAcked = makeDerivedSqlite({ upstreamMessageId: 101, ackSeen: true });
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: `[DEPENDS_ON: ${REAL_PINID_1}]` }, upstreamAcked),
+    REAL_PINID_1,
+    'upstream ACKed -> inherits, no new watch',
+  );
+  const upstreamNotAcked = makeDerivedSqlite({ upstreamMessageId: 101, ackSeen: false });
+  assert.equal(
+    resolveDerivedAssignmentUpstream(task, { content: `[DEPENDS_ON: ${REAL_PINID_1}]` }, upstreamNotAcked),
+    '',
+    'upstream message exists but not ACKed -> normal watch',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// P1-3: the chair planning directive carries pending invites / placeholders
+// ---------------------------------------------------------------------------
+
+test('P1-3: buildOpenTeamPlanningStatusBlock reports pending invites and placeholders', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2], { activate: false });
+    const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+    const groupTaskStore = h.groupTaskStore;
+
+    // Nothing to report -> empty block.
+    assert.equal(buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore), '');
+    assert.equal(buildOpenTeamPlanningStatusBlock(undefined, task, groupTaskStore), '', 'unwired store');
+
+    // A live pending invite must appear with the "do not re-decompose" hint.
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-invitee',
+      inviteeName: 'Fortune Bot',
+      invitePinId: 'pending-pin-1',
+    });
+    const block = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.match(block, /Fortune Bot/);
+    assert.match(block, /Do NOT plan a "search for a remote bot/);
+    assert.match(block, /already invited/);
+
+    // A placeholder member (no join pin, no pending invite) must appear too.
+    groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-stale-placeholder',
+      displayName: 'Stale Placeholder',
+      role: 'worker',
+      joinedPinId: null,
+    });
+    const block2 = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.match(block2, /Stale Placeholder/);
+    assert.match(block2, /join never confirmed/);
+
+    // A confirmed remote member (joined pin) is NOT a placeholder.
+    groupTaskStore.addMember({
+      taskId: task.id,
+      metabotId: null,
+      globalmetaid: 'gmid-confirmed-remote',
+      displayName: 'Confirmed Remote',
+      role: 'worker',
+      joinedPinId: 'joined-pin-x',
+    });
+    const block3 = buildOpenTeamPlanningStatusBlock(membershipStore, task, groupTaskStore);
+    assert.doesNotMatch(block3, /Confirmed Remote/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-3: the planning directive embeds the OpenTeam block when invites are pending', async () => {
+  const h = await createHarness();
+  try {
+    const membershipStore = new OpenTeamMembershipStore(h.db, h.store.getSaveFunction());
+    // Wire the optional store getter (same shape main.ts passes).
+    h.loop = createGroupTaskDaemonLoop({
+      ...h.deps,
+      getOpenTeamMembershipStore: () => membershipStore,
+    });
+    const task = h.createTask([2], { activate: false }); // planning
+    membershipStore.createInvite({
+      taskId: task.id,
+      groupId: GROUP_ID,
+      inviteeGlobalmetaid: 'gmid-remote-invitee',
+      inviteeName: 'Fortune Bot',
+      invitePinId: 'pending-pin-2',
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.sends.length, 1, 'chair posted exactly one plan');
+    const planningCall = h.chatCalls[0];
+    assert.match(planningCall.userMessage, /OpenTeam invites already sent/);
+    assert.match(planningCall.userMessage, /Fortune Bot/);
+    assert.match(planningCall.userMessage, /Do NOT plan a "search for a remote bot/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P1-4: worker who spoke before the watch armed is not flagged at ACK timeout (implicit ACK)', async () => {
+  const h = await createHarness({ ackTimeoutMs: 180_000 });
+  try {
+    const task = h.createTask([2]);
+    const startMs = Date.now();
+    h.state.nowMs = startMs;
+
+    // Cursor edge: the worker's speech message has a LOWER id than the
+    // assignment, so it is processed first (no watch exists yet — clearPendingAck
+    // is a no-op), and the assignment re-arms the watch afterwards. The worker
+    // demonstrably spoke at the same chain second as the assignment, so the
+    // watchdog must treat it as engaged instead of flagging it as not ACKed.
+    insertGroupMessage(h.db, {
+      pinId: 'pin-impack-s1', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'on it, checking the sources',
+      chainTimestamp: Math.ceil(startMs / 1000),
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'pin-impack-a1', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot please build the metaapp',
+      chainTimestamp: Math.floor(startMs / 1000),
+    });
+    await h.loop.runTick();
+    const assignId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['pin-impack-a1'])[0].values[0][0];
+    const watch = JSON.parse(h.store.get(`group_task_ack_pending:${task.id}:2`));
+    assert.equal(watch.messageId, assignId, 'watch armed by the assignment, not the speech');
+    h.sends.length = 0;
+
+    // Past the ACK timeout: the worker spoke at the assignment's chain second
+    // (implicit ACK) → ack-seen recorded, watch cleared, NO chair reminder.
+    h.state.nowMs = startMs + 200_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0, 'no no-ACK reminder for an engaged worker');
+    assert.equal(h.store.get(`group_task_ack_seen:${task.id}:${assignId}`), '1', 'ack-seen recorded for the assignment');
+    assert.equal(h.store.get(`group_task_ack_pending:${task.id}:2`), undefined, 'pending watch cleared (kv delete)');
+
+    // Later ticks stay quiet — the reminder never fires.
+    h.state.nowMs = startMs + 400_000;
+    await h.loop.runTick();
+    assert.equal(h.sends.length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 清单 #10 P-A (groupTaskDaemon canonical path): a worker whose session did
+// real work but ended with an EMPTY reply must fail the canonical attempt with
+// WORKER_EMPTY_HANDOFF_WITH_ACTIVITY + summary, not an opaque bare code.
+// ---------------------------------------------------------------------------
+test('canonical: empty worker reply + substantive session activity → attempt fails with WORKER_EMPTY_HANDOFF_WITH_ACTIVITY', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    skillReply: '',
+  });
+  try {
+    // The fake skill turn now also persists real-looking activity into the
+    // task session (mimicking the real runner appending tool messages while
+    // the worker worked) and ends with an empty final reply.
+    const baseRunSkillTurn = h.deps.runSkillTurn;
+    h.deps.runSkillTurn = async (params) => {
+      const result = await baseRunSkillTurn(params);
+      h.coworkStore.addMessage(params.sessionId, { type: 'assistant', content: 'Plan: implement the fix.' });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_use', content: 'Using tool: Edit', metadata: { toolName: 'Edit', toolInput: { file_path: 'src/a.ts' }, toolUseId: 'tu-1' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_result', content: 'Edited src/a.ts', metadata: { toolUseId: 'tu-1', isError: false, toolResult: 'Edited src/a.ts' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_use', content: 'Using tool: Bash', metadata: { toolName: 'Bash', toolInput: { command: 'npm test' }, toolUseId: 'tu-2' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'tool_result', content: '315/315 tests passed', metadata: { toolUseId: 'tu-2', isError: false, toolResult: '315/315 tests passed' } });
+      h.coworkStore.addMessage(params.sessionId, { type: 'assistant', content: 'Progress: core fix done.' });
+      return result; // replyText: ''
+    };
+
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'empty-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot implement the fix and report back',
+    });
+    await h.loop.runTick();
+
+    const canonicalId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    assert.ok(canonicalId, 'canonical orchestration task linked');
+    const canonical = h.orchestrationStore.getTask(canonicalId);
+    const step = h.orchestrationStore.listSteps(canonical.id)[0];
+    const attempt = h.orchestrationStore.listAttempts(step.id)[0];
+    assert.equal(attempt.status, 'failed');
+    assert.match(attempt.error, /^WORKER_EMPTY_HANDOFF_WITH_ACTIVITY:/);
+    assert.match(attempt.error, /files=\[src\/a\.ts\]/);
+    assert.match(attempt.error, /tests=\[.*315\/315/);
+    assert.match(attempt.error, /toolCalls=2/);
+    // the activity the summary describes matches what the session recorded
+    const sessionMessages = h.coworkStore.getSessionMessages(attempt.workerSessionId);
+    assert.equal(sessionMessages.filter((m) => m.type === 'tool_use').length, 2);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('canonical: empty worker reply + bare session keeps the plain WORKER_EMPTY_HANDOFF', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>web-search</available_skills>', activeSkillIds: ['web-search'] }),
+    skillReply: '',
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'bare-empty-i0', senderMetaId: 'metaid-h', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Human', content: '@Coder Bot quick question',
+    });
+    await h.loop.runTick();
+
+    const canonicalId = h.groupTaskStore.getTaskById(task.id).orchestrationTaskId;
+    const canonical = h.orchestrationStore.getTask(canonicalId);
+    const step = h.orchestrationStore.listSteps(canonical.id)[0];
+    const attempt = h.orchestrationStore.listAttempts(step.id)[0];
+    assert.equal(attempt.status, 'failed');
+    assert.equal(attempt.error, 'WORKER_EMPTY_HANDOFF');
   } finally {
     h.cleanup();
   }

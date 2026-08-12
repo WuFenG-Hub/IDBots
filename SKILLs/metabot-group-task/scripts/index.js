@@ -8,7 +8,7 @@
  *   node index.js --payload @/path/to/payload.json
  *   echo '<JSON string>' | node index.js
  *
- * Payload: { action: 'create'|'list'|'show'|'send'|'invite'|'close', ... }
+ * Payload: { action: 'create'|'list'|'show'|'member_status'|'send'|'invite'|'kick'|'close'|'search_remote'|'invite_remote', ... }
  * RPC base: process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200'
  */
 'use strict';
@@ -21,9 +21,14 @@ const ACTION_PATHS = {
   create: '/api/idbots/group-task/create',
   list: '/api/idbots/group-task/list',
   show: '/api/idbots/group-task/show',
+  member_status: '/api/idbots/group-task/member-status',
   send: '/api/idbots/group-task/send',
   invite: '/api/idbots/group-task/invite',
+  kick: '/api/idbots/group-task/kick-member',
   close: '/api/idbots/group-task/close',
+  'deliverable-delete': '/api/idbots/group-task/deliverable-delete',
+  search_remote: '/api/idbots/group-task/search-remote-candidates',
+  invite_remote: '/api/idbots/group-task/invite-remote',
   bots: '/api/idbots/list-metabots',
 };
 
@@ -107,6 +112,15 @@ async function main() {
       const taskId = Number(params.task_id);
       if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for show');
       body = { task_id: taskId };
+      // Round-4: view=summary (default) keeps the output small; view=full returns everything.
+      const view = String(params.view ?? '').trim();
+      body.view = view === 'full' ? 'full' : 'summary';
+      break;
+    }
+    case 'member_status': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for member_status');
+      body = { task_id: taskId };
       break;
     }
     case 'send': {
@@ -137,6 +151,54 @@ async function main() {
       }
       break;
     }
+    case 'kick': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for kick');
+      body = { task_id: taskId };
+      const globalmetaid = String(params.globalmetaid ?? '').trim();
+      const metabotName = String(params.metabot_name ?? '').trim();
+      if (globalmetaid) {
+        body.globalmetaid = globalmetaid;
+      } else if (typeof params.metabot_id === 'number' && params.metabot_id > 0) {
+        body.metabot_id = params.metabot_id;
+      } else if (metabotName) {
+        body.metabot_name = metabotName;
+      } else {
+        fail('globalmetaid, metabot_id or metabot_name is required for kick');
+      }
+      const reason = String(params.reason ?? '').trim();
+      if (reason) body.reason = reason;
+      break;
+    }
+    case 'search_remote': {
+      body = {};
+      const query = String(params.query ?? '').trim();
+      const skill = String(params.skill ?? '').trim();
+      if (query) body.query = query;
+      if (skill) body.skill = skill;
+      if (params.limit !== undefined) {
+        const limit = Number(params.limit);
+        if (!Number.isInteger(limit) || limit <= 0) fail('limit must be a positive integer for search_remote');
+        body.limit = limit;
+      }
+      break;
+    }
+    case 'invite_remote': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for invite_remote');
+      const globalmetaid = String(params.globalmetaid ?? '').trim();
+      if (!globalmetaid) fail('globalmetaid is required for invite_remote');
+      body = { task_id: taskId, globalmetaid };
+      const name = String(params.name ?? '').trim();
+      if (name) body.name = name;
+      if (Array.isArray(params.required_skills) && params.required_skills.length) {
+        body.required_skills = params.required_skills.map((s) => String(s ?? '').trim()).filter(Boolean);
+      }
+      if (params.allow_reinvite === true || params.allow_reinvite === 'true') {
+        body.allow_reinvite = true;
+      }
+      break;
+    }
     case 'close': {
       const taskId = Number(params.task_id);
       if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for close');
@@ -145,6 +207,14 @@ async function main() {
       body = { task_id: taskId, status };
       const reason = String(params.reason ?? '').trim();
       if (reason) body.reason = reason;
+      break;
+    }
+    case 'deliverable-delete': {
+      const taskId = Number(params.task_id);
+      if (!Number.isInteger(taskId) || taskId <= 0) fail('task_id is required for deliverable-delete');
+      const deliverableId = Number(params.deliverable_id);
+      if (!Number.isInteger(deliverableId) || deliverableId <= 0) fail('deliverable_id is required for deliverable-delete');
+      body = { task_id: taskId, deliverable_id: deliverableId };
       break;
     }
     default:

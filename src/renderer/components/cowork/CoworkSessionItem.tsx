@@ -21,6 +21,9 @@ const statusLabels: Record<CoworkSessionStatus, string> = {
   running: 'coworkStatusRunning',
   completed: 'coworkStatusCompleted',
   error: 'coworkStatusError',
+  // 清单 #12: failed attempt already superseded by a retry — distinct from an
+  // unattended 'error' so users don't mistake it for a hanging task.
+  error_retried: 'coworkStatusErrorRetried',
 };
 
 const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean }> = ({
@@ -208,6 +211,9 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
   const actionButtonRef = useRef<HTMLButtonElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const ignoreNextBlurRef = useRef(false);
+  // Right-click opens the menu at the cursor; the reposition effect must not
+  // snap it back to the action button.
+  const menuPositionFromContextMenuRef = useRef(false);
 
   useEffect(() => {
     if (!isRenaming) {
@@ -242,6 +248,31 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
       setMenuPosition(position);
     }
     setShowConfirmDelete(false);
+  };
+
+  /** Open the session menu at the mouse position (right-click entry point). */
+  const openMenuAt = (clientX: number, clientY: number) => {
+    if (isRenaming) return;
+    const menuWidth = 180;
+    const menuHeight = 160;
+    const padding = 8;
+    const x = Math.min(
+      Math.max(padding, clientX),
+      window.innerWidth - menuWidth - padding
+    );
+    const y = Math.min(
+      Math.max(padding, clientY),
+      window.innerHeight - menuHeight - padding
+    );
+    menuPositionFromContextMenuRef.current = true;
+    setMenuPosition({ x, y });
+    setShowConfirmDelete(false);
+  };
+
+  const handleContextMenu = (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    openMenuAt(event.clientX, event.clientY);
   };
 
   const closeMenu = () => {
@@ -345,6 +376,11 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
 
   useEffect(() => {
     if (!menuPosition) return;
+    // Right-click positioning is anchored to the cursor: keep it as-is.
+    if (menuPositionFromContextMenuRef.current) {
+      menuPositionFromContextMenuRef.current = false;
+      return;
+    }
     const menuHeight = showConfirmDelete ? 112 : 160;
     const position = calculateMenuPosition(menuHeight);
     if (position && (position.x !== menuPosition.x || position.y !== menuPosition.y)) {
@@ -399,6 +435,7 @@ const CoworkSessionItem: React.FC<CoworkSessionItemProps> = ({
         closeMenu();
         onSelect();
       }}
+      onContextMenu={handleContextMenu}
       className={`group relative px-2.5 py-1.5 rounded-lg cursor-pointer transition-all duration-150 ${
         isActive
           ? 'bg-black/[0.06] dark:bg-white/[0.08]'

@@ -11,6 +11,7 @@ let buildDreamPrompt;
 let getDayBoundsMs;
 let DREAM_RETRY_BASE_DELAY_MS;
 let DREAM_RETRY_MAX_DELAY_MS;
+let DREAM_VERSION;
 try {
   ({
     computeDreamStaggerMinute,
@@ -23,6 +24,7 @@ try {
     getDayBoundsMs,
     DREAM_RETRY_BASE_DELAY_MS,
     DREAM_RETRY_MAX_DELAY_MS,
+    DREAM_VERSION,
   } = await import('../dist-electron/main/libs/dreamPrompt.js'));
 } catch {
   ({
@@ -36,6 +38,7 @@ try {
     getDayBoundsMs,
     DREAM_RETRY_BASE_DELAY_MS,
     DREAM_RETRY_MAX_DELAY_MS,
+    DREAM_VERSION,
   } = await import('../dist-electron/libs/dreamPrompt.js'));
 }
 
@@ -56,10 +59,10 @@ test('computeDueDreamDates: yesterday is due inside the window after the stagger
   assert.equal(notYet.includes('2026-08-01'), false, 'yesterday should wait for the staggered minute');
 });
 
-test('computeDueDreamDates: yesterday waits outside the window, older dates catch up any time', () => {
+test('computeDueDreamDates: yesterday catches up outside the window, older dates catch up any time', () => {
   const midday = new Date(2026, 7, 8, 12, 0);
   const { dueDates } = computeDueDreamDates({ now: midday, metabotId: 1, runStates: new Map() });
-  assert.equal(dueDates.includes('2026-08-07'), false, 'yesterday must wait for the next nightly window');
+  assert.ok(dueDates.includes('2026-08-07'), 'a missed nightly window must self-heal during the day');
   assert.ok(dueDates.includes('2026-08-06'), 'two days ago should catch up immediately');
   assert.ok(dueDates.includes('2026-08-02'), 'six days ago should catch up');
   assert.equal(dueDates.includes('2026-07-31'), false, 'beyond the 7-day lookback');
@@ -119,7 +122,7 @@ test('computeDueDreamDates: a completed run that started mid-day is not final an
 
   // Once re-dreamed after the day ended, the date is final.
   const settled = new Map([
-    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: 4 }],
+    ['2026-08-03', { status: 'completed', attemptCount: 2, startedAt: new Date(2026, 7, 4, 0, 20).getTime(), dreamVersion: DREAM_VERSION }],
   ]);
   const next = computeDueDreamDates({ now: new Date(2026, 7, 5, 1, 0), metabotId: 1, runStates: settled });
   assert.equal(next.dueDates.includes('2026-08-03'), false);
@@ -319,4 +322,134 @@ test('buildDreamPrompt truncates oversized activity within budget', () => {
   assert.ok(user.includes('会话0'), 'first session present');
   assert.ok(user.includes('会话29'), 'last session present');
   assert.ok(user.includes('当天共有 30 段会话'), 'inventory counts all sessions');
+});
+
+test('buildDreamPrompt buckets group task sessions separately and renders acceptance evaluations', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [
+        {
+          sessionId: 'gt1',
+          title: '海报设计群任务',
+          sessionType: 'group_task',
+          peerName: null,
+          isOrder: false,
+          messages: [{ type: 'assistant', content: '我先出三版方案', createdAt: 1 }],
+        },
+        {
+          sessionId: 'h1',
+          title: '日常闲聊',
+          sessionType: 'standard',
+          peerName: null,
+          isOrder: false,
+          messages: [{ type: 'user', content: '你好', createdAt: 2 }],
+        },
+      ],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [{
+        taskId: 1,
+        title: '海报设计',
+        goal: '做一张发布会海报',
+        memberRole: 'worker',
+        rating: 5,
+        ratingComment: '设计很好,下次继续保持',
+      }],
+    },
+  });
+
+  assert.ok(user.includes('## 群任务协作'), 'group task sessions get their own bucket');
+  assert.ok(user.includes('海报设计群任务'));
+  assert.ok(user.includes('## 与人类用户的对话'), 'human bucket still renders for standard sessions');
+  const humanSection = user.split('## 与人类用户的对话')[1]?.split('##')[0] ?? '';
+  assert.ok(!humanSection.includes('海报设计群任务'), 'group task session must not land in the human bucket');
+
+  assert.ok(user.includes('## 群任务验收评价'), 'acceptance evaluation section renders');
+  assert.ok(user.includes('★★★★★(5/5)'), 'star rendering of the rating');
+  assert.ok(user.includes('设计很好,下次继续保持'), 'owner comment present');
+  assert.ok(user.includes('执行(worker)'), 'bot role in the task present');
+  assert.ok(user.includes('群任务验收评价 1 项'), 'inventory counts evaluations');
+  assert.ok(user.includes('"group_tasks"'), 'output contract carries the group_tasks section key');
+  assert.ok(user.includes('高分(4-5 星)'), 'rating-alignment guidance present');
+});
+
+test('buildDreamPrompt renders unrated (automation-closed) group tasks without stars', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [{
+        taskId: 2,
+        title: '数据整理',
+        goal: '整理表',
+        memberRole: 'chair',
+        rating: null,
+        ratingComment: null,
+      }],
+    },
+  });
+  assert.ok(user.includes('## 群任务验收评价'));
+  assert.ok(user.includes('未评分'), 'unrated tasks are marked as such');
+  assert.ok(!user.includes('★'), 'no fabricated stars');
+  assert.ok(user.includes('主持(chair)'));
+});
+
+test('buildDreamPrompt annotates human-rated messages and carries the feedback contract', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [{
+        sessionId: 'fb1',
+        title: '方案讨论',
+        sessionType: 'standard',
+        peerName: null,
+        isOrder: false,
+        messages: [
+          { type: 'user', content: '给个迁移方案', createdAt: 1 },
+          { type: 'assistant', content: '方案一:先迁移数据', createdAt: 2, feedbackRating: 'up' },
+          { type: 'assistant', content: '方案二:直接重写', createdAt: 3, feedbackRating: 'down', feedbackComment: '风险太大 没有考虑回滚' },
+          { type: 'assistant', content: '补充说明', createdAt: 4 },
+        ],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+    },
+  });
+
+  assert.ok(user.includes('方案一:先迁移数据〔人类评价:赞〕'), 'up marker appended inline');
+  assert.ok(
+    user.includes('方案二:直接重写〔人类评价:踩〕〔人类留言:风险太大 没有考虑回滚〕'),
+    'down marker plus human comment appended inline'
+  );
+  assert.ok(user.includes('补充说明'), 'unrated message still renders');
+  assert.ok(!user.includes('补充说明〔人类评价'), 'unrated message carries no marker');
+  assert.ok(user.includes('人类逐条评价 2 条(赞 1,踩 1)'), 'inventory counts rated messages');
+  assert.ok(user.includes('关于人类逐条消息评价'), 'feedback contract instruction present');
+  assert.ok(user.includes('ground truth'), 'contract points at the human comment as ground truth');
+});
+
+test('buildDreamPrompt omits the rated-message inventory when nothing was rated', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [{
+        sessionId: 'h1',
+        title: '日常闲聊',
+        sessionType: 'standard',
+        peerName: null,
+        isOrder: false,
+        messages: [{ type: 'user', content: '你好', createdAt: 1 }],
+      }],
+      taskRuns: [],
+      orderCount: 0,
+    },
+  });
+  assert.ok(!user.includes('人类逐条评价'), 'no inventory mention without rated messages');
 });

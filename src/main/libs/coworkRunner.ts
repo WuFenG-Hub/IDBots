@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import { type ChildProcessByStdio } from 'child_process';
+import { createHash } from 'crypto';
 import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
@@ -17,6 +18,7 @@ import {
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, isEmptyTerminalSdkResult } from './coworkAssistantReply';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
@@ -25,11 +27,25 @@ import {
   RECENT_SUMMARIES_PROMPT_DAYS,
   type ExperienceRecallArgs,
 } from './experiencePromptBlocks';
-import { getCoworkContextBudget, isContextWindowExceededError } from './coworkContextBudget';
+import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
+import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
+import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
-import { getCoworkOpenAICompatProxyStatus } from './coworkOpenAICompatProxy';
+import {
+  getCoworkOpenAICompatProxyStatus,
+  getCoworkSnipHeadTokens,
+  resetCoworkSnipHeadTokens,
+  resolveCoworkBillingSource,
+  setCoworkSnipHeadTokens,
+} from './coworkOpenAICompatProxy';
+import {
+  COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS,
+  COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS,
+  snipStaleToolResultBlocks,
+  type AnthropicMessageLike,
+} from './coworkToolResultSnip';
 import {
   buildUserConfiguredMcpServerConfigs,
   type UserConfiguredMcpServerDefinition,
@@ -40,9 +56,15 @@ import { isPathWithin, resolveElectronExecutablePath } from './runtimePaths';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
-import { CoworkCrossSessionService } from '../services/coworkCrossSession';
 import {
+  CoworkCrossSessionService,
+  type CoworkCrossSessionInsertResult,
+} from '../services/coworkCrossSession';
+import {
+  buildTwinLocalImpressionBlock,
+  buildTwinLocalRosterBlock,
   TwinWorkerDirectoryAuthorizationError,
+  type TwinImpressionEntry,
   type TwinWorkerDirectoryResult,
 } from '../services/twinWorkerDirectoryService';
 import type {
@@ -52,12 +74,22 @@ import type {
 } from '../services/twinOrchestrationService';
 import {
   buildBotBrowserAgentTools,
+  buildBotBrowserScreenshotTool,
   type BotBrowserControl,
 } from './botBrowserAgentTools';
 import {
   buildMetaIdSearchAgentTools,
   type MetaIdSearchControl,
 } from './metaIdSearchAgentTools';
+import {
+  buildProjectsAgentTools,
+  buildProjectsPromptSection,
+  type ProjectsControl,
+} from './projectsAgentTools';
+import {
+  buildSocialRecallAgentTools,
+  type SocialRecallControl,
+} from './socialRecallAgentTools';
 import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
@@ -97,6 +129,27 @@ const SANDBOX_WORKSPACE_GUEST_ROOT = '/workspace/project';
 const SANDBOX_WORKSPACE_LEGACY_ROOT = '/workspace';
 const SAFE_ATTACHMENT_PROMPT_LABEL = '附件路径';
 const ATTACHMENT_LINE_RE = /^\s*(?:[-*]\s*)?(输入文件|input\s*file|附件路径|附件文件|attachment\s*path|attachment\s*file)\s*[:：]\s*(.+?)\s*$/i;
+// Raster image formats the model would receive as base64 image blocks. Used by
+// the non-vision Read/View guard (N1) and the same-file read dedupe (N2).
+// Deliberately excludes .svg (text/XML — readable and useful as text) and
+// non-image binaries (handled by BINARY_ATTACHMENT_EXTENSIONS instead).
+const IMAGE_FILE_EXTENSIONS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.ico',
+  '.heic',
+  '.heif',
+  '.tif',
+  '.tiff',
+  '.avif',
+]);
+/** Files at or above this size are dedupe candidates too (base64 expansion is
+ * what blew up the diagnosed session — 120KB image -> 360K chars). */
+const COWORK_READ_DEDUPE_MIN_BYTES = 50 * 1024;
 const BINARY_ATTACHMENT_EXTENSIONS = new Set([
   '.pdf',
   '.png',
@@ -176,6 +229,7 @@ const SUBAGENT_PROGRESS_THROTTLE_MS = 1_000;
 const READ_ONLY_TOOL_NAMES = new Set([
   'read', 'view', 'ls', 'glob', 'grep', 'list',
   'todowrite', 'taskget', 'tasklist',
+  'project_query',  // local Projects metadata lookup; no side effects
   'websearch', 'webfetch',  // informational only; network policy handled separately
 ]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
@@ -474,6 +528,163 @@ function shouldForceTextOnlyAttachmentMode(
   return normalizedModel.startsWith('deepseek');
 }
 
+/**
+ * Estimate the token savings a snip boundary would buy for a session, by
+ * projecting its cowork store messages into Anthropic-shaped messages and
+ * running the same deterministic snip the proxy will run on the wire. The
+ * store truncates tool results for display, so this is a lower bound — the
+ * same is true of the budget estimate it is compared against.
+ */
+function estimateCoworkStoreToolResultSnipSavings(
+  messages: CoworkMessage[],
+  headTokenBudget: number
+): number {
+  const projected: AnthropicMessageLike[] = [];
+  for (const message of messages) {
+    if (!shouldIncludeCoworkContextMessage(message)) {
+      continue;
+    }
+    if (message.type === 'tool_result') {
+      const toolUseId = typeof message.metadata?.toolUseId === 'string' ? message.metadata.toolUseId : message.id;
+      projected.push({
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: toolUseId, content: message.content }],
+      });
+      continue;
+    }
+    projected.push({
+      role: message.type === 'user' ? 'user' : 'assistant',
+      content: message.content,
+    });
+  }
+  return snipStaleToolResultBlocks(projected, headTokenBudget).stats.savedTokens;
+}
+
+function isImageFilePath(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  return ext ? IMAGE_FILE_EXTENSIONS.has(ext) : false;
+}
+
+/**
+ * statSync wrapper that returns null instead of throwing (missing file,
+ * permission errors). Used by the Read dedupe / vision guard before the SDK
+ * actually executes the tool, so a stat failure must not block the read.
+ */
+function safeFileStat(filePath: string): { mtimeMs: number; size: number } | null {
+  try {
+    const stat = fs.statSync(filePath);
+    return { mtimeMs: stat.mtimeMs, size: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+export interface ShouldEvaluateCoworkContextBudgetInput {
+  claudeSessionId: string | null;
+  isRetry: boolean;
+  messageCount: number;
+}
+
+/**
+ * GT#12 N4: whether the per-turn context budget must be evaluated before
+ * running. The check is decoupled from claudeSessionId: after a DeepSeek
+ * reasoning-history reset claudeSessionId is null while the cowork store
+ * history keeps growing — gating on it skipped snip/compact until the next
+ * successful resume. Any history at all (or an existing SDK session) triggers
+ * evaluation; brand-new sessions with zero messages still skip the first run,
+ * and automatic error-retry re-runs (isRetry) are skipped so a retry never
+ * double-compacts the same turn. Pure + unit-tested.
+ */
+export function shouldEvaluateCoworkContextBudget(
+  input: ShouldEvaluateCoworkContextBudgetInput
+): boolean {
+  if (input.isRetry) {
+    return false;
+  }
+  return Boolean(input.claudeSessionId) || input.messageCount > 0;
+}
+
+export type ReadImageGuardDecision =
+  | { action: 'deny'; reason: 'no-vision-image' | 'duplicate-read'; message: string }
+  | {
+      action: 'allow';
+      register?: { path: string; mtimeMs: number; size: number };
+    };
+
+export interface EvaluateReadImageGuardInput {
+  toolName: string;
+  /** Absolute path of the file the Read/View tool targets. */
+  absolutePath: string;
+  /** Pre-fetched stat (null when the file is missing / unreadable). */
+  fileStat: { mtimeMs: number; size: number } | null;
+  /** Whether the session's model can consume image content blocks. */
+  supportsVision: boolean;
+  /** Files read earlier in this session (absolute path -> stat at read time). */
+  priorReads?: ReadonlyMap<string, { mtimeMs: number; size: number }> | null;
+}
+
+/**
+ * Pure decision logic for the GT#12 Read/View guards, kept outside canUseTool
+ * so it is unit-testable without a full runner instance:
+ * - N1: a non-vision model (supportsVision=false) never reads image files —
+ *   deny before execution so base64 never enters session history.
+ * - N2: re-reading the SAME unchanged image/large file inside one session is
+ *   denied with a hint; a file whose mtime/size changed is allowed again and
+ *   re-registered. Ordinary text files (< 50KB) are never deduped.
+ */
+export function evaluateReadImageGuard(input: EvaluateReadImageGuardInput): ReadImageGuardDecision {
+  const toolName = input.toolName.trim().toLowerCase();
+  const isReadTool = toolName === 'read' || toolName === 'view';
+  if (!isReadTool) {
+    return { action: 'allow' };
+  }
+
+  const isImageFile = isImageFilePath(input.absolutePath);
+
+  if (isImageFile && input.supportsVision === false) {
+    const sizeLabel = input.fileStat
+      ? `，${Math.max(1, Math.round(input.fileStat.size / 1024))}KB`
+      : '';
+    return {
+      action: 'deny',
+      reason: 'no-vision-image',
+      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用文字描述图片内容，或切换到支持多模态输入的模型（如 Claude/GPT）。`,
+    };
+  }
+
+  const isLargeFile = input.fileStat !== null && input.fileStat.size >= COWORK_READ_DEDUPE_MIN_BYTES;
+  if (!isImageFile && !isLargeFile) {
+    return { action: 'allow' };
+  }
+
+  const priorRead = input.priorReads?.get(input.absolutePath);
+  if (
+    priorRead
+    && input.fileStat
+    && input.fileStat.mtimeMs === priorRead.mtimeMs
+    && input.fileStat.size === priorRead.size
+  ) {
+    return {
+      action: 'deny',
+      reason: 'duplicate-read',
+      message: `该文件已在本次会话读取过，内容无变化，为避免重复占用上下文未再次注入：${input.absolutePath}。如确实需要重新读取，请先修改文件后再读，或说明原因。`,
+    };
+  }
+
+  if (input.fileStat) {
+    return {
+      action: 'allow',
+      register: {
+        path: input.absolutePath,
+        mtimeMs: input.fileStat.mtimeMs,
+        size: input.fileStat.size,
+      },
+    };
+  }
+
+  return { action: 'allow' };
+}
+
 function isUnsupportedMultimodalContentError(message: string): boolean {
   if (!message) return false;
   const normalized = message.toLowerCase();
@@ -703,6 +914,13 @@ export interface PermissionRequest {
   toolInput: Record<string, unknown>;
 }
 
+export type LocalBufferedSteer = {
+  submissionId: string;
+  text: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+};
+
 interface ActiveSession {
   sessionId: string;
   claudeSessionId: string | null;
@@ -731,8 +949,27 @@ interface ActiveSession {
   staleResumeRetryAllowed: boolean;
   contextOverflowDetected: boolean;
   contextOverflowRetryAllowed: boolean;
+  /**
+   * True when the SDK reported a `success` result for the turn but the final
+   * assistant message carried no usable text (empty `payload.result`). This is
+   * the signature of a DeepSeek thinking turn that ended after emitting only
+   * the `[reasoning unavailable]` placeholder (or otherwise no handoff). When
+   * set, the turn must NOT be falsely reported as `completed` — see the
+   * completion guard in runClaudeCodeLocal.
+   */
+  emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
   localInputChannel?: CoworkSteerChannel;
+  /**
+   * Steers accepted while the CLI is mid-turn. The native SDK runtime drops
+   * user messages written to stdin while a tool is running (the transcript
+   * records an enqueue followed by a remove), so accepted steers are held here
+   * and written into the input channel only when the CLI is idle at an input
+   * prompt: normally right after interruptLocalTurnForSteers aborts the
+   * in-flight turn, or at the next local turn boundary (end_turn / result) as
+   * the fallback when no interrupt is available.
+   */
+  localBufferedSteers: LocalBufferedSteer[];
   localAcceptedInputs: number;
   localSettledInputs: number;
   localPendingSteerIds: string[];
@@ -768,6 +1005,25 @@ interface ActiveSession {
   lastSubagentThrottleAt?: number;
   /** Task id of the last throttled subagent progress emit. */
   lastSubagentThrottleTaskId?: string;
+  /**
+   * Files already Read/View'd in this session (absolute path -> stat at read
+   * time), used to dedupe repeated reads of the same image/large file (N2).
+   * A file whose mtime/size changed since the last read is allowed through
+   * again. Grows only with distinct read files, bounded by session lifetime.
+   */
+  readFiles?: Map<string, { mtimeMs: number; size: number }>;
+  /**
+   * Billing identity resolved from the API config at run start ('deepseek'
+   * only when the DeepSeek account is actually billed — provider key
+   * 'deepseek' or a deepseek host; gateway providers serving deepseek models
+   * count as 'other'). The usage chip uses it to decide whether DeepSeek
+   * balance/CNY estimates apply at all.
+   */
+  billingSource?: 'deepseek' | 'anthropic' | 'other';
+  /** Provider key ('deepseek', 'opencode', ...) the session actually runs on (from the resolved API config). */
+  upstreamProvider?: string;
+  /** Real upstream base URL the session's requests are forwarded to (e.g. https://opencode.ai/zen/go/v1). */
+  upstreamBaseURL?: string;
   /** Accumulated token usage from SDK result events (drives cost display). */
   usageStats?: {
     inputTokens: number;
@@ -775,15 +1031,23 @@ interface ActiveSession {
     cacheReadTokens: number;
     cacheCreationTokens: number;
     totalCostUsd?: number;
-    source: 'deepseek' | 'anthropic' | 'none';
+    source: 'deepseek' | 'anthropic' | 'other' | 'none';
+    /** Provider key the session actually runs on (observability; e.g. 'opencode'). */
+    upstreamProvider?: string;
+    /** Real upstream base URL the session's requests are forwarded to. */
+    upstreamBaseURL?: string;
     /** Number of LLM turns accumulated so far (for cache-miss attribution). */
     turnCount?: number;
+    /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
+    lastTurnInputTokens?: number;
     /**
-     * Lightweight cache-miss attribution: one entry per turn where the provider
-     * reported cache-creation (miss) tokens, recording the turn index and a
-     * probable reason. The first turn is always 'cold_start' (no prefix cached
-     * yet). Subsequent misses are left as 'unknown' since we cannot inspect the
-     * exact prefix break without the full message history. Used for diagnostics.
+     * Cache-miss attribution trail: one entry per turn where the provider
+     * reported cache-creation (miss) tokens, recording the turn index and the
+     * reason. The first turn is always 'cold_start'; later misses carry the
+     * pendingCacheBreakReason recorded at the reset point (system_prompt_changed,
+     * compaction, snip, overflow_retry, stale_session_retry, reasoning_history_retry,
+     * multimodal_retry, system_prompt_drift) or 'unknown' when no reset was
+     * tracked. Used for diagnostics in the UsageStatsChip popover.
      */
     cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
     /**
@@ -792,7 +1056,68 @@ interface ActiveSession {
      * turn hit rate — the correct signal for prefix stability.
      */
     turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
+    /**
+     * Cumulative per-model token usage from the SDK's modelUsage breakdown.
+     * The top-level counters above only cover the main loop; Task subagents
+     * and CLI side jobs (prompt suggestions, progress summaries) are billed
+     * to the provider but only show up here. Keys are CLI-requested model
+     * ids, including subagent fallback names.
+     */
+    perModelUsage?: Record<string, {
+      inputTokens: number;
+      outputTokens: number;
+      cacheReadTokens: number;
+      cacheCreationTokens: number;
+    }>;
+    /**
+     * Last real per-category context usage snapshot captured from the SDK's
+     * getContextUsage() (local mode). Persisted alongside the usage stats so
+     * the context ring can show the REAL current context size even after the
+     * active session is cleaned up at the end of the turn (the in-memory
+     * activeSession.realContextUsage dies with it).
+     */
+    lastRealContextUsage?: CoworkContextUsage | null;
   };
+  /**
+   * Live SDK Query control surface (local mode only) used by the subagent
+   * panel to stop a running task or background a foreground task. Null/absent
+   * for sandbox sessions (the SDK runs inside the VM — there is no host-side
+   * Query object to drive).
+   */
+  sdkTaskControl?: {
+    stopTask(taskId: string): Promise<void>;
+    backgroundTasks(toolUseId?: string): Promise<boolean>;
+  } | null;
+  /**
+   * MetaBot persona block, computed once when the session starts and reused on
+   * every continued turn. Persona text lives at the head of the system prompt,
+   * so re-reading it from the DB each turn would let a mid-session persona edit
+   * silently break DeepSeek's cached prefix. Edits take effect on the next
+   * session instead (Reasonix rule: mid-session changes never touch the prefix).
+   */
+  personaBlock?: string;
+  /**
+   * Reason the next turn's cache prefix will be cold, set at every point that
+   * resets or rewrites the provider-visible prefix (system-prompt change,
+   * compaction, tool-result snip, overflow/stale-session retries). Consumed by
+   * accumulateResultUsage to label the next miss event instead of 'unknown'
+   * (Reasonix CompareShape-style attribution, adapted to SDK-managed history).
+   */
+  pendingCacheBreakReason?: string | null;
+  /**
+   * Set by requestManualCompaction() while the session is idle. The next
+   * local-mode turn resets the SDK session and sends a synthetic compacted
+   * prompt instead of resuming (same path as automatic tier-2 compaction).
+   * In-memory only: if the app restarts before the next message, the user
+   * simply clicks the button again.
+   */
+  pendingManualCompact: boolean;
+  /**
+   * SHA-256 (8 hex chars) of the effective system prompt sent on the previous
+   * turn. A change without a known reset event means silent drift — recorded
+   * as 'system_prompt_drift' and logged as a regression alarm.
+   */
+  lastSystemPromptHash?: string | null;
   /**
    * Cached real context usage from the SDK's getContextUsage() (local mode only).
    * Refreshed after each completed local turn; undefined for sandbox mode.
@@ -823,6 +1148,19 @@ const DEFAULT_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   includeMemoryPromptBlocks: true,
   includeMemoryStrategy: true,
 };
+
+/**
+ * R4 防护：定时任务唤醒轮的用户消息优先级约束（方案 C）。
+ * 8/8 事故中 SDK cron 触发 prompt 与用户消息竞争同一会话队列，cron 连续 4 轮
+ * 抢先导致用户消息从未被消费（SDK 无优先级配置——如实记录为 SDK 限制）。
+ * 宿主侧缓解：在系统提示中约束模型——cron 唤醒轮若存在未响应的用户消息，
+ * 先响应用户消息再处理定时任务内容。
+ */
+const SDK_CRON_USER_PRIORITY_GUARD = [
+  '## 定时任务与用户消息优先级',
+  '当本轮输入包含「定时任务触发/调度内容」，且会话中同时存在尚未响应的用户消息时，',
+  '必须先完整响应用户消息，再处理定时任务内容；不要忽略或推迟用户的提问。',
+].join('\n');
 
 const SERVICE_ORDER_A2A_SYSTEM_PROMPT_PROFILE: SystemPromptProfile = {
   id: 'service_order_a2a',
@@ -867,6 +1205,23 @@ type CrossSessionContinuationQueueResult =
       reason: 'TARGET_SESSION_STOPPED';
       error: string;
     };
+
+/**
+ * Result of the host cross-session insert-and-queue path
+ * (insertCrossSessionMessageAndQueue): the insert result plus the
+ * best-effort queue-to-continue outcome. The insert and the queue are
+ * decoupled — runQueued:false with a reason (e.g. TARGET_SESSION_STOPPED)
+ * still means the message was inserted; on insert failure there is no queue
+ * attempt at all.
+ */
+export interface CoworkCrossSessionInsertAndQueueResult {
+  insert: CoworkCrossSessionInsertResult;
+  runQueued: boolean;
+  queueDepth?: number;
+  warning?: string;
+  reason?: string;
+  error?: string;
+}
 
 type AttachmentEntry = {
   lineIndex: number;
@@ -917,9 +1272,26 @@ export interface CoworkExperienceStore {
   ): Array<{ summaryDate: string; summaryText: string; sessionRefs?: Array<{ sessionId: string; title: string }> }>;
 }
 
+/**
+ * R1：SDK 定时任务宿主侧镜像桥（方案 C）。
+ * 宿主（main.ts）实现并注入：Stop hook 的 session_crons 采集 + 会话结束对账。
+ * 用接口而非直接依赖 SdkCronMirrorStore，避免 coworkRunner 与 sqlite 存储耦合、便于测试。
+ */
+export interface SdkCronMirrorBridge {
+  /** Stop hook 每轮结束调用：把该会话当前 SDK cron 任务采集进宿主镜像（幂等 upsert）。 */
+  collectSessionCrons(
+    sessionId: string,
+    crons: { id: string; schedule: string; recurring: boolean; prompt: string }[]
+  ): void;
+  /** 会话结束（自然结束/停止/abort）调用：对账该会话镜像（SDK 侧已删的标记 deleted）。 */
+  reconcileSessionEnd(sessionId: string): void;
+}
+
 export interface CoworkRunnerOptions {
   /** Test seam for the runtime-loaded ESM SDK; production uses the standard loader. */
   loadClaudeSdk?: typeof loadClaudeSdk;
+  /** R1: When set, Stop-hook session_crons are mirrored into host storage for UI display. */
+  sdkCronMirror?: SdkCronMirrorBridge;
   /** When set, env overrides (e.g. Twin wallet for metabot-basic) are merged into session env for tool execution. */
   getSkillSessionEnvOverrides?: (sessionId: string) => Promise<Record<string, string>>;
   /** When set, fetches MetaBot by id for persona injection into system prompt. */
@@ -928,6 +1300,13 @@ export interface CoworkRunnerOptions {
   getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   /** Twin-only host capability directory. The callback must revalidate authorization. */
   listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  /**
+   * Twin-only distilled impressions of local Workers, keyed by each subject
+   * Worker's globalMetaID (observer is the current Twin). Nightly dream
+   * consolidation rewrites these, so the rendered block lives in the volatile
+   * per-turn tail, never the cached system-prompt prefix.
+   */
+  listTwinImpressions?: (observerGlobalMetaID: string) => TwinImpressionEntry[] | Promise<TwinImpressionEntry[]>;
   /** Twin-only asynchronous delegation into a dedicated Worker Cowork session. */
   delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
   twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
@@ -976,6 +1355,21 @@ export interface CoworkRunnerOptions {
    */
   metaIdSearch?: MetaIdSearchControl;
   /**
+   * When set, every cowork session gets the project_query tool backed by the
+   * local Projects store (Settings > Projects), and a `## Local Projects`
+   * section is injected into the composed system prompt. Disabled projects are
+   * soft-frozen: listed as frozen and never revealed by the tool.
+   */
+  projects?: ProjectsControl;
+  /**
+   * When set, every cowork session gets on-chain social post search tools
+   * (search_social_posts + social_post_detail + social_post_comments) backed
+   * by the metaso-p2p Social Recall API (so.metaid.io/api/social/*). Browser
+   * sessions may open an author's page via bot_browser_open_uri; other
+   * sessions only present clickable metaid:// author links.
+   */
+  socialRecall?: SocialRecallControl;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -991,6 +1385,7 @@ export class CoworkRunner extends EventEmitter {
   private getRemoteServicesPrompt?: () => string | null;
   private getMetabotById?: (id: number) => CoworkMetabotIdentity | null;
   private listLocalWorkers?: (sessionId: string) => Promise<TwinWorkerDirectoryResult> | TwinWorkerDirectoryResult;
+  private listTwinImpressions?: (observerGlobalMetaID: string) => TwinImpressionEntry[] | Promise<TwinImpressionEntry[]>;
   private delegateLocalWorker?: (sessionId: string, input: DelegateLocalWorkerInput) => Promise<DelegateLocalWorkerResult>;
   private twinTaskStatus?: (sessionId: string, taskId: string) => TwinTaskStatusResult;
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
@@ -1003,6 +1398,9 @@ export class CoworkRunner extends EventEmitter {
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
   private metaIdSearch?: MetaIdSearchControl;
+  private projects?: ProjectsControl;
+  private socialRecall?: SocialRecallControl;
+  private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
@@ -1013,6 +1411,20 @@ export class CoworkRunner extends EventEmitter {
    * chip can be read after the turn completes via getSessionUsageStats.
    */
   private usageStatsBySessionId: Map<string, NonNullable<ActiveSession['usageStats']>> = new Map();
+  /**
+   * User-initiated manual compaction requests queued while the session is
+   * IDLE (no activeSession in memory). Local-mode sessions remove their
+   * activeSession at the end of every turn, so the classic
+   * activeSession.pendingManualCompact flag could never be set between turns —
+   * the button always failed with "Session is not active". This queue bridges
+   * the idle gap: requestManualCompaction records the session here and the
+   * next local-mode turn consumes it (same compacted-prompt path). In-memory
+   * only; if the app restarts before the next message, the user just clicks
+   * the button again.
+   */
+  private pendingManualCompactSessions: Set<string> = new Set();
+  /** Latest estimated thinking-token count from SDK thinking_tokens events. */
+  private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
@@ -1032,6 +1444,7 @@ export class CoworkRunner extends EventEmitter {
     this.getRemoteServicesPrompt = options?.getRemoteServicesPrompt;
     this.getMetabotById = options?.getMetabotById;
     this.listLocalWorkers = options?.listLocalWorkers;
+    this.listTwinImpressions = options?.listTwinImpressions;
     this.delegateLocalWorker = options?.delegateLocalWorker;
     this.twinTaskStatus = options?.twinTaskStatus;
     this.twinTaskCancel = options?.twinTaskCancel;
@@ -1044,6 +1457,9 @@ export class CoworkRunner extends EventEmitter {
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
     this.metaIdSearch = options?.metaIdSearch;
+    this.projects = options?.projects;
+    this.socialRecall = options?.socialRecall;
+    this.sdkCronMirror = options?.sdkCronMirror;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -1071,7 +1487,19 @@ export class CoworkRunner extends EventEmitter {
     if (this.activeSessions.get(sessionId) !== activeSession) return;
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.close();
+    this.rejectBufferedSteers(
+      activeSession,
+      new Error('Cowork steer input channel closed before delivery')
+    );
     this.activeSessions.delete(sessionId);
+    // R1 会话结束对账：SDK 侧已删的会话内 cron 从镜像标记 deleted（幂等，失败仅告警）。
+    if (this.sdkCronMirror) {
+      try {
+        this.sdkCronMirror.reconcileSessionEnd(sessionId);
+      } catch (error) {
+        console.warn('Failed to reconcile sdk cron mirror for session end:', error);
+      }
+    }
     if (
       !activeSession.turnSettlementResolved
       && typeof activeSession.resolveTurnSettled === 'function'
@@ -1098,6 +1526,7 @@ export class CoworkRunner extends EventEmitter {
     activeSession.localInputChannel?.stop(error);
     activeSession.localInputChannel = undefined;
     activeSession.maybeCloseLocalTurn = undefined;
+    this.rejectBufferedSteers(activeSession, error);
     const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
       ? activeSession.localPendingSteerIds.splice(0)
       : [];
@@ -1114,6 +1543,7 @@ export class CoworkRunner extends EventEmitter {
   ): void {
     activeSession.localTurnState = 'closing';
     activeSession.localInputChannel?.stop(error);
+    this.rejectBufferedSteers(activeSession, error);
     const pendingSteerIds = Array.isArray(activeSession.localPendingSteerIds)
       ? activeSession.localPendingSteerIds.splice(0)
       : [];
@@ -1123,6 +1553,90 @@ export class CoworkRunner extends EventEmitter {
       }
     }
     activeSession.localDeliveredSteerIds?.clear();
+  }
+
+  private rejectBufferedSteers(activeSession: ActiveSession, error: Error): void {
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers.splice(0)
+      : [];
+    for (const pending of buffered) {
+      pending.reject(error);
+    }
+  }
+
+  /**
+   * Writes accepted-but-undelivered steers into the live input channel. The
+   * CLI must be open and idle at an input prompt for the writes to survive;
+   * callers are the local turn boundary handler (end_turn / result) and the
+   * interrupt-on-steer path, which aborts the in-flight turn first so the
+   * correction becomes the CLI's next turn instead of being dropped mid-tool.
+   */
+  private flushBufferedLocalSteers(activeSession: ActiveSession, channel: CoworkSteerChannel): void {
+    if (activeSession.localInputChannel !== channel) return;
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers.splice(0)
+      : [];
+    if (buffered.length === 0) return;
+    for (const pending of buffered) {
+      if (activeSession.localTurnState !== 'open' || !channel.isOpen) {
+        pending.reject(new Error('Cowork steer input channel closed before delivery'));
+        continue;
+      }
+      const queued = channel.enqueue(buildCoworkSteerSdkMessage(pending.text));
+      void queued.delivered.then(
+        () => {
+          activeSession.localDeliveredSteerIds.add(pending.submissionId);
+          pending.resolve();
+          activeSession.maybeCloseLocalTurn?.();
+        },
+        (error: Error) => pending.reject(error)
+      );
+    }
+    coworkLog('INFO', 'flushBufferedLocalSteers', `Flushed ${buffered.length} buffered cowork steer(s)`, {
+      sessionId: activeSession.sessionId,
+      trigger: channel.deliveredCount > activeSession.localSettledInputs ? 'interrupt' : 'boundary',
+    });
+  }
+
+  /**
+   * Interrupt-on-steer: while a delivered input is still unsettled (the CLI is
+   * mid-turn, e.g. a tool is running), ask the live SDK Query control surface
+   * to abort the current turn, then flush buffered steers immediately so the
+   * user's correction is processed as the CLI's next turn. Without the
+   * interrupt, the steer would only be delivered at the next natural turn
+   * boundary — the in-flight task (e.g. the original weather query) would
+   * finish first. If the interrupt is unavailable or fails, steers stay
+   * buffered and are delivered at the next boundary as a fallback.
+   */
+  private async interruptLocalTurnForSteers(activeSession: ActiveSession): Promise<void> {
+    const control = activeSession.sdkTaskControl as (NonNullable<ActiveSession['sdkTaskControl']> & {
+      interrupt?: () => Promise<unknown>;
+    }) | null | undefined;
+    if (!control || typeof control.interrupt !== 'function') return;
+    const channel = activeSession.localInputChannel;
+    if (!channel || !channel.isOpen || activeSession.localTurnState !== 'open') return;
+    // Never interrupt while a permission prompt is pending: the CLI is paused
+    // waiting for a human answer, there is no in-flight task to abort, and an
+    // interrupt could drop the prompt itself. The steer stays buffered and is
+    // delivered at the next boundary as the fallback.
+    if (activeSession.pendingPermission) return;
+    // Only interrupt when a delivered input is still unsettled (mid-turn).
+    // At a boundary the CLI is already idle and the steer can be written
+    // directly without aborting anything.
+    if (activeSession.localSettledInputs >= channel.deliveredCount) return;
+    try {
+      await control.interrupt();
+      coworkLog('INFO', 'interruptLocalTurnForSteers', 'Interrupted local turn for immediate cowork steer delivery', {
+        sessionId: activeSession.sessionId,
+      });
+      this.flushBufferedLocalSteers(activeSession, channel);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'interruptLocalTurnForSteers', 'Local turn interrupt for steer failed; steer stays buffered until the next turn boundary', {
+        sessionId: activeSession.sessionId,
+        error: message,
+      });
+    }
   }
 
   trySubmitSteer(
@@ -1139,16 +1653,26 @@ export class CoworkRunner extends EventEmitter {
       return { accepted: false, reason: 'closing' };
     }
 
-    const queued = activeSession.localInputChannel.enqueue(buildCoworkSteerSdkMessage(text));
-    const delivered = queued.delivered.then(() => {
-      activeSession.localDeliveredSteerIds.add(submissionId);
-      activeSession.maybeCloseLocalTurn?.();
+    let resolveDelivered!: () => void;
+    let rejectDelivered!: (error: Error) => void;
+    const delivered = new Promise<void>((resolve, reject) => {
+      resolveDelivered = resolve;
+      rejectDelivered = reject;
     });
     // The submission controller observes this promise too, but attach a rejection
     // observer immediately so Stop cannot create a transient unhandled rejection.
     void delivered.then(undefined, () => undefined);
+
+    const buffered = Array.isArray(activeSession.localBufferedSteers)
+      ? activeSession.localBufferedSteers
+      : (activeSession.localBufferedSteers = []);
+    buffered.push({ submissionId, text, resolve: resolveDelivered, reject: rejectDelivered });
     activeSession.localPendingSteerIds.push(submissionId);
     activeSession.localAcceptedInputs = activeSession.localInputChannel.acceptedCount;
+    // Interrupt-on-steer: abort the in-flight turn so the buffered correction
+    // is flushed to the CLI immediately and becomes its next turn, instead of
+    // waiting for the current task to finish (human interrupt semantics).
+    void this.interruptLocalTurnForSteers(activeSession);
     return { accepted: true, delivered };
   }
 
@@ -1174,7 +1698,116 @@ export class CoworkRunner extends EventEmitter {
    */
   getRealContextUsage(sessionId: string): CoworkContextUsage | null {
     const activeSession = this.activeSessions.get(sessionId);
-    return activeSession?.realContextUsage ?? null;
+    if (activeSession?.realContextUsage) {
+      return activeSession.realContextUsage;
+    }
+    // The active session is removed at the end of every local turn, so the
+    // real snapshot is also persisted with the usage stats to keep the ring
+    // truthful between turns (and across app restarts).
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId) as
+        { lastRealContextUsage?: CoworkContextUsage | null } | null;
+      if (persisted?.lastRealContextUsage) {
+        return persisted.lastRealContextUsage;
+      }
+    } catch {
+      // Best-effort read; the estimator remains the fallback.
+    }
+    return null;
+  }
+
+  /**
+   * Asks the live SDK Query for its real per-category context usage and caches
+   * + persists it. Must be called while the CLI process is idle at the input
+   * prompt (end_turn boundary): after the result event the SDK closes stdin
+   * for single-turn queries and the control request fails with
+   * "ProcessTransport is not ready for writing". Failures are non-fatal.
+   */
+  private async captureRealContextUsageFromSdk(
+    sessionId: string,
+    activeSession: ActiveSession,
+    queryResult: { getContextUsage?: () => Promise<unknown> }
+  ): Promise<void> {
+    try {
+      const usageResult = await queryResult.getContextUsage?.();
+      if (usageResult && typeof usageResult === 'object') {
+        const usage = usageResult as {
+          totalTokens?: number;
+          maxTokens?: number;
+          percentage?: number;
+          categories?: Array<{ name?: string; tokens?: number; color?: string }>;
+        };
+        const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
+        const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
+        if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
+          const realContextUsage: CoworkContextUsage = {
+            usedTokens: totalTokens,
+            contextWindow: maxTokens,
+            usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
+            isRealUsage: true,
+            categories: Array.isArray(usage.categories)
+              ? usage.categories
+                  .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
+                  .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
+              : undefined,
+          };
+          activeSession.realContextUsage = realContextUsage;
+          // Persist so the ring keeps showing real numbers after the active
+          // session is cleaned up at turn end.
+          this.persistRealContextUsage(sessionId, realContextUsage);
+        }
+      }
+    } catch (usageError) {
+      coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
+        sessionId,
+        error: usageError instanceof Error ? usageError.message : String(usageError),
+      });
+    }
+  }
+
+  /**
+   * Persists the last real SDK context-usage snapshot so the context ring can
+   * show real numbers after the active session is cleaned up at turn end.
+   */
+  private persistRealContextUsage(sessionId: string, usage: CoworkContextUsage): void {
+    try {
+      const existing = this.usageStatsBySessionId.get(sessionId)
+        ?? (this.store.getSessionUsageStats(sessionId) as NonNullable<ActiveSession['usageStats']> | null)
+        ?? ({} as NonNullable<ActiveSession['usageStats']>);
+      existing.lastRealContextUsage = usage;
+      this.usageStatsBySessionId.set(sessionId, existing);
+      this.store.setSessionUsageStats(sessionId, existing);
+    } catch (error) {
+      coworkLog('WARN', 'persistRealContextUsage', 'Failed to persist real context usage', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /**
+   * Returns the real total input tokens (cached + uncached) of the most recent
+   * LLM turn, from the provider-reported result usage (proxy-translated for
+   * DeepSeek). Used by the compaction budget as the authoritative context size
+   * when available (Phase 2). Returns undefined when no turn has reported
+   * usage yet (first turn, sandbox, or providers without usage data).
+   */
+  getSessionLastTurnInputTokens(sessionId: string): number | undefined {
+    const activeSession = this.activeSessions.get(sessionId);
+    const inMemory = activeSession?.usageStats?.lastTurnInputTokens;
+    if (Number.isFinite(inMemory) && (inMemory as number) > 0) {
+      return inMemory as number;
+    }
+    try {
+      const persisted = this.store.getSessionUsageStats(sessionId) as
+        { lastTurnInputTokens?: number } | null;
+      if (persisted && Number.isFinite(persisted.lastTurnInputTokens) && (persisted.lastTurnInputTokens as number) > 0) {
+        return persisted.lastTurnInputTokens as number;
+      }
+    } catch {
+      // Best-effort read; the heuristic estimator remains the fallback.
+    }
+    return undefined;
   }
 
   /**
@@ -1234,16 +1867,48 @@ export class CoworkRunner extends EventEmitter {
         // Persisted read is best-effort; fall back to zeroed stats.
       }
     }
+    // The in-memory map can hold a PARTIAL stats object seeded by
+    // persistRealContextUsage before any turn's usage has accumulated (it only
+    // sets lastRealContextUsage). Trusting it blindly leaves the counters
+    // undefined — undefined + n = NaN, which JSON.stringify then persists as
+    // null, and the usage chip renders NaN for input/output/cache rows.
+    // Normalize the counters no matter where prev came from (also heals rows
+    // already poisoned with null).
+    const finiteOrZero = (value: unknown): number =>
+      typeof value === 'number' && Number.isFinite(value) ? value : 0;
+    prev = {
+      ...prev,
+      inputTokens: finiteOrZero(prev.inputTokens),
+      outputTokens: finiteOrZero(prev.outputTokens),
+      cacheReadTokens: finiteOrZero(prev.cacheReadTokens),
+      cacheCreationTokens: finiteOrZero(prev.cacheCreationTokens),
+    };
     const nextTurn = (prev.turnCount ?? 0) + 1;
     // Attribute cache misses: the first turn is always a cold start (nothing was
-    // cached yet). Later misses are recorded as 'unknown' — without diffing the
-    // full message history we cannot say whether the system prompt, tools, or a
-    // compact broke the prefix. This gives a lightweight diagnostic trail.
+    // cached yet). For later turns, consume the pending break reason recorded at
+    // the point that reset the prefix (system-prompt change, compaction,
+    // overflow/stale/reasoning/multimodal retries, or detected prompt drift).
+    // Without a pending reason the label depends on the turn's own hit ratio:
+    // every turn's miss includes the newly appended tail (previous turn's
+    // output + the new user message), which is normal append-only growth — but
+    // a turn where almost nothing hit means the prefix itself broke through a
+    // path we did not track (e.g. SDK-internal autocompact), and that stays
+    // 'unknown' as an investigation signal.
+    const turnInputTotal = inputTokens + cacheReadTokens + cacheCreationTokens;
+    const turnHitRatio = turnInputTotal > 0 ? cacheReadTokens / turnInputTotal : 1;
+    const untrackedMissReason = turnHitRatio < 0.3 ? 'unknown' : 'append_only';
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
     if (cacheCreationTokens > 0) {
+      const activeForAttribution = this.activeSessions.get(sessionId);
+      const breakReason = nextTurn === 1
+        ? 'cold_start'
+        : (activeForAttribution?.pendingCacheBreakReason ?? untrackedMissReason);
+      if (activeForAttribution) {
+        activeForAttribution.pendingCacheBreakReason = null;
+      }
       cacheMissEvents.push({
         turn: nextTurn,
-        reason: nextTurn === 1 ? 'cold_start' : 'unknown',
+        reason: breakReason,
         missTokens: cacheCreationTokens,
       });
     }
@@ -1258,18 +1923,63 @@ export class CoworkRunner extends EventEmitter {
       cacheHitTokens: cacheReadTokens,
       cacheMissTokens: cacheCreationTokens,
     });
+    // Per-model breakdown from the SDK result's modelUsage. The main-loop
+    // `usage` above ignores Task subagents and CLI side jobs (prompt
+    // suggestions, progress summaries, classifiers) — all of which the proxy
+    // maps to the session model and bills to DeepSeek. modelUsage is the only
+    // place that spend shows up, so accumulate it per CLI-requested model id
+    // (subagent fallback names included) for the chip's breakdown display.
+    const perModelUsage: NonNullable<UsageStatsShape['perModelUsage']> = {
+      ...(prev.perModelUsage ?? {}),
+    };
+    const modelUsage = payload.modelUsage && typeof payload.modelUsage === 'object'
+      ? payload.modelUsage as Record<string, Record<string, unknown>>
+      : null;
+    if (modelUsage) {
+      for (const [model, entry] of Object.entries(modelUsage)) {
+        if (!entry || typeof entry !== 'object') continue;
+        const prevEntry = perModelUsage[model] ?? {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+        };
+        perModelUsage[model] = {
+          inputTokens: prevEntry.inputTokens + (typeof entry.inputTokens === 'number' ? entry.inputTokens : 0),
+          outputTokens: prevEntry.outputTokens + (typeof entry.outputTokens === 'number' ? entry.outputTokens : 0),
+          cacheReadTokens: prevEntry.cacheReadTokens
+            + (typeof entry.cacheReadInputTokens === 'number' ? entry.cacheReadInputTokens : 0),
+          cacheCreationTokens: prevEntry.cacheCreationTokens
+            + (typeof entry.cacheCreationInputTokens === 'number' ? entry.cacheCreationInputTokens : 0),
+        };
+      }
+    }
+    const activeForBilling = this.activeSessions.get(sessionId);
+    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
+    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
+    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
+    // fresh-only with cache partitioned into the cache_* fields.
+    const cacheIncludedInInput = billingSource !== 'anthropic';
+    const lastTurnContextTokens = cacheIncludedInInput
+      ? inputTokens
+      : inputTokens + cacheReadTokens + cacheCreationTokens;
     const nextStats = {
       inputTokens: prev.inputTokens + inputTokens,
       outputTokens: prev.outputTokens + outputTokens,
       cacheReadTokens: prev.cacheReadTokens + cacheReadTokens,
       cacheCreationTokens: prev.cacheCreationTokens + cacheCreationTokens,
       totalCostUsd: typeof payload.total_cost_usd === 'number'
-        ? prev.totalCostUsd ?? 0 + payload.total_cost_usd
+        ? (prev.totalCostUsd ?? 0) + payload.total_cost_usd
         : prev.totalCostUsd,
-      source: prev.source === 'none' ? 'deepseek' : prev.source,
+      source: billingSource,
+      lastTurnInputTokens: lastTurnContextTokens,
+      // Real upstream identity for observability (usage panel "upstream" row).
+      upstreamProvider: this.activeSessions.get(sessionId)?.upstreamProvider ?? prev.upstreamProvider,
+      upstreamBaseURL: this.activeSessions.get(sessionId)?.upstreamBaseURL ?? prev.upstreamBaseURL,
       turnCount: nextTurn,
       cacheMissEvents,
       turnStats,
+      perModelUsage,
     };
     // Store in the persistent map (survives session cleanup) AND mirror onto
     // the active session for any code that reads activeSession.usageStats
@@ -1295,13 +2005,21 @@ export class CoworkRunner extends EventEmitter {
     // In-memory map first (covers the active run and the post-turn window when
     // the session was cleaned up by removeActiveSession).
     const inMemory = this.usageStatsBySessionId.get(sessionId);
-    if (inMemory) return inMemory;
+    const thinkingTokensEstimate = this.thinkingTokensBySessionId.get(sessionId);
+    if (inMemory) {
+      return thinkingTokensEstimate !== undefined
+        ? { ...inMemory, thinkingTokensEstimate }
+        : inMemory;
+    }
     // Fall back to the persisted row so the chip shows historical usage after
     // an app restart (the in-memory map is gone).
     try {
       const persisted = this.store.getSessionUsageStats(sessionId);
       if (persisted) {
-        return persisted as unknown as CoworkUsageStats;
+        const stats = persisted as unknown as CoworkUsageStats;
+        return thinkingTokensEstimate !== undefined
+          ? { ...stats, thinkingTokensEstimate }
+          : stats;
       }
     } catch (error) {
       coworkLog('WARN', 'getSessionUsageStats', 'Failed to read persisted usage stats', {
@@ -1698,12 +2416,13 @@ export class CoworkRunner extends EventEmitter {
     const targetSessionId = typeof args.targetSessionId === 'string'
       ? args.targetSessionId
       : String(args.sessionId ?? '');
-    const result = this.getCrossSessionService().insertUserMessage({
+    const combined = this.insertCrossSessionMessageAndQueue({
       sourceSessionId,
       targetSessionId,
       message: typeof args.message === 'string' ? args.message : '',
     });
 
+    const result = combined.insert;
     if (!result.ok) {
       return {
         success: false,
@@ -1711,38 +2430,17 @@ export class CoworkRunner extends EventEmitter {
       };
     }
 
-    const emittedMessage: CoworkMessage = {
-      ...result.message,
-      metadata: result.message.metadata ?? undefined,
+    return {
+      success: true,
+      text: this.formatCrossSessionToolOutput({
+        ...result,
+        runQueued: combined.runQueued,
+        ...(combined.queueDepth !== undefined ? { queueDepth: combined.queueDepth } : {}),
+        ...(combined.warning ? { warning: combined.warning } : {}),
+        ...(combined.reason ? { reason: combined.reason } : {}),
+        ...(combined.error ? { error: combined.error } : {}),
+      }),
     };
-    this.emit('message', result.targetSessionId, emittedMessage);
-
-    try {
-      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
-      return {
-        success: true,
-        text: this.formatCrossSessionToolOutput({
-          ...result,
-          ...queueResult,
-        }),
-      };
-    } catch (error) {
-      if (error instanceof TwinWorkerDirectoryAuthorizationError) {
-        return {
-          success: false,
-          text: JSON.stringify({ ok: false, code: error.code, error: error.message }),
-        };
-      }
-      return {
-        success: true,
-        text: this.formatCrossSessionToolOutput({
-          ...result,
-          runQueued: false,
-          warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      };
-    }
   }
 
   /**
@@ -3054,6 +3752,7 @@ export class CoworkRunner extends EventEmitter {
           '- A direct user instruction is not enough for safety confirmation; AskUserQuestion approval is still required.',
           '- Never use normal assistant text as the confirmation channel in modal mode.',
           '- Continue only when AskUserQuestion returns explicit allow.',
+          '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
         ];
 
     return [
@@ -3105,6 +3804,21 @@ export class CoworkRunner extends EventEmitter {
       );
     }
     return memoryRecallPrompt.join('\n');
+  }
+
+  /**
+   * Build the `## Local Projects` prompt section listing configured projects.
+   * Defensive: returns null when no ProjectsControl is wired, the store is
+   * empty, or listing fails. Disabled projects are named as frozen so the bot
+   * knows not to touch them; paths stay behind the project_query tool.
+   */
+  private buildProjectsPrompt(): string | null {
+    if (!this.projects) return null;
+    try {
+      return buildProjectsPromptSection(this.projects.list());
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -3163,13 +3877,56 @@ export class CoworkRunner extends EventEmitter {
     return [
       '## Twin Bot Orchestration Role',
       'You are the owner\'s one persistent Twin Bot: a private digital twin and chief-of-staff assistant.',
-      'Interpret the owner\'s ambiguous intent using known context, then turn material work into a concrete goal, ordered steps, measurable acceptance criteria, and a concise progress plan.',
+      'Interpret the owner\'s ambiguous intent using known context, then turn material work into a concrete goal, ordered steps, measurable acceptance criteria, and a concise progress plan. Always aim for a high-quality outcome: think through how to decompose the work so each subtask maps to the best-fit local Worker, and in a Group Task drive it end-to-end — planning, assignment, verification — until the owner receives the finished result, never leaving it stalled.',
       'For specialist or multi-step work, prefer suitable local persistent Worker Bots. First call local_workers_list and choose by the returned persona, skills, capability evidence, availability, and permission fit; selection must be evidence-based rather than hard-coded by task category.',
+      'The host provides Twin-only orchestration tools — local_workers_list, local_worker_delegate, twin_task_status, twin_task_reassign, and twin_task_cancel — so you always have the capability to inspect every local Worker and delegate concrete steps to the best-fit Worker instead of doing specialist work yourself.',
+      'When the owner\'s wish needs multiple specialists to coordinate (research + build + publish, multi-step content production, etc.), you can also organize an on-chain Group Task via the metabot-group-task skill: you chair it, local Workers join as members, and you drive planning, assignments, verification, and the final report.',
+      'Plan local-first: match every decomposed step against the local Worker roster (persona, skills, capability evidence) before looking outside; only when a needed capability has no local match should you recruit one remote bot through the metabot-group-task skill\'s OpenTeam flow (search_remote → invite_remote, one candidate at a time, wait for the join before assigning).',
       'Delegate with local_worker_delegate only after defining one bounded step, required evidence, and an explicit permission scope. A Worker is a persistent specialist with its own identity, memories, history, wallet, skills, workspace, and permissions; a subagent is only an ephemeral tool inside a Worker run.',
       'Remain available to the owner while delegated work runs. Never fabricate progress or completion. Treat a Worker handoff as evidence to review, not proof; verify deliverables and report blockers, retries, reassignment, and final evidence.',
       'Do not disclose private owner memory or unrelated conversation history in a delegated prompt. Do not broaden authority for payments, transfers, destructive actions, public publishing, or private messaging without the owner\'s explicit bounded approval.',
-      'You may directly complete a trivial request when delegation adds no value, but your default role is to coordinate the right Worker and report the verified result to the owner.',
+      'Do not personally perform specialist execution — editing code or files, writing deliverables, publishing, or similar hands-on work — when a suitable local Worker or a Group Task can carry it out. Delegate, supervise, verify, and report; complete a request yourself only when it is trivial and delegation would add no value.',
+      'Local Workers are preferred, never mandatory. When no suitable local Worker exists — including a fresh machine with only the Twin Bot — execute the work yourself with your own skills and tools, then verify and report; never refuse or stall the owner\'s request just because no Worker is available.',
+      'Speak in plain user language, not internal jargon: align with what the owner sees in the UI, lead with the conclusion, and never hand the owner homework. Your purpose is to reduce the owner\'s mental load.',
     ].join('\n');
+  }
+
+  /**
+   * Stable local Worker roster for the Twin system prompt. The roster only
+   * changes when a Bot is created or edited, so it is safe in the cached
+   * system-prompt prefix (unlike dream-written impressions, which live in the
+   * per-turn tail). Failures degrade to '' — the Twin keeps its overlay and
+   * orchestration tools.
+   */
+  private async buildTwinLocalRosterPrompt(sessionId: string): Promise<string> {
+    if (!this.isTwinSession(sessionId) || !this.listLocalWorkers) return '';
+    try {
+      const directory = await this.listLocalWorkers(sessionId);
+      return buildTwinLocalRosterBlock(directory);
+    } catch (error) {
+      coworkLog('WARN', 'buildTwinLocalRosterPrompt', 'Local Worker roster unavailable', { sessionId });
+      return '';
+    }
+  }
+
+  /**
+   * Volatile Twin impressions of local Workers (nightly dream layer). Injected
+   * into the current user-message tail via buildVolatileContextPrompt so dream
+   * rewrites never invalidate the cached system-prompt prefix. Failures
+   * degrade to ''.
+   */
+  private async buildTwinLocalImpressionPrompt(sessionId: string): Promise<string> {
+    if (!this.isTwinSession(sessionId) || !this.listLocalWorkers || !this.listTwinImpressions) return '';
+    try {
+      const directory = await this.listLocalWorkers(sessionId);
+      const twinGlobalMetaID = this.getMetabotById?.(directory.requester.twinId)?.globalmetaid?.trim();
+      if (!twinGlobalMetaID) return '';
+      const impressions = await this.listTwinImpressions(twinGlobalMetaID);
+      return buildTwinLocalImpressionBlock(directory, impressions);
+    } catch (error) {
+      coworkLog('WARN', 'buildTwinLocalImpressionPrompt', 'Local Worker impressions unavailable', { sessionId });
+      return '';
+    }
   }
 
   /**
@@ -3177,6 +3934,11 @@ export class CoworkRunner extends EventEmitter {
    * plus its last few days of dream summaries. Returns '' when the session
    * has no attributed bot (strict, no cross-bot guessing) or no experience
    * data exists yet.
+   *
+   * Volatile by nature (the dream service rewrites entries nightly and the
+   * summary window rolls daily), so this block is injected into the CURRENT
+   * user message via buildVolatileContextPrompt — never into the system
+   * prompt, where any change would wipe DeepSeek's cached prefix.
    */
   private buildExperiencePromptBlocksXml(sessionId: string): string {
     const metabotId = this.getMemoryBackend().resolveMetabotIdForMemory(sessionId);
@@ -3208,6 +3970,20 @@ export class CoworkRunner extends EventEmitter {
     });
   }
 
+  /**
+   * The MetaBot's llm_id is the provider key the bot was configured with
+   * ('deepseek', 'opencode', ...). Return it as the session's automation
+   * model override so the bot's CoWork traffic actually routes to that
+   * provider — resolveApiConfigForModel resolves the key to a concrete model
+   * (llm_id 'deepseek' maps to the default flash model; other keys are
+   * matched as provider keys and use the provider's model list).
+   *
+   * NOTE: this used to only honor llm_id === 'deepseek' and silently ignore
+   * every other value, so metabots configured for opencode (or any other
+   * provider) still fell back to the global default model — their traffic
+   * never reached the configured provider. Now any non-empty llm_id routes
+   * the session (unknown keys fall back to the global default in the caller).
+   */
   private getSessionAutomationModelOverride(sessionId: string): string | null {
     if (!this.getMetabotById) return null;
     const session = this.store.getSession(sessionId);
@@ -3215,8 +3991,7 @@ export class CoworkRunner extends EventEmitter {
     if (metabotId == null || typeof metabotId !== 'number') return null;
     const metabot = this.getMetabotById(metabotId);
     const llmId = metabot?.llm_id?.trim();
-    if (!llmId) return null;
-    return llmId.toLowerCase() === 'deepseek' ? llmId : null;
+    return llmId || null;
   }
 
   private escapeXmlText(value: string): string {
@@ -3251,14 +4026,48 @@ export class CoworkRunner extends EventEmitter {
   ): string {
     const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
     const memoryStrategyPrompt = this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy);
+    const projectsPrompt = this.buildProjectsPrompt();
     const trimmedBasePrompt = baseSystemPrompt?.trim();
     const sections = [
       personaBlock,
       safetyPrompt,
+      // Projects sit ahead of the memory strategy/base prompt on purpose: the
+      // section is small, changes rarely, and early placement makes weak models
+      // noticeably more likely to honor it.
+      projectsPrompt,
       memoryStrategyPrompt,
       trimmedBasePrompt,
+      // R4 防护（追加在末尾，避免破坏 DeepSeek 前缀缓存的首段）：
+      // SDK 定时任务触发（cron prompt）与用户消息在同一会话队列竞争（8/8 事故根因，
+      // SDK 无优先级配置），此约束让模型在 cron 唤醒轮优先处理未响应的用户消息。
+      // 常量文本，字节级稳定，不随会话变化。
+      SDK_CRON_USER_PRIORITY_GUARD,
     ];
     return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
+  }
+
+  /**
+   * Record the effective system prompt's hash on the active session and flag
+   * silent drift. The system prompt leads DeepSeek's cacheable prefix, so any
+   * byte change without a known reset event (system-prompt switch, compaction,
+   * retry) is a cache regression — label it so the next miss event carries
+   * 'system_prompt_drift' instead of 'unknown'.
+   */
+  private trackSystemPromptHash(activeSession: ActiveSession, sessionId: string, effectiveSystemPrompt: string): void {
+    const hash = createHash('sha256').update(effectiveSystemPrompt).digest('hex').slice(0, 8);
+    if (
+      activeSession.lastSystemPromptHash
+      && activeSession.lastSystemPromptHash !== hash
+      && !activeSession.pendingCacheBreakReason
+    ) {
+      activeSession.pendingCacheBreakReason = 'system_prompt_drift';
+      coworkLog('WARN', 'trackSystemPromptHash', 'Effective system prompt changed without a known reset event; next turn will be a full cache miss', {
+        sessionId,
+        previousHash: activeSession.lastSystemPromptHash,
+        nextHash: hash,
+      });
+    }
+    activeSession.lastSystemPromptHash = hash;
   }
 
   /**
@@ -3280,6 +4089,17 @@ export class CoworkRunner extends EventEmitter {
     const sections: Array<string | null> = [];
     if (profile.includeMemoryPromptBlocks) {
       sections.push(this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }));
+      // Hot-layer experience injection (self-identity + recent dream summaries).
+      // The dream service rewrites these nightly and the summary window rolls
+      // daily, so they can never live in the system prompt — they belong here
+      // in the request tail with the other volatile blocks.
+      if (sessionMemoryEnabled) {
+        sections.push(this.buildExperiencePromptBlocksXml(sessionId));
+        // Twin-side distilled impressions of local Workers also ride the
+        // per-turn tail: the dream layer rewrites them nightly, so they must
+        // never enter the cached system-prompt prefix.
+        sections.push(await this.buildTwinLocalImpressionPrompt(sessionId));
+      }
     }
     if (this.getBrowserContextPrompt) {
       // Browser tab state is live; fetch async and degrade silently on failure.
@@ -3584,6 +4404,54 @@ export class CoworkRunner extends EventEmitter {
     };
   }
 
+  /**
+   * Host cross-session insert + queue-to-continue, the single shared seam for
+   * the MCP idbots_session_insert_user_message tool and internal consumers
+   * such as TwinOrchestrationService's ORCH-NOTIFY terminal-state notification:
+   * insert the message into the target session, emit it to session listeners
+   * (UI), then queue a continuation run on the target session — the drain loop
+   * resumes it via continueSession(skipUserMessage) once the target is not
+   * mid-turn, which is exactly the "queue that session to continue" behavior
+   * of the MCP channel.
+   *
+   * Insert and queue are decoupled: an unqueueable target (stopped session,
+   * queue acceptance failure) still keeps the inserted message and reports
+   * runQueued:false with the reason, mirroring the MCP tool's partial-success
+   * contract. Consumers that only care about the insert result use `.insert`.
+   */
+  insertCrossSessionMessageAndQueue(input: {
+    sourceSessionId: string;
+    targetSessionId: string;
+    message: string;
+  }): CoworkCrossSessionInsertAndQueueResult {
+    const result = this.getCrossSessionService().insertUserMessage(input);
+    if (!result.ok) {
+      // Insert failure (missing session, A2A target, …): nothing to queue.
+      return { insert: result, runQueued: false };
+    }
+
+    const emittedMessage: CoworkMessage = {
+      ...result.message,
+      metadata: result.message.metadata ?? undefined,
+    };
+    this.emit('message', result.targetSessionId, emittedMessage);
+
+    try {
+      const queueResult = this.enqueueCrossSessionContinuation(result.targetSessionId, result.message.content);
+      return { insert: result, ...queueResult };
+    } catch (error) {
+      if (error instanceof TwinWorkerDirectoryAuthorizationError) {
+        return { insert: result, runQueued: false, error: error.message };
+      }
+      return {
+        insert: result,
+        runQueued: false,
+        warning: 'MESSAGE_INSERTED_BUT_RUN_NOT_QUEUED',
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async startSession(
     sessionId: string,
     prompt: string,
@@ -3611,12 +4479,14 @@ export class CoworkRunner extends EventEmitter {
 
     let persistedSystemPrompt = session.systemPrompt;
     let persistedClaudeSessionId = session.claudeSessionId;
+    let systemPromptChanged = false;
     if (
       typeof options.systemPrompt === 'string'
       && options.systemPrompt !== session.systemPrompt
     ) {
       persistedSystemPrompt = options.systemPrompt;
       persistedClaudeSessionId = null;
+      systemPromptChanged = true;
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
@@ -3678,12 +4548,16 @@ export class CoworkRunner extends EventEmitter {
       staleResumeRetryAllowed: true,
       contextOverflowDetected: false,
       contextOverflowRetryAllowed: false,
+      emptyTerminalTurnDetected: false,
+      readFiles: new Map(),
       executionMode: session.executionMode || this.store.getConfig().executionMode || 'local',
       localAcceptedInputs: 0,
       localSettledInputs: 0,
       localPendingSteerIds: [],
       localDeliveredSteerIds: new Set(),
+      localBufferedSteers: [],
       localTurnState: 'starting',
+      pendingManualCompact: false,
       turnSettled,
       resolveTurnSettled,
       turnSettlementResolved: false,
@@ -3698,19 +4572,30 @@ export class CoworkRunner extends EventEmitter {
       ),
     };
     this.activeSessions.set(sessionId, activeSession);
+    if (systemPromptChanged) {
+      // Same attribution as continueSession's reset: the next turn's miss must
+      // be labeled 'system_prompt_changed', not 'unknown'.
+      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
+    }
     if (session.cwd !== sessionCwd) {
       this.store.updateSession(sessionId, { cwd: sessionCwd });
     }
 
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
     const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Freeze the persona block for the lifetime of this active session: it sits
+    // at the head of the system prompt, so a live DB re-read per turn would let
+    // any mid-session persona edit break DeepSeek's cached prefix.
+    activeSession.personaBlock = personaBlock;
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [
+      personaBlock,
+      this.buildTwinOrchestrationPrompt(sessionId),
+      await this.buildTwinLocalRosterPrompt(sessionId),
+    ]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3723,6 +4608,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     // Run claude-code using the SDK
     try {
@@ -3795,6 +4681,7 @@ export class CoworkRunner extends EventEmitter {
     ) {
       persistedSystemPrompt = options.systemPrompt;
       activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'system_prompt_changed';
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
@@ -3811,14 +4698,18 @@ export class CoworkRunner extends EventEmitter {
     // Use provided systemPrompt (e.g. with updated skill routing) or fall back to session's stored one.
     // Always prepend workspace safety prompt so folder boundary rules are enforced at prompt level.
     const baseSystemPrompt = options.systemPrompt ?? persistedSystemPrompt;
-    const personaBlock = this.buildMetabotPersonaBlock(sessionId);
+    // Reuse the persona block frozen at session start (see startSession); fall
+    // back to a fresh read only if this active session predates the freeze.
+    const personaBlock = activeSession.personaBlock ?? this.buildMetabotPersonaBlock(sessionId);
     const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
-    // Hot-layer experience injection (self-identity + recent dream summaries),
-    // gated on the same memory switch as the user-fact memory blocks.
-    const experiencePromptBlocksXml = sessionMemoryEnabled
-      ? this.buildExperiencePromptBlocksXml(sessionId)
-      : '';
-    const personaWithExperience = [personaBlock, this.buildTwinOrchestrationPrompt(sessionId), experiencePromptBlocksXml]
+    // Only session-invariant blocks belong in the system prompt. The hot-layer
+    // experience injection (self-identity + dream summaries, rewritten nightly)
+    // rides the current user message via buildVolatileContextPrompt instead.
+    const personaWithExperience = [
+      personaBlock,
+      this.buildTwinOrchestrationPrompt(sessionId),
+      await this.buildTwinLocalRosterPrompt(sessionId),
+    ]
       .filter((section) => section?.trim())
       .join('\n\n');
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
@@ -3831,6 +4722,7 @@ export class CoworkRunner extends EventEmitter {
       personaWithExperience,
       systemPromptProfile
     );
+    this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
     try {
       this.markCrossSessionTurnRunning(sessionId);
@@ -3854,6 +4746,120 @@ export class CoworkRunner extends EventEmitter {
     }
     this.store.updateSession(sessionId, { permissionMode: mode });
     coworkLog('INFO', 'setPermissionMode', 'Permission mode updated', { sessionId, mode });
+  }
+
+  /**
+   * Queues a user-initiated manual compaction for the next local-mode turn.
+   *
+   * The SDK session is reset and the next submitted message is sent with a
+   * synthetic compacted prompt (the same path the automatic tier-2 compaction
+   * uses), so the user keeps chatting seamlessly from a summarized history.
+   *
+   * Guards: the session must be active, in local mode, idle (no turn running),
+   * with actual conversation history, and no compaction already queued.
+   */
+  async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
+    const activeSession = this.activeSessions.get(sessionId);
+    if (activeSession) {
+      if (activeSession.executionMode !== 'local') {
+        return { success: false, error: 'Manual compaction is only available in local mode.' };
+      }
+      if (activeSession.localTurnState !== 'none') {
+        return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+      }
+      if (activeSession.pendingManualCompact) {
+        return { success: false, error: 'Manual compaction is already queued for the next message.' };
+      }
+    } else {
+      // Idle local sessions have no activeSession in memory (runClaudeCodeLocal
+      // removes it in its finally block), but the user must still be able to
+      // queue a manual compaction from the header button. Validate against the
+      // persisted session and the cross-session turn guard instead.
+      if (this.isCrossSessionTurnRunning(sessionId)) {
+        return { success: false, error: 'Wait for the current turn to finish before compacting.' };
+      }
+      if (this.pendingManualCompactSessions.has(sessionId)) {
+        return { success: false, error: 'Manual compaction is already queued for the next message.' };
+      }
+    }
+    const session = this.store.getSession(sessionId);
+    if (!session) {
+      return { success: false, error: 'Session is not active. Send a message first, then try again.' };
+    }
+    const executionMode = session.executionMode || this.store.getConfig().executionMode || 'local';
+    if (executionMode !== 'local') {
+      return { success: false, error: 'Manual compaction is only available in local mode.' };
+    }
+    const messages = session?.messages ?? [];
+    const hasCompressibleHistory = messages.some(
+      (message) => message.type === 'user' || message.type === 'assistant' || message.type === 'tool_use' || message.type === 'tool_result'
+    );
+    if (!hasCompressibleHistory) {
+      return { success: false, error: 'No conversation history to compact yet.' };
+    }
+
+    if (activeSession) {
+      activeSession.pendingManualCompact = true;
+    } else {
+      this.pendingManualCompactSessions.add(sessionId);
+    }
+    this.addSystemMessage(
+      sessionId,
+      '已请求手动压缩历史：下一条消息将自动从压缩后的上下文继续。'
+    );
+    coworkLog('INFO', 'requestManualCompaction', 'Manual compaction queued for next turn', {
+      sessionId,
+      messageCount: messages.length,
+      queuedWhileIdle: !activeSession,
+    });
+    return { success: true };
+  }
+
+  /**
+   * Stops a running background/subagent task via the live SDK Query control
+   * surface (task id from task_started/task_notification events). Local mode
+   * only; sandbox sessions have no host-side Query object.
+   */
+  async stopSubagentTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
+    const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
+    if (!control) {
+      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+    }
+    const normalizedTaskId = taskId.trim();
+    if (!normalizedTaskId) {
+      return { success: false, error: 'Missing task id.' };
+    }
+    try {
+      await control.stopTask(normalizedTaskId);
+      coworkLog('INFO', 'stopSubagentTask', 'Stop requested', { sessionId, taskId: normalizedTaskId });
+      return { success: true };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'stopSubagentTask', 'Stop failed', { sessionId, taskId: normalizedTaskId, error: message });
+      return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Backgrounds a running foreground task via the live SDK Query control
+   * surface. With toolUseId, targets the single task started by that tool_use
+   * block; without it, backgrounds all foreground tasks. Local mode only.
+   */
+  async backgroundSubagentTask(sessionId: string, toolUseId?: string): Promise<{ success: boolean; backgrounded?: boolean; error?: string }> {
+    const control = this.activeSessions.get(sessionId)?.sdkTaskControl;
+    if (!control) {
+      return { success: false, error: 'Task control unavailable (session not running or sandbox mode).' };
+    }
+    const normalizedToolUseId = toolUseId?.trim() ? toolUseId.trim() : undefined;
+    try {
+      const backgrounded = await control.backgroundTasks(normalizedToolUseId);
+      coworkLog('INFO', 'backgroundSubagentTask', 'Background requested', { sessionId, toolUseId: normalizedToolUseId ?? null, backgrounded });
+      return { success: true, backgrounded };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      coworkLog('WARN', 'backgroundSubagentTask', 'Background failed', { sessionId, toolUseId: normalizedToolUseId ?? null, error: message });
+      return { success: false, error: message };
+    }
   }
 
   /**
@@ -4234,12 +5240,26 @@ export class CoworkRunner extends EventEmitter {
     activeSession.staleResumeRetryAllowed = !isRetry;
     activeSession.contextOverflowDetected = false;
     activeSession.contextOverflowRetryAllowed = false;
+    activeSession.emptyTerminalTurnDetected = false;
 
     const automationModelOverride = this.getSessionAutomationModelOverride(sessionId);
-    const apiConfigResolution = automationModelOverride
+    let apiConfigResolution = automationModelOverride
       ? resolveApiConfigForModel(automationModelOverride, 'local')
       : { config: getCurrentApiConfig('local') };
-    const apiConfig = apiConfigResolution.config;
+    let apiConfig = apiConfigResolution.config;
+    if (!apiConfig && automationModelOverride) {
+      // The metabot's llm_id did not resolve (provider disabled/removed, or
+      // the key is not a known provider). Fall back to the global default
+      // config instead of failing the session — the legacy behavior ignored
+      // unknown llm_ids silently, so keep sessions runnable.
+      coworkLog('WARN', 'runClaudeCodeLocal', 'Metabot llm_id did not resolve to an enabled provider; falling back to the default model config', {
+        sessionId,
+        llmId: automationModelOverride,
+        reason: apiConfigResolution.error ?? null,
+      });
+      apiConfigResolution = { config: getCurrentApiConfig('local') };
+      apiConfig = apiConfigResolution.config;
+    }
     if (!apiConfig) {
       this.handleError(sessionId, apiConfigResolution.error ?? 'API configuration not found. Please configure model settings.');
       this.clearPendingPermissions(sessionId);
@@ -4247,6 +5267,24 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
     const modelLimits = resolveCurrentModelLimits(apiConfig.model);
+    // Record who actually bills this session: only a deepseek provider key or
+    // deepseek host gets the DeepSeek balance/CNY treatment in the usage chip.
+    // Gateway providers (opencode plans, custom gateways, ...) serving deepseek
+    // models are 'other' — tokens only, no account balance, no rate estimate.
+    activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
+    // Remember the REAL upstream for observability: the usage panel and logs
+    // show which provider this session actually hits (metabot llm_id override,
+    // defaultProvider preference, or config-order fallback — whatever won).
+    activeSession.upstreamProvider = apiConfig.provider;
+    activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL;
+    coworkLog('INFO', 'runClaudeCodeLocal', 'Resolved API config for session', {
+      sessionId,
+      provider: apiConfig.provider ?? null,
+      upstreamBaseURL: apiConfig.upstreamBaseURL ?? null,
+      model: apiConfig.model,
+      apiType: apiConfig.apiType,
+      billingSource: activeSession.billingSource,
+    });
 
     const claudeCodePath = getClaudeCodePath();
     const envVars = await getEnhancedEnvWithTmpdir(cwd, 'local', apiConfig);
@@ -4261,9 +5299,40 @@ export class CoworkRunner extends EventEmitter {
     envVars.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS = '1';
     // So the SDK's forked process uses the correct Electron exe on Windows (avoids process.execPath returning e.g. lDBots.exe)
     envVars.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
+
+    // Enable the SDK/CLI built-in auto-compact for non-Claude models with
+    // known context windows (DeepSeek V4 1M, Qwen, GLM, ...). The native CLI
+    // falls back to a 200K window for unknown models and skips its auto-compact
+    // gate when no window override is configured, which is why sessions used to
+    // grow until the provider rejected them. CLAUDE_CODE_MAX_CONTEXT_TOKENS is
+    // only honored by the CLI for non-claude-* model ids. The SDK then owns
+    // proactive (segmented/reactive) compaction in-session; IDBots' own tier
+    // compaction demotes to a safety net (see getCoworkContextBudget below).
+    const sdkAutoCompactEnv = buildCoworkSdkAutoCompactEnv(modelLimits);
+    if (sdkAutoCompactEnv) {
+      Object.assign(envVars, sdkAutoCompactEnv.env);
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Enabled SDK built-in auto-compact', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        contextWindow: modelLimits.contextWindow,
+        maxOutputTokens: modelLimits.maxOutputTokens,
+        limitSource: modelLimits.source,
+        autoCompactWindow: sdkAutoCompactEnv.autoCompactWindow,
+      });
+    }
     const skillEnvOverrides = await this.getSkillSessionEnvOverrides?.(sessionId);
     if (skillEnvOverrides && Object.keys(skillEnvOverrides).length > 0) {
       Object.assign(envVars, skillEnvOverrides);
+    }
+    // Route this session's Anthropic traffic through the session-scoped proxy
+    // path (/s/<coworkSessionId>/v1/messages) so the proxy can apply the
+    // per-session tool-result snip boundary (tiered compaction tier 1). The
+    // Anthropic SDK joins baseURL + path via plain string concat, so appending
+    // the segment here suffices. Use the CoWork session id — it survives SDK
+    // session resets and hard compactions, unlike claudeSessionId. Local mode
+    // only: sandbox envs come from buildSandboxEnv and stay untouched.
+    if (envVars.ANTHROPIC_BASE_URL) {
+      envVars.ANTHROPIC_BASE_URL = `${envVars.ANTHROPIC_BASE_URL.replace(/\/+$/, '')}/s/${encodeURIComponent(sessionId)}`;
     }
     let stderrTail = '';
 
@@ -4291,40 +5360,161 @@ export class CoworkRunner extends EventEmitter {
 
     let effectivePrompt = prompt;
     const sessionSnapshotForBudget = this.store.getSession(sessionId);
-    if (activeSession.claudeSessionId && !isRetry) {
+    // User-initiated manual compaction (Phase 3): the button queues this flag
+    // while the session is idle; the next turn resets the SDK session and
+    // folds the conversation into a synthetic compacted prompt (same path as
+    // the automatic tier-2 compaction). Consumed once; retries never re-run it.
+    let manualCompactApplied = false;
+    // Consume the user-initiated manual compaction: either queued on the live
+    // active session (button pressed mid-session) or in the idle queue
+    // (button pressed between turns, when no activeSession exists). The idle
+    // queue entry is consumed exactly once and never re-applied.
+    const manualCompactQueued = activeSession.pendingManualCompact || this.pendingManualCompactSessions.has(sessionId);
+    if (manualCompactQueued && !isRetry) {
+      activeSession.pendingManualCompact = false;
+      this.pendingManualCompactSessions.delete(sessionId);
+      resetCoworkSnipHeadTokens(sessionId);
+      const compacted = buildCoworkCompactedPrompt({
+        messages: sessionSnapshotForBudget?.messages ?? [],
+        currentPrompt: prompt,
+        modelLimits,
+      });
+      effectivePrompt = compacted.prompt;
+      this.store.updateSession(sessionId, { claudeSessionId: null });
+      activeSession.claudeSessionId = null;
+      activeSession.pendingCacheBreakReason = 'manual_compact';
+      manualCompactApplied = true;
+      coworkLog('INFO', 'runClaudeCodeLocal', 'Manual compaction requested; starting compacted SDK session instead of resume', {
+        sessionId,
+        modelId: modelLimits.modelId,
+        compactedEstimatedTokens: compacted.estimatedTokens,
+        compactedRecentMessages: compacted.recentMessages,
+        compactedSummarizedMessages: compacted.summarizedMessages,
+      });
+      this.addSystemMessage(
+        sessionId,
+        '已手动压缩历史并重置底层模型会话，本次输入从压缩后的上下文继续。'
+      );
+    }
+    // N4 (GT#12): budget evaluation must not depend on claudeSessionId being
+    // present. DeepSeek reasoning-history resets clear claudeSessionId and
+    // start a fresh SDK session while the cowork store history keeps growing;
+    // gating on claudeSessionId there skipped snip/compact until the next
+    // successful resume, letting sessions balloon to the window limit (the
+    // 2026-08-09 diagnosed session reached 605K chars with no Tier-1/Tier-2
+    // intervention). Evaluate whenever there is history to evaluate — a brand
+    // new session with zero messages still skips the first run — and keep
+    // skipping automatic error-retry re-runs (isRetry) so a retry never
+    // double-compacts the same turn. The manual-compaction branch above
+    // already compacted this turn, so it takes precedence over the automatic
+    // budget (no re-evaluation on top of an explicit compaction).
+    if (!manualCompactApplied && shouldEvaluateCoworkContextBudget({
+      claudeSessionId: activeSession.claudeSessionId,
+      isRetry,
+      messageCount: sessionSnapshotForBudget?.messages?.length ?? 0,
+    })) {
+      const lastTurnInputTokens = this.getSessionLastTurnInputTokens(sessionId);
+      if (
+        lastTurnInputTokens !== undefined
+        && modelLimits.contextWindow > 0
+        && lastTurnInputTokens > modelLimits.contextWindow
+      ) {
+        // Some gateways serving DeepSeek report per-turn totals far above the
+        // model window (observed 1.5M-3.9M on a 1M model). These are NOT the
+        // current per-request context size, so they must not drive compaction
+        // or the ring. getCoworkContextBudget already ignores such values;
+        // log here so the phenomenon stays observable.
+        coworkLog('WARN', 'runClaudeCodeLocal', 'Provider-reported last-turn input exceeds model window; ignoring it for context budget', {
+          sessionId,
+          modelId: modelLimits.modelId,
+          contextWindow: modelLimits.contextWindow,
+          lastTurnInputTokens,
+        });
+      }
       const budget = getCoworkContextBudget({
         messages: sessionSnapshotForBudget?.messages ?? [],
         currentPrompt: prompt,
         systemPrompt,
         modelLimits,
+        // When the SDK owns proactive compaction, IDBots' tier-1/tier-2
+        // compaction stays as a safety net near the real ceiling so the two
+        // mechanisms don't double-compact at the same threshold.
+        ...(sdkAutoCompactEnv ? { softThresholdRatio: COWORK_CONTEXT_SAFETY_NET_RATIO } : {}),
+        // Real provider-reported context size from the last turn (Phase 2);
+        // the heuristic estimate stays as the floor when unavailable. Values
+        // above the model window are ignored inside the budget (gateway
+        // per-turn totals are not per-request context).
+        realUsageTokens: lastTurnInputTokens,
       });
 
       if (budget.shouldCompact) {
-        const compacted = buildCoworkCompactedPrompt({
-          messages: sessionSnapshotForBudget?.messages ?? [],
-          currentPrompt: prompt,
-          modelLimits,
-        });
-        effectivePrompt = compacted.prompt;
-        this.store.updateSession(sessionId, { claudeSessionId: null });
-        activeSession.claudeSessionId = null;
-        coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
-          sessionId,
-          modelId: modelLimits.modelId,
-          contextWindow: modelLimits.contextWindow,
-          maxOutputTokens: modelLimits.maxOutputTokens,
-          limitSource: modelLimits.source,
-          estimatedTokens: budget.estimatedTokens,
-          softThresholdTokens: budget.softThresholdTokens,
-          usableInputTokens: budget.usableInputTokens,
-          compactedEstimatedTokens: compacted.estimatedTokens,
-          compactedRecentMessages: compacted.recentMessages,
-          compactedSummarizedMessages: compacted.summarizedMessages,
-        });
-        this.addSystemMessage(
-          sessionId,
-          '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
-        );
+        // Tiered compaction tier 1 (Reasonix-style tool-result snipping):
+        // raise this session's persisted snip boundary so the proxy shortens
+        // stale tool_result blocks in the head region while keeping a
+        // COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS tail byte-stable. The SDK
+        // session survives; only the prefix after the first newly snipped
+        // block breaks. Hysteresis: the boundary only advances in big steps,
+        // so ordinary turns never re-break the prefix.
+        const snipHeadTokens = Math.max(0, budget.estimatedTokens - COWORK_TOOL_RESULT_SNIP_TAIL_TOKENS);
+        const persistedSnipHeadTokens = getCoworkSnipHeadTokens(sessionId);
+        let snipApplied = false;
+        if (snipHeadTokens >= persistedSnipHeadTokens + COWORK_TOOL_RESULT_SNIP_HYSTERESIS_TOKENS) {
+          const snipSavedTokens = estimateCoworkStoreToolResultSnipSavings(
+            sessionSnapshotForBudget?.messages ?? [],
+            snipHeadTokens
+          );
+          const effectiveEstimatedTokens = budget.estimatedTokens - snipSavedTokens;
+          if (effectiveEstimatedTokens < budget.softThresholdTokens) {
+            setCoworkSnipHeadTokens(sessionId, snipHeadTokens);
+            activeSession.pendingCacheBreakReason = 'snip';
+            snipApplied = true;
+            coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; snipping stale tool results instead of compacting the SDK session', {
+              sessionId,
+              modelId: modelLimits.modelId,
+              estimatedTokens: budget.estimatedTokens,
+              softThresholdTokens: budget.softThresholdTokens,
+              usableInputTokens: budget.usableInputTokens,
+              snipHeadTokens,
+              previousSnipHeadTokens: persistedSnipHeadTokens,
+              snipSavedTokens,
+              effectiveEstimatedTokens,
+            });
+          }
+        }
+
+        if (!snipApplied) {
+          // Tier 2 (existing behavior): flatten history into one synthetic
+          // message and reset the SDK session — a full cold start. The fresh
+          // session rebuilds history from scratch, so the old snip boundary
+          // no longer applies.
+          resetCoworkSnipHeadTokens(sessionId);
+          const compacted = buildCoworkCompactedPrompt({
+            messages: sessionSnapshotForBudget?.messages ?? [],
+            currentPrompt: prompt,
+            modelLimits,
+          });
+          effectivePrompt = compacted.prompt;
+          this.store.updateSession(sessionId, { claudeSessionId: null });
+          activeSession.claudeSessionId = null;
+          activeSession.pendingCacheBreakReason = 'compaction';
+          coworkLog('INFO', 'runClaudeCodeLocal', 'Context estimate reached soft threshold; starting compacted SDK session instead of resume', {
+            sessionId,
+            modelId: modelLimits.modelId,
+            contextWindow: modelLimits.contextWindow,
+            maxOutputTokens: modelLimits.maxOutputTokens,
+            limitSource: modelLimits.source,
+            estimatedTokens: budget.estimatedTokens,
+            softThresholdTokens: budget.softThresholdTokens,
+            usableInputTokens: budget.usableInputTokens,
+            compactedEstimatedTokens: compacted.estimatedTokens,
+            compactedRecentMessages: compacted.recentMessages,
+            compactedSummarizedMessages: compacted.summarizedMessages,
+          });
+          this.addSystemMessage(
+            sessionId,
+            '当前 cowork 会话已接近模型上下文上限，已自动压缩历史并重置底层模型会话继续。'
+          );
+        }
       }
     }
 
@@ -4349,9 +5539,7 @@ export class CoworkRunner extends EventEmitter {
     const volatileHead = [localTimePrompt, volatileBlocks]
       .filter((section) => section?.trim())
       .join('\n\n');
-    if (volatileHead) {
-      effectivePrompt = `${volatileHead}\n\n${effectivePrompt}`;
-    }
+    effectivePrompt = volatileHead ? `${volatileHead}\n\n${effectivePrompt}` : effectivePrompt;
 
     const forceTextOnlyAttachments = shouldForceTextOnlyAttachmentMode(
       envVars.ANTHROPIC_BASE_URL,
@@ -4396,6 +5584,11 @@ export class CoworkRunner extends EventEmitter {
       pathToClaudeCodeExecutable: claudeCodePath,
       permissionMode: activeSession.permissionMode,
       includePartialMessages: true,
+      // Explicitly enable the SDK's todo/task tracking panel. The CLI binary
+      // defaults it to on, but passing it keeps the behavior deterministic and
+      // lets the model emit TaskCreate/TaskUpdate (headless) or TodoWrite so
+      // the renderer can surface the live step list.
+      todoFeatureEnabled: true,
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
         : {}),
@@ -4478,6 +5671,56 @@ export class CoworkRunner extends EventEmitter {
           }
         }
 
+        // --- N1/N2: vision capability gate + same-file read dedupe (GT#12) ---
+        // Both guards key off Read/View tool parameters BEFORE the SDK executes
+        // the tool, so a denied read never produces a tool_result and never
+        // enters session history. This is the same real execution path the
+        // text-only attachment mode above uses; the guards are capability-driven
+        // (modelLimits.supportsVision) and session-state driven
+        // (activeSession.readFiles), complementing the URL/model-string
+        // heuristics of forceTextOnlyAttachments. Decision logic lives in the
+        // pure evaluateReadImageGuard (unit-tested); this block only assembles
+        // inputs and applies the outcome.
+        if (resolvedName.trim().toLowerCase() === 'read' || resolvedName.trim().toLowerCase() === 'view') {
+          const guardFilePath = this.resolveToolFilePathFromInput(resolvedInput, cwd);
+          if (guardFilePath) {
+            const absoluteGuardPath = path.resolve(guardFilePath);
+            const guardStat = safeFileStat(absoluteGuardPath);
+            const guardDecision = evaluateReadImageGuard({
+              toolName: resolvedName,
+              absolutePath: absoluteGuardPath,
+              fileStat: guardStat,
+              supportsVision: modelLimits.supportsVision,
+              priorReads: activeSession.readFiles,
+            });
+            if (guardDecision.action === 'deny') {
+              coworkLog(
+                guardDecision.reason === 'no-vision-image' ? 'WARN' : 'INFO',
+                'runClaudeCodeLocal',
+                guardDecision.reason === 'no-vision-image'
+                  ? 'Blocked Read/View image for non-vision model'
+                  : 'Deduplicated repeated Read/View of unchanged file',
+                {
+                  sessionId,
+                  toolName: resolvedName,
+                  filePath: absoluteGuardPath,
+                  modelId: modelLimits.modelId,
+                  supportsVision: modelLimits.supportsVision,
+                  fileSize: guardStat?.size ?? null,
+                  fileMtimeMs: guardStat?.mtimeMs ?? null,
+                }
+              );
+              return { behavior: 'deny', message: guardDecision.message };
+            }
+            if (guardDecision.register) {
+              activeSession.readFiles?.set(guardDecision.register.path, {
+                mtimeMs: guardDecision.register.mtimeMs,
+                size: guardDecision.register.size,
+              });
+            }
+          }
+        }
+
         const blockedToolResult = this.denyBlockedBuiltinWebTool(sessionId, 'local', resolvedName);
         if (blockedToolResult) {
           return blockedToolResult;
@@ -4510,6 +5753,23 @@ export class CoworkRunner extends EventEmitter {
             };
           }
           return { behavior: 'allow', updatedInput: resolvedInput };
+        }
+
+        // Risk-tiered auto-approval under full trust: AskUserQuestion payloads
+        // whose questions are all explicitly marked low-risk (header
+        // LOW_RISK_QUESTION_HEADER) are answered automatically with their first
+        // option, so routine low-risk deletions (merged branches, worktrees)
+        // never open the confirmation modal. Anything unmarked or multi-select
+        // still routes to the interactive flow below.
+        if (permissionMode === 'bypassPermissions' && resolvedName === 'AskUserQuestion') {
+          const autoAnswers = tryAutoAnswerLowRiskQuestion(resolvedInput);
+          if (autoAnswers) {
+            coworkLog('INFO', 'canUseTool', 'Auto-approved low-risk question under full trust', {
+              sessionId,
+              questionCount: Object.keys(autoAnswers).length,
+            });
+            return { behavior: 'allow', updatedInput: { ...resolvedInput, answers: autoAnswers } };
+          }
         }
 
         // acceptEdits / bypassPermissions: skip the delete-safety confirmation.
@@ -4601,6 +5861,42 @@ export class CoworkRunner extends EventEmitter {
           ],
         },
       ],
+      Stop: [
+        {
+          hooks: [
+            async (input: unknown): Promise<Record<string, unknown>> => {
+              // R1 镜像采集：每轮结束把会话内 SDK cron（session_crons）镜像进宿主存储。
+              // 纯展示用途；删除/停用走管理桥（会话内 CronDelete）。失败仅告警，不阻断会话。
+              const mirror = this.sdkCronMirror;
+              if (!mirror) return {};
+              try {
+                const hookInput = input as { session_crons?: unknown };
+                const rawCrons = Array.isArray(hookInput.session_crons)
+                  ? hookInput.session_crons
+                  : [];
+                const crons = rawCrons
+                  .filter((c): c is Record<string, unknown> => Boolean(c) && typeof c === 'object')
+                  .map((c) => ({
+                    id: String(c.id ?? ''),
+                    schedule: String(c.schedule ?? ''),
+                    recurring: c.recurring !== false,
+                    prompt: String(c.prompt ?? ''),
+                  }))
+                  .filter((c) => c.id && c.schedule);
+                if (crons.length > 0) {
+                  mirror.collectSessionCrons(sessionId, crons);
+                }
+              } catch (error) {
+                coworkLog('WARN', 'Stop', 'Failed to mirror SDK cron tasks', {
+                  sessionId,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              }
+              return {};
+            },
+          ],
+        },
+      ],
     };
     options.agents = {
       ...(options.agents as Record<string, AgentDefinition> | undefined),
@@ -4633,6 +5929,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.claudeSessionId = null;
       activeSession.contextOverflowRetryAllowed = false;
       activeSession.contextOverflowDetected = false;
+      activeSession.pendingCacheBreakReason = 'overflow_retry';
       coworkLog('WARN', 'runClaudeCodeLocal', 'Context window exceeded while resuming; retrying with compacted fresh SDK session', {
         sessionId,
         reason,
@@ -5069,6 +6366,15 @@ export class CoworkRunner extends EventEmitter {
           ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
         );
       }
+      // Bot Browser screenshot is registered for EVERY cowork surface (not only
+      // browser sessions) so any MetaBot can capture the active tab. When the
+      // surface is not visible the tool returns a graceful hint instead of
+      // erroring — matching the posture of the other browser tools.
+      if (this.controlBotBrowser) {
+        memoryTools.push(
+          ...buildBotBrowserScreenshotTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+        );
+      }
       // MetaID search is registered for every cowork surface: browser sessions
       // open the best match in the Bot Browser directly; other sessions only
       // present clickable metaid:// links so the user stays in their flow.
@@ -5077,6 +6383,26 @@ export class CoworkRunner extends EventEmitter {
           ...buildMetaIdSearchAgentTools({
             tool,
             metaIdSearch: this.metaIdSearch,
+            openBestMatchInBrowser: isBrowserSession,
+          })
+        );
+      }
+      // Local Projects query is registered for every cowork surface so any
+      // MetaBot can resolve a project name to its guidelines and paths.
+      if (this.projects) {
+        memoryTools.push(
+          ...buildProjectsAgentTools({ tool, control: this.projects })
+        );
+      }
+      // On-chain social post search (MetaSo social recall) is registered for
+      // every cowork surface with the same posture as MetaID search: browser
+      // sessions may open an author's page; other sessions keep metaid://
+      // author links clickable only.
+      if (this.socialRecall) {
+        memoryTools.push(
+          ...buildSocialRecallAgentTools({
+            tool,
+            socialRecall: this.socialRecall,
             openBestMatchInBrowser: isBrowserSession,
           })
         );
@@ -5114,6 +6440,7 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localSettledInputs = 0;
       activeSession.localPendingSteerIds = [];
       activeSession.localDeliveredSteerIds = new Set();
+      activeSession.localBufferedSteers = [];
       activeSession.localTurnState = 'open';
       let unmatchedTopLevelAssistantBoundaries = 0;
       const settleNextLocalInput = (requireDelivery: boolean) => {
@@ -5127,6 +6454,17 @@ export class CoworkRunner extends EventEmitter {
             this.emit('steerSettled', sessionId, settledSubmissionId);
           }
         }
+      };
+      // Accepted steers are held in localBufferedSteers while the CLI is
+      // mid-turn. Writing them mid-turn (while a tool is running) is unreliable
+      // on the SDK 0.3.x native runtime: the CLI records an enqueue and then a
+      // queue remove when the in-flight tool result arrives, so the model never
+      // sees the correction. interruptLocalTurnForSteers aborts the current
+      // turn via the SDK Query control surface and flushes the buffered steers
+      // immediately; this boundary flush remains as the fallback for steers
+      // that arrive during the interrupt or when no interrupt is available.
+      const flushBufferedSteers = (): void => {
+        this.flushBufferedLocalSteers(activeSession, channel);
       };
       // Stall watchdog: a steered (interrupted) turn can end without any
       // terminal assistant boundary or result event, leaving a delivered input
@@ -5167,6 +6505,12 @@ export class CoworkRunner extends EventEmitter {
       };
       const maybeCloseLocalTurn = () => {
         if (activeSession.localInputChannel !== channel) return;
+        // Keep the channel open while accepted steers are still buffered; they
+        // are written at the next boundary and need a live channel.
+        if ((activeSession.localBufferedSteers?.length ?? 0) > 0) {
+          armLocalTurnStallWatchdog();
+          return;
+        }
         if (
           activeSession.localSettledInputs >= channel.acceptedCount
           && channel.deliveredCount >= channel.acceptedCount
@@ -5184,6 +6528,9 @@ export class CoworkRunner extends EventEmitter {
       activeSession.localAcceptedInputs = channel.acceptedCount;
 
       const result = await query({ prompt: channel, options } as any);
+      // Expose the live Query control surface so the subagent panel can stop a
+      // task or background a foreground task mid-run (local mode only).
+      activeSession.sdkTaskControl = result as unknown as NonNullable<ActiveSession['sdkTaskControl']>;
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude Code process started, iterating events');
       for await (const event of result as AsyncIterable<unknown>) {
         if (this.isSessionStopRequested(sessionId, activeSession)) {
@@ -5197,6 +6544,23 @@ export class CoworkRunner extends EventEmitter {
           unmatchedTopLevelAssistantBoundaries += 1;
           settleNextLocalInput(true);
           maybeCloseLocalTurn();
+          // The turn has reached a safe boundary (CLI idle at the input
+          // prompt): flush buffered steers so the CLI processes them as the
+          // next turn instead of dropping them mid-tool.
+          flushBufferedSteers();
+          maybeCloseLocalTurn();
+          // The CLI is idle at the input prompt here and its transport is
+          // still writable — the ONLY reliable moment to ask it for real
+          // context usage. Once the result event arrives, the SDK closes
+          // stdin for single-turn queries and getContextUsage() fails with
+          // "ProcessTransport is not ready for writing".
+          if (!isRetry) {
+            void this.captureRealContextUsageFromSdk(
+              sessionId,
+              activeSession,
+              result as { getContextUsage?: () => Promise<unknown> }
+            ).catch(() => undefined);
+          }
         }
         if (isSdkResultEvent(event)) {
           if (unmatchedTopLevelAssistantBoundaries > 0) {
@@ -5205,53 +6569,30 @@ export class CoworkRunner extends EventEmitter {
             settleNextLocalInput(false);
           }
           maybeCloseLocalTurn();
+          flushBufferedSteers();
+          maybeCloseLocalTurn();
         }
       }
       clearLocalTurnStallWatchdog();
 
-      // Capture real per-category context usage from the SDK (local mode only).
-      // getContextUsage() is a Query method that asks the running CLI binary for
-      // its actual context accounting. We cache it on the active session so
-      // cowork:session:get can surface real numbers instead of the heuristic
-      // estimator. Failures are non-fatal — the estimator remains the fallback.
+      // Fallback capture after the loop. The reliable capture happens at the
+      // end_turn boundary above (CLI idle, transport still writable); by the
+      // time the result event arrives the SDK has already closed stdin for
+      // single-turn queries, so this normally no-ops with "ProcessTransport
+      // is not ready for writing". Failures are non-fatal — the estimator
+      // remains the fallback.
       if (!isRetry) {
-        try {
-          const usageResult = await (result as { getContextUsage?: () => Promise<unknown> })
-            .getContextUsage?.();
-          if (usageResult && typeof usageResult === 'object') {
-            const usage = usageResult as {
-              totalTokens?: number;
-              maxTokens?: number;
-              percentage?: number;
-              categories?: Array<{ name?: string; tokens?: number; color?: string }>;
-            };
-            const totalTokens = typeof usage.totalTokens === 'number' ? usage.totalTokens : undefined;
-            const maxTokens = typeof usage.maxTokens === 'number' ? usage.maxTokens : undefined;
-            if (totalTokens !== undefined && maxTokens && maxTokens > 0) {
-              activeSession.realContextUsage = {
-                usedTokens: totalTokens,
-                contextWindow: maxTokens,
-                usageRatio: Math.min(1, Math.max(0, totalTokens / maxTokens)),
-                isRealUsage: true,
-                categories: Array.isArray(usage.categories)
-                  ? usage.categories
-                      .filter((c) => typeof c?.tokens === 'number' && typeof c?.name === 'string')
-                      .map((c) => ({ name: String(c.name), tokens: Number(c.tokens), color: c.color }))
-                  : undefined,
-              };
-            }
-          }
-        } catch (usageError) {
-          coworkLog('DEBUG', 'runClaudeCodeLocal', 'getContextUsage() unavailable or failed, keeping estimator', {
-            sessionId,
-            error: usageError instanceof Error ? usageError.message : String(usageError),
-          });
-        }
+        await this.captureRealContextUsageFromSdk(
+          sessionId,
+          activeSession,
+          result as { getContextUsage?: () => Promise<unknown> }
+        );
       }
 
       if (activeSession.staleResumeDetected && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after result-event stale session, retrying once without resume', { sessionId });
         contextOverflowExceptionRetryAllowed = false;
         this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5274,7 +6615,20 @@ export class CoworkRunner extends EventEmitter {
 
       const session = this.store.getSession(sessionId);
       if (session?.status !== 'error') {
-        this.store.updateSession(sessionId, { status: 'completed' });
+        // Empty terminal turn: the SDK reported success but the final assistant
+        // message had no usable text (DeepSeek thinking-placeholder truncation,
+        // etc.). Do NOT falsely report `completed` — the task list would show
+        // "done" while the final handoff is missing. Surface a clear diagnostic
+        // and leave the session `idle` so the user can re-send the last message
+        // to continue. Still emit `complete` so any automation waiter resolves
+        // (the orchestrator bridge already treats an empty reply as a
+        // non-answer via isNonAnswerAssistantReply).
+        if (activeSession.emptyTerminalTurnDetected) {
+          this.reportEmptyTerminalTurn(sessionId);
+          this.store.updateSession(sessionId, { status: 'idle' });
+        } else {
+          this.store.updateSession(sessionId, { status: 'completed' });
+        }
         this.applyTurnMemoryUpdatesForSession(sessionId);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
       }
@@ -5305,6 +6659,7 @@ export class CoworkRunner extends EventEmitter {
       if (isStaleResumeError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'stale_session_retry';
         coworkLog('INFO', 'runClaudeCodeLocal', 'Cleared stale claudeSessionId after "No conversation found", retrying once without resume', { sessionId });
         try {
           this.transitionLocalTurnForRetry(activeSession, 'automatic stale-session retry');
@@ -5322,6 +6677,7 @@ export class CoworkRunner extends EventEmitter {
       if (isDeepSeekReasoningHistoryError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'reasoning_history_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'DeepSeek thinking history lost reasoning_content; retrying with fresh session', {
           sessionId,
           errorMessage: providerErrorSignal,
@@ -5360,6 +6716,7 @@ export class CoworkRunner extends EventEmitter {
       if (isMultimodalCompatError && !isRetry) {
         this.store.updateSession(sessionId, { claudeSessionId: null });
         activeSession.claudeSessionId = null;
+        activeSession.pendingCacheBreakReason = 'multimodal_retry';
         coworkLog('WARN', 'runClaudeCodeLocal', 'Provider rejected image/document content block; retrying with fresh text-only session', {
           sessionId,
           errorMessage: providerErrorSignal,
@@ -5413,6 +6770,7 @@ export class CoworkRunner extends EventEmitter {
       this.handleError(sessionId, detailedError);
       throw runtimeError;
     } finally {
+      activeSession.sdkTaskControl = null;
       this.clearPendingPermissions(sessionId);
       this.removeActiveSession(sessionId, activeSession);
     }
@@ -5594,6 +6952,9 @@ export class CoworkRunner extends EventEmitter {
       this.removeActiveSession(sessionId, activeSession);
       return;
     }
+    activeSession.billingSource = resolveCoworkBillingSource(apiConfig.provider, apiConfig.upstreamBaseURL);
+    activeSession.upstreamProvider = apiConfig.provider;
+    activeSession.upstreamBaseURL = apiConfig.upstreamBaseURL;
 
     const paths = ensureCoworkSandboxDirs(sessionId);
     const cwdMapping = resolveSandboxCwd(cwd);
@@ -6571,6 +7932,34 @@ export class CoworkRunner extends EventEmitter {
       return;
     }
 
+    // claude.ai plan rate-limit windows (direct Anthropic accounts only).
+    // Surface only actionable states (warning/rejected) as a system message.
+    if (eventType === 'rate_limit_event') {
+      const info = payload.rate_limit_info && typeof payload.rate_limit_info === 'object'
+        ? payload.rate_limit_info as Record<string, unknown>
+        : null;
+      const status = typeof info?.status === 'string' ? info.status : null;
+      const utilization = Number.isFinite(info?.utilization) ? Number(info.utilization) : null;
+      if (status === 'allowed_warning' || status === 'rejected') {
+        this.addSystemMessage(sessionId, '', {
+          sdkRateLimit: {
+            status,
+            utilization: utilization !== null ? Math.round(utilization * 1000) / 1000 : null,
+            rateLimitType: typeof info?.rateLimitType === 'string' ? info.rateLimitType : null,
+          },
+        });
+      }
+      coworkLog('DEBUG', 'handleClaudeEvent', 'SDK rate_limit_event', { sessionId, status, utilization });
+      return;
+    }
+
+    // Conversation was reset (e.g. after overflow recovery). Inform the user.
+    if (eventType === 'conversation_reset') {
+      this.addSystemMessage(sessionId, '', { sdkConversationReset: true });
+      coworkLog('INFO', 'handleClaudeEvent', 'SDK conversation_reset', { sessionId });
+      return;
+    }
+
     if (eventType === 'system') {
       const subtype = String(payload.subtype ?? '');
       if (subtype === 'init' && typeof payload.session_id === 'string') {
@@ -6642,6 +8031,98 @@ export class CoworkRunner extends EventEmitter {
           sessionId,
           originalModel,
         });
+        return;
+      }
+
+      // --- SDK UX/observability events (previously silently dropped) ---
+
+      // Generic CLI notification: surface the text as a system message and
+      // keep priority/key in metadata so the renderer can style it.
+      if (subtype === 'notification') {
+        const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+        const key = typeof payload.key === 'string' ? payload.key : null;
+        const priority = typeof payload.priority === 'string' ? payload.priority : null;
+        if (text) {
+          this.addSystemMessage(sessionId, text, { sdkNotification: { key, priority } });
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK notification', { sessionId, key, priority, text });
+        return;
+      }
+
+      // Informational messages carry a render level (info/notice/suggestion/
+      // warning). Surface as a system message with the level in metadata.
+      if (subtype === 'informational') {
+        const content = typeof payload.content === 'string' ? payload.content.trim() : '';
+        const level = typeof payload.level === 'string' ? payload.level : null;
+        if (content) {
+          this.addSystemMessage(sessionId, content, { sdkInformational: { level } });
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK informational', { sessionId, level, content });
+        return;
+      }
+
+      // Context compaction happened: show a structured system message so the
+      // user knows why earlier context is gone (and roughly by how much).
+      if (subtype === 'compact_boundary') {
+        const meta = payload.compact_metadata && typeof payload.compact_metadata === 'object'
+          ? payload.compact_metadata as Record<string, unknown>
+          : null;
+        const trigger = typeof meta?.trigger === 'string' ? meta.trigger : null;
+        const preTokens = Number.isFinite(meta?.pre_tokens) ? Number(meta.pre_tokens) : null;
+        const postTokens = Number.isFinite(meta?.post_tokens) ? Number(meta.post_tokens) : null;
+        const durationMs = Number.isFinite(meta?.duration_ms) ? Number(meta.duration_ms) : null;
+        this.addSystemMessage(sessionId, '', {
+          sdkCompactBoundary: { trigger, preTokens, postTokens, durationMs },
+        });
+        coworkLog('INFO', 'handleClaudeEvent', 'SDK compact_boundary', { sessionId, trigger, preTokens, postTokens, durationMs });
+        return;
+      }
+
+      // A tool call was denied (top-level or inside a subagent): surface the
+      // human-readable reason instead of keeping it invisible.
+      if (subtype === 'permission_denied') {
+        const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : null;
+        const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+        const reason = typeof payload.decision_reason === 'string' ? payload.decision_reason : null;
+        const reasonType = typeof payload.decision_reason_type === 'string' ? payload.decision_reason_type : null;
+        const agentId = typeof payload.agent_id === 'string' ? payload.agent_id : null;
+        this.addSystemMessage(
+          sessionId,
+          message || `Tool "${toolName ?? 'unknown'}" was denied.`,
+          { sdkPermissionDenied: { toolName, reason, reasonType, agentId } }
+        );
+        coworkLog('WARN', 'handleClaudeEvent', 'SDK permission_denied', { sessionId, toolName, agentId, reasonType, reason });
+        return;
+      }
+
+      // Estimated thinking-token usage (claude.ai-style accounting). Not a
+      // billed number for IDBots' proxy providers, but useful observability;
+      // the latest estimate is merged into the session usage chip.
+      if (subtype === 'thinking_tokens') {
+        const estimated = Number.isFinite(payload.estimated_tokens) ? Number(payload.estimated_tokens) : null;
+        const delta = Number.isFinite(payload.estimated_tokens_delta) ? Number(payload.estimated_tokens_delta) : null;
+        if (estimated !== null) {
+          this.thinkingTokensBySessionId.set(sessionId, estimated);
+        }
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK thinking_tokens', { sessionId, estimated, delta });
+        return;
+      }
+
+      // Session state transitions are informational for us: IDBots already
+      // infers running/idle from the message stream and permission flow, so
+      // only log them (no UI, avoids conflicting status writes).
+      if (subtype === 'session_state_changed') {
+        const state = typeof payload.state === 'string' ? payload.state : null;
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK session_state_changed', { sessionId, state });
+        return;
+      }
+
+      // File checkpoint persistence events only matter if IDBots adopts
+      // fileCheckpointingEnabled/rewindFiles (deferred). Log for diagnostics.
+      if (subtype === 'files_persisted') {
+        const count = Array.isArray(payload.files) ? payload.files.length : 0;
+        const failed = Array.isArray(payload.failed) ? payload.failed.length : 0;
+        coworkLog('DEBUG', 'handleClaudeEvent', 'SDK files_persisted (checkpointing not adopted)', { sessionId, count, failed });
         return;
       }
 
@@ -6856,6 +8337,28 @@ export class CoworkRunner extends EventEmitter {
       if (typeof payload.result === 'string' && payload.result.trim()) {
         this.persistFinalResult(sessionId, activeSession, payload.result);
         markAssistantTextOutput();
+      } else if (isEmptyTerminalSdkResult(payload)) {
+        // The SDK reported a `success` result but the final assistant message
+        // carried no usable text (empty/missing `payload.result`). This is the
+        // signature of a DeepSeek thinking turn that ended after emitting only
+        // the `[reasoning unavailable]` placeholder (or otherwise produced no
+        // handoff) — intermediate progress notes may exist, but the final
+        // synthesis is missing. `payload.result` is the SDK's authoritative
+        // final-answer text, so an empty value reliably means no final reply
+        // was produced. Flag it so the completion guard in runClaudeCodeLocal
+        // (and the sandbox completion below) does NOT falsely report the
+        // session as `completed`.
+        activeSession.emptyTerminalTurnDetected = true;
+        coworkLog(
+          'WARN',
+          'handleClaudeEvent',
+          'SDK success result carried no final reply text (empty terminal turn) — likely DeepSeek thinking-placeholder truncation; will not mark completed',
+          {
+            sessionId,
+            hasAssistantTextOutput: activeSession.hasAssistantTextOutput,
+            hasAssistantThinkingOutput: activeSession.hasAssistantThinkingOutput,
+          }
+        );
       }
 
       // Accumulate per-turn token usage into the session stats. The proxy
@@ -6869,7 +8372,12 @@ export class CoworkRunner extends EventEmitter {
         this.finalizeStreamingContent(activeSession);
         const session = this.store.getSession(sessionId);
         if (session?.status !== 'error' && session?.status !== 'completed') {
-          this.store.updateSession(sessionId, { status: 'completed' });
+          if (activeSession.emptyTerminalTurnDetected) {
+            this.reportEmptyTerminalTurn(sessionId);
+            this.store.updateSession(sessionId, { status: 'idle' });
+          } else {
+            this.store.updateSession(sessionId, { status: 'completed' });
+          }
           this.applyTurnMemoryUpdatesForSession(sessionId);
           this.emit('complete', sessionId, activeSession.claudeSessionId);
         }
@@ -7009,6 +8517,14 @@ export class CoworkRunner extends EventEmitter {
       const blockType = String(record.type ?? '');
 
       if (blockType === 'thinking' && typeof record.thinking === 'string' && record.thinking.trim()) {
+        // Skip the DeepSeek `[reasoning unavailable]` placeholder: it is an
+        // injected request-history sentinel (coworkOpenAICompatProxy) that can
+        // round-trip back as thinking content, not real reasoning. Persisting
+        // it pollutes the conversation (one failure session accumulated 24 such
+        // messages) and confuses downstream reply extraction.
+        if (record.thinking.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER) {
+          continue;
+        }
         if (hasStreamedThinking || hadPendingThinkingStreaming) {
           continue;
         }
@@ -7092,9 +8608,15 @@ export class CoworkRunner extends EventEmitter {
       if (blockType === 'thinking') {
         // Start a new thinking message for streaming
         const initialThinkingRaw = typeof contentBlock.thinking === 'string' ? contentBlock.thinking : '';
-        const initialThinking = this.truncateLargeContent(initialThinkingRaw, STREAMING_THINKING_MAX_CHARS);
+        // Drop the DeepSeek `[reasoning unavailable]` placeholder sentinel at
+        // the block boundary too — see the thinking_delta guard below and the
+        // result-event thinking-block guard for the full rationale.
+        const sanitizedInitialRaw = initialThinkingRaw.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER
+          ? ''
+          : initialThinkingRaw;
+        const initialThinking = this.truncateLargeContent(sanitizedInitialRaw, STREAMING_THINKING_MAX_CHARS);
         activeSession.currentStreamingThinking = initialThinking;
-        activeSession.currentStreamingThinkingTruncated = initialThinking.length < initialThinkingRaw.length;
+        activeSession.currentStreamingThinkingTruncated = initialThinking.length < sanitizedInitialRaw.length;
         activeSession.lastStreamingThinkingUpdateAt = 0;
         activeSession.currentStreamingBlockType = 'thinking';
 
@@ -7148,6 +8670,13 @@ export class CoworkRunner extends EventEmitter {
 
       if (deltaType === 'thinking_delta' && typeof delta.thinking === 'string') {
         if (delta.thinking.length === 0) return;
+        // Skip the DeepSeek `[reasoning unavailable]` placeholder sentinel — it
+        // is not real reasoning (see the result-event thinking-block guard
+        // above for the full rationale) and persisting/streaming it only
+        // pollutes the conversation.
+        if (delta.thinking.trim() === DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER) {
+          return;
+        }
         const next = this.appendStreamingDelta(
           activeSession.currentStreamingThinking,
           delta.thinking,
@@ -7672,20 +9201,40 @@ export class CoworkRunner extends EventEmitter {
     this.emit('message', sessionId, message);
   }
 
-  private addSystemMessage(sessionId: string, content: string): void {
+  private addSystemMessage(sessionId: string, content: string, metadata?: Record<string, unknown>): void {
     const session = this.store.getSession(sessionId);
     const lastMessage = session?.messages[session.messages.length - 1];
+    const metadataJson = metadata ? JSON.stringify(metadata) : null;
     if (
       lastMessage?.type === 'system'
       && lastMessage.content.trim() === content.trim()
+      && (metadataJson === null || JSON.stringify(lastMessage.metadata ?? {}) === metadataJson)
     ) {
       return;
     }
     const message = this.store.addMessage(sessionId, {
       type: 'system',
       content,
+      ...(metadata ? { metadata } : {}),
     });
     this.emit('message', sessionId, message);
+  }
+
+  /**
+   * Surface a clear explanation when a turn ended without producing a final
+   * reply (the SDK reported success but the terminal assistant message had no
+   * usable text — the DeepSeek thinking-placeholder truncation signature).
+   *
+   * The session is left `idle` (not `completed`) by the caller so the task
+   * list stops falsely showing "done"; this message tells the user why and how
+   * to continue. Earlier tool work in the session is preserved.
+   *
+   * Sends empty content + an `emptyTerminalTurn: true` metadata flag, mirroring
+   * the sdkConversationReset pattern: the renderer renders the localized text
+   * via i18n key `coworkEmptyTerminalTurn` so it always follows the UI language.
+   */
+  private reportEmptyTerminalTurn(sessionId: string): void {
+    this.addSystemMessage(sessionId, '', { emptyTerminalTurn: true });
   }
 
   private findAttachmentsOutsideCwd(prompt: string, cwd: string): string[] {

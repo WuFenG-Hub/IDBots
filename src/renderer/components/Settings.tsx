@@ -8,8 +8,9 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, EnvelopeIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
+import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
 import { setAvailableModels } from '../store/slices/modelSlice';
 import { RootState } from '../store';
@@ -19,18 +20,24 @@ import type {
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
   CoworkMemoryPolicy,
+  CoworkMemoryScopesOverview,
+  CoworkMetaIDContactSummary,
+  CoworkMetaIDContactDetail,
   CoworkSandboxProgress,
   CoworkSandboxStatus,
   CoworkSessionSummary,
 } from '../types/cowork';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
+import MetaIDContactPanel from './settings/MetaIDContactPanel';
 import SkillMcpManager from './skills/SkillMcpManager';
+import ProjectsManager from './projects/ProjectsManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
+import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 
-type TabType = 'user' | 'general' | 'model' | 'skills' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -40,6 +47,9 @@ export type SettingsOpenOptions = {
 interface SettingsProps extends SettingsOpenOptions {
   onClose: () => void;
 }
+
+/** Archived Chats panel page size (Settings). */
+const ARCHIVED_CHATS_PAGE_SIZE = 20;
 
 const formatLocalDateInput = (date: Date): string => {
   const year = date.getFullYear();
@@ -60,17 +70,21 @@ const providerKeys = [
   'xiaomi',
   'openrouter',
   'ollama',
+  'opencode',
 ] as const;
 
 type ProviderType = (typeof providerKeys)[number];
 type ProvidersConfig = NonNullable<AppConfig['providers']>;
-type ProviderConfig = ProvidersConfig[string];
+// name 字段来自 AppConfig.providers 的 index signature（自定义供应商显示名），
+// 命名的内置供应商成员类型不含该字段，这里显式补上以便统一访问。
+type ProviderConfig = ProvidersConfig[string] & { name?: string };
 type Model = NonNullable<ProviderConfig['models']>[number];
 type MemoryMetabotOption = {
   id: number;
   name: string;
   avatar: string | null;
   metabot_type: string;
+  globalmetaid: string | null;
 };
 type MetabotMemoryPolicyDraft = Pick<
   CoworkMemoryPolicy,
@@ -80,13 +94,17 @@ type MetabotMemoryPolicyDraft = Pick<
   | 'memoryGuardLevel'
   | 'memoryUserMemoriesMaxItems'
 >;
+/** Usage classes a user may assign manually. `self_identity` is dream-protected. */
+type CoworkMemoryEditableUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
 
 interface ProviderExportEntry {
   enabled: boolean;
   apiKey: PasswordEncryptedPayload;
   baseUrl: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
   models?: Model[];
+  /** 自定义供应商显示名称，内置供应商无此字段 */
+  name?: string;
 }
 
 interface ProvidersExportPayload {
@@ -107,8 +125,10 @@ interface ProvidersImportEntry {
   apiKeyEncrypted?: string;
   apiKeyIv?: string;
   baseUrl?: string;
-  apiFormat?: 'anthropic' | 'openai' | 'native';
+  apiFormat?: 'anthropic' | 'openai' | 'responses' | 'native';
   models?: Model[];
+  /** 自定义供应商显示名称，内置供应商无此字段 */
+  name?: string;
 }
 
 interface ProvidersImportPayload {
@@ -189,6 +209,10 @@ const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode 
       <svg fill="currentColor" fillRule="evenodd" height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>Ollama</title><path d="M7.905 1.09c.216.085.411.225.588.41.295.306.544.744.734 1.263.191.522.315 1.1.362 1.68a5.054 5.054 0 012.049-.636l.051-.004c.87-.07 1.73.087 2.48.474.101.053.2.11.297.17.05-.569.172-1.134.36-1.644.19-.52.439-.957.733-1.264a1.67 1.67 0 01.589-.41c.257-.1.53-.118.796-.042.401.114.745.368 1.016.737.248.337.434.769.561 1.287.23.934.27 2.163.115 3.645l.053.04.026.019c.757.576 1.284 1.397 1.563 2.35.435 1.487.216 3.155-.534 4.088l-.018.021.002.003c.417.762.67 1.567.724 2.4l.002.03c.064 1.065-.2 2.137-.814 3.19l-.007.01.01.024c.472 1.157.62 2.322.438 3.486l-.006.039a.651.651 0 01-.747.536.648.648 0 01-.54-.742c.167-1.033.01-2.069-.48-3.123a.643.643 0 01.04-.617l.004-.006c.604-.924.854-1.83.8-2.72-.046-.779-.325-1.544-.8-2.273a.644.644 0 01.18-.886l.009-.006c.243-.159.467-.565.58-1.12a4.229 4.229 0 00-.095-1.974c-.205-.7-.58-1.284-1.105-1.683-.595-.454-1.383-.673-2.38-.61a.653.653 0 01-.632-.371c-.314-.665-.772-1.141-1.343-1.436a3.288 3.288 0 00-1.772-.332c-1.245.099-2.343.801-2.67 1.686a.652.652 0 01-.61.425c-1.067.002-1.893.252-2.497.703-.522.39-.878.935-1.066 1.588a4.07 4.07 0 00-.068 1.886c.112.558.331 1.02.582 1.269l.008.007c.212.207.257.53.109.785-.36.622-.629 1.549-.673 2.44-.05 1.018.186 1.902.719 2.536l.016.019a.643.643 0 01.095.69c-.576 1.236-.753 2.252-.562 3.052a.652.652 0 01-1.269.298c-.243-1.018-.078-2.184.473-3.498l.014-.035-.008-.012a4.339 4.339 0 01-.598-1.309l-.005-.019a5.764 5.764 0 01-.177-1.785c.044-.91.278-1.842.622-2.59l.012-.026-.002-.002c-.293-.418-.51-.953-.63-1.545l-.005-.024a5.352 5.352 0 01.093-2.49c.262-.915.777-1.701 1.536-2.269.06-.045.123-.09.186-.132-.159-1.493-.119-2.73.112-3.67.127-.518.314-.95.562-1.287.27-.368.614-.622 1.015-.737.266-.076.54-.059.797.042zm4.116 9.09c.936 0 1.8.313 2.446.855.63.527 1.005 1.235 1.005 1.94 0 .888-.406 1.58-1.133 2.022-.62.375-1.451.557-2.403.557-1.009 0-1.871-.259-2.493-.734-.617-.47-.963-1.13-.963-1.845 0-.707.398-1.417 1.056-1.946.668-.537 1.55-.849 2.485-.849zm0 .896a3.07 3.07 0 00-1.916.65c-.461.37-.722.835-.722 1.25 0 .428.21.829.61 1.134.455.347 1.124.548 1.943.548.799 0 1.473-.147 1.932-.426.463-.28.7-.686.7-1.257 0-.423-.246-.89-.683-1.256-.484-.405-1.14-.643-1.864-.643zm.662 1.21l.004.004c.12.151.095.37-.056.49l-.292.23v.446a.375.375 0 01-.376.373.375.375 0 01-.376-.373v-.46l-.271-.218a.347.347 0 01-.052-.49.353.353 0 01.494-.051l.215.172.22-.174a.353.353 0 01.49.051zm-5.04-1.919c.478 0 .867.39.867.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zm8.706 0c.48 0 .868.39.868.871a.87.87 0 01-.868.871.87.87 0 01-.867-.87.87.87 0 01.867-.872zM7.44 2.3l-.003.002a.659.659 0 00-.285.238l-.005.006c-.138.189-.258.467-.348.832-.17.692-.216 1.631-.124 2.782.43-.128.899-.208 1.404-.237l.01-.001.019-.034c.046-.082.095-.161.148-.239.123-.771.022-1.692-.253-2.444-.134-.364-.297-.65-.453-.813a.628.628 0 00-.107-.09L7.44 2.3zm9.174.04l-.002.001a.628.628 0 00-.107.09c-.156.163-.32.45-.453.814-.29.794-.387 1.776-.23 2.572l.058.097.008.014h.03a5.184 5.184 0 011.466.212c.086-1.124.038-2.043-.128-2.722-.09-.365-.21-.643-.349-.832l-.004-.006a.659.659 0 00-.285-.239h-.004z"></path></svg>
     ),
   },
+  opencode: {
+    label: 'OpenCode',
+    icon: <OpenCodeIcon />,
+  },
 };
 
 const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropic: string; openai: string }>> = {
@@ -224,13 +248,21 @@ const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropi
     anthropic: 'http://localhost:11434',
     openai: 'http://localhost:11434/v1',
   },
+  opencode: {
+    // OpenCode Go 网关：三个端点共用同一 Base URL（https://opencode.ai/docs/zh-cn/go）
+    anthropic: 'https://opencode.ai/zen/go/v1',
+    openai: 'https://opencode.ai/zen/go/v1',
+  },
 };
 
 const providerRequiresApiKey = (provider: ProviderType) => provider !== 'ollama';
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.trim().replace(/\/+$/, '').toLowerCase();
-const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' => (
-  value === 'openai' ? 'openai' : 'anthropic'
-);
+const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses' => {
+  if (value === 'responses') {
+    return 'responses';
+  }
+  return value === 'openai' ? 'openai' : 'anthropic';
+};
 const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' | null => {
   if (provider === 'openai' || provider === 'gemini') {
     return 'openai';
@@ -240,7 +272,7 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   }
   return null;
 };
-const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' => (
+const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => (
   getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value)
 );
 const shouldShowApiFormatSelector = (provider: string): boolean => (
@@ -248,8 +280,11 @@ const shouldShowApiFormatSelector = (provider: string): boolean => (
 );
 const getProviderDefaultBaseUrl = (
   provider: ProviderType,
-  apiFormat: 'anthropic' | 'openai'
+  apiFormat: 'anthropic' | 'openai' | 'responses'
 ): string | null => {
+  if (apiFormat === 'responses') {
+    return null;
+  }
   const defaults = providerSwitchableDefaultBaseUrls[provider];
   return defaults ? defaults[apiFormat] : null;
 };
@@ -351,6 +386,44 @@ const getDefaultActiveProvider = (): ProviderType => {
   return firstEnabledProvider ?? providerKeys[0];
 };
 
+// --- 自定义供应商辅助 ---
+// 自定义供应商由用户通过"添加供应商"创建，key 形如 custom-<slug>，
+// 不在 providerKeys / providerMeta 内置注册表内，显示名存于配置的 name 字段。
+const isCustomProviderKey = (key: string): boolean => (
+  !(providerKeys as readonly string[]).includes(key)
+);
+
+const getProviderDisplayLabel = (key: ProviderType, config?: ProviderConfig): string => {
+  if (isCustomProviderKey(key)) {
+    return config?.name?.trim() || key.charAt(0).toUpperCase() + key.slice(1);
+  }
+  return providerMeta[key]?.label ?? key;
+};
+
+const getProviderIcon = (key: ProviderType): React.ReactNode => {
+  if (isCustomProviderKey(key)) {
+    return <CustomProviderIcon />;
+  }
+  return providerMeta[key]?.icon;
+};
+
+const generateCustomProviderKey = (name: string, existingKeys: string[]): string => {
+  const slug = name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32);
+  const base = slug ? `custom-${slug}` : 'custom-provider';
+  let candidate = base;
+  let suffix = 2;
+  while (existingKeys.includes(candidate)) {
+    candidate = `${base}-${suffix}`;
+    suffix += 1;
+  }
+  return candidate;
+};
+
 const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const dispatch = useDispatch();
   // 状态
@@ -432,6 +505,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [newModelSupportsImage, setNewModelSupportsImage] = useState(false);
   const [modelFormError, setModelFormError] = useState<string | null>(null);
 
+  // State for the custom provider add dialog
+  const [isAddingCustomProvider, setIsAddingCustomProvider] = useState(false);
+  const [customProviderName, setCustomProviderName] = useState('');
+  const [customProviderBaseUrl, setCustomProviderBaseUrl] = useState('');
+  const [customProviderApiKey, setCustomProviderApiKey] = useState('');
+  const [customProviderApiFormat, setCustomProviderApiFormat] = useState<'anthropic' | 'openai' | 'responses'>('anthropic');
+  const [customProviderModels, setCustomProviderModels] = useState<Model[]>([]);
+  const [customModelName, setCustomModelName] = useState('');
+  const [customModelId, setCustomModelId] = useState('');
+  const [customProviderError, setCustomProviderError] = useState<string | null>(null);
+
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
 
@@ -457,6 +541,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [coworkMemoryEditingId, setCoworkMemoryEditingId] = useState<string | null>(null);
   const [coworkMemoryDraftText, setCoworkMemoryDraftText] = useState<string>('');
   const [showMemoryModal, setShowMemoryModal] = useState<boolean>(false);
+  const [coworkMemoryScopes, setCoworkMemoryScopes] = useState<CoworkMemoryScopesOverview | null>(null);
+  const [coworkMemorySelectedScope, setCoworkMemorySelectedScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string }>({ kind: 'owner', key: 'owner:self' });
+  const [coworkMemoryContacts, setCoworkMemoryContacts] = useState<CoworkMetaIDContactSummary[]>([]);
+  const [coworkMemoryContactDetail, setCoworkMemoryContactDetail] = useState<CoworkMetaIDContactDetail | null>(null);
+  const [coworkMemoryContactDetailLoading, setCoworkMemoryContactDetailLoading] = useState<boolean>(false);
+  const [coworkMemoryDraftScope, setCoworkMemoryDraftScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string } | null>(null);
+  const [coworkMemoryDraftUsageClass, setCoworkMemoryDraftUsageClass] = useState<CoworkMemoryEditableUsageClass>('profile_fact');
+  const [coworkMemoryDraftVisibility, setCoworkMemoryDraftVisibility] = useState<'local_only' | 'external_safe'>('local_only');
   const [coworkSandboxStatus, setCoworkSandboxStatus] = useState<CoworkSandboxStatus | null>(null);
   const [coworkSandboxLoading, setCoworkSandboxLoading] = useState(true);
   const [coworkSandboxProgress, setCoworkSandboxProgress] = useState<CoworkSandboxProgress | null>(null);
@@ -466,7 +558,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [archivedChats, setArchivedChats] = useState<CoworkSessionSummary[]>([]);
   const [archivedChatsLoading, setArchivedChatsLoading] = useState<boolean>(false);
   const [archivedChatsQuery, setArchivedChatsQuery] = useState<string>('');
+  const [archivedChatsSearchContent, setArchivedChatsSearchContent] = useState<boolean>(false);
   const [archivedChatsMetabotId, setArchivedChatsMetabotId] = useState<number | null>(null);
+  const [archivedChatsPage, setArchivedChatsPage] = useState<number>(0);
+  const [archivedChatsTotal, setArchivedChatsTotal] = useState<number>(0);
   const [archivedChatsNotice, setArchivedChatsNotice] = useState<string | null>(null);
 
   // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
@@ -482,7 +577,26 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     createdAt: number;
     updatedAt: number;
   };
+  // Run rows power the failure fallback entries. They are read straight from
+  // metabot_dream_runs — the same table the scheduler's computeDueDreamDates
+  // uses as its only due/idle anchor — and are never written anywhere, so
+  // displaying a failed entry cannot mark the date as done or make the
+  // auto-heal retry skip it.
+  type DreamDiaryRun = {
+    id: string;
+    metabotId: number;
+    dreamDate: string;
+    status: 'running' | 'completed' | 'failed';
+    attemptCount: number;
+    llmId: string | null;
+    dreamVersion: number;
+    error: string | null;
+    startedAt: number;
+    completedAt: number | null;
+    nextRetryAt: number | null;
+  };
   const [dreamDiarySummaries, setDreamDiarySummaries] = useState<DreamDiarySummary[]>([]);
+  const [dreamDiaryRuns, setDreamDiaryRuns] = useState<DreamDiaryRun[]>([]);
   const [dreamDiaryLoading, setDreamDiaryLoading] = useState<boolean>(false);
   const [dreamDiaryMetabotId, setDreamDiaryMetabotId] = useState<number | null>(null);
   const [dreamDiaryExpandedId, setDreamDiaryExpandedId] = useState<string | null>(null);
@@ -730,7 +844,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     return unsubscribe;
   }, []);
 
-  // All LLM providers shown uniformly (no language filtering per SDD)
+  // All LLM providers shown uniformly (no language filtering per SDD),
+  // plus user-created custom providers (keys outside the built-in registry).
   const visibleProviders = useMemo(() => {
     const visibleKeys = getVisibleProviders(language);
     const filtered: Partial<ProvidersConfig> = {};
@@ -738,6 +853,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       if (providers[key as keyof ProvidersConfig]) {
         filtered[key as keyof ProvidersConfig] = providers[key as keyof ProvidersConfig];
       }
+    }
+    for (const key of Object.keys(providers)) {
+      if (visibleKeys.includes(key)) {
+        continue;
+      }
+      filtered[key as keyof ProvidersConfig] = providers[key as keyof ProvidersConfig];
     }
     return filtered as ProvidersConfig;
   }, [language, providers]);
@@ -943,9 +1064,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const [entries, stats] = await Promise.all([
         coworkService.listMemoryEntries({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
           query: coworkMemoryQuery.trim() || undefined,
         }),
-        coworkService.getMemoryStats({ metabotId: coworkMemoryMetabotId }),
+        coworkService.getMemoryStats({
+          metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
+        }),
       ]);
       setCoworkMemoryEntries(entries);
       setCoworkMemoryStats(stats);
@@ -959,18 +1086,92 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   }, [
     coworkMemoryQuery,
     coworkMemoryMetabotId,
+    coworkMemorySelectedScope.kind,
+    coworkMemorySelectedScope.key,
   ]);
+
+  const loadCoworkMemoryScopes = useCallback(async (metabotId: number | null) => {
+    if (metabotId == null) {
+      setCoworkMemoryScopes(null);
+      return;
+    }
+    try {
+      const overview = await coworkService.listMemoryScopes({ metabotId });
+      setCoworkMemoryScopes(overview);
+      setCoworkMemorySelectedScope((current) => {
+        if (!overview) return current;
+        const stillExists = (overview.owner?.key === current.key)
+          || overview.contacts.some((scope) => scope.key === current.key)
+          || overview.conversations.some((scope) => scope.key === current.key);
+        if (stillExists) return current;
+        return { kind: 'owner', key: overview.owner?.key ?? 'owner:self' };
+      });
+    } catch (loadError) {
+      console.error('Failed to load cowork memory scopes:', loadError);
+      setCoworkMemoryScopes(null);
+    }
+  }, []);
+
+  const loadCoworkMemoryContacts = useCallback(async (metabotId: number | null) => {
+    if (metabotId == null) {
+      setCoworkMemoryContacts([]);
+      return;
+    }
+    try {
+      const observer = coworkMemoryMetabots.find((metabot) => metabot.id === metabotId);
+      const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
+      if (!observerGlobalMetaId) {
+        setCoworkMemoryContacts([]);
+        return;
+      }
+      const contacts = await coworkService.listMetaIDContacts({ observerGlobalMetaId });
+      setCoworkMemoryContacts(contacts);
+    } catch (loadError) {
+      console.error('Failed to load MetaID contacts:', loadError);
+      setCoworkMemoryContacts([]);
+    }
+  }, [coworkMemoryMetabots]);
+
+  const loadCoworkMemoryContactDetail = useCallback(async (observerGlobalMetaId: string | null, subjectGlobalMetaId: string | null) => {
+    if (!observerGlobalMetaId || !subjectGlobalMetaId) {
+      setCoworkMemoryContactDetail(null);
+      return;
+    }
+    setCoworkMemoryContactDetailLoading(true);
+    try {
+      const detail = await coworkService.getMetaIDContactDetail({
+        observerGlobalMetaId,
+        subjectGlobalMetaId,
+      });
+      setCoworkMemoryContactDetail(detail);
+    } catch (loadError) {
+      console.error('Failed to load MetaID contact detail:', loadError);
+      setCoworkMemoryContactDetail(null);
+    } finally {
+      setCoworkMemoryContactDetailLoading(false);
+    }
+  }, []);
 
   const loadCoworkMemoryMetabots = useCallback(async () => {
     try {
-      const result = await window.electron?.idbots?.getMetaBots();
+      // `metabot:list` carries `globalmetaid`, which the ID-anchored contact
+      // view needs to resolve the observer bot's on-chain identity.
+      const result = await window.electron?.metabot?.list();
       const list = result?.success && Array.isArray(result.list)
-        ? result.list.filter((item): item is MemoryMetabotOption => (
+        ? result.list
+          .filter((item) => (
             typeof item?.id === 'number'
             && Number.isFinite(item.id)
             && item.id > 0
             && typeof item?.name === 'string'
           ))
+          .map((item) => ({
+            id: item.id,
+            name: item.name,
+            avatar: item.avatar ?? null,
+            metabot_type: item.metabot_type === 'worker' ? 'worker' : 'twin',
+            globalmetaid: item.globalmetaid ?? null,
+          }))
         : [];
       setCoworkMemoryMetabots(list);
       setCoworkMemoryMetabotId((current) => {
@@ -1007,22 +1208,65 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     void loadCoworkMemoryData();
   }, [activeTab, loadCoworkMemoryData]);
 
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    void loadCoworkMemoryScopes(coworkMemoryMetabotId);
+  }, [activeTab, loadCoworkMemoryScopes, coworkMemoryMetabotId]);
+
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    void loadCoworkMemoryContacts(coworkMemoryMetabotId);
+  }, [activeTab, loadCoworkMemoryContacts, coworkMemoryMetabotId]);
+
+  // Load the ID-anchored contact detail (impression + events) whenever a
+  // contact scope is selected.
+  useEffect(() => {
+    if (activeTab !== 'coworkMemory') return;
+    if (coworkMemorySelectedScope.kind !== 'contact') {
+      setCoworkMemoryContactDetail(null);
+      return;
+    }
+    const observer = coworkMemoryMetabots.find((metabot) => metabot.id === coworkMemoryMetabotId);
+    const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
+    const subjectGlobalMetaId = coworkMemoryContacts.find((contact) =>
+      contact.globalMetaID === coworkMemorySelectedScope.key.split(':peer:').pop(),
+    )?.globalMetaID
+      ?? coworkMemorySelectedScope.key.split(':peer:').pop()
+      ?? null;
+    void loadCoworkMemoryContactDetail(observerGlobalMetaId, subjectGlobalMetaId);
+  }, [
+    activeTab,
+    coworkMemorySelectedScope,
+    coworkMemoryMetabotId,
+    coworkMemoryMetabots,
+    coworkMemoryContacts,
+    loadCoworkMemoryContactDetail,
+  ]);
+
   const loadArchivedChats = useCallback(async () => {
     setArchivedChatsLoading(true);
     try {
       const result = await window.electron?.cowork?.listArchivedSessions({
         metabotId: archivedChatsMetabotId,
         query: archivedChatsQuery.trim() || undefined,
-        limit: 100,
+        searchContent: archivedChatsSearchContent || undefined,
+        limit: ARCHIVED_CHATS_PAGE_SIZE,
+        offset: archivedChatsPage * ARCHIVED_CHATS_PAGE_SIZE,
       });
       setArchivedChats(result?.success && Array.isArray(result.sessions) ? result.sessions : []);
+      setArchivedChatsTotal(result?.success && typeof result.total === 'number' ? result.total : 0);
     } catch (loadError) {
       console.error('Failed to load archived chats:', loadError);
       setArchivedChats([]);
     } finally {
       setArchivedChatsLoading(false);
     }
-  }, [archivedChatsQuery, archivedChatsMetabotId]);
+  }, [archivedChatsQuery, archivedChatsMetabotId, archivedChatsSearchContent, archivedChatsPage]);
+
+  // Jump back to the first page whenever a filter (bot, query or content toggle) changes.
+  useEffect(() => {
+    setArchivedChatsPage(0);
+  }, [archivedChatsQuery, archivedChatsMetabotId, archivedChatsSearchContent]);
 
   useEffect(() => {
     if (activeTab !== 'archivedChats') return;
@@ -1042,7 +1286,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     try {
       const result = await window.electron?.cowork?.unarchiveSession(sessionId);
       if (result?.success) {
-        setArchivedChats((current) => current.filter((session) => session.id !== sessionId));
+        const remaining = archivedChats.filter((session) => session.id !== sessionId);
+        setArchivedChats(remaining);
+        if (remaining.length === 0 && archivedChatsPage > 0) {
+          setArchivedChatsPage((page) => Math.max(0, page - 1));
+        }
         setArchivedChatsNotice(i18nService.t('archivedChatsRestored'));
       }
     } catch (unarchiveError) {
@@ -1063,33 +1311,60 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const loadDreamDiary = useCallback(async () => {
     if (dreamDiaryMetabotId == null) {
       setDreamDiarySummaries([]);
+      setDreamDiaryRuns([]);
       return;
     }
     setDreamDiaryLoading(true);
     try {
-      const result = await window.electron?.dream?.listDailySummaries({
-        metabotId: dreamDiaryMetabotId,
-        limit: 60,
-      });
+      const [summariesResult, runsResult] = await Promise.all([
+        window.electron?.dream?.listDailySummaries({
+          metabotId: dreamDiaryMetabotId,
+          limit: 60,
+        }),
+        window.electron?.dream?.listRuns({
+          metabotId: dreamDiaryMetabotId,
+          limit: 60,
+        }),
+      ]);
       setDreamDiarySummaries(
-        (result?.success && Array.isArray(result.summaries) ? result.summaries : []) as DreamDiarySummary[]
+        (summariesResult?.success && Array.isArray(summariesResult.summaries) ? summariesResult.summaries : []) as DreamDiarySummary[]
+      );
+      setDreamDiaryRuns(
+        (runsResult?.success && Array.isArray(runsResult.runs) ? runsResult.runs : []) as DreamDiaryRun[]
       );
     } catch (loadError) {
       console.error('Failed to load dream diary:', loadError);
       setDreamDiarySummaries([]);
+      setDreamDiaryRuns([]);
     } finally {
       setDreamDiaryLoading(false);
     }
   }, [dreamDiaryMetabotId]);
 
-  const handleForceDream = async () => {
-    if (dreamDiaryMetabotId == null || !dreamDiaryRunDate || dreamDiaryRunning) return;
+  // Failed runs for dates that have no summary become fallback entries, merged
+  // newest-first with the summaries. Read-only view of the runs table — the
+  // auto-heal scheduler keys off run status (failed → retry after backoff),
+  // never off this list, so these entries cannot suppress a re-dream.
+  const dreamDiaryEntries: Array<
+    | { kind: 'summary'; date: string; summary: DreamDiarySummary }
+    | { kind: 'failed'; date: string; run: DreamDiaryRun }
+  > = [
+    ...dreamDiarySummaries.map((summary) => ({ kind: 'summary' as const, date: summary.summaryDate, summary })),
+    ...dreamDiaryRuns
+      .filter((run) => run.status === 'failed')
+      .filter((run) => !dreamDiarySummaries.some((summary) => summary.summaryDate === run.dreamDate))
+      .map((run) => ({ kind: 'failed' as const, date: run.dreamDate, run })),
+  ].sort((a, b) => b.date.localeCompare(a.date));
+
+  const handleForceDream = async (dateOverride?: string) => {
+    const targetDate = dateOverride ?? dreamDiaryRunDate;
+    if (dreamDiaryMetabotId == null || !targetDate || dreamDiaryRunning) return;
     setDreamDiaryRunning(true);
     setDreamDiaryNotice(null);
     try {
       const result = await window.electron?.dream?.runNow({
         metabotId: dreamDiaryMetabotId,
-        date: dreamDiaryRunDate,
+        date: targetDate,
       });
       if (!result?.success) {
         throw new Error(result?.error || i18nService.t('dreamDiaryForceFailed'));
@@ -1098,8 +1373,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${result.run.error || i18nService.t('dreamDiaryForceFailed')}`);
       } else {
         setDreamDiaryNotice(i18nService.t('dreamDiaryForceCompleted'));
-        await loadDreamDiary();
       }
+      await loadDreamDiary();
     } catch (runError) {
       console.error('Failed to force dream:', runError);
       setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
@@ -1129,12 +1404,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const resetCoworkMemoryEditor = () => {
     setCoworkMemoryEditingId(null);
     setCoworkMemoryDraftText('');
+    setCoworkMemoryDraftScope(null);
+    setCoworkMemoryDraftUsageClass('profile_fact');
+    setCoworkMemoryDraftVisibility('local_only');
     setShowMemoryModal(false);
   };
 
   useEffect(() => {
     setCoworkMemoryEditingId(null);
     setCoworkMemoryDraftText('');
+    setCoworkMemoryDraftScope(null);
+    setCoworkMemoryDraftUsageClass('profile_fact');
+    setCoworkMemoryDraftVisibility('local_only');
     setShowMemoryModal(false);
   }, [coworkMemoryMetabotId]);
 
@@ -1148,20 +1429,30 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       if (coworkMemoryEditingId) {
         await coworkService.updateMemoryEntry({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: coworkMemorySelectedScope.kind,
+          scopeKey: coworkMemorySelectedScope.key,
+          usageClass: coworkMemoryDraftUsageClass,
+          visibility: coworkMemoryDraftVisibility,
           id: coworkMemoryEditingId,
           text,
           status: 'created',
           isExplicit: true,
         });
       } else {
+        const draftScope = coworkMemoryDraftScope ?? { kind: 'owner', key: 'owner:self' };
         await coworkService.createMemoryEntry({
           metabotId: coworkMemoryMetabotId,
+          scopeKind: draftScope.kind,
+          scopeKey: draftScope.key,
+          usageClass: coworkMemoryDraftUsageClass,
+          visibility: coworkMemoryDraftVisibility,
           text,
           isExplicit: true,
         });
       }
       resetCoworkMemoryEditor();
       await loadCoworkMemoryData();
+      await loadCoworkMemoryScopes(coworkMemoryMetabotId);
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : i18nService.t('coworkMemoryCrudSaveFailed'));
     } finally {
@@ -1172,6 +1463,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const handleEditCoworkMemoryEntry = (entry: CoworkUserMemoryEntry) => {
     setCoworkMemoryEditingId(entry.id);
     setCoworkMemoryDraftText(entry.text);
+    setCoworkMemoryDraftScope(entry.scopeKind && entry.scopeKey
+      ? { kind: entry.scopeKind, key: entry.scopeKey }
+      : null);
+    setCoworkMemoryDraftUsageClass(entry.usageClass === 'operational_preference'
+      || entry.usageClass === 'work_review'
+      || entry.usageClass === 'value_boundary'
+      || entry.usageClass === 'preference'
+      ? entry.usageClass
+      : 'profile_fact');
+    setCoworkMemoryDraftVisibility(entry.visibility === 'external_safe' ? 'external_safe' : 'local_only');
     setShowMemoryModal(true);
   };
 
@@ -1206,9 +1507,41 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  const getMemoryScopeLabel = (scope: { kind: 'owner' | 'contact' | 'conversation'; key: string }, overview: CoworkMemoryScopesOverview | null): string => {
+    if (scope.kind === 'owner') return i18nService.t('coworkMemoryScopeOwner');
+    const summary = (overview?.contacts ?? []).find((item) => item.key === scope.key)
+      ?? (overview?.conversations ?? []).find((item) => item.key === scope.key);
+    if (summary?.kind === 'contact') {
+      const peerName = summary.peerName?.trim() || summary.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+      return `${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`;
+    }
+    if (summary) {
+      const shortKey = scope.key.length > 32 ? `${scope.key.slice(0, 29)}...` : scope.key;
+      return `${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`;
+    }
+    return scope.kind === 'conversation' ? i18nService.t('coworkMemoryScopeConversation') : i18nService.t('coworkMemoryScopeContact');
+  };
+
+  const getMemoryUsageClassLabel = (usageClass?: CoworkUserMemoryEntry['usageClass']): string | null => {
+    if (usageClass === 'self_identity') return i18nService.t('coworkMemorySelfIdentity');
+    if (usageClass === 'profile_fact') return i18nService.t('coworkMemoryUsageProfileFact');
+    if (usageClass === 'preference') return i18nService.t('coworkMemoryUsagePreference');
+    if (usageClass === 'operational_preference') return i18nService.t('coworkMemoryUsageOperationalPreference');
+    if (usageClass === 'work_review') return i18nService.t('coworkMemoryUsageWorkReview');
+    if (usageClass === 'value_boundary') return i18nService.t('coworkMemoryUsageValueBoundary');
+    return null;
+  };
+
+  const getMemoryVisibilityLabel = (visibility?: CoworkUserMemoryEntry['visibility']): string => {
+    return visibility === 'external_safe'
+      ? i18nService.t('coworkMemoryVisibilityExternalSafe')
+      : i18nService.t('coworkMemoryVisibilityLocalOnly');
+  };
+
   const handleOpenCoworkMemoryModal = () => {
     if (coworkMemoryMetabotId == null) return;
     resetCoworkMemoryEditor();
+    setCoworkMemoryDraftScope({ ...coworkMemorySelectedScope });
     setShowMemoryModal(true);
   };
 
@@ -1281,7 +1614,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       });
 
       // 更新 Redux store 中的可用模型列表
-      const allModels: { id: string; name: string; provider?: string; supportsImage?: boolean; options?: AppConfig['model']['availableModels'][number]['options'] }[] = [];
+      const allModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: AppConfig['model']['availableModels'][number]['options'] }[] = [];
       Object.entries(normalizedProviders).forEach(([providerName, config]) => {
         if (config.enabled && config.models) {
           config.models.forEach(model => {
@@ -1289,6 +1622,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               id: model.id,
               name: model.name,
               provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+              providerKey: providerName,
               supportsImage: model.supportsImage ?? false,
               options: model.options,
             });
@@ -1327,6 +1661,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       setNewModelId('');
       setNewModelSupportsImage(false);
       setModelFormError(null);
+      handleCancelCustomProvider();
     }
     if (tab === 'paramsConfig') {
       loadFeeRates();
@@ -1453,6 +1788,102 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  // --- 自定义供应商添加/删除 ---
+  const handleAddCustomProviderClick = () => {
+    setCustomProviderName('');
+    setCustomProviderBaseUrl('');
+    setCustomProviderApiKey('');
+    setCustomProviderApiFormat('anthropic');
+    setCustomProviderModels([]);
+    setCustomModelName('');
+    setCustomModelId('');
+    setCustomProviderError(null);
+    setIsAddingCustomProvider(true);
+  };
+
+  const handleCancelCustomProvider = () => {
+    setIsAddingCustomProvider(false);
+    setCustomProviderError(null);
+  };
+
+  const handleAddCustomModelDraft = () => {
+    const modelName = customModelName.trim();
+    const modelId = customModelId.trim();
+    if (!modelName || !modelId) {
+      setCustomProviderError(i18nService.t('modelNameAndIdRequired'));
+      return;
+    }
+    if (customProviderModels.some(model => model.id === modelId)) {
+      setCustomProviderError(i18nService.t('modelIdExists'));
+      return;
+    }
+    setCustomProviderModels(prev => [
+      ...prev,
+      { id: modelId, name: modelName, supportsImage: false },
+    ]);
+    setCustomModelName('');
+    setCustomModelId('');
+    setCustomProviderError(null);
+  };
+
+  const handleRemoveCustomModelDraft = (modelId: string) => {
+    setCustomProviderModels(prev => prev.filter(model => model.id !== modelId));
+  };
+
+  const handleAddCustomProvider = () => {
+    const name = customProviderName.trim();
+    const baseUrl = customProviderBaseUrl.trim();
+    if (!name) {
+      setCustomProviderError(i18nService.t('providerNameRequired'));
+      return;
+    }
+    if (!baseUrl) {
+      setCustomProviderError(i18nService.t('providerBaseUrlRequired'));
+      return;
+    }
+    const providerKey = generateCustomProviderKey(name, Object.keys(providers));
+    setProviders(prev => ({
+      ...prev,
+      [providerKey]: {
+        enabled: false,
+        apiKey: customProviderApiKey.trim(),
+        baseUrl,
+        apiFormat: customProviderApiFormat,
+        name,
+        models: customProviderModels.length > 0 ? customProviderModels : undefined,
+      },
+    }));
+    setTestResult(null);
+    setIsAddingCustomProvider(false);
+    setCustomProviderError(null);
+    setActiveProvider(providerKey as ProviderType);
+  };
+
+  const handleCustomProviderDialogKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      handleCancelCustomProvider();
+    }
+  };
+
+  const handleDeleteCustomProvider = (providerKey: string) => {
+    const displayName = providers[providerKey]?.name?.trim() || providerKey;
+    if (!window.confirm(i18nService.t('deleteCustomProviderConfirm').replace('{name}', displayName))) {
+      return;
+    }
+    setProviders(prev => {
+      const next = { ...prev };
+      delete next[providerKey];
+      return next;
+    });
+    setTestResult(null);
+    if (activeProvider === providerKey) {
+      const remainingKeys = Object.keys(visibleProviders).filter(key => key !== providerKey);
+      const firstEnabled = remainingKeys.find(key => visibleProviders[key]?.enabled);
+      setActiveProvider((firstEnabled ?? remainingKeys[0]) as ProviderType);
+    }
+  };
+
   // 测试 API 连接
   const handleTestConnection = async () => {
     setIsTesting(true);
@@ -1575,6 +2006,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             baseUrl: providerConfig.baseUrl,
             apiFormat: getEffectiveApiFormat(providerKey, providerConfig.apiFormat),
             models: providerConfig.models,
+            name: isCustomProviderKey(providerKey) ? (providerConfig as ProviderConfig).name : undefined,
           },
         ] as const;
       })
@@ -1678,11 +2110,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     try {
       const providerUpdates: Partial<ProvidersConfig> = {};
       let hadDecryptFailure = false;
-      for (const providerKey of providerKeys) {
+      // Built-in providers plus any custom provider keys present in the file
+      const importKeys = Array.from(new Set([
+        ...providerKeys,
+        ...Object.keys(payload.providers ?? {}).filter(key => !(providerKeys as readonly string[]).includes(key)),
+      ]));
+      for (const providerKey of importKeys) {
         const providerData = payload.providers?.[providerKey];
         if (!providerData) {
           continue;
         }
+        const existing = providers[providerKey] as ProviderConfig | undefined;
 
         let apiKey: string | undefined;
         if (typeof providerData.apiKey === 'string') {
@@ -1706,11 +2144,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         const models = normalizeModels(providerData.models);
 
         providerUpdates[providerKey] = {
-          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : providers[providerKey].enabled,
-          apiKey: apiKey ?? providers[providerKey].apiKey,
-          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : providers[providerKey].baseUrl,
-          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? providers[providerKey].apiFormat),
-          models: models ?? providers[providerKey].models,
+          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : existing?.enabled ?? false,
+          apiKey: apiKey ?? existing?.apiKey ?? '',
+          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : existing?.baseUrl ?? '',
+          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? existing?.apiFormat),
+          models: models ?? existing?.models,
+          name: typeof providerData.name === 'string' ? providerData.name : existing?.name,
         };
       }
 
@@ -1757,11 +2196,17 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const providerUpdates: Partial<ProvidersConfig> = {};
       let hadDecryptFailure = false;
 
-      for (const providerKey of providerKeys) {
+      // Built-in providers plus any custom provider keys present in the file
+      const importKeys = Array.from(new Set([
+        ...providerKeys,
+        ...Object.keys(payload.providers ?? {}).filter(key => !(providerKeys as readonly string[]).includes(key)),
+      ]));
+      for (const providerKey of importKeys) {
         const providerData = payload.providers[providerKey];
         if (!providerData) {
           continue;
         }
+        const existing = providers[providerKey] as ProviderConfig | undefined;
 
         let apiKey: string | undefined;
         if (typeof providerData.apiKey === 'string') {
@@ -1782,11 +2227,12 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         const models = normalizeModels(providerData.models);
 
         providerUpdates[providerKey] = {
-          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : providers[providerKey].enabled,
-          apiKey: apiKey ?? providers[providerKey].apiKey,
-          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : providers[providerKey].baseUrl,
-          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? providers[providerKey].apiFormat),
-          models: models ?? providers[providerKey].models,
+          enabled: typeof providerData.enabled === 'boolean' ? providerData.enabled : existing?.enabled ?? false,
+          apiKey: apiKey ?? existing?.apiKey ?? '',
+          baseUrl: typeof providerData.baseUrl === 'string' ? providerData.baseUrl : existing?.baseUrl ?? '',
+          apiFormat: getEffectiveApiFormat(providerKey, providerData.apiFormat ?? existing?.apiFormat),
+          models: models ?? existing?.models,
+          name: typeof providerData.name === 'string' ? providerData.name : existing?.name,
         };
       }
 
@@ -1839,13 +2285,14 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'general',        label: i18nService.t('general'),        icon: <Cog6ToothIcon className="h-5 w-5" /> },
     { key: 'model',          label: i18nService.t('model'),          icon: <CubeIcon className="h-5 w-5" /> },
     { key: 'skills',         label: i18nService.t('skills'),         icon: <PuzzlePieceIcon className="h-5 w-5" /> },
+    { key: 'projects',       label: i18nService.t('projectsTab'),    icon: <BriefcaseIcon className="h-5 w-5" /> },
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
-    { key: 'email',          label: i18nService.t('emailTab'),       icon: <EnvelopeIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
     { key: 'dreamDiary',     label: i18nService.t('dreamDiaryTab'),     icon: <MoonIcon className="h-5 w-5" /> },
     { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
+    { key: 'traffic',         label: i18nService.t('trafficTab'),     icon: <BoltIcon className="h-5 w-5" /> },
     { key: 'p2p',             label: 'P2P',                           icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M7.5 21 3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5" /></svg> },
   ], [language]);
 
@@ -2063,6 +2510,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       case 'skills':
         return <SkillMcpManager />;
 
+      case 'projects':
+        return <ProjectsManager />;
+
       case 'coworkSandbox':
         return (
           <div className="space-y-6">
@@ -2220,7 +2670,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     {i18nService.t('coworkMemoryManageHint')}
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('coworkMemoryScopeMetabot')}
                   </div>
@@ -2241,6 +2691,53 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           {metabot.name}
                         </option>
                       ))
+                    )}
+                  </select>
+                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('coworkMemoryScopeSelect')}
+                  </div>
+                  <select
+                    value={`${coworkMemorySelectedScope.kind}:${coworkMemorySelectedScope.key}`}
+                    onChange={(event) => {
+                      const [kind, ...keyParts] = event.target.value.split(':');
+                      const key = keyParts.join(':');
+                      if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
+                        setCoworkMemorySelectedScope({ kind, key });
+                      }
+                    }}
+                    className="min-w-[240px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                    disabled={coworkMemoryMetabotId == null || (coworkMemoryScopes == null && coworkMemoryContacts.length === 0)}
+                  >
+                    <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
+                      {`${i18nService.t('coworkMemoryScopeOwner')}${coworkMemoryScopes?.owner ? ` (${coworkMemoryScopes.owner.count})` : ''}`}
+                    </option>
+                    {coworkMemoryContacts.length > 0 ? (
+                      coworkMemoryContacts.map((contact) => {
+                        const contactName = contact.name?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+                        return (
+                          <option key={contact.globalMetaID} value={`contact:metaweb_private:peer:${contact.globalMetaID}`}>
+                            {`${i18nService.t('coworkMemoryScopeContact')}: ${contactName} (${contact.interactionCount})`}
+                          </option>
+                        );
+                      })
+                    ) : (
+                      <option value="" disabled>
+                        {i18nService.t('coworkMemoryScopeNoContacts')}
+                      </option>
+                    )}
+                    {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 ? (
+                      coworkMemoryScopes.conversations.map((scope) => {
+                        const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
+                        return (
+                          <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                            {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey} (${scope.count})`}
+                          </option>
+                        );
+                      })
+                    ) : (
+                      <option value="" disabled>
+                        {i18nService.t('coworkMemoryScopeNoConversations')}
+                      </option>
                     )}
                   </select>
                   <button
@@ -2350,7 +2847,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 )}
               </div>
 
-              {coworkMemoryStats && (
+              {coworkMemoryStats && coworkMemorySelectedScope.kind !== 'contact' && (
                 <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                   {`${i18nService.t('coworkMemoryTotalLabel')}: ${coworkMemoryStats.created + coworkMemoryStats.stale} · ${i18nService.t('coworkMemoryActiveLabel')}: ${coworkMemoryStats.created} · ${i18nService.t('coworkMemoryInactiveLabel')}: ${coworkMemoryStats.stale}`}
                 </div>
@@ -2362,82 +2859,112 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               )}
 
-              <input
-                type="text"
-                value={coworkMemoryQuery}
-                onChange={(event) => setCoworkMemoryQuery(event.target.value)}
-                placeholder={i18nService.t('coworkMemorySearchPlaceholder')}
-                disabled={coworkMemoryMetabotId == null}
-                className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              />
-
-              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
-                {coworkMemoryListLoading ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              {coworkMemorySelectedScope.kind === 'contact' ? (
+                coworkMemoryContactDetailLoading ? (
+                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('loading')}
                   </div>
-                ) : coworkMemoryEntries.length === 0 ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                ) : coworkMemoryContactDetail ? (
+                  <MetaIDContactPanel
+                    detail={coworkMemoryContactDetail}
+                    facts={coworkMemoryEntries}
+                    factsLoading={coworkMemoryListLoading}
+                    onEditFact={handleEditCoworkMemoryEntry}
+                    onDeleteFact={(entry) => { void handleDeleteCoworkMemoryEntry(entry); }}
+                  />
+                ) : (
+                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('coworkMemoryEmpty')}
                   </div>
-                ) : (
-                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                    {coworkMemoryEntries.map((entry) => (
-                      <div key={entry.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1 space-y-1 min-w-0">
-                            <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
-                              {entry.text}
-                            </div>
-                            <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                              <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                {getMemoryStatusLabel(entry.status)}
-                              </span>
-                              {entry.usageClass === 'self_identity' && (
-                                <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
-                                  {i18nService.t('coworkMemorySelfIdentity')}
-                                </span>
-                              )}
-                              <span>
-                                {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
-                              </span>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1 flex-shrink-0">
-                            {/* self_identity entries are maintained exclusively by the dream
-                                service; the store rejects edits/deletes, so hide the actions. */}
-                            {entry.usageClass !== 'self_identity' && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => handleEditCoworkMemoryEntry(entry)}
-                                  className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                                >
-                                  {i18nService.t('edit')}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
-                                  className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
-                                  disabled={coworkMemoryListLoading}
-                                >
-                                  {i18nService.t('delete')}
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </div>
+                )
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    value={coworkMemoryQuery}
+                    onChange={(event) => setCoworkMemoryQuery(event.target.value)}
+                    placeholder={i18nService.t('coworkMemorySearchPlaceholder')}
+                    disabled={coworkMemoryMetabotId == null}
+                    className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                  />
+
+                  <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
+                    {coworkMemoryListLoading ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('loading')}
                       </div>
-                    ))}
+                    ) : coworkMemoryEntries.length === 0 ? (
+                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryEmpty')}
+                      </div>
+                    ) : (
+                      <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
+                        {coworkMemoryEntries.map((entry) => (
+                          <div key={entry.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="flex-1 space-y-1 min-w-0">
+                                <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
+                                  {entry.text}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                    {getMemoryStatusLabel(entry.status)}
+                                  </span>
+                                  {getMemoryUsageClassLabel(entry.usageClass) && (
+                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
+                                      {getMemoryUsageClassLabel(entry.usageClass)}
+                                    </span>
+                                  )}
+                                  {entry.visibility === 'external_safe' ? (
+                                    <span className="rounded-full border px-2 py-0.5 border-emerald-500/50 text-emerald-600 dark:text-emerald-400">
+                                      {getMemoryVisibilityLabel(entry.visibility)}
+                                    </span>
+                                  ) : (
+                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
+                                      {getMemoryVisibilityLabel(entry.visibility)}
+                                    </span>
+                                  )}
+                                  <span>
+                                    {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
+                                  </span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 flex-shrink-0">
+                                {entry.usageClass !== 'self_identity' && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditCoworkMemoryEntry(entry)}
+                                      className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                                    >
+                                      {i18nService.t('edit')}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
+                                      className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
+                                      disabled={coworkMemoryListLoading}
+                                    >
+                                      {i18nService.t('delete')}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </>
+              )}
             </div>
 
           </div>
         );
 
-      case 'archivedChats':
+      case 'archivedChats': {
+        const totalArchivedChatPages = Math.max(1, Math.ceil(archivedChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));
         return (
           <div className="space-y-6">
             <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
@@ -2467,13 +2994,24 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </select>
               </div>
 
-              <input
-                type="text"
-                value={archivedChatsQuery}
-                onChange={(event) => setArchivedChatsQuery(event.target.value)}
-                placeholder={i18nService.t('archivedChatsSearchPlaceholder')}
-                className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-              />
+              <div className="flex items-center gap-3">
+                <input
+                  type="text"
+                  value={archivedChatsQuery}
+                  onChange={(event) => setArchivedChatsQuery(event.target.value)}
+                  placeholder={i18nService.t('archivedChatsSearchPlaceholder')}
+                  className="flex-1 min-w-0 rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                />
+                <label className="flex shrink-0 items-center gap-1.5 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={archivedChatsSearchContent}
+                    onChange={(event) => setArchivedChatsSearchContent(event.target.checked)}
+                    className="h-3.5 w-3.5 accent-claude-accent"
+                  />
+                  {i18nService.t('archivedChatsSearchContent')}
+                </label>
+              </div>
 
               {archivedChatsNotice && (
                 <div className="text-xs text-green-600 dark:text-green-400">{archivedChatsNotice}</div>
@@ -2524,9 +3062,40 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   </div>
                 )}
               </div>
+
+              {!archivedChatsLoading && archivedChatsTotal > 0 && (
+                <div className="flex items-center justify-between gap-3 pt-1">
+                  <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService
+                      .t('archivedChatsPageInfo')
+                      .replace('{page}', String(archivedChatsPage + 1))
+                      .replace('{totalPages}', String(totalArchivedChatPages))
+                      .replace('{total}', String(archivedChatsTotal))}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={archivedChatsPage === 0}
+                      onClick={() => setArchivedChatsPage((page) => Math.max(0, page - 1))}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsPrevPage')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={archivedChatsPage + 1 >= totalArchivedChatPages}
+                      onClick={() => setArchivedChatsPage((page) => page + 1)}
+                      className="rounded-lg border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      {i18nService.t('archivedChatsNextPage')}
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         );
+      }
 
       case 'dreamDiary':
         return (
@@ -2595,13 +3164,58 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('loading')}
                   </div>
-                ) : dreamDiarySummaries.length === 0 ? (
+                ) : dreamDiaryEntries.length === 0 ? (
                   <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                     {i18nService.t('dreamDiaryEmpty')}
                   </div>
                 ) : (
                   <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                    {dreamDiarySummaries.map((summary) => {
+                    {dreamDiaryEntries.map((entry) => {
+                      if (entry.kind === 'failed') {
+                        const { run } = entry;
+                        const retryPending = run.nextRetryAt == null || run.nextRetryAt <= Date.now();
+                        return (
+                          <div key={`failed-${run.id}`} className="px-3 py-3 text-xs">
+                            <div className="flex items-start gap-2">
+                              <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 flex-shrink-0 text-amber-500" />
+                              <span className="flex-1 min-w-0">
+                                <span className="font-medium dark:text-claude-darkText text-claude-text">{run.dreamDate}</span>
+                                <span className="ml-2 rounded-full border px-2 py-0.5 text-amber-600 border-amber-300 dark:text-amber-400 dark:border-amber-500/40">
+                                  {i18nService.t('dreamDiaryFailedBadge')}
+                                </span>
+                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                                  {`${i18nService.t('dreamDiaryFailedAttempts')}: ${run.attemptCount}`}
+                                </span>
+                                {run.error && (
+                                  <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
+                                    {run.error}
+                                  </span>
+                                )}
+                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                                  {retryPending
+                                    ? i18nService.t('dreamDiaryRetryPending')
+                                    : `${i18nService.t('dreamDiaryNextRetry')}: ${new Date(run.nextRetryAt ?? 0).toLocaleString()}`}
+                                </span>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDreamDiaryRunDate(run.dreamDate);
+                                  void handleForceDream(run.dreamDate);
+                                }}
+                                title={i18nService.t('dreamDiaryForceHint')}
+                                aria-label={i18nService.t('dreamDiaryRetryNow')}
+                                disabled={dreamDiaryRunning}
+                                className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <ArrowPathIcon className={`h-3.5 w-3.5 ${dreamDiaryRunning ? 'animate-spin' : ''}`} />
+                                <span>{i18nService.t('dreamDiaryRetryNow')}</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      }
+                      const summary = entry.summary;
                       const expanded = dreamDiaryExpandedId === summary.id;
                       const sectionEntries = Object.entries(summary.sections ?? {}).filter(([, text]) => typeof text === 'string' && text.trim());
                       return (
@@ -2672,28 +3286,38 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           <div className="flex h-full">
             {/* Provider List - Left Side */}
             <div className="w-2/5 border-r dark:border-claude-darkBorder border-claude-border pr-3 space-y-1.5 overflow-y-auto">
-              <div className="flex items-center justify-between mb-2 px-1">
-                <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                  {i18nService.t('modelProviders')}
-                </h3>
-                <div className="flex items-center space-x-1">
-                  <button
-                    type="button"
-                    onClick={handleImportProvidersClick}
-                    disabled={isImportingProviders || isExportingProviders}
-                    className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
-                  >
-                    {i18nService.t('import')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleExportProviders}
-                    disabled={isImportingProviders || isExportingProviders}
-                    className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
-                  >
-                    {i18nService.t('export')}
-                  </button>
+              <div className="mb-1.5 px-1">
+                <div className="flex items-center justify-between mb-1.5">
+                  <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('modelProviders')}
+                  </h3>
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={handleImportProvidersClick}
+                      disabled={isImportingProviders || isExportingProviders}
+                      className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+                    >
+                      {i18nService.t('import')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportProviders}
+                      disabled={isImportingProviders || isExportingProviders}
+                      className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover disabled:opacity-50 disabled:cursor-not-allowed transition-colors active:scale-[0.98]"
+                    >
+                      {i18nService.t('export')}
+                    </button>
+                  </div>
                 </div>
+                <button
+                  type="button"
+                  onClick={handleAddCustomProviderClick}
+                  className="btn-idchat-primary-filled inline-flex items-center justify-center w-full px-2 py-1 text-[10px] font-medium"
+                >
+                  <PlusCircleIcon className="h-2.5 w-2.5 mr-1" />
+                  {i18nService.t('addProvider')}
+                </button>
               </div>
               <input
                 ref={importInputRef}
@@ -2704,14 +3328,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
               />
               {Object.entries(visibleProviders).map(([provider, config]) => {
                 const providerKey = provider as ProviderType;
-                const providerInfo = providerMeta[providerKey];
                 const missingApiKey = providerRequiresApiKey(providerKey) && !config.apiKey.trim();
                 const canToggleProvider = config.enabled || !missingApiKey;
                 return (
                   <div
                     key={provider}
                     onClick={() => handleProviderChange(providerKey)}
-                    className={`flex items-center p-2 rounded-xl cursor-pointer transition-colors ${
+                    className={`flex items-center p-2 rounded-xl cursor-pointer transition-colors group ${
                       activeProvider === provider
                         ? 'bg-claude-accent/10 dark:bg-claude-accent/20 border border-claude-accent/30 shadow-subtle'
                         : 'dark:bg-claude-darkSurface/50 bg-claude-surface hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover border border-transparent'
@@ -2720,7 +3343,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     <div className="flex flex-1 items-center">
                       <div className="mr-2 flex h-7 w-7 items-center justify-center">
                         <span className="dark:text-claude-darkText text-claude-text">
-                          {providerInfo?.icon}
+                          {getProviderIcon(providerKey)}
                         </span>
                       </div>
                       <span className={`text-sm font-medium truncate ${
@@ -2728,10 +3351,23 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           ? 'text-claude-accent'
                           : 'dark:text-claude-darkText text-claude-text'
                       }`}>
-                        {providerInfo?.label ?? provider.charAt(0).toUpperCase() + provider.slice(1)}
+                        {getProviderDisplayLabel(providerKey, config)}
                       </span>
                     </div>
                     <div className="flex items-center ml-2">
+                      {isCustomProviderKey(providerKey) && (
+                        <button
+                          type="button"
+                          title={i18nService.t('deleteProvider')}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteCustomProvider(providerKey);
+                          }}
+                          className="p-1 mr-1 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                        >
+                          <TrashIcon className="h-3.5 w-3.5" />
+                        </button>
+                      )}
                       <div
                         title={!canToggleProvider ? i18nService.t('configureApiKey') : undefined}
                         className={`w-7 h-4 rounded-full flex items-center transition-colors ${
@@ -2763,7 +3399,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             <div className="w-3/5 pl-4 space-y-4 overflow-y-auto">
               <div className="flex items-center justify-between pb-2 border-b dark:border-claude-darkBorder border-claude-border">
                 <h3 className="text-base font-medium dark:text-claude-darkText text-claude-text">
-                  {(providerMeta[activeProvider]?.label ?? activeProvider.charAt(0).toUpperCase() + activeProvider.slice(1))} {i18nService.t('providerSettings')}
+                  {getProviderDisplayLabel(activeProvider, providers[activeProvider])} {i18nService.t('providerSettings')}
                 </h3>
                 <div
                   className={`px-2 py-0.5 rounded-lg text-xs font-medium ${
@@ -2812,13 +3448,13 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   <label htmlFor={`${activeProvider}-apiFormat`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('apiFormat')}
                   </label>
-                  <div className="flex items-center space-x-4">
+                  <div className="flex items-center space-x-4 flex-wrap gap-y-1.5">
                     <label className="flex items-center">
                       <input
                         type="radio"
                         name={`${activeProvider}-apiFormat`}
                         value="anthropic"
-                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) !== 'openai'}
+                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'anthropic'}
                         onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'anthropic')}
                         className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
                       />
@@ -2837,6 +3473,19 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       />
                       <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
                         {i18nService.t('apiFormatOpenAI')}
+                      </span>
+                    </label>
+                    <label className="flex items-center">
+                      <input
+                        type="radio"
+                        name={`${activeProvider}-apiFormat`}
+                        value="responses"
+                        checked={getEffectiveApiFormat(activeProvider, providers[activeProvider].apiFormat) === 'responses'}
+                        onChange={() => handleProviderConfigChange(activeProvider, 'apiFormat', 'responses')}
+                        className="h-3.5 w-3.5 text-claude-accent focus:ring-claude-accent dark:bg-claude-darkSurface bg-claude-surface"
+                      />
+                      <span className="ml-2 text-xs dark:text-claude-darkText text-claude-text">
+                        {i18nService.t('apiFormatResponses')}
                       </span>
                     </label>
                   </div>
@@ -3075,10 +3724,20 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       case 'p2p':
         return <P2PConfigPanel />;
 
+      case 'traffic':
+        return <TrafficSettings />;
+
       default:
         return null;
     }
   };
+
+  const coworkMemoryDraftExternalSafeAllowed = (
+    coworkMemoryDraftScope?.kind ?? 'owner'
+  ) === 'owner' && coworkMemoryDraftUsageClass === 'operational_preference';
+  const coworkMemoryEditingTagLabel = coworkMemoryDraftScope
+    ? `${i18nService.t('coworkMemoryEditingTag')} · ${getMemoryScopeLabel(coworkMemoryDraftScope, coworkMemoryScopes)}`
+    : i18nService.t('coworkMemoryEditingTag');
 
   return (
     <div
@@ -3282,6 +3941,199 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             </div>
           )}
 
+          {isAddingCustomProvider && (
+            <div
+              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4"
+              onClick={handleCancelCustomProvider}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-label={i18nService.t('addCustomProviderTitle')}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={handleCustomProviderDialogKeyDown}
+                className="w-full max-w-md rounded-2xl dark:bg-claude-darkSurface bg-claude-bg dark:border-claude-darkBorder border-claude-border border shadow-modal p-4"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <h4 className="text-sm font-semibold dark:text-claude-darkText text-claude-text">
+                    {i18nService.t('addCustomProviderTitle')}
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={handleCancelCustomProvider}
+                    className="p-1 dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:text-claude-darkText hover:text-claude-text rounded-md dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover"
+                  >
+                    <XMarkIcon className="h-4 w-4" />
+                  </button>
+                </div>
+                <p className="mb-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                  {i18nService.t('addCustomProviderDesc')}
+                </p>
+
+                {customProviderError && (
+                  <p className="mb-3 text-xs text-red-600 dark:text-red-400">
+                    {customProviderError}
+                  </p>
+                )}
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('providerName')}
+                    </label>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={customProviderName}
+                      onChange={(e) => {
+                        setCustomProviderName(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('providerNamePlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('baseUrl')}
+                    </label>
+                    <input
+                      type="text"
+                      value={customProviderBaseUrl}
+                      onChange={(e) => {
+                        setCustomProviderBaseUrl(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('providerBaseUrlPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('apiKey')}
+                    </label>
+                    <input
+                      type="password"
+                      value={customProviderApiKey}
+                      onChange={(e) => {
+                        setCustomProviderApiKey(e.target.value);
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                      placeholder={i18nService.t('apiKeyPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary mb-1">
+                      {i18nService.t('apiFormat')}
+                    </label>
+                    <select
+                      value={customProviderApiFormat}
+                      onChange={(e) => {
+                        setCustomProviderApiFormat(e.target.value as 'anthropic' | 'openai' | 'responses');
+                        if (customProviderError) {
+                          setCustomProviderError(null);
+                        }
+                      }}
+                      className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                    >
+                      <option value="anthropic">{i18nService.t('apiFormatNative')}</option>
+                      <option value="openai">{i18nService.t('apiFormatOpenAI')}</option>
+                      <option value="responses">{i18nService.t('apiFormatResponses')}</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('availableModels')}
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleAddCustomModelDraft}
+                        className="inline-flex items-center text-xs text-claude-accent hover:text-claude-accentHover"
+                      >
+                        <PlusCircleIcon className="h-3.5 w-3.5 mr-1" />
+                        {i18nService.t('addModel')}
+                      </button>
+                    </div>
+                    <div className="flex items-center space-x-2 mb-2">
+                      <input
+                        type="text"
+                        value={customModelName}
+                        onChange={(e) => setCustomModelName(e.target.value)}
+                        className="block w-1/2 rounded-lg bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-2.5 py-1.5 text-xs"
+                        placeholder={i18nService.t('modelName')}
+                      />
+                      <input
+                        type="text"
+                        value={customModelId}
+                        onChange={(e) => setCustomModelId(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            handleAddCustomModelDraft();
+                          }
+                        }}
+                        className="block w-1/2 rounded-lg bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-2.5 py-1.5 text-xs"
+                        placeholder={i18nService.t('modelId')}
+                      />
+                    </div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {customProviderModels.map(model => (
+                        <div
+                          key={model.id}
+                          className="dark:bg-claude-darkSurface/50 bg-claude-surface/50 p-2 rounded-lg dark:border-claude-darkBorder border-claude-border border group/model"
+                        >
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-1.5 min-w-0">
+                              <span className="dark:text-claude-darkText text-claude-text font-medium text-[11px] truncate">{model.name}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">{model.id}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveCustomModelDraft(model.id)}
+                              className="p-0.5 ml-1 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-red-500 opacity-0 group-hover/model:opacity-100 transition-opacity"
+                            >
+                              <TrashIcon className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                      {customProviderModels.length === 0 && (
+                        <p className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                          {i18nService.t('noModelsAvailable')}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end space-x-2 mt-4">
+                  <button
+                    type="button"
+                    onClick={handleCancelCustomProvider}
+                    className="px-3 py-1.5 text-xs dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover rounded-xl border dark:border-claude-darkBorder border-claude-border"
+                  >
+                    {i18nService.t('cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleAddCustomProvider}
+                    className="btn-idchat-primary-filled px-3 py-1.5 text-xs"
+                  >
+                    {i18nService.t('addProvider')}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Memory Modal */}
           {showMemoryModal && (
             <div
@@ -3301,7 +4153,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 <div className="px-5 py-4 space-y-4">
                   {coworkMemoryEditingId && (
                     <div className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {i18nService.t('coworkMemoryEditingTag')}
+                      {coworkMemoryEditingTagLabel}
                     </div>
                   )}
                   <textarea
@@ -3311,6 +4163,96 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     autoFocus
                     className="min-h-[200px] w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30"
                   />
+                  {!coworkMemoryEditingId && (
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryScopeSelect')}
+                      </span>
+                      <select
+                        value={`${coworkMemoryDraftScope?.kind ?? 'owner'}:${coworkMemoryDraftScope?.key ?? 'owner:self'}`}
+                        onChange={(event) => {
+                          const [kind, ...keyParts] = event.target.value.split(':');
+                          const key = keyParts.join(':');
+                          if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
+                            setCoworkMemoryDraftScope({ kind, key });
+                            if (kind !== 'owner') {
+                              setCoworkMemoryDraftVisibility('local_only');
+                            }
+                          }
+                        }}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                      >
+                        <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
+                          {i18nService.t('coworkMemoryScopeOwner')}
+                        </option>
+                        {coworkMemoryScopes && coworkMemoryScopes.contacts.length > 0 && (
+                          coworkMemoryScopes.contacts.map((scope) => {
+                            const peerName = scope.peerName?.trim() || scope.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+                            return (
+                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                                {`${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`}
+                              </option>
+                            );
+                          })
+                        )}
+                        {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 && (
+                          coworkMemoryScopes.conversations.map((scope) => {
+                            const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
+                            return (
+                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
+                                {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`}
+                              </option>
+                            );
+                          })
+                        )}
+                      </select>
+                    </label>
+                  )}
+                  <div className="grid grid-cols-2 gap-3">
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryCategoryAll')}
+                      </span>
+                      <select
+                        value={coworkMemoryDraftUsageClass}
+                        onChange={(event) => {
+                          const next = event.target.value as CoworkMemoryEditableUsageClass;
+                          setCoworkMemoryDraftUsageClass(next);
+                          if (next !== 'operational_preference') {
+                            setCoworkMemoryDraftVisibility('local_only');
+                          }
+                        }}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                      >
+                        <option value="profile_fact">{i18nService.t('coworkMemoryUsageProfileFact')}</option>
+                        <option value="preference">{i18nService.t('coworkMemoryUsagePreference')}</option>
+                        <option value="operational_preference">{i18nService.t('coworkMemoryUsageOperationalPreference')}</option>
+                        <option value="work_review">{i18nService.t('coworkMemoryUsageWorkReview')}</option>
+                        <option value="value_boundary">{i18nService.t('coworkMemoryUsageValueBoundary')}</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                        {i18nService.t('coworkMemoryVisibility')}
+                      </span>
+                      <select
+                        value={coworkMemoryDraftVisibility}
+                        onChange={(event) => {
+                          setCoworkMemoryDraftVisibility(event.target.value === 'external_safe' ? 'external_safe' : 'local_only');
+                        }}
+                        disabled={!coworkMemoryDraftExternalSafeAllowed}
+                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface disabled:opacity-60"
+                      >
+                        <option value="local_only">{i18nService.t('coworkMemoryVisibilityLocalOnly')}</option>
+                        <option value="external_safe">{i18nService.t('coworkMemoryVisibilityExternalSafe')}</option>
+                      </select>
+                    </label>
+                  </div>
+                  {!coworkMemoryDraftExternalSafeAllowed && (
+                    <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('coworkMemoryVisibilityLockedHint')}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex justify-end space-x-2 px-5 pb-5">

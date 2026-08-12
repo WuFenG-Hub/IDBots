@@ -1,5 +1,7 @@
 import http from 'http';
-import { BrowserWindow, session } from 'electron';
+import fs from 'fs';
+import path from 'path';
+import { BrowserWindow, session, app } from 'electron';
 import {
   anthropicToOpenAI,
   buildOpenAIChatCompletionsURL,
@@ -8,6 +10,12 @@ import {
   openAIToAnthropic,
   type OpenAIStreamChunk,
 } from './coworkFormatTransform';
+import { DeepSeekReasoningStore } from './deepseekReasoningStore';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply';
+import { writeFileAtomicSync } from './atomicFile';
+import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
+import { foldLowValueToolResults } from './coworkToolResultFold';
+import { modelSupportsVision } from './coworkModelLimits';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
 
@@ -16,6 +24,13 @@ export type OpenAICompatUpstreamConfig = {
   apiKey?: string;
   model: string;
   provider?: string;
+  /**
+   * User-selected API format from the provider config. 'responses' forces the
+   * Responses upstream regardless of the provider name; 'openai' / absent
+   * keep the provider-based resolution (openai -> Responses, deepseek flash ->
+   * Responses, everything else -> Chat Completions).
+   */
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
 };
 
 export type OpenAICompatProxyTarget = 'local' | 'sandbox';
@@ -72,6 +87,16 @@ type ResponsesStreamContext = {
   functionCallByItemId: Map<string, ResponsesFunctionCallState>;
   nextToolIndex: number;
   hasAnyDelta: boolean;
+  /** True once any reasoning delta was forwarded to the client this stream. */
+  hasReasoningDeltas: boolean;
+  /**
+   * Ids of web_search_call output items already relayed as Anthropic
+   * server_tool_use blocks, so output_item.added/done pairs and the completed
+   * fallback each emit the marker exactly once per search.
+   */
+  emittedWebSearchItemIds: Set<string>;
+  /** Text deltas relayed to the client this stream (layer-2 assertion gate). */
+  accumulatedText: string;
 };
 
 const PROXY_BIND_HOST = '0.0.0.0';
@@ -89,14 +114,164 @@ const GEMINI_FALLBACK_THOUGHT_SIGNATURE = 'skip_thought_signature_validator';
 // pointer to the (possibly empty) ReasoningContent field.
 const DEEPSEEK_REASONING_PLACEHOLDER = '';
 
+/**
+ * Anti-hallucination guard appended to the instructions of DeepSeek Responses
+ * requests (which carry the injected server-side web_search tool). The model
+ * must not confidently assert post-training real-time facts (news, awards,
+ * standings, prices, weather, latest figures) without search evidence — the
+ * confident fabrication of non-existent facts is worse than admitting a gap.
+ * Constant text keeps the cached prompt prefix byte-stable across turns.
+ */
+const DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD =
+  '实时信息规范：对于训练截止之后发生或变化的事实（新闻、奖项、赛事、行情、天气、最新数据、人物当选或任命等），'
+  + '第一步必须调用 web_search 工具搜索后再作答，禁止凭记忆直接作答。'
+  + '若未执行搜索或搜索结果不足以确认答案，只能回答「无法确认」或「未验证」并简述原因，'
+  + '禁止给出具体的人名、日期、比分、数字或结论。';
+
+/** Concatenated final answer text of a Responses output (message/output_text). */
+function extractResponsesOutputText(responseObj: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) !== 'message') {
+      continue;
+    }
+    for (const block of toArray(itemObj?.content)) {
+      const blockObj = toOptionalObject(block);
+      if (toString(blockObj?.type) !== 'output_text') {
+        continue;
+      }
+      const text = toString(blockObj?.text);
+      if (text) {
+        parts.push(text);
+      }
+    }
+  }
+  return parts.join('');
+}
+
+// DeepSeek's Responses API is stricter than chat/completions: it REJECTS an
+// empty reasoning pass-back (`reasoning` input items with empty text) with the
+// same 400. When the real reasoning is unrecoverable in the Responses path we
+// inject this CONSTANT placeholder instead — byte-stable across turns (any set
+// of lost-reasoning turns serializes identically), unlike a variable text.
+
 let proxyServer: http.Server | null = null;
 let proxyPort: number | null = null;
 let upstreamConfig: OpenAICompatUpstreamConfig | null = null;
 let lastProxyError: string | null = null;
 const toolCallExtraContentById = new Map<string, unknown>();
-const deepSeekReasoningByToolCallId = new Map<string, string>();
 const MAX_TOOL_CALL_EXTRA_CONTENT_CACHE = 1024;
 const MAX_DEEPSEEK_REASONING_CACHE = 1024;
+// Reasoning_content is persisted (JSONL in the user-data dir) so an app
+// restart no longer degrades historical reasoning to '' — that fallback is a
+// mid-history byte change that breaks DeepSeek's cached prefix. The store
+// stays memory-only when the user-data path is unavailable (e.g. tests).
+const deepSeekReasoningStore = new DeepSeekReasoningStore(MAX_DEEPSEEK_REASONING_CACHE);
+let deepSeekReasoningStoreLoaded = false;
+
+function ensureDeepSeekReasoningStoreLoaded(): void {
+  if (deepSeekReasoningStoreLoaded) {
+    return;
+  }
+  deepSeekReasoningStoreLoaded = true;
+  try {
+    const filePath = path.join(app.getPath('userData'), 'cowork', 'deepseek-reasoning-cache.jsonl');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    deepSeekReasoningStore.load(filePath);
+  } catch {
+    // Memory-only fallback (non-Electron test hosts, early app init).
+  }
+}
+
+// --- Per-session tool-result snip boundaries ---
+// Reasonix-style tiered truncation: instead of flattening the whole history
+// when the context estimate crosses the soft threshold (a full cold start for
+// DeepSeek's cached prefix), the runner raises a per-session HEAD boundary
+// and the proxy snips stale tool_result blocks below it (see
+// coworkToolResultSnip.ts). The boundary is monotonic per session so a
+// previously snipped prefix stays byte-identical, and it is persisted across
+// restarts for the same reason as the DeepSeek reasoning cache above. The
+// in-memory map is the hot path (lookups happen on every /v1/messages
+// request); the JSON file is only rewritten when a boundary actually moves.
+const snipHeadTokensBySession = new Map<string, number>();
+let snipHeadTokensLoaded = false;
+let snipHeadTokensFilePath: string | null = null;
+
+function ensureSnipHeadTokensLoaded(): void {
+  if (snipHeadTokensLoaded) {
+    return;
+  }
+  snipHeadTokensLoaded = true;
+  try {
+    snipHeadTokensFilePath = path.join(app.getPath('userData'), 'cowork', 'tool-result-snip.json');
+    const parsed = JSON.parse(fs.readFileSync(snipHeadTokensFilePath, 'utf8')) as { sessions?: unknown };
+    const sessions = parsed?.sessions;
+    if (sessions && typeof sessions === 'object' && !Array.isArray(sessions)) {
+      for (const [key, value] of Object.entries(sessions as Record<string, unknown>)) {
+        if (key && typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          snipHeadTokensBySession.set(key, Math.floor(value));
+        }
+      }
+    }
+  } catch {
+    // Missing/corrupt file or non-Electron host: memory-only, start empty.
+  }
+}
+
+function persistSnipHeadTokens(): void {
+  if (!snipHeadTokensFilePath) {
+    return;
+  }
+  try {
+    const sessions: Record<string, number> = {};
+    for (const [key, value] of snipHeadTokensBySession) {
+      sessions[key] = value;
+    }
+    fs.mkdirSync(path.dirname(snipHeadTokensFilePath), { recursive: true });
+    writeFileAtomicSync(snipHeadTokensFilePath, Buffer.from(JSON.stringify({ sessions })));
+  } catch {
+    // Best effort; the in-memory map still serves this run.
+  }
+}
+
+/** Current snip boundary (estimated head tokens) for a session; 0 when unset. */
+export function getCoworkSnipHeadTokens(sessionKey: string): number {
+  if (!sessionKey) {
+    return 0;
+  }
+  ensureSnipHeadTokensLoaded();
+  return snipHeadTokensBySession.get(sessionKey) ?? 0;
+}
+
+/**
+ * Raise a session's snip boundary. Monotonic: a value at or below the
+ * persisted one is ignored — lowering the boundary would un-snip previously
+ * snipped blocks and break the cached prefix a second time.
+ */
+export function setCoworkSnipHeadTokens(sessionKey: string, tokens: number): void {
+  if (!sessionKey || !Number.isFinite(tokens) || tokens <= 0) {
+    return;
+  }
+  ensureSnipHeadTokensLoaded();
+  const existing = snipHeadTokensBySession.get(sessionKey) ?? 0;
+  if (tokens <= existing) {
+    return;
+  }
+  snipHeadTokensBySession.set(sessionKey, Math.floor(tokens));
+  persistSnipHeadTokens();
+}
+
+/** Forget a session's boundary (session deleted, or history fully compacted into a fresh SDK session). */
+export function resetCoworkSnipHeadTokens(sessionKey: string): void {
+  if (!sessionKey) {
+    return;
+  }
+  ensureSnipHeadTokensLoaded();
+  if (snipHeadTokensBySession.delete(sessionKey)) {
+    persistSnipHeadTokens();
+  }
+}
 
 // --- Scheduled task API dependencies ---
 interface ScheduledTaskDeps {
@@ -285,14 +460,8 @@ function cacheDeepSeekReasoningForToolCall(toolCallId: string, reasoningContent:
     return;
   }
 
-  deepSeekReasoningByToolCallId.set(toolCallId, reasoningContent);
-
-  if (deepSeekReasoningByToolCallId.size > MAX_DEEPSEEK_REASONING_CACHE) {
-    const oldestKey = deepSeekReasoningByToolCallId.keys().next().value;
-    if (typeof oldestKey === 'string') {
-      deepSeekReasoningByToolCallId.delete(oldestKey);
-    }
-  }
+  ensureDeepSeekReasoningStoreLoaded();
+  deepSeekReasoningStore.set(toolCallId, reasoningContent);
 }
 
 function cacheDeepSeekReasoningFromToolCalls(toolCalls: unknown, reasoningContent: string): void {
@@ -341,16 +510,69 @@ function cacheToolCallExtraContentFromOpenAIToolCalls(toolCalls: unknown): void 
   }
 }
 
-function isDeepSeekProvider(provider?: string, baseURL?: string): boolean {
+/**
+ * Whether a model id is a DeepSeek thinking-capable model. Used to apply the
+ * DeepSeek reasoning round-trip machinery to gateway providers (e.g. the
+ * opencode "Console Go" upstream serving `deepseek-v4-flash`), whose provider
+ * name/base URL carry no "deepseek" marker.
+ */
+function isDeepSeekModel(model?: string): boolean {
+  const normalized = (model ?? '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes('deepseek')
+    || normalized.includes('v4-flash')
+    || normalized.includes('v4-pro')
+    || normalized.includes('reasoner')
+    || normalized === 'r1'
+    || normalized.startsWith('r1-');
+}
+
+function isDeepSeekProvider(provider?: string, baseURL?: string, model?: string): boolean {
   const normalizedProvider = provider?.trim().toLowerCase();
   if (normalizedProvider === 'deepseek') {
+    return true;
+  }
+  if (isDeepSeekModel(model)) {
     return true;
   }
   return Boolean(baseURL?.toLowerCase().includes('deepseek'));
 }
 
-function isDeepSeekThinkingRequest(body: Record<string, unknown>, provider?: string, baseURL?: string): boolean {
-  if (!isDeepSeekProvider(provider, baseURL)) {
+/**
+ * Billing identity of a CoWork session's upstream. Unlike isDeepSeekProvider
+ * (which also matches deepseek MODELS served through gateways like opencode —
+ * needed for reasoning round-trips), this is the strict "who do we pay"
+ * signal: only a deepseek provider key or a deepseek host means the DeepSeek
+ * account balance and CNY rate estimate apply. Everything else ('other':
+ * opencode plans, openrouter, custom gateways, ollama, ...) is billed by its
+ * own plan/counter and must not show DeepSeek balances or cost estimates.
+ */
+export function resolveCoworkBillingSource(
+  provider?: string,
+  baseURL?: string
+): 'deepseek' | 'anthropic' | 'other' {
+  const normalizedProvider = provider?.trim().toLowerCase();
+  if (normalizedProvider === 'deepseek') {
+    return 'deepseek';
+  }
+  if (normalizedProvider === 'anthropic') {
+    return 'anthropic';
+  }
+  if (baseURL?.toLowerCase().includes('deepseek')) {
+    return 'deepseek';
+  }
+  return 'other';
+}
+
+function isDeepSeekThinkingRequest(
+  body: Record<string, unknown>,
+  provider?: string,
+  baseURL?: string,
+  model?: string
+): boolean {
+  if (!isDeepSeekProvider(provider, baseURL, model ?? toString(body.model))) {
     return false;
   }
 
@@ -363,8 +585,10 @@ function isDeepSeekThinkingRequest(body: Record<string, unknown>, provider?: str
     return true;
   }
 
-  const model = toString(body.model).toLowerCase();
-  return /\b(?:deepseek-)?(?:v4-pro|reasoner|r1)\b/.test(model);
+  const resolvedModel = toString(body.model).toLowerCase();
+  // Any DeepSeek thinking-capable model (flash defaults to thinking ON, like
+  // pro/reasoner/r1) needs reasoning pass-back; plain `deepseek-chat` does not.
+  return /\b(?:deepseek-)?(?:v4-flash|v4-pro|reasoner|r1)\b/.test(resolvedModel);
 }
 
 type DeepSeekReasoningHydrateResult = {
@@ -382,7 +606,8 @@ function resolveDeepSeekReasoningForToolCalls(toolCalls: unknown): string {
     }
 
     const toolCallId = toString(toolCallObj.id);
-    const cachedReasoning = toolCallId ? deepSeekReasoningByToolCallId.get(toolCallId) : undefined;
+    ensureDeepSeekReasoningStoreLoaded();
+    const cachedReasoning = toolCallId ? deepSeekReasoningStore.get(toolCallId) : undefined;
     if (cachedReasoning) {
       return cachedReasoning;
     }
@@ -492,14 +717,14 @@ function cacheToolCallExtraContentFromOpenAIResponse(body: unknown): void {
 function attachDeepSeekReasoningToOpenAIResponseToolCalls(
   body: unknown,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): void {
-  if (!isDeepSeekProvider(provider, baseURL)) {
-    return;
-  }
-
   const responseObj = toOptionalObject(body);
   if (!responseObj) {
+    return;
+  }
+  if (!isDeepSeekProvider(provider, baseURL, model ?? toString(responseObj.model))) {
     return;
   }
 
@@ -598,7 +823,12 @@ function extractErrorMessage(raw: string): string {
   return raw;
 }
 
-function resolveUpstreamAPIType(provider?: string, model?: string): UpstreamAPIType {
+function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: string): UpstreamAPIType {
+  // An explicit user-selected 'responses' format always wins so custom
+  // providers pointing at Responses-only endpoints work.
+  if (apiFormat === 'responses') {
+    return 'responses';
+  }
   const normalizedProvider = provider?.toLowerCase();
   // OpenAI always uses the Responses API.
   if (normalizedProvider === 'openai') {
@@ -687,7 +917,27 @@ function extractTextFromChatContent(content: unknown): string {
   return chunks.join('');
 }
 
-function convertUserChatContentToResponsesInput(content: unknown): Array<Record<string, unknown>> {
+/** Text placeholder replacing an image block for non-vision models (GT#12 N1). */
+function imageBlockPlaceholderForNonVisionModel(imageURL: string): string {
+  if (/^data:image\//i.test(imageURL)) {
+    return '[图片块已省略：当前模型不支持视觉输入（base64 图片内容不透明，已不发送）]';
+  }
+  return `[图片已省略：当前模型不支持视觉输入（来源：${imageURL.slice(0, 120)}）]`;
+}
+
+/**
+ * N1 scheme-B fallback: degrade image content blocks to short text
+ * placeholders when the request's model has no vision capability. Scheme A
+ * (canUseTool guard) blocks new reads at the source; this catches image
+ * blocks that were persisted before the guard existed, when history is
+ * replayed through the proxy — so a non-vision model never receives base64
+ * it cannot interpret. Content blocks stay structurally valid (input_text
+ * instead of input_image).
+ */
+function convertUserChatContentToResponsesInput(
+  content: unknown,
+  supportsVision: boolean = true
+): Array<Record<string, unknown>> {
   if (typeof content === 'string') {
     return content
       ? [{ type: 'input_text', text: content }]
@@ -714,12 +964,42 @@ function convertUserChatContentToResponsesInput(content: unknown): Array<Record<
       const imageURLObj = toOptionalObject(itemObj.image_url);
       const imageURL = toString(imageURLObj?.url) || toString(itemObj.image_url);
       if (imageURL) {
-        parts.push({ type: 'input_image', image_url: imageURL });
+        if (!supportsVision) {
+          parts.push({ type: 'input_text', text: imageBlockPlaceholderForNonVisionModel(imageURL) });
+        } else {
+          parts.push({ type: 'input_image', image_url: imageURL });
+        }
       }
     }
   }
 
   return parts;
+}
+
+/**
+ * N1 scheme-B fallback for tool messages: a persisted tool_result whose
+ * content embeds image blocks (e.g. `[{"type":"image","source":{base64}}]`)
+ * is degraded to a text placeholder for non-vision models. Array content is
+ * mapped block-by-block so text blocks survive; string content that looks
+ * like an image JSON block is replaced wholesale. Pairing (tool_use_id) is
+ * preserved — only content changes.
+ */
+function sanitizeToolContentForNonVisionModel(content: unknown): unknown {
+  if (Array.isArray(content)) {
+    const nextBlocks = content.map((block) => {
+      const blockObj = toOptionalObject(block);
+      if (blockObj && toString(blockObj.type) === 'image') {
+        return { type: 'text', text: imageBlockPlaceholderForNonVisionModel('data:image/*') };
+      }
+      return block;
+    });
+    return nextBlocks;
+  }
+  const raw = stringifyUnknown(content);
+  if (raw.length > 0 && /"type"\s*:\s*"image"/i.test(raw)) {
+    return `[图片块已省略：当前模型不支持视觉输入（原 content 含 image 块，${raw.length} 字符，已不发送）]`;
+  }
+  return content;
 }
 
 function normalizeResponsesToolsFromChat(toolsInput: unknown): Array<Record<string, unknown>> {
@@ -809,7 +1089,12 @@ function convertChatCompletionsRequestToResponsesRequest(
   const instructions: string[] = [];
   const unresolvedFunctionCalls = new Map<string, { name: string; hasOutput: boolean }>();
 
-  const isDeepSeek = provider?.toLowerCase() === 'deepseek';
+  const isDeepSeek = provider?.toLowerCase() === 'deepseek'
+    || isDeepSeekModel(toString(chatRequest.model));
+  // N1 scheme-B: whether the effective model can consume image blocks. Unknown
+  // models default to true (safe default), only known non-vision models
+  // (DeepSeek V4 family) degrade images to placeholders.
+  const supportsVision = modelSupportsVision(toString(chatRequest.model));
 
   if (chatRequest.model !== undefined) {
     request.model = chatRequest.model;
@@ -836,8 +1121,9 @@ function convertChatCompletionsRequestToResponsesRequest(
   if (responseTools.length > 0) {
     request.tools = responseTools;
   }
-  if (chatRequest.tool_choice !== undefined) {
-    request.tool_choice = normalizeResponsesToolChoiceFromChat(chatRequest.tool_choice);
+  const explicitToolChoice = chatRequest.tool_choice;
+  if (explicitToolChoice !== undefined) {
+    request.tool_choice = normalizeResponsesToolChoiceFromChat(explicitToolChoice);
   } else if (isDeepSeek && responseTools.length > 0) {
     // Default to auto so the model decides when to invoke web_search.
     request.tool_choice = 'auto';
@@ -846,17 +1132,21 @@ function convertChatCompletionsRequestToResponsesRequest(
   // DeepSeek Responses API controls reasoning depth via `reasoning.effort`,
   // distinct from chat/completions' top-level reasoning_effort / thinking. Map
   // the chat-style controls into the Responses reasoning object so effort set
-  // on the model preset (or by the caller) still applies.
+  // on the model preset (or by the caller) still applies. The API defaults to
+  // thinking ON (effort 'high') when `reasoning` is omitted, so disabling
+  // thinking requires an explicit { effort: 'none' } — omitting the field
+  // silently turns thinking back on.
   if (isDeepSeek) {
     const thinking = toOptionalObject(chatRequest.thinking);
     const thinkingEnabled = toString(thinking?.type).toLowerCase() !== 'disabled';
     const rawEffort = toString(chatRequest.reasoning_effort)
       || toString(toOptionalObject(chatRequest.output_config)?.effort);
-    // Normalize effort: empty/off defaults to 'high' (matches Reasonix default).
-    const effort = normalizeDeepSeekResponsesEffort(rawEffort) ?? (thinkingEnabled ? 'high' : undefined);
-    if (effort) {
-      request.reasoning = { effort };
-    }
+    // 'off'/'none' effort requests disable thinking just like thinking.disabled;
+    // empty effort keeps the 'high' default (matches Reasonix default).
+    const effort = thinkingEnabled
+      ? (normalizeDeepSeekResponsesEffort(rawEffort) ?? (rawEffort ? 'none' : 'high'))
+      : 'none';
+    request.reasoning = { effort };
   }
 
   const maxOutputTokens = toNumber(chatRequest.max_output_tokens)
@@ -883,7 +1173,12 @@ function convertChatCompletionsRequestToResponsesRequest(
 
     if (role === 'tool') {
       const toolCallId = toString(messageObj.tool_call_id);
-      const output = stringifyUnknown(messageObj.content);
+      // N1 scheme-B: degrade image blocks persisted in old tool_results before
+      // they are forwarded to a non-vision model.
+      const toolContent = supportsVision
+        ? messageObj.content
+        : sanitizeToolContentForNonVisionModel(messageObj.content);
+      const output = stringifyUnknown(toolContent);
       if (toolCallId && output) {
         input.push({
           type: 'function_call_output',
@@ -896,6 +1191,31 @@ function convertChatCompletionsRequestToResponsesRequest(
 
     if (role === 'assistant') {
       const text = extractTextFromChatContent(messageObj.content);
+      const toolCalls = toArray(messageObj.tool_calls);
+      const hasToolCalls = toolCalls.length > 0;
+
+      // DeepSeek's Responses API requires the assistant's chain-of-thought to
+      // be passed back as a `reasoning` input item whenever the turn made tool
+      // calls (thinking mode; empty reasoning text is rejected with a 400).
+      // `reasoning_content` was hydrated onto the message by
+      // hydrateDeepSeekReasoningForRequest (or replayed as thinking blocks);
+      // unrecoverable reasoning falls back to a constant placeholder so the
+      // request stays valid and the cached prefix stays byte-stable. For
+      // non-DeepSeek Responses providers (OpenAI etc.) plain-text reasoning
+      // items are not part of their contract, so we only emit them for
+      // DeepSeek models.
+      if (isDeepSeek) {
+        const reasoningContent = toString(messageObj.reasoning_content) || toString(messageObj.reasoning);
+        const effectiveReasoning = reasoningContent
+          || (hasToolCalls ? DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER : '');
+        if (effectiveReasoning) {
+          input.push({
+            type: 'reasoning',
+            content: [{ type: 'reasoning_text', text: effectiveReasoning }],
+          });
+        }
+      }
+
       if (text) {
         input.push({
           role: 'assistant',
@@ -903,7 +1223,7 @@ function convertChatCompletionsRequestToResponsesRequest(
         });
       }
 
-      for (const toolCall of toArray(messageObj.tool_calls)) {
+      for (const toolCall of toolCalls) {
         const toolCallObj = toOptionalObject(toolCall);
         const functionObj = toOptionalObject(toolCallObj?.function);
         if (!toolCallObj || !functionObj) {
@@ -935,7 +1255,7 @@ function convertChatCompletionsRequestToResponsesRequest(
       continue;
     }
 
-    const userParts = convertUserChatContentToResponsesInput(messageObj.content);
+    const userParts = convertUserChatContentToResponsesInput(messageObj.content, supportsVision);
     if (userParts.length > 0) {
       input.push({
         role: role || 'user',
@@ -944,8 +1264,15 @@ function convertChatCompletionsRequestToResponsesRequest(
     }
   }
 
-  if (instructions.length > 0) {
-    request.instructions = instructions.join('\n\n');
+  if (instructions.length > 0 || isDeepSeek) {
+    const instructionParts = [...instructions];
+    if (isDeepSeek) {
+      // DeepSeek Responses requests always carry the injected web_search tool;
+      // the guard makes the model search instead of confidently fabricating
+      // real-time facts, and mark results it cannot verify as unverified.
+      instructionParts.push(DEEPSEEK_WEB_SEARCH_INTEGRITY_GUARD);
+    }
+    request.instructions = instructionParts.join('\n\n');
   }
 
   for (const messageItem of input) {
@@ -1313,6 +1640,9 @@ function createResponsesStreamContext(): ResponsesStreamContext {
     functionCallByItemId: new Map<string, ResponsesFunctionCallState>(),
     nextToolIndex: 0,
     hasAnyDelta: false,
+    hasReasoningDeltas: false,
+    emittedWebSearchItemIds: new Set<string>(),
+    accumulatedText: '',
   };
 }
 
@@ -1991,6 +2321,98 @@ function emitResponsesFunctionCallArgumentsOnce(
   context.hasAnyDelta = true;
 }
 
+/**
+ * Relay a server-side `web_search_call` output item as an Anthropic
+ * `server_tool_use` content block, so the SDK context records that a web
+ * search actually ran (mirrors cognitiveChatCompletion marking response
+ * metadata with 'web_search'). Upstreams (opencode gateway, api.deepseek.com)
+ * do NOT embed search_results in the item, so the block carries an empty
+ * input — its purpose is the search marker, not the result text. Emitted
+ * exactly once per item id (output_item.added/done pairs + completed fallback
+ * all funnel here).
+ */
+function emitResponsesWebSearchBlockOnce(
+  res: http.ServerResponse,
+  state: StreamState,
+  context: ResponsesStreamContext,
+  itemObj: Record<string, unknown>
+): void {
+  const itemId = toString(itemObj.id);
+  if (!itemId || context.emittedWebSearchItemIds.has(itemId)) {
+    return;
+  }
+  context.emittedWebSearchItemIds.add(itemId);
+  context.hasAnyDelta = true;
+
+  // The block is real stream content: make sure message_start exists even if
+  // this was the first event of the stream.
+  ensureMessageStart(res, state, {});
+  closeCurrentBlockIfNeeded(res, state);
+
+  const index = state.contentIndex;
+  emitSSE(res, 'content_block_start', {
+    type: 'content_block_start',
+    index,
+    content_block: {
+      type: 'server_tool_use',
+      id: itemId,
+      name: 'web_search',
+      input: {},
+    },
+  });
+  emitSSE(res, 'content_block_stop', {
+    type: 'content_block_stop',
+    index,
+  });
+
+  state.contentIndex = index + 1;
+  state.currentBlockType = null;
+  state.activeToolIndex = null;
+}
+
+/**
+ * Non-stream path: inject web_search_call items from the Responses output as
+ * `server_tool_use` blocks into the Anthropic-shaped response, placed before
+ * the answer text (the search precedes the answer). The streaming path relays
+ * the same marker per output_item.done event instead.
+ */
+function injectResponsesWebSearchBlocks(
+  anthropicResponse: Record<string, unknown>,
+  upstreamJSON: unknown
+): void {
+  const responseObj = resolveResponsesObject(upstreamJSON);
+  const blocks: Array<Record<string, unknown>> = [];
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) !== 'web_search_call') {
+      continue;
+    }
+    const itemId = toString(itemObj?.id);
+    if (!itemId) {
+      continue;
+    }
+    blocks.push({
+      type: 'server_tool_use',
+      id: itemId,
+      name: 'web_search',
+      input: {},
+    });
+  }
+  if (blocks.length === 0) {
+    return;
+  }
+
+  const content = Array.isArray(anthropicResponse.content)
+    ? anthropicResponse.content
+    : [];
+  const firstTextIndex = content.findIndex(
+    (block) => toString(toOptionalObject(block)?.type) === 'text'
+  );
+  const insertAt = firstTextIndex === -1 ? content.length : firstTextIndex;
+  content.splice(insertAt, 0, ...blocks);
+  anthropicResponse.content = content;
+}
+
 function emitResponsesCompletedFunctionCalls(
   res: http.ServerResponse,
   state: StreamState,
@@ -2052,6 +2474,17 @@ function emitResponsesFallbackContent(
   responseObj: Record<string, unknown>,
   context: ResponsesStreamContext
 ): void {
+  // Server-side web searches recorded in the final output are relayed as
+  // server_tool_use blocks even when no deltas streamed (truncated stream that
+  // only produced response.completed). Deduped by item id, so the marker is
+  // not duplicated when the regular output_item.done path already emitted it.
+  for (const item of toArray(responseObj.output)) {
+    const itemObj = toOptionalObject(item);
+    if (toString(itemObj?.type) === 'web_search_call') {
+      emitResponsesWebSearchBlockOnce(res, state, context, itemObj);
+    }
+  }
+
   const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(responseObj);
   const firstChoice = toOptionalObject(toArray(syntheticOpenAIResponse.choices)[0]);
   const message = toOptionalObject(firstChoice?.message);
@@ -2154,6 +2587,7 @@ function processResponsesStreamEvent(
         choices: [{ delta: { content: textDelta } }],
       });
       context.hasAnyDelta = true;
+      context.accumulatedText += textDelta;
     }
     return;
   }
@@ -2161,6 +2595,13 @@ function processResponsesStreamEvent(
   if (
     eventType === 'response.reasoning_summary_text.delta'
     || eventType === 'response.reasoning.delta'
+    // DeepSeek's Responses API streams chain-of-thought via
+    // `response.reasoning_text.delta` (not the OpenAI summary events). Without
+    // this handler the reasoning is silently dropped: the CLI never sees
+    // thinking blocks, the reasoning store stays empty, and the next request
+    // fails with "The `reasoning_text` in the thinking mode must be passed
+    // back to the API".
+    || eventType === 'response.reasoning_text.delta'
   ) {
     const thinkingDelta = toString(payloadObj.delta);
     if (thinkingDelta) {
@@ -2168,6 +2609,28 @@ function processResponsesStreamEvent(
         id: toString(payloadObj.response_id),
         model: toString(payloadObj.model),
         choices: [{ delta: { reasoning: thinkingDelta } }],
+      });
+      context.hasAnyDelta = true;
+      context.hasReasoningDeltas = true;
+    }
+    return;
+  }
+
+  if (
+    eventType === 'response.reasoning_text.done'
+    || eventType === 'response.reasoning_summary_text.done'
+  ) {
+    // Some providers emit the full reasoning only on the `*_done` event. Skip
+    // when deltas already streamed it to avoid duplicating the chain-of-thought.
+    if (context.hasReasoningDeltas) {
+      return;
+    }
+    const fullReasoning = toString(payloadObj.text) || toString(payloadObj.summary);
+    if (fullReasoning) {
+      processOpenAIChunk(res, state, {
+        id: toString(payloadObj.response_id),
+        model: toString(payloadObj.model),
+        choices: [{ delta: { reasoning: fullReasoning } }],
       });
       context.hasAnyDelta = true;
     }
@@ -2206,6 +2669,14 @@ function processResponsesStreamEvent(
             model
           );
         }
+      }
+    } else if (toString(itemObj.type) === 'web_search_call') {
+      // Server-side web search (DeepSeek Responses / opencode gateway). Relay
+      // it as an Anthropic server_tool_use block once the item completes; the
+      // search marker must reach the SDK context so a search-backed answer is
+      // distinguishable from a bare training-memory answer.
+      if (eventType === 'response.output_item.done') {
+        emitResponsesWebSearchBlockOnce(res, state, context, itemObj);
       }
     }
     return;
@@ -2275,7 +2746,8 @@ async function handleResponsesStreamResponse(
   upstreamResponse: Response,
   res: http.ServerResponse,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2292,7 +2764,7 @@ async function handleResponsesStreamResponse(
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   const state = createStreamState({
-    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL),
+    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL, model),
   });
   const context = createResponsesStreamContext();
 
@@ -2369,7 +2841,8 @@ async function handleChatCompletionsStreamResponse(
   upstreamResponse: Response,
   res: http.ServerResponse,
   provider?: string,
-  baseURL?: string
+  baseURL?: string,
+  model?: string
 ): Promise<void> {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
@@ -2386,7 +2859,7 @@ async function handleChatCompletionsStreamResponse(
   const reader = upstreamResponse.body.getReader();
   const decoder = new TextDecoder();
   const state = createStreamState({
-    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL),
+    preserveDeepSeekReasoning: isDeepSeekProvider(provider, baseURL, model),
   });
 
   let buffer = '';
@@ -2570,6 +3043,36 @@ async function handleCreateScheduledTask(
   }
 }
 
+const MESSAGES_ROUTE_PATH = '/v1/messages';
+const SESSION_MESSAGES_ROUTE_PATTERN = /^\/s\/([^/]+)\/v1\/messages$/;
+// Snipping runs on every session-scoped request while a boundary is set; skip
+// the walk entirely for conversations too short to have a meaningful head
+// region beyond the always-intact tail.
+const MIN_MESSAGES_FOR_TOOL_RESULT_SNIP = 6;
+
+/**
+ * Match the Anthropic messages route. Returns null for the plain
+ * `/v1/messages` form, the decoded session key for the session-scoped
+ * `/s/<sessionKey>/v1/messages` form, and undefined for anything else. The
+ * runner points the CLI at the session-scoped form by appending
+ * `/s/<sessionId>` to ANTHROPIC_BASE_URL (the Anthropic SDK joins
+ * baseURL + path via plain string concat).
+ */
+function parseMessagesRouteSessionKey(pathname: string): string | null | undefined {
+  if (pathname === MESSAGES_ROUTE_PATH) {
+    return null;
+  }
+  const match = SESSION_MESSAGES_ROUTE_PATTERN.exec(pathname);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(match[1]) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function handleRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse
@@ -2593,7 +3096,8 @@ async function handleRequest(
     return;
   }
 
-  if (method !== 'POST' || url.pathname !== '/v1/messages') {
+  const messagesRouteSessionKey = parseMessagesRouteSessionKey(url.pathname);
+  if (method !== 'POST' || messagesRouteSessionKey === undefined) {
     writeJSON(res, 404, createAnthropicErrorBody('Not found', 'not_found_error'));
     return;
   }
@@ -2624,14 +3128,65 @@ async function handleRequest(
     return;
   }
 
-  const openAIRequest = anthropicToOpenAI(parsedRequestBody);
+  let anthropicRequestBody = parsedRequestBody;
+  let requestMessages = toOptionalObject(parsedRequestBody)?.messages;
+  if (messagesRouteSessionKey) {
+    if (Array.isArray(requestMessages)) {
+      // GT#12 N5: fold low-value polling tool_result blocks by CONTENT VALUE
+      // (complements tier-1 snip, which cuts by token boundary). Storage is
+      // untouched — only this replayed request body is affected. Runs before
+      // snip so the two savings compose.
+      const foldResult = foldLowValueToolResults(requestMessages);
+      if (foldResult.stats.folded > 0) {
+        anthropicRequestBody = {
+          ...(parsedRequestBody as Record<string, unknown>),
+          messages: foldResult.messages,
+        };
+        requestMessages = toOptionalObject(anthropicRequestBody)?.messages;
+        console.info('[cowork-openai-compat-proxy] Folded low-value polling tool_result blocks', {
+          sessionKey: messagesRouteSessionKey,
+          total: foldResult.stats.total,
+          folded: foldResult.stats.folded,
+          kept: foldResult.stats.kept,
+        });
+      }
+    }
+  }
+  if (messagesRouteSessionKey) {
+    // Tiered compaction tier 1: deterministically snip stale tool_result
+    // blocks in the head region of this session's conversation. Same input
+    // bytes + same persisted boundary => same output bytes, so DeepSeek's
+    // cached prefix only breaks once per boundary raise.
+    const snipHeadTokens = getCoworkSnipHeadTokens(messagesRouteSessionKey);
+    if (
+      snipHeadTokens > 0
+      && Array.isArray(requestMessages)
+      && requestMessages.length >= MIN_MESSAGES_FOR_TOOL_RESULT_SNIP
+    ) {
+      const snipResult = snipStaleToolResultBlocks(requestMessages, snipHeadTokens);
+      if (snipResult.stats.snippedBlocks > 0) {
+        anthropicRequestBody = {
+          ...(anthropicRequestBody as Record<string, unknown>),
+          messages: snipResult.messages,
+        };
+        console.info('[cowork-openai-compat-proxy] Snipped stale tool_result blocks in head region', {
+          sessionKey: messagesRouteSessionKey,
+          snippedBlocks: snipResult.stats.snippedBlocks,
+          savedTokens: snipResult.stats.savedTokens,
+          snipHeadTokens,
+        });
+      }
+    }
+  }
+
+  const openAIRequest = anthropicToOpenAI(anthropicRequestBody);
   openAIRequest.model = resolveEffectiveUpstreamModel(
     toString(openAIRequest.model),
     upstreamConfig.model
   );
   // Resolve the upstream API type from the EFFECTIVE model so that a request
   // body overriding the model (e.g. deepseek-v4-pro) still routes correctly.
-  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model));
+  const upstreamAPIType = resolveUpstreamAPIType(upstreamConfig.provider, toString(openAIRequest.model), upstreamConfig.apiFormat);
   filterOpenAIToolsForProvider(openAIRequest, upstreamConfig.provider);
   hydrateOpenAIRequestToolCalls(openAIRequest, upstreamConfig.provider, upstreamConfig.baseURL);
   const deepSeekReasoningHydrateResult = hydrateDeepSeekReasoningForRequest(
@@ -2777,14 +3332,16 @@ async function handleRequest(
         upstreamResponse,
         res,
         upstreamConfig.provider,
-        upstreamConfig.baseURL
+        upstreamConfig.baseURL,
+        toString(openAIRequest.model)
       );
     } else {
       await handleChatCompletionsStreamResponse(
         upstreamResponse,
         res,
         upstreamConfig.provider,
-        upstreamConfig.baseURL
+        upstreamConfig.baseURL,
+        toString(openAIRequest.model)
       );
     }
     return;
@@ -2801,9 +3358,19 @@ async function handleRequest(
 
   if (upstreamAPIType === 'responses') {
     const syntheticOpenAIResponse = convertResponsesToOpenAIResponse(upstreamJSON);
+    attachDeepSeekReasoningToOpenAIResponseToolCalls(
+      syntheticOpenAIResponse,
+      upstreamConfig.provider,
+      upstreamConfig.baseURL,
+      toString(syntheticOpenAIResponse.model)
+    );
     cacheToolCallExtraContentFromOpenAIResponse(syntheticOpenAIResponse);
     cacheToolCallExtraContentFromResponsesResponse(upstreamJSON);
     const anthropicResponse = openAIToAnthropic(syntheticOpenAIResponse);
+    // Non-stream Responses responses may contain web_search_call output items;
+    // relay them as server_tool_use blocks so the SDK context still records
+    // that a web search ran (streaming path relays per output_item.done).
+    injectResponsesWebSearchBlocks(anthropicResponse, upstreamJSON);
     writeJSON(res, 200, anthropicResponse);
     return;
   }
@@ -2811,7 +3378,8 @@ async function handleRequest(
   attachDeepSeekReasoningToOpenAIResponseToolCalls(
     upstreamJSON,
     upstreamConfig.provider,
-    upstreamConfig.baseURL
+    upstreamConfig.baseURL,
+    toString(openAIRequest.model)
   );
   cacheToolCallExtraContentFromOpenAIResponse(upstreamJSON);
 
@@ -2831,8 +3399,12 @@ export const __openAICompatProxyTestUtils = {
   filterOpenAIToolsForProvider,
   hydrateDeepSeekReasoningForRequest,
   resolveEffectiveUpstreamModel,
+  parseMessagesRouteSessionKey,
+  injectResponsesWebSearchBlocks,
+  extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {
-    deepSeekReasoningByToolCallId.clear();
+    deepSeekReasoningStoreLoaded = false;
+    deepSeekReasoningStore.clear();
     toolCallExtraContentById.clear();
   },
 };

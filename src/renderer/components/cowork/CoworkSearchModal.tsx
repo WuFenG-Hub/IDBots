@@ -8,6 +8,10 @@ interface CoworkSearchModalProps {
   isOpen: boolean;
   onClose: () => void;
   sessions: CoworkSessionSummary[];
+  /** Sessions of the currently selected task-record tab (scope filter). */
+  scopedSessions: CoworkSessionSummary[];
+  /** Display name of the current tab, used for the scope-filter label. */
+  scopeLabel: string;
   currentSessionId: string | null;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -19,6 +23,8 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
   isOpen,
   onClose,
   sessions,
+  scopedSessions,
+  scopeLabel,
   currentSessionId,
   onSelectSession,
   onDeleteSession,
@@ -26,16 +32,22 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
   onRenameSession,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
+  const [scopedOnly, setScopedOnly] = useState(true);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const baseSessions = scopedOnly ? scopedSessions : sessions;
 
   const filteredSessions = useMemo(() => {
     const trimmedQuery = searchQuery.trim().toLowerCase();
-    if (!trimmedQuery) return sessions;
-    return sessions.filter((session) => session.title.toLowerCase().includes(trimmedQuery));
-  }, [sessions, searchQuery]);
+    if (!trimmedQuery) return baseSessions;
+    return baseSessions.filter((session) => session.title.toLowerCase().includes(trimmedQuery));
+  }, [baseSessions, searchQuery]);
 
   useEffect(() => {
     if (isOpen) {
+      // Scope the search to the current tab by default; the toggle falls back
+      // to the full history list.
+      setScopedOnly(true);
       requestAnimationFrame(() => {
         searchInputRef.current?.focus();
         searchInputRef.current?.select();
@@ -94,6 +106,17 @@ const CoworkSearchModal: React.FC<CoworkSearchModalProps> = ({
           >
             <XMarkIcon className="h-5 w-5" />
           </button>
+        </div>
+        <div className="flex items-center px-4 pb-2.5 border-b dark:border-claude-darkBorder border-claude-border">
+          <label className="inline-flex items-center gap-1.5 text-xs cursor-pointer select-none dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            <input
+              type="checkbox"
+              checked={scopedOnly}
+              onChange={(event) => setScopedOnly(event.target.checked)}
+              className="accent-claude-accent"
+            />
+            {i18nService.t('coworkSearchScopedOnly').replace('{scope}', scopeLabel)}
+          </label>
         </div>
         <div className="px-3 py-3 max-h-[60vh] overflow-y-auto">
           {filteredSessions.length === 0 ? (

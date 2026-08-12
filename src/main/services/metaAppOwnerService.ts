@@ -1,4 +1,5 @@
 import { createPin } from './metaidCore';
+import { getRate as getGlobalFeeRate } from './feeRateStore';
 import type { MetabotStore } from '../metabotStore';
 import {
   buildMetaAppProtocolPayload,
@@ -15,6 +16,15 @@ import type { MetaAppSearchItem } from './metaAppSearchService';
 // createPin expects as its first arg (metaidCore.ts:419).
 
 const DEFAULT_SIZE = 12;
+
+// Fee rate follows the globally selected tier for the write's target chain
+// (same network resolution as createPin's resolveCreatePinNetwork).
+function resolveMetaAppWriteFeeRate(network?: string): number {
+  const normalized = network != null && String(network).trim() !== ''
+    ? String(network).toLowerCase().trim()
+    : 'mvc';
+  return getGlobalFeeRate(normalized);
+}
 
 export interface OwnerListParams { cursor?: string; size?: number; }
 export interface OwnerListResult {
@@ -223,7 +233,7 @@ export async function publishMetaApp(
     encryption: '0',
     version: '1.0',
     encoding: 'utf-8',
-  }, { network: options.network });
+  }, { network: options.network, feeRate: resolveMetaAppWriteFeeRate(options.network) });
   const pinId = String(chainWrite.pinId).toLowerCase();
   store.upsertMetaAppOwnerCache({
     metabot_id: metabotId,
@@ -258,7 +268,7 @@ export async function updateMetaApp(
     encryption: '0',
     version: '1.0',
     encoding: 'utf-8',
-  }, { network: options.network });
+  }, { network: options.network, feeRate: resolveMetaAppWriteFeeRate(options.network) });
   const pinId = String(chainWrite.pinId).toLowerCase();
   // Use the record's true create-root firstPinId as the modify cache group key when available,
   // so the modified record collapses onto the same indexer group (create + all modifies) instead
@@ -296,7 +306,7 @@ export async function removeMetaApp(
     encryption: '0',
     version: '1.0',
     encoding: 'utf-8',
-  }, { network: options.network });
+  }, { network: options.network, feeRate: resolveMetaAppWriteFeeRate(options.network) });
   const pinId = String(chainWrite.pinId).toLowerCase();
   // Use the record's true firstPinId (the create root) as the revoke cache group key when available,
   // so a revoke hides the whole group (create + all modifies) and the app doesn't reappear after a

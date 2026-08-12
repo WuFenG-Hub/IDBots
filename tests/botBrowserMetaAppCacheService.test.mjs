@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import http from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -6,9 +7,11 @@ import test from 'node:test';
 import AdmZip from 'adm-zip';
 
 import { createBotBrowserMetaAppCacheService } from '../src/main/services/botBrowserMetaAppCacheService.ts';
+import { fetchContentWithFallback } from '../src/main/services/localIndexerProxy.ts';
 import {
   assertMetaAppZipDownloadIntegrity,
   assertZipArchiveIntegrity,
+  looksLikeZipArchive,
 } from '../src/main/libs/metaAppZipDownload.ts';
 
 function createMetaAppZip() {
@@ -16,6 +19,29 @@ function createMetaAppZip() {
   zip.addFile('index.html', Buffer.from('<!doctype html><html><body>MetaAPP OK</body></html>', 'utf8'));
   zip.addFile('assets/app.js', Buffer.from('window.__metaAppLoaded = true;', 'utf8'));
   return zip.toBuffer();
+}
+
+function startLocalServer(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+const serverAddress = (server) => `http://127.0.0.1:${server.address().port}`;
+
+async function withP2PLocalBase(base, run) {
+  const previous = process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+  process.env.IDBOTS_MAN_P2P_LOCAL_BASE = base;
+  try {
+    return await run();
+  } finally {
+    if (previous == null) {
+      delete process.env.IDBOTS_MAN_P2P_LOCAL_BASE;
+    } else {
+      process.env.IDBOTS_MAN_P2P_LOCAL_BASE = previous;
+    }
+  }
 }
 
 test('Bot Browser MetaApp cache resolver downloads, caches, and serves a MetaAPP preview', async () => {
@@ -369,4 +395,196 @@ test('invalid Content-Length header is rejected', () => {
     },
     /content-length is invalid/,
   );
+});
+
+test('Bot Browser MetaApp cache falls back to the direct content API URL when accelerate fails', async () => {
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), 'idbots-bot-browser-cache-'));
+  const metaAppPinId = 'c06b7a2db6efa241560a2356e9966cf9758dae3ec9c795f614a652b113e30329i0';
+  const codePinId = '7086cf5272192d32e888a7675ceaada6a86cbcf5cf936355c36c2f0fed538352i0';
+  const zipBuffer = createMetaAppZip();
+  const accelerateUrl = `https://file.metaid.io/metafile-indexer/api/v1/files/accelerate/content/${codePinId}`;
+  const contentApiUrl = `https://file.metaid.io/metafile-indexer/api/v1/files/content/${codePinId}`;
+  const requestedUrls = [];
+  const service = createBotBrowserMetaAppCacheService({
+    cacheRoot,
+    fetch: async (url) => {
+      requestedUrls.push(String(url));
+      if (String(url).endsWith(`/pin/${metaAppPinId}`)) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            pin: {
+              path: '/protocols/metaapp',
+              ownerGlobalMetaId: 'idq1publisher',
+              timestamp: 1_700_000_000,
+              contentSummary: JSON.stringify({
+                title: 'Fallback App',
+                appName: 'fallback-app',
+                runtime: 'browser',
+                version: '1.0.0',
+                indexFile: 'index.html',
+                contentType: 'application/zip',
+                codeType: 'application/zip',
+                content: `metafile://${codePinId}.zip`,
+              }),
+            },
+          },
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (String(url) === accelerateUrl) {
+        return new Response('accelerate unavailable', { status: 500 });
+      }
+      if (String(url) === contentApiUrl) {
+        return new Response(zipBuffer, {
+          status: 200,
+          headers: { 'content-type': 'application/zip' },
+        });
+      }
+      return new Response('not found', { status: 404 });
+    },
+  });
+
+  try {
+    const resolved = await service.resolveMetaAppPin(metaAppPinId);
+    assert.equal(resolved.ok, true);
+    assert.match(resolved.data.runUrl, /^http:\/\/127\.0\.0\.1:\d+\/browser-cache\/metaapp-preview\//);
+    assert.ok(requestedUrls.includes(contentApiUrl), 'direct content API URL should be used as fallback');
+    assert.equal(requestedUrls.some((url) => url.includes('man.metaid.io/content/')), false);
+    assert.equal(requestedUrls.some((url) => url.includes('/metafile-indexer/content/')), false);
+
+    const stats = await service.getCache();
+    assert.equal(stats.ok, true);
+    assert.equal(stats.data.artifactCount, 1);
+  } finally {
+    await service.stop();
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+test('fetchContentWithFallback skips a JSON local body when the zip validator is set', async () => {
+  const zipBuffer = createMetaAppZip();
+  let remoteHit = false;
+  const localServer = await startLocalServer((req, res) => {
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': '38',
+    });
+    res.end('{"code":100,"message":"no pin found."}');
+  });
+  const remoteServer = await startLocalServer((req, res) => {
+    remoteHit = true;
+    res.writeHead(200, { 'content-type': 'application/zip' });
+    res.end(zipBuffer);
+  });
+
+  try {
+    const response = await withP2PLocalBase(serverAddress(localServer), () => (
+      fetchContentWithFallback(
+        'pin123i0',
+        `${serverAddress(remoteServer)}/content/pin123i0`,
+        { redirect: 'follow' },
+        looksLikeZipArchive,
+      )
+    ));
+    assert.equal(response.ok, true);
+    const body = Buffer.from(await response.arrayBuffer());
+    assert.deepEqual(body, zipBuffer);
+    assert.equal(remoteHit, true, 'invalid local body should fall back to the remote URL');
+  } finally {
+    localServer.close();
+    remoteServer.close();
+  }
+});
+
+test('fetchContentWithFallback keeps accepting a local JSON body without a validator', async () => {
+  let remoteHit = false;
+  const localServer = await startLocalServer((req, res) => {
+    res.writeHead(200, {
+      'content-type': 'application/json; charset=utf-8',
+      'content-length': '38',
+    });
+    res.end('{"code":100,"message":"no pin found."}');
+  });
+  const remoteServer = await startLocalServer((req, res) => {
+    remoteHit = true;
+    res.writeHead(200, { 'content-type': 'application/zip' });
+    res.end('remote');
+  });
+
+  try {
+    const response = await withP2PLocalBase(serverAddress(localServer), () => (
+      fetchContentWithFallback('pin123i0', `${serverAddress(remoteServer)}/content/pin123i0`)
+    ));
+    assert.equal(response.ok, true);
+    assert.equal(await response.text(), '{"code":100,"message":"no pin found."}');
+    assert.equal(remoteHit, false);
+  } finally {
+    localServer.close();
+    remoteServer.close();
+  }
+});
+
+test('fetchContentWithFallback accepts a valid zip from the local node', async () => {
+  const zipBuffer = createMetaAppZip();
+  let remoteHit = false;
+  const localServer = await startLocalServer((req, res) => {
+    res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': String(zipBuffer.length),
+    });
+    res.end(zipBuffer);
+  });
+  const remoteServer = await startLocalServer((req, res) => {
+    remoteHit = true;
+    res.writeHead(200, { 'content-type': 'application/zip' });
+    res.end(zipBuffer);
+  });
+
+  try {
+    const response = await withP2PLocalBase(serverAddress(localServer), () => (
+      fetchContentWithFallback(
+        'pin123i0',
+        `${serverAddress(remoteServer)}/content/pin123i0`,
+        { redirect: 'follow' },
+        looksLikeZipArchive,
+      )
+    ));
+    assert.equal(response.ok, true);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), zipBuffer);
+    assert.equal(remoteHit, false);
+  } finally {
+    localServer.close();
+    remoteServer.close();
+  }
+});
+
+test('fetchContentWithFallback falls back to remote when the local node misses', async () => {
+  const zipBuffer = createMetaAppZip();
+  const localServer = await startLocalServer((req, res) => {
+    res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' });
+    res.end('{"code":100,"message":"no pin found."}');
+  });
+  const remoteServer = await startLocalServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/zip' });
+    res.end(zipBuffer);
+  });
+
+  try {
+    const response = await withP2PLocalBase(serverAddress(localServer), () => (
+      fetchContentWithFallback(
+        'pin123i0',
+        `${serverAddress(remoteServer)}/content/pin123i0`,
+        { redirect: 'follow' },
+        looksLikeZipArchive,
+      )
+    ));
+    assert.equal(response.ok, true);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), zipBuffer);
+  } finally {
+    localServer.close();
+    remoteServer.close();
+  }
 });

@@ -9,6 +9,9 @@ import {
   addMessage,
   prependMessages,
   updateMessageContent,
+  setMessageFeedback as setMessageFeedbackAction,
+  clearMessageFeedback as clearMessageFeedbackAction,
+  loadSessionFeedback as loadSessionFeedbackAction,
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,
@@ -34,6 +37,10 @@ import type {
   CoworkUserMemoryEntry,
   CoworkMemoryStats,
   CoworkMemoryPolicy,
+  CoworkMemoryScopesOverview,
+  CoworkSessionMemoryScope,
+  CoworkMetaIDContactSummary,
+  CoworkMetaIDContactDetail,
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
@@ -45,6 +52,7 @@ import type {
   CoworkSubmitInput,
   CoworkSubmitInputResult,
   CoworkMessage,
+  MessageFeedbackRating,
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../types/cowork';
@@ -225,15 +233,24 @@ class CoworkService {
     const completeCleanup = cowork.onStreamComplete(({ sessionId }) => {
       store.dispatch(updateSessionStatus({ sessionId, status: 'completed' }));
       store.dispatch(updateBrowserSessionStatus({ sessionId, status: 'completed' }));
-      // Refresh the current session so usageStats (token/cost chip) reflects
-      // the just-finished turn.
-      if (store.getState().cowork.currentSessionId === sessionId) {
-        void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
-          if (refreshed?.success && refreshed.session) {
-            store.dispatch(setCurrentSession(refreshed.session));
-          }
-        }).catch(() => {});
-      }
+      // Correct the status from the backend if it did NOT actually mark the
+      // turn completed. An "empty terminal turn" (DeepSeek thinking-placeholder
+      // truncation — the model ended with only reasoning and no final reply)
+      // is left `idle` by the backend; without this correction the task list
+      // would falsely show "completed" while the final handoff is missing.
+      // Also refreshes the current session so usageStats (token/cost chip)
+      // reflects the just-finished turn.
+      void window.electron?.cowork?.getSession(sessionId).then((refreshed) => {
+        if (!refreshed?.success || !refreshed.session) return;
+        const backendStatus = refreshed.session.status;
+        if (backendStatus && backendStatus !== 'completed') {
+          store.dispatch(updateSessionStatus({ sessionId, status: backendStatus }));
+          store.dispatch(updateBrowserSessionStatus({ sessionId, status: backendStatus }));
+        }
+        if (store.getState().cowork.currentSessionId === sessionId) {
+          store.dispatch(setCurrentSession(refreshed.session));
+        }
+      }).catch(() => {});
     });
     this.streamListenerCleanups.push(completeCleanup);
 
@@ -348,6 +365,24 @@ class CoworkService {
     }
   }
 
+  /**
+   * Queues a manual compaction for the next local-mode turn (Phase 3). The
+   * runner validates that the session is idle and has history; on success the
+   * next submitted message continues from a compacted summary.
+   */
+  async requestManualCompaction(sessionId: string): Promise<{ success: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.requestManualCompaction) {
+      console.error('requestManualCompaction API not available');
+      return { success: false, error: 'Manual compaction API not available' };
+    }
+    const result = await cowork.requestManualCompaction(sessionId);
+    if (!result) {
+      return { success: false, error: 'Unknown error while requesting manual compaction' };
+    }
+    return result;
+  }
+
   async stopSession(sessionId: string): Promise<boolean> {
     const cowork = window.electron?.cowork;
     if (!cowork) return false;
@@ -376,6 +411,40 @@ class CoworkService {
     }
     console.error('Failed to set permission mode:', result.error);
     return false;
+  }
+
+  /**
+   * Stops a running subagent/background task via the live SDK Query control.
+   * Returns true when the stop request was accepted (the SDK emits a
+   * task_notification with status 'stopped' afterwards).
+   */
+  async stopTask(sessionId: string, taskId: string): Promise<{ success: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.stopTask) {
+      return { success: false, error: 'stopTask API not available' };
+    }
+    try {
+      return await cowork.stopTask(sessionId, taskId);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /**
+   * Backgrounds a running foreground task via the live SDK Query control.
+   * Pass toolUseId to target one task; omit it to background all foreground
+   * tasks. Returns true when the request was accepted.
+   */
+  async backgroundTask(sessionId: string, toolUseId?: string): Promise<{ success: boolean; backgrounded?: boolean; error?: string }> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.backgroundTask) {
+      return { success: false, error: 'backgroundTask API not available' };
+    }
+    try {
+      return await cowork.backgroundTask(sessionId, toolUseId);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   async setEffort(sessionId: string, effort: string | null): Promise<boolean> {
@@ -743,6 +812,43 @@ class CoworkService {
     return result.page.messages.length;
   }
 
+  async setMessageFeedback(input: { messageId: string; rating: MessageFeedbackRating | null; comment?: string | null }): Promise<boolean> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.setMessageFeedback) return false;
+
+    const result = await cowork.setMessageFeedback(input);
+    if (!result.success) {
+      console.error('Failed to set message feedback:', result.error);
+      return false;
+    }
+    if (result.feedback) {
+      store.dispatch(setMessageFeedbackAction({
+        messageId: result.feedback.messageId,
+        rating: result.feedback.rating,
+        comment: result.feedback.comment ?? undefined,
+      }));
+    } else {
+      store.dispatch(clearMessageFeedbackAction(input.messageId));
+    }
+    return true;
+  }
+
+  async loadSessionFeedback(sessionId: string): Promise<void> {
+    const cowork = window.electron?.cowork;
+    if (!cowork?.listSessionFeedback) return;
+
+    const result = await cowork.listSessionFeedback({ sessionId });
+    if (!result.success || !result.feedback) {
+      console.error('Failed to load session feedback:', result.error);
+      return;
+    }
+    store.dispatch(loadSessionFeedbackAction(result.feedback.map((record) => ({
+      messageId: record.messageId,
+      rating: record.rating,
+      comment: record.comment ?? undefined,
+    }))));
+  }
+
   async getA2AConversationHistoryPage(input: {
     sessionId: string;
     beforeCursor?: CoworkA2AHistoryCursor | null;
@@ -825,6 +931,8 @@ class CoworkService {
   async listMemoryEntries(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
     includeDeleted?: boolean;
@@ -841,6 +949,10 @@ class CoworkService {
   async createMemoryEntry(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     text: string;
     confidence?: number;
     isExplicit?: boolean;
@@ -855,6 +967,10 @@ class CoworkService {
   async updateMemoryEntry(input: {
     sessionId?: string;
     metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+    visibility?: 'local_only' | 'external_safe';
     id: string;
     text?: string;
     confidence?: number;
@@ -875,12 +991,33 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
-  async getMemoryStats(input?: { sessionId?: string; metabotId?: number }): Promise<CoworkMemoryStats | null> {
+  async getMemoryStats(input?: {
+    sessionId?: string;
+    metabotId?: number;
+    scopeKind?: 'owner' | 'contact' | 'conversation';
+    scopeKey?: string;
+  }): Promise<CoworkMemoryStats | null> {
     const api = window.electron?.cowork?.getMemoryStats;
     if (!api) return null;
     const result = await api(input);
     if (!result?.success || !result.stats) return null;
     return result.stats;
+  }
+
+  async listMemoryScopes(input: { metabotId?: number }): Promise<CoworkMemoryScopesOverview | null> {
+    const api = window.electron?.cowork?.listMemoryScopes;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.overview) return null;
+    return result.overview;
+  }
+
+  async getSessionMemoryScope(input: { sessionId?: string }): Promise<CoworkSessionMemoryScope | null> {
+    const api = window.electron?.cowork?.getSessionMemoryScope;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.sessionScope) return null;
+    return result.sessionScope;
   }
 
   async getMemoryPolicy(input?: { sessionId?: string; metabotId?: number }): Promise<CoworkMemoryPolicy | null> {
@@ -904,6 +1041,25 @@ class CoworkService {
     const result = await api(input);
     if (!result?.success || !result.policy) return null;
     return result.policy;
+  }
+
+  async listMetaIDContacts(input: { observerGlobalMetaId: string }): Promise<CoworkMetaIDContactSummary[]> {
+    const api = window.electron?.p2p?.listContacts;
+    if (!api) return [];
+    const result = await api(input);
+    if (!result?.success || !Array.isArray(result.contacts)) return [];
+    return result.contacts;
+  }
+
+  async getMetaIDContactDetail(input: {
+    observerGlobalMetaId: string;
+    subjectGlobalMetaId: string;
+  }): Promise<CoworkMetaIDContactDetail | null> {
+    const api = window.electron?.p2p?.getContactDetail;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.detail) return null;
+    return result.detail;
   }
 
   onSandboxDownloadProgress(callback: (progress: CoworkSandboxProgress) => void): () => void {

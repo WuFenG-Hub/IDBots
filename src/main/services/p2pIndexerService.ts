@@ -56,6 +56,7 @@ let recentProcessLogLines: string[] = [];
 let lastProcessFailure: StartupFailureSnapshot | null = null;
 
 let cachedStatus: P2PStatus = { running: false };
+let adoptedExternal = false;
 
 export interface StartupFailureSnapshot {
   exitCode: number | null;
@@ -66,6 +67,7 @@ export interface StartupFailureSnapshot {
 export interface StartupFailureAnalysis {
   likelyDataCorruption: boolean;
   likelyPortConflict: boolean;
+  likelyDbLockConflict: boolean;
   summary: string | null;
 }
 
@@ -127,7 +129,14 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
   const hasWalReplayIssue = /wal file .*stopped reading at offset/.test(joined);
   const hasPanic = joined.includes('panic:');
   const hasNilPointer = joined.includes('invalid memory address or nil pointer dereference');
-  const likelyDataCorruption = hasPebble && (hasWalReplayIssue || hasNilPointer) && hasPanic;
+  const hasDbLockConflict = joined.includes('resource temporarily unavailable')
+    || joined.includes('cannot acquire lock')
+    || joined.includes('lock held by another process')
+    || joined.includes('database is locked');
+  // A DB lock conflict (e.g. another man-p2p instance already opened the same
+  // Pebble data dir) also surfaces as a pebble + nil-pointer panic in the Go
+  // binary, but the local data is NOT corrupt - never classify it as such.
+  const likelyDataCorruption = hasPebble && (hasWalReplayIssue || hasNilPointer) && hasPanic && !hasDbLockConflict;
   const likelyPortConflict = joined.includes('address already in use')
     || joined.includes('only one usage of each socket address');
 
@@ -135,7 +144,17 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
     return {
       likelyDataCorruption: true,
       likelyPortConflict,
+      likelyDbLockConflict: false,
       summary: 'man-p2p crashed while replaying local Pebble WAL (likely corrupted local p2p data)',
+    };
+  }
+
+  if (hasDbLockConflict) {
+    return {
+      likelyDataCorruption: false,
+      likelyPortConflict,
+      likelyDbLockConflict: true,
+      summary: 'another man-p2p instance is already using the local Pebble data directory (database lock unavailable)',
     };
   }
 
@@ -143,6 +162,7 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
     return {
       likelyDataCorruption: false,
       likelyPortConflict: true,
+      likelyDbLockConflict: false,
       summary: `man-p2p could not bind ${P2P_LOCAL_PORT} (address already in use)`,
     };
   }
@@ -151,6 +171,7 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
     return {
       likelyDataCorruption: false,
       likelyPortConflict: false,
+      likelyDbLockConflict: false,
       summary: `man-p2p exited early with code ${snapshot.exitCode}`,
     };
   }
@@ -159,6 +180,7 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
     return {
       likelyDataCorruption: false,
       likelyPortConflict: false,
+      likelyDbLockConflict: false,
       summary: `man-p2p exited early with signal ${snapshot.signal}`,
     };
   }
@@ -166,6 +188,7 @@ export function analyzeStartupFailure(snapshot: StartupFailureSnapshot): Startup
   return {
     likelyDataCorruption: false,
     likelyPortConflict: false,
+    likelyDbLockConflict: false,
     summary: null,
   };
 }
@@ -321,10 +344,31 @@ export async function refreshStatusFromLocalApi(): Promise<P2PStatus | null> {
   }
 }
 
+async function isHealthyLocalManP2p(): Promise<boolean> {
+  if (!(await healthCheck())) {
+    return false;
+  }
+  const status = await refreshStatusFromLocalApi();
+  return !!status
+    && status.running === true
+    && (!!status.peerId || (Array.isArray(status.listenAddrs) && status.listenAddrs.length > 0));
+}
+
 function startStatusPoll(): void {
   clearStatusPoll();
   statusPollTimer = setInterval(async () => {
     try {
+      if (adoptedExternal) {
+        // We adopted an instance we do not own (e.g. the packaged app's
+        // man-p2p). If it disappears, start our own instance to keep the
+        // indexer available.
+        if (!stopping && lastStartArgs && !(await isHealthyLocalManP2p())) {
+          console.warn('[p2p] Adopted man-p2p became unreachable; starting our own instance');
+          adoptedExternal = false;
+          await start(lastStartArgs.dataDir, lastStartArgs.configPath, { resetRetryCount: false });
+        }
+        return;
+      }
       await refreshStatusFromLocalApi();
     } catch {
       // Silently ignore poll errors; process exit event handles crash detection
@@ -338,6 +382,26 @@ function scheduleRestart(): void {
   if (retryCount >= MAX_RETRIES) {
     console.error('[p2p] Max retries exceeded, giving up');
     emitStatusToAllWindows({ running: false, error: 'max retries exceeded' });
+    return;
+  }
+
+  // A Pebble DB lock conflict means another instance owns the local data dir;
+  // restarting our own copy would just crash again. Try to adopt the running
+  // instance once, otherwise give up with a clear error instead of looping.
+  if (lastProcessFailure && analyzeStartupFailure(lastProcessFailure).likelyDbLockConflict) {
+    console.warn('[p2p] Last crash was a local Pebble database lock conflict; checking for an existing instance to adopt');
+    void (async () => {
+      if (await isHealthyLocalManP2p()) {
+        adoptedExternal = true;
+        emitStatusToAllWindows({ ...cachedStatus, running: true, error: undefined });
+        startStatusPoll();
+        console.log('[p2p] Adopted existing healthy local man-p2p after lock conflict');
+      } else {
+        const summary = analyzeStartupFailure(lastProcessFailure!).summary;
+        console.error('[p2p] Pebble database lock conflict and no healthy existing instance found; giving up', summary ?? '');
+        setOfflineStatus(summary ?? 'local man-p2p database is locked by another instance');
+      }
+    })();
     return;
   }
 
@@ -529,6 +593,26 @@ export async function start(
     });
   }
 
+  // If a healthy man-p2p is already serving the local API (e.g. the packaged
+  // app's indexer is running and holds the Pebble data-dir lock), adopt it
+  // instead of spawning a duplicate that would crash against the same DB.
+  if (await isHealthyLocalManP2p()) {
+    adoptedExternal = true;
+    childProcess = null;
+    retryCount = 0;
+    resetStartupDiagnostics();
+    console.log('[p2p] Adopted existing healthy local man-p2p (skipping duplicate spawn)');
+    emitStatusToAllWindows({ ...cachedStatus, running: true, error: undefined });
+    try {
+      await refreshStatusFromLocalApi();
+    } catch {
+      emitStatusToAllWindows({ ...cachedStatus, running: true, error: undefined });
+    }
+    startStatusPoll();
+    return;
+  }
+  adoptedExternal = false;
+
   startupInProgressCount += 1;
   try {
     await spawnProcess(dataDir, configPath);
@@ -568,6 +652,7 @@ export async function start(
 
 export async function stop(): Promise<void> {
   stopping = true;
+  adoptedExternal = false;
 
   if (restartTimer !== null) {
     clearTimeout(restartTimer);

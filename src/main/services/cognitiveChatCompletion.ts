@@ -108,6 +108,34 @@ function normalizeDeepSeekResponsesEffort(effort: string | undefined): 'low' | '
   return 'high';
 }
 
+/**
+ * Reasoning object for the DeepSeek Responses API. The API defaults to
+ * thinking ON (effort 'high') when `reasoning` is omitted, so 'disabled' must
+ * be sent explicitly as { effort: 'none' } — omitting the field does NOT
+ * disable thinking and lets the chain-of-thought consume the whole
+ * max_output_tokens budget (status=incomplete with empty output).
+ * Enabled/undefined stays at 'max' to match the project's DeepSeek-first
+ * thinking-on policy. See https://api-docs.deepseek.com/zh-cn/guides/thinking_mode
+ */
+function resolveDeepSeekResponsesReasoning(
+  thinking: 'enabled' | 'disabled' | undefined,
+): { effort: 'none' | 'max' } {
+  return thinking === 'disabled' ? { effort: 'none' } : { effort: 'max' };
+}
+
+/**
+ * Default max output tokens for one-shot cognitive calls that do not pass
+ * maxTokens. Thinking-mode reasoning shares the output budget, so a
+ * thinking-enabled call needs far more headroom than a disabled one — a 2-4K
+ * ceiling lets max-effort reasoning consume the whole budget and return
+ * truncated or empty text (the 2026-08-08 dream-diary failure mode, elsewhere).
+ * Ceilings only: billing is by actual tokens used, so short replies cost the
+ * same as before.
+ */
+function resolveDefaultMaxOutputTokens(thinking: 'enabled' | 'disabled' | undefined): number {
+  return thinking === 'disabled' ? 4_096 : 16_384;
+}
+
 function extractAnthropicThinkingText(block: { type?: string; text?: string; thinking?: string }): string {
   if (block.type !== 'thinking' && block.type !== 'redacted_thinking') return '';
   return block.thinking || block.text || '';
@@ -338,7 +366,7 @@ async function callAnthropicStyleWithTools(
 
   const body: Record<string, unknown> = {
     model,
-    max_tokens: maxTokens ?? 2048,
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
     messages: anthropicMessages,
     system: systemParts.join('\n\n'),
   };
@@ -430,6 +458,8 @@ export const __cognitiveChatCompletionTestUtils = {
   shouldUseDeepSeekResponses,
   buildDeepSeekResponsesURL,
   normalizeDeepSeekResponsesEffort,
+  resolveDeepSeekResponsesReasoning,
+  resolveDefaultMaxOutputTokens,
 };
 
 /**
@@ -450,7 +480,7 @@ async function callOpenAIStyleWithTools(
   const body: Record<string, unknown> = {
     model,
     messages: toOpenAIMessages(messages),
-    max_tokens: maxTokens ?? 2048,
+    max_tokens: maxTokens ?? resolveDefaultMaxOutputTokens(thinking),
   };
   if (Array.isArray(tools) && tools.length > 0) {
     body.tools = tools;
@@ -604,20 +634,13 @@ async function callDeepSeekResponsesStyle(
   if (instructions.length > 0) {
     body.instructions = instructions.join('\n\n');
   }
-  if (maxTokens !== undefined) {
-    body.max_output_tokens = maxTokens;
-  } else {
-    body.max_output_tokens = 4096;
-  }
+  body.max_output_tokens = maxTokens ?? resolveDefaultMaxOutputTokens(thinking);
   if (temperature !== undefined) {
     body.temperature = temperature;
   }
-  // Reasoning effort: 'disabled' → omit reasoning (no thinking); otherwise map
-  // to the Responses reasoning object. Default effort is 'max' to match the
-  // project's DeepSeek-first thinking-on policy.
-  if (thinking !== 'disabled') {
-    body.reasoning = { effort: 'max' };
-  }
+  // Reasoning effort: 'disabled' must be explicit ({ effort: 'none' }) — an
+  // omitted field means thinking stays ON. See resolveDeepSeekResponsesReasoning.
+  body.reasoning = resolveDeepSeekResponsesReasoning(thinking);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey.trim()) {

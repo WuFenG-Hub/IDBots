@@ -219,7 +219,7 @@ const App: React.FC = () => {
         apiService.setConfig(apiConfig);
 
         // 从 providers 配置中加载可用模型列表到 Redux
-        const providerModels: { id: string; name: string; provider?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
+        const providerModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
         if (config.providers) {
           Object.entries(config.providers).forEach(([providerName, providerConfig]) => {
             if (providerConfig.enabled && providerConfig.models) {
@@ -228,6 +228,7 @@ const App: React.FC = () => {
                   id: model.id,
                   name: model.name,
                   provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+                  providerKey: providerName,
                   supportsImage: model.supportsImage ?? false,
                   options: model.options,
                 });
@@ -240,11 +241,17 @@ const App: React.FC = () => {
           name: model.name,
           supportsImage: model.supportsImage ?? false,
           options: model.options,
+          // Legacy availableModels carry no provider association.
+          providerKey: undefined as string | undefined,
         }));
         const resolvedModels = providerModels.length > 0 ? providerModels : fallbackModels;
         if (resolvedModels.length > 0) {
           dispatch(setAvailableModels(resolvedModels));
-          const preferredModel = resolvedModels.find(model => model.id === config.model.defaultModel) ?? resolvedModels[0];
+          // Same defaultProvider-aware selection as handleOnboardingComplete:
+          // keep the stored provider preference across restarts.
+          const preferredModel = resolvedModels.find(
+            (model) => model.id === config.model.defaultModel && model.providerKey === config.model.defaultProvider
+          ) ?? resolvedModels.find(model => model.id === config.model.defaultModel) ?? resolvedModels[0];
           dispatch(setSelectedModel(preferredModel));
         }
         
@@ -310,7 +317,7 @@ const App: React.FC = () => {
     const config = configService.getConfig();
     apiService.setConfig({ apiKey: config.api.key, baseUrl: config.api.baseUrl });
     if (config.providers) {
-      const allModels: { id: string; name: string; provider?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
+      const allModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
       Object.entries(config.providers).forEach(([providerName, providerConfig]) => {
         if (providerConfig.enabled && providerConfig.models) {
           providerConfig.models.forEach((model: { id: string; name: string; supportsImage?: boolean; options?: ModelOptions }) => {
@@ -318,6 +325,7 @@ const App: React.FC = () => {
               id: model.id,
               name: model.name,
               provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+              providerKey: providerName,
               supportsImage: model.supportsImage ?? false,
               options: model.options,
             });
@@ -326,7 +334,12 @@ const App: React.FC = () => {
       });
       if (allModels.length > 0) {
         dispatch(setAvailableModels(allModels));
-        const preferred = allModels.find((m) => m.id === config.model.defaultModel) ?? allModels[0];
+        // Prefer the model the user's stored defaultProvider points to, so a
+        // restart cannot silently switch an opencode default back to the
+        // first provider that happens to offer the same model id.
+        const preferred = allModels.find(
+          (m) => m.id === config.model.defaultModel && m.providerKey === config.model.defaultProvider
+        ) ?? allModels.find((m) => m.id === config.model.defaultModel) ?? allModels[0];
         dispatch(setSelectedModel(preferred));
       }
     }
@@ -347,14 +360,17 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isInitialized || !selectedModel?.id) return;
     const config = configService.getConfig();
-    if (config.model.defaultModel === selectedModel.id) return;
+    const wantsProvider = selectedModel.providerKey ? selectedModel.providerKey : null;
+    const providerUnchanged = wantsProvider === null || config.model.defaultProvider === wantsProvider;
+    if (config.model.defaultModel === selectedModel.id && providerUnchanged) return;
     void configService.updateConfig({
       model: {
         ...config.model,
         defaultModel: selectedModel.id,
+        ...(wantsProvider ? { defaultProvider: wantsProvider } : {}),
       },
     });
-  }, [isInitialized, selectedModel?.id]);
+  }, [isInitialized, selectedModel?.id, selectedModel?.providerKey]);
 
   const handleShowSettings = useCallback((options?: SettingsOpenOptions) => {
     setSettingsOptions({
@@ -778,7 +794,7 @@ const App: React.FC = () => {
     });
 
     if (config.providers) {
-      const allModels: { id: string; name: string; provider?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
+      const allModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: ModelOptions }[] = [];
       Object.entries(config.providers).forEach(([providerName, providerConfig]) => {
         if (providerConfig.enabled && providerConfig.models) {
           providerConfig.models.forEach((model: { id: string; name: string; supportsImage?: boolean; options?: ModelOptions }) => {
@@ -786,6 +802,7 @@ const App: React.FC = () => {
               id: model.id,
               name: model.name,
               provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+              providerKey: providerName,
               supportsImage: model.supportsImage ?? false,
               options: model.options,
             });

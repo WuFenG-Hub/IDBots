@@ -5,8 +5,39 @@
 
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
+import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
+import { generateSessionTitle } from '../libs/coworkUtil';
+import { buildOrchestratorSessionTitle } from '../libs/orchestratorSessionTitle';
+import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 const SKILL_TURN_TIMEOUT_MS = 300_000;
+/**
+ * How long the bridge keeps watching a session after the skill-turn watchdog
+ * fires. The watchdog only detaches the caller's promise: the worker session
+ * keeps running inside CoworkRunner and may legitimately deliver its result
+ * hours later (a real delegation took ~8h). Late results are handed to
+ * onLateCompletion so the attempt can be corrected to completed instead of
+ * staying permanently failed. If the session neither completes nor terminates
+ * within this window, recovery is abandoned via onRecoveryExpired.
+ */
+const SKILL_TURN_RECOVERY_WINDOW_MS = 12 * 60 * 60 * 1000;
+
+/**
+ * Error the skill-turn promise rejects with when the watchdog fires. Carries
+ * the sessionId so the caller can keep tracking the still-running session and
+ * correct its attempt state when a late result eventually arrives.
+ */
+export class SkillTurnTimeoutError extends Error {
+  readonly sessionId: string;
+  readonly timeoutMs: number;
+
+  constructor(sessionId: string, timeoutMs: number) {
+    super(`Skill turn timed out after ${timeoutMs / 1000}s`);
+    this.name = 'SkillTurnTimeoutError';
+    this.sessionId = sessionId;
+    this.timeoutMs = timeoutMs;
+  }
+}
 
 export interface RunOrchestratorSkillTurnParams {
   systemPrompt: string;
@@ -27,6 +58,20 @@ export interface RunOrchestratorSkillTurnParams {
   autoApprove?: boolean;
   disableMemoryUpdates?: boolean;
   permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+  /** Overrides the skill-turn watchdog timeout (ms). Defaults to 300s. */
+  skillTurnTimeoutMs?: number;
+  /**
+   * How long (ms) the bridge keeps watching the session after the watchdog
+   * fires so a still-running worker session can deliver a late result.
+   * Defaults to 12h. Only matters when the session outlives the watchdog.
+   */
+  lateCompletionTimeoutMs?: number;
+  /** Called when the session completes after the watchdog fired (late result). */
+  onLateCompletion?: (late: { sessionId: string; replyText: string }) => void | Promise<void>;
+  /** Called when the session errors or is stopped after the watchdog fired. */
+  onLateTermination?: (late: { sessionId: string; reason: 'error' | 'stopped'; message?: string }) => void | Promise<void>;
+  /** Called when the recovery window expires without any terminal session event. */
+  onRecoveryExpired?: (late: { sessionId: string }) => void | Promise<void>;
 }
 
 export interface RunExistingSessionSkillTurnParams {
@@ -45,11 +90,71 @@ export interface RunExistingSessionSkillTurnResult {
 }
 
 /**
+ * Extract the final usable assistant reply from a session's messages.
+ *
+ * A message counts as a usable final reply only when ALL of these hold:
+ * - it is an assistant text message (not a persisted thinking block);
+ * - it is not a known non-answer placeholder (e.g. DeepSeek's
+ *   `[reasoning unavailable]` can be persisted as thinking content);
+ * - it is not followed by any tool_use/tool_result — text emitted before
+ *   more tool activity is an intermediate progress note, not the handoff.
+ *
+ * This prevents a worker session that ended with a reasoning-only turn (no
+ * real text output) from being reported as a successful completion with
+ * `[reasoning unavailable]` as its "reply".
+ */
+function extractFinalAssistantReply(
+  messages: Array<{ id: string; type: string; content: string; metadata?: Record<string, unknown> }>
+): { replyText: string; assistantMessageId: string | null } {
+  let sawToolAfter = false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.type === 'tool_use' || message.type === 'tool_result') {
+      sawToolAfter = true;
+      continue;
+    }
+    if (message.type !== 'assistant') continue;
+    if (message.metadata?.privateChatSkillWaitNotice === true) continue;
+    if (message.metadata?.isThinking === true) continue;
+    const content = String(message.content ?? '');
+    if (isNonAnswerAssistantReply(content)) continue;
+    if (sawToolAfter) continue; // intermediate text, more tool activity followed
+    return { replyText: content.trim(), assistantMessageId: message.id ?? null };
+  }
+  return { replyText: '', assistantMessageId: null };
+}
+
+/**
+ * Resolve the session title for an orchestrator-delegated (non-group) worker
+ * session: localized prefix + LLM one-sentence summary of the delegation
+ * content, using the same summarization logic as regular Co-Worker session
+ * titles (generateSessionTitle — whose prompt already forces the title to be
+ * in the same language as the input, so a Chinese delegation yields a Chinese
+ * title and an English delegation an English one). On summarization failure
+ * the title falls back to a meaningful fragment of the delegation objective
+ * instead of an opaque timestamp.
+ */
+async function resolveOrchestratorSessionTitle(store: CoworkStore, userMessage: string): Promise<string> {
+  let summary: string | null = null;
+  try {
+    summary = await generateSessionTitle(userMessage);
+  } catch (error) {
+    if (isSqliteWasmBoundsError(error)) throw error;
+    console.warn(
+      '[Orchestrator] Session title summarization failed, using fallback title:',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+  return buildOrchestratorSessionTitle(store.getAppLanguage(), summary, userMessage);
+}
+
+/**
  * Run one skill turn using CoworkRunner: create a new session,
  * startSession with autoApprove, wait for 'complete', extract last assistant
  * content, keep session for UI visibility, return reply text.
  */
-export function runOrchestratorSkillTurn(
+export async function runOrchestratorSkillTurn(
   runner: CoworkRunner,
   store: CoworkStore,
   params: RunOrchestratorSkillTurnParams
@@ -76,7 +181,7 @@ export function runOrchestratorSkillTurn(
   const normalizedGroupId = (groupId ?? '').trim();
   const sessionTitle = normalizedGroupId
     ? `Group-${normalizedGroupId.slice(0, 12)}-${now}`
-    : `[Orchestrator] skill-turn-${now}`;
+    : await resolveOrchestratorSessionTitle(store, userMessage);
   const externalConversationId = normalizedGroupId
     ? `metaweb-group:${normalizedGroupId}:${now}`
     : `orchestrator:${now}`;
@@ -125,12 +230,20 @@ export function runOrchestratorSkillTurn(
   });
   runner.emit('message', sessionId, userMessageRecord);
 
+  const skillTurnTimeoutMs = params.skillTurnTimeoutMs ?? SKILL_TURN_TIMEOUT_MS;
+  const lateCompletionTimeoutMs = params.lateCompletionTimeoutMs ?? SKILL_TURN_RECOVERY_WINDOW_MS;
+
   return new Promise<string>((resolve, reject) => {
     let settled = false;
+    let recoveryActive = false;
+    let recoveryWindowTimer: ReturnType<typeof setTimeout> | null = null;
+
     const cleanup = () => {
       runner.off('complete', onComplete);
       runner.off('error', onError);
+      runner.off('stopped', onRecoveryStopped);
       if (timeoutId != null) clearTimeout(timeoutId);
+      if (recoveryWindowTimer != null) clearTimeout(recoveryWindowTimer);
     };
 
     const finish = (result: string) => {
@@ -152,31 +265,98 @@ export function runOrchestratorSkillTurn(
       reject(typeof err === 'string' ? new Error(err) : err);
     };
 
+    const extractLastAssistantContent = (): string => {
+      const messages = store.getSession(sessionId)?.messages ?? [];
+      return extractFinalAssistantReply(messages).replyText;
+    };
+
+    const reportLateCompletion = (replyText: string) => {
+      cleanup();
+      if (!params.onLateCompletion) return;
+      const report = () => params.onLateCompletion!({ sessionId, replyText });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Late skill-turn completion callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Late skill-turn completion callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const reportLateTermination = (reason: 'error' | 'stopped', message?: string) => {
+      cleanup();
+      if (!params.onLateTermination) return;
+      const report = () => params.onLateTermination!({ sessionId, reason, message });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Late skill-turn termination callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Late skill-turn termination callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
+    const reportRecoveryExpired = () => {
+      cleanup();
+      if (!params.onRecoveryExpired) return;
+      const report = () => params.onRecoveryExpired!({ sessionId });
+      try {
+        void Promise.resolve(report()).catch((error) => {
+          console.warn('[Orchestrator] Skill-turn recovery expiry callback failed:', error instanceof Error ? error.message : String(error));
+        });
+      } catch (error) {
+        console.warn('[Orchestrator] Skill-turn recovery expiry callback failed:', error instanceof Error ? error.message : String(error));
+      }
+    };
+
     const onComplete = (sid: string) => {
       if (sid !== sessionId) return;
-      const sessionWithMessages = store.getSession(sessionId);
-      const messages = sessionWithMessages?.messages ?? [];
-      const toolUseCount = messages.filter((m) => m.type === 'tool_use').length;
-      const toolResultCount = messages.filter((m) => m.type === 'tool_result').length;
-      let lastAssistantContent = '';
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].type === 'assistant' && messages[i].content) {
-          lastAssistantContent = String(messages[i].content).trim();
-          break;
-        }
+      const lastAssistantContent = extractLastAssistantContent();
+      if (recoveryActive) {
+        // Watchdog already fired: the session finished late. Hand the result to
+        // the recovery callback so the attempt can be corrected to completed.
+        reportLateCompletion(lastAssistantContent || '');
+        return;
       }
       finish(lastAssistantContent || '');
     };
 
     const onError = (sid: string, errorMessage: string) => {
       if (sid !== sessionId) return;
+      if (recoveryActive) {
+        reportLateTermination('error', errorMessage);
+        return;
+      }
       fail(errorMessage);
+    };
+
+    const onRecoveryStopped = (sid: string) => {
+      if (sid !== sessionId || !recoveryActive) return;
+      reportLateTermination('stopped');
+    };
+
+    const enterRecovery = () => {
+      recoveryActive = true;
+      // Keep listening for a late 'complete'/'error' — the worker session is
+      // still alive inside CoworkRunner and its eventual result is recoverable.
+      runner.on('stopped', onRecoveryStopped);
+      recoveryWindowTimer = setTimeout(() => {
+        recoveryWindowTimer = null;
+        reportRecoveryExpired();
+      }, lateCompletionTimeoutMs);
     };
 
     let timeoutId: ReturnType<typeof setTimeout> | null = setTimeout(() => {
       timeoutId = null;
-      fail(`Skill turn timed out after ${SKILL_TURN_TIMEOUT_MS / 1000}s`);
-    }, SKILL_TURN_TIMEOUT_MS);
+      if (settled) return;
+      // The caller's promise gives up at the watchdog, but the session itself
+      // is NOT stopped and keeps running. Park the turn in recovery mode
+      // instead of failing the session: a late completion must still be able
+      // to correct the attempt state (see onLateCompletion).
+      settled = true;
+      enterRecovery();
+      reject(new SkillTurnTimeoutError(sessionId, skillTurnTimeoutMs));
+    }, skillTurnTimeoutMs);
 
     runner.on('complete', onComplete);
     runner.on('error', onError);
@@ -297,23 +477,10 @@ export function runSkillTurnInExistingSession(
       if (sid !== sessionId) return;
       const sessionWithMessages = store.getSession(sessionId);
       const messages = sessionWithMessages?.messages ?? [];
-      let lastAssistantContent = '';
-      let lastAssistantMessageId: string | null = null;
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (
-          messages[i].type === 'assistant'
-          && messages[i].content
-          && messages[i].metadata?.privateChatSkillWaitNotice !== true
-          && messages[i].metadata?.isThinking !== true
-        ) {
-          lastAssistantContent = String(messages[i].content).trim();
-          lastAssistantMessageId = messages[i].id;
-          break;
-        }
-      }
+      const { replyText, assistantMessageId } = extractFinalAssistantReply(messages);
       finishAfterSkillStartNotice({
-        replyText: lastAssistantContent || '',
-        assistantMessageId: lastAssistantMessageId,
+        replyText,
+        assistantMessageId,
       });
     };
 

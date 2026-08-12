@@ -17,6 +17,9 @@ import type {
   MemoryDeleteUserMemoryInput,
   MemoryListUserMemoriesOptions,
   MemoryScopeSelectorInput,
+  MemoryScopesOverview,
+  MemoryScopeSummary,
+  MemorySessionScopeResolution,
   MemoryUpdateUserMemoryInput,
   MemoryUserMemoryStats,
 } from './memory/memoryBackend';
@@ -26,8 +29,10 @@ import {
   normalizeMemoryScopeSelector,
   normalizeScopeChannel,
   normalizeScopeIdentity,
+  parseContactScopeKey,
   type MemoryOrigin,
   type MemoryScope,
+  type MemoryScopeKind,
   type MemoryUsageClass,
   type MemoryVisibility,
 } from './memory/memoryScope';
@@ -487,7 +492,10 @@ export function buildA2AParticipantPairKey(localGlobalMetaId: string, peerGlobal
 }
 
 // Types mirroring src/types/cowork.ts for main process use
-export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// 'error_retried' (清单 #12): an orchestration attempt failed AND the step was
+// already retried with a fresh attempt — the session is a historical failure,
+// distinguishable from an un-attended 'error'.
+export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
@@ -3210,6 +3218,61 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * Shared WHERE builder for archived-session listing/counting: archived rows,
+   * optional bot filter, and text search across title / peer name / message
+   * content. Content search is intentionally a LIKE scan (the UI accepts
+   * slower results in exchange for finding older conversation bodies).
+   */
+  private buildArchivedSessionFilter(options?: {
+    metabotId?: number | null;
+    query?: string;
+    /** When true, also match archived conversations whose message bodies contain the query. */
+    searchContent?: boolean;
+  }): { clauses: string[]; params: Array<string | number> } {
+    const clauses: string[] = ['s.archived_at IS NOT NULL'];
+    const params: Array<string | number> = [];
+
+    const metabotId = options?.metabotId;
+    if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
+      clauses.push('s.metabot_id = ?');
+      params.push(metabotId);
+    }
+    const query = options?.query?.trim();
+    if (query) {
+      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`).toLowerCase();
+      const titleClauses = [
+        `LOWER(s.title) LIKE ? ESCAPE '\\'`,
+        `LOWER(COALESCE(s.peer_name, '')) LIKE ? ESCAPE '\\'`,
+      ];
+      params.push(`%${escaped}%`, `%${escaped}%`);
+      if (options?.searchContent === true) {
+        titleClauses.push(`EXISTS (
+          SELECT 1 FROM cowork_messages m
+          WHERE m.session_id = s.id AND LOWER(m.content) LIKE ? ESCAPE '\\'
+        )`);
+        params.push(`%${escaped}%`);
+      }
+      clauses.push(`(${titleClauses.join(' OR ')})`);
+    }
+    return { clauses, params };
+  }
+
+  /** Total archived sessions matching the same filters (for pagination). */
+  countArchivedSessions(options?: {
+    metabotId?: number | null;
+    query?: string;
+    searchContent?: boolean;
+  }): number {
+    const { clauses, params } = this.buildArchivedSessionFilter(options);
+    const row = this.getOne<{ count: number }>(`
+      SELECT COUNT(*) AS count
+      FROM cowork_sessions s
+      WHERE ${clauses.join(' AND ')}
+    `, params);
+    return Number(row?.count ?? 0);
+  }
+
+  /**
    * Archived conversations for the Settings "Archived Chats" panel: sessions
    * put away by the user (records preserved), newest archive first. Separate
    * from listSessions, which deliberately excludes archived rows.
@@ -3217,6 +3280,7 @@ export class CoworkStore implements MemoryBackend {
   listArchivedSessions(options?: {
     metabotId?: number | null;
     query?: string;
+    searchContent?: boolean;
     limit?: number;
     offset?: number;
   }): CoworkSessionSummary[] {
@@ -3236,20 +3300,7 @@ export class CoworkStore implements MemoryBackend {
       updated_at: number;
     }
 
-    const clauses: string[] = ['s.archived_at IS NOT NULL'];
-    const params: Array<string | number> = [];
-
-    const metabotId = options?.metabotId;
-    if (typeof metabotId === 'number' && Number.isInteger(metabotId) && metabotId > 0) {
-      clauses.push('s.metabot_id = ?');
-      params.push(metabotId);
-    }
-    const query = options?.query?.trim();
-    if (query) {
-      const escaped = query.replace(/[\\%_]/g, (char) => `\\${char}`).toLowerCase();
-      clauses.push(`(LOWER(s.title) LIKE ? ESCAPE '\\' OR LOWER(COALESCE(s.peer_name, '')) LIKE ? ESCAPE '\\')`);
-      params.push(`%${escaped}%`, `%${escaped}%`);
-    }
+    const { clauses, params } = this.buildArchivedSessionFilter(options);
     const limit = Math.max(1, Math.min(200, Math.floor(options?.limit ?? 50)));
     const offset = Math.max(0, Math.floor(options?.offset ?? 0));
 
@@ -3666,6 +3717,39 @@ export class CoworkStore implements MemoryBackend {
       SELECT id, type, content, metadata, created_at, sequence
       FROM cowork_messages
       WHERE session_id = ?
+      ORDER BY
+        created_at DESC,
+        COALESCE(sequence, 0) DESC,
+        ROWID DESC
+      LIMIT 1
+    `, [sessionId]);
+
+    if (!row) return null;
+
+    return {
+      id: row.id,
+      type: row.type as CoworkMessageType,
+      content: row.content,
+      timestamp: row.created_at,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+    };
+  }
+
+  /**
+   * Latest EXTERNALLY VISIBLE message: skips thinking drafts
+   * (metadata.isThinking=true) and unfinished streaming placeholders
+   * (metadata.isStreaming=true) so session-history consumers (readLatest /
+   * idbots_session_read_latest) never see a chain-of-thought draft or a
+   * half-streamed message masquerading as the formal reply (GT#12 N3).
+   * Same lightweight single-row query shape as getSessionLatestMessage.
+   */
+  getSessionLatestVisibleMessage(sessionId: string): CoworkMessage | null {
+    const row = this.getOne<CoworkMessageRow>(`
+      SELECT id, type, content, metadata, created_at, sequence
+      FROM cowork_messages
+      WHERE session_id = ?
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isThinking":true%')
+        AND (metadata IS NULL OR metadata NOT LIKE '%"isStreaming":true%')
       ORDER BY
         created_at DESC,
         COALESCE(sequence, 0) DESC,
@@ -5856,6 +5940,91 @@ export class CoworkStore implements MemoryBackend {
     }
 
     return stats;
+  }
+
+  listMemoryScopes(metabotId: number): MemoryScopesOverview {
+    const rows = this.getAll<{
+      scope_kind: string;
+      scope_key: string;
+      count: number;
+    }>(`
+      SELECT scope_kind, scope_key, COUNT(*) AS count
+      FROM user_memories
+      WHERE metabot_id = ? AND status != 'deleted'
+      GROUP BY scope_kind, scope_key
+      ORDER BY scope_key ASC
+    `, [metabotId]);
+
+    const overview: MemoryScopesOverview = {
+      owner: null,
+      contacts: [],
+      conversations: [],
+    };
+
+    for (const row of rows) {
+      const kind: MemoryScopeKind = row.scope_kind === 'contact' || row.scope_kind === 'conversation'
+        ? row.scope_kind
+        : 'owner';
+      const key = normalizeScopeIdentity(row.scope_key) || OWNER_SCOPE_KEY;
+      const count = Number(row.count) || 0;
+      const summary: MemoryScopeSummary = { kind, key, count };
+
+      if (kind === 'contact') {
+        const parsed = parseContactScopeKey(key);
+        const peerGlobalMetaId = parsed?.peerGlobalMetaId ?? null;
+        summary.peerGlobalMetaId = peerGlobalMetaId;
+        if (peerGlobalMetaId) {
+          const peer = this.getOne<{ peer_name: string | null; peer_avatar: string | null }>(`
+            SELECT peer_name, peer_avatar
+            FROM cowork_sessions
+            WHERE peer_global_metaid = ?
+              AND peer_name IS NOT NULL AND peer_name != ''
+            ORDER BY updated_at DESC
+            LIMIT 1
+          `, [peerGlobalMetaId]);
+          summary.peerName = peer?.peer_name ?? null;
+          summary.peerAvatar = peer?.peer_avatar ?? null;
+        }
+        overview.contacts.push(summary);
+      } else if (kind === 'conversation') {
+        overview.conversations.push(summary);
+      } else {
+        overview.owner = summary;
+      }
+    }
+
+    // Always present the owner scope even when empty so the UI can default to it.
+    if (!overview.owner) {
+      overview.owner = { kind: 'owner', key: OWNER_SCOPE_KEY, count: 0 };
+    }
+
+    return overview;
+  }
+
+  resolveMemoryScopeForSession(sessionId?: string | null): MemorySessionScopeResolution | null {
+    const metabotId = this.resolveMetabotIdForMemory(sessionId);
+    if (metabotId == null) {
+      return null;
+    }
+    const resolved = resolveMemoryScopes(this.buildResolvedMemoryScopeInput({ metabotId, sessionId }));
+    let peerName: string | null = null;
+    let peerAvatar: string | null = null;
+    if (resolved.writeScope.kind === 'contact' && sessionId) {
+      const sessionRow = this.getOne<{ peer_name: string | null; peer_avatar: string | null }>(`
+        SELECT peer_name, peer_avatar
+        FROM cowork_sessions
+        WHERE id = ?
+        LIMIT 1
+      `, [sessionId]);
+      peerName = sessionRow?.peer_name ?? null;
+      peerAvatar = sessionRow?.peer_avatar ?? null;
+    }
+    return {
+      metabotId,
+      scope: resolved.writeScope,
+      peerName,
+      peerAvatar,
+    };
   }
 
   autoDeleteNonPersonalMemories(metabotId?: number, scopeSelector?: MemoryScopeSelectorInput): number {

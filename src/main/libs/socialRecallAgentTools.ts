@@ -1,0 +1,333 @@
+import { z } from 'zod';
+import type { SocialPostItem, SocialCommentItem } from '../services/socialRecallService';
+
+/** A feed candidate from the Social Recall API, marked when authored by one of the user's own MetaBots. */
+export type SocialPostCandidate = SocialPostItem & { isOwn?: boolean };
+
+/**
+ * Control surface the host (main.ts) provides for on-chain social search
+ * tools. Backed by the metaso-p2p Social Recall API
+ * (so.metaid.io/api/social/*); feed items are pre-marked with isOwn when the
+ * author belongs to one of the user's MetaBots, and `scope=following` has its
+ * `user` resolved host-side to the identity the user acts as.
+ */
+export type SocialRecallControl = {
+  feed(input: {
+    keywords?: string[];
+    publisher?: string;
+    publishers?: string[];
+    since?: number;
+    until?: number;
+    sort?: 'newest' | 'hot';
+    scope?: 'following';
+    user?: string;
+    chainName?: string;
+    size?: number;
+    cursor?: string;
+  }): Promise<{ items: SocialPostCandidate[]; hasMore: boolean; nextCursor?: string | null }>;
+  post(pinId: string): Promise<SocialPostCandidate>;
+  comments(input: { pinId: string; size?: number; cursor?: string }): Promise<{
+    items: SocialCommentItem[];
+    hasMore: boolean;
+    nextCursor?: string | null;
+  }>;
+};
+
+/** Minimal shape of the claude-agent-sdk `tool()` helper we depend on. */
+type SdkToolFactory = (
+  name: string,
+  description: string,
+  schema: Record<string, unknown>,
+  handler: (args: any) => Promise<unknown>
+) => unknown;
+
+function textResult(text: string, isError = false) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function metaIdUri(globalMetaId: string): string {
+  return `metaid://${globalMetaId}`;
+}
+
+function sanitizeLinkLabel(value: string): string {
+  return value.replace(/[[\]]/g, '');
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max)}…` : value;
+}
+
+/** UTC "YYYY-MM-DD HH:MM" — the Social Recall API timestamps are Unix seconds. */
+function formatTime(ts: number): string {
+  return ts ? `${new Date(ts * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC` : '';
+}
+
+function postSnippet(post: SocialPostItem): string {
+  const content = post.payload?.content?.trim();
+  if (!content) return '(no text content)';
+  return truncate(content.replace(/\s+/g, ' '), 120);
+}
+
+function authorName(post: SocialPostItem): string {
+  return post.author.globalMetaId || post.author.address || post.author.metaId || 'unknown';
+}
+
+/** Ready-to-quote markdown bullets for social feed candidates. Author names are metaid:// links. */
+export function formatSocialPostBullets(items: SocialPostItem[]): string {
+  return items.map((item) => {
+    const name = authorName(item);
+    const label = sanitizeLinkLabel(name);
+    const namePart = item.author.globalMetaId ? `[${label}](${metaIdUri(item.author.globalMetaId)})` : label;
+    const own = (item as SocialPostCandidate).isOwn ? ' (your post)' : '';
+    const head = `- **${postSnippet(item)}** — by ${namePart} · ${formatTime(item.createdAt)}${own}`;
+    const meta = [
+      `likes ${item.likeCount}`,
+      `comments ${item.commentCount}`,
+      `quotes ${item.quoteCount}`,
+      item.hotScore != null ? `hot ${item.hotScore}` : '',
+      item.chainName ? `chain: ${item.chainName}` : '',
+      item.pinId ? `pin: ${item.pinId}` : '',
+    ].filter(Boolean).join(' | ');
+    return meta ? `${head}\n  ${meta}` : head;
+  }).join('\n');
+}
+
+/** Human-readable sheet for social_post_detail; the author line is a ready-to-quote metaid:// link. */
+export function formatSocialPostDetail(post: SocialPostCandidate): string {
+  const name = authorName(post);
+  const label = sanitizeLinkLabel(name);
+  const namePart = post.author.globalMetaId ? `[${label}](${metaIdUri(post.author.globalMetaId)})` : label;
+  const own = post.isOwn ? ' (your post)' : '';
+  const lines = [
+    `Post ${post.pinId}:`,
+    `- author: ${namePart}${own}`,
+  ];
+  if (post.chainName) lines.push(`- chain: ${post.chainName}`);
+  if (post.protocolPath) lines.push(`- protocol: ${post.protocolPath}`);
+  if (post.createdAt) {
+    const created = formatTime(post.createdAt);
+    const updated = post.updatedAt && post.updatedAt !== post.createdAt ? formatTime(post.updatedAt) : '';
+    lines.push(`- ${[`created: ${created}`, updated ? `updated: ${updated}` : ''].filter(Boolean).join(' | ')}`);
+  }
+  lines.push(`- engagement: likes ${post.likeCount} | comments ${post.commentCount} | quotes ${post.quoteCount} | donates ${post.donateCount}`);
+  const content = post.payload?.content?.trim();
+  if (content) lines.push(`- content: ${truncate(content, 1500)}`);
+  if (post.payload?.attachments?.length) lines.push(`- attachments: ${post.payload.attachments.join(', ')}`);
+  return lines.join('\n');
+}
+
+/** Ready-to-quote markdown bullets for post comments; author names are metaid:// links. */
+export function formatSocialComments(items: SocialCommentItem[]): string {
+  return items.map((comment) => {
+    const name = comment.authorGlobalMetaId || comment.authorAddress || comment.authorMetaId || 'unknown';
+    const label = sanitizeLinkLabel(name);
+    const namePart = comment.authorGlobalMetaId ? `[${label}](${metaIdUri(comment.authorGlobalMetaId)})` : label;
+    const content = comment.content ? truncate(comment.content.replace(/\s+/g, ' '), 200) : '(empty comment)';
+    return `- ${content} — ${namePart} · ${formatTime(comment.timestamp)}${comment.pinId ? ` · pin: ${comment.pinId}` : ''}`;
+  }).join('\n');
+}
+
+/** Human-readable filter summary used in headers and empty-result messages. */
+function filtersLabel(args: {
+  query?: string;
+  keywords?: string[];
+  publisher?: string;
+  publishers?: string[];
+  sinceDays?: number;
+  sort?: 'newest' | 'hot';
+  following?: boolean;
+  chainName?: string;
+}, keywords: string[]): string {
+  const parts: string[] = [];
+  if (keywords.length) parts.push(`matching "${keywords.join('", "')}"`);
+  const authors = [...(args.publisher ? [args.publisher] : []), ...(args.publishers ?? [])];
+  if (authors.length) parts.push(`by ${authors.join(', ')}`);
+  if (args.following) parts.push('by people you follow');
+  if (args.sort === 'hot') parts.push('hot-ranked (last 48h)');
+  if (args.sinceDays) parts.push(`within the last ${args.sinceDays} day(s)`);
+  if (args.chainName) parts.push(`on ${args.chainName}`);
+  return parts.length ? ` (${parts.join('; ')})` : '';
+}
+
+/** Merge the free-text query (split into OR terms) with the explicit keyword list. */
+function mergeKeywords(query: string | undefined, keywords: string[] | undefined): string[] {
+  const terms: string[] = [];
+  for (const term of [...(query ? query.split(/[\s,，、]+/) : []), ...(keywords ?? [])]) {
+    const trimmed = term.trim();
+    if (trimmed && !terms.includes(trimmed)) terms.push(trimmed);
+  }
+  // Coarse recall only — cap the OR set so the request stays meaningful.
+  return terms.slice(0, 5);
+}
+
+/**
+ * Inline MCP tools that let any cowork session search on-chain social posts
+ * (simplebuzz) through the MetaSo Social Recall API. Registered for every
+ * session type when the host provides SocialRecallControl (see coworkRunner).
+ * Triggering is intentionally loose: any "what's happening on-chain" phrasing
+ * (topic, author, time window, hot, following) routes here; the tools return a
+ * coarse candidate set and the Agent ranks/picks 3-5 for the user.
+ */
+export function buildSocialRecallAgentTools(deps: {
+  tool: SdkToolFactory;
+  socialRecall: SocialRecallControl;
+  /** True for browser-type sessions (Bot Browser side panel with bot_browser_open_uri available). */
+  openBestMatchInBrowser: boolean;
+}): unknown[] {
+  const { tool, socialRecall, openBestMatchInBrowser } = deps;
+
+  const candidatesGuidance = openBestMatchInBrowser
+    ? 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: author names MUST remain metaid:// links and pinIds must stay intact (they are needed for social_post_detail / social_post_comments). When the user wants to view an author, open their page with bot_browser_open_uri on the metaid:// URI (prefer newTab=true). Never invent posts, authors, or engagement numbers.'
+    : 'Pick the 3-5 posts most relevant to the user and rank them by the user\'s interest — the list above is an unranked coarse candidate set. In your reply, REUSE the bullet lines above verbatim: author names MUST remain clickable metaid:// links and pinIds must stay intact; never invent posts, authors, or engagement numbers. Do NOT open anything in the Bot Browser yourself: the user works in this chat view and will click links. For a post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.';
+
+  const detailGuidance = openBestMatchInBrowser
+    ? 'Present these fields to the user with the author name kept as a clickable metaid:// link, and open the author\'s bot page with bot_browser_open_uri on that URI when the user asks to view them. For the post\'s replies use social_post_comments.'
+    : 'Present these fields to the user with the author name kept as a clickable metaid:// link. Do NOT open the Bot Browser yourself — the user clicks the link to view the author. For the post\'s replies use social_post_comments.';
+
+  const searchSocialPosts = tool(
+    'search_social_posts',
+    'Search on-chain social posts (simplebuzz feed, MetaSo). Trigger LIBERALLY whenever the user asks about on-chain posts/buzz/content by topic, author, time window, or popularity — e.g. "今天有什么关于 AI 的帖子" / "what\'s new about AI", "这两天 MVC 社区说了些什么", "what did <someone> post recently", "我关注的人有什么新帖" / "posts from people I follow", "最近有什么热帖" / "latest hot posts", "随便看看最新的帖子" / "show me the latest buzz", or a morning digest over several topics ("AI, MVC, web3 的早报"). Returns up to `size` coarse candidate posts (newest first, or hot-ranked when sort=hot) as markdown bullets with author links, timestamps, snippets, and engagement counts. This is a BROAD candidate set — YOU pick the 3-5 most relevant posts for the user and rank them. Filters combine with AND; multiple keywords and multiple publishers match with OR. Time windows: pass sinceDays for "today" (1) / "last two days" (2), or since/until as Unix seconds. `publisher` accepts a GlobalMetaID, legacy MetaID, or address — if the user names a person, resolve the name to a GlobalMetaID with search_metaids first. For a specific post\'s aggregated engagement (likes/comments/quotes) use social_post_detail; for its replies use social_post_comments.',
+    {
+      query: z.string().optional(),
+      keywords: z.array(z.string()).optional(),
+      publisher: z.string().optional(),
+      publishers: z.array(z.string()).optional(),
+      sinceDays: z.number().optional(),
+      since: z.number().optional(),
+      until: z.number().optional(),
+      sort: z.enum(['newest', 'hot']).optional(),
+      following: z.boolean().optional(),
+      chainName: z.string().optional(),
+      size: z.number().optional(),
+      cursor: z.string().optional(),
+    },
+    async (args: {
+      query?: string;
+      keywords?: string[];
+      publisher?: string;
+      publishers?: string[];
+      sinceDays?: number;
+      since?: number;
+      until?: number;
+      sort?: 'newest' | 'hot';
+      following?: boolean;
+      chainName?: string;
+      size?: number;
+      cursor?: string;
+    }) => {
+      const size = Math.min(50, Math.max(1, Math.floor(args.size ?? 20)));
+      const keywords = mergeKeywords(args.query, args.keywords);
+      const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
+        ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
+        : args.since;
+      const request = {
+        keywords,
+        publisher: args.publisher,
+        publishers: args.publishers,
+        since,
+        until: args.until,
+        sort: args.sort,
+        scope: args.following === true ? ('following' as const) : undefined,
+        chainName: args.chainName,
+        size,
+        cursor: args.cursor,
+      };
+      try {
+        let { items, hasMore, nextCursor } = await socialRecall.feed(request);
+        // Empty-result degradation: drop the weakest (last) keyword once and retry.
+        if (!items.length && !args.cursor && keywords.length > 1) {
+          ({ items, hasMore, nextCursor } = await socialRecall.feed({
+            ...request,
+            keywords: keywords.slice(0, -1),
+          }));
+        }
+        if (!items.length) {
+          return textResult(`No on-chain social posts matched${filtersLabel(args, keywords)}. Tell the user honestly; do NOT invent posts.`);
+        }
+        const ordering = args.sort === 'hot' ? 'hot-ranked first' : 'newest first';
+        const sections = [
+          `${items.length} on-chain post(s)${filtersLabel(args, keywords)}, ${ordering}:`,
+          formatSocialPostBullets(items),
+          candidatesGuidance,
+        ];
+        if (hasMore && nextCursor) {
+          sections.push(`More results are available — call search_social_posts again with cursor="${nextCursor}" if the user wants them.`);
+        }
+        return textResult(sections.join('\n\n'));
+      } catch (error) {
+        return textResult(`Social post search failed: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  const socialPostDetail = tool(
+    'social_post_detail',
+    'Get the aggregated detail of a specific on-chain post by pinId: full content, author (metaid:// link), timestamps, attachments, and engagement counters (likes, comments, quotes, donates). Use when the user asks about a concrete post — "how many likes does this post have", "有没有人回复这个帖子", "查看这个帖子的点赞/回复情况" — or when you already hold a pinId from search_social_posts. To report on the user\'s own latest post ("我最新发的帖子有多少点赞"), first find it with search_social_posts (publisher=your identity), then detail its pinId. A missing or hidden post (40400) is reported honestly.',
+    {
+      pinId: z.string().min(1),
+    },
+    async (args: { pinId: string }) => {
+      const pinId = (args.pinId ?? '').trim();
+      if (!pinId) {
+        return textResult('social_post_detail requires a non-empty pinId.', true);
+      }
+      try {
+        const post = await socialRecall.post(pinId);
+        return textResult([
+          formatSocialPostDetail(post),
+          detailGuidance,
+        ].join('\n\n'));
+      } catch (error) {
+        if (error instanceof Error && error.name === 'SocialRecallNotFoundError') {
+          return textResult(`No on-chain post matches pinId "${pinId}" (missing or hidden). Tell the user honestly; do NOT invent post data.`);
+        }
+        return textResult(`Failed to fetch the social post: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  const socialPostComments = tool(
+    'social_post_comments',
+    'List the comments/replies attached to a specific on-chain post by pinId (paged, size default 20). Use when the user asks about a post\'s replies — "有没有人回复这个帖子", "看看这个帖子的评论", "what did people say under this post" — or when you want to summarize a post\'s discussion. For aggregated counts (likes/comments/quotes) use social_post_detail instead.',
+    {
+      pinId: z.string().min(1),
+      size: z.number().optional(),
+      cursor: z.string().optional(),
+    },
+    async (args: { pinId: string; size?: number; cursor?: string }) => {
+      const pinId = (args.pinId ?? '').trim();
+      if (!pinId) {
+        return textResult('social_post_comments requires a non-empty pinId.', true);
+      }
+      try {
+        const { items, hasMore, nextCursor } = await socialRecall.comments({
+          pinId,
+          size: args.size,
+          cursor: args.cursor,
+        });
+        if (!items.length) {
+          return textResult(`No comments on post "${pinId}" yet. Tell the user honestly; do NOT invent comments.`);
+        }
+        const sections = [
+          `${items.length} comment(s) on post "${pinId}":`,
+          formatSocialComments(items),
+          'Present these comments; keep author names as clickable metaid:// links.',
+        ];
+        if (hasMore && nextCursor) {
+          sections.push(`More comments are available — call social_post_comments again with cursor="${nextCursor}" if the user wants them.`);
+        }
+        return textResult(sections.join('\n\n'));
+      } catch (error) {
+        if (error instanceof Error && error.name === 'SocialRecallNotFoundError') {
+          return textResult(`No on-chain post matches pinId "${pinId}" (missing or hidden). Tell the user honestly.`);
+        }
+        return textResult(`Failed to fetch the post comments: ${error instanceof Error ? error.message : String(error)}`, true);
+      }
+    }
+  );
+
+  return [searchSocialPosts, socialPostDetail, socialPostComments];
+}

@@ -12,6 +12,8 @@ interface CoworkSessionListProps {
   onDeleteSession: (sessionId: string) => void;
   onTogglePin: (sessionId: string, pinned: boolean) => void;
   onRenameSession: (sessionId: string, title: string) => void;
+  /** Empty-state message; defaults to the generic "no tasks" text. */
+  emptyText?: string;
 }
 
 const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
@@ -21,6 +23,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
   onDeleteSession,
   onTogglePin,
   onRenameSession,
+  emptyText,
 }) => {
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const unreadSessionIdSet = useMemo(() => new Set(unreadSessionIds), [unreadSessionIds]);
@@ -46,7 +49,7 @@ const CoworkSessionList: React.FC<CoworkSessionListProps> = ({
     return (
       <div className="text-center py-8">
         <p className="text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('coworkNoSessions')}
+          {emptyText ?? i18nService.t('coworkNoSessions')}
         </p>
       </div>
     );

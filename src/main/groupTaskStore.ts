@@ -5,10 +5,53 @@
  */
 
 import type { SqliteDatabase as Database } from './sqliteTypes';
+import { normalizeRawGlobalMetaId } from './shared/globalMetaId';
+
+/**
+ * Canonical GlobalMetaID form when the value parses (trim + lowercase), else
+ * the trimmed original so legacy non-canonical rows stay comparable. Applied
+ * at every globalmetaid entry point, same normalization as the invite path.
+ */
+function normalizeMemberGlobalMetaId(value: unknown): string {
+  return normalizeRawGlobalMetaId(value) ?? (typeof value === 'string' ? value.trim() : '');
+}
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
+
+/**
+ * Who moved a group task between statuses. 'chair' = the chair bot acted
+ * (on-chain [STATUS:...] tag or its RPC close), 'owner' = the human owner
+ * acted (UI accept/close/back-to-work), 'system' = host-internal transition
+ * without a recorded actor (defaults, migration/backfill paths).
+ */
+export type GroupTaskStatusEventActorKind = 'chair' | 'owner' | 'system';
+
+export interface GroupTaskStatusEventActor {
+  kind: GroupTaskStatusEventActorKind;
+  globalMetaId?: string | null;
+  name?: string | null;
+}
+
+/** One recorded status transition (P1-5: who/when/from/to). */
+export interface GroupTaskStatusEvent {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus;
+  toStatus: GroupTaskStatus;
+  actorKind: GroupTaskStatusEventActorKind;
+  actorGlobalMetaId: string | null;
+  actorName: string | null;
+  /** sqlite datetime('now') text, UTC. */
+  createdAt: string | null;
+}
+
+export interface UpdateGroupTaskStatusOptions {
+  /** Recorded in group_task_status_events; defaults to a 'system' actor. */
+  actor?: GroupTaskStatusEventActor;
+}
 
 export interface GroupTask {
   id: number;
@@ -20,11 +63,27 @@ export interface GroupTask {
   status: GroupTaskStatus;
   chairMetabotId: number;
   createdBy: string;
+  /**
+   * Round-4 (semantics): the daemon cursor — id of the LAST MESSAGE THE HOST
+   * SUCCESSFULLY PROCESSED. It only advances on success; a failing message is
+   * retried (bounded) and never silently skipped.
+   */
   lastProcessedMsgId: number;
+  /**
+   * Round-4: epoch SECONDS of the host's last daemon drive (per-tick heartbeat
+   * for the stall signal). null when the daemon has never driven the task.
+   */
+  lastDrivenAt: number | null;
   createPinId: string | null;
   createdAt: string | null;
   updatedAt: string | null;
   closedAt: string | null;
+  /** Owner acceptance rating (1-5 stars), recorded when the task is accepted. */
+  rating: number | null;
+  /** Optional free-text review from the owner alongside the star rating. */
+  ratingComment: string | null;
+  /** datetime('now') of the rating; null for unrated tasks. */
+  ratedAt: string | null;
 }
 
 export interface GroupTaskMember {
@@ -35,8 +94,18 @@ export interface GroupTaskMember {
   role: GroupTaskMemberRole;
   joinedPinId: string | null;
   createdAt: string | null;
-  /** Joined from metabots for display / mention matching (null for remote members). */
+  /** Inviter-side name snapshot for remote members (no local metabots row). */
+  displayName: string | null;
+  /** Set when the member was kicked (M3); active members have NULL. */
+  removedAt: string | null;
+  /** On-chain /protocols/simplegroupremoveuser pin that removed the member (M3). */
+  removePinId: string | null;
+  /** Joined from metabots for display / mention matching (falls back to displayName for remote members). */
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status: GroupTaskMemberStatus;
+  /** P0-2: epoch-seconds (sqlite datetime) of the last status change. */
+  statusChangedAt: string | null;
 }
 
 export interface GroupTaskDeliverable {
@@ -48,6 +117,8 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (sources + outcomes) for a deliverable. */
+  verification: string | null;
 }
 
 /** One transcript row for the Group Task chat view (content already decrypted). */
@@ -63,6 +134,12 @@ export interface GroupChatTranscriptMessage {
   chainTimestamp: number | null;
   msgIndex: number | null;
   replyPin: string | null;
+  /**
+   * Round-4 attribution: true when the chain-signature GlobalMetaID could not
+   * be resolved OR is neither a task member nor the owner — display-only flag,
+   * the sender must never be inferred from senderName.
+   */
+  senderSuspect: boolean;
 }
 
 export interface CreateGroupTaskInput {
@@ -81,6 +158,18 @@ export interface AddGroupTaskMemberInput {
   globalmetaid?: string | null;
   role: GroupTaskMemberRole;
   joinedPinId?: string | null;
+  /** Name snapshot for remote members (metabotId === null). */
+  displayName?: string | null;
+}
+
+export interface MarkGroupTaskMemberRemovedInput {
+  taskId: number;
+  /** Local member path (metabots row id). */
+  metabotId?: number | null;
+  /** Remote member path (metabot_id IS NULL rows). */
+  globalmetaid?: string | null;
+  /** The on-chain removeuser pin id, recorded for audit. */
+  removePinId?: string | null;
 }
 
 export interface AddGroupTaskDeliverableInput {
@@ -90,6 +179,37 @@ export interface AddGroupTaskDeliverableInput {
   kind?: string | null;
   uri?: string | null;
 }
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
+}
+
+export interface AddGroupTaskTransitionInput {
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor?: string | null;
+  reason?: string | null;
+}
+export type GroupTaskIntegrityEventType = 'correction' | 'honest_report';
+
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: GroupTaskIntegrityEventType;
+  /** Human-readable detail (the public declaration text, capped). */
+  detail: string | null;
+  createdAt: string | null;
+}
+
+
 
 interface GroupTaskRow {
   id: number;
@@ -102,10 +222,14 @@ interface GroupTaskRow {
   chair_metabot_id: number;
   created_by: string;
   last_processed_msg_id: number;
+  last_driven_at: number | null;
   create_pin_id: string | null;
   created_at: string | null;
   updated_at: string | null;
   closed_at: string | null;
+  rating: number | null;
+  rating_comment: string | null;
+  rated_at: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -116,8 +240,13 @@ interface GroupTaskMemberRow {
   role: string;
   joined_pin_id: string | null;
   created_at: string | null;
+  display_name: string | null;
+  removed_at: string | null;
+  remove_pin_id: string | null;
   metabot_name: string | null;
   metabot_globalmetaid: string | null;
+  status: string;
+  status_changed_at: string | null;
 }
 
 interface GroupTaskDeliverableRow {
@@ -128,6 +257,38 @@ interface GroupTaskDeliverableRow {
   kind: string | null;
   uri: string | null;
   status: string;
+  created_at: string | null;
+  verification: string | null;
+}
+
+interface GroupTaskTransitionRow {
+  id: number;
+  task_id: number;
+  from_status: string | null;
+  to_status: string;
+  actor: string | null;
+  reason: string | null;
+  created_at: string | null;
+}
+
+interface GroupTaskIntegrityEventRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  event_type: string;
+  detail: string | null;
+  created_at: string | null;
+}
+
+interface GroupTaskStatusEventRow {
+  id: number;
+  task_id: number;
+  from_status: string;
+  to_status: string;
+  actor_kind: string;
+  actor_globalmetaid: string | null;
+  actor_name: string | null;
   created_at: string | null;
 }
 
@@ -143,6 +304,20 @@ interface GroupChatTranscriptRow {
   chain_timestamp: number | null;
   msg_index: number | null;
   reply_pin: string | null;
+  sender_suspect?: number | null;
+}
+
+function rowToGroupTaskStatusEvent(row: GroupTaskStatusEventRow): GroupTaskStatusEvent {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    fromStatus: isGroupTaskStatus(row.from_status) ? row.from_status : 'planning',
+    toStatus: isGroupTaskStatus(row.to_status) ? row.to_status : 'planning',
+    actorKind: row.actor_kind === 'chair' || row.actor_kind === 'owner' ? row.actor_kind : 'system',
+    actorGlobalMetaId: row.actor_globalmetaid ?? null,
+    actorName: row.actor_name ?? null,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChatTranscriptMessage {
@@ -158,6 +333,7 @@ function rowToGroupChatTranscriptMessage(row: GroupChatTranscriptRow): GroupChat
     chainTimestamp: row.chain_timestamp ?? null,
     msgIndex: row.msg_index ?? null,
     replyPin: row.reply_pin ?? null,
+    senderSuspect: Number(row.sender_suspect ?? 0) === 1,
   };
 }
 
@@ -179,6 +355,11 @@ const LEGAL_TRANSITIONS: Record<GroupTaskStatus, GroupTaskStatus[]> = {
   cancelled: [],
 };
 
+function isGroupTaskMemberStatus(value: string): value is GroupTaskMemberStatus {
+  return value === 'assigned' || value === 'working' || value === 'standby'
+    || value === 'done' || value === 'unreachable';
+}
+
 function isGroupTaskStatus(value: string): value is GroupTaskStatus {
   return value === 'planning' || value === 'executing' || value === 'review'
     || value === 'done' || value === 'cancelled';
@@ -196,10 +377,14 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     chairMetabotId: row.chair_metabot_id,
     createdBy: row.created_by,
     lastProcessedMsgId: row.last_processed_msg_id ?? 0,
+    lastDrivenAt: row.last_driven_at ?? null,
     createPinId: row.create_pin_id ?? null,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at ?? null,
     closedAt: row.closed_at ?? null,
+    rating: row.rating ?? null,
+    ratingComment: row.rating_comment ?? null,
+    ratedAt: row.rated_at ?? null,
   };
 }
 
@@ -213,7 +398,45 @@ function rowToGroupTaskMember(row: GroupTaskMemberRow): GroupTaskMember {
     role: row.role === 'chair' ? 'chair' : 'worker',
     joinedPinId: row.joined_pin_id ?? null,
     createdAt: row.created_at ?? null,
-    name: row.metabot_name ?? null,
+    displayName: row.display_name ?? null,
+    removedAt: row.removed_at ?? null,
+    removePinId: row.remove_pin_id ?? null,
+    // Local members get the metabots-table name; remote members fall back to
+    // the display_name snapshot recorded at invite time.
+    name: row.metabot_name ?? row.display_name ?? null,
+    // P0-2: default status — chair starts 'working', workers 'assigned'. Old
+    // rows without a status column default the same way.
+    status: isGroupTaskMemberStatus(row.status)
+      ? row.status
+      : (row.role === 'chair' ? 'working' : 'assigned'),
+    statusChangedAt: row.status_changed_at ?? null,
+  };
+}
+
+function rowToGroupTaskIntegrityEvent(row: GroupTaskIntegrityEventRow): GroupTaskIntegrityEvent {
+  const type = row.event_type === 'honest_report' ? 'honest_report' : 'correction';
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    eventType: type,
+    detail: row.detail ?? null,
+    createdAt: row.created_at ?? null,
+  };
+}
+
+function rowToGroupTaskTransition(row: GroupTaskTransitionRow): GroupTaskTransition {
+  const from = row.from_status;
+  const to = row.to_status;
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    fromStatus: from && isGroupTaskStatus(from) ? from : null,
+    toStatus: isGroupTaskStatus(to) ? to : 'planning',
+    actor: row.actor ?? null,
+    reason: row.reason ?? null,
+    createdAt: row.created_at ?? null,
   };
 }
 
@@ -228,6 +451,7 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     uri: row.uri ?? null,
     status: status === 'accepted' || status === 'rejected' ? status : 'pending',
     createdAt: row.created_at ?? null,
+    verification: row.verification ?? null,
   };
 }
 
@@ -354,8 +578,15 @@ export class GroupTaskStore {
   /**
    * Transition a task to `nextStatus`, enforcing the state machine.
    * Throws on illegal transitions. Sets closed_at when entering a terminal state.
+   * Every REAL transition (before !== next) is recorded in
+   * group_task_status_events with the given actor (P1-5 status-transition log);
+   * a recording failure never breaks the transition itself.
    */
-  updateTaskStatus(id: number, nextStatus: GroupTaskStatus): GroupTask {
+  updateTaskStatus(
+    id: number,
+    nextStatus: GroupTaskStatus,
+    opts?: UpdateGroupTaskStatusOptions,
+  ): GroupTask {
     const task = this.getTaskById(id);
     if (!task) throw new Error(`Group task ${id} not found`);
     if (task.status === nextStatus) return task;
@@ -365,6 +596,7 @@ export class GroupTaskStore {
         `Illegal group task status transition: ${task.status} -> ${nextStatus} (task ${id})`,
       );
     }
+    const beforeStatus = task.status;
     if (TERMINAL_STATUSES.has(nextStatus)) {
       this.db.run(
         `UPDATE group_tasks SET status = ?, updated_at = datetime('now'), closed_at = datetime('now') WHERE id = ?`,
@@ -379,11 +611,81 @@ export class GroupTaskStore {
     this.saveDb();
     const updated = this.getTaskById(id);
     if (!updated) throw new Error(`Group task ${id} not found after status update`);
+    this.recordStatusEvent(id, beforeStatus, nextStatus, opts?.actor);
     return updated;
+  }
+
+  /** Insert one status-transition event row (best-effort, never throws). */
+  private recordStatusEvent(
+    taskId: number,
+    fromStatus: GroupTaskStatus,
+    toStatus: GroupTaskStatus,
+    actor?: GroupTaskStatusEventActor,
+  ): void {
+    try {
+      this.db.run(
+        `INSERT INTO group_task_status_events (task_id, from_status, to_status, actor_kind, actor_globalmetaid, actor_name)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          taskId,
+          fromStatus,
+          toStatus,
+          actor?.kind ?? 'system',
+          actor?.globalMetaId?.trim() || null,
+          actor?.name?.trim() || null,
+        ],
+      );
+      this.saveDb();
+    } catch (error) {
+      console.warn(
+        `Failed to record status event for group task ${taskId} (${fromStatus} -> ${toStatus}): ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /** Status transition history for one task, newest first (P1-5). */
+  listStatusEvents(taskId: number, opts?: { limit?: number }): GroupTaskStatusEvent[] {
+    const limit = Math.max(1, Math.min(200, Math.trunc(opts?.limit ?? 100)));
+    const rows = this.getAll<GroupTaskStatusEventRow>(
+      `SELECT id, task_id, from_status, to_status, actor_kind, actor_globalmetaid, actor_name, created_at
+       FROM group_task_status_events
+       WHERE task_id = ?
+       ORDER BY id DESC
+       LIMIT ?`,
+      [taskId, limit],
+    );
+    return rows.map(rowToGroupTaskStatusEvent);
   }
 
   isTerminalStatus(status: GroupTaskStatus): boolean {
     return TERMINAL_STATUSES.has(status);
+  }
+
+  /**
+   * Record the owner's acceptance rating (1-5 stars + optional comment).
+   * The star rating is mandatory for acceptance and validated here (the DB has
+   * no CHECK because the column was added via ALTER TABLE on existing DBs).
+   * Idempotent: re-rating a task overwrites the previous rating.
+   */
+  updateTaskRating(id: number, rating: number, comment?: string | null): GroupTask {
+    const task = this.getTaskById(id);
+    if (!task) throw new Error(`Group task ${id} not found`);
+    const value = Math.trunc(rating);
+    if (!Number.isFinite(value) || value < 1 || value > 5) {
+      throw new Error(`Group task rating must be an integer between 1 and 5 (got ${rating})`);
+    }
+    const text = (comment ?? '').trim();
+    this.db.run(
+      `UPDATE group_tasks
+       SET rating = ?, rating_comment = ?, rated_at = datetime('now'), updated_at = datetime('now')
+       WHERE id = ?`,
+      [value, text || null, id],
+    );
+    this.saveDb();
+    const updated = this.getTaskById(id);
+    if (!updated) throw new Error(`Group task ${id} not found after rating update`);
+    return updated;
   }
 
   /** Advance the daemon cursor (monotonic: never moves backwards). */
@@ -391,6 +693,15 @@ export class GroupTaskStore {
     this.db.run(
       'UPDATE group_tasks SET last_processed_msg_id = MAX(last_processed_msg_id, ?) WHERE id = ?',
       [Math.trunc(msgId), id],
+    );
+    this.saveDb();
+  }
+
+  /** Round-4: heartbeat of the last daemon drive (epoch seconds). */
+  updateLastDrivenAt(id: number, epochSec: number): void {
+    this.db.run(
+      'UPDATE group_tasks SET last_driven_at = ? WHERE id = ?',
+      [Math.trunc(epochSec), id],
     );
     this.saveDb();
   }
@@ -419,7 +730,7 @@ export class GroupTaskStore {
       ? Math.trunc(opts.beforeId)
       : null;
     const columns = `id, pin_id, tx_id, sender_name, sender_global_metaid, sender_avatar,
-      content, content_type, chain_timestamp, msg_index, reply_pin`;
+      content, content_type, chain_timestamp, msg_index, reply_pin, sender_suspect`;
     const rows = (beforeId != null
       ? this.getAll<GroupChatTranscriptRow>(
           `SELECT ${columns} FROM group_chat_messages
@@ -435,53 +746,424 @@ export class GroupTaskStore {
     return rows.map(rowToGroupChatTranscriptMessage);
   }
 
+  /**
+   * Round-4 attribution: persist the GlobalMetaID resolved from the message's
+   * chain-signature legacy metaid (manapi /api/info/metaid/{metaid}). The
+   * chain signature is the ONLY identity source; sender_name is never used
+   * for attribution.
+   */
+  updateMessageSenderGlobalMetaId(id: number, globalMetaId: string): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_global_metaid = ? WHERE id = ?',
+      [globalMetaId.trim(), id],
+    );
+    this.saveDb();
+  }
+
+  /** Round-4 attribution: mark a message whose sender fails the member/owner check. */
+  setMessageSenderSuspect(id: number, suspect: boolean): void {
+    this.db.run(
+      'UPDATE group_chat_messages SET sender_suspect = ? WHERE id = ?',
+      [suspect ? 1 : 0, id],
+    );
+    this.saveDb();
+  }
+
   // --- group_task_members ---
 
+  /**
+   * Add a member row, idempotently. Local members dedupe on (task_id, metabot_id)
+   * (backed by the UNIQUE constraint); remote members (metabotId === null) dedupe
+   * in code on (task_id, globalmetaid) among active rows, because the UNIQUE
+   * constraint does not apply to NULL metabot_id. Returns the existing row when
+   * the member is already present instead of throwing after a no-op insert.
+   *
+   * Re-join after a kick (M3): a LOCAL member whose row is already marked
+   * removed is revived in place (removed_at/remove_pin_id cleared, the provided
+   * joined_pin_id/display_name refreshed) because the UNIQUE constraint forbids
+   * a second row. A removed REMOTE member instead gets a fresh row, keeping the
+   * removed row as history.
+   */
   addMember(input: AddGroupTaskMemberInput): GroupTaskMember {
+    const isRemote = input.metabotId == null;
+    const remoteGlobalmetaid = isRemote ? normalizeMemberGlobalMetaId(input.globalmetaid) : '';
+    if (isRemote && !remoteGlobalmetaid) {
+      throw new Error(`addMember failed for task ${input.taskId}: remote member requires globalmetaid`);
+    }
+
+    // Code-level pre-check: an already-present active member is returned as-is.
+    const existing = isRemote
+      ? this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+          [input.taskId, remoteGlobalmetaid],
+        )
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, input.metabotId!],
+        );
+    if (existing) {
+      if (!isRemote && existing.removed_at) {
+        // Revive the kicked local member on the same row (UNIQUE forbids a new one).
+        this.db.run(
+          `UPDATE group_task_members
+           SET removed_at = NULL, remove_pin_id = NULL,
+               joined_pin_id = COALESCE(?, joined_pin_id),
+               display_name = COALESCE(?, display_name)
+           WHERE id = ?`,
+          [input.joinedPinId ?? null, input.displayName ?? null, existing.id],
+        );
+        this.saveDb();
+        const revived = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [existing.id]);
+        if (!revived || revived.removed_at) {
+          throw new Error(`addMember failed for task ${input.taskId}: member ${existing.id} not revived`);
+        }
+        return rowToGroupTaskMember(revived);
+      }
+      if (isRemote && existing.joined_pin_id == null && input.joinedPinId) {
+        // P1-2: the join watcher previously created a placeholder row (or an
+        // indexer-created row predated the ACCEPT); now that the join pin is
+        // known, backfill it on the existing row so "already joined" is
+        // readable from the member.
+        this.db.run(
+          `UPDATE group_task_members
+           SET joined_pin_id = ?,
+               display_name = COALESCE(?, display_name)
+           WHERE id = ?`,
+          [input.joinedPinId, input.displayName ?? null, existing.id],
+        );
+        this.saveDb();
+        const updated = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [existing.id]);
+        if (updated) return rowToGroupTaskMember(updated);
+      }
+      return rowToGroupTaskMember(existing);
+    }
+
     this.db.run(
-      `INSERT OR IGNORE INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO group_task_members (task_id, metabot_id, globalmetaid, role, joined_pin_id, display_name, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         input.taskId,
         input.metabotId,
-        input.globalmetaid ?? null,
+        isRemote ? remoteGlobalmetaid : normalizeMemberGlobalMetaId(input.globalmetaid) || null,
         input.role,
         input.joinedPinId ?? null,
+        input.displayName ?? null,
+        input.role === 'chair' ? 'working' : 'assigned',
       ],
     );
     this.saveDb();
-    const existing = input.metabotId != null
+    const inserted = isRemote
       ? this.getOne<GroupTaskMemberRow>(
-          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
-          [input.taskId, input.metabotId],
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+          [input.taskId, remoteGlobalmetaid],
         )
-      : undefined;
-    if (!existing) throw new Error(`addMember failed for task ${input.taskId}`);
-    return rowToGroupTaskMember(existing);
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, input.metabotId!],
+        );
+    if (!inserted) throw new Error(`addMember failed for task ${input.taskId}`);
+    return rowToGroupTaskMember(inserted);
   }
 
-  listMembers(taskId: number): GroupTaskMember[] {
-    const rows = this.getAll<GroupTaskMemberRow>(
-      `${MEMBER_SELECT} WHERE m.task_id = ? ORDER BY m.id ASC`,
-      [taskId],
-    );
+  /**
+   * Members of one task, oldest first. By default only active members are
+   * returned (removed_at IS NULL); pass includeRemoved for the full history.
+   */
+  listMembers(taskId: number, opts?: { includeRemoved?: boolean }): GroupTaskMember[] {
+    const rows = opts?.includeRemoved
+      ? this.getAll<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? ORDER BY m.id ASC`,
+          [taskId],
+        )
+      : this.getAll<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.removed_at IS NULL ORDER BY m.id ASC`,
+          [taskId],
+        );
     return rows.map(rowToGroupTaskMember);
   }
 
-  isMember(taskId: number, metabotId: number): boolean {
+  /**
+   * P1-1: active remote member row for one GlobalMetaID, or null. A remote row
+   * with joined_pin_id NULL is a PLACEHOLDER ("invite sent, join not yet
+   * confirmed") — invite_remote retries key off this to decide whether the
+   * member actually blocks a re-invite.
+   */
+  getActiveRemoteMember(taskId: number, globalmetaid?: string | null): GroupTaskMember | null {
+    const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+    if (!gmid) return null;
+    const row = this.getOne<GroupTaskMemberRow>(
+      `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ? AND m.removed_at IS NULL`,
+      [taskId, gmid],
+    );
+    return row ? rowToGroupTaskMember(row) : null;
+  }
+
+  /**
+   * Membership check among ACTIVE rows (removed members fail the check). Local
+   * members match on metabot_id; remote members (metabotId === null) match on
+   * globalmetaid.
+   */
+  isMember(taskId: number, metabotId: number | null, globalmetaid?: string | null): boolean {
+    if (metabotId == null) {
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+      if (!gmid) return false;
+      const row = this.getOne<{ found: number }>(
+        `SELECT 1 AS found FROM group_task_members
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL LIMIT 1`,
+        [taskId, gmid],
+      );
+      return Boolean(row);
+    }
     const row = this.getOne<{ found: number }>(
-      'SELECT 1 AS found FROM group_task_members WHERE task_id = ? AND metabot_id = ? LIMIT 1',
+      `SELECT 1 AS found FROM group_task_members
+       WHERE task_id = ? AND metabot_id = ? AND removed_at IS NULL LIMIT 1`,
       [taskId, metabotId],
     );
     return Boolean(row);
   }
 
-  updateMemberJoinedPinId(taskId: number, metabotId: number, joinedPinId: string | null): void {
+  /**
+   * Record the on-chain join pin. Local members match on metabot_id; remote
+   * members (metabotId === null) match the active row by globalmetaid.
+   */
+  updateMemberJoinedPinId(
+    taskId: number,
+    metabotId: number | null,
+    joinedPinId: string | null,
+    globalmetaid?: string | null,
+  ): void {
+    if (metabotId == null) {
+      const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+      if (!gmid) {
+        throw new Error(`updateMemberJoinedPinId failed for task ${taskId}: remote member requires globalmetaid`);
+      }
+      this.db.run(
+        `UPDATE group_task_members SET joined_pin_id = ?
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL`,
+        [joinedPinId, taskId, gmid],
+      );
+      this.saveDb();
+      return;
+    }
     this.db.run(
       'UPDATE group_task_members SET joined_pin_id = ? WHERE task_id = ? AND metabot_id = ?',
       [joinedPinId, taskId, metabotId],
     );
     this.saveDb();
+  }
+
+  // --- P0-2: member state machine ---
+
+  /**
+   * Set a member's state-machine status with a change timestamp. Local members
+   * match by metabot_id; remote members (metabotId === null) by globalmetaid.
+   */
+  setMemberStatus(
+    taskId: number,
+    metabotId: number | null,
+    status: GroupTaskMemberStatus,
+    globalmetaid?: string | null,
+  ): GroupTaskMember | undefined {
+    if (metabotId == null) {
+      const gmid = (globalmetaid ?? '').trim();
+      if (!gmid) throw new Error(`setMemberStatus failed for task ${taskId}: remote member requires globalmetaid`);
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NULL`,
+        [status, taskId, gmid],
+      );
+    } else {
+      this.db.run(
+        `UPDATE group_task_members
+         SET status = ?, status_changed_at = datetime('now')
+         WHERE task_id = ? AND metabot_id = ?`,
+        [status, taskId, metabotId],
+      );
+    }
+    this.saveDb();
+    const updated = this.listMembers(taskId).find((member) =>
+      metabotId == null
+        ? member.globalmetaid?.trim() === (globalmetaid ?? '').trim()
+        : member.metabotId === metabotId,
+    );
+    return updated;
+  }
+
+  /** P0-2: list members whose status is one of the given values. */
+  listMembersWithStatus(taskId: number, statuses: GroupTaskMemberStatus[]): GroupTaskMember[] {
+    const set = new Set(statuses);
+    return this.listMembers(taskId).filter((member) => set.has(member.status));
+  }
+
+  /** P0-5: update a task's status with an optional transition-log entry (actor/reason). */
+  updateTaskStatusWithLog(
+    id: number,
+    nextStatus: GroupTaskStatus,
+    meta?: { actor?: string | null; reason?: string | null },
+  ): GroupTask {
+    const before = this.getTaskById(id);
+    const updated = this.updateTaskStatus(id, nextStatus);
+    if (before && before.status !== updated.status) {
+      this.addTaskTransition({
+        taskId: id,
+        fromStatus: before.status,
+        toStatus: updated.status,
+        actor: meta?.actor ?? null,
+        reason: meta?.reason ?? null,
+      });
+    }
+    return updated;
+  }
+
+  /** P0-5: append a state-transition log row. */
+  addTaskTransition(input: AddGroupTaskTransitionInput): GroupTaskTransition {
+    this.db.run(
+      `INSERT INTO group_task_transitions (task_id, from_status, to_status, actor, reason)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.fromStatus ?? null,
+        input.toStatus,
+        input.actor ?? null,
+        input.reason ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addTaskTransition failed: row ${id} not found after insert`);
+    return rowToGroupTaskTransition(row);
+  }
+
+  /** P0-5: full transition history for one task, oldest first. */
+  listTaskTransitions(taskId: number): GroupTaskTransition[] {
+    const rows = this.getAll<GroupTaskTransitionRow>(
+      'SELECT * FROM group_task_transitions WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskTransition);
+  }
+
+  /** P0-8: record a public integrity declaration (honest correction/report). */
+  addIntegrityEvent(input: {
+    taskId: number;
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    eventType: GroupTaskIntegrityEventType;
+    detail?: string | null;
+  }): GroupTaskIntegrityEvent {
+    this.db.run(
+      `INSERT INTO group_task_integrity_events (task_id, msg_pin_id, author_globalmetaid, event_type, detail)
+       VALUES (?, ?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.msgPinId ?? null,
+        input.authorGlobalmetaid ?? null,
+        input.eventType,
+        input.detail ?? null,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addIntegrityEvent failed: row ${id} not found after insert`);
+    return rowToGroupTaskIntegrityEvent(row);
+  }
+
+  /** P0-8: all integrity events for one task, oldest first. */
+  listIntegrityEvents(taskId: number): GroupTaskIntegrityEvent[] {
+    const rows = this.getAll<GroupTaskIntegrityEventRow>(
+      'SELECT * FROM group_task_integrity_events WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskIntegrityEvent);
+  }
+
+  /** P0-8: dedupe check — an event already recorded for this message pin. */
+  hasIntegrityEventWithMsgPin(taskId: number, msgPinId: string): boolean {
+    const row = this.getOne<{ found: number }>(
+      'SELECT 1 AS found FROM group_task_integrity_events WHERE task_id = ? AND msg_pin_id = ? LIMIT 1',
+      [taskId, msgPinId],
+    );
+    return Boolean(row);
+  }
+
+  /**
+   * Mark a member as kicked (M3): sets removed_at (+ the removeuser pin id for
+   * audit) without deleting the row, so history/deliverables stay intact.
+   * Local members match on metabot_id (UNIQUE guarantees one row); remote
+   * members match the ACTIVE row by globalmetaid. Idempotent: an
+   * already-removed member is returned as-is; a never-member throws.
+   */
+  markMemberRemoved(input: MarkGroupTaskMemberRemovedInput): GroupTaskMember {
+    const metabotId = input.metabotId != null ? Math.trunc(Number(input.metabotId)) : null;
+    const gmid = normalizeMemberGlobalMetaId(input.globalmetaid);
+    if (metabotId == null && !gmid) {
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: metabotId or globalmetaid is required`);
+    }
+
+    const row = metabotId != null
+      ? this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id = ?`,
+          [input.taskId, metabotId],
+        )
+      : this.getOne<GroupTaskMemberRow>(
+          `${MEMBER_SELECT} WHERE m.task_id = ? AND m.metabot_id IS NULL AND m.globalmetaid = ?
+           ORDER BY m.id DESC LIMIT 1`,
+          [input.taskId, gmid],
+        );
+    if (!row) {
+      const who = metabotId != null ? `metabot ${metabotId}` : `globalmetaid ${gmid}`;
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: ${who} is not a member`);
+    }
+    if (row.removed_at) return rowToGroupTaskMember(row);
+
+    this.db.run(
+      `UPDATE group_task_members SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now'), remove_pin_id = ?
+       WHERE id = ? AND removed_at IS NULL`,
+      [input.removePinId ?? null, row.id],
+    );
+    this.saveDb();
+    const updated = this.getOne<GroupTaskMemberRow>(`${MEMBER_SELECT} WHERE m.id = ?`, [row.id]);
+    if (!updated || !updated.removed_at) {
+      throw new Error(`markMemberRemoved failed for task ${input.taskId}: member ${row.id} not removed`);
+    }
+    return rowToGroupTaskMember(updated);
+  }
+
+  /**
+   * OpenTeam (M3/R2): true when this task has a REMOVED remote member row for
+   * the GlobalMetaID. With `notBeforeMs` (epoch ms), only rows kicked at or
+   * after that moment count — this distinguishes "the membership this invite
+   * created was later kicked" (freeze the invite; never revive) from "an
+   * older membership was kicked before this invite existed" (an explicit
+   * re-invite must still be able to complete its handshake). The threshold is
+   * rendered at millisecond precision (removed_at is stored with %f) so a
+   * same-second kick + re-invite stays ordered correctly.
+   */
+  hasRemovedMember(taskId: number, globalmetaid: string, notBeforeMs?: number): boolean {
+    const gmid = normalizeMemberGlobalMetaId(globalmetaid);
+    if (!gmid) return false;
+    const row = notBeforeMs != null && Number.isFinite(notBeforeMs)
+      ? this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL
+             AND removed_at >= strftime('%Y-%m-%d %H:%M:%f', ? / 1000.0, 'unixepoch') LIMIT 1`,
+          [taskId, gmid, Math.trunc(notBeforeMs)],
+        )
+      : this.getOne<{ found: number }>(
+          `SELECT 1 AS found FROM group_task_members
+           WHERE task_id = ? AND metabot_id IS NULL AND globalmetaid = ? AND removed_at IS NOT NULL LIMIT 1`,
+          [taskId, gmid],
+        );
+    return Boolean(row);
   }
 
   // --- group_task_deliverables ---
@@ -525,9 +1207,141 @@ export class GroupTaskStore {
     return Boolean(row);
   }
 
+  /**
+   * Round-4: one message now carries one row PER [DELIVERABLE] tag line (a
+   * message with two tag lines yields two rows), so the old whole-message
+   * msg_pin_id dedupe would drop real URIs. Dedupe is per
+   * (msg_pin_id, uri, kind) — identical rows from a retried message are
+   * skipped, distinct tag lines are each recorded.
+   */
+  findDeliverableByMsgPinAndUri(
+    taskId: number,
+    msgPinId: string,
+    uri: string | null,
+    kind: string | null,
+  ): GroupTaskDeliverable | undefined {
+    const row = this.getOne<GroupTaskDeliverableRow>(
+      `SELECT * FROM group_task_deliverables
+       WHERE task_id = ? AND msg_pin_id = ? AND uri IS ? AND kind = ?
+       LIMIT 1`,
+      [taskId, msgPinId, uri, kind],
+    );
+    return row ? rowToGroupTaskDeliverable(row) : undefined;
+  }
+
+  /**
+   * Round-4 (show summary): last chain speak timestamp (epoch seconds) per
+   * sender GlobalMetaID for one group — the summary view's member list shows
+   * when each member last spoke. Senders without any timestamp are absent.
+   */
+  getMembersLastSpeakAt(
+    groupId: string,
+    globalMetaIds: Array<string | null | undefined>,
+  ): Map<string, number> {
+    const ids = [...new Set(
+      globalMetaIds
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    const result = new Map<string, number>();
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.getAll<{ sender_global_metaid: string; last_speak_at: number }>(
+      `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_speak_at
+       FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
+         AND chain_timestamp IS NOT NULL
+       GROUP BY sender_global_metaid`,
+      [groupId, ...ids],
+    );
+    for (const row of rows) {
+      const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
+      if (key) result.set(key, Number(row.last_speak_at));
+    }
+    return result;
+  }
+
+  /**
+   * P0-2 (round 5): last chain timestamp (epoch seconds) per sender GlobalMetaID
+   * of a message carrying the `[WORKING]` status tag — the durable half of the
+   * worker ACK/progress protocol. The service derives the member workStatus
+   * from these timestamps (fresh [WORKING] within the working window => working).
+   */
+  getMembersWorkingAt(
+    groupId: string,
+    globalMetaIds: Array<string | null | undefined>,
+  ): Map<string, number> {
+    const ids = [...new Set(
+      globalMetaIds
+        .map((value) => String(value ?? '').trim().toLowerCase())
+        .filter(Boolean),
+    )];
+    const result = new Map<string, number>();
+    if (ids.length === 0) return result;
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = this.getAll<{ sender_global_metaid: string; last_working_at: number }>(
+      `SELECT sender_global_metaid, MAX(chain_timestamp) AS last_working_at
+       FROM group_chat_messages
+       WHERE group_id = ? AND sender_global_metaid IN (${placeholders})
+         AND content LIKE '%[WORKING]%' ESCAPE '\\'
+         AND chain_timestamp IS NOT NULL
+       GROUP BY sender_global_metaid`,
+      [groupId, ...ids],
+    );
+    for (const row of rows) {
+      const key = String(row.sender_global_metaid ?? '').trim().toLowerCase();
+      if (key) result.set(key, Number(row.last_working_at));
+    }
+    return result;
+  }
+
+  /**
+   * OpenTeam M3: one sender's non-suspect message count in a group — feeds the
+   * participation stats of collaboration impressions.
+   */
+  countGroupChatMessagesBySender(groupId: string, senderGlobalMetaId: string): number {
+    const row = this.getOne<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM group_chat_messages
+       WHERE group_id = ? AND LOWER(sender_global_metaid) = LOWER(?)
+         AND (sender_suspect IS NULL OR sender_suspect = 0)`,
+      [groupId, senderGlobalMetaId.trim()],
+    );
+    return Number(row?.n ?? 0);
+  }
+
+  /** Round-4: in-place update of a deliverable (correction-first aggregation). */
+  updateDeliverableUri(id: number, uri: string | null, kind: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET uri = ?, kind = ? WHERE id = ?',
+      [uri, kind, id],
+    );
+    this.saveDb();
+  }
+
   updateDeliverableStatus(id: number, status: GroupTaskDeliverableStatus): void {
     this.db.run('UPDATE group_task_deliverables SET status = ? WHERE id = ?', [status, id]);
     this.saveDb();
+  }
+
+  /** P0-4: persist the multi-source verification report for a deliverable. */
+  updateDeliverableVerification(id: number, verification: string): void {
+    this.db.run(
+      'UPDATE group_task_deliverables SET verification = ? WHERE id = ?',
+      [verification, id],
+    );
+    this.saveDb();
+  }
+
+  /** Remove a mistakenly recorded deliverable (P1-4 cleanup hatch for the chair). */
+  deleteDeliverable(id: number): boolean {
+    const row = this.getOne<{ id: number }>(
+      'SELECT id FROM group_task_deliverables WHERE id = ?',
+      [id],
+    );
+    if (!row) return false;
+    this.db.run('DELETE FROM group_task_deliverables WHERE id = ?', [id]);
+    this.saveDb();
+    return true;
   }
 }
 

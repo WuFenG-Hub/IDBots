@@ -79,6 +79,13 @@ const TaskListItem: React.FC<TaskListItemProps> = ({ task, onRequestDelete }) =>
 
   const handleToggle = async (e: React.MouseEvent) => {
     e.stopPropagation();
+    // R2：已迁移任务由 SDK durable cron 调度，禁止在宿主侧重新启用（避免双触发）。
+    if (task.migrationStatus === 'migrated') {
+      window.dispatchEvent(new CustomEvent('app:showToast', {
+        detail: '该任务已迁移为 SDK 定时任务，请在「SDK 任务」页管理（删除即停用）。',
+      }));
+      return;
+    }
     const warning = await scheduledTaskService.toggleTask(task.id, !task.enabled);
     if (warning) {
       const msg = warning === 'TASK_AT_PAST'
@@ -115,8 +122,15 @@ const TaskListItem: React.FC<TaskListItemProps> = ({ task, onRequestDelete }) =>
       onClick={() => dispatch(selectTask(task.id))}
     >
       {/* Title */}
-      <div className={`text-sm truncate ${task.enabled ? 'dark:text-claude-darkText text-claude-text' : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'}`}>
-        {task.name}
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`text-sm truncate ${task.enabled ? 'dark:text-claude-darkText text-claude-text' : 'dark:text-claude-darkTextSecondary text-claude-textSecondary'}`}>
+          {task.name}
+        </span>
+        {task.migrationStatus === 'migrated' && (
+          <span className="shrink-0 inline-flex items-center text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300">
+            已迁移
+          </span>
+        )}
       </div>
 
       {/* Schedule */}

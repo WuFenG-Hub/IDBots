@@ -14,6 +14,13 @@ contextBridge.exposeInMainWorld('electron', {
     get: (key: string) => ipcRenderer.invoke('store:get', key),
     set: (key: string, value: any) => ipcRenderer.invoke('store:set', key, value),
     remove: (key: string) => ipcRenderer.invoke('store:remove', key),
+    onChanged: (callback: (payload: { key: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: { key: string }) => callback(payload);
+      ipcRenderer.on('store:changed', handler);
+      return () => {
+        ipcRenderer.removeListener('store:changed', handler);
+      };
+    },
   },
   skills: {
     list: () => ipcRenderer.invoke('skills:list'),
@@ -38,6 +45,13 @@ contextBridge.exposeInMainWorld('electron', {
     update: (id: string, data: any) => ipcRenderer.invoke('mcp:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('mcp:delete', id),
     setEnabled: (options: { id: string; enabled: boolean }) => ipcRenderer.invoke('mcp:setEnabled', options),
+  },
+  projects: {
+    list: () => ipcRenderer.invoke('projects:list'),
+    create: (data: any) => ipcRenderer.invoke('projects:create', data),
+    update: (id: string, data: any) => ipcRenderer.invoke('projects:update', id, data),
+    delete: (id: string) => ipcRenderer.invoke('projects:delete', id),
+    setEnabled: (options: { id: string; enabled: boolean }) => ipcRenderer.invoke('projects:setEnabled', options),
   },
   metaapps: {
     list: () => ipcRenderer.invoke('metaapps:list'),
@@ -86,6 +100,26 @@ contextBridge.exposeInMainWorld('electron', {
       result?: unknown;
       error?: string;
     }) => ipcRenderer.send('botBrowser:tab-command:response', response),
+    onCaptureRequest: (callback: (input: {
+      requestId: string;
+      tabId?: number;
+      fullSurface?: boolean;
+    }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, input: Parameters<typeof callback>[0]) => callback(input);
+      ipcRenderer.on('botBrowser:capture-request', handler);
+      return () => ipcRenderer.removeListener('botBrowser:capture-request', handler);
+    },
+    respondToCaptureRequest: (response: {
+      requestId: string;
+      success: boolean;
+      result?: { data: string; mimeType: string; width: number; height: number };
+      error?: string;
+    }) => ipcRenderer.send('botBrowser:capture-request:response', response),
+    capturePage: (options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    }) => ipcRenderer.invoke('botBrowser:capturePage', options),
     resolveResource: (input: { actorId?: string; uri: string }) =>
       ipcRenderer.invoke('botBrowser:resolveResource', input),
     getProfile: (input: { actorId?: string; globalMetaId: string }) =>
@@ -338,6 +372,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:stop', sessionId),
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) =>
       ipcRenderer.invoke('cowork:session:setPermissionMode', { sessionId, permissionMode }),
+    requestManualCompaction: (sessionId: string) =>
+      ipcRenderer.invoke('cowork:session:compact', sessionId),
+    stopTask: (sessionId: string, taskId: string) =>
+      ipcRenderer.invoke('cowork:session:stopTask', { sessionId, taskId }),
+    backgroundTask: (sessionId: string, toolUseId?: string) =>
+      ipcRenderer.invoke('cowork:session:backgroundTask', { sessionId, toolUseId }),
     forkSession: (sessionId: string, messageId: string, title?: string) =>
       ipcRenderer.invoke('cowork:session:fork', { sessionId, messageId, title }),
     rewindSession: (sessionId: string, messageId: string) =>
@@ -372,7 +412,7 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:archive', sessionId),
     unarchiveSession: (sessionId: string) =>
       ipcRenderer.invoke('cowork:session:unarchive', sessionId),
-    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) =>
+    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) =>
       ipcRenderer.invoke('cowork:session:listArchived', options),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
@@ -384,6 +424,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:refreshPeerProfile', input),
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) =>
       ipcRenderer.invoke('cowork:session:getMessagesPage', input),
+    setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) =>
+      ipcRenderer.invoke('cowork:message:setFeedback', input),
+    listSessionFeedback: (input: { sessionId: string }) =>
+      ipcRenderer.invoke('cowork:session:listFeedback', input),
     getA2AConversationHistoryPage: (input: {
       sessionId: string;
       beforeCursor?: { episodeIndex: number; beforeSequence: number } | null;
@@ -424,6 +468,8 @@ contextBridge.exposeInMainWorld('electron', {
     listMemoryEntries: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
@@ -434,6 +480,10 @@ contextBridge.exposeInMainWorld('electron', {
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+      visibility?: 'local_only' | 'external_safe';
       text: string;
       confidence?: number;
       isExplicit?: boolean;
@@ -442,6 +492,10 @@ contextBridge.exposeInMainWorld('electron', {
     updateMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+      visibility?: 'local_only' | 'external_safe';
       id: string;
       text?: string;
       confidence?: number;
@@ -451,8 +505,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:memory:updateEntry', input),
     deleteMemoryEntry: (input: { sessionId?: string; metabotId?: number; id: string }) =>
       ipcRenderer.invoke('cowork:memory:deleteEntry', input),
-    getMemoryStats: (input?: { sessionId?: string; metabotId?: number }) =>
+    getMemoryStats: (input?: { sessionId?: string; metabotId?: number; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }) =>
       ipcRenderer.invoke('cowork:memory:getStats', input),
+    listMemoryScopes: (input: { metabotId?: number }) =>
+      ipcRenderer.invoke('cowork:memory:listScopes', input),
+    getSessionMemoryScope: (input: { sessionId?: string }) =>
+      ipcRenderer.invoke('cowork:memory:getSessionScope', input),
     getMemoryPolicy: (input?: { sessionId?: string; metabotId?: number }) =>
       ipcRenderer.invoke('cowork:memory:getPolicy', input),
     setMemoryPolicy: (input: {
@@ -525,6 +583,12 @@ contextBridge.exposeInMainWorld('electron', {
     openPath: (filePath: string) => ipcRenderer.invoke('shell:openPath', filePath),
     showItemInFolder: (filePath: string) => ipcRenderer.invoke('shell:showItemInFolder', filePath),
     openExternal: (url: string) => ipcRenderer.invoke('shell:openExternal', url),
+    getOpenWithApps: (filePath: string) => ipcRenderer.invoke('shell:getOpenWithApps', filePath),
+    openWith: (filePath: string, appId: string) => ipcRenderer.invoke('shell:openWith', { filePath, appId }),
+    chooseOpenWithApp: (filePath: string) => ipcRenderer.invoke('shell:chooseOpenWithApp', filePath),
+  },
+  fs: {
+    readTextFile: (filePath: string, maxBytes?: number) => ipcRenderer.invoke('fs:readTextFile', { filePath, maxBytes }),
   },
   autoLaunch: {
     get: () => ipcRenderer.invoke('app:getAutoLaunch'),
@@ -535,6 +599,25 @@ contextBridge.exposeInMainWorld('electron', {
     getSelected: () => ipcRenderer.invoke('feeRates:getSelected') as Promise<Record<string, string>>,
     select: (chain: string, tierTitle: string) => ipcRenderer.invoke('feeRates:select', chain, tierTitle) as Promise<{ success: boolean }>,
     refresh: () => ipcRenderer.invoke('feeRates:refresh') as Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>,
+  },
+  traffic: {
+    ensureAccount: () => ipcRenderer.invoke('traffic:ensureAccount'),
+    getAccount: () => ipcRenderer.invoke('traffic:getAccount'),
+    getBalance: (input?: { forceRefresh?: boolean }) => ipcRenderer.invoke('traffic:getBalance', input ?? {}),
+    getLedger: (input?: { cursor?: number; limit?: number; direction?: number }) =>
+      ipcRenderer.invoke('traffic:getLedger', input ?? {}),
+    getDailyUsage: (input?: { from?: number; to?: number; botAddress?: string }) =>
+      ipcRenderer.invoke('traffic:getDailyUsage', input ?? {}),
+    getUsageSummary: () => ipcRenderer.invoke('traffic:getUsageSummary'),
+    bindAllBots: () => ipcRenderer.invoke('traffic:bindAllBots'),
+    getLocalJournal: (input?: { limit?: number; botAddress?: string }) =>
+      ipcRenderer.invoke('traffic:getLocalJournal', input ?? {}),
+    getPricing: () => ipcRenderer.invoke('traffic:getPricing'),
+    createRechargeOrder: (input: { planId: string }) => ipcRenderer.invoke('traffic:createRechargeOrder', input),
+    getRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:getRechargeOrder', input),
+    mockConfirmRechargeOrder: (input: { orderId: string }) => ipcRenderer.invoke('traffic:mockConfirmRechargeOrder', input),
+    getSettings: () => ipcRenderer.invoke('traffic:getSettings'),
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => ipcRenderer.invoke('traffic:setSettings', input),
   },
   appInfo: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
@@ -611,6 +694,19 @@ contextBridge.exposeInMainWorld('electron', {
     listAllRuns: (limit?: number, offset?: number) =>
       ipcRenderer.invoke('scheduledTask:listAllRuns', limit, offset),
 
+    // SDK cron 镜像（方案 C R1/R2）
+    sdkCronMirror: {
+      list: () => ipcRenderer.invoke('sdkCronMirror:list'),
+      requestDelete: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:requestDelete', cronId),
+      create: (input: { spec: any; replacesId?: string | null }) =>
+        ipcRenderer.invoke('sdkCronMirror:create', input),
+      toggle: (cronId: string, enabled: boolean) =>
+        ipcRenderer.invoke('sdkCronMirror:toggle', cronId, enabled),
+      runNow: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:runNow', cronId),
+    },
+    migratePlan: () => ipcRenderer.invoke('scheduledTask:migratePlan'),
+    migrateExecute: () => ipcRenderer.invoke('scheduledTask:migrateExecute'),
+
     // Stream event listeners
     onStatusUpdate: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
@@ -628,12 +724,18 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('groupTask:create', input),
     list: (filter?: { status?: string }) => ipcRenderer.invoke('groupTask:list', filter),
     get: (taskId: number) => ipcRenderer.invoke('groupTask:get', { taskId }),
-    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) =>
+    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }) =>
       ipcRenderer.invoke('groupTask:close', input),
+    reopen: (input: { taskId: number; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:reopen', input),
+    rework: (input: { taskId: number; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:rework', input),
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) =>
       ipcRenderer.invoke('groupTask:listMessages', input),
     sendUserMessage: (input: { taskId: number; content: string }) =>
       ipcRenderer.invoke('groupTask:sendUserMessage', input),
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) =>
+      ipcRenderer.invoke('groupTask:kickMember', input),
     onStatusChanged: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
       ipcRenderer.on('groupTask:statusChanged', handler);
@@ -644,6 +746,14 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.on('groupTask:ownerReportDelivery', handler);
       return () => ipcRenderer.removeListener('groupTask:ownerReportDelivery', handler);
     },
+  },
+  openTeamCollab: {
+    list: () => ipcRenderer.invoke('openTeamCollab:list'),
+    listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
+      ipcRenderer.invoke('openTeamCollab:listMessages', input),
+    // P0-1: every [OPENTEAM_INVITE] this machine's bots received (joined or
+    // not), newest first — backs the "Received invites" block of the collab UI.
+    listGuestInvites: () => ipcRenderer.invoke('openTeamCollab:listGuestInvites'),
   },
   idbots: {
     getMetaBots: () => ipcRenderer.invoke('idbots:getMetaBots'),
@@ -756,6 +866,7 @@ contextBridge.exposeInMainWorld('electron', {
     updateName: (input: { name: string }) => ipcRenderer.invoke('userIdentity:updateName', input),
     logout: () => ipcRenderer.invoke('userIdentity:logout'),
     revealMnemonic: () => ipcRenderer.invoke('userIdentity:revealMnemonic'),
+    retrySubsidy: () => ipcRenderer.invoke('userIdentity:retrySubsidy'),
     retryChainSync: () => ipcRenderer.invoke('userIdentity:retryChainSync'),
   },
   metaWebListener: {
@@ -808,6 +919,9 @@ contextBridge.exposeInMainWorld('electron', {
       homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),
+    /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
+    getSetting: (id: number, key: string) => ipcRenderer.invoke('metabot:getSetting', id, key),
+    setSetting: (id: number, key: string, value: string) => ipcRenderer.invoke('metabot:setSetting', id, key, value),
     checkNameExists: (options: { name: string; excludeId?: number }) =>
       ipcRenderer.invoke('metabot:checkNameExists', options),
     getPositions: () => ipcRenderer.invoke('metabot:getPositions'),
@@ -816,6 +930,8 @@ contextBridge.exposeInMainWorld('electron', {
     getStatus: () => ipcRenderer.invoke('dream:getStatus'),
     listDailySummaries: (options: { metabotId: number; limit?: number; offset?: number }) =>
       ipcRenderer.invoke('dream:listDailySummaries', options),
+    listRuns: (options: { metabotId: number; limit?: number }) =>
+      ipcRenderer.invoke('dream:listRuns', options),
     runNow: (options: { metabotId: number; date?: string }) =>
       ipcRenderer.invoke('dream:runNow', options),
     onStatusChanged: (callback: (payload: { metabotId: number; dreaming: boolean }) => void) => {
@@ -836,6 +952,10 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaid:getUserInfo', params),
     resolveAvatarSource: (params: { reference: string }) =>
       ipcRenderer.invoke('metaid:resolveAvatarSource', params),
+    listContacts: (params: { observerGlobalMetaId: string }) =>
+      ipcRenderer.invoke('metaid:contacts:list', params),
+    getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) =>
+      ipcRenderer.invoke('metaid:contacts:detail', params),
     onStatusUpdate: (callback: (status: unknown) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, status: unknown) => callback(status);
       ipcRenderer.on('p2p:statusUpdate', handler);

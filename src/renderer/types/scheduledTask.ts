@@ -47,6 +47,10 @@ export interface ScheduledTask {
   executionMode: 'auto' | 'local' | 'sandbox';
   metabotId: number | null;
   coworkSessionId: string | null;
+  /** R2：null = 未参与迁移；'migrated' = 已迁移为 SDK durable cron（原任务已禁用）。 */
+  migrationStatus: 'pending' | 'migrated' | 'not_supported' | 'skipped_disabled' | null;
+  /** R2：迁移后对应的 SDK cron id（幂等键）。 */
+  migratedTaskId: string | null;
   expiresAt: string | null; // ISO 8601 日期（精确到天），null 表示不过期
   notifyPlatforms: NotifyPlatform[]; // 任务完成后通知的 IM 平台
   state: TaskState;
@@ -99,3 +103,71 @@ export interface ScheduledTaskRunEvent {
 
 // UI 视图模式
 export type ScheduledTaskViewMode = 'list' | 'create' | 'edit' | 'detail';
+
+// ==================== SDK 定时任务镜像（方案 C R1/R2） ====================
+
+/**
+ * 宿主侧保存的「完整调度快照」——用于停用后重建（开关 = 删→重建）。
+ * 由新建/编辑表单生成；会话采集/文件扫描补全的镜像此字段为 null（只读，不可开关/编辑）。
+ */
+export interface SdkCronScheduleSpec {
+  mode: 'once' | 'interval' | 'daily' | 'weekly' | 'monthly' | 'cron';
+  date: string;
+  time: string;
+  weekday: number;
+  monthDay: number;
+  intervalValue: number;
+  intervalUnit: 'minutes' | 'hours' | 'days';
+  cronExpression: string;
+  prompt: string;
+  name: string;
+  metabotId: number | null;
+}
+
+/** SDK cron 在宿主侧的展示镜像（只展示不调度）。 */
+export interface SdkCronMirror {
+  id: string;
+  sessionId: string;
+  /** 从 prompt 提取的展示名。 */
+  name: string;
+  /** 5 字段 cron 表达式。 */
+  schedule: string;
+  /** 人类可读调度描述，可能为空。 */
+  humanSchedule: string | null;
+  recurring: boolean;
+  durable: boolean;
+  prompt: string;
+  source: 'stop_hook' | 'file_scan' | 'migration';
+  /** R2 迁移映射：原 scheduled_tasks.id。 */
+  migratedTaskId: string | null;
+  status: 'active' | 'deletion_requested' | 'deleted';
+  firstSeenAt: string;
+  lastSeenAt: string;
+  createdAt: string;
+  updatedAt: string;
+  /** IPC 增强字段：所属会话标题/是否活跃。 */
+  sessionTitle?: string | null;
+  sessionActive?: boolean;
+  /** 宿主侧开关状态（停用=镜像保留但 SDK 侧已删除，重建后恢复）。默认 true。 */
+  enabled: boolean;
+  /** 完整调度快照（有则可重建/可编辑；会话采集的只读镜像为 null）。 */
+  scheduleSpec: SdkCronScheduleSpec | null;
+  /** 停用时间（用于提示「重新启用会重置 7 天计时」）。 */
+  disabledAt: string | null;
+}
+
+/** R2 迁移计划项（IPC scheduledTask:migratePlan 返回）。 */
+export interface MigrationPlanItem {
+  task: ScheduledTask;
+  spec?: {
+    taskId: string;
+    cronExpression: string;
+    prompt: string;
+    recurring: boolean;
+    sevenDayLimited: boolean;
+    nextFireMs: number | null;
+    promptTruncated: boolean;
+  } | null;
+  reason?: string | null;
+  skipped?: boolean;
+}

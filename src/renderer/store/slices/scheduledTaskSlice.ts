@@ -5,6 +5,7 @@ import type {
   ScheduledTaskRunWithName,
   TaskState,
   ScheduledTaskViewMode,
+  SdkCronMirror,
 } from '../../types/scheduledTask';
 
 interface ScheduledTaskState {
@@ -13,6 +14,8 @@ interface ScheduledTaskState {
   viewMode: ScheduledTaskViewMode;
   runs: Record<string, ScheduledTaskRun[]>;
   allRuns: ScheduledTaskRunWithName[];
+  sdkMirrors: SdkCronMirror[];
+  sdkMirrorsLoading: boolean;
   loading: boolean;
   error: string | null;
 }
@@ -23,6 +26,8 @@ const initialState: ScheduledTaskState = {
   viewMode: 'list',
   runs: {},
   allRuns: [],
+  sdkMirrors: [],
+  sdkMirrorsLoading: false,
   loading: false,
   error: null,
 };
@@ -95,6 +100,24 @@ const scheduledTaskSlice = createSlice({
         state.runs[taskId].unshift(action.payload);
       }
     },
+    setSdkMirrors(state, action: PayloadAction<SdkCronMirror[]>) {
+      state.sdkMirrors = action.payload;
+      state.sdkMirrorsLoading = false;
+    },
+    setSdkMirrorsLoading(state, action: PayloadAction<boolean>) {
+      state.sdkMirrorsLoading = action.payload;
+    },
+    updateSdkMirror(state, action: PayloadAction<SdkCronMirror>) {
+      const index = state.sdkMirrors.findIndex((m) => m.id === action.payload.id);
+      if (index !== -1) {
+        state.sdkMirrors[index] = action.payload;
+      } else {
+        state.sdkMirrors.unshift(action.payload);
+      }
+    },
+    removeSdkMirror(state, action: PayloadAction<string>) {
+      state.sdkMirrors = state.sdkMirrors.filter((m) => m.id !== action.payload);
+    },
     setAllRuns(state, action: PayloadAction<ScheduledTaskRunWithName[]>) {
       state.allRuns = action.payload;
     },
@@ -118,6 +141,10 @@ export const {
   addOrUpdateRun,
   setAllRuns,
   appendAllRuns,
+  setSdkMirrors,
+  setSdkMirrorsLoading,
+  updateSdkMirror,
+  removeSdkMirror,
 } = scheduledTaskSlice.actions;
 
 export default scheduledTaskSlice.reducer;

@@ -5,6 +5,7 @@
 
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
+export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
 export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
 
 export interface GroupTask {
@@ -22,6 +23,11 @@ export interface GroupTask {
   createdAt: string | null;
   updatedAt: string | null;
   closedAt: string | null;
+  /** Owner acceptance rating (1-5 stars); null for unrated tasks. */
+  rating: number | null;
+  /** Optional free-text review from the owner alongside the star rating. */
+  ratingComment: string | null;
+  ratedAt: string | null;
 }
 
 export interface GroupTaskMember {
@@ -32,7 +38,38 @@ export interface GroupTaskMember {
   role: GroupTaskMemberRole;
   joinedPinId: string | null;
   createdAt: string | null;
+  /** Inviter-side name snapshot for remote members (no local metabots row). */
+  displayName?: string | null;
+  /** Set when the member was kicked (M3); active members have null. */
+  removedAt?: string | null;
   name: string | null;
+  /** P0-2: member state-machine status (assigned/working/standby/done/unreachable). */
+  status?: GroupTaskMemberStatus;
+  /** P0-2: sqlite UTC timestamp of the last status change. */
+  statusChangedAt?: string | null;
+  /** P0-2: epoch seconds of the member's last chain speech (summary/detail). */
+  lastSpeakAt?: number | null;
+}
+
+
+export interface GroupTaskIntegrityEvent {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  eventType: 'correction' | 'honest_report';
+  detail: string | null;
+  createdAt: string | null;
+}
+
+export interface GroupTaskTransition {
+  id: number;
+  taskId: number;
+  fromStatus: GroupTaskStatus | null;
+  toStatus: GroupTaskStatus;
+  actor: string | null;
+  reason: string | null;
+  createdAt: string | null;
 }
 
 export interface GroupTaskDeliverable {
@@ -44,11 +81,49 @@ export interface GroupTaskDeliverable {
   uri: string | null;
   status: GroupTaskDeliverableStatus;
   createdAt: string | null;
+  /** P0-4: JSON verification report (multi-source outcomes). */
+  verification?: string | null;
+}
+
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+
+export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Epoch seconds of the member's last chain speech (round-4). */
+  lastSpeakAt?: number | null;
+  /** Epoch ms of the member's last `[WORKING]` tag message (P1-4). */
+  lastWorkingAt?: number | null;
+  /** Host-computed work state (P1-4): idle/working/error/unknown. */
+  workStatus?: GroupTaskMemberWorkStatus;
+}
+
+export interface GroupTaskStatusEvent {
+  id: number;
+  taskId: number;
+  fromStatus: string;
+  toStatus: string;
+  actorKind: 'chair' | 'owner' | 'system';
+  actorGlobalMetaId: string | null;
+  actorName: string | null;
+  /** sqlite datetime('now') text, UTC. */
+  createdAt: string | null;
+}
+
+export interface GroupTaskDriverInfo {
+  instanceId: string;
+  atMs: number;
 }
 
 export interface GroupTaskDetail extends GroupTask {
-  members: GroupTaskMember[];
+  members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** P0-5: state-transition audit log. */
+  transitions?: GroupTaskTransition[];
+  /** P0-8: public integrity declarations (honest corrections/reports). */
+  integrityEvents?: GroupTaskIntegrityEvent[];
+  /** P1-5: status transition history (newest first). */
+  statusEvents?: GroupTaskStatusEvent[];
+  /** P2-8: the daemon instance currently driving this task. */
+  driver?: GroupTaskDriverInfo | null;
 }
 
 export interface GroupTaskSummary extends GroupTask {
@@ -69,6 +144,8 @@ export interface GroupChatTranscriptMessage {
   chainTimestamp: number | null;
   msgIndex: number | null;
   replyPin: string | null;
+  /** Round-4 attribution: chain GlobalMetaID is not a task member/owner. */
+  senderSuspect?: boolean;
 }
 
 export interface GroupTaskStatusEvent {

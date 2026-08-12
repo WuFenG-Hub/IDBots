@@ -79,6 +79,10 @@ export interface DreamActivityMessage {
   type: 'user' | 'assistant';
   content: string;
   createdAt: number;
+  /** Human's per-message rating (thumbs up/down), when the message was rated. */
+  feedbackRating?: 'up' | 'down';
+  /** Human's free-text comment attached to the rating, when present. */
+  feedbackComment?: string | null;
 }
 
 export interface DreamSessionActivity {
@@ -97,11 +101,28 @@ export interface DreamTaskRunActivity {
   sessionId: string | null;
 }
 
+/**
+ * One group task the bot participated in that reached owner acceptance — the
+ * human's star rating + review are the alignment signal for the dream review.
+ */
+export interface DreamGroupTaskEvaluation {
+  taskId: number;
+  title: string;
+  goal: string;
+  /** This bot's role in the task ('chair' | 'worker'). */
+  memberRole: string;
+  /** 1-5 stars; null when the task was closed without a rating (automation). */
+  rating: number | null;
+  ratingComment: string | null;
+}
+
 export interface DreamDayActivity {
   sessions: DreamSessionActivity[];
   taskRuns: DreamTaskRunActivity[];
   /** service_orders rows created that day (raw order count, not sessions). */
   orderCount: number;
+  /** Group tasks accepted/rated that day where this bot was a member. */
+  groupTasks: DreamGroupTaskEvaluation[];
 }
 
 interface DreamRunRow {
@@ -439,6 +460,20 @@ export class DreamStore {
     return row ? this.mapRunRow(row) : null;
   }
 
+  /**
+   * Recent run rows for display (dream diary failure fallback), newest date
+   * first. Read-only: scheduling decisions use getRunStates/computeDueDreamDates
+   * on this same table, so surfacing these rows can never mark a date as done.
+   */
+  listRecentRuns(metabotId: number, limit: number = 30): DreamRun[] {
+    const clampedLimit = Math.max(1, Math.min(365, Math.floor(limit)));
+    const rows = this.getAll<DreamRunRow>(
+      'SELECT * FROM metabot_dream_runs WHERE metabot_id = ? ORDER BY dream_date DESC LIMIT ?',
+      [metabotId, clampedLimit]
+    );
+    return rows.map((row) => this.mapRunRow(row));
+  }
+
   getDreamFragment(metabotId: number, dreamDate: string, fragmentKey: string): DreamFragment | null {
     const row = this.getOne<DreamFragmentRow>(
       `SELECT * FROM metabot_dream_fragments
@@ -712,13 +747,21 @@ export class DreamStore {
     `, [metabotId, dayStartMs, dayEndMs]);
 
     const sessions: DreamSessionActivity[] = sessionRows.map((session) => {
-      const messageRows = this.getAll<{ type: string; content: string | null; created_at: number | string }>(`
-        SELECT type, content, created_at
-        FROM cowork_messages
-        WHERE session_id = ?
-          AND created_at >= ? AND created_at < ?
-          AND type IN ('user', 'assistant')
-        ORDER BY created_at ASC
+      const messageRows = this.getAll<{
+        type: string;
+        content: string | null;
+        created_at: number | string;
+        feedback_rating: string | null;
+        feedback_comment: string | null;
+      }>(`
+        SELECT m.type, m.content, m.created_at,
+          mf.rating AS feedback_rating, mf.comment AS feedback_comment
+        FROM cowork_messages m
+        LEFT JOIN message_feedback mf ON mf.message_id = m.id
+        WHERE m.session_id = ?
+          AND m.created_at >= ? AND m.created_at < ?
+          AND m.type IN ('user', 'assistant')
+        ORDER BY m.created_at ASC
       `, [session.id, dayStartMs, dayEndMs]);
       return {
         sessionId: session.id,
@@ -732,6 +775,10 @@ export class DreamStore {
             type: row.type as 'user' | 'assistant',
             content: row.content as string,
             createdAt: Number(row.created_at),
+            feedbackRating: row.feedback_rating === 'up' || row.feedback_rating === 'down'
+              ? row.feedback_rating
+              : undefined,
+            feedbackComment: row.feedback_comment ?? undefined,
           })),
       };
     });
@@ -764,6 +811,37 @@ export class DreamStore {
       [metabotId, dayStartMs, dayEndMs]
     );
 
-    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0 };
+    // Group tasks accepted that day where this bot was a member — the owner's
+    // star rating + review feed the dream's work-review alignment. Day
+    // attribution uses rated_at, falling back to closed_at for unrated
+    // (automation-closed) tasks; both are UTC datetime('now') strings.
+    const dayStartSec = Math.floor(dayStartMs / 1000);
+    const dayEndSec = Math.floor(dayEndMs / 1000);
+    const groupTasks = this.getAll<{
+      id: number;
+      title: string;
+      goal: string;
+      role: string;
+      rating: number | null;
+      rating_comment: string | null;
+    }>(`
+      SELECT t.id, t.title, t.goal, m.role, t.rating, t.rating_comment
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.status = 'done'
+        AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) >= ?
+        AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) < ?
+      ORDER BY t.id ASC
+    `, [metabotId, dayStartSec, dayEndSec]).map((row) => ({
+      taskId: row.id,
+      title: row.title,
+      goal: row.goal,
+      memberRole: row.role === 'chair' ? 'chair' : 'worker',
+      rating: row.rating ?? null,
+      ratingComment: row.rating_comment ?? null,
+    }));
+
+    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0, groupTasks };
   }
 }

@@ -56,6 +56,23 @@ export class NativeSqliteDatabase implements SqliteDatabase {
   constructor(filename: string, module: NativeSqliteModule) {
     this.db = new module.DatabaseSync(filename);
     this.db.exec('PRAGMA foreign_keys = ON;');
+    // 清单 #11: concurrent-write safety. The SQLite defaults (rollback journal,
+    // busy_timeout = 0) make a write from ANY second connection fail instantly
+    // with SQLITE_BUSY ("database is locked") — reproduced live when a Twin
+    // session and a delegated worker session wrote the same database at the
+    // same time and the worker session was killed mid-task. WAL lets readers
+    // run alongside the single writer without blocking, and busy_timeout makes
+    // a writer wait for the other connection's transaction to finish instead
+    // of throwing. Both are idempotent per-connection/per-database settings;
+    // journal_mode = WAL persists in the database header, so existing user
+    // databases keep working and every later connection inherits WAL.
+    this.db.exec('PRAGMA busy_timeout = 5000;');
+    try {
+      this.db.exec('PRAGMA journal_mode = WAL;');
+    } catch {
+      // WAL unavailable (read-only media, exotic filesystems): degrade to the
+      // default rollback journal; busy_timeout above still serializes writers.
+    }
   }
 
   exec(sql: string, params: unknown[] = []): SqliteExecResult[] {
@@ -88,6 +105,15 @@ export class NativeSqliteDatabase implements SqliteDatabase {
 
   close(): void {
     if (this.closed) return;
+    // Fold any WAL frames back into the main database file so a later
+    // main-file-only reader (e.g. the sql.js fallback backend) sees the full
+    // contents after a clean shutdown. Best-effort: a concurrent writer can
+    // make the checkpoint busy, and the database stays valid either way.
+    try {
+      this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    } catch {
+      // best-effort checkpoint; close proceeds regardless
+    }
     this.db.close();
     this.closed = true;
   }

@@ -1,6 +1,7 @@
 import type {
   DreamActivityMessage,
   DreamDayActivity,
+  DreamGroupTaskEvaluation,
   DreamSessionActivity,
   DreamTaskRunActivity,
 } from '../dreamStore';
@@ -18,6 +19,7 @@ export interface DreamActivityChunk {
   messages: DreamActivityMessage[];
   taskRuns: DreamTaskRunActivity[];
   orderCount: number;
+  groupTasks: DreamGroupTaskEvaluation[];
   sourceMessageCount: number;
   sourceCharCount: number;
   estimatedInputTokens: number;
@@ -41,6 +43,11 @@ export function estimateDreamMessageTokens(message: DreamActivityMessage): numbe
 export function estimateDreamActivityTokens(activity: DreamDayActivity): number {
   let tokens = 32 + estimateCoworkTextTokens(
     activity.taskRuns.map((run) => `${run.taskName} ${run.status}`).join(' ')
+  );
+  tokens += estimateCoworkTextTokens(
+    (activity.groupTasks ?? [])
+      .map((task) => `${task.title} ${task.goal} ${task.rating ?? ''} ${task.ratingComment ?? ''}`)
+      .join(' ')
   );
   for (const session of activity.sessions) {
     tokens += SESSION_FRAME_TOKENS + estimateCoworkTextTokens(`${session.title} ${session.peerName ?? ''}`);
@@ -89,6 +96,7 @@ function chunkSession(
   maxInputTokens: number,
   taskRuns: DreamTaskRunActivity[],
   orderCount: number,
+  groupTasks: DreamGroupTaskEvaluation[],
 ): DreamActivityChunk[] {
   const chunks: DreamActivityChunk[] = [];
   let current: DreamActivityMessage[] = [];
@@ -108,6 +116,7 @@ function chunkSession(
       messages: current,
       taskRuns: chunkIndex === 0 ? taskRuns : [],
       orderCount: chunkIndex === 0 ? orderCount : 0,
+      groupTasks: chunkIndex === 0 ? groupTasks : [],
       sourceMessageCount: current.length,
       sourceCharCount: current.reduce((sum, message) => sum + message.content.length, 0),
       estimatedInputTokens: currentTokens,
@@ -139,6 +148,7 @@ export function chunkDreamActivity(activity: DreamDayActivity, maxInputTokens: n
   const budget = Math.max(256, Math.floor(maxInputTokens));
   const chunks: DreamActivityChunk[] = [];
   const sessions = activity.sessions.filter((session) => session.messages.length > 0);
+  const groupTasks = activity.groupTasks ?? [];
 
   for (const session of sessions) {
     const sessionChunks = chunkSession(
@@ -146,11 +156,12 @@ export function chunkDreamActivity(activity: DreamDayActivity, maxInputTokens: n
       budget,
       chunks.length === 0 ? activity.taskRuns : [],
       chunks.length === 0 ? activity.orderCount : 0,
+      chunks.length === 0 ? groupTasks : [],
     );
     chunks.push(...sessionChunks);
   }
 
-  if (chunks.length === 0 && (activity.taskRuns.length > 0 || activity.orderCount > 0)) {
+  if (chunks.length === 0 && (activity.taskRuns.length > 0 || activity.orderCount > 0 || groupTasks.length > 0)) {
     chunks.push({
       fragmentKey: 'tasks:0',
       sessionId: '__dream_tasks__',
@@ -162,6 +173,7 @@ export function chunkDreamActivity(activity: DreamDayActivity, maxInputTokens: n
       messages: [],
       taskRuns: activity.taskRuns,
       orderCount: activity.orderCount,
+      groupTasks,
       sourceMessageCount: 0,
       sourceCharCount: activity.taskRuns.reduce((sum, run) => sum + run.taskName.length, 0),
       estimatedInputTokens: 32 + estimateCoworkTextTokens(activity.taskRuns.map((run) => run.taskName).join(' ')),
@@ -169,6 +181,7 @@ export function chunkDreamActivity(activity: DreamDayActivity, maxInputTokens: n
   } else if (chunks.length > 0 && activity.taskRuns.length > 0 && chunks[0].taskRuns.length === 0) {
     chunks[0].taskRuns = activity.taskRuns;
     chunks[0].orderCount = activity.orderCount;
+    chunks[0].groupTasks = groupTasks;
   }
 
   return chunks;
@@ -188,6 +201,7 @@ export function chunkToActivity(chunk: DreamActivityChunk): DreamDayActivity {
       : [],
     taskRuns: chunk.taskRuns,
     orderCount: chunk.orderCount,
+    groupTasks: chunk.groupTasks ?? [],
   };
 }
 
@@ -195,6 +209,7 @@ export function summariesToActivity(
   summaries: DreamFragmentSummary[],
   taskRuns: DreamTaskRunActivity[],
   orderCount: number,
+  groupTasks: DreamGroupTaskEvaluation[] = [],
 ): DreamDayActivity {
   return {
     sessions: summaries.map((summary) => ({
@@ -217,5 +232,6 @@ export function summariesToActivity(
     })),
     taskRuns,
     orderCount,
+    groupTasks,
   };
 }

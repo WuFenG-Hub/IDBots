@@ -5,7 +5,10 @@ import { selectTask } from '../../store/slices/groupTasksSlice';
 import { groupTaskService } from '../../services/groupTaskService';
 import { i18nService } from '../../services/i18n';
 import type { GroupTaskListTab, GroupTaskSummary } from '../../types/groupTask';
+import type { OpenTeamCollabSummary } from '../../types/openTeamCollab';
 import GroupTaskDetailView from './GroupTaskDetailView';
+import OpenTeamCollabsSection from './OpenTeamCollabsSection';
+import OpenTeamCollabDetailView from './OpenTeamCollabDetailView';
 import {
   filterGroupTasksByTab,
   formatGroupTaskTime,
@@ -84,6 +87,7 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
   const loading = useSelector((state: RootState) => state.groupTasks.loading);
   const selectedTaskId = useSelector((state: RootState) => state.groupTasks.selectedTaskId);
   const [activeTab, setActiveTab] = useState<GroupTaskListTab>('active');
+  const [selectedCollab, setSelectedCollab] = useState<OpenTeamCollabSummary | null>(null);
 
   useEffect(() => {
     void groupTaskService.loadTasks();
@@ -91,9 +95,24 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
 
   const filteredTasks = filterGroupTasksByTab(tasks, activeTab);
 
+  if (selectedCollab) {
+    return (
+      <OpenTeamCollabDetailView
+        key={selectedCollab.id}
+        collab={selectedCollab}
+        isSidebarCollapsed={isSidebarCollapsed}
+        onToggleSidebar={onToggleSidebar}
+        onNewChat={onNewChat}
+        updateBadge={updateBadge}
+        onBack={() => setSelectedCollab(null)}
+      />
+    );
+  }
+
   if (selectedTaskId != null) {
     return (
       <GroupTaskDetailView
+        key={selectedTaskId}
         taskId={selectedTaskId}
         isSidebarCollapsed={isSidebarCollapsed}
         onToggleSidebar={onToggleSidebar}
@@ -194,6 +213,8 @@ const GroupTasksView: React.FC<GroupTasksViewProps> = ({
             />
           ))
         )}
+        {/* OpenTeam invitee-side traceability: external group tasks our bots joined */}
+        <OpenTeamCollabsSection onOpenCollab={setSelectedCollab} />
       </div>
     </div>
   );

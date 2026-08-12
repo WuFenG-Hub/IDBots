@@ -54,6 +54,34 @@ export function buildContactScopeKey(input: {
   return `${channel}:peer:${peerGlobalMetaId}`;
 }
 
+/**
+ * Reverse of `buildContactScopeKey`: extracts the peer identity from a
+ * contact scope key of the form `<channel>:peer:<peerGlobalMetaId>`.
+ * Returns null when the key does not follow the contact shape.
+ */
+export function parseContactScopeKey(scopeKey?: string | null): {
+  sourceChannel: string | null;
+  peerGlobalMetaId: string | null;
+} | null {
+  const key = normalizeScopeIdentity(scopeKey);
+  if (!key) {
+    return null;
+  }
+  const peerMarkerIndex = key.indexOf(':peer:');
+  if (peerMarkerIndex <= 0) {
+    return null;
+  }
+  const sourceChannel = key.slice(0, peerMarkerIndex);
+  const peerGlobalMetaId = key.slice(peerMarkerIndex + ':peer:'.length);
+  if (!sourceChannel || !peerGlobalMetaId) {
+    return null;
+  }
+  return {
+    sourceChannel,
+    peerGlobalMetaId,
+  };
+}
+
 export function createContactMemoryScope(input: {
   sourceChannel?: string | null;
   peerGlobalMetaId?: string | null;

@@ -32,13 +32,22 @@ type ProviderConfig = {
   enabled: boolean;
   apiKey: string;
   baseUrl: string;
-  apiFormat?: 'anthropic' | 'openai' | 'native';
+  apiFormat?: 'anthropic' | 'openai' | 'responses' | 'native';
   models?: ProviderModel[];
 };
 
 type AppConfig = {
   model?: {
     defaultModel?: string;
+    /**
+     * Explicit default-provider key ('deepseek', 'opencode', ...) recorded
+     * when the user picks a model in the UI. Used to disambiguate identical
+     * model ids offered by multiple enabled providers (e.g. deepseek and
+     * opencode both serve deepseek-v4-flash): without it, the config-order
+     * scan below would always pick whichever provider appears first.
+     * Absent on legacy configs — behavior stays the config-order scan.
+     */
+    defaultProvider?: string;
     /** Optional SDK fallback model id for automatic model refusal fallback. */
     fallbackModel?: string;
     availableModels?: ProviderModel[];
@@ -213,12 +222,33 @@ function resolveMatchedProvider(
     return { matched: null, error: 'No available model configured in enabled providers.' };
   }
 
-  let providerEntry: [string, ProviderConfig] | undefined = Object.entries(providers).find(
-    ([, provider]) => {
-      if (!provider?.enabled || !provider.models) return false;
-      return provider.models.some((model) => model.id === modelId);
-    }
-  ) as [string, ProviderConfig] | undefined;
+  // Explicit default-provider preference (global/default sessions only):
+  // resolve the model against the user-chosen provider FIRST. Multiple
+  // enabled providers can offer the same model id (e.g. deepseek and
+  // opencode both serve deepseek-v4-flash), and the config-order scan below
+  // would otherwise always pick whichever provider appears first. A
+  // requestedOverride (metabot llm_id) is an explicit provider choice of its
+  // own and must NOT be overridden by the global default provider.
+  const defaultProviderKey = requestedOverride
+    ? null
+    : appConfig.model?.defaultProvider?.trim().toLowerCase() || null;
+  let providerEntry: [string, ProviderConfig] | undefined;
+  if (defaultProviderKey) {
+    providerEntry = Object.entries(providers).find(
+      ([name, provider]) =>
+        name.toLowerCase() === defaultProviderKey
+        && provider?.enabled
+        && provider.models?.some((model) => model.id === modelId)
+    ) as [string, ProviderConfig] | undefined;
+  }
+  if (!providerEntry) {
+    providerEntry = Object.entries(providers).find(
+      ([, provider]) => {
+        if (!provider?.enabled || !provider.models) return false;
+        return provider.models.some((model) => model.id === modelId);
+      }
+    ) as [string, ProviderConfig] | undefined;
+  }
 
   let resolvedModelId: string = modelId;
 
@@ -377,6 +407,7 @@ function buildApiConfigFromMatched(
     apiKey: resolvedApiKey || undefined,
     model: matched.modelId,
     provider: matched.providerName,
+    apiFormat: matched.apiFormat,
   });
 
   const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL(target);

@@ -321,8 +321,10 @@ test('listGroupChatMessages: ordering, paging with beforeId, column set', async 
     const keys = Object.keys(all[0]).sort();
     assert.deepEqual(keys, [
       'chainTimestamp', 'content', 'contentType', 'id', 'msgIndex',
-      'pinId', 'replyPin', 'senderAvatar', 'senderGlobalMetaId', 'senderName', 'txId',
+      'pinId', 'replyPin', 'senderAvatar', 'senderGlobalMetaId', 'senderName',
+      'senderSuspect', 'txId',
     ]);
+    assert.equal(all[0].senderSuspect, false);
     assert.equal(all[0].msgIndex, 1);
     assert.equal(all[0].replyPin, 'pin-parent');
     assert.equal(all[0].senderAvatar, 'ava');
@@ -394,6 +396,140 @@ test('buildMetabotDirectory: sanitized roster with profiles, disabled bots inclu
     assert.equal(old.goal, null);
     assert.equal(old.position, null);
     assert.equal(old.globalmetaid, null);
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-2: member state machine — default statuses, setMemberStatus, listMembersWithStatus', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p02', title: 'P0-2', goal: 'member states',
+      chairMetabotId: 1, createdBy: 'user',
+    });
+    const chair = groupTaskStore.addMember({ taskId: task.id, metabotId: 1, role: 'chair' });
+    const worker = groupTaskStore.addMember({ taskId: task.id, metabotId: 2, role: 'worker' });
+
+    // Default statuses: chair working, worker assigned.
+    assert.equal(chair.status, 'working');
+    assert.equal(worker.status, 'assigned');
+
+    // Member can set own status (worker -> working).
+    const updated = groupTaskStore.setMemberStatus(task.id, 2, 'working');
+    assert.equal(updated.status, 'working');
+    assert.ok(updated.statusChangedAt);
+
+    // listMembersWithStatus filters.
+    assert.deepEqual(
+      groupTaskStore.listMembersWithStatus(task.id, ['working']).map((m) => m.metabotId).sort(),
+      [1, 2],
+    );
+
+    // chair can mark unreachable.
+    const unreachable = groupTaskStore.setMemberStatus(task.id, 2, 'unreachable');
+    assert.equal(unreachable.status, 'unreachable');
+
+    // remote member by globalmetaid.
+    const remote = groupTaskStore.addMember({ taskId: task.id, metabotId: null, globalmetaid: 'gmid-remote', role: 'worker', displayName: 'Remote Bot' });
+    const remoteUpdated = groupTaskStore.setMemberStatus(task.id, null, 'standby', 'gmid-remote');
+    assert.equal(remoteUpdated.status, 'standby');
+    assert.equal(remote.id, remoteUpdated.id);
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-2: migration adds status columns on existing databases', async () => {
+  const tempDir = makeTempDir();
+  const { store, db } = await openStores(tempDir);
+  try {
+    const cols = getColumns(db, 'group_task_members');
+    assert.ok(cols.includes('status'), 'group_task_members.status should exist');
+    assert.ok(cols.includes('status_changed_at'), 'group_task_members.status_changed_at should exist');
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-4: deliverable verification column + updateDeliverableVerification', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(db, 'group_task_deliverables').includes('verification'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p04', title: 'P0-4', goal: 'verify', chairMetabotId: 1, createdBy: 'user',
+    });
+    const deliverable = groupTaskStore.addDeliverable({
+      taskId: task.id,
+      kind: 'metaapp',
+      uri: 'metaapp://ab'.repeat(32) + 'i0',
+      authorGlobalmetaid: 'gmid-x',
+    });
+    groupTaskStore.updateDeliverableVerification(deliverable.id, JSON.stringify({ verified: true }));
+    const updated = groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(updated.verification, JSON.stringify({ verified: true }));
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-5: transition log table + updateTaskStatusWithLog records who/from/to/reason', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    const cols = getColumns(db, 'group_task_transitions');
+    assert.ok(cols.includes('task_id') && cols.includes('from_status') && cols.includes('to_status'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p05', title: 'P0-5', goal: 'transitions', chairMetabotId: 1, createdBy: 'user',
+    });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'executing', { actor: 'metabot:1', reason: 'kickoff' });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'review', { actor: 'Twin Bot', reason: '[STATUS:REVIEW] tag' });
+    groupTaskStore.updateTaskStatusWithLog(task.id, 'executing', { actor: 'Twin Bot', reason: 'rework requested' });
+
+    const transitions = groupTaskStore.listTaskTransitions(task.id);
+    assert.equal(transitions.length, 3);
+    assert.deepEqual(
+      transitions.map((t) => [t.fromStatus, t.toStatus, t.actor]),
+      [
+        ['planning', 'executing', 'metabot:1'],
+        ['executing', 'review', 'Twin Bot'],
+        ['review', 'executing', 'Twin Bot'],
+      ],
+    );
+    assert.equal(transitions[2].reason, 'rework requested');
+  } finally {
+    store.close();
+  }
+});
+
+test('P0-8: integrity events table + add/list/dedupe-by-pin', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    assert.ok(getColumns(db, 'group_task_integrity_events').includes('event_type'));
+    const task = groupTaskStore.createTask({
+      groupId: 'group-p08', title: 'P0-8', goal: 'integrity', chairMetabotId: 1, createdBy: 'user',
+    });
+    const event = groupTaskStore.addIntegrityEvent({
+      taskId: task.id,
+      msgPinId: 'pin-correction',
+      authorGlobalmetaid: 'gmid-w',
+      eventType: 'correction',
+      detail: 'corrected the link',
+    });
+    assert.equal(event.eventType, 'correction');
+    assert.equal(groupTaskStore.hasIntegrityEventWithMsgPin(task.id, 'pin-correction'), true);
+    assert.equal(groupTaskStore.listIntegrityEvents(task.id).length, 1);
+    groupTaskStore.addIntegrityEvent({
+      taskId: task.id,
+      msgPinId: 'pin-report',
+      authorGlobalmetaid: 'gmid-w',
+      eventType: 'honest_report',
+      detail: 'honest failure',
+    });
+    assert.equal(groupTaskStore.listIntegrityEvents(task.id).length, 2);
   } finally {
     store.close();
   }

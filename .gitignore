@@ -14,6 +14,10 @@ release/
 .env
 .env.local
 
+# Local logs and TypeScript incremental build cache (regenerated on each build)
+logs/
+*.tsbuildinfo
+
 
 # ZCode worktrees (do not publish)
 .zcode/
@@ -30,6 +34,11 @@ docs/*
 !docs/metaid_protocols/
 !docs/metaid_protocols/**
 !docs/deepseek-optimization.md
+!docs/group-task-orchestration-improvements-2026-08-09.md
+!docs/gasfee-flow/
+!docs/gasfee-flow/**
+!docs/analysis/
+!docs/analysis/**
 tests/*
 !tests/runtimeDependencyContract.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs
@@ -42,7 +51,15 @@ tests/*
 !tests/groupChatMsgIndexMigration.test.mjs
 !tests/groupChatTransport.test.mjs
 !tests/groupTaskDaemon.test.mjs
+!tests/groupTaskDaemonProtocol.test.mjs
+!tests/groupTaskDeliverableParser.test.mjs
+!tests/groupTaskReopenAndStatus.test.mjs
+!tests/groupTaskSession.test.mjs
+!tests/groupTaskStatusEvents.test.mjs
 !tests/groupTaskUtils.test.mjs
+!tests/groupTaskKickMember.test.mjs
+!tests/groupTaskKickMemberRpc.test.mjs
+!tests/openTeamInviteA2ADisplay.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs
 !tests/gigSquareOrderMessageBuilder.test.mjs
@@ -55,6 +72,7 @@ tests/*
 !tests/botBrowserHostService.test.mjs
 !tests/privateChatOrderCoworkTimeout.test.mjs
 !tests/a2aGuidanceRestart.test.ts
+!tests/orchestratorSessionTitle.test.ts
 !tests/orderPromptBuilder.test.ts
 !tests/privateChatOrderCoworkDeliveryArtifacts.test.mjs
 !tests/privateChatRatingPrompt.test.ts
@@ -62,14 +80,23 @@ tests/*
 !tests/serviceDeliveryArtifacts.test.mjs
 !tests/coworkStreamForwarding.test.mjs
 !tests/coworkStreamPresentation.test.mjs
+!tests/coworkEmptyTerminalTurn.test.mjs
 !tests/coworkFormatTransform.test.mjs
 !tests/coworkModelLimits.test.mjs
 !tests/coworkContextBudget.test.mjs
+!tests/coworkManualCompactionQueue.test.mjs
 !tests/coworkContextCompaction.test.mjs
 !tests/coworkProviderErrors.test.mjs
+!tests/coworkPermissionRisk.test.mjs
+!tests/coworkTodoList.test.ts
+!tests/coworkTaskControl.test.mjs
+!tests/coworkSdkEvents.test.mjs
+!tests/coworkSdkAutoCompact.test.mjs
+!tests/localFileLinkIntegration.test.mjs
 !tests/transferServiceMvcRecovery.test.mjs
 !tests/metaidCoreMvcRecovery.test.mjs
 !tests/metabotPostBuzzSkill.test.mjs
+!tests/metabotGroupTaskSkill.test.mjs
 !tests/metabotInfoPayload.test.mjs
 !tests/metabotInfoSyncSteps.test.mjs
 !tests/metabotRestoreProtocol.test.mjs
@@ -110,10 +137,14 @@ SKILLs/metaid-master-wiki/
 # Local generated skills for development only; never bundled into release.
 .local-skills/
 
-# Local MetaApp installs/generated apps
+# Local MetaApp installs/generated apps (bundled buzz/chat remain tracked)
+METAAPPs/*
+!METAAPPs/buzz/
+!METAAPPs/buzz/**
+!METAAPPs/chat/
+!METAAPPs/chat/**
 METAAPPs/metaapps.config.json
-METAAPPs/IDDisk/
-METAAPPs/id-music-player/
+METAAPPs/**/.DS_Store
 
 # SKILLs runtime files
 SKILLs/**/.connection
@@ -165,8 +196,10 @@ man_base_data_pebble/
 !tests/orchestrationStore.test.mjs
 !tests/twinOrchestrationService.test.mjs
 !tests/twinOrchestrationPrompt.test.mjs
+!tests/skillTurnTimeoutRecovery.test.mjs
 !tests/groupTaskOrchestrationBridge.test.mjs
 !tests/dreamService.test.mjs
+!tests/groupTaskRating.test.mjs
 !tests/experiencePromptBlocks.test.mjs
 !tests/dreamStoreSearch.test.mjs
 !tests/experiencePromptInjection.test.mjs
@@ -177,4 +210,11 @@ man_base_data_pebble/
 !tests/appUpdateSilentFlowStatic.test.mjs
 !tests/appUpdateResumableDownload.test.mjs
 !tests/deepseekResponses.test.mjs
+!tests/deepseekReasoningRoundtrip.test.mjs
 !tests/avatarSource.test.mjs
+
+!tests/sdkCronHostTrigger.test.mjs
+!tests/metabotSettingsService.test.mjs
+!tests/coworkReadImageGuard.test.mjs
+!tests/coworkToolResultFold.test.mjs
+!tests/messageFeedback.test.mjs

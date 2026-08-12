@@ -11,7 +11,7 @@ export interface ApiConfig {
   apiKey: string;
   baseUrl: string;
   provider?: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai' | 'responses';
 }
 
 export class ApiError extends Error {
@@ -51,7 +51,10 @@ class ApiService {
     this.currentRequestId = null;
   }
 
-  private normalizeApiFormat(apiFormat: unknown): 'anthropic' | 'openai' {
+  private normalizeApiFormat(apiFormat: unknown): 'anthropic' | 'openai' | 'responses' {
+    if (apiFormat === 'responses') {
+      return 'responses';
+    }
     if (apiFormat === 'openai') {
       return 'openai';
     }
@@ -87,8 +90,21 @@ class ApiService {
     return `${normalized}/v1/chat/completions`;
   }
 
-  private buildOpenAIResponsesUrl(baseUrl: string): string {
-    const normalized = baseUrl.trim().replace(/\/+$/, '');
+  private buildOpenAIResponsesUrl(baseUrl: string, provider?: string): string {
+    let normalized = baseUrl.trim().replace(/\/+$/, '');
+    // DeepSeek's Responses endpoint lives at the host root (`/responses`) without a
+    // version prefix, matching https://api-docs.deepseek.com/zh-cn/guides/responses_api.
+    // Strip a trailing /anthropic or /v1 so a base URL like
+    // https://api.deepseek.com/anthropic resolves to the root responses path.
+    const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
+      || provider?.toLowerCase() === 'deepseek';
+    if (isDeepSeekHost) {
+      normalized = normalized.replace(/\/anthropic$/, '').replace(/\/v1$/, '');
+      if (!normalized) {
+        return '/responses';
+      }
+      return normalized.endsWith('/responses') ? normalized : `${normalized}/responses`;
+    }
     if (!normalized) {
       return '/v1/responses';
     }
@@ -101,8 +117,18 @@ class ApiService {
     return `${normalized}/v1/responses`;
   }
 
-  private shouldUseOpenAIResponsesApi(provider: string): boolean {
-    return provider === 'openai';
+  private shouldUseOpenAIResponsesApi(provider: string, modelId?: string): boolean {
+    // OpenAI always uses the Responses API.
+    if (provider === 'openai') {
+      return true;
+    }
+    // DeepSeek Responses API currently only serves flash models; pro and other
+    // variants fall back to chat/completions. Mirrors the host proxy logic in
+    // coworkOpenAICompatProxy.ts resolveUpstreamAPIType().
+    if (provider === 'deepseek') {
+      return (modelId ?? '').toLowerCase().includes('flash');
+    }
+    return false;
   }
 
   private buildImageHint(images?: ImageAttachment[]): string {
@@ -261,11 +287,15 @@ class ApiService {
   // 检测当前选择的模型属于哪个 provider
   private detectProvider(modelId: string, providerHint?: string): string {
     const normalizedHint = providerHint?.toLowerCase();
-    if (
-      normalizedHint
-      && ['openai', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'openrouter', 'gemini', 'anthropic', 'xiaomi', 'ollama'].includes(normalizedHint)
-    ) {
-      return normalizedHint;
+    // The hint is the (capitalized) provider key. Built-in and custom
+    // providers alike are resolved against the config so opencode and
+    // user-created providers route to their own credentials instead of
+    // falling back to the OpenAI defaults.
+    if (normalizedHint) {
+      const appConfig = configService.getConfig();
+      if (appConfig?.providers?.[normalizedHint]) {
+        return normalizedHint;
+      }
     }
     const normalizedModelId = modelId.toLowerCase();
     if (normalizedModelId.startsWith('claude')) {
@@ -338,11 +368,12 @@ class ApiService {
 
     // 根据 API 协议格式决定调用方式：
     // - anthropic: Anthropic 兼容协议 (/v1/messages)
-    // - openai: OpenAI 兼容协议 (OpenAI provider uses /v1/responses)
+    // - openai: OpenAI 兼容协议 (Chat Completions)
+    // - responses: OpenAI Responses 协议 (/v1/responses)
     const normalizedApiFormat = this.normalizeApiFormat(effectiveConfig.apiFormat);
-    const useOpenAIFormat = normalizedApiFormat === 'openai';
+    const useAnthropicFormat = normalizedApiFormat === 'anthropic';
 
-    if (!useOpenAIFormat) {
+    if (useAnthropicFormat) {
       return this.chatWithAnthropic(
         userMessage,
         onProgress,
@@ -552,7 +583,9 @@ class ApiService {
       this.cancelOngoingRequest();
       const requestId = generateRequestId();
       this.currentRequestId = requestId;
-      const useResponsesApi = this.shouldUseOpenAIResponsesApi(provider);
+      // The Responses API is used by providers that default to it (openai) or
+      // by any provider whose user-selected API format is 'responses'.
+      const useResponsesApi = this.shouldUseOpenAIResponsesApi(provider, modelId) || config.apiFormat === 'responses';
 
       const userMessage: ChatMessagePayload = {
         role: 'user',
@@ -699,7 +732,7 @@ class ApiService {
         }
 
         const requestUrl = useResponsesApi
-          ? this.buildOpenAIResponsesUrl(config.baseUrl)
+          ? this.buildOpenAIResponsesUrl(config.baseUrl, provider)
           : this.buildOpenAICompatibleChatCompletionsUrl(config.baseUrl, provider);
         const requestBody: Record<string, unknown> = useResponsesApi
           ? {

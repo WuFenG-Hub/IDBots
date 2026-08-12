@@ -367,3 +367,64 @@ test('submission errors are localized for every typed IPC failure code', () => {
   }
   assert.match(detailSource, /role="alert"/);
 });
+
+test('composer textarea has a localized right-click menu for cut/copy/paste/select-all', () => {
+  // Both the large (new task) and compact (session steer) composers get the menu.
+  assert.equal(inputSource.split('onContextMenu={handleTextareaContextMenu}').length - 1, 2);
+  assert.match(inputSource, /role="menu"/);
+  assert.match(inputSource, /runContextMenuCut/);
+  assert.match(inputSource, /runContextMenuCopy/);
+  assert.match(inputSource, /runContextMenuPaste/);
+  assert.match(inputSource, /runContextMenuSelectAll/);
+  assert.match(inputSource, /onMouseDown=\{\(event\) => event\.preventDefault\(\)\}/);
+  for (const [key, zh, en] of [
+    ['contextMenuCut', '剪切', 'Cut'],
+    ['contextMenuCopy', '复制', 'Copy'],
+    ['contextMenuPaste', '粘贴', 'Paste'],
+    ['contextMenuSelectAll', '全选', 'Select All'],
+  ]) {
+    assert.match(i18nSource, new RegExp(`${key}: '${zh}'`));
+    assert.match(i18nSource, new RegExp(`${key}: '${en}'`));
+  }
+});
+
+test('composer context menu derives item availability and splices paste text', async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cowork-context-menu-'));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const outputFile = path.join(tempDir, 'context-menu.mjs');
+  await build({
+    absWorkingDir: projectRoot,
+    stdin: {
+      contents: `export { deriveCoworkContextMenuState } from './src/renderer/components/cowork/CoworkPromptInput.tsx';`,
+      resolveDir: projectRoot,
+      sourcefile: 'context-menu-entry.ts',
+      loader: 'ts',
+    },
+    outfile: outputFile,
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    logLevel: 'silent',
+  });
+  const { deriveCoworkContextMenuState } = await import(
+    `${pathToFileURL(outputFile).href}?test=${Date.now()}`
+  );
+
+  assert.deepEqual(
+    deriveCoworkContextMenuState({ valueLength: 12, selectionStart: 3, selectionEnd: 7, disabled: false }),
+    { canCut: true, canCopy: true, canSelectAll: true },
+  );
+  assert.deepEqual(
+    deriveCoworkContextMenuState({ valueLength: 12, selectionStart: 4, selectionEnd: 4, disabled: false }),
+    { canCut: false, canCopy: false, canSelectAll: true },
+  );
+  assert.deepEqual(
+    deriveCoworkContextMenuState({ valueLength: 0, selectionStart: 0, selectionEnd: 0, disabled: false }),
+    { canCut: false, canCopy: false, canSelectAll: false },
+  );
+  assert.deepEqual(
+    deriveCoworkContextMenuState({ valueLength: 12, selectionStart: 0, selectionEnd: 12, disabled: true }),
+    { canCut: false, canCopy: true, canSelectAll: false },
+  );
+
+});

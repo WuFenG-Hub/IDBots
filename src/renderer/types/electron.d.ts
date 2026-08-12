@@ -1,4 +1,7 @@
 import type { McpServerConfig, McpServerFormData } from './mcp';
+import type { ProjectFormData, ProjectRecord } from './project';
+import type { GroupChatTranscriptMessage } from './groupTask';
+import type { OpenTeamCollabSummary, OpenTeamGuestInvite } from './openTeamCollab';
 import type {
   BrowserCommandResult as CoreBrowserCommandResult,
   MetaAppGalleryRecord,
@@ -17,6 +20,7 @@ import type {
 import type {
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
 } from './cowork';
 import type {
@@ -50,6 +54,94 @@ interface ApiResponse {
   error?: string;
 }
 
+/** Traffic account snapshot (balance/usage are byte counts). */
+interface TrafficAccountInfo {
+  accountId: string;
+  identityAddress: string;
+  balanceBytes: number;
+  reservedBytes: number;
+  grantedBytesTotal: number;
+  spentBytesTotal: number;
+  status: number;
+}
+
+interface TrafficLedgerEntryInfo {
+  id: number;
+  direction: number;
+  amountBytes: number;
+  balanceAfter: number;
+  sourceType: string;
+  sourceId: string;
+  remark: string;
+  timestamp: number;
+  /** Local-journal enrichment (this-device sponsored commits only). */
+  txId?: string;
+  botAddress?: string;
+  kind?: string;
+}
+
+interface TrafficDailyUsageRowInfo {
+  date: string;
+  botAddress: string;
+  bytes: number;
+  txCount: number;
+}
+
+interface TrafficBindSummaryInfo {
+  accountId: string;
+  results: Array<{ botAddress: string; status: 'bound' | 'conflict' | 'failed'; error?: string }>;
+  boundCount: number;
+  conflictCount: number;
+  failedCount: number;
+}
+
+interface TrafficSpendJournalEntryInfo {
+  id: number;
+  txId: string;
+  botAddress: string;
+  orderId: string;
+  txSize: number;
+  sponsoredMinerFee: number;
+  savedFee: number;
+  billedBy: 'traffic' | 'quota';
+  /** Pin protocol path or purpose tag (e.g. /protocols/simplemsg, /file); '' for legacy rows. */
+  kind: string;
+  createdAt: number;
+}
+
+interface TrafficPricingPlanInfo {
+  planId: string;
+  chain: string;
+  payCurrency: string;
+  payAmount: number;
+  trafficBytes: number;
+  status: number;
+  remark: string;
+}
+
+interface TrafficRechargeOrderInfo {
+  orderId: string;
+  payAmount: number;
+  payCurrency: string;
+  trafficBytes: number;
+  gatewayParams: unknown;
+}
+
+/** status: 1=created, 2=paid, 3=credited, 4=closed. */
+interface TrafficRechargeOrderStatusInfo {
+  orderId: string;
+  status: number;
+  paidAt?: number;
+  creditedAt?: number;
+}
+
+interface TrafficSettingsInfo {
+  mode: 'traffic' | 'selfpay';
+  fallbackPolicy: 'selfpay' | 'strict';
+  /** Configured assist-service base URL override; '' = production default. */
+  apiBase: string;
+}
+
 interface ApiStreamResponse {
   ok: boolean;
   status: number;
@@ -71,6 +163,12 @@ interface PublicUserIdentity {
   globalmetaid: string | null;
   name: string;
   avatar: string | null;
+  subsidy_state: 'pending' | 'claimed' | 'failed' | null;
+  subsidy_error: string | null;
+  name_pin_id: string | null;
+  avatar_pin_id: string | null;
+  sync_state: 'pending' | 'synced' | 'partial' | 'failed' | null;
+  sync_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -79,8 +177,17 @@ interface UserIdentityChainSyncResult {
   success: boolean;
   txids: string[];
   chatPublicKeyPinId?: string;
+  namePinId?: string;
+  avatarPinId?: string;
   failedSteps: Array<'name' | 'avatar' | 'chatpubkey'>;
   error?: string;
+}
+
+interface UserIdentitySubsidyResult {
+  success: boolean;
+  error?: string;
+  step1?: unknown;
+  step2?: unknown;
 }
 
 interface AppUpdateDownloadProgress {
@@ -139,7 +246,7 @@ interface CoworkSession {
   createdAt: number;
   updatedAt: number;
   metabotId?: number | null;
-  sessionType?: 'standard' | 'a2a';
+  sessionType?: 'standard' | 'a2a' | 'group_task';
   peerGlobalMetaId?: string | null;
   peerName?: string | null;
   peerAvatar?: string | null;
@@ -233,7 +340,7 @@ interface CoworkSessionSummary {
   updatedAt: number;
   metabotId?: number | null;
   archivedAt?: number | null;
-  sessionType?: 'standard' | 'a2a';
+  sessionType?: 'standard' | 'a2a' | 'group_task';
   peerName?: string | null;
   peerAvatar?: string | null;
   metabotName?: string | null;
@@ -527,6 +634,7 @@ interface IElectronAPI {
     get: (key: string) => Promise<any>;
     set: (key: string, value: any) => Promise<void>;
     remove: (key: string) => Promise<void>;
+    onChanged: (callback: (payload: { key: string }) => void) => () => void;
   };
   skills: {
     list: () => Promise<{ success: boolean; skills?: Skill[]; error?: string }>;
@@ -585,6 +693,22 @@ interface IElectronAPI {
       result?: BotBrowserTabCommandResult;
       error?: string;
     }) => void;
+    onCaptureRequest: (callback: (input: {
+      requestId: string;
+      tabId?: number;
+      fullSurface?: boolean;
+    }) => void) => () => void;
+    respondToCaptureRequest: (response: {
+      requestId: string;
+      success: boolean;
+      result?: { data: string; mimeType: string; width: number; height: number };
+      error?: string;
+    }) => void;
+    capturePage: (options: {
+      rect: { x: number; y: number; width: number; height: number };
+      format?: 'png' | 'jpeg';
+      quality?: number;
+    }) => Promise<{ success: boolean; data?: string; mimeType?: string; width?: number; height?: number; error?: string }>;
     resolveResource: (input: BrowserResolveInput) => Promise<HostBrowserCommandResult<BrowserResolveResult>>;
     getProfile: (input: { actorId?: string; globalMetaId: string }) => Promise<HostBrowserCommandResult<Record<string, unknown>>>;
     getSettings: (input?: BrowserSettingsInput) => Promise<HostBrowserCommandResult<BrowserSettingsSnapshot>>;
@@ -769,6 +893,9 @@ interface IElectronAPI {
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     setPermissionMode: (sessionId: string, permissionMode: CoworkPermissionMode) => Promise<{ success: boolean; error?: string }>;
+    requestManualCompaction: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
+    stopTask: (sessionId: string, taskId: string) => Promise<{ success: boolean; error?: string }>;
+    backgroundTask: (sessionId: string, toolUseId?: string) => Promise<{ success: boolean; backgrounded?: boolean; error?: string }>;
     setEffort: (sessionId: string, effort: string | null) => Promise<{ success: boolean; error?: string }>;
     forkSession: (sessionId: string, messageId: string, title?: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     rewindSession: (sessionId: string, messageId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
@@ -783,12 +910,14 @@ interface IElectronAPI {
     resendA2ADeliveryArtifact: (input: string | { sessionId: string; orderTxid?: string | null }) => Promise<{ success: boolean; deliveryPinId?: string | null; error?: string }>;
     archiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     unarchiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
-    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
+    listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; total?: number; error?: string }>;
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
     getSessionMessagesPage: (input: { sessionId: string; beforeSequence?: number | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkMessagePage; error?: string }>;
+    setMessageFeedback: (input: { messageId: string; rating: 'up' | 'down' | null; comment?: string | null }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord | null; error?: string }>;
+    listSessionFeedback: (input: { sessionId: string }) => Promise<{ success: boolean; feedback?: CoworkMessageFeedbackRecord[]; error?: string }>;
     getA2AConversationHistoryPage: (input: { sessionId: string; beforeCursor?: CoworkA2AHistoryCursor | null; limit?: number }) => Promise<{ success: boolean; page?: CoworkA2AHistoryPage; error?: string }>;
     listSessions: (options?: { metabotId?: number | null }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; error?: string }>;
     processServiceRefund: (sessionId: string) => Promise<{
@@ -824,6 +953,8 @@ interface IElectronAPI {
     listMemoryEntries: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;
@@ -833,6 +964,10 @@ interface IElectronAPI {
     createMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+      visibility?: 'local_only' | 'external_safe';
       text: string;
       confidence?: number;
       isExplicit?: boolean;
@@ -840,6 +975,10 @@ interface IElectronAPI {
     updateMemoryEntry: (input: {
       sessionId?: string;
       metabotId?: number;
+      scopeKind?: 'owner' | 'contact' | 'conversation';
+      scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
+      visibility?: 'local_only' | 'external_safe';
       id: string;
       text?: string;
       confidence?: number;
@@ -847,7 +986,9 @@ interface IElectronAPI {
       isExplicit?: boolean;
     }) => Promise<{ success: boolean; entry?: CoworkUserMemoryEntry; error?: string }>;
     deleteMemoryEntry: (input: { sessionId?: string; metabotId?: number; id: string }) => Promise<{ success: boolean; error?: string }>;
-    getMemoryStats: (input?: { sessionId?: string; metabotId?: number }) => Promise<{ success: boolean; stats?: CoworkMemoryStats; error?: string }>;
+    getMemoryStats: (input?: { sessionId?: string; metabotId?: number; scopeKind?: 'owner' | 'contact' | 'conversation'; scopeKey?: string }) => Promise<{ success: boolean; stats?: CoworkMemoryStats; error?: string }>;
+    listMemoryScopes: (input: { metabotId?: number }) => Promise<{ success: boolean; overview?: CoworkMemoryScopesOverview; error?: string }>;
+    getSessionMemoryScope: (input: { sessionId?: string }) => Promise<{ success: boolean; sessionScope?: CoworkSessionMemoryScope; error?: string }>;
     getMemoryPolicy: (input?: { sessionId?: string; metabotId?: number }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
     setMemoryPolicy: (input: {
       metabotId: number;
@@ -879,6 +1020,12 @@ interface IElectronAPI {
     openPath: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
     openExternal: (url: string) => Promise<{ success: boolean; error?: string }>;
+    getOpenWithApps: (filePath: string) => Promise<{ success: boolean; apps: OpenWithAppInfo[]; error?: string }>;
+    openWith: (filePath: string, appId: string) => Promise<{ success: boolean; error?: string }>;
+    chooseOpenWithApp: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  };
+  fs: {
+    readTextFile: (filePath: string, maxBytes?: number) => Promise<{ success: boolean; content?: string; size?: number; limit?: number; error?: string }>;
   };
   autoLaunch: {
     get: () => Promise<{ enabled: boolean }>;
@@ -889,6 +1036,22 @@ interface IElectronAPI {
     getSelected: () => Promise<Record<string, string>>;
     select: (chain: string, tierTitle: string) => Promise<{ success: boolean }>;
     refresh: () => Promise<Record<string, { title: string; desc: string; feeRate: number }[]>>;
+  };
+  traffic: {
+    ensureAccount: () => Promise<{ success: boolean; account?: TrafficAccountInfo; error?: string }>;
+    getAccount: () => Promise<{ success: boolean; account?: TrafficAccountInfo | null; error?: string }>;
+    getBalance: (input?: { forceRefresh?: boolean }) => Promise<{ success: boolean; balance?: TrafficAccountInfo; error?: string }>;
+    getLedger: (input?: { cursor?: number; limit?: number; direction?: number }) => Promise<{ success: boolean; entries?: TrafficLedgerEntryInfo[]; nextCursor?: number; error?: string }>;
+    getDailyUsage: (input?: { from?: number; to?: number; botAddress?: string }) => Promise<{ success: boolean; rows?: TrafficDailyUsageRowInfo[]; error?: string }>;
+    getUsageSummary: () => Promise<{ success: boolean; summary?: { todayBytes: number; weekBytes: number; monthBytes: number }; error?: string }>;
+    bindAllBots: () => Promise<{ success: boolean; summary?: TrafficBindSummaryInfo; error?: string }>;
+    getLocalJournal: (input?: { limit?: number; botAddress?: string }) => Promise<{ success: boolean; entries?: TrafficSpendJournalEntryInfo[]; error?: string }>;
+    getPricing: () => Promise<{ success: boolean; plans?: TrafficPricingPlanInfo[]; error?: string }>;
+    createRechargeOrder: (input: { planId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderInfo; error?: string }>;
+    getRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
+    mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
+    getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
+    setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };
   appInfo: {
     getVersion: () => Promise<string>;
@@ -934,6 +1097,15 @@ interface IElectronAPI {
     listRuns: (taskId: string, limit?: number, offset?: number) => Promise<any>;
     countRuns: (taskId: string) => Promise<any>;
     listAllRuns: (limit?: number, offset?: number) => Promise<any>;
+    sdkCronMirror: {
+      list: () => Promise<any>;
+      requestDelete: (cronId: string) => Promise<any>;
+      create: (input: { spec: any; replacesId?: string | null }) => Promise<any>;
+      toggle: (cronId: string, enabled: boolean) => Promise<any>;
+      runNow: (cronId: string) => Promise<any>;
+    };
+    migratePlan: () => Promise<any>;
+    migrateExecute: () => Promise<any>;
     onStatusUpdate: (callback: (data: any) => void) => () => void;
     onRunUpdate: (callback: (data: any) => void) => () => void;
   };
@@ -941,11 +1113,21 @@ interface IElectronAPI {
     create: (input: { title: string; goal: string; acceptanceCriteria?: string; memberMetabotIds?: number[] }) => Promise<any>;
     list: (filter?: { status?: string }) => Promise<any>;
     get: (taskId: number) => Promise<any>;
-    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }) => Promise<any>;
+    close: (input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }) => Promise<any>;
+    reopen: (input: { taskId: number; reason?: string }) => Promise<any>;
+    rework: (input: { taskId: number; reason?: string }) => Promise<any>;
     listMessages: (input: { taskId: number; beforeId?: number; limit?: number }) => Promise<any>;
     sendUserMessage: (input: { taskId: number; content: string }) => Promise<any>;
+    kickMember: (input: { taskId: number; metabotId?: number; globalmetaid?: string; reason?: string }) => Promise<any>;
     onStatusChanged: (callback: (data: any) => void) => () => void;
     onOwnerReportDelivery: (callback: (data: any) => void) => () => void;
+  };
+  openTeamCollab: {
+    list: () => Promise<{ success: boolean; items?: OpenTeamCollabSummary[]; error?: string }>;
+    listMessages: (input: { groupId: string; beforeId?: number; limit?: number }) =>
+      Promise<{ success: boolean; messages?: GroupChatTranscriptMessage[]; error?: string }>;
+    // P0-1: received-invite history (joined or not), newest first.
+    listGuestInvites: () => Promise<{ success: boolean; items?: OpenTeamGuestInvite[]; error?: string }>;
   };
   idbots: {
     getMetaBots: () => Promise<{ success: boolean; list?: Array<{ id: number; name: string; avatar: string | null; metabot_type: string; position?: string | null }>; error?: string }>;
@@ -1142,6 +1324,7 @@ interface IElectronAPI {
       identity?: PublicUserIdentity | null;
       /** Present only on create, for the one-time backup step. */
       mnemonic?: string;
+      subsidy?: UserIdentitySubsidyResult;
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;
@@ -1149,6 +1332,7 @@ interface IElectronAPI {
       success: boolean;
       identity?: PublicUserIdentity | null;
       profileSource?: 'chain' | 'local';
+      subsidy?: UserIdentitySubsidyResult;
       chainSync?: UserIdentityChainSyncResult;
       error?: string;
     }>;
@@ -1160,7 +1344,8 @@ interface IElectronAPI {
     }>;
     logout: () => Promise<{ success: boolean; error?: string }>;
     revealMnemonic: () => Promise<{ success: boolean; mnemonic?: string; error?: string }>;
-    retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; chainSync?: UserIdentityChainSyncResult; error?: string }>;
+    retrySubsidy: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; error?: string }>;
+    retryChainSync: () => Promise<{ success: boolean; identity?: PublicUserIdentity | null; subsidy?: UserIdentitySubsidyResult; chainSync?: UserIdentityChainSyncResult; error?: string }>;
   };
   metaWebListener: {
     getListenerConfig: () => Promise<{ success: boolean; config?: { enabled: boolean; groupChats: boolean; privateChats: boolean; serviceRequests: boolean; respondToStrangerPrivateChats: boolean }; error?: string }>;
@@ -1176,6 +1361,9 @@ interface IElectronAPI {
     create: (input: MetabotCreateInput) => Promise<{ success: boolean; metabot?: Metabot; error?: string }>;
     update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
+    /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
+    getSetting: (id: number, key: string) => Promise<{ success: boolean; value?: string | null; error?: string }>;
+    setSetting: (id: number, key: string, value: string) => Promise<{ success: boolean; value?: string; error?: string }>;
     checkNameExists: (options: { name: string; excludeId?: number }) => Promise<{ success: boolean; exists?: boolean; error?: string }>;
     getPositions: () => Promise<{
       success: boolean;
@@ -1209,6 +1397,24 @@ interface IElectronAPI {
         llmId: string | null;
         createdAt: number;
         updatedAt: number;
+      }>;
+      error?: string;
+    }>;
+    listRuns: (options: { metabotId: number; limit?: number }) => Promise<{
+      success: boolean;
+      runs?: Array<{
+        id: string;
+        metabotId: number;
+        dreamDate: string;
+        status: 'running' | 'completed' | 'failed';
+        attemptCount: number;
+        llmId: string | null;
+        dreamVersion: number;
+        error: string | null;
+        startedAt: number;
+        completedAt: number | null;
+        /** Failed runs only: when the scheduler's backoff makes the date eligible again. */
+        nextRetryAt: number | null;
       }>;
       error?: string;
     }>;
@@ -1246,6 +1452,13 @@ interface IElectronAPI {
     delete: (id: string) => Promise<{ success: boolean; servers?: McpServerConfig[]; error?: string }>;
     setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; servers?: McpServerConfig[]; error?: string }>;
   };
+  projects: {
+    list: () => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    create: (data: ProjectFormData) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    update: (id: string, data: Partial<ProjectFormData>) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    delete: (id: string) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+    setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; projects?: ProjectRecord[]; error?: string }>;
+  };
   p2p: {
     getStatus: () => Promise<ElectronP2PStatus>;
     getConfig: () => Promise<ElectronP2PConfig>;
@@ -1253,6 +1466,8 @@ interface IElectronAPI {
     getPeers: () => Promise<string[]>;
     getUserInfo: (params: { globalMetaId: string }) => Promise<unknown>;
     resolveAvatarSource: (params: { reference: string }) => Promise<unknown>;
+    listContacts: (params: { observerGlobalMetaId: string }) => Promise<{ success: boolean; contacts?: CoworkMetaIDContactSummary[]; error?: string }>;
+    getContactDetail: (params: { observerGlobalMetaId: string; subjectGlobalMetaId: string }) => Promise<{ success: boolean; detail?: CoworkMetaIDContactDetail; error?: string }>;
     onStatusUpdate: (callback: (status: ElectronP2PStatus) => void) => () => void;
     onSyncProgress: (callback: (data: unknown) => void) => () => void;
   };
@@ -1461,6 +1676,12 @@ interface IMMessage {
 declare global {
   interface Window {
     electron: IElectronAPI;
+  }
+
+  /** An application detected on the current OS that can open a file (used by the file right-click menu). */
+  interface OpenWithAppInfo {
+    id: string;
+    name: string;
   }
 }
 

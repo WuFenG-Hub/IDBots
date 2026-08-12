@@ -1,5 +1,7 @@
 // Cowork session status
-export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error';
+// 'error_retried' (清单 #12): a failed orchestration attempt whose step was
+// already retried — historical failure, not an unattended task.
+export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried';
 
 /**
  * Permission mode controls how tool calls are gated in the cowork session.
@@ -16,8 +18,9 @@ export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result
 // Cowork execution mode
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 
-// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot, browser = Bot Browser co-work panel
-export type CoworkSessionType = 'standard' | 'a2a' | 'browser';
+// Session type: standard = human↔MetaBot, a2a = MetaBot↔MetaBot,
+// browser = Bot Browser co-work panel, group_task = group task chat channel
+export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';
 
 export type CoworkSteerStatus = 'queued' | 'delivered' | 'settled' | 'failed' | 'cancelled';
 
@@ -99,14 +102,32 @@ export interface CoworkUsageStats {
   cacheCreationTokens: number;
   /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
   totalCostUsd?: number;
-  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
-  source: 'deepseek' | 'anthropic' | 'none';
+  /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, 'other' (gateway/plan providers), or none. */
+  source: 'deepseek' | 'anthropic' | 'other' | 'none';
+  /** Provider key the session actually runs on (e.g. 'opencode'), for the upstream row. */
+  upstreamProvider?: string;
+  /** Real upstream base URL the session's requests are forwarded to. */
+  upstreamBaseURL?: string;
   /** Number of LLM turns accumulated (for cache-miss attribution). */
   turnCount?: number;
+  /** Latest estimated thinking-token count from SDK thinking_tokens events (observability only, not billed). */
+  thinkingTokensEstimate?: number;
+  /** Total input tokens (cached + uncached) of the most recent LLM turn (provider-reported real context size). */
+  lastTurnInputTokens?: number;
   /** Per-turn cache-miss attribution trail (diagnostics). */
   cacheMissEvents?: Array<{ turn: number; reason: string; missTokens: number }>;
   /** Per-turn cache hit/miss breakdown for every turn (drives per-turn hit rate). */
   turnStats?: Array<{ turn: number; cacheHitTokens: number; cacheMissTokens: number }>;
+  /**
+   * Cumulative per-model token usage from the SDK's modelUsage breakdown,
+   * including subagent/side-job traffic the top-level counters miss.
+   */
+  perModelUsage?: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }>;
 }
 
 // Live subagent / background task state, driven by SDK task_* and tool_progress
@@ -157,6 +178,24 @@ export interface CoworkMessage {
   content: string;
   timestamp: number;
   metadata?: CoworkMessageMetadata;
+}
+
+// Per-message human feedback (thumbs up/down) recorded on assistant messages.
+export type MessageFeedbackRating = 'up' | 'down';
+
+export interface MessageFeedback {
+  rating: MessageFeedbackRating;
+  comment?: string;
+}
+
+/** Persisted feedback record as returned by the main process. */
+export interface CoworkMessageFeedbackRecord {
+  messageId: string;
+  sessionId: string;
+  rating: MessageFeedbackRating;
+  comment: string | null;
+  createdAt: number;
+  updatedAt: number;
 }
 
 export interface CoworkMessagePage {
@@ -339,11 +378,132 @@ export interface CoworkUserMemoryEntry {
   isExplicit: boolean;
   status: CoworkUserMemoryStatus;
   /** 'self_identity' entries are dream-written and protected from edit/delete. */
-  usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review';
+  usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review' | 'value_boundary';
+  scopeKind?: 'owner' | 'contact' | 'conversation';
+  scopeKey?: string;
+  visibility?: 'local_only' | 'external_safe';
   origin?: 'conversation' | 'dream';
   createdAt: number;
   updatedAt: number;
   lastUsedAt: number | null;
+}
+
+export interface CoworkMemoryScopeSummary {
+  kind: 'owner' | 'contact' | 'conversation';
+  key: string;
+  count: number;
+  peerGlobalMetaId?: string | null;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+}
+
+export interface CoworkMemoryScopesOverview {
+  owner: CoworkMemoryScopeSummary | null;
+  contacts: CoworkMemoryScopeSummary[];
+  conversations: CoworkMemoryScopeSummary[];
+}
+
+export interface CoworkSessionMemoryScope {
+  scopeKind: 'owner' | 'contact' | 'conversation';
+  scopeKey: string;
+  peerName?: string | null;
+  peerAvatar?: string | null;
+  stats: CoworkMemoryStats;
+}
+
+/** One contact (subject) in the ID-anchored contact list of an observer bot. */
+export interface CoworkMetaIDContactSummary {
+  globalMetaID: string;
+  name: string | null;
+  lastSeenAt: number | null;
+  interactionCount: number;
+  directInteractionCount: number;
+}
+
+export interface CoworkMetaIDImpressionSnapshot {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  interactionCount: number;
+  directInteractionCount: number;
+  summaryText: string;
+  styleDescriptors: string[];
+  cooperationContext: string | null;
+  relationshipTemperature: string | null;
+  communicationGuidance: string | null;
+  uncertaintyText: string | null;
+  latestObservationId: string;
+  snapshotVersion: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoworkMetaIDImpressionObservation {
+  id: string;
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  episodeId: string | null;
+  observationText: string;
+  interpretationText: string;
+  dimensions: Record<string, unknown>;
+  communicationGuidance: string | null;
+  confidence: Record<string, unknown>;
+  dreamDate: string;
+  status: 'active' | 'superseded' | 'rejected';
+  createdAt: number;
+}
+
+export interface CoworkMetaIDExperienceEpisode {
+  id: string;
+  ownerGlobalMetaID: string;
+  episodeType: 'direct_interaction' | 'task_participation' | 'service_order' | 'scheduled_task' | 'public_pin_observation' | 'third_party_reference';
+  sourceChannel: string;
+  sourceKey: string;
+  sessionId: string | null;
+  externalConversationId: string | null;
+  taskId: string | null;
+  orderId: string | null;
+  status: 'open' | 'completed' | 'failed' | 'abandoned';
+  startedAt: number;
+  endedAt: number | null;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CoworkMetaIDExperienceEvidence {
+  id: string;
+  episodeId: string;
+  evidenceType: string;
+  sourceKey: string;
+  pinId: string | null;
+  publisherGlobalMetaID: string | null;
+  messageId: string | null;
+  occurredAt: number;
+  metadata: Record<string, unknown>;
+}
+
+export interface CoworkMetaIDContactEvidenceText {
+  content: string | null;
+  senderName: string | null;
+  pinId: string | null;
+  direction: string | null;
+}
+
+export interface CoworkMetaIDContactEpisodeView {
+  episode: CoworkMetaIDExperienceEpisode;
+  evidence: CoworkMetaIDExperienceEvidence[];
+  evidenceTexts: CoworkMetaIDContactEvidenceText[];
+}
+
+export interface CoworkMetaIDContactDetail {
+  observerGlobalMetaID: string;
+  subjectGlobalMetaID: string;
+  subjectName: string | null;
+  snapshot: CoworkMetaIDImpressionSnapshot | null;
+  observations: CoworkMetaIDImpressionObservation[];
+  episodes: CoworkMetaIDContactEpisodeView[];
 }
 
 export interface CoworkMemoryStats {

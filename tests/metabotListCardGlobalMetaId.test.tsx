@@ -37,7 +37,6 @@ test('MetaBotListCard renders global meta id summary below the avatar with a cop
       metabot={baseMetabot}
       onEdit={() => {}}
       onToggleEnabled={() => {}}
-      onDelete={() => {}}
       isChainSynced
       onSyncToChain={() => {}}
     />,
@@ -54,7 +53,6 @@ test('MetaBotListCard shows the Twin badge only on the Twin bot', () => {
         metabot={metabot}
         onEdit={() => {}}
         onToggleEnabled={() => {}}
-        onDelete={() => {}}
         isChainSynced
         onSyncToChain={() => {}}
       />,

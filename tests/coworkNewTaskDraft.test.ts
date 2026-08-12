@@ -8,6 +8,8 @@ import reducer, {
   clearPreferredMetabotId,
   prependMessages,
   setCurrentSession,
+  setSessionDraft,
+  deleteSession,
 } from '../src/renderer/store/slices/coworkSlice';
 import type { CoworkSession } from '../src/renderer/types/cowork';
 
@@ -51,6 +53,37 @@ test('draftPrompt is a standalone global draft for the New Task composer', () =>
   assert.equal(state.draftPrompt, 'a long task description');
   state = reducer(state, setDraftPrompt(''));
   assert.equal(state.draftPrompt, '');
+});
+
+test('session drafts are keyed per session and never clobber each other', () => {
+  let state = reducer(undefined, setSessionDraft({ sessionId: 'session-a', value: 'abc', attachments: [] }));
+  state = reducer(state, setSessionDraft({ sessionId: 'session-b', value: 'xyz', attachments: [{ path: '/b.txt', name: 'b.txt' }] }));
+  assert.deepEqual(state.sessionDrafts, {
+    'session-a': { value: 'abc', attachments: [] },
+    'session-b': { value: 'xyz', attachments: [{ path: '/b.txt', name: 'b.txt' }] },
+  });
+
+  // Editing session A must not touch session B's draft.
+  state = reducer(state, setSessionDraft({ sessionId: 'session-a', value: 'abc def', attachments: [] }));
+  assert.equal(state.sessionDrafts['session-b']?.value, 'xyz');
+});
+
+test('clearing a session draft removes its store entry', () => {
+  let state = reducer(undefined, setSessionDraft({ sessionId: 'session-a', value: 'abc', attachments: [] }));
+  state = reducer(state, setSessionDraft({ sessionId: 'session-a', value: '', attachments: [] }));
+  assert.equal(state.sessionDrafts['session-a'], undefined);
+
+  // A draft consisting only of attachments is still kept.
+  state = reducer(state, setSessionDraft({ sessionId: 'session-a', value: '', attachments: [{ path: '/a.txt', name: 'a.txt' }] }));
+  assert.deepEqual(state.sessionDrafts['session-a'], { value: '', attachments: [{ path: '/a.txt', name: 'a.txt' }] });
+});
+
+test('deleting a session purges its draft', () => {
+  let state = reducer(undefined, setSessionDraft({ sessionId: 'session-a', value: 'abc', attachments: [] }));
+  state = reducer(state, setSessionDraft({ sessionId: 'session-b', value: 'xyz', attachments: [] }));
+  state = reducer(state, deleteSession('session-a'));
+  assert.equal(state.sessionDrafts['session-a'], undefined);
+  assert.equal(state.sessionDrafts['session-b']?.value, 'xyz');
 });
 
 test('paged A2A history prepends without duplicates and survives a metadata refresh', () => {

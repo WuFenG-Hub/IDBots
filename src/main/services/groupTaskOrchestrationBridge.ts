@@ -9,7 +9,9 @@ import {
   GroupTaskStore,
   type GroupTask,
   type GroupTaskDeliverable,
+  type GroupTaskStatusEventActor,
 } from '../groupTaskStore';
+import { recordDeliverableVerdictImpression } from './openTeamImpressionService';
 
 export interface GroupTaskOrchestrationBridgeDeps {
   groupTaskStore: GroupTaskStore;
@@ -272,7 +274,73 @@ export class GroupTaskOrchestrationBridge {
     });
   }
 
-  acceptGroupTask(groupTaskId: number): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
+  /**
+   * Auto-ignore noise steps: failed steps are typically noise (a mistaken worker
+   * mention whose skill routing failed) that carries no real deliverable. When a
+   * task enters review, demote them to completed with an `ignored` marker so they
+   * neither block owner acceptance nor show up as real work. Safe to call at any
+   * point; steps that already have a different status are left untouched.
+   */
+  ignoreFailedSteps(groupTaskId: number): number {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
+    if (!groupTask.orchestrationTaskId) return 0;
+    const steps = this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId);
+    let ignored = 0;
+    for (const step of steps) {
+      if (step.status !== 'failed') continue;
+      this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', {
+        acceptedResult: {
+          ignored: true,
+          reason: 'noise step auto-ignored on review entry (no real deliverable)',
+        },
+      });
+      ignored += 1;
+    }
+    return ignored;
+  }
+
+  /**
+   * P1-5: latest canonical attempt state for one worker of one group task —
+   * the "error/working" half of the member workStatus readout. 'running'
+   * attempt => working; 'failed' attempt (recent) => error. `atMs` is the
+   * attempt start (running) or finish (failed) timestamp.
+   */
+  getWorkerAttemptStatus(
+    groupTaskId: number,
+    workerMetabotId: number,
+  ): { status: 'running' | 'failed' | null; atMs: number | null } {
+    const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
+    if (!groupTask?.orchestrationTaskId) return { status: null, atMs: null };
+    const steps = this.deps.orchestrationStore.listSteps(groupTask.orchestrationTaskId)
+      .filter((step) => step.assigneeMetabotId === workerMetabotId);
+    let latest: { status: 'running' | 'failed'; atMs: number | null } | null = null;
+    let latestQueuedMs = 0;
+    for (const step of steps) {
+      for (const attempt of this.deps.orchestrationStore.listAttempts(step.id)) {
+        const queuedMs = Date.parse(attempt.queuedAt);
+        if (!Number.isFinite(queuedMs) || queuedMs < latestQueuedMs) continue;
+        latestQueuedMs = queuedMs;
+        const atMsOf = (value: string | null): number | null => {
+          const parsed = Date.parse(value ?? '');
+          return Number.isFinite(parsed) ? parsed : null;
+        };
+        if (attempt.status === 'running') {
+          latest = { status: 'running', atMs: atMsOf(attempt.startedAt) };
+        } else if (attempt.status === 'failed') {
+          latest = { status: 'failed', atMs: atMsOf(attempt.finishedAt) };
+        } else {
+          latest = null;
+        }
+      }
+    }
+    return latest ?? { status: null, atMs: null };
+  }
+
+  acceptGroupTask(
+    groupTaskId: number,
+    actor?: GroupTaskStatusEventActor,
+  ): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
     let canonical = this.ensureCanonicalTask(groupTask);
@@ -280,9 +348,27 @@ export class GroupTaskOrchestrationBridge {
       throw new Error(`Orchestration task ${canonical.id} is cancelled`);
     }
     const steps = this.deps.orchestrationStore.listSteps(canonical.id);
-    const unfinished = steps.filter((step) => !['waiting_input', 'completed'].includes(step.status));
+    // Only ACTIVE steps (ready/queued/running/blocked) block acceptance; failed and
+    // cancelled steps are noise (mistaken mentions, aborted turns) and never carry
+    // a real deliverable, so they must not trap the task in review.
+    const unfinished = steps.filter((step) =>
+      ['ready', 'queued', 'running', 'blocked'].includes(step.status),
+    );
     if (unfinished.length > 0) {
-      throw new Error(`Group task ${groupTaskId} has unfinished canonical steps`);
+      // F6 (GT#11): the close error names every remaining step with its status
+      // and the concrete remedy — previously it was a bare "unfinished
+      // canonical steps" with no way to see what blocked the close.
+      const detail = unfinished
+        .map((step) =>
+          `#${step.ordinal} "${step.title}" [${step.status}]` +
+          (step.assigneeMetabotId != null ? ` assignee=bot-${step.assigneeMetabotId}` : ''),
+        )
+        .join('; ');
+      throw new Error(
+        `Group task ${groupTaskId} has ${unfinished.length} unfinished canonical step(s): ${detail}. ` +
+        'Let the running steps finish, or re-dispatch the queued/blocked ones (chair @mentions the assignee), ' +
+        'then set the task to review again; failed/cancelled noise steps never block acceptance.',
+      );
     }
     if (steps.length > 0 && groupTask.status !== 'review' && groupTask.status !== 'done') {
       throw new Error(`Group task ${groupTaskId} must be in review before owner acceptance`);
@@ -303,6 +389,16 @@ export class GroupTaskOrchestrationBridge {
     for (const deliverable of this.deps.groupTaskStore.listDeliverables(groupTask.id)) {
       if (deliverable.status === 'pending') {
         this.deps.groupTaskStore.updateDeliverableStatus(deliverable.id, 'accepted');
+        // OpenTeam M3: the chair sediments a delivery impression for REMOTE
+        // authors (local authors are covered by the canonical attempt
+        // projection in recordDeliverable plus the dream pipeline).
+        // Best-effort, never throws.
+        recordDeliverableVerdictImpression(
+          groupTask.id,
+          deliverable.authorGlobalmetaid ?? '',
+          'accepted',
+          deliverable.uri,
+        );
       }
     }
     canonical = this.deps.orchestrationStore.getTask(canonical.id)!;
@@ -314,11 +410,14 @@ export class GroupTaskOrchestrationBridge {
     }
     const closed = groupTask.status === 'done'
       ? groupTask
-      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'done');
+      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'done', { actor: actor ?? { kind: 'system' } });
     return { groupTask: closed, canonicalTask: canonical };
   }
 
-  cancelGroupTask(groupTaskId: number): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
+  cancelGroupTask(
+    groupTaskId: number,
+    actor?: GroupTaskStatusEventActor,
+  ): { groupTask: GroupTask; canonicalTask: OrchestrationTask } {
     const groupTask = this.deps.groupTaskStore.getTaskById(groupTaskId);
     if (!groupTask) throw new Error(`Group task ${groupTaskId} not found`);
     const canonical = this.ensureCanonicalTask(groupTask);
@@ -327,7 +426,7 @@ export class GroupTaskOrchestrationBridge {
       : this.deps.orchestrationStore.cancelTaskCascade(canonical.id);
     const cancelledGroup = groupTask.status === 'cancelled'
       ? groupTask
-      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'cancelled');
+      : this.deps.groupTaskStore.updateTaskStatus(groupTask.id, 'cancelled', { actor: actor ?? { kind: 'system' } });
     return { groupTask: cancelledGroup, canonicalTask: cancelledCanonical };
   }
 }

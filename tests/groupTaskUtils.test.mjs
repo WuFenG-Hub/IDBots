@@ -57,6 +57,11 @@ test('groupTaskStatusBadgeClass: every known status has a class, unknown falls b
   assert.equal(groupTaskStatusBadgeClass('nope'), groupTaskStatusBadgeClass('cancelled'));
 });
 
+test('groupTaskStatusBadgeClass: executing uses the breathing blue badge, distinct from done', () => {
+  assert.equal(groupTaskStatusBadgeClass('executing'), 'group-task-badge-executing');
+  assert.notEqual(groupTaskStatusBadgeClass('executing'), groupTaskStatusBadgeClass('done'));
+});
+
 test('formatGroupTaskTime: sqlite UTC text, ms epoch, seconds epoch, null/garbage', () => {
   // sqlite datetime('now') text is UTC without a marker
   const fromText = formatGroupTaskTime('2026-08-04 10:00:00');
@@ -98,4 +103,29 @@ test('shouldStickToBottom: threshold semantics', () => {
   assert.equal(shouldStickToBottom(800, 200, 1000), true);
   assert.equal(shouldStickToBottom(720, 200, 1000), true, 'within the 80px threshold');
   assert.equal(shouldStickToBottom(100, 200, 1000), false, 'scrolled up');
+});
+
+test('P0-2: member status badge class + label cover all states', async () => {
+  const { groupTaskMemberStatusBadgeClass, groupTaskMemberStatusLabel } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  for (const status of ['assigned', 'working', 'standby', 'done', 'unreachable']) {
+    assert.equal(typeof groupTaskMemberStatusBadgeClass(status), 'string');
+    assert.equal(groupTaskMemberStatusLabel(status), status);
+  }
+  assert.equal(typeof groupTaskMemberStatusBadgeClass('unknown'), 'string');
+});
+
+test('P0-4: deliverableVerificationState maps stored reports', async () => {
+  const { deliverableVerificationState, deliverableVerificationBadgeClass } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(deliverableVerificationState(null), 'unknown');
+  assert.equal(deliverableVerificationState('garbage'), 'unknown');
+  assert.equal(deliverableVerificationState(JSON.stringify({ verified: true, sources: [{ outcome: 'found' }] })), 'verified');
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }, { outcome: 'found' }] })),
+    'pending-sync',
+  );
+  assert.equal(
+    deliverableVerificationState(JSON.stringify({ verified: false, sources: [{ outcome: 'not_found' }] })),
+    'unverified',
+  );
+  assert.equal(typeof deliverableVerificationBadgeClass('verified'), 'string');
 });

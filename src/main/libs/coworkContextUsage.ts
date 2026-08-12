@@ -14,8 +14,33 @@ export interface CoworkUsageStats {
   cacheCreationTokens: number;
   /** SDK-priced cost (Anthropic direct sessions only; proxy providers use local rates). */
   totalCostUsd?: number;
-  /** Where the numbers came from: 'deepseek' via proxy, 'anthropic' direct, or none. */
-  source: 'deepseek' | 'anthropic' | 'none';
+  /** Where the numbers came from: 'deepseek' via proxy (DeepSeek-billed), 'anthropic' direct, or none. */
+  source: 'deepseek' | 'anthropic' | 'other' | 'none';
+  /** Latest estimated thinking-token count from SDK thinking_tokens events (observability only, not billed). */
+  thinkingTokensEstimate?: number;
+  /**
+   * Total input tokens (cached + uncached) of the most recent LLM turn — the
+   * provider's real context size. Drives the IDBots-side compaction safety net
+   * (Phase 2) so the fallback follows the actual SDK session size (including
+   * in-session SDK compaction) instead of the store-history heuristic.
+   */
+  lastTurnInputTokens?: number;
+  /**
+   * Cumulative per-model token usage from the SDK's modelUsage breakdown,
+   * including subagent/side-job traffic the top-level counters miss.
+   */
+  perModelUsage?: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }>;
+  /**
+   * Last real per-category context usage snapshot from the SDK's
+   * getContextUsage() (local mode), persisted so the ring keeps showing real
+   * numbers after the active session is cleaned up at turn end.
+   */
+  lastRealContextUsage?: CoworkContextUsage | null;
 }
 
 export interface CoworkContextUsage {
@@ -40,6 +65,12 @@ export interface CoworkContextUsageInput {
   systemPrompt?: string;
   modelLimits: Pick<CoworkModelLimits, 'contextWindow' | 'maxOutputTokens'>;
   /**
+   * Real total input tokens from the most recent LLM turn (provider-reported).
+   * Keeps the fallback indicator consistent with the runner's compaction
+   * trigger (Phase 2).
+   */
+  realUsageTokens?: number;
+  /**
    * When set, only the most recent N messages are counted. A2A private chats
    * rebuild the model context every turn from only the latest segment messages
    * (see PRIVATE_CHAT_CONTEXT_MAX_MESSAGES), so their usage estimate must be
@@ -63,6 +94,7 @@ export function computeCoworkContextUsage(input: CoworkContextUsageInput): Cowor
     messages,
     systemPrompt: input.systemPrompt,
     modelLimits: input.modelLimits,
+    realUsageTokens: input.realUsageTokens,
   });
   const usedTokens = Math.max(0, budget.estimatedTokens);
   const usageRatio = contextWindow > 0

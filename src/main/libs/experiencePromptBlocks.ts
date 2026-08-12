@@ -79,6 +79,29 @@ export function buildValueBoundariesBlock(entries: Array<{ text: string }>, maxI
 }
 
 /**
+ * Past work reviews written by the dream service — including the owner's
+ * acceptance ratings and review comments on group tasks — injected so prior
+ * feedback actively guides new work instead of sitting in storage.
+ */
+export function buildWorkReviewsBlock(entries: Array<{ text: string }>, maxItems = 5): string {
+  const items = entries
+    .map((entry) => entry.text?.trim())
+    .filter((text): text is string => Boolean(text))
+    .slice(0, Math.max(1, maxItems));
+  if (items.length === 0) return '';
+  return [
+    '<work_reviews>',
+    ...items.map((text) => `  <review>${escapeXml(text)}</review>`),
+    '</work_reviews>',
+    '<instruction>',
+    'The &lt;work_reviews&gt; block lists reviews of your past work, distilled in your nightly dreams',
+    'and aligned with the human\'s acceptance ratings and comments. When a new task resembles one of',
+    'them, reuse the approaches the human rated highly and avoid the patterns they criticized.',
+    '</instruction>',
+  ].join('\n');
+}
+
+/**
  * Hot layer: the bot's last few days of dream summaries, newest first,
  * oldest dropped when over the char budget.
  */
@@ -116,11 +139,13 @@ export function buildExperiencePromptBlocksXml(input: {
   identityText?: string | null;
   summaries: ExperienceSummaryLike[];
   valueBoundaries?: Array<{ text: string }>;
+  workReviews?: Array<{ text: string }>;
   maxChars?: number;
 }): string {
   return [
     input.identityText ? buildSelfIdentityBlock(input.identityText) : '',
     buildValueBoundariesBlock(input.valueBoundaries ?? []),
+    buildWorkReviewsBlock(input.workReviews ?? []),
     buildRecentDailySummariesBlock(input.summaries, input.maxChars),
   ]
     .filter((block) => block.trim())

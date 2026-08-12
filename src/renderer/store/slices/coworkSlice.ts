@@ -9,6 +9,8 @@ import type {
   CoworkPermissionRequest,
   CoworkPermissionMode,
   CoworkSessionStatus,
+  MessageFeedback,
+  MessageFeedbackRating,
   SubagentTaskState,
   SubagentTaskStatus,
 } from '../../types/cowork';
@@ -22,6 +24,12 @@ interface CoworkState {
   /** MetaBot selected on the New Task home page; persisted globally so the single-instance page keeps its state across navigation. */
   newTaskMetabotId: number | null;
   draftPrompt: string;
+  /**
+   * Composer drafts keyed by session id (the steer input of each session
+   * detail view). Kept in the store so switching sessions restores the text
+   * the user typed in every session's input instead of wiping it.
+   */
+  sessionDrafts: Record<string, { value: string; attachments: Array<{ path: string; name: string }> }>;
   unreadSessionIds: string[];
   isCoworkActive: boolean;
   isStreaming: boolean;
@@ -31,6 +39,8 @@ interface CoworkState {
   subagentTasks: Record<string, SubagentTaskState>;
   /** Whether the subagent panel is open. */
   isSubagentPanelOpen: boolean;
+  /** Per-message human feedback (thumbs up/down) keyed by message id. */
+  feedbackByMessageId: Record<string, MessageFeedback>;
 }
 
 const initialState: CoworkState = {
@@ -40,12 +50,14 @@ const initialState: CoworkState = {
   preferredMetabotId: null,
   newTaskMetabotId: null,
   draftPrompt: '',
+  sessionDrafts: {},
   unreadSessionIds: [],
   isCoworkActive: false,
   isStreaming: false,
   pendingPermissions: [],
   subagentTasks: {},
   isSubagentPanelOpen: false,
+  feedbackByMessageId: {},
   config: {
     workingDirectory: '',
     systemPrompt: '',
@@ -153,6 +165,20 @@ const coworkSlice = createSlice({
       state.draftPrompt = action.payload;
     },
 
+    /**
+     * Persist one session's composer draft (text + attachments). Empty drafts
+     * are dropped so idle sessions do not accumulate entries.
+     */
+    setSessionDraft(state, action: PayloadAction<{ sessionId: string; value: string; attachments: Array<{ path: string; name: string }> }>) {
+      const { sessionId, value, attachments } = action.payload;
+      if (!sessionId) return;
+      if (!value && attachments.length === 0) {
+        delete state.sessionDrafts[sessionId];
+        return;
+      }
+      state.sessionDrafts[sessionId] = { value, attachments };
+    },
+
     setNewTaskMetabotId(state, action: PayloadAction<number | null>) {
       state.newTaskMetabotId = action.payload;
     },
@@ -210,6 +236,8 @@ const coworkSlice = createSlice({
       const sessionId = action.payload;
       state.sessions = state.sessions.filter(s => s.id !== sessionId);
       state.unreadSessionIds = state.unreadSessionIds.filter((id) => id !== sessionId);
+      // A deleted session can never be reopened, so its composer draft is gone too.
+      delete state.sessionDrafts[sessionId];
 
       if (state.currentSessionId === sessionId) {
         state.currentSessionId = null;
@@ -269,6 +297,21 @@ const coworkSlice = createSlice({
       }
 
       markSessionUnread(state, sessionId);
+    },
+
+    setMessageFeedback(state, action: PayloadAction<{ messageId: string; rating: MessageFeedbackRating; comment?: string }>) {
+      const { messageId, rating, comment } = action.payload;
+      state.feedbackByMessageId[messageId] = { rating, comment };
+    },
+
+    clearMessageFeedback(state, action: PayloadAction<string>) {
+      delete state.feedbackByMessageId[action.payload];
+    },
+
+    loadSessionFeedback(state, action: PayloadAction<Array<{ messageId: string; rating: MessageFeedbackRating; comment?: string }>>) {
+      for (const record of action.payload) {
+        state.feedbackByMessageId[record.messageId] = { rating: record.rating, comment: record.comment };
+      }
     },
 
     setStreaming(state, action: PayloadAction<boolean>) {
@@ -404,6 +447,7 @@ export const {
   setCurrentSessionId,
   setCurrentSession,
   setDraftPrompt,
+  setSessionDraft,
   setNewTaskMetabotId,
   addSession,
   registerBackgroundSession,
@@ -412,6 +456,9 @@ export const {
   addMessage,
   prependMessages,
   updateMessageContent,
+  setMessageFeedback,
+  clearMessageFeedback,
+  loadSessionFeedback,
   setStreaming,
   updateSessionPinned,
   updateSessionTitle,

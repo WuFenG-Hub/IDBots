@@ -6,7 +6,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 - If you notice unfamiliar or unrelated file changes, continue working and stay focused on your own scoped edits unless the user asks you to inspect them.
 - All IDBots-related edits must stay within this IDBots project directory; modifying files outside the IDBots project is strictly forbidden.
-- Before creating a new git worktree or branch, ask for explicit user confirmation first.
+- Unless the user explicitly asks to work on `main`, make every change on a new branch paired with a same-named worktree (path and name following project convention — e.g. branch `fix/foo` or `feat/foo` uses worktree `.worktrees/foo`); you do not need to ask for confirmation before creating it. Edit directly on `main` only when the user explicitly says so.
 - Every new branch must be created together with a dedicated local worktree; use one worktree working directory per branch, and do not create or switch branches in the main working directory.
 - All feature or temporary branches must branch directly from `main`; never create a new branch from another branch. Branch depth is capped at 1.
 - When the user says "commit", stage and commit only the files you changed and understand.
@@ -17,6 +17,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 - Use commit messages in the format `<type>: <short description>`, where `<type>` is one of `feat`, `fix`, `refactor`, `docs`, or `chore`.
 - Before committing, make sure the relevant local tests or verification steps pass for your changes.
 - When merging completed work into `main`, use `git merge --no-ff` to preserve the feature merge point.
+- Do not merge a feature branch back into `main` on your own initiative; wait for an explicit user instruction to merge or close out the work.
+- When the user asks to merge a branch back into `main`, after the merge you may delete that branch and its worktree without asking, provided the branch is now fully absorbed into `main` (safe to delete). Do not delete branches that still carry unmerged or uncommitted work.
 
 ## Language Conventions
 

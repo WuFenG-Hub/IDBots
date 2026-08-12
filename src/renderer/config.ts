@@ -27,6 +27,13 @@ export interface AppConfig {
   model: {
     availableModels: ConfiguredModel[];
     defaultModel: string;
+    /**
+     * Provider key ('deepseek', 'opencode', ...) recorded when the user
+     * picks a model in the UI, so identical model ids offered by multiple
+     * enabled providers resolve to the user's chosen provider instead of the
+     * first one in config order.
+     */
+    defaultProvider?: string;
   };
   // 多模型提供商配置
   providers?: {
@@ -35,85 +42,88 @@ export interface AppConfig {
       apiKey: string;
       baseUrl: string;
       // API 协议格式：anthropic 为 Anthropic 兼容，openai 为 OpenAI 兼容
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     deepseek: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     moonshot: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     zhipu: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     minimax: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     qwen: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     openrouter: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     gemini: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     anthropic: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     xiaomi: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     ollama: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
     };
     [key: string]: {
       enabled: boolean;
       apiKey: string;
       baseUrl: string;
-      apiFormat?: 'anthropic' | 'openai';
+      // API 协议格式：anthropic 为 Anthropic Messages，openai 为 Chat Completions，responses 为 OpenAI Responses
+      apiFormat?: 'anthropic' | 'openai' | 'responses';
       models?: ConfiguredModel[];
+      // 自定义供应商显示名称（内置供应商无此字段，label 来自 providerMeta）
+      name?: string;
     };
   };
   // 主题配置
@@ -124,6 +134,8 @@ export interface AppConfig {
   language_initialized?: boolean;
   // Provider 预设模型迁移版本号 (升级后自动注入新模型/移除已淘汰模型，详见 services/config.ts)
   providerModelMigrationVersion?: number;
+  // Provider API 格式语义迁移版本号 (升级后自动纠正出厂默认 apiFormat，详见 services/config.ts)
+  providerApiFormatMigrationVersion?: number;
   // 应用配置
   app: {
     port: number;
@@ -173,11 +185,15 @@ type ModelLike = {
 
 export const DEEPSEEK_DEFAULT_MODEL_ID = 'deepseek-v4-flash';
 export const DEEPSEEK_V4_PRO_CONTEXT_WINDOW = 1_000_000;
-export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 16_000;
+// The DeepSeek API allows up to 384K output tokens for the whole V4 family;
+// the app declares a 32K ceiling (aligned with the MetaApp bridge limit).
+// Keep in sync with src/main/libs/coworkModelLimits.ts.
+export const DEEPSEEK_V4_PRO_MAX_OUTPUT_TOKENS = 32_768;
 // Same family, same 1M context window. The flash variant drives cowork/A2A
 // automation sessions, so it must carry a real context window or the context
 // usage ring falls back to the 128K default.
 export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_000_000;
+export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 32_768;
 
 const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
   {
@@ -185,6 +201,7 @@ const DEEPSEEK_DEFAULT_MODELS: ReadonlyArray<ModelLike> = Object.freeze([
     name: 'DeepSeek V4 Flash',
     supportsImage: false,
     contextWindow: DEEPSEEK_V4_FLASH_CONTEXT_WINDOW,
+    maxOutputTokens: DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS,
     // DeepSeek-first policy: the flash model is the default for all automation
     // paths. Enable thinking + max reasoning effort by default so orchestrator /
     // private-chat / group-task / browser-bridge calls get full reasoning unless
@@ -514,6 +531,19 @@ export const defaultConfig: AppConfig = {
         { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false, contextWindow: 204_800 }
       ]
+    },
+    opencode: {
+      enabled: false,
+      apiKey: '',
+      // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
+      // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
+      // Default to the Responses endpoint: DeepSeek Flash carries reasoning there and
+      // the gateway serves pro/flash alike on /v1/responses.
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiFormat: 'responses',
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
+      ]
     }
   },
   theme: 'system',
@@ -550,7 +580,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
+  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
 ] as const;
 
 /**

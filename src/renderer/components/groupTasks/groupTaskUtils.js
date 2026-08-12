@@ -15,6 +15,30 @@ export function canAcceptGroupTask(status) {
   return status === 'review';
 }
 
+/**
+ * P0-1: a review task can be pulled back to executing (Back to work) — the
+ * owner/chair reopens it to assign supplementary subtasks.
+ */
+export function canReopenGroupTask(status) {
+  return status === 'review';
+}
+
+/** P1-4: i18n label key for a member workStatus. */
+export function groupTaskWorkStatusLabelKey(status) {
+  switch (status) {
+    case 'working':
+      return 'groupTasksWorkStatusWorking';
+    case 'error':
+      return 'groupTasksWorkStatusError';
+    case 'idle':
+      return 'groupTasksWorkStatusIdle';
+    case 'unknown':
+      return 'groupTasksWorkStatusUnknown';
+    default:
+      return 'groupTasksWorkStatusUnknown';
+  }
+}
+
 /** Client-side status filter for the list tabs: active | done | cancelled | all. */
 export function filterGroupTasksByTab(tasks, tab) {
   const list = Array.isArray(tasks) ? tasks : [];
@@ -30,7 +54,9 @@ export function groupTaskStatusBadgeClass(status) {
     case 'planning':
       return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
     case 'executing':
-      return 'bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-300';
+      // Breathing blue gradient (defined in index.css) so the in-progress
+      // state reads as alive and distinct from the green "done" badge.
+      return 'group-task-badge-executing';
     case 'review':
       return 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300';
     case 'done':
@@ -83,4 +109,69 @@ export function mergeTranscriptMessages(existing, incoming) {
 /** Whether the transcript view should stick to the bottom on new messages. */
 export function shouldStickToBottom(scrollTop, clientHeight, scrollHeight, threshold = 80) {
   return scrollHeight - (scrollTop + clientHeight) <= threshold;
+}
+
+/** P0-2: Tailwind classes for the member state-machine status badge. */
+export function groupTaskMemberStatusBadgeClass(status) {
+  switch (status) {
+    case 'working':
+      return 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300';
+    case 'standby':
+      return 'bg-slate-100 text-slate-600 dark:bg-slate-800/50 dark:text-slate-300';
+    case 'done':
+      return 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300';
+    case 'unreachable':
+      return 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300';
+    case 'assigned':
+    default:
+      return 'bg-gray-100 text-gray-600 dark:bg-gray-800/50 dark:text-gray-300';
+  }
+}
+
+/** P0-2: human label for the member state-machine status. */
+export function groupTaskMemberStatusLabel(status) {
+  switch (status) {
+    case 'working': return 'working';
+    case 'standby': return 'standby';
+    case 'done': return 'done';
+    case 'unreachable': return 'unreachable';
+    case 'assigned':
+    default: return 'assigned';
+  }
+}
+
+/**
+ * P0-4: summarize a deliverable's stored verification report (JSON string).
+ * Returns one of 'verified' | 'pending-sync' | 'unverified' | 'unknown'.
+ */
+export function deliverableVerificationState(verification) {
+  if (!verification) return 'unknown';
+  let report;
+  try {
+    report = typeof verification === 'string' ? JSON.parse(verification) : verification;
+  } catch {
+    return 'unknown';
+  }
+  const sources = Array.isArray(report?.sources) ? report.sources : [];
+  if (report?.verified === true) return 'verified';
+  if (sources.some((entry) => entry?.outcome === 'not_found')
+    && sources.some((entry) => entry?.outcome === 'found')) {
+    return 'pending-sync';
+  }
+  if (sources.some((entry) => entry?.outcome === 'not_found')) return 'unverified';
+  return 'unverified';
+}
+
+/** Tailwind classes for the verification badge. */
+export function deliverableVerificationBadgeClass(state) {
+  switch (state) {
+    case 'verified':
+      return 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400';
+    case 'pending-sync':
+      return 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
+    case 'unverified':
+      return 'bg-red-500/15 text-red-600 dark:text-red-400';
+    default:
+      return 'bg-gray-500/15 text-gray-600 dark:text-gray-400';
+  }
 }

@@ -1,7 +1,8 @@
 /**
- * Group chat transport service: on-chain pin writes (create/join/send) for MetaWeb
- * group chats, plus an indexer-readiness poll. Consolidates logic that previously
- * existed only as an inline arrow function in main.ts and inside skill scripts.
+ * Group chat transport service: on-chain pin writes (create/join/send/remove) for
+ * MetaWeb group chats, plus an indexer-readiness poll. Consolidates logic that
+ * previously existed only as an inline arrow function in main.ts and inside skill
+ * scripts.
  *
  * Payload references:
  * - Create body mirrors idchat production createChannel (idchat/src/utils/talk.ts:724-741).
@@ -14,6 +15,7 @@ import type { UserIdentityStore } from '../userIdentityStore';
 import type { UserIdentity } from '../types/userIdentity';
 import { createPin, createPinForIdentity } from './metaidCore';
 import { encryptGroupMessageECB } from './metaWebCrypto';
+import { getRate as getGlobalFeeRate } from './feeRateStore';
 
 export interface CreateGroupChatOptions {
   groupName: string;
@@ -22,6 +24,12 @@ export interface CreateGroupChatOptions {
 
 export interface JoinGroupChatOptions {
   referrer?: string;
+}
+
+export interface RemoveGroupChatMemberOptions {
+  /** Legacy MetaID of the member being removed (not the GlobalMetaID). */
+  removeMetaid: string;
+  reason?: string;
 }
 
 export interface SendGroupChatMessageOptions {
@@ -44,6 +52,7 @@ const GROUP_INFO_ENDPOINTS = ['https://api.idchat.io', 'https://www.show.now'];
 
 const DEFAULT_INDEX_TIMEOUT_MS = 60_000;
 const INDEX_POLL_INTERVAL_MS = 2_000;
+const MEMBER_LIST_TIMEOUT_MS = 10_000;
 
 // Dependency injection for MetabotStore, mirroring libs/claudeSettings.ts setStoreGetter:
 // main.ts wires its getMetabotStore() here once during startup.
@@ -85,17 +94,22 @@ function getUserIdentity(): UserIdentity {
 // Pin-function seams (same setter-injection style as groupTaskService): tests override
 // these to inspect payloads without chain writes.
 let createPinForIdentityFn = createPinForIdentity;
+// fetch seam: tests stub HTTP responses for the member-list/indexer clients.
+let fetchFn: typeof fetch = globalThis.fetch;
 
 export interface GroupChatTransportOverrides {
   createPinForIdentity?: typeof createPinForIdentity;
+  fetchFn?: typeof fetch;
 }
 
 export function setGroupChatTransportOverrides(overrides: GroupChatTransportOverrides): void {
   createPinForIdentityFn = overrides.createPinForIdentity ?? createPinForIdentity;
+  fetchFn = overrides.fetchFn ?? globalThis.fetch;
 }
 
 export function resetGroupChatTransportOverrides(): void {
   createPinForIdentityFn = createPinForIdentity;
+  fetchFn = globalThis.fetch;
 }
 
 /**
@@ -132,7 +146,7 @@ export async function createGroupChat(
     path: '/protocols/simplegroupcreate',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { groupId: result.pinId, pinId: result.pinId };
 }
 
@@ -156,7 +170,36 @@ export async function joinGroupChat(
     path: '/protocols/simplegroupjoin',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
+  return { pinId: result.pinId };
+}
+
+/**
+ * Remove a member from a group on-chain (/protocols/simplegroupremoveuser).
+ * Only the group creator's signature is honored by the indexer, so callers must
+ * pass the chair (group creator) metabot id. `removeMetaid` is the kicked
+ * member's legacy MetaID (idchat removeMember convention); body mirrors the
+ * SimpleGroupRemoveUser protocol doc
+ * (SKILLs/metabot-omni-caster/references/03-group-management.md).
+ */
+export async function removeGroupChatMember(
+  metabotId: number,
+  groupId: string,
+  opts: RemoveGroupChatMemberOptions
+): Promise<{ pinId: string }> {
+  const body = {
+    removeMetaid: opts.removeMetaid,
+    groupId,
+    reason: opts.reason?.trim() ?? '',
+    timestamp: Math.floor(Date.now() / 1000), // idchat uses seconds
+  };
+  const result = await createPin(getMetabotStore(), metabotId, {
+    operation: 'create',
+    path: '/protocols/simplegroupremoveuser',
+    contentType: 'application/json',
+    encryption: '0',
+    payload: JSON.stringify(body),
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { pinId: result.pinId };
 }
 
@@ -182,6 +225,7 @@ export async function joinGroupChatAsIdentity(groupId: string): Promise<{ pinId:
       contentType: 'application/json',
       payload: JSON.stringify(body),
     },
+    options: { feeRate: getGlobalFeeRate('mvc') },
   });
   return { pinId: result.pinId };
 }
@@ -216,6 +260,7 @@ export async function sendGroupChatMessageAsIdentity(
       contentType: 'application/json',
       payload: JSON.stringify(body),
     },
+    options: { feeRate: getGlobalFeeRate('mvc') },
   });
   return { pinId: result.pinId };
 }
@@ -245,7 +290,7 @@ export async function sendGroupChatMessage(
     path: '/protocols/simplegroupchat',
     contentType: 'application/json',
     payload: JSON.stringify(body),
-  });
+  }, { feeRate: getGlobalFeeRate('mvc') });
   return { pinId: result.pinId };
 }
 
@@ -261,16 +306,72 @@ function isIndexedGroupInfo(json: unknown, groupId: string): boolean {
   return Object.keys(record).length > 0;
 }
 
-async function fetchGroupInfoOnce(endpointBase: string, groupId: string): Promise<boolean> {
+/** Group creator identity extracted from a group-info record (idchat GroupRoomInfo shape). */
+export interface GroupInfoDetails {
+  groupId: string;
+  createUserMetaId: string;
+  createUserGlobalMetaId: string;
+}
+
+export type FetchGroupInfoResult =
+  | { status: 'found'; info: GroupInfoDetails }
+  | { status: 'not_found' }
+  | { status: 'error' };
+
+/**
+ * Single-endpoint group-info query (injectable via the module fetchFn seam).
+ * 'found' carries the group record's creator identity fields; 'not_found'
+ * means the indexer answered but has no such group; 'error' means the
+ * endpoint itself failed (network/HTTP/JSON). Never throws.
+ */
+async function fetchGroupInfoOnce(
+  endpointBase: string,
+  groupId: string,
+  timeoutMs: number
+): Promise<FetchGroupInfoResult> {
   const url = `${endpointBase}/chat-api/group-chat/group-info?groupId=${encodeURIComponent(groupId)}`;
+  let json: unknown;
   try {
-    const response = await fetch(url);
-    if (!response.ok) return false;
-    const json: unknown = await response.json();
-    return isIndexedGroupInfo(json, groupId);
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) return { status: 'error' };
+    json = await response.json();
   } catch {
-    return false;
+    return { status: 'error' };
   }
+  if (!isIndexedGroupInfo(json, groupId)) return { status: 'not_found' };
+  const data = (json as { data: Record<string, unknown> }).data;
+  return {
+    status: 'found',
+    info: {
+      groupId:
+        typeof data.groupId === 'string' && data.groupId.trim() ? data.groupId.trim() : groupId,
+      createUserMetaId:
+        typeof data.createUserMetaId === 'string' ? data.createUserMetaId.trim() : '',
+      createUserGlobalMetaId:
+        typeof data.createUserGlobalMetaId === 'string' ? data.createUserGlobalMetaId.trim() : '',
+    },
+  };
+}
+
+/**
+ * Group-info lookup across both indexer endpoints: the first 'found' wins; a
+ * definitive 'not_found' from a healthy endpoint is reported when no endpoint
+ * found the group; 'error' only when every endpoint failed. Used by the
+ * OpenTeam guest flow to verify an invited group really exists and to check
+ * the inviter against the group's creator. Never throws.
+ */
+export async function fetchGroupInfo(
+  groupId: string,
+  opts?: { timeoutMs?: number }
+): Promise<FetchGroupInfoResult> {
+  const timeoutMs = Math.max(1_000, opts?.timeoutMs ?? MEMBER_LIST_TIMEOUT_MS);
+  let sawNotFound = false;
+  for (const endpoint of GROUP_INFO_ENDPOINTS) {
+    const result = await fetchGroupInfoOnce(endpoint, groupId, timeoutMs);
+    if (result.status === 'found') return result;
+    if (result.status === 'not_found') sawNotFound = true;
+  }
+  return sawNotFound ? { status: 'not_found' } : { status: 'error' };
 }
 
 /**
@@ -285,10 +386,114 @@ export async function waitForGroupIndexed(
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     for (const endpoint of GROUP_INFO_ENDPOINTS) {
-      if (await fetchGroupInfoOnce(endpoint, groupId)) return true;
+      const result = await fetchGroupInfoOnce(endpoint, groupId, MEMBER_LIST_TIMEOUT_MS);
+      if (result.status === 'found') return true;
     }
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await new Promise((resolve) => setTimeout(resolve, Math.min(INDEX_POLL_INTERVAL_MS, remaining)));
+  }
+}
+
+/**
+ * Collect every member identity string from a group-member-list `data` payload,
+ * tolerantly: entries under data.list / data.admins / data.creator contribute
+ * their metaId / globalMetaId, and plain-string entries are collected as-is.
+ * Returned strings are raw (trimmed only) — callers do their own matching.
+ */
+function collectMemberIdentities(data: unknown): string[] {
+  const found = new Set<string>();
+  const push = (value: unknown): void => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    if (text) found.add(text);
+  };
+  const pushEntry = (entry: unknown): void => {
+    if (typeof entry === 'string') {
+      push(entry);
+      return;
+    }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return;
+    const record = entry as Record<string, unknown>;
+    push(record.metaId);
+    push(record.globalMetaId);
+  };
+  if (Array.isArray(data)) {
+    data.forEach(pushEntry);
+    return [...found];
+  }
+  if (!data || typeof data !== 'object') return [];
+  const record = data as Record<string, unknown>;
+  if (Array.isArray(record.list)) record.list.forEach(pushEntry);
+  if (Array.isArray(record.admins)) record.admins.forEach(pushEntry);
+  pushEntry(record.creator);
+  return [...found];
+}
+
+async function fetchGroupMembersOnce(
+  endpointBase: string,
+  groupId: string,
+  timeoutMs: number
+): Promise<string[] | null> {
+  const url = `${endpointBase}/chat-api/group-chat/group-member-list?groupId=${encodeURIComponent(groupId)}`;
+  try {
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) return null;
+    const json: unknown = await response.json();
+    if (!json || typeof json !== 'object') return null;
+    const envelope = json as { code?: unknown; data?: unknown };
+    if (envelope.code !== 0) return null;
+    return collectMemberIdentities(envelope.data);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Thin group-member-list client (OpenTeam join confirmation): returns the raw
+ * member identity strings (metaId/globalMetaId forms mixed) or null when both
+ * indexer endpoints failed — an empty array is a real, successful empty list.
+ * Never throws.
+ */
+export async function fetchGroupMembers(
+  groupId: string,
+  opts?: { timeoutMs?: number }
+): Promise<string[] | null> {
+  const timeoutMs = Math.max(1_000, opts?.timeoutMs ?? MEMBER_LIST_TIMEOUT_MS);
+  for (const endpoint of GROUP_INFO_ENDPOINTS) {
+    const members = await fetchGroupMembersOnce(endpoint, groupId, timeoutMs);
+    if (members) return members;
+  }
+  return null;
+}
+
+/**
+ * Poll group-member-list until any of the given identities appears (match is
+ * case-insensitive; pass both the globalMetaId and the legacy metaId form when
+ * both are known). Returns true on the first hit, false on timeout. Failed
+ * fetches simply cost one round. Never throws — same semantics as
+ * waitForGroupIndexed.
+ */
+export async function waitForMemberJoined(
+  groupId: string,
+  identities: string | string[],
+  opts?: { timeoutMs?: number; intervalMs?: number }
+): Promise<boolean> {
+  const candidates = new Set(
+    (Array.isArray(identities) ? identities : [identities])
+      .map((value) => String(value ?? '').trim().toLowerCase())
+      .filter((value) => value.length > 0)
+  );
+  if (candidates.size === 0) return false;
+  const timeoutMs = Math.max(0, opts?.timeoutMs ?? DEFAULT_INDEX_TIMEOUT_MS);
+  const intervalMs = Math.max(250, opts?.intervalMs ?? INDEX_POLL_INTERVAL_MS);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const members = await fetchGroupMembers(groupId);
+    if (members && members.some((member) => candidates.has(member.trim().toLowerCase()))) {
+      return true;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(intervalMs, remaining)));
   }
 }

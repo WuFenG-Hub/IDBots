@@ -324,6 +324,26 @@ export class SqliteStore {
       ON cowork_messages(session_id, created_at DESC);
     `);
 
+    // Per-message human feedback (thumbs up/down) on cowork messages — one row
+    // per rated message, read by the dream consolidation as the human's
+    // per-message alignment signal. CREATE TABLE IF NOT EXISTS is the
+    // idempotent first-run migration; existing rows are never touched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS message_feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL UNIQUE,
+        session_id TEXT NOT NULL,
+        rating TEXT NOT NULL CHECK(rating IN ('up','down')),
+        comment TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (message_id) REFERENCES cowork_messages(id) ON DELETE CASCADE
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback(session_id);
+    `);
+
     this.db.run(`
       CREATE TABLE IF NOT EXISTS cowork_config (
         key TEXT PRIMARY KEY,
@@ -340,6 +360,20 @@ export class SqliteStore {
         enabled INTEGER NOT NULL DEFAULT 1,
         transport_type TEXT NOT NULL DEFAULT 'stdio',
         config_json TEXT NOT NULL DEFAULT '{}',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        icon TEXT,
+        guidelines TEXT,
+        source_dir TEXT,
+        resources_json TEXT NOT NULL DEFAULT '[]',
+        enabled INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -768,10 +802,31 @@ export class SqliteStore {
         create_pin_id TEXT,
         created_at TEXT DEFAULT (datetime('now')),
         updated_at TEXT DEFAULT (datetime('now')),
-        closed_at TEXT
+        closed_at TEXT,
+        rating INTEGER,
+        rating_comment TEXT,
+        rated_at TEXT
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
+    this.migrateGroupTasksLastDrivenAt();
+    this.migrateGroupTasksRatingColumns();
+    // P0-5: state-transition audit log (who/from/to/reason + timestamp).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_transitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        from_status TEXT,
+        to_status TEXT NOT NULL,
+        actor TEXT,
+        reason TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_transitions_task
+        ON group_task_transitions(task_id, id);
+    `);
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_members (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -796,11 +851,131 @@ export class SqliteStore {
         created_at TEXT DEFAULT (datetime('now'))
       );
     `);
+    // Migration: add display_name / removed_at to group_task_members (OpenTeam remote members).
+    this.migrateGroupTaskMembersOpenTeamColumns();
+    this.migrateGroupTaskMembersStatusColumns();
+    this.migrateGroupTaskDeliverablesVerification();
+    // P0-8: public integrity declarations (honest corrections/reports).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_integrity_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        event_type TEXT NOT NULL DEFAULT 'correction'
+          CHECK(event_type IN ('correction','honest_report')),
+        detail TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_integrity_events_task
+        ON group_task_integrity_events(task_id, id);
+    `);
+
+    // Group Task status transition history (who moved the task from/to which
+    // status and when) — the source for the detail-view status timeline.
+    // CREATE TABLE IF NOT EXISTS is the idempotent first-run migration; the
+    // table simply does not exist for older user databases until this schema
+    // block runs again, and existing rows are never touched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_status_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        from_status TEXT NOT NULL,
+        to_status TEXT NOT NULL,
+        actor_kind TEXT NOT NULL DEFAULT 'system' CHECK(actor_kind IN ('chair','owner','system')),
+        actor_globalmetaid TEXT,
+        actor_name TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_status_events_task
+        ON group_task_status_events(task_id, id);
+    `);
+
+    // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_memberships (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        metabot_id INTEGER NOT NULL,
+        globalmetaid TEXT,
+        inviter_globalmetaid TEXT,
+        task_title TEXT,
+        invite_pin_id TEXT,
+        joined_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','left')),
+        created_at TEXT DEFAULT (datetime('now')),
+        last_processed_msg_id INTEGER NOT NULL DEFAULT 0,
+        activated_at TEXT,
+        UNIQUE(group_id, metabot_id)
+      );
+    `);
+    // Migration: add last_processed_msg_id to openteam_memberships (guest daemon cursor).
+    this.migrateOpenTeamMembershipsCursorColumn();
+    // Migration: add activated_at to openteam_memberships (guest self-check grace anchor).
+    this.migrateOpenTeamMembershipsActivatedColumn();
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        group_id TEXT NOT NULL,
+        invitee_globalmetaid TEXT NOT NULL,
+        invitee_name TEXT,
+        invite_pin_id TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK(status IN ('pending','accepted','declined','expired')),
+        decline_reason TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        responded_at TEXT,
+        invitee_metaid TEXT,
+        required_skills TEXT
+      );
+    `);
+    // Migration: add invitee_metaid to openteam_invites (legacy identity form for watchers).
+    this.migrateOpenTeamInvitesMetaIdColumn();
+    // Migration: add joined_pin_id to openteam_invites (P1-2: the ACCEPT
+    // envelope's join pin is persisted here and copied into the member row).
+    this.migrateOpenTeamInvitesJoinedPinColumn();
+    // Migration: add required_skills to openteam_invites (#13: the join-welcome
+    // handshake states WHY the remote member was invited — required skills
+    // carried on the invite row, JSON array text).
+    this.migrateOpenTeamInvitesRequiredSkillsColumn();
+    // P0-1: guest-side invite history — every [OPENTEAM_INVITE] this machine's
+    // bots received, regardless of outcome, so the invite is visible in the
+    // A2A session system / collab UI even before (or without) a join.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS openteam_guest_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id TEXT NOT NULL,
+        inviter_globalmetaid TEXT NOT NULL,
+        inviter_name TEXT,
+        task_title TEXT,
+        goal_summary TEXT,
+        required_skills TEXT,
+        invite_pin_id TEXT,
+        target_globalmetaid TEXT,
+        expires_at INTEGER,
+        status TEXT NOT NULL DEFAULT 'invited'
+          CHECK(status IN ('invited','accepted','declined','skipped','expired')),
+        decline_reason TEXT,
+        joined_pin_id TEXT,
+        created_at TEXT DEFAULT (datetime('now')),
+        responded_at TEXT
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_openteam_guest_invites_group
+        ON openteam_guest_invites(group_id, id);
+    `);
     this.db.run(`
       CREATE INDEX IF NOT EXISTS idx_group_chat_messages_group_id
         ON group_chat_messages(group_id, id);
     `);
     this.migrateGroupChatMessagesMsgIndex();
+    this.migrateGroupChatMessagesSenderSuspect();
 
     // MetaID pins: full-field persistence from manapi.metaid.io
     this.db.run(`
@@ -1254,6 +1429,12 @@ export class SqliteStore {
         globalmetaid TEXT,
         name TEXT NOT NULL,
         avatar TEXT,
+        subsidy_state TEXT,
+        subsidy_error TEXT,
+        name_pin_id TEXT,
+        avatar_pin_id TEXT,
+        sync_state TEXT,
+        sync_error TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
@@ -1373,6 +1554,9 @@ export class SqliteStore {
     // One-shot migration: normalize metabot_type, collapse duplicate twins, and
     // promote the earliest bot when no twin exists (unique-Twin backfill).
     this.migrateMetabotTwinBackfill();
+    // Migration: persist user-identity bootstrap state (subsidy + per-pin sync status)
+    // so chain setup can be resumed/retried idempotently after failures.
+    this.migrateUserIdentitySetupColumns();
 
     // Migrations - safely add columns if they don't exist
     try {
@@ -1795,6 +1979,25 @@ export class SqliteStore {
   }
 
   /**
+   * Migration (round-4 attribution): add sender_suspect to group_chat_messages.
+   * The chain-signature GlobalMetaID is the ONLY identity source for group-task
+   * attribution; a message whose resolved GlobalMetaID is neither a task member
+   * nor the owner is flagged (default 0 = trusted) so the daemon and the UI can
+   * surface [SUSPECT] instead of misattributing by sender_name.
+   */
+  private migrateGroupChatMessagesSenderSuspect(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_chat_messages)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('sender_suspect')) return;
+      this.db.run('ALTER TABLE group_chat_messages ADD COLUMN sender_suspect INTEGER NOT NULL DEFAULT 0');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupChatMessagesSenderSuspect:', e);
+    }
+  }
+
+  /**
    * Migration: add protocol_paths to agent_game_grants (forward-compatible
    * column for auto-write authorization). No-op once present.
    */
@@ -1844,6 +2047,185 @@ export class SqliteStore {
   }
 
   /**
+   * Migration: OpenTeam remote members — display_name is the inviter-side name
+   * snapshot for members without a local metabots row (metabot_id IS NULL);
+   * removed_at marks kicked members (M3) without deleting history, and
+   * remove_pin_id records the on-chain removeuser pin for audit.
+   */
+  private migrateGroupTaskMembersOpenTeamColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_members)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('display_name')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN display_name TEXT');
+        columns = [...columns, 'display_name'];
+        changed = true;
+      }
+      if (!columns.includes('removed_at')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN removed_at TEXT');
+        columns = [...columns, 'removed_at'];
+        changed = true;
+      }
+      if (!columns.includes('remove_pin_id')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN remove_pin_id TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskMembersOpenTeamColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-2): member state-machine status columns. status defaults to
+   * 'assigned' at the SQL level; rowToGroupTaskMember upgrades chair rows to
+   * 'working' for legacy rows without a status. Idempotent PRAGMA-guarded.
+   */
+  private migrateGroupTaskMembersStatusColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_members)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('status')) {
+        this.db.run(
+          "ALTER TABLE group_task_members ADD COLUMN status TEXT NOT NULL DEFAULT 'assigned'",
+        );
+        changed = true;
+      }
+      if (!columns.includes('status_changed_at')) {
+        this.db.run('ALTER TABLE group_task_members ADD COLUMN status_changed_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskMembersStatusColumns:', error);
+    }
+  }
+
+  /**
+   * Migration (P0-4): deliverable verification report column (JSON text).
+   * Idempotent PRAGMA-guarded; existing rows stay NULL (unverified).
+   */
+  private migrateGroupTaskDeliverablesVerification(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_deliverables)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('verification')) {
+        this.db.run('ALTER TABLE group_task_deliverables ADD COLUMN verification TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesVerification:', error);
+    }
+  }
+
+  /**
+   * Migration: legacy metaId identity form on openteam_invites (OpenTeam
+   * join-confirmation watchers). PRAGMA-guarded and idempotent; existing rows
+   * keep NULL (their watchers fall back to the GlobalMetaID form only).
+   */
+  private migrateOpenTeamInvitesMetaIdColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('invitee_metaid')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN invitee_metaid TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesMetaIdColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: join pin of the ACCEPT envelope on openteam_invites (P1-2).
+   * The guest echoes its join pin in [OPENTEAM_ACCEPT]; persisting it here lets
+   * the inviter's watcher copy it into the remote member row when the join is
+   * confirmed, so "already joined" becomes readable from the member row.
+   * PRAGMA-guarded and idempotent; existing accepted rows keep NULL (their
+   * member rows keep NULL too until the next join).
+   */
+  private migrateOpenTeamInvitesJoinedPinColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('joined_pin_id')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN joined_pin_id TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesJoinedPinColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: required-skills on openteam_invites (#13 join-welcome handshake).
+   * The inviter stores the invite's required_skills (JSON array text) so the
+   * daemon's welcome broadcast can state WHY the remote member was invited.
+   * PRAGMA-guarded and idempotent; existing rows keep NULL (welcome falls back
+   * to a generic "invited to collaborate on this task").
+   */
+  private migrateOpenTeamInvitesRequiredSkillsColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_invites)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('required_skills')) {
+        this.db.run('ALTER TABLE openteam_invites ADD COLUMN required_skills TEXT');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamInvitesRequiredSkillsColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: guest-daemon message cursor on openteam_memberships (OpenTeam
+   * M1). PRAGMA-guarded and idempotent, same pattern as the other column
+   * migrations; existing rows start at 0 (process from the group history the
+   * daemon already sees, then the accept flow catches the cursor up).
+   */
+  private migrateOpenTeamMembershipsCursorColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('last_processed_msg_id')) {
+        this.db.run(
+          'ALTER TABLE openteam_memberships ADD COLUMN last_processed_msg_id INTEGER NOT NULL DEFAULT 0',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsCursorColumn:', error);
+    }
+  }
+
+  /**
+   * Migration: activation timestamp on openteam_memberships (guest self-check
+   * grace anchor). created_at cannot serve here because upsertActiveMembership
+   * reviving an old row does not refresh it. PRAGMA-guarded and idempotent;
+   * existing rows are backfilled from created_at (they were activated when the
+   * row was created), so an upgrade does not grant a fresh grace window.
+   */
+  private migrateOpenTeamMembershipsActivatedColumn(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(openteam_memberships)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('activated_at')) {
+        this.db.run('ALTER TABLE openteam_memberships ADD COLUMN activated_at TEXT');
+        this.db.run('UPDATE openteam_memberships SET activated_at = created_at WHERE activated_at IS NULL');
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateOpenTeamMembershipsActivatedColumn:', error);
+    }
+  }
+
+  /**
    * Migration: bind each observable Group Task to at most one canonical Twin
    * orchestration task. Existing tasks remain valid and are reconciled lazily.
    */
@@ -1864,7 +2246,56 @@ export class SqliteStore {
     }
   }
 
-  private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
+  /**
+   * Migration (round-4): add last_driven_at (epoch seconds) to group_tasks —
+   * heartbeat of the daemon's last drive, used for the stall signal. No-op
+   * once present; existing tasks get null (stall falls back to updated_at).
+   */
+  private migrateGroupTasksLastDrivenAt(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (columns.includes('last_driven_at')) return;
+      this.db.run('ALTER TABLE group_tasks ADD COLUMN last_driven_at INTEGER');
+      this.save();
+    } catch (e) {
+      console.warn('migrateGroupTasksLastDrivenAt:', e);
+    }
+  }
+
+  /**
+   * Migration: owner acceptance rating on group_tasks — rating (1-5 integer,
+   * validated in code), rating_comment (optional free text), rated_at. No-op
+   * once present; existing tasks keep NULL (unrated history stays unrated).
+   */
+  private migrateGroupTasksRatingColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      if (!columns.includes('rating')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rating INTEGER');
+        columns = [...columns, 'rating'];
+        changed = true;
+      }
+      if (!columns.includes('rating_comment')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rating_comment TEXT');
+        columns = [...columns, 'rating_comment'];
+        changed = true;
+      }
+      if (!columns.includes('rated_at')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN rated_at TEXT');
+        changed = true;
+      }
+      if (changed) {
+        this.save();
+      }
+    } catch (e) {
+      console.warn('migrateGroupTasksRatingColumns:', e);
+    }
+  }
+
+    private migrateMetabotWalletRelationAndAvatar(_basePath: string): void {
     try {
       const walletCols = this.db.exec("PRAGMA table_info(metabot_wallets);");
       const walletColumnNames = (walletCols[0]?.values.map((row) => row[1]) || []) as string[];
@@ -2246,6 +2677,32 @@ export class SqliteStore {
       this.set(METABOT_TWIN_BACKFILL_MIGRATION_KEY, true);
     } catch (error) {
       console.warn('migrateMetabotTwinBackfill:', error);
+    }
+  }
+
+  /** Idempotently add user-identity bootstrap-state columns to user_identity. */
+  private migrateUserIdentitySetupColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(user_identity);');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      const additions: Array<[string, string]> = [
+        ['subsidy_state', 'TEXT'],
+        ['subsidy_error', 'TEXT'],
+        ['name_pin_id', 'TEXT'],
+        ['avatar_pin_id', 'TEXT'],
+        ['sync_state', 'TEXT'],
+        ['sync_error', 'TEXT'],
+      ];
+      let changed = false;
+      for (const [col, decl] of additions) {
+        if (!columns.includes(col)) {
+          this.db.run(`ALTER TABLE user_identity ADD COLUMN ${col} ${decl};`);
+          changed = true;
+        }
+      }
+      if (changed) this.save();
+    } catch (error) {
+      console.warn('migrateUserIdentitySetupColumns:', error);
     }
   }
 

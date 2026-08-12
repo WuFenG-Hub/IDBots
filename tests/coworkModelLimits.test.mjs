@@ -29,6 +29,9 @@ test('resolveCoworkModelLimits reads explicit provider model limits', async () =
     modelId: 'deepseek-v4-pro',
     contextWindow: 1_000_000,
     maxOutputTokens: 16_000,
+    // Provider metadata did not declare supportsVision, so the known-model
+    // capability (DeepSeek V4 family has no vision) applies.
+    supportsVision: false,
     source: 'provider-model',
   });
 });
@@ -52,6 +55,9 @@ test('resolveCoworkModelLimits falls back conservatively for unknown models', as
     modelId: 'custom-model',
     contextWindow: DEFAULT_COWORK_CONTEXT_WINDOW,
     maxOutputTokens: DEFAULT_COWORK_MAX_OUTPUT_TOKENS,
+    // Safe default: models we have not catalogued are treated as vision-capable
+    // so the image guard never blocks a model we simply do not know about.
+    supportsVision: true,
     source: 'fallback',
   });
   assert.equal(DEFAULT_COWORK_CONTEXT_WINDOW, 128_000);
@@ -74,9 +80,23 @@ test('resolveCoworkModelLimits can use built-in DeepSeek V4 Pro defaults by mode
   assert.deepEqual(limits, {
     modelId: 'deepseek-v4-pro',
     contextWindow: 1_000_000,
-    maxOutputTokens: 16_000,
+    maxOutputTokens: 32_768,
+    supportsVision: false,
     source: 'known-model',
   });
+});
+
+test('deepseek-v4-flash declares a 32K output ceiling instead of the 8192 fallback', async () => {
+  const { resolveCoworkModelLimits } = await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'deepseek-v4-flash', availableModels: [] },
+    providers: {},
+  });
+
+  assert.equal(limits.source, 'known-model');
+  assert.equal(limits.contextWindow, 1_000_000);
+  assert.equal(limits.maxOutputTokens, 32_768);
 });
 
 // ---------------------------------------------------------------------------
@@ -218,4 +238,87 @@ test('deepseek-v4-flash — the automation model behind cowork/A2A — resolves 
   const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, 'deepseek-v4-flash');
   assert.equal(limits.contextWindow, 1_000_000);
   assert.notEqual(limits.source, 'fallback');
+});
+
+// ---------------------------------------------------------------------------
+// GT#12 N1: supportsVision capability — the DeepSeek V4 family has NO vision,
+// every other catalogued preset does, and unknown models default to true so the
+// Read/View image guard never blocks a model we have not catalogued.
+// ---------------------------------------------------------------------------
+
+const NON_VISION_MODELS = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+
+test('deepseek V4 family resolves supportsVision=false via known-model limits', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  for (const modelId of NON_VISION_MODELS) {
+    const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
+    assert.equal(limits.supportsVision, false, `${modelId} must be marked non-vision`);
+    assert.equal(limits.source, 'known-model');
+  }
+});
+
+test('every catalogued vision-capable preset resolves supportsVision=true', async () => {
+  const { resolveCoworkModelLimits } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const nonVision = new Set(NON_VISION_MODELS);
+  const regressions = [];
+  for (const modelId of PRESET_MODEL_IDS) {
+    if (nonVision.has(modelId)) {
+      continue;
+    }
+    const limits = resolveCoworkModelLimits(APP_CONFIG_WITHOUT_PROVIDER_META, modelId);
+    if (limits.supportsVision !== true) {
+      regressions.push({ modelId, supportsVision: limits.supportsVision });
+    }
+  }
+  assert.deepEqual(
+    regressions,
+    [],
+    `Vision-capable presets must resolve supportsVision=true: ${JSON.stringify(regressions)}`,
+  );
+});
+
+test('unknown models default to supportsVision=true (safe default, no false block)', async () => {
+  const { resolveCoworkModelLimits, modelSupportsVision } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'totally-unknown-model', availableModels: [] },
+    providers: {},
+  });
+  assert.equal(limits.supportsVision, true);
+  assert.equal(limits.source, 'fallback');
+
+  // Direct query API used by the proxy scheme-B fallback.
+  assert.equal(modelSupportsVision('totally-unknown-model'), true);
+  assert.equal(modelSupportsVision(''), true);
+  assert.equal(modelSupportsVision(null), true);
+  assert.equal(modelSupportsVision(undefined), true);
+});
+
+test('provider metadata can explicitly override supportsVision', async () => {
+  const { resolveCoworkModelLimits, modelSupportsVision } =
+    await import('../dist-electron/main/libs/coworkModelLimits.js');
+
+  // A gateway serving deepseek-v4-pro through a vision-capable front model:
+  // explicit provider metadata wins over the known-model table.
+  const limits = resolveCoworkModelLimits({
+    model: { defaultModel: 'deepseek-v4-pro', availableModels: [] },
+    providers: {
+      custom: {
+        enabled: true,
+        models: [
+          { id: 'deepseek-v4-pro', contextWindow: 1_000_000, maxOutputTokens: 32_768, supportsVision: true },
+        ],
+      },
+    },
+  });
+  assert.equal(limits.supportsVision, true);
+  assert.equal(limits.source, 'provider-model');
+
+  // modelSupportsVision stays authoritative for the proxy (request model id).
+  assert.equal(modelSupportsVision('deepseek-v4-pro'), false);
 });

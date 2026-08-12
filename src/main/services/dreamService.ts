@@ -46,10 +46,11 @@ import {
 
 const DREAM_TICK_INTERVAL_MS = 60_000;
 const DREAM_LLM_TIMEOUT_MS = 180_000;
-// The requested ceiling is clamped to the selected model's declared limit.
-// DeepSeek V4 Flash and unknown models stay at 8192; models declaring a larger
-// output budget can use up to 16K without sending an unsupported parameter.
-const DREAM_LLM_TARGET_MAX_TOKENS = 16_000;
+// The requested ceiling is clamped to the selected model's declared limit
+// (DeepSeek V4 declares 32K, unknown models stay at 8192). The dream JSON is
+// far smaller in practice; the headroom only matters so a long day is never
+// truncated mid-JSON, and it costs nothing on short days.
+const DREAM_LLM_TARGET_MAX_TOKENS = 32_768;
 const DREAM_FRAGMENT_MAX_TOKENS = 4_096;
 const DREAM_CONTEXT_RESERVE_TOKENS = 8_000;
 const DREAM_FAST_PATH_MAX_TOKENS = 96_000;
@@ -517,7 +518,7 @@ export class DreamService {
       ));
     }
 
-    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount);
+    const synthesisActivity = summariesToActivity(summaries, activity.taskRuns, activity.orderCount, activity.groupTasks);
     const prompt = buildDreamPrompt({
       botName: metabot.name,
       role: metabot.role,
@@ -555,7 +556,7 @@ export class DreamService {
       const { startMs, endMs } = getDayBoundsMs(date);
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
-      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && impressionSubjects.length === 0) {
+      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && activity.groupTasks.length === 0 && impressionSubjects.length === 0) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         return;
@@ -668,6 +669,7 @@ export class DreamService {
         orderSessionCount: activity.sessions.filter((session) => session.isOrder).length,
         orderCount: activity.orderCount,
         taskRunCount: activity.taskRuns.length,
+        groupTaskEvaluationCount: activity.groupTasks.length,
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
         activityCharCount: activity.sessions.reduce(
           (sum, session) => sum + session.messages.reduce((sessionSum, message) => sessionSum + message.content.length, 0),

@@ -115,7 +115,21 @@ class GroupTaskService {
     return result.task as GroupTaskDetail;
   }
 
-  async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string }): Promise<GroupTaskDetail> {
+  /** P0-5: move a REVIEW task back to EXECUTING (rework hatch). */
+  async reworkTask(input: { taskId: number; reason?: string }): Promise<GroupTaskDetail> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.rework(input);
+    if (!result.success || !result.task) {
+      throw new Error(result.error ?? 'Failed to rework group task');
+    }
+    const task = result.task as GroupTaskDetail;
+    store.dispatch(upsertTask(this.toSummary(task)));
+    return task;
+  }
+
+  async closeTask(input: { taskId: number; status: 'done' | 'cancelled'; reason?: string; rating?: number; ratingComment?: string }): Promise<GroupTaskDetail> {
     const api = window.electron?.groupTask;
     if (!api) throw new Error('Group task API unavailable');
 
@@ -126,6 +140,41 @@ class GroupTaskService {
     const task = result.task as GroupTaskDetail;
     store.dispatch(upsertTask(this.toSummary(task)));
     return task;
+  }
+
+  /** P0-1: pull a review task back to executing (Back to work / 返回修改). */
+  async reopenTask(taskId: number): Promise<GroupTaskDetail> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.reopen({ taskId });
+    if (!result.success || !result.task) {
+      throw new Error(result.error ?? 'Failed to reopen group task');
+    }
+    const task = result.task as GroupTaskDetail;
+    store.dispatch(upsertTask(this.toSummary(task)));
+    return task;
+  }
+
+  /**
+   * Throws on failure so the caller (modal) can show the API error inline.
+   * Resolves with the kicked member row, including chainRemovalConfirmed
+   * (R2P1-2: false = the on-chain removal could not be confirmed yet).
+   */
+  async kickMember(input: {
+    taskId: number;
+    metabotId?: number;
+    globalmetaid?: string;
+    reason?: string;
+  }): Promise<{ chainRemovalConfirmed?: boolean }> {
+    const api = window.electron?.groupTask;
+    if (!api) throw new Error('Group task API unavailable');
+
+    const result = await api.kickMember(input);
+    if (!result.success) {
+      throw new Error(result.error ?? 'Failed to remove the member');
+    }
+    return (result.member ?? {}) as { chainRemovalConfirmed?: boolean };
   }
 
   async listMessages(

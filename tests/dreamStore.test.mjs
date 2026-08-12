@@ -87,6 +87,33 @@ test('resetStaleRunningRuns marks interrupted runs as failed', async () => {
   }
 });
 
+test('listRecentRuns returns newest dates first with full run detail', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = new DreamStore(db, () => {});
+    store.beginRun(5, '2026-07-28', 'deepseek-v4-flash', 4);
+    store.finishRun(5, '2026-07-28', 'completed');
+    store.beginRun(5, '2026-07-30', 'deepseek-v4-flash', 4);
+    store.finishRun(5, '2026-07-30', 'failed', 'LLM returned no text');
+    store.beginRun(5, '2026-07-29', null, 4);
+    store.beginRun(6, '2026-07-30', null, 4); // other bot: not listed
+
+    const runs = store.listRecentRuns(5);
+    assert.deepEqual(runs.map((run) => run.dreamDate), ['2026-07-30', '2026-07-29', '2026-07-28']);
+    assert.equal(runs[0].status, 'failed');
+    assert.equal(runs[0].error, 'LLM returned no text');
+    assert.equal(runs[0].attemptCount, 1);
+    assert.equal(runs[1].status, 'running');
+    assert.equal(runs[2].status, 'completed');
+    assert.ok(runs.every((run) => run.metabotId === 5));
+
+    const limited = store.listRecentRuns(5, 2);
+    assert.deepEqual(limited.map((run) => run.dreamDate), ['2026-07-30', '2026-07-29']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('dream fragments are idempotent, resumable, and migrate with the dream schema', async () => {
   const { db, cleanup } = await createSqliteStore();
   try {
@@ -260,6 +287,38 @@ test('getActivityForDate returns only the bot\'s sessions and messages from that
     assert.equal(otherBot.sessions.length, 1);
     assert.equal(otherBot.taskRuns.length, 0);
     assert.equal(otherBot.orderCount, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('getActivityForDate surfaces human feedback on rated assistant messages', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+    const session = coworkStore.createSession('反馈会话', '/tmp/fb', '', 'local', [], 5);
+
+    insertMessage(db, session.id, 'user', '给个方案', DAY_START + 1000, 1);
+    insertMessage(db, session.id, 'assistant', '方案 A', DAY_START + 2000, 2);
+    insertMessage(db, session.id, 'assistant', '方案 B', DAY_START + 3000, 3);
+
+    db.run(
+      `INSERT INTO message_feedback (message_id, session_id, rating, comment, created_at, updated_at)
+       VALUES (?, ?, 'down', '方案不可行', ?, ?)`,
+      [`msg-${session.id}-2`, session.id, DAY_START + 4000, DAY_START + 4000]
+    );
+
+    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END);
+    assert.equal(activity.sessions.length, 1);
+    const messages = activity.sessions[0].messages;
+    assert.equal(messages.length, 3);
+    assert.equal(messages[1].feedbackRating, 'down');
+    assert.equal(messages[1].feedbackComment, '方案不可行');
+    assert.equal(messages[0].feedbackRating, undefined, 'unrated user message has no feedback');
+    assert.equal(messages[0].feedbackComment, undefined);
+    assert.equal(messages[2].feedbackRating, undefined, 'unrated assistant message has no feedback');
+    assert.equal(messages[2].feedbackComment, undefined);
   } finally {
     cleanup();
   }

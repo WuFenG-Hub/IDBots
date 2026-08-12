@@ -111,6 +111,44 @@ byte-stable (constant regardless of which turns lost reasoning) and is
 accepted by the API. This mirrors Reasonix's `openai.go`, which sends a
 pointer to the (possibly empty) `ReasoningContent` field.
 
+### Gateway providers and the Responses API round-trip (third pass)
+
+Two gaps remained after the placeholder fix, both reproducing the user-visible
+`400 ... reasoning_content in the thinking mode must be passed back` error:
+
+1. **Gateway providers serving DeepSeek models were invisible to the whole
+   reasoning machinery.** `isDeepSeekProvider` matched only the provider name
+   `deepseek` or a base URL containing `deepseek`. The opencode "Console Go"
+   upstream (`https://opencode.ai/zen/go/v1`, provider name `opencode`) serves
+   `deepseek-v4-flash` with thinking enabled, so every request it proxied went
+   out without `reasoning_content` — hydration, the placeholder fallback, the
+   streaming cache, and the persisted `DeepSeekReasoningStore` were all
+   skipped. The detection is now **model-aware** (`isDeepSeekModel`): any
+   request whose effective model is a DeepSeek thinking model
+   (`deepseek-v4-*`, `deepseek-reasoner`, `r1`) gets the full reasoning
+   round-trip regardless of the provider name / base URL.
+
+2. **The Responses API path dropped reasoning in both directions.** DeepSeek's
+   `/responses` streams chain-of-thought via `response.reasoning_text.delta`
+   (not the OpenAI `response.reasoning_summary_text.delta` events), so the
+   proxy silently discarded every reasoning delta: the CLI never received
+   `thinking` blocks, the reasoning store stayed empty, and subsequent
+   requests carried no reasoning pass-back. On the request side, the
+   chat→Responses converter never emitted `reasoning` input items (the
+   Responses API rejects requests whose tool-call turns lack them; empty
+   reasoning text is also rejected, unlike chat/completions). Fixes:
+   - `processResponsesStreamEvent` now handles `response.reasoning_text.delta`
+     and `.done` (plus `reasoning_summary_text.done`), forwarding thinking to
+     the CLI and populating the reasoning store for future hydration.
+   - `convertChatCompletionsRequestToResponsesRequest` emits
+     `{ type: 'reasoning', content: [{ type: 'reasoning_text', text }] }`
+     items before each assistant message / `function_call` for DeepSeek
+     models, falling back to a **constant** non-empty placeholder
+     (`[reasoning unavailable]`) when the real reasoning is unrecoverable
+     (empty text is rejected by the Responses API).
+   - Non-streaming responses responses now also cache reasoning for tool
+     calls, matching the chat/completions path.
+
 ## 3. Cache Hit Rate Improvements
 
 DeepSeek has no explicit caching API — the entire strategy is **prefix
@@ -152,17 +190,44 @@ appended at the end. Memory-strategy and workspace-safety blocks are static
 text. Volatile data (time, browser tabs, session state) belongs in the user
 message, never the system head.
 
+### Experience/dream blocks moved to the user turn (second pass)
+
+A later audit found the rule above was still violated by the **hot-layer
+experience injection**: self-identity + value boundaries + the rolling 7-day
+dream summaries were composed into the persona section at the head of the
+system prompt (`buildExperiencePromptBlocksXml`). The dream service rewrites
+those entries nightly and the summary window rolls daily, guaranteeing one
+full-prefix cache wipe per day per session — the dominant remaining breaker.
+
+**Fix**:
+- `startSession` / `continueSession` no longer include experience blocks in
+  the system prompt; `buildVolatileContextPrompt` injects them into the
+  current user message instead, gated on the same memory switch.
+- The persona block itself (a live DB read) is now **frozen per active
+  session** (`activeSession.personaBlock`), so a mid-session persona edit no
+  longer silently breaks the prefix. Edits take effect on the next session —
+  Reasonix's "mid-session changes never touch the prefix" rule.
+
 ### Reasoning-content round-trip stability
 
 DeepSeek requires `reasoning_content` on assistant tool-call messages. The
 common path is already byte-stable: the SDK replays historical `thinking`
 blocks, and `convertMessageToOpenAI` deterministically converts them back to
 `reasoning_content` (`existingReasoning` branch in
-`hydrateDeepSeekReasoningForRequest`). The in-memory LRU side-cache only
-kicks in when the SDK drops the block; unrecoverable reasoning falls back to
-an empty string (constant, cache-stable). True byte drift is limited to the
-LRU-eviction / process-restart recovery path, which is an edge case rather
-than the per-turn breaker.
+`hydrateDeepSeekReasoningForRequest`). The side-cache only kicks in when the
+SDK drops the block; unrecoverable reasoning falls back to an empty string
+(constant, cache-stable).
+
+The side-cache is also **persistent across app restarts**:
+`DeepSeekReasoningStore` (`deepseekReasoningStore.ts`) backs the proxy's
+reasoning map with a JSONL file
+(`userData/cowork/deepseek-reasoning-cache.jsonl`, 1024-entry LRU,
+append-on-set, atomic compaction). Previously the map was in-process only,
+so every app restart degraded historical reasoning to `''` — a mid-history
+byte change that broke the prefix from that message on. Reasonix keeps
+reasoning in its persisted session log for the same reason. True byte drift
+is now limited to LRU eviction past 1024 tool calls, an edge case rather
+than the per-restart breaker.
 
 ### Cache-miss attribution
 
@@ -171,22 +236,43 @@ than the per-turn breaker.
 (miss) tokens records `{ turn, reason, missTokens }`:
 
 - **Turn 1**: always `'cold_start'` (nothing was cached yet).
-- **Later turns**: `'unknown'` — without diffing the full message history we
-  cannot attribute the miss to a specific cause (system change, tools change,
-  compaction). A future tiered-compaction subsystem (like Reasonix's) could
-  refine this.
+- **Later turns**: the reason recorded at the point that reset the
+  provider-visible prefix — `system_prompt_changed`, `compaction`,
+  `overflow_retry`, `stale_session_retry`, `reasoning_history_retry`,
+  `multimodal_retry`, or `system_prompt_drift` (see below) — consumed from
+  `activeSession.pendingCacheBreakReason`. `'unknown'` only when no reset
+  was tracked.
+
+`trackSystemPromptHash` stores the effective system prompt's SHA-256 per
+turn; a byte change without a known reset event is labeled
+`system_prompt_drift` and logged as a regression alarm (after the
+experience-block and persona-freeze fixes, drift should never fire). This is
+the Reasonix `CompareShape` idea adapted to SDK-managed history: we label
+the events we control instead of diffing the full message shape.
 
 The `UsageStatsChip` hover popover shows the session cache-hit rate (%) and
 the most recent 3 miss events, so users can see whether misses are just cold
 starts or a recurring prefix break.
+
+### Usage accounting honesty (second pass)
+
+- `totalCostUsd` had an operator-precedence bug
+  (`prev.totalCostUsd ?? 0 + cost`) that froze the cumulative cost after
+  turn 1; now parenthesized so it accumulates.
+- The SDK result's main-loop `usage` ignores Task subagents and CLI side
+  jobs (prompt suggestions, progress summaries). Those live in
+  `modelUsage`, now accumulated into a persisted `perModelUsage` breakdown
+  and shown in the `UsageStatsChip` popover — real provider spend is no
+  longer invisible.
 
 ### Not yet ported from Reasonix
 
 - **Tiered context compaction** (snip stale tool results → prune → summarize,
   pinned prefix, cold-resume prune by 24h TTL). The Claude Agent SDK already
   manages its own history, so the gains are limited. Tracked for future work.
-- **Cache-prefix-change attribution** (Reasonix's `CompareShape`), which
-  diffs the system/tools/message shape to pinpoint the exact prefix break.
+- **Full shape-diff attribution** (Reasonix hashes the tools array and message
+  shape too). We label runner-controlled reset events and hash the system
+  prompt; tool-array drift is not yet hashed.
 
 ## 4. Balance + Usage Visibility
 
@@ -233,9 +319,16 @@ Run the relevant test suites:
 npm run compile:electron
 node --test tests/coworkFormatTransform.test.mjs \
           tests/cognitiveChatCompletion.test.mjs \
-          tests/deepseekResponses.test.mjs
+          tests/deepseekResponses.test.mjs \
+          tests/deepseekCachePrefix.test.mjs \
+          tests/deepseekReasoningStore.test.mjs \
+          tests/coworkUsageAccounting.test.mjs \
+          tests/coworkCacheAttribution.test.mjs
 ```
 
 The `deepseekResponses.test.mjs` suite covers upstream routing, endpoint URL
 construction, web_search injection, reasoning effort mapping, and the
-cognitive-layer Responses gating.
+cognitive-layer Responses gating. The second-pass suites cover prefix
+placement (`deepseekCachePrefix`), reasoning-store persistence
+(`deepseekReasoningStore`), usage accounting (`coworkUsageAccounting`), and
+miss attribution (`coworkCacheAttribution`).

@@ -45,6 +45,12 @@ import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import type { MetaidDataPayload } from './metaidCore';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
+import { parseOpenTeamEnvelope, type OpenTeamInvitePayload } from './openTeamProtocols';
+import {
+  handleIncomingOpenTeamInvite,
+  handleIncomingOpenTeamKick,
+  handleIncomingOpenTeamResponse,
+} from './openTeamGuestService';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -2672,6 +2678,254 @@ async function resolvePeerChatPubkey(
   return '';
 }
 
+// ---------------------------------------------------------------------------
+// OpenTeam protocol interception (invite/accept/decline envelopes)
+// ---------------------------------------------------------------------------
+
+/**
+ * Human-readable invite text for the guest's A2A private-chat stream
+ * (改进清单 #15): the invitation must be visible in the invitee's online
+ * conversations with the group-task name/identifier, the inviting bot, the
+ * time and the explicit "invite to join a group task" intent — not only in
+ * the collab history card. The message's own timestamp carries the arrival
+ * time; the text carries the group identity, inviter, goal and expiry.
+ */
+export function buildOpenTeamInviteDisplayText(
+  invite: OpenTeamInvitePayload,
+  botName: string,
+): string {
+  const task = invite.taskTitle?.trim() || `group task ${invite.groupId}`;
+  const inviter = invite.inviterName?.trim() || invite.inviterGlobalMetaId || 'unknown';
+  const lines = [
+    `[OpenTeam Invite] ${inviter} invites ${botName} to join the group task "${task}".`,
+    `Group: ${invite.groupId}`,
+    `Inviter: ${inviter} (${invite.inviterGlobalMetaId})`,
+    `Goal: ${invite.goalSummary?.trim() || '(not provided)'}`,
+  ];
+  if (invite.requiredSkills.length > 0) {
+    lines.push(`Required skills: ${invite.requiredSkills.join(', ')}`);
+  }
+  lines.push(`Invite ID: ${invite.inviteId}`);
+  const expires = Number.isFinite(invite.expiresAt)
+    ? new Date(invite.expiresAt * 1000).toLocaleString()
+    : 'unknown';
+  lines.push(`Expires: ${expires}`);
+  return lines.join('\n');
+}
+
+/**
+ * Make an incoming [OPENTEAM_INVITE] visible in the guest's A2A private-chat
+ * stream (改进清单 #15): ensure the canonical metaweb_private session with the
+ * INVITER exists and append the invitation as a user message. Runs at
+ * interception time — before the accept/decline outcome is known — so the
+ * invite is visible on the invitee's machine even when the bot later declines
+ * it or it is skipped as a duplicate: the invitation itself is the trace a
+ * Boss must be able to see ("my bot was invited out to collaborate").
+ * Deduplicated by the envelope pinId so the socket push and the history
+ * backfill of the same envelope produce a single bubble.
+ */
+export function recordOpenTeamInviteA2ADisplay(params: {
+  coworkStore: CoworkStore;
+  /** Local bot that received the invite (its session owns the message). */
+  metabot: Pick<Metabot, 'id' | 'name' | 'globalmetaid'>;
+  invite: OpenTeamInvitePayload;
+  /** Actual sender of the invite simplemsg row (the inviting bot). */
+  senderGlobalMetaId: string;
+  senderName?: string | null;
+  senderAvatar?: string | null;
+  /** PinId of the invite envelope message; the dedup identity. */
+  envelopePinId?: string;
+  emitToRenderer?: RendererEmitter;
+}): { sessionId: string; message: CoworkMessage | null; duplicate: boolean } | null {
+  const peerGlobalMetaId = String(params.senderGlobalMetaId ?? '').trim();
+  if (!peerGlobalMetaId) return null;
+  const botName = params.metabot.name?.trim() || `bot-${params.metabot.id}`;
+
+  const ensured = ensureCoworkA2ASession({
+    coworkStore: params.coworkStore,
+    getMetabotById: () => ({
+      id: params.metabot.id,
+      name: params.metabot.name,
+      globalmetaid: params.metabot.globalmetaid,
+    }),
+    input: {
+      localMetabotId: params.metabot.id,
+      peerGlobalMetaId,
+      peerName: params.senderName,
+      peerAvatar: params.senderAvatar,
+    },
+  });
+
+  const chainPinId = normalizePrivateChatPinId(params.envelopePinId)
+    || normalizePrivateChatPinId(params.invite.inviteId);
+  if (chainPinId) {
+    const dedupRow = { pin_id: chainPinId } as PrivateChatMessageRow;
+    const alreadyTracked = params.coworkStore.getSessionMessagesMatchingMetadataValues(
+      ensured.session.id,
+      [chainPinId],
+    ).some((message) => (
+      message.type === 'user'
+      && message.metadata?.sourceChannel === 'metaweb_private'
+      && message.metadata?.openTeamInvite === true
+      && metadataHasPrivateChatChainIdentity(message.metadata, dedupRow)
+    ));
+    if (alreadyTracked) {
+      return { sessionId: ensured.session.id, message: null, duplicate: true };
+    }
+  }
+
+  const message = appendPrivateChatA2AMessage({
+    coworkStore: params.coworkStore,
+    sessionId: ensured.session.id,
+    externalConversationId: ensured.externalConversationId,
+    type: 'user',
+    content: buildOpenTeamInviteDisplayText(params.invite, botName),
+    senderGlobalMetaId: peerGlobalMetaId,
+    senderName: params.senderName,
+    senderAvatar: params.senderAvatar,
+    extraMetadata: {
+      simplemsgKind: 'private_chat',
+      openTeamInvite: true,
+      ...buildPrivateChatA2AChainMetadata({ pinId: chainPinId }),
+    },
+    emitToRenderer: params.emitToRenderer,
+  });
+  params.coworkStore.touchConversationMapping(
+    'metaweb_private',
+    ensured.externalConversationId,
+    params.metabot.id,
+  );
+  return { sessionId: ensured.session.id, message, duplicate: false };
+}
+
+/** Injectable seams for interceptOpenTeamEnvelope (tests stub the handlers/schedule). */
+export interface PrivateChatOpenTeamInterceptionDeps {
+  handleInvite: typeof handleIncomingOpenTeamInvite;
+  handleResponse: typeof handleIncomingOpenTeamResponse;
+  handleKick: typeof handleIncomingOpenTeamKick;
+  /** Async handoff used to keep the handling off the processOne call stack. */
+  schedule: (task: () => void) => void;
+  /** 改进清单 #15: surface an incoming invite in the invitee's A2A stream. */
+  recordInviteDisplay?: typeof recordOpenTeamInviteA2ADisplay;
+}
+
+const defaultOpenTeamInterceptionDeps: PrivateChatOpenTeamInterceptionDeps = {
+  handleInvite: (input) => handleIncomingOpenTeamInvite(input),
+  handleResponse: (envelope, options) => handleIncomingOpenTeamResponse(envelope, options),
+  handleKick: (input) => handleIncomingOpenTeamKick(input),
+  schedule: (task) => setImmediate(task),
+  recordInviteDisplay: (input) => recordOpenTeamInviteA2ADisplay(input),
+};
+
+/**
+ * OpenTeam protocol interception for processOne. Runs right after the row's
+ * plaintext is resolved and BEFORE the enabled/wallet/chat-pubkey gates, so a
+ * disabled bot still answers an invite with DECLINE instead of leaving the
+ * inviter to wait out the whole invite TTL.
+ *
+ * Returns true when the plaintext carried an OpenTeam envelope — the caller
+ * must then markProcessed and return immediately (the envelope never reaches
+ * the LLM reply path). The actual handling (on-chain join + ACCEPT/DECLINE
+ * pins, invite state transitions) is dispatched fire-and-forget via the
+ * detached-work tracker: it never stalls the private-chat pipeline, and since
+ * the row is marked processed first, an async failure can never cause the
+ * same message to be handled twice. Without from_chat_pubkey no reply is
+ * possible, so reply-bound envelopes (invite/accept/decline) are only consumed
+ * (true) without dispatching; the one-way KICK notification needs no reply and
+ * is still dispatched.
+ */
+export function interceptOpenTeamEnvelope(params: {
+  plaintext: string;
+  metabot: Metabot;
+  /** Actual sender of the simplemsg row (from_global_metaid/from_metaid). */
+  fromGlobalMetaId: string;
+  fromChatPubkey: string;
+  messageId: number;
+  emitLog: (msg: string) => void;
+  onWasmBoundsError?: () => void;
+  deps?: PrivateChatOpenTeamInterceptionDeps;
+  /** 改进清单 #15: cowork store to surface the invite in the A2A stream. */
+  coworkStore?: CoworkStore;
+  /** Sender display fields from the simplemsg row (A2A peer identity). */
+  senderName?: string | null;
+  senderAvatar?: string | null;
+  /** PinId of the invite envelope message; dedup identity for the A2A bubble. */
+  rowPinId?: string;
+  emitToRenderer?: RendererEmitter;
+}): boolean {
+  const envelope = parseOpenTeamEnvelope(params.plaintext);
+  if (!envelope) return false;
+  const emitLog = params.emitLog;
+  if (!params.fromChatPubkey && envelope.kind !== 'kick') {
+    emitLog(
+      `[OpenTeam] Message ${params.messageId}: envelope has no from_chat_pubkey; ` +
+      'cannot reply, skipping without dispatch.',
+    );
+    return true;
+  }
+  const handlers = params.deps ?? defaultOpenTeamInterceptionDeps;
+  const work = new Promise<void>((resolve) => {
+    handlers.schedule(() => resolve());
+  }).then(async () => {
+    if (envelope.kind === 'invite') {
+      // 改进清单 #15: surface the invite in the invitee's A2A private-chat
+      // stream BEFORE the accept/decline outcome is known — the invitation
+      // must be visible on this machine's online conversations even when the
+      // bot later declines it. Best effort: a display failure is logged and
+      // must never block the invite handling (join + ACCEPT).
+      if (params.coworkStore && params.fromGlobalMetaId && handlers.recordInviteDisplay) {
+        try {
+          handlers.recordInviteDisplay({
+            coworkStore: params.coworkStore,
+            metabot: params.metabot,
+            invite: envelope.invite,
+            senderGlobalMetaId: params.fromGlobalMetaId,
+            senderName: params.senderName,
+            senderAvatar: params.senderAvatar,
+            envelopePinId: params.rowPinId,
+            emitToRenderer: params.emitToRenderer,
+          });
+        } catch (error) {
+          emitLog(
+            `[OpenTeam] Invite A2A display failed for message ${params.messageId}: ` +
+            `${error instanceof Error ? error.message : error}`,
+          );
+        }
+      }
+      await handlers.handleInvite({
+        metabot: params.metabot,
+        invite: envelope.invite,
+        senderGlobalMetaId: params.fromGlobalMetaId,
+        replyContext: {
+          peerGlobalMetaId: params.fromGlobalMetaId,
+          peerChatPubkey: params.fromChatPubkey,
+          invitePinId: envelope.invite.inviteId,
+        },
+      });
+    } else if (envelope.kind === 'kick') {
+      handlers.handleKick({
+        metabot: params.metabot,
+        kick: envelope.kick,
+        senderGlobalMetaId: params.fromGlobalMetaId,
+      });
+    } else {
+      handlers.handleResponse(envelope, { senderGlobalMetaId: params.fromGlobalMetaId });
+    }
+  }).catch((error) => {
+    if (isSqliteWasmBoundsError(error)) {
+      void stopPrivateChatDaemon();
+      params.onWasmBoundsError?.();
+      return;
+    }
+    emitLog(
+      `[OpenTeam] Envelope handling failed for message ${params.messageId}: ` +
+      `${error instanceof Error ? error.message : error}`,
+    );
+  });
+  trackPrivateChatDetachedWork(work);
+  return true;
+}
+
 async function processOne(
   row: PrivateChatMessageRow,
   db: Database,
@@ -2738,6 +2992,11 @@ async function processOne(
           emitLog(
             `[PrivateChat] Outgoing sync: skipping transport handshake ${normalizeHandshakeWord(plaintext)}.`
           );
+        } else if (parseOpenTeamEnvelope(plaintext)) {
+          // OpenTeam envelopes are transport-level protocol messages, not chat
+          // content — keep them out of the local A2A session display on the
+          // outgoing path too (the inbound side is intercepted in processOne).
+          emitLog('[PrivateChat] Outgoing sync: skipping OpenTeam protocol envelope.');
         } else {
           try {
             const recorded = recordOutgoingPrivateChatA2ADisplay({
@@ -2809,93 +3068,143 @@ async function processOne(
       return;
     }
 
+    const wallet = metabotStore.getMetabotWalletByMetabotId(metabot.id);
+    const fromChatPubkey = (row.from_chat_pubkey ?? '').trim();
+    const fromGlobalMetaId = (row.from_global_metaid || row.from_metaid || '').trim();
+
+    // Resolve the plaintext whenever the crypto material is available. The
+    // OpenTeam interception below runs BEFORE the enabled/wallet/chat-pubkey
+    // gates so a disabled bot can still DECLINE an invite (otherwise the
+    // inviter waits out the whole invite TTL). Rows that cannot be decrypted
+    // keep the original skip behavior via the gates re-checked afterward.
+    let plaintext = '';
+    let sharedSecretForReply = '';
+    if (wallet?.mnemonic?.trim() && fromChatPubkey) {
+      let privateKeyBuffer: Buffer;
+      try {
+        privateKeyBuffer = await getPrivateKeyBufferForEcdh(wallet.mnemonic, wallet.path ?? "m/44'/10001'/0'/0/0");
+      } catch (e) {
+        rethrowSqliteWasmBoundsError(e);
+        emitLog(`[PrivateChat] Skip message ${row.id}: getPrivateKeyBufferForEcdh failed: ${e instanceof Error ? e.message : e}`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+
+      let sharedSecretSha256: string;
+      let sharedSecretRaw: string;
+      try {
+        sharedSecretSha256 = computeEcdhSharedSecretSha256(privateKeyBuffer, fromChatPubkey);
+        sharedSecretRaw = computeEcdhSharedSecret(privateKeyBuffer, fromChatPubkey);
+      } catch (e) {
+        rethrowSqliteWasmBoundsError(e);
+        emitLog(`[PrivateChat] Skip message ${row.id}: invalid peer public key (${fromChatPubkey.slice(0, 16)}…): ${e instanceof Error ? e.message : e}`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+      emitLog(
+        `[PrivateChat] ECDH ready: from_chat_pubkey(first/last16)=${fromChatPubkey.slice(0, 16)}...${fromChatPubkey.slice(-16)} sha256Secret(first/last16)=${sharedSecretSha256.slice(0, 16)}...${sharedSecretSha256.slice(-16)}`
+      );
+
+      const contentInDb = (row.content ?? '').trim();
+      const contentInRawData = getCipherTextFromRawData(
+        typeof row.raw_data === 'string' ? row.raw_data : null
+      );
+      const cipherText = contentInRawData || contentInDb;
+      if (!cipherText && !contentInDb) {
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+
+      const shouldDecrypt =
+        !!contentInRawData || looksLikeEncryptedPrivateContent(contentInDb);
+      plaintext = contentInDb;
+      sharedSecretForReply = sharedSecretSha256;
+      if (shouldDecrypt) {
+        const plainBySha256 = tryDecryptWithSecret(cipherText, sharedSecretSha256);
+        if (plainBySha256 != null) {
+          plaintext = plainBySha256;
+          sharedSecretForReply = sharedSecretSha256;
+        } else {
+          const plainByRaw = tryDecryptWithSecret(cipherText, sharedSecretRaw);
+          if (plainByRaw != null) {
+            plaintext = plainByRaw;
+            sharedSecretForReply = sharedSecretRaw;
+            emitLog('[PrivateChat] Decrypt fallback: using raw shared secret for legacy payload.');
+          } else {
+            emitLog(
+              `[PrivateChat] Skip message ${row.id}: decrypt failed for both sha256/raw shared secret`
+            );
+            markProcessed(db, row.id, saveDb);
+            return;
+          }
+        }
+      }
+      if (!plaintext.trim()) {
+        emitLog(`[PrivateChat] Skip message ${row.id}: plaintext empty after decode`);
+        markProcessed(db, row.id, saveDb);
+        return;
+      }
+    } else {
+      // Without the wallet or the peer chat pubkey the ciphertext is
+      // unreadable; only a row already stored as plaintext can still be
+      // inspected for an OpenTeam envelope below.
+      const contentInDb = (row.content ?? '').trim();
+      const contentInRawData = getCipherTextFromRawData(
+        typeof row.raw_data === 'string' ? row.raw_data : null
+      );
+      if (!contentInRawData && contentInDb && !looksLikeEncryptedPrivateContent(contentInDb)) {
+        plaintext = contentInDb;
+      }
+    }
+
+    // OpenTeam protocol envelopes (invite/accept/decline/kick) are handled by the
+    // OpenTeam guest/inviter flows and must never reach the LLM reply path —
+    // same interception pattern as the MetaSwarm handshake and [ORDER]
+    // protocols. `metabot` here is the local RECIPIENT bot of this message, so
+    // invite handling always runs in the invitee's context. markProcessed runs
+    // FIRST: the actual handling continues fire-and-forget (join + ACCEPT are
+    // two chain pins and must not stall the private-chat pipeline), and an
+    // async failure must never cause this row to be handled twice.
+    if (plaintext.trim() && interceptOpenTeamEnvelope({
+      plaintext,
+      metabot,
+      fromGlobalMetaId,
+      fromChatPubkey,
+      messageId: row.id,
+      emitLog,
+      onWasmBoundsError,
+      // 改进清单 #15: pass the cowork store + row display fields so an
+      // incoming invite becomes a visible message in the invitee's A2A
+      // private-chat stream (not a silent protocol consume).
+      coworkStore,
+      senderName: (row.from_name as string | null) ?? null,
+      senderAvatar: (row.from_avatar as string | null) ?? null,
+      rowPinId: row.pin_id,
+      emitToRenderer,
+    })) {
+      markProcessed(db, row.id, saveDb);
+      return;
+    }
+
     if (metabot.enabled === false) {
       emitLog(`[PrivateChat] Skip message ${row.id}: MetaBot ${metabot.name} is disabled.`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    const wallet = metabotStore.getMetabotWalletByMetabotId(metabot.id);
     if (!wallet?.mnemonic?.trim()) {
       emitLog(`[PrivateChat] Skip message ${row.id}: MetaBot ${metabot.name} has no wallet`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    const fromChatPubkey = (row.from_chat_pubkey ?? '').trim();
     if (!fromChatPubkey) {
       emitLog(`[PrivateChat] Skip message ${row.id}: no from_chat_pubkey`);
       markProcessed(db, row.id, saveDb);
       return;
     }
 
-    let privateKeyBuffer: Buffer;
-    try {
-      privateKeyBuffer = await getPrivateKeyBufferForEcdh(wallet.mnemonic, wallet.path ?? "m/44'/10001'/0'/0/0");
-    } catch (e) {
-      rethrowSqliteWasmBoundsError(e);
-      emitLog(`[PrivateChat] Skip message ${row.id}: getPrivateKeyBufferForEcdh failed: ${e instanceof Error ? e.message : e}`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    let sharedSecretSha256: string;
-    let sharedSecretRaw: string;
-    try {
-      sharedSecretSha256 = computeEcdhSharedSecretSha256(privateKeyBuffer, fromChatPubkey);
-      sharedSecretRaw = computeEcdhSharedSecret(privateKeyBuffer, fromChatPubkey);
-    } catch (e) {
-      rethrowSqliteWasmBoundsError(e);
-      emitLog(`[PrivateChat] Skip message ${row.id}: invalid peer public key (${fromChatPubkey.slice(0, 16)}…): ${e instanceof Error ? e.message : e}`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-    emitLog(
-      `[PrivateChat] ECDH ready: from_chat_pubkey(first/last16)=${fromChatPubkey.slice(0, 16)}...${fromChatPubkey.slice(-16)} sha256Secret(first/last16)=${sharedSecretSha256.slice(0, 16)}...${sharedSecretSha256.slice(-16)}`
-    );
-
-    const contentInDb = (row.content ?? '').trim();
-    const contentInRawData = getCipherTextFromRawData(
-      typeof row.raw_data === 'string' ? row.raw_data : null
-    );
-    const cipherText = contentInRawData || contentInDb;
-    if (!cipherText && !contentInDb) {
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
-    const shouldDecrypt =
-      !!contentInRawData || looksLikeEncryptedPrivateContent(contentInDb);
-    let plaintext = contentInDb;
-    let sharedSecretForReply = sharedSecretSha256;
-    if (shouldDecrypt) {
-      const plainBySha256 = tryDecryptWithSecret(cipherText, sharedSecretSha256);
-      if (plainBySha256 != null) {
-        plaintext = plainBySha256;
-        sharedSecretForReply = sharedSecretSha256;
-      } else {
-        const plainByRaw = tryDecryptWithSecret(cipherText, sharedSecretRaw);
-        if (plainByRaw != null) {
-          plaintext = plainByRaw;
-          sharedSecretForReply = sharedSecretRaw;
-          emitLog('[PrivateChat] Decrypt fallback: using raw shared secret for legacy payload.');
-        } else {
-          emitLog(
-            `[PrivateChat] Skip message ${row.id}: decrypt failed for both sha256/raw shared secret`
-          );
-          markProcessed(db, row.id, saveDb);
-          return;
-        }
-      }
-    }
-    if (!plaintext.trim()) {
-      emitLog(`[PrivateChat] Skip message ${row.id}: plaintext empty after decode`);
-      markProcessed(db, row.id, saveDb);
-      return;
-    }
-
     const handshakeWord = normalizeHandshakeWord(plaintext.trim());
-    const fromGlobalMetaId = (row.from_global_metaid || row.from_metaid || '').trim();
     const createSimpleMsgPin = async (payload: string) => createPinWithMvcSubsidyRetry({
       metabot,
       wallet,

@@ -12,6 +12,8 @@ export interface Metabot {
   enabled: boolean;
   globalmetaid: string | null;
   metabot_type: 'twin' | 'worker';
+  /** Structured worker position slug; null for twins and legacy workers. */
+  position?: string | null;
   role: string;
   soul: string;
   goal: string | null;
