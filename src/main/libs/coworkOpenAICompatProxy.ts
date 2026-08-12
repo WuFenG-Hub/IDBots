@@ -61,6 +61,17 @@ type StreamState = {
   toolCalls: Record<number, ToolCallState>;
   preserveDeepSeekReasoning: boolean;
   currentDeepSeekReasoningContent: string;
+  /**
+   * finish_reason seen on the last content chunk. With OpenAI/DeepSeek
+   * streaming convention (stream_options.include_usage=true) the REAL usage
+   * arrives in a separate FINAL chunk with an empty choices array, AFTER the
+   * finish chunk. We hold the stop reason here and emit the message_delta only
+   * once the usage chunk lands (or at stream end), so the SDK's result event
+   * gets the provider's actual token/cache accounting instead of zeros.
+   */
+  pendingStopReason: string | null;
+  /** Usage carried by the trailing usage-only stream chunk (choices: []). */
+  collectedUsage: OpenAIStreamChunk['usage'] | null;
 };
 
 type StreamStateOptions = {
@@ -1630,6 +1641,8 @@ function createStreamState(options: StreamStateOptions = {}): StreamState {
     toolCalls: {},
     preserveDeepSeekReasoning: Boolean(options.preserveDeepSeekReasoning),
     currentDeepSeekReasoningContent: '',
+    pendingStopReason: null,
+    collectedUsage: null,
   };
 }
 
@@ -1952,10 +1965,13 @@ function emitMessageDelta(
   res: http.ServerResponse,
   state: StreamState,
   finishReason: string | null | undefined,
-  chunk: OpenAIStreamChunk
+  chunk?: OpenAIStreamChunk
 ): void {
   closeCurrentBlockIfNeeded(res, state);
 
+  // Prefer the chunk's own usage; fall back to the trailing usage-only chunk
+  // collected on the stream state (stream_end emit path).
+  const usage = chunk?.usage ?? state.collectedUsage;
   emitSSE(res, 'message_delta', {
     type: 'message_delta',
     delta: {
@@ -1963,13 +1979,13 @@ function emitMessageDelta(
       stop_sequence: null,
     },
     usage: {
-      input_tokens: chunk.usage?.prompt_tokens ?? 0,
-      output_tokens: chunk.usage?.completion_tokens ?? 0,
+      input_tokens: usage?.prompt_tokens ?? 0,
+      output_tokens: usage?.completion_tokens ?? 0,
       // DeepSeek reports cache hits/misses at the top level of usage; map
       // them to Anthropic's cache fields so the SDK's result event carries
       // real per-turn token accounting for the cost display.
-      cache_read_input_tokens: chunk.usage?.prompt_cache_hit_tokens ?? 0,
-      cache_creation_input_tokens: chunk.usage?.prompt_cache_miss_tokens ?? 0,
+      cache_read_input_tokens: usage?.prompt_cache_hit_tokens ?? 0,
+      cache_creation_input_tokens: usage?.prompt_cache_miss_tokens ?? 0,
     },
   });
 }
@@ -1980,6 +1996,21 @@ function processOpenAIChunk(
   chunk: OpenAIStreamChunk
 ): void {
   ensureMessageStart(res, state, chunk);
+
+  // A usage-only chunk (choices: []) is the OpenAI/DeepSeek convention for the
+  // FINAL stream chunk when stream_options.include_usage=true. It carries the
+  // per-request token/cache accounting that the SDK's result event consumes;
+  // dropping it (the old behavior) left every proxy-streamed session with
+  // zeroed usage and a broken cache-hit-rate panel. Emit the pending
+  // message_delta here so the real numbers land on the SDK.
+  if (chunk.usage && (!chunk.choices || chunk.choices.length === 0)) {
+    state.collectedUsage = chunk.usage;
+    if (state.pendingStopReason) {
+      emitMessageDelta(res, state, state.pendingStopReason, chunk);
+      state.pendingStopReason = null;
+    }
+    return;
+  }
 
   const choice = chunk.choices?.[0];
   if (!choice) {
@@ -2067,7 +2098,17 @@ function processOpenAIChunk(
   }
 
   if (choice.finish_reason) {
-    emitMessageDelta(res, state, choice.finish_reason, chunk);
+    if (chunk.usage) {
+      // Provider attaches usage directly to the finish chunk (Responses path):
+      // emit immediately with the real numbers.
+      emitMessageDelta(res, state, choice.finish_reason, chunk);
+    } else {
+      // OpenAI/DeepSeek convention: usage arrives in a SEPARATE trailing chunk
+      // with an empty choices array. Hold the stop reason and emit the
+      // message_delta when that chunk lands (or at stream end) so the SDK's
+      // result usage carries the provider's real accounting instead of zeros.
+      state.pendingStopReason = choice.finish_reason;
+    }
   }
 }
 
@@ -2777,6 +2818,13 @@ async function handleResponsesStreamResponse(
     }
     if (!state.hasMessageStop) {
       closeCurrentBlockIfNeeded(res, state);
+      if (state.pendingStopReason) {
+        // The provider never sent a trailing usage-only chunk (or sent it
+        // before the finish chunk): emit the held message_delta now with
+        // whatever usage was collected (possibly none).
+        emitMessageDelta(res, state, state.pendingStopReason);
+        state.pendingStopReason = null;
+      }
       emitSSE(res, 'message_stop', {
         type: 'message_stop',
       });
@@ -2871,6 +2919,13 @@ async function handleChatCompletionsStreamResponse(
     }
     if (!state.hasMessageStop) {
       closeCurrentBlockIfNeeded(res, state);
+      if (state.pendingStopReason) {
+        // The provider never sent a trailing usage-only chunk (or sent it
+        // before the finish chunk): emit the held message_delta now with
+        // whatever usage was collected (possibly none).
+        emitMessageDelta(res, state, state.pendingStopReason);
+        state.pendingStopReason = null;
+      }
       emitSSE(res, 'message_stop', {
         type: 'message_stop',
       });

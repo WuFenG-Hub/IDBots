@@ -92,3 +92,26 @@ test('accumulateResultUsage normalizes a partial prev (context-snapshot seed) in
   assert.match(source, /finiteOrZero\(prev\.cacheReadTokens\)/);
   assert.match(source, /finiteOrZero\(prev\.cacheCreationTokens\)/);
 });
+
+test('accumulateResultUsage aggregates modelUsage (turn-cumulative) as the authoritative counters', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  // SDK semantics (verified end-to-end against the bundled 0.3.x agent SDK):
+  // top-level result `usage` holds only the LAST request of the turn, while
+  // `modelUsage` accumulates EVERY request. A tool loop issues several
+  // requests per turn; summing modelUsage is the only way the panel totals
+  // and the cache-hit rate reflect the whole turn instead of the worst
+  // (final, most-new-content) request alone.
+  assert.match(source, /const modelUsage = payload\.modelUsage/);
+  assert.match(source, /Object\.keys\(modelUsage\)\.length > 0/);
+  assert.match(source, /for \(const entry of Object\.values\(modelUsage\)\)/);
+  assert.match(source, /inputTokens \+= typeof entry\.inputTokens === 'number' \? entry\.inputTokens : 0/);
+  assert.match(source, /outputTokens \+= typeof entry\.outputTokens === 'number' \? entry\.outputTokens : 0/);
+  assert.match(source, /cacheReadTokens \+= typeof entry\.cacheReadInputTokens === 'number'/);
+  assert.match(source, /cacheCreationTokens \+= typeof entry\.cacheCreationInputTokens === 'number'/);
+  // The top-level usage remains the fallback for SDK builds without modelUsage.
+  assert.match(source, /cache_read_input_tokens === 'number'\s*\?\s*usage\.cache_read_input_tokens/);
+  // lastTurnInputTokens keeps the top-level (last-request) value: it feeds the
+  // compaction budget as the REAL context size of the most recent request.
+  assert.match(source, /const lastTurnInputRaw = usage && typeof usage\.input_tokens === 'number' \? usage\.input_tokens : 0/);
+});
