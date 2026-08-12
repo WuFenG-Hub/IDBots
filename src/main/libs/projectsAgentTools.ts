@@ -152,7 +152,7 @@ export function buildProjectsAgentTools(deps: {
 
   const projectQuery = tool(
     'project_query',
-    'Query locally configured Projects. Without arguments, returns a summary list of enabled projects (name, guidelines excerpt, source directory, resource count) plus the names of frozen (disabled) projects. With `name`, returns the full detail for that project: full guidelines, source directory, and every resource path with its type (directory/file) and whether it is missing. Use this BEFORE working on a project the user mentions by name, and treat its guidelines as binding instructions.',
+    'Query locally configured Projects. Without arguments, returns a summary list of enabled projects (name, guidelines excerpt, source directory, resource count) plus the names of frozen (disabled) projects. With `name`, returns the full detail for that project: full guidelines, source directory, and every resource path with its type (directory/file) and whether it is missing. Use this BEFORE working on a project the user mentions by name, and treat its guidelines as binding instructions. When NOT to use: if a project is not in the list it is not configured locally — do not guess or invent its paths; and never read or modify frozen (disabled) projects (their paths are intentionally hidden).',
     {
       name: z.string().optional().describe('Project name to get full details for; omit to list all projects'),
     },

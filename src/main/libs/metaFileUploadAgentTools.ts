@@ -137,6 +137,7 @@ export function buildMetaFileUploadAgentTools(deps: {
     [
       'Upload ONE local file to MetaWeb and return its metafile:// URI plus preview, download, and share links. The runtime streams bytes from disk — never pass file contents, only the absolute local path.',
       'Use when the user asks the local MetaBot/Bot to upload a file, or a downstream step (buzz attachment, service icon/document, MetaApp asset, A2A delivery artifact) needs a metafile:// URI.',
+      'When NOT to use: do not upload files the user did not ask to publish on-chain (uploads are permanent and publicly readable); do not use this for plain local file reads/writes (use your file tools); and never pass file contents into the tool — only the absolute local path.',
       'Routing is automatic: direct upload at or below 5 MiB, chunked upload above 5 MiB (MVC-only). For eligible direct MVC uploads the sponsor link is tried first and falls back to the bot\'s own on-chain wallet when the sponsor balance is insufficient — the user does not choose.',
       'Limits: 50 MiB hard cap; DOGE is unsupported; BTC/OPCAT are direct-only (below 5 MiB). Pass `network` only when the human explicitly names a chain; omit it otherwise.',
       'Returns pinId, metafileUri, metawebUrl (share link for other people), preview/download URLs, size, content type, upload mode, and verification status when requested.',

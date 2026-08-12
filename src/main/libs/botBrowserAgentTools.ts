@@ -152,7 +152,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserTabs = tool(
     'bot_browser_tabs',
-    'List, open, close, or switch tabs in the Bot Browser (the on-chain Agent browser shown on the right side of the app). Use action "list" to inspect open tabs (ids, titles, URIs, which one is active), "open" with a uri to open a new tab, "close" or "switch" with a tabId.',
+    'List, open, close, or switch tabs in the Bot Browser (the on-chain Agent browser shown on the right side of the app). Use action "list" to inspect open tabs (ids, titles, URIs, which one is active), "open" with a uri to open a new tab, "close" or "switch" with a tabId. When NOT to use: to navigate the active tab to a specific on-chain URI prefer bot_browser_open_uri; this tool is mainly for tab management, and always call action "list" first to obtain tab ids before close/switch.',
     {
       action: z.enum(['list', 'open', 'close', 'switch']),
       uri: z.string().optional(),
@@ -191,7 +191,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserOpenUri = tool(
     'bot_browser_open_uri',
-    'Navigate the Bot Browser to a URI: metaid://<globalMetaId> for an Agent homepage, metaapp://<pinId> for a MetaApp, map:// or metafile:// resources. By default the active tab navigates; set newTab=true to open in a new tab instead. Use this when the user asks to open or view a specific Agent, app, or on-chain page.',
+    'Navigate the Bot Browser to a URI: metaid://<globalMetaId> for an Agent homepage, metaapp://<pinId> for a MetaApp, map:// or metafile:// resources. By default the active tab navigates; set newTab=true to open in a new tab instead. Use this when the user asks to open or view a specific Agent, app, or on-chain page. When NOT to use: to preview a LOCAL app you are building use bot_browser_preview_local (preview-metaapp://); and to discover an app by intent before opening it, use search_metaapps first.',
     {
       uri: z.string().min(1),
       newTab: z.boolean().optional(),
@@ -213,7 +213,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserPreviewLocal = tool(
     'bot_browser_preview_local',
-    'Preview a local HTML app (directory containing index.html, or a single html/pdf/image/video/audio file) in the Bot Browser via preview-metaapp://. Use this to preview a MetaApp you are building or editing locally BEFORE publishing it on-chain. Requires an absolute path. The preview reads live from disk, so the user can reload to see your latest edits.',
+    'Preview a local HTML app (directory containing index.html, or a single html/pdf/image/video/audio file) in the Bot Browser via preview-metaapp://. Use this to preview a MetaApp you are building or editing locally BEFORE publishing it on-chain. Requires an absolute path. The preview reads live from disk, so the user can reload to see your latest edits. When NOT to use: to open an already-published ON-CHAIN app use bot_browser_open_uri with metaapp://<pinId>; this tool is only for local files/directories, and it always needs an absolute path.',
     {
       path: z.string().min(1),
       newTab: z.boolean().optional(),
@@ -244,7 +244,7 @@ export function buildBotBrowserAgentTools(deps: {
 
   const botBrowserReadPage = tool(
     'bot_browser_read_page',
-    'Read the visible text content of a Bot Browser tab (the current tab by default). Works fully for first-party pages like bot homepages and pin inspectors. For MetaApps (metaapp:// URIs), the page renders inside a sandboxed frame that cannot be read from outside — this tool then returns the app\'s local SOURCE directory instead; read the source files with your file tools. Use this whenever the user asks what a page says or means, or before modifying a page. NEVER use Playwright or external browser automation — the Bot Browser is not a Playwright browser.',
+    'Read the visible text content of a Bot Browser tab (the current tab by default). Works fully for first-party pages like bot homepages and pin inspectors. For MetaApps (metaapp:// URIs), the page renders inside a sandboxed frame that cannot be read from outside — this tool then returns the app\'s local SOURCE directory instead; read the source files with your file tools. Use this whenever the user asks what a page says or means, or before modifying a page. When NOT to use: for a local MetaApp whose source you already know, read those files directly instead of going through this tool. NEVER use Playwright or external browser automation — the Bot Browser is not a Playwright browser.',
     {
       tabId: z.number().optional(),
     },
@@ -318,7 +318,7 @@ export function buildBotBrowserAgentTools(deps: {
     extraTools.push(
       tool(
         'search_metaapps',
-        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app. Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.',
+        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app. When NOT to use: if you already have an app pinId, skip the search and open it directly with bot_browser_open_uri (metaapp://<pinId>); and this is for apps only — for social posts use search_social_posts, for identities use search_metaids. Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.',
         {
           query: z.string().optional(),
           tag: z.string().optional(),
@@ -407,7 +407,7 @@ export function buildBotBrowserAgentTools(deps: {
     extraTools.push(
       tool(
         'bot_browser_fork_current_app',
-        'Fork the MetaApp currently shown in the Bot Browser (or a given metaapp:// URI) into your workspace as an editable copy. Returns a workspace directory with the full source. Edit files there with your normal file tools, then preview with bot_browser_preview_local and publish with bot_browser_publish_app. Use this when the user asks to modify, remix, or build on top of the app they are viewing.',
+        'Fork the MetaApp currently shown in the Bot Browser (or a given metaapp:// URI) into your workspace as an editable copy. Returns a workspace directory with the full source. Edit files there with your normal file tools, then preview with bot_browser_preview_local and publish with bot_browser_publish_app. Use this when the user asks to modify, remix, or build on top of the app they are viewing. When NOT to use: do not fork just to READ or inspect an app — use bot_browser_read_page for that; fork only when you intend to edit/remix the source.',
         {
           uri: z.string().optional(),
         },
@@ -445,7 +445,7 @@ export function buildBotBrowserAgentTools(deps: {
     extraTools.push(
       tool(
         'bot_browser_publish_app',
-        'Publish a local MetaApp directory (one forked by bot_browser_fork_current_app, or a new app you built in the workspace) on-chain under the user\'s MetaID. Before publishing an app you created, write an APP.md at the directory root: a natural-language self-description for other agents (what it does, structure map, params/outputs, subpages, protocols used, remix notes — no schema, facts only). This writes to the blockchain, COSTS fees, and is IRREVERSIBLE — always show the user a preview first (bot_browser_preview_local) and explicitly confirm they want to publish before calling. The host shows a final native confirmation dialog; if the user cancels there, the publish is aborted. forkedFrom provenance is recorded automatically for forked apps.',
+        'Publish a local MetaApp directory (one forked by bot_browser_fork_current_app, or a new app you built in the workspace) on-chain under the user\'s MetaID. Before publishing an app you created, write an APP.md at the directory root: a natural-language self-description for other agents (what it does, structure map, params/outputs, subpages, protocols used, remix notes — no schema, facts only). This writes to the blockchain, COSTS fees, and is IRREVERSIBLE — always show the user a preview first (bot_browser_preview_local) and explicitly confirm they want to publish before calling. When NOT to use: never publish without a preview AND explicit user confirmation, and never publish an app that has no APP.md. The host shows a final native confirmation dialog; if the user cancels there, the publish is aborted. forkedFrom provenance is recorded automatically for forked apps.',
         {
           dir: z.string().min(1),
           title: z.string().optional(),
@@ -520,6 +520,7 @@ export function buildBotBrowserScreenshotTool(deps: {
         'The Bot Browser is the built-in on-chain browser shown on the right of the app; a MetaApp renders inside it.',
         'By default the ACTIVE tab is captured (cropped to the MetaApp content area); pass `uri` to navigate first (metaapp://<pinId>, metaid://<globalMetaId>, or preview-metaapp:// for a local app you are building) or `tabId` to switch tabs first.',
         'Use this to SEE how a MetaApp renders — verify layout, debug visual issues, or confirm an app looks right before/after publishing — instead of guessing from source files.',
+        'When NOT to use: do not screenshot to READ the text on a page — use bot_browser_read_page for text; reserve screenshots for visual/layout verification you cannot get from source.',
         'After navigation the tool waits briefly for the page to paint; pass `waitMs` (0–10000) to override the default.',
         '`clip` ({x,y,width,height} in CSS px) narrows the capture to a region within the resolved target (the content area by default, or the whole surface when fullSurface=true); it is clamped to the target bounds.',
         '`format` defaults to "png"; pass "jpeg" for a smaller image (better when sending to the model), with optional `quality` 0–100 (default 80, png ignores quality).',

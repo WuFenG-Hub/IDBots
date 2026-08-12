@@ -5927,7 +5927,21 @@ export class CoworkRunner extends EventEmitter {
     let contextOverflowExceptionRetryAllowed = !isRetry && usedResumeForThisRun;
 
     if (systemPrompt) {
-      options.systemPrompt = systemPrompt;
+      // Use Claude Code's battle-tested default system prompt and APPEND
+      // IDBots' custom identity/safety/response-style prompt, instead of
+      // fully replacing the default. Passing a plain string replaces the
+      // SDK's preset prompt, which drops the entire coding-quality behavioral
+      // layer that the default carries (prefer editing existing files,
+      // proactive TodoWrite for complex tasks, parallel tool calls, minimal
+      // edits, run tests before reporting done, file_path:line refs). Appended
+      // text comes last, so IDBots' identity/safety rules still take
+      // precedence over any conflicting default guidance. See SDK option docs:
+      // systemPrompt string = custom (replace); preset+append = keep default.
+      options.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: systemPrompt,
+      };
     }
 
     const retryWithCompactedContext = async (
@@ -6003,7 +6017,7 @@ export class CoworkRunner extends EventEmitter {
       const memoryTools: any[] = [
         tool(
           'conversation_search',
-          'Search prior conversations by query and return Claude-style <chat> blocks.',
+          'Search the user\'s prior conversations across all sessions by keyword/phrase and return matching chats as Claude-style <chat> blocks (id, title, snippet, time). Use when the user references a past conversation ("我们之前聊过...", "the chat where we discussed X", "上次说的那个") or you need to recall what was decided/built before. When NOT to use: not for the current session (its history is already in context), and not for on-chain posts/social content — use search_social_posts for that. Supports max_results (1-10) and before/after cursors for paging. Returns zero or more <chat> blocks; an empty result means no match, not an error.',
           {
             query: z.string().min(1),
             max_results: z.number().int().min(1).max(10).optional(),
@@ -6029,7 +6043,7 @@ export class CoworkRunner extends EventEmitter {
         ),
         tool(
           'recent_chats',
-          'List recent chats and return Claude-style <chat> blocks.',
+          'List the user\'s most recent conversations as Claude-style <chat> blocks (id, title, time). Use when the user wants an overview of recent chats without a specific keyword ("最近有哪些对话", "what have I been working on lately", "show my recent sessions"). When NOT to use: if the user is looking for a specific topic, use conversation_search with a query instead — this tool is keyword-free and lists purely by recency. Supports n (1-20), sort_order (asc/desc), and before/after cursors.',
           {
             n: z.number().int().min(1).max(20).optional(),
             sort_order: z.enum(['asc', 'desc']).optional(),
@@ -6050,7 +6064,7 @@ export class CoworkRunner extends EventEmitter {
         ),
         tool(
           'idbots_session_read_all',
-          'Read all messages from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          'Read ALL messages from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only — never modifies the target. Use when you need the full history of another session (reviewing what a delegated Worker did, catching up on an A2A task). When NOT to use: for just the last message use idbots_session_read_latest (cheaper); and not for the CURRENT session (already in context). Returns the session message log as text; an error if the session does not exist.',
           {
             sessionId: z.string().min(1),
           },
@@ -6064,7 +6078,7 @@ export class CoworkRunner extends EventEmitter {
         ),
         tool(
           'idbots_session_read_latest',
-          'Read the latest message from a local IDBots Cowork or A2A session by raw session id or IDBots:// link. This is read-only.',
+          'Read only the LATEST message from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only. Use for a quick status check on another session ("did the Worker finish?", "what is the latest in that task") without pulling the whole history. When NOT to use: if you need full context/decisions, use idbots_session_read_all instead. Returns the single latest message as text; an error if the session does not exist.',
           {
             sessionId: z.string().min(1),
           },
@@ -6078,7 +6092,7 @@ export class CoworkRunner extends EventEmitter {
         ),
         tool(
           'idbots_session_insert_user_message',
-          'Send an instruction into another local IDBots Cowork session and queue that session to continue. A2A sessions are read-only targets and writes will be rejected.',
+          'Send an instruction (as a user message) into ANOTHER local IDBots Cowork session and queue that session to continue processing it. Use to steer or hand off work to a parallel session the user has open. When NOT to use: do not write into the CURRENT session (reply normally instead), and never use this to spam or loop messages between sessions. A2A sessions are read-only targets — writes to them are rejected. Returns a confirmation, or an error if the target is missing or not a Cowork session.',
           {
             targetSessionId: z.string().min(1),
             message: z.string().min(1),
@@ -6096,7 +6110,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'local_workers_list',
-            'List all local MetaBots for Twin orchestration. Returns sanitized identity, persona, skills, capability evidence, and availability. This tool is available only to the current Twin Bot.',
+            'List all local MetaBots available as Workers for Twin orchestration — sanitized identity, persona, skills, capability evidence, and availability. Twin Bot only. Use BEFORE delegating, to pick a Worker whose skills match the step. When NOT to use: not in non-Twin sessions (the tool is absent there anyway); and not for browsing bots socially — use search_metaids for that. Returns one entry per local bot; select on the capability evidence, not the display name.',
             {},
             async () => {
               const result = await this.handleHostToolExecution({ toolName: 'local_workers_list', toolInput: {} }, sessionId);
@@ -6112,7 +6126,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'local_worker_delegate',
-            'Delegate one concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns immediately only after the Worker handoff is collected; use local_workers_list first to select by capability evidence.',
+            'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns only after the Worker handoff is collected. Twin Bot only. Use when a step is well-defined enough to hand off (clear objective + acceptance criteria); call local_workers_list first to choose by capability evidence. When NOT to use: do not delegate vague or multi-step blobs (break them down first), and do not delegate trivial steps you can do faster yourself — delegation has overhead. Provide workerMetabotId + objective at minimum; acceptanceCriteria/context/permissionScope make the handoff verifiable. Returns the attempt/handoff result; verify the Worker actual output via twin_task_status before reporting done.',
             {
               workerMetabotId: z.number().int().positive(),
               objective: z.string().min(1),
@@ -6138,7 +6152,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'twin_task_status',
-            'Read the durable status, steps, attempts, Worker sessions, and handoff evidence for one Twin orchestration task.',
+            'Read the durable status of one Twin orchestration task: steps, attempts, Worker sessions, and handoff evidence. Twin Bot only. Use to track delegated work ("how is the task going?", "did the Worker finish?") and to verify actual output before reporting completion. When NOT to use: do not poll in a tight loop — check once after meaningful time has passed. Returns the full task state; a "completed" task should still have its handoff inspected, not assumed correct.',
             { taskId: z.string().min(1) },
             async (args) => {
               const result = await this.handleHostToolExecution({ toolName: 'twin_task_status', toolInput: args }, sessionId);
@@ -6147,7 +6161,7 @@ export class CoworkRunner extends EventEmitter {
           ),
           tool(
             'twin_task_cancel',
-            'Cancel a durable Twin orchestration task and its queued or running Worker attempts.',
+            'Cancel a durable Twin orchestration task, including its queued or running Worker attempts. Twin Bot only. Use when a task is no longer needed or was started by mistake. When NOT to use: do not cancel just because a step is slow — check twin_task_status first; and prefer twin_task_reassign to retry a failed step on another Worker rather than killing the whole task. Returns a confirmation; cancellation stops further Worker work on this task.',
             { taskId: z.string().min(1) },
             async (args) => {
               const result = await this.handleHostToolExecution({ toolName: 'twin_task_cancel', toolInput: args }, sessionId);
@@ -6156,7 +6170,7 @@ export class CoworkRunner extends EventEmitter {
           ),
           tool(
             'twin_task_reassign',
-            'Reassign one failed or in-progress orchestration step to another persistent Worker Bot with a new idempotent attempt.',
+            'Reassign ONE orchestration step (failed or in-progress) to another persistent Worker Bot, creating a new idempotent attempt. Twin Bot only. Use to retry a step on a better-suited Worker after a failure, without canceling the whole task. When NOT to use: do not reassign repeatedly without new information (it fails the same way) — fix the objective/context first; and do not use this to cancel (use twin_task_cancel). Requires stepId + workerMetabotId; returns the new attempt result.',
             {
               stepId: z.string().min(1),
               workerMetabotId: z.number().int().positive(),
@@ -6177,7 +6191,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'memory_user_edits',
-            'Manage user memories. action=list|add|update|delete.',
+            'Manage the current user\'s long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. Use when the user states a durable fact ("I always want X", "记住我做的是 Y") or you discover one worth persisting. When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.',
             {
               action: z.enum(['list', 'add', 'update', 'delete']),
               id: z.string().optional(),
@@ -6230,7 +6244,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'experience_recall',
-            'Recall your own past experiences as daily summaries. Bare call returns the last 30 days; provide query for a full-history keyword search; optional date_from/date_to (YYYY-MM-DD) pin a range.',
+            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks; an empty result means nothing was recorded for the range/query.',
             {
               query: z.string().optional(),
               date_from: z.string().optional(),
@@ -6254,7 +6268,7 @@ export class CoworkRunner extends EventEmitter {
         memoryTools.push(
           tool(
             'open_metaapp',
-            'Open a local MetaApp by app id and optional target path.',
+            'Open a LOCAL MetaApp (one installed/published on this machine) by app id, optionally targeting a specific sub-path. Use when the user explicitly names a local app to open. When NOT to use: do not open an app the user did not ask for (the host guards against unprompted opens); for on-chain app discovery use search_metaapps + bot_browser_open_uri instead. Not available in browser-type sessions. Returns the opened app URL, or an error if the app id is unknown.',
             {
               appId: z.string().min(1),
               targetPath: z.string().optional(),
@@ -6329,7 +6343,7 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         tool(
           'resolve_metaapp_url',
-            'Resolve a local MetaApp URL by app id and optional target path without opening it.',
+            'Resolve a LOCAL MetaApp URL (by app id, optional sub-path) WITHOUT opening it — returns the URL you would open. Use when you need the URL to embed or reference a local app without launching it. When NOT to use: if the user wants to actually view the app, use open_metaapp instead. Not available in browser-type sessions. Returns the resolved URL, or an error if the app id is unknown.',
             {
               appId: z.string().min(1),
               targetPath: z.string().optional(),
