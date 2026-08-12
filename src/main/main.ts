@@ -8604,12 +8604,17 @@ if (!gotTheLock) {
               messages: session.messages ?? [],
               systemPrompt: session.systemPrompt,
               modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
-              // Real provider-reported context size from the last turn (Phase 2):
-              // keeps the fallback ring consistent with the compaction trigger.
-              realUsageTokens: getCoworkRunner().getSessionLastTurnInputTokens(sessionId),
-              // A2A private chats rebuild the model context every turn from only
-              // the latest segment messages; cap the estimate the same way so the
-              // ring reflects real per-turn usage instead of full history.
+              // Deliberately NOT passing realUsageTokens here. The provider's
+              // last-turn input count is the FULL request payload — the SDK
+              // preset system prompt, every MCP/builtin tool definition, and
+              // the whole message history. On DeepSeek sessions that fixed
+              // overhead alone reads as hundreds of thousands of tokens, so a
+              // conversation that just started showed "54%" (observed
+              // 541K-1.8M reported for sessions whose store history is only
+              // ~50K tokens). The ring should reflect the conversation's own
+              // context growth, not the request envelope. Compaction (the
+              // other caller of getCoworkContextBudget) still passes the real
+              // value as its overflow safety net.
               maxRecentMessages: session.sessionType === 'a2a'
                 ? PRIVATE_CHAT_CONTEXT_MAX_MESSAGES
                 : undefined,

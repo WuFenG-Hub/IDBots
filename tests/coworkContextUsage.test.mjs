@@ -1,5 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const repoRoot = path.resolve(import.meta.dirname, '..');
+
+function read(relativePath) {
+  return fs.readFileSync(path.join(repoRoot, relativePath), 'utf8');
+}
 
 test('computeCoworkContextUsage reports usage ratio against the context window', async () => {
   const {
@@ -93,4 +101,30 @@ test('computeCoworkContextUsage counts only the most recent N messages when capp
     modelLimits: { contextWindow: 128_000, maxOutputTokens: 8_192 },
   });
   assert.equal(uncapped.usedTokens, 100 * 104);
+});
+
+test('context ring estimate is not overridden by the provider whole-request input', () => {
+  const mainSource = read('src/main/main.ts');
+
+  // The ring must NOT pass the provider's last-turn input_tokens as the
+  // displayed usedTokens. That number is the FULL request payload — the SDK
+  // preset system prompt, every MCP/builtin tool definition, and the whole
+  // history. On DeepSeek sessions the fixed overhead alone read as hundreds of
+  // thousands of tokens (observed 541K for a session whose store history is
+  // ~50K tokens), so a conversation that just started showed "54%". The
+  // compaction budget (getCoworkContextBudget in coworkRunner.ts) still uses
+  // the provider value as its overflow safety net; only the ring's display
+  // estimate must stay conversation-only.
+  const sessionGetIndex = mainSource.indexOf('cowork:session:get');
+  const callStart = mainSource.indexOf('computeCoworkContextUsage({', sessionGetIndex);
+  assert.ok(callStart > sessionGetIndex, 'session:get handler must call computeCoworkContextUsage');
+  const callChunk = mainSource.slice(callStart, callStart + 600);
+  assert.ok(
+    !callChunk.includes('realUsageTokens:'),
+    'ring estimate must not be overridden by the provider whole-request input'
+  );
+  assert.ok(
+    callChunk.includes('systemPrompt: session.systemPrompt'),
+    'ring estimate must keep counting the conversation system prompt'
+  );
 });
