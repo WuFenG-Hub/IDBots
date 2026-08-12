@@ -123,6 +123,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
   const pendingScrollRestoreRef = useRef<{ prevScrollHeight: number; prevScrollTop: number } | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMore, setHasMore] = useState(true);
+  // Integrity-event → message anchor: messagesRef mirrors the loaded transcript
+  // for the async jump loop; highlightPinId briefly rings the target row.
+  const messagesRef = useRef<GroupChatTranscriptMessage[]>([]);
+  const [highlightPinId, setHighlightPinId] = useState<string | null>(null);
+  const [jumpHint, setJumpHint] = useState<string | null>(null);
 
   const refreshDetail = useCallback(async () => {
     try {
@@ -263,6 +268,12 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   }, [messages]);
 
+  // Mirror the loaded transcript into a ref so the async jump loop reads the
+  // latest rows instead of a stale closure snapshot.
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   // After an older page is prepended, keep the user's viewport anchored on the
   // same message instead of jumping to the new (older) top. Runs before paint
   // so there is no flicker; a no-op when no restore is pending.
@@ -297,6 +308,40 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       void loadOlder();
     }
   };
+
+  // Integrity-event → message anchor: ensure the target message is loaded
+  // (paging back via the existing beforeId path if it is older than the window),
+  // then scroll it into view and briefly highlight it.
+  const jumpToMessage = useCallback(async (pinId: string) => {
+    if (!pinId) return;
+    let guard = 0;
+    while (
+      messagesRef.current.every((message) => message.pinId !== pinId)
+      && hasMoreRef.current
+      && oldestLoadedIdRef.current != null
+      && guard < 12
+    ) {
+      guard += 1;
+      // eslint-disable-next-line no-await-in-loop
+      await loadOlder();
+    }
+    const present = messagesRef.current.some((message) => message.pinId === pinId);
+    if (!present) {
+      setJumpHint(i18nService.t('groupTasksAnchorNotFound'));
+      window.setTimeout(() => setJumpHint(null), 2500);
+      return;
+    }
+    // Let React commit any prepended rows before querying the DOM node.
+    window.setTimeout(() => {
+      const target = scrollRef.current?.querySelector(`[data-pin-id="${pinId}"]`) as HTMLElement | null;
+      if (!target) return;
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setHighlightPinId(pinId);
+      window.setTimeout(() => setHighlightPinId((current) => (current === pinId ? null : current)), 1800);
+      // A jump up means we are no longer tracking the bottom.
+      stickToBottomRef.current = false;
+    }, 60);
+  }, [loadOlder]);
 
   const handleSend = async () => {
     const text = input.trim();
@@ -629,6 +674,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     message.senderGlobalMetaId
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
+                  highlight={highlightPinId != null && message.pinId === highlightPinId}
                 />
               ))
             )}
@@ -804,13 +850,24 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             ) : (
               <div className="space-y-1.5">
                 {(detail.integrityEvents ?? []).map((event) => (
-                  <div key={event.id} className="text-[11px] leading-tight dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80">
+                  <button
+                    type="button"
+                    key={event.id}
+                    disabled={!event.msgPinId}
+                    onClick={() => event.msgPinId && void jumpToMessage(event.msgPinId)}
+                    title={event.msgPinId ? i18nService.t('groupTasksJumpToMessage') : undefined}
+                    className={`block w-full text-left rounded-md px-1.5 py-1 text-[11px] leading-tight transition-colors dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 ${
+                      event.msgPinId
+                        ? 'hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover cursor-pointer'
+                        : 'cursor-default'
+                    }`}
+                  >
                     <span className={`font-medium ${event.eventType === 'correction' ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
                       {event.eventType === 'correction' ? 'correction' : 'honest report'}
                     </span>
                     <div className="text-[10px] opacity-80 line-clamp-2">{event.detail ?? ''}</div>
                     <div className="text-[10px] opacity-70">{formatGroupTaskTime(event.createdAt)}</div>
-                  </div>
+                  </button>
                 ))}
               </div>
             )}
@@ -961,6 +1018,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       {closeError && !confirmAction && (
         <div className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-red-500 text-white text-sm px-4 py-2 shadow-lg">
           {closeError}
+        </div>
+      )}
+      {jumpHint && (
+        <div className="fixed bottom-4 right-4 z-[9998] rounded-lg bg-claude-textSecondary text-white text-sm px-4 py-2 shadow-lg">
+          {jumpHint}
         </div>
       )}
     </div>
