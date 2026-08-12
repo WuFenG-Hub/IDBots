@@ -1577,6 +1577,15 @@ async function handleRequest(requestId, request, requestPath) {
         append: request.systemPrompt,
       };
     }
+    if (request.agents && typeof request.agents === 'object') {
+      // Apply the host's IDBots-flavored agent overrides (e.g. a neutral
+      // general-purpose subagent prompt instead of the built-in "agent for
+      // Claude Code") so branding stays consistent on the sandbox path too.
+      options.agents = {
+        ...(options.agents || {}),
+        ...request.agents,
+      };
+    }
 
     const result = await query({ prompt: request.prompt || '', options });
     for await (const event of result) {
