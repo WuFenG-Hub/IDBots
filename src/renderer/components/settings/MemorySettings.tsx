@@ -186,7 +186,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     memoryImplicitUpdateEnabled: true,
     memoryLlmJudgeEnabled: true,
     memoryGuardLevel: 'strict',
-    memoryUserMemoriesMaxItems: 12,
+    memoryUserMemoriesMaxItems: 20,
   });
 
   const [error, setError] = useState<string | null>(null);
@@ -574,7 +574,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         memoryImplicitUpdateEnabled: coworkConfig.memoryImplicitUpdateEnabled ?? true,
         memoryLlmJudgeEnabled: coworkConfig.memoryLlmJudgeEnabled ?? true,
         memoryGuardLevel: coworkConfig.memoryGuardLevel ?? 'strict',
-        memoryUserMemoriesMaxItems: coworkConfig.memoryUserMemoriesMaxItems ?? 12,
+        memoryUserMemoriesMaxItems: coworkConfig.memoryUserMemoriesMaxItems ?? 20,
       });
     }
   }, [
@@ -601,7 +601,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       memoryImplicitUpdateEnabled: coworkConfig.memoryImplicitUpdateEnabled ?? true,
       memoryLlmJudgeEnabled: coworkConfig.memoryLlmJudgeEnabled ?? true,
       memoryGuardLevel: coworkConfig.memoryGuardLevel ?? 'strict',
-      memoryUserMemoriesMaxItems: coworkConfig.memoryUserMemoriesMaxItems ?? 12,
+      memoryUserMemoriesMaxItems: coworkConfig.memoryUserMemoriesMaxItems ?? 20,
     };
   }, [policy, coworkConfig]);
 
@@ -618,7 +618,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     setPolicySaving(true);
     setPolicyNotice(null);
     try {
-      const normalizedMaxItems = Math.max(1, Math.min(60, Math.floor(draft.memoryUserMemoriesMaxItems || 12)));
+      const normalizedMaxItems = Math.max(1, Math.min(60, Math.floor(draft.memoryUserMemoriesMaxItems || 20)));
       if (useOverride) {
         const saved = await coworkService.setMemoryPolicy({
           metabotId,
@@ -1330,7 +1330,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                         value={draft.memoryUserMemoriesMaxItems}
                         onChange={(event) => {
                           const next = Number(event.target.value);
-                          setDraft((prev) => ({ ...prev, memoryUserMemoriesMaxItems: Number.isFinite(next) ? next : 12 }));
+                          setDraft((prev) => ({ ...prev, memoryUserMemoriesMaxItems: Number.isFinite(next) ? next : 20 }));
                         }}
                         className="w-20 rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
                         disabled={metabotId == null || policySaving || !draft.memoryEnabled}
