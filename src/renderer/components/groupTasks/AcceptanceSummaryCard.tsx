@@ -4,7 +4,7 @@ import type {
   GroupTaskAcceptanceSummary,
   GroupTaskAcceptanceSummaryDeliverable,
 } from '../../types/groupTask';
-import { deliverableKindBadge } from './groupTaskUtils';
+import { deliverableKindBadge, isBotBrowserUri, openGroupTaskUri } from './groupTaskUtils';
 import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
 
 /**
@@ -135,9 +135,23 @@ const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDelivera
         )}
       </div>
       {deliverable.uri ? (
-        <code className="block mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
-          {deliverable.uri}
-        </code>
+        (() => {
+          const clickable = isBotBrowserUri(deliverable.uri) || /^https?:\/\//i.test(deliverable.uri);
+          return clickable ? (
+            <button
+              type="button"
+              onClick={() => openGroupTaskUri(deliverable.uri)}
+              title={deliverable.uri}
+              className="block mt-1 text-left text-xs text-claude-accent hover:underline break-all cursor-pointer"
+            >
+              {deliverable.uri}
+            </button>
+          ) : (
+            <code className="block mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
+              {deliverable.uri}
+            </code>
+          );
+        })()
       ) : (
         <span className="block mt-1 text-[11px] italic dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
           {i18nService.t('groupTasksDeliverableNoSource')}

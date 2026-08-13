@@ -17,6 +17,8 @@ import {
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
   formatGroupTaskTime,
+  isBotBrowserUri,
+  openGroupTaskUri,
   groupTaskMemberStatusBadgeClass,
   groupTaskMemberStatusLabel,
   groupTaskStatusBadgeClass,
@@ -68,6 +70,54 @@ const RoomIdBadge: React.FC<{ groupId: string }> = ({ groupId }) => {
         ? <CheckIcon className="h-3 w-3 text-emerald-500" />
         : <ClipboardDocumentIcon className="h-3 w-3" />}
     </button>
+  );
+};
+
+/**
+ * R3: a deliverable URI rendered in FULL (never abbreviated — bots/owners must be
+ * able to copy the exact id). metaweb schemes (metaapp://, pin://, …) and http(s)
+ * are clickable and open in the right surface (Bot Browser vs external browser);
+ * the copy button always gives the full URI regardless of scheme.
+ */
+const DeliverableUri: React.FC<{ uri: string }> = ({ uri }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(uri);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable — silently ignore.
+    }
+  };
+  const clickable = isBotBrowserUri(uri) || /^https?:\/\//i.test(uri);
+  return (
+    <div className="mt-1 flex items-start gap-1">
+      <button
+        type="button"
+        onClick={() => clickable && openGroupTaskUri(uri)}
+        disabled={!clickable}
+        title={clickable ? uri : i18nService.t('groupTasksAcceptancePublishedPin')}
+        className={`block text-left text-xs break-all ${
+          clickable
+            ? 'text-claude-accent hover:underline cursor-pointer'
+            : 'dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-text'
+        }`}
+      >
+        {uri}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => void handleCopy(e)}
+        className="shrink-0 mt-px inline-flex items-center text-[10px] text-claude-accent hover:underline"
+        title={i18nService.t('copy')}
+      >
+        {copied
+          ? <CheckIcon className="h-3 w-3 text-emerald-500" />
+          : <ClipboardDocumentIcon className="h-3 w-3" />}
+      </button>
+    </div>
   );
 };
 
@@ -1017,20 +1067,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       })()}
                     </div>
                     {deliverable.uri ? (
-                      /^https?:\/\//i.test(deliverable.uri) ? (
-                        <a
-                          href={deliverable.uri}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="block mt-1 text-xs text-claude-accent hover:underline break-all"
-                        >
-                          {deliverable.uri}
-                        </a>
-                      ) : (
-                        <code className="block mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
-                          {deliverable.uri}
-                        </code>
-                      )
+                      <DeliverableUri uri={deliverable.uri} />
                     ) : (
                       // Text deliverable (no uri): fold the producing message
                       // body so the panel reads as content, not an empty card.
