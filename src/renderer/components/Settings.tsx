@@ -8,7 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
-import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
+import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
@@ -17,12 +17,6 @@ import { RootState } from '../store';
 import ThemedSelect from './ui/ThemedSelect';
 import type {
   CoworkExecutionMode,
-  CoworkUserMemoryEntry,
-  CoworkMemoryStats,
-  CoworkMemoryPolicy,
-  CoworkMemoryScopesOverview,
-  CoworkMetaIDContactSummary,
-  CoworkMetaIDContactDetail,
   CoworkSandboxProgress,
   CoworkSandboxStatus,
   CoworkSessionSummary,
@@ -33,7 +27,7 @@ import { groupTaskStatusBadgeClass } from './groupTasks/groupTaskUtils';
 import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
-import MetaIDContactPanel from './settings/MetaIDContactPanel';
+import MemorySettings from './settings/MemorySettings';
 import SkillMcpManager from './skills/SkillMcpManager';
 import ProjectsManager from './projects/ProjectsManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
@@ -41,7 +35,7 @@ import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
 
-type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'dreamDiary' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
+type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
 export type SettingsOpenOptions = {
   initialTab?: TabType;
@@ -55,12 +49,6 @@ interface SettingsProps extends SettingsOpenOptions {
 /** Archived Chats panel page size (Settings). */
 const ARCHIVED_CHATS_PAGE_SIZE = 20;
 
-const formatLocalDateInput = (date: Date): string => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
 
 const providerKeys = [
   'openai',
@@ -90,16 +78,6 @@ type MemoryMetabotOption = {
   metabot_type: string;
   globalmetaid: string | null;
 };
-type MetabotMemoryPolicyDraft = Pick<
-  CoworkMemoryPolicy,
-  | 'memoryEnabled'
-  | 'memoryImplicitUpdateEnabled'
-  | 'memoryLlmJudgeEnabled'
-  | 'memoryGuardLevel'
-  | 'memoryUserMemoriesMaxItems'
->;
-/** Usage classes a user may assign manually. `self_identity` is dream-protected. */
-type CoworkMemoryEditableUsageClass = 'profile_fact' | 'preference' | 'operational_preference' | 'work_review' | 'value_boundary';
 
 interface ProviderExportEntry {
   enabled: boolean;
@@ -524,35 +502,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const imConfig = useSelector((state: RootState) => state.im.config);
 
   const [coworkExecutionMode, setCoworkExecutionMode] = useState<CoworkExecutionMode>(coworkConfig.executionMode || 'local');
-  const [coworkMemoryEnabled, setCoworkMemoryEnabled] = useState<boolean>(coworkConfig.memoryEnabled ?? true);
-  const [coworkMemoryLlmJudgeEnabled, setCoworkMemoryLlmJudgeEnabled] = useState<boolean>(coworkConfig.memoryLlmJudgeEnabled ?? true);
-  const [coworkMemoryEntries, setCoworkMemoryEntries] = useState<CoworkUserMemoryEntry[]>([]);
-  const [coworkMemoryStats, setCoworkMemoryStats] = useState<CoworkMemoryStats | null>(null);
-  const [coworkMemoryListLoading, setCoworkMemoryListLoading] = useState<boolean>(false);
-  const [coworkMemoryQuery, setCoworkMemoryQuery] = useState<string>('');
+  // Shared MetaBot list — also used by the Archived Chats tab.
   const [coworkMemoryMetabots, setCoworkMemoryMetabots] = useState<MemoryMetabotOption[]>([]);
-  const [coworkMemoryMetabotId, setCoworkMemoryMetabotId] = useState<number | null>(null);
-  const [coworkMetabotMemoryEnabled, setCoworkMetabotMemoryEnabled] = useState<boolean>(true);
-  const [coworkMetabotMemoryImplicitUpdateEnabled, setCoworkMetabotMemoryImplicitUpdateEnabled] = useState<boolean>(true);
-  const [coworkMetabotMemoryLlmJudgeEnabled, setCoworkMetabotMemoryLlmJudgeEnabled] = useState<boolean>(true);
-  const [coworkMetabotMemoryGuardLevel, setCoworkMetabotMemoryGuardLevel] = useState<'strict' | 'standard' | 'relaxed'>('strict');
-  const [coworkMetabotMemoryMaxItems, setCoworkMetabotMemoryMaxItems] = useState<number>(12);
-  const [coworkMetabotMemoryPolicySource, setCoworkMetabotMemoryPolicySource] = useState<'global' | 'metabot'>('global');
-  const [coworkMetabotMemoryPolicyBaseline, setCoworkMetabotMemoryPolicyBaseline] = useState<MetabotMemoryPolicyDraft | null>(null);
-  const [coworkMetabotMemoryPolicyLoading, setCoworkMetabotMemoryPolicyLoading] = useState<boolean>(false);
-  const [coworkMetabotMemoryPolicySaving, setCoworkMetabotMemoryPolicySaving] = useState<boolean>(false);
-  const [coworkMetabotMemoryPolicyNotice, setCoworkMetabotMemoryPolicyNotice] = useState<string | null>(null);
-  const [coworkMemoryEditingId, setCoworkMemoryEditingId] = useState<string | null>(null);
-  const [coworkMemoryDraftText, setCoworkMemoryDraftText] = useState<string>('');
-  const [showMemoryModal, setShowMemoryModal] = useState<boolean>(false);
-  const [coworkMemoryScopes, setCoworkMemoryScopes] = useState<CoworkMemoryScopesOverview | null>(null);
-  const [coworkMemorySelectedScope, setCoworkMemorySelectedScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string }>({ kind: 'owner', key: 'owner:self' });
-  const [coworkMemoryContacts, setCoworkMemoryContacts] = useState<CoworkMetaIDContactSummary[]>([]);
-  const [coworkMemoryContactDetail, setCoworkMemoryContactDetail] = useState<CoworkMetaIDContactDetail | null>(null);
-  const [coworkMemoryContactDetailLoading, setCoworkMemoryContactDetailLoading] = useState<boolean>(false);
-  const [coworkMemoryDraftScope, setCoworkMemoryDraftScope] = useState<{ kind: 'owner' | 'contact' | 'conversation'; key: string } | null>(null);
-  const [coworkMemoryDraftUsageClass, setCoworkMemoryDraftUsageClass] = useState<CoworkMemoryEditableUsageClass>('profile_fact');
-  const [coworkMemoryDraftVisibility, setCoworkMemoryDraftVisibility] = useState<'local_only' | 'external_safe'>('local_only');
   const [coworkSandboxStatus, setCoworkSandboxStatus] = useState<CoworkSandboxStatus | null>(null);
   const [coworkSandboxLoading, setCoworkSandboxLoading] = useState(true);
   const [coworkSandboxProgress, setCoworkSandboxProgress] = useState<CoworkSandboxProgress | null>(null);
@@ -582,49 +533,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [archivedA2AChatsPage, setArchivedA2AChatsPage] = useState<number>(0);
   const [archivedA2AChatsNotice, setArchivedA2AChatsNotice] = useState<string | null>(null);
 
-  // Dream Diary panel (P4): per-bot nightly dream summaries, read-only.
-  type DreamDiarySummary = {
-    id: string;
-    metabotId: number;
-    summaryDate: string;
-    summaryText: string;
-    sections: Record<string, string>;
-    stats: Record<string, number>;
-    sessionRefs?: Array<{ sessionId: string; title: string; sessionType: string; isOrder: boolean }>;
-    llmId: string | null;
-    createdAt: number;
-    updatedAt: number;
-  };
-  // Run rows power the failure fallback entries. They are read straight from
-  // metabot_dream_runs — the same table the scheduler's computeDueDreamDates
-  // uses as its only due/idle anchor — and are never written anywhere, so
-  // displaying a failed entry cannot mark the date as done or make the
-  // auto-heal retry skip it.
-  type DreamDiaryRun = {
-    id: string;
-    metabotId: number;
-    dreamDate: string;
-    status: 'running' | 'completed' | 'failed';
-    attemptCount: number;
-    llmId: string | null;
-    dreamVersion: number;
-    error: string | null;
-    startedAt: number;
-    completedAt: number | null;
-    nextRetryAt: number | null;
-  };
-  const [dreamDiarySummaries, setDreamDiarySummaries] = useState<DreamDiarySummary[]>([]);
-  const [dreamDiaryRuns, setDreamDiaryRuns] = useState<DreamDiaryRun[]>([]);
-  const [dreamDiaryLoading, setDreamDiaryLoading] = useState<boolean>(false);
-  const [dreamDiaryMetabotId, setDreamDiaryMetabotId] = useState<number | null>(null);
-  const [dreamDiaryExpandedId, setDreamDiaryExpandedId] = useState<string | null>(null);
-  const [dreamDiaryRunDate, setDreamDiaryRunDate] = useState<string>(() => {
-    const now = new Date();
-    return formatLocalDateInput(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
-  });
-  const [dreamDiaryRunning, setDreamDiaryRunning] = useState<boolean>(false);
-  const [dreamDiaryNotice, setDreamDiaryNotice] = useState<string | null>(null);
-
   useEffect(() => {
     window.electron.appInfo
       .getVersion()
@@ -634,13 +542,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
 
   useEffect(() => {
     setCoworkExecutionMode(coworkConfig.executionMode || 'local');
-    setCoworkMemoryEnabled(coworkConfig.memoryEnabled ?? true);
-    setCoworkMemoryLlmJudgeEnabled(coworkConfig.memoryLlmJudgeEnabled ?? true);
-  }, [
-    coworkConfig.executionMode,
-    coworkConfig.memoryEnabled,
-    coworkConfig.memoryLlmJudgeEnabled,
-  ]);
+  }, [coworkConfig.executionMode]);
 
   const loadCoworkSandboxStatus = useCallback(async () => {
     setCoworkSandboxLoading(true);
@@ -939,9 +841,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     });
   };
 
-  const hasCoworkConfigChanges = coworkExecutionMode !== coworkConfig.executionMode
-    || coworkMemoryEnabled !== coworkConfig.memoryEnabled
-    || coworkMemoryLlmJudgeEnabled !== coworkConfig.memoryLlmJudgeEnabled;
+  const hasCoworkConfigChanges = coworkExecutionMode !== coworkConfig.executionMode;
 
   const coworkSandboxDisabled = !coworkSandboxStatus?.supported
     || !coworkSandboxStatus?.runtimeReady
@@ -986,190 +886,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
-  const applyMetabotMemoryPolicyToState = useCallback((policy: CoworkMemoryPolicy) => {
-    setCoworkMetabotMemoryEnabled(policy.memoryEnabled);
-    setCoworkMetabotMemoryImplicitUpdateEnabled(policy.memoryImplicitUpdateEnabled);
-    setCoworkMetabotMemoryLlmJudgeEnabled(policy.memoryLlmJudgeEnabled);
-    setCoworkMetabotMemoryGuardLevel(policy.memoryGuardLevel);
-    setCoworkMetabotMemoryMaxItems(policy.memoryUserMemoriesMaxItems);
-    setCoworkMetabotMemoryPolicySource(policy.source);
-    setCoworkMetabotMemoryPolicyBaseline({
-      memoryEnabled: policy.memoryEnabled,
-      memoryImplicitUpdateEnabled: policy.memoryImplicitUpdateEnabled,
-      memoryLlmJudgeEnabled: policy.memoryLlmJudgeEnabled,
-      memoryGuardLevel: policy.memoryGuardLevel,
-      memoryUserMemoriesMaxItems: policy.memoryUserMemoriesMaxItems,
-    });
-  }, []);
-
-  const loadCoworkMetabotMemoryPolicy = useCallback(async () => {
-    if (coworkMemoryMetabotId == null) {
-      setCoworkMetabotMemoryPolicyBaseline(null);
-      setCoworkMetabotMemoryPolicySource('global');
-      setCoworkMetabotMemoryPolicyNotice(null);
-      return;
-    }
-    setCoworkMetabotMemoryPolicyLoading(true);
-    setCoworkMetabotMemoryPolicyNotice(null);
-    try {
-      const policy = await coworkService.getMemoryPolicy({ metabotId: coworkMemoryMetabotId });
-      if (!policy) {
-        setCoworkMetabotMemoryPolicyBaseline(null);
-        setCoworkMetabotMemoryPolicySource('global');
-        return;
-      }
-      applyMetabotMemoryPolicyToState(policy);
-    } catch (loadError) {
-      console.error('Failed to load MetaBot memory policy:', loadError);
-      setCoworkMetabotMemoryPolicyBaseline(null);
-      setCoworkMetabotMemoryPolicySource('global');
-    } finally {
-      setCoworkMetabotMemoryPolicyLoading(false);
-    }
-  }, [applyMetabotMemoryPolicyToState, coworkMemoryMetabotId]);
-
-  const hasCoworkMetabotMemoryPolicyChanges = useMemo(() => {
-    if (!coworkMetabotMemoryPolicyBaseline) return false;
-    return coworkMetabotMemoryPolicyBaseline.memoryEnabled !== coworkMetabotMemoryEnabled
-      || coworkMetabotMemoryPolicyBaseline.memoryImplicitUpdateEnabled !== coworkMetabotMemoryImplicitUpdateEnabled
-      || coworkMetabotMemoryPolicyBaseline.memoryLlmJudgeEnabled !== coworkMetabotMemoryLlmJudgeEnabled
-      || coworkMetabotMemoryPolicyBaseline.memoryGuardLevel !== coworkMetabotMemoryGuardLevel
-      || coworkMetabotMemoryPolicyBaseline.memoryUserMemoriesMaxItems !== coworkMetabotMemoryMaxItems;
-  }, [
-    coworkMetabotMemoryEnabled,
-    coworkMetabotMemoryImplicitUpdateEnabled,
-    coworkMetabotMemoryLlmJudgeEnabled,
-    coworkMetabotMemoryGuardLevel,
-    coworkMetabotMemoryMaxItems,
-    coworkMetabotMemoryPolicyBaseline,
-  ]);
-
-  const handleSaveCoworkMetabotMemoryPolicy = async () => {
-    if (coworkMemoryMetabotId == null) return;
-    setCoworkMetabotMemoryPolicySaving(true);
-    setCoworkMetabotMemoryPolicyNotice(null);
-    try {
-      const normalizedMaxItems = Math.max(1, Math.min(60, Math.floor(coworkMetabotMemoryMaxItems || 12)));
-      const policy = await coworkService.setMemoryPolicy({
-        metabotId: coworkMemoryMetabotId,
-        memoryEnabled: coworkMetabotMemoryEnabled,
-        memoryImplicitUpdateEnabled: coworkMetabotMemoryImplicitUpdateEnabled,
-        memoryLlmJudgeEnabled: coworkMetabotMemoryLlmJudgeEnabled,
-        memoryGuardLevel: coworkMetabotMemoryGuardLevel,
-        memoryUserMemoriesMaxItems: normalizedMaxItems,
-      });
-      if (!policy) {
-        throw new Error(i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
-      }
-      applyMetabotMemoryPolicyToState(policy);
-      setCoworkMetabotMemoryPolicyNotice(i18nService.t('coworkMemoryMetabotPolicySaved'));
-      await loadCoworkMemoryData();
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : i18nService.t('coworkMemoryMetabotPolicySaveFailed'));
-    } finally {
-      setCoworkMetabotMemoryPolicySaving(false);
-    }
-  };
-
-  const loadCoworkMemoryData = useCallback(async () => {
-    if (coworkMemoryMetabotId == null) {
-      setCoworkMemoryEntries([]);
-      setCoworkMemoryStats(null);
-      return;
-    }
-    setCoworkMemoryListLoading(true);
-    try {
-      const [entries, stats] = await Promise.all([
-        coworkService.listMemoryEntries({
-          metabotId: coworkMemoryMetabotId,
-          scopeKind: coworkMemorySelectedScope.kind,
-          scopeKey: coworkMemorySelectedScope.key,
-          query: coworkMemoryQuery.trim() || undefined,
-        }),
-        coworkService.getMemoryStats({
-          metabotId: coworkMemoryMetabotId,
-          scopeKind: coworkMemorySelectedScope.kind,
-          scopeKey: coworkMemorySelectedScope.key,
-        }),
-      ]);
-      setCoworkMemoryEntries(entries);
-      setCoworkMemoryStats(stats);
-    } catch (loadError) {
-      console.error('Failed to load cowork memory data:', loadError);
-      setCoworkMemoryEntries([]);
-      setCoworkMemoryStats(null);
-    } finally {
-      setCoworkMemoryListLoading(false);
-    }
-  }, [
-    coworkMemoryQuery,
-    coworkMemoryMetabotId,
-    coworkMemorySelectedScope.kind,
-    coworkMemorySelectedScope.key,
-  ]);
-
-  const loadCoworkMemoryScopes = useCallback(async (metabotId: number | null) => {
-    if (metabotId == null) {
-      setCoworkMemoryScopes(null);
-      return;
-    }
-    try {
-      const overview = await coworkService.listMemoryScopes({ metabotId });
-      setCoworkMemoryScopes(overview);
-      setCoworkMemorySelectedScope((current) => {
-        if (!overview) return current;
-        const stillExists = (overview.owner?.key === current.key)
-          || overview.contacts.some((scope) => scope.key === current.key)
-          || overview.conversations.some((scope) => scope.key === current.key);
-        if (stillExists) return current;
-        return { kind: 'owner', key: overview.owner?.key ?? 'owner:self' };
-      });
-    } catch (loadError) {
-      console.error('Failed to load cowork memory scopes:', loadError);
-      setCoworkMemoryScopes(null);
-    }
-  }, []);
-
-  const loadCoworkMemoryContacts = useCallback(async (metabotId: number | null) => {
-    if (metabotId == null) {
-      setCoworkMemoryContacts([]);
-      return;
-    }
-    try {
-      const observer = coworkMemoryMetabots.find((metabot) => metabot.id === metabotId);
-      const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
-      if (!observerGlobalMetaId) {
-        setCoworkMemoryContacts([]);
-        return;
-      }
-      const contacts = await coworkService.listMetaIDContacts({ observerGlobalMetaId });
-      setCoworkMemoryContacts(contacts);
-    } catch (loadError) {
-      console.error('Failed to load MetaID contacts:', loadError);
-      setCoworkMemoryContacts([]);
-    }
-  }, [coworkMemoryMetabots]);
-
-  const loadCoworkMemoryContactDetail = useCallback(async (observerGlobalMetaId: string | null, subjectGlobalMetaId: string | null) => {
-    if (!observerGlobalMetaId || !subjectGlobalMetaId) {
-      setCoworkMemoryContactDetail(null);
-      return;
-    }
-    setCoworkMemoryContactDetailLoading(true);
-    try {
-      const detail = await coworkService.getMetaIDContactDetail({
-        observerGlobalMetaId,
-        subjectGlobalMetaId,
-      });
-      setCoworkMemoryContactDetail(detail);
-    } catch (loadError) {
-      console.error('Failed to load MetaID contact detail:', loadError);
-      setCoworkMemoryContactDetail(null);
-    } finally {
-      setCoworkMemoryContactDetailLoading(false);
-    }
-  }, []);
-
   const loadCoworkMemoryMetabots = useCallback(async () => {
     try {
       // `metabot:list` carries `globalmetaid`, which the ID-anchored contact
@@ -1192,18 +908,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           }))
         : [];
       setCoworkMemoryMetabots(list);
-      setCoworkMemoryMetabotId((current) => {
-        if (current != null && list.some((item) => item.id === current)) {
-          return current;
-        }
-        const defaultTwin = list.find((item) => item.metabot_type === 'twin');
-        if (defaultTwin) return defaultTwin.id;
-        return list.length > 0 ? list[0].id : null;
-      });
     } catch (loadError) {
       console.error('Failed to load MetaBots for memory scope:', loadError);
       setCoworkMemoryMetabots([]);
-      setCoworkMemoryMetabotId(null);
     }
   }, []);
 
@@ -1215,51 +922,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     if (activeTab !== 'coworkMemory') return;
     void loadCoworkMemoryMetabots();
   }, [activeTab, loadCoworkMemoryMetabots]);
-
-  useEffect(() => {
-    if (activeTab !== 'coworkMemory') return;
-    void loadCoworkMetabotMemoryPolicy();
-  }, [activeTab, loadCoworkMetabotMemoryPolicy]);
-
-  useEffect(() => {
-    if (activeTab !== 'coworkMemory') return;
-    void loadCoworkMemoryData();
-  }, [activeTab, loadCoworkMemoryData]);
-
-  useEffect(() => {
-    if (activeTab !== 'coworkMemory') return;
-    void loadCoworkMemoryScopes(coworkMemoryMetabotId);
-  }, [activeTab, loadCoworkMemoryScopes, coworkMemoryMetabotId]);
-
-  useEffect(() => {
-    if (activeTab !== 'coworkMemory') return;
-    void loadCoworkMemoryContacts(coworkMemoryMetabotId);
-  }, [activeTab, loadCoworkMemoryContacts, coworkMemoryMetabotId]);
-
-  // Load the ID-anchored contact detail (impression + events) whenever a
-  // contact scope is selected.
-  useEffect(() => {
-    if (activeTab !== 'coworkMemory') return;
-    if (coworkMemorySelectedScope.kind !== 'contact') {
-      setCoworkMemoryContactDetail(null);
-      return;
-    }
-    const observer = coworkMemoryMetabots.find((metabot) => metabot.id === coworkMemoryMetabotId);
-    const observerGlobalMetaId = observer?.globalmetaid?.trim() || null;
-    const subjectGlobalMetaId = coworkMemoryContacts.find((contact) =>
-      contact.globalMetaID === coworkMemorySelectedScope.key.split(':peer:').pop(),
-    )?.globalMetaID
-      ?? coworkMemorySelectedScope.key.split(':peer:').pop()
-      ?? null;
-    void loadCoworkMemoryContactDetail(observerGlobalMetaId, subjectGlobalMetaId);
-  }, [
-    activeTab,
-    coworkMemorySelectedScope,
-    coworkMemoryMetabotId,
-    coworkMemoryMetabots,
-    coworkMemoryContacts,
-    loadCoworkMemoryContactDetail,
-  ]);
 
   const loadArchivedChats = useCallback(async () => {
     setArchivedChatsLoading(true);
@@ -1413,196 +1075,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     window.dispatchEvent(new CustomEvent('cowork:viewSession', { detail: { sessionId: trimmed } }));
   };
 
-  const loadDreamDiary = useCallback(async () => {
-    if (dreamDiaryMetabotId == null) {
-      setDreamDiarySummaries([]);
-      setDreamDiaryRuns([]);
-      return;
-    }
-    setDreamDiaryLoading(true);
-    try {
-      const [summariesResult, runsResult] = await Promise.all([
-        window.electron?.dream?.listDailySummaries({
-          metabotId: dreamDiaryMetabotId,
-          limit: 60,
-        }),
-        window.electron?.dream?.listRuns({
-          metabotId: dreamDiaryMetabotId,
-          limit: 60,
-        }),
-      ]);
-      setDreamDiarySummaries(
-        (summariesResult?.success && Array.isArray(summariesResult.summaries) ? summariesResult.summaries : []) as DreamDiarySummary[]
-      );
-      setDreamDiaryRuns(
-        (runsResult?.success && Array.isArray(runsResult.runs) ? runsResult.runs : []) as DreamDiaryRun[]
-      );
-    } catch (loadError) {
-      console.error('Failed to load dream diary:', loadError);
-      setDreamDiarySummaries([]);
-      setDreamDiaryRuns([]);
-    } finally {
-      setDreamDiaryLoading(false);
-    }
-  }, [dreamDiaryMetabotId]);
-
-  // Failed runs for dates that have no summary become fallback entries, merged
-  // newest-first with the summaries. Read-only view of the runs table — the
-  // auto-heal scheduler keys off run status (failed → retry after backoff),
-  // never off this list, so these entries cannot suppress a re-dream.
-  const dreamDiaryEntries: Array<
-    | { kind: 'summary'; date: string; summary: DreamDiarySummary }
-    | { kind: 'failed'; date: string; run: DreamDiaryRun }
-  > = [
-    ...dreamDiarySummaries.map((summary) => ({ kind: 'summary' as const, date: summary.summaryDate, summary })),
-    ...dreamDiaryRuns
-      .filter((run) => run.status === 'failed')
-      .filter((run) => !dreamDiarySummaries.some((summary) => summary.summaryDate === run.dreamDate))
-      .map((run) => ({ kind: 'failed' as const, date: run.dreamDate, run })),
-  ].sort((a, b) => b.date.localeCompare(a.date));
-
-  const handleForceDream = async (dateOverride?: string) => {
-    const targetDate = dateOverride ?? dreamDiaryRunDate;
-    if (dreamDiaryMetabotId == null || !targetDate || dreamDiaryRunning) return;
-    setDreamDiaryRunning(true);
-    setDreamDiaryNotice(null);
-    try {
-      const result = await window.electron?.dream?.runNow({
-        metabotId: dreamDiaryMetabotId,
-        date: targetDate,
-      });
-      if (!result?.success) {
-        throw new Error(result?.error || i18nService.t('dreamDiaryForceFailed'));
-      }
-      if (result.run?.status === 'failed') {
-        setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${result.run.error || i18nService.t('dreamDiaryForceFailed')}`);
-      } else {
-        setDreamDiaryNotice(i18nService.t('dreamDiaryForceCompleted'));
-      }
-      await loadDreamDiary();
-    } catch (runError) {
-      console.error('Failed to force dream:', runError);
-      setDreamDiaryNotice(`${i18nService.t('dreamDiaryForceFailed')}: ${runError instanceof Error ? runError.message : String(runError)}`);
-    } finally {
-      setDreamDiaryRunning(false);
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab !== 'dreamDiary') return;
-    // Default to the twin bot (same fallback as the memory tab).
-    setDreamDiaryMetabotId((current) => {
-      if (current != null && coworkMemoryMetabots.some((item) => item.id === current)) {
-        return current;
-      }
-      const defaultTwin = coworkMemoryMetabots.find((item) => item.metabot_type === 'twin');
-      if (defaultTwin) return defaultTwin.id;
-      return coworkMemoryMetabots.length > 0 ? coworkMemoryMetabots[0].id : null;
-    });
-  }, [activeTab, coworkMemoryMetabots]);
-
-  useEffect(() => {
-    if (activeTab !== 'dreamDiary') return;
-    void loadDreamDiary();
-  }, [activeTab, loadDreamDiary]);
-
-  const resetCoworkMemoryEditor = () => {
-    setCoworkMemoryEditingId(null);
-    setCoworkMemoryDraftText('');
-    setCoworkMemoryDraftScope(null);
-    setCoworkMemoryDraftUsageClass('profile_fact');
-    setCoworkMemoryDraftVisibility('local_only');
-    setShowMemoryModal(false);
-  };
-
-  useEffect(() => {
-    setCoworkMemoryEditingId(null);
-    setCoworkMemoryDraftText('');
-    setCoworkMemoryDraftScope(null);
-    setCoworkMemoryDraftUsageClass('profile_fact');
-    setCoworkMemoryDraftVisibility('local_only');
-    setShowMemoryModal(false);
-  }, [coworkMemoryMetabotId]);
-
-  const handleSaveCoworkMemoryEntry = async () => {
-    if (coworkMemoryMetabotId == null) return;
-    const text = coworkMemoryDraftText.trim();
-    if (!text) return;
-
-    setCoworkMemoryListLoading(true);
-    try {
-      if (coworkMemoryEditingId) {
-        await coworkService.updateMemoryEntry({
-          metabotId: coworkMemoryMetabotId,
-          scopeKind: coworkMemorySelectedScope.kind,
-          scopeKey: coworkMemorySelectedScope.key,
-          usageClass: coworkMemoryDraftUsageClass,
-          visibility: coworkMemoryDraftVisibility,
-          id: coworkMemoryEditingId,
-          text,
-          status: 'created',
-          isExplicit: true,
-        });
-      } else {
-        const draftScope = coworkMemoryDraftScope ?? { kind: 'owner', key: 'owner:self' };
-        await coworkService.createMemoryEntry({
-          metabotId: coworkMemoryMetabotId,
-          scopeKind: draftScope.kind,
-          scopeKey: draftScope.key,
-          usageClass: coworkMemoryDraftUsageClass,
-          visibility: coworkMemoryDraftVisibility,
-          text,
-          isExplicit: true,
-        });
-      }
-      resetCoworkMemoryEditor();
-      await loadCoworkMemoryData();
-      await loadCoworkMemoryScopes(coworkMemoryMetabotId);
-    } catch (saveError) {
-      setError(saveError instanceof Error ? saveError.message : i18nService.t('coworkMemoryCrudSaveFailed'));
-    } finally {
-      setCoworkMemoryListLoading(false);
-    }
-  };
-
-  const handleEditCoworkMemoryEntry = (entry: CoworkUserMemoryEntry) => {
-    setCoworkMemoryEditingId(entry.id);
-    setCoworkMemoryDraftText(entry.text);
-    setCoworkMemoryDraftScope(entry.scopeKind && entry.scopeKey
-      ? { kind: entry.scopeKind, key: entry.scopeKey }
-      : null);
-    setCoworkMemoryDraftUsageClass(entry.usageClass === 'operational_preference'
-      || entry.usageClass === 'work_review'
-      || entry.usageClass === 'value_boundary'
-      || entry.usageClass === 'preference'
-      ? entry.usageClass
-      : 'profile_fact');
-    setCoworkMemoryDraftVisibility(entry.visibility === 'external_safe' ? 'external_safe' : 'local_only');
-    setShowMemoryModal(true);
-  };
-
-  const handleDeleteCoworkMemoryEntry = async (entry: CoworkUserMemoryEntry) => {
-    if (coworkMemoryMetabotId == null) return;
-    setCoworkMemoryListLoading(true);
-    try {
-      await coworkService.deleteMemoryEntry({ id: entry.id, metabotId: coworkMemoryMetabotId });
-      if (coworkMemoryEditingId === entry.id) {
-        resetCoworkMemoryEditor();
-      }
-      await loadCoworkMemoryData();
-    } catch (deleteError) {
-      setError(deleteError instanceof Error ? deleteError.message : i18nService.t('coworkMemoryCrudDeleteFailed'));
-    } finally {
-      setCoworkMemoryListLoading(false);
-    }
-  };
-
-  const getMemoryStatusLabel = (status: CoworkUserMemoryEntry['status']): string => {
-    if (status === 'created') return i18nService.t('coworkMemoryStatusActive');
-    if (status === 'stale') return i18nService.t('coworkMemoryStatusInactive');
-    return i18nService.t('coworkMemoryStatusDeleted');
-  };
-
   const formatMemoryUpdatedAt = (timestamp: number): string => {
     if (!Number.isFinite(timestamp) || timestamp <= 0) return '-';
     try {
@@ -1610,44 +1082,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     } catch {
       return '-';
     }
-  };
-
-  const getMemoryScopeLabel = (scope: { kind: 'owner' | 'contact' | 'conversation'; key: string }, overview: CoworkMemoryScopesOverview | null): string => {
-    if (scope.kind === 'owner') return i18nService.t('coworkMemoryScopeOwner');
-    const summary = (overview?.contacts ?? []).find((item) => item.key === scope.key)
-      ?? (overview?.conversations ?? []).find((item) => item.key === scope.key);
-    if (summary?.kind === 'contact') {
-      const peerName = summary.peerName?.trim() || summary.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
-      return `${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`;
-    }
-    if (summary) {
-      const shortKey = scope.key.length > 32 ? `${scope.key.slice(0, 29)}...` : scope.key;
-      return `${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`;
-    }
-    return scope.kind === 'conversation' ? i18nService.t('coworkMemoryScopeConversation') : i18nService.t('coworkMemoryScopeContact');
-  };
-
-  const getMemoryUsageClassLabel = (usageClass?: CoworkUserMemoryEntry['usageClass']): string | null => {
-    if (usageClass === 'self_identity') return i18nService.t('coworkMemorySelfIdentity');
-    if (usageClass === 'profile_fact') return i18nService.t('coworkMemoryUsageProfileFact');
-    if (usageClass === 'preference') return i18nService.t('coworkMemoryUsagePreference');
-    if (usageClass === 'operational_preference') return i18nService.t('coworkMemoryUsageOperationalPreference');
-    if (usageClass === 'work_review') return i18nService.t('coworkMemoryUsageWorkReview');
-    if (usageClass === 'value_boundary') return i18nService.t('coworkMemoryUsageValueBoundary');
-    return null;
-  };
-
-  const getMemoryVisibilityLabel = (visibility?: CoworkUserMemoryEntry['visibility']): string => {
-    return visibility === 'external_safe'
-      ? i18nService.t('coworkMemoryVisibilityExternalSafe')
-      : i18nService.t('coworkMemoryVisibilityLocalOnly');
-  };
-
-  const handleOpenCoworkMemoryModal = () => {
-    if (coworkMemoryMetabotId == null) return;
-    resetCoworkMemoryEditor();
-    setCoworkMemoryDraftScope({ ...coworkMemorySelectedScope });
-    setShowMemoryModal(true);
   };
 
   // Toggle provider enabled status
@@ -1739,8 +1173,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       if (hasCoworkConfigChanges) {
         await coworkService.updateConfig({
           executionMode: coworkExecutionMode,
-          memoryEnabled: coworkMemoryEnabled,
-          memoryLlmJudgeEnabled: coworkMemoryLlmJudgeEnabled,
         });
       }
 
@@ -2394,7 +1826,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     { key: 'im',             label: i18nService.t('imBot'),          icon: <ChatBubbleLeftIcon className="h-5 w-5" /> },
     { key: 'coworkMemory',   label: i18nService.t('coworkMemoryTitle'), icon: <BrainIcon className="h-5 w-5" /> },
     { key: 'archivedChats',  label: i18nService.t('archivedChatsTab'),  icon: <ArchiveBoxIcon className="h-5 w-5" /> },
-    { key: 'dreamDiary',     label: i18nService.t('dreamDiaryTab'),     icon: <MoonIcon className="h-5 w-5" /> },
     { key: 'coworkSandbox',  label: i18nService.t('coworkSandbox'),  icon: <ShieldCheckIcon className="h-5 w-5" /> },
     { key: 'paramsConfig',    label: i18nService.t('paramsAndConfig'), icon: <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="h-5 w-5"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" /></svg> },
     { key: 'traffic',         label: i18nService.t('trafficTab'),     icon: <BoltIcon className="h-5 w-5" /> },
@@ -2721,352 +2152,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
         );
 
       case 'coworkMemory':
-        return (
-          <div className="space-y-6">
-            <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
-              <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                {i18nService.t('coworkMemoryTitle')}
-              </div>
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={coworkMemoryEnabled}
-                  onChange={(event) => setCoworkMemoryEnabled(event.target.checked)}
-                  className="mt-1"
-                />
-                <span>
-                  <span className="block text-sm dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('coworkMemoryEnabled')}
-                  </span>
-                  <span className="block text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryEnabledHint')}
-                  </span>
-                  <span className="mt-1 block text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemorySimpleHint')}
-                  </span>
-                </span>
-              </label>
-              <label className={`flex items-start gap-3 ${coworkMemoryEnabled ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
-                <input
-                  type="checkbox"
-                  checked={coworkMemoryLlmJudgeEnabled}
-                  onChange={(event) => setCoworkMemoryLlmJudgeEnabled(event.target.checked)}
-                  disabled={!coworkMemoryEnabled}
-                  className="mt-1"
-                />
-                <span>
-                  <span className="block text-sm dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('coworkMemoryLlmJudgeEnabled')}
-                  </span>
-                  <span className="block text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryLlmJudgeEnabledHint')}
-                  </span>
-                </span>
-              </label>
-            </div>
-
-            <div className="space-y-4 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
-              <div className="flex items-center justify-between">
-                <div className="space-y-1">
-                  <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('coworkMemoryCrudTitle')}
-                  </div>
-                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryManageHint')}
-                  </div>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryScopeMetabot')}
-                  </div>
-                  <select
-                    value={coworkMemoryMetabotId ?? ''}
-                    onChange={(event) => {
-                      const next = Number(event.target.value);
-                      setCoworkMemoryMetabotId(Number.isFinite(next) && next > 0 ? next : null);
-                    }}
-                    className="min-w-[180px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                    disabled={coworkMemoryMetabots.length === 0}
-                  >
-                    {coworkMemoryMetabots.length === 0 ? (
-                      <option value="">{i18nService.t('coworkMemoryNoMetabotAvailable')}</option>
-                    ) : (
-                      coworkMemoryMetabots.map((metabot) => (
-                        <option key={metabot.id} value={metabot.id}>
-                          {metabot.name}
-                        </option>
-                      ))
-                    )}
-                  </select>
-                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryScopeSelect')}
-                  </div>
-                  <select
-                    value={`${coworkMemorySelectedScope.kind}:${coworkMemorySelectedScope.key}`}
-                    onChange={(event) => {
-                      const [kind, ...keyParts] = event.target.value.split(':');
-                      const key = keyParts.join(':');
-                      if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
-                        setCoworkMemorySelectedScope({ kind, key });
-                      }
-                    }}
-                    className="min-w-[240px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                    disabled={coworkMemoryMetabotId == null || (coworkMemoryScopes == null && coworkMemoryContacts.length === 0)}
-                  >
-                    <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
-                      {`${i18nService.t('coworkMemoryScopeOwner')}${coworkMemoryScopes?.owner ? ` (${coworkMemoryScopes.owner.count})` : ''}`}
-                    </option>
-                    {coworkMemoryContacts.length > 0 ? (
-                      coworkMemoryContacts.map((contact) => {
-                        const contactName = contact.name?.trim() || i18nService.t('coworkMemoryPeerUnknown');
-                        return (
-                          <option key={contact.globalMetaID} value={`contact:metaweb_private:peer:${contact.globalMetaID}`}>
-                            {`${i18nService.t('coworkMemoryScopeContact')}: ${contactName} (${contact.interactionCount})`}
-                          </option>
-                        );
-                      })
-                    ) : (
-                      <option value="" disabled>
-                        {i18nService.t('coworkMemoryScopeNoContacts')}
-                      </option>
-                    )}
-                    {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 ? (
-                      coworkMemoryScopes.conversations.map((scope) => {
-                        const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
-                        return (
-                          <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
-                            {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey} (${scope.count})`}
-                          </option>
-                        );
-                      })
-                    ) : (
-                      <option value="" disabled>
-                        {i18nService.t('coworkMemoryScopeNoConversations')}
-                      </option>
-                    )}
-                  </select>
-                  <button
-                    type="button"
-                    onClick={handleOpenCoworkMemoryModal}
-                    disabled={coworkMemoryMetabotId == null}
-                    className="btn-idchat-primary-filled inline-flex items-center justify-center px-3 py-1.5 text-sm disabled:opacity-60"
-                  >
-                    <PlusCircleIcon className="h-4 w-4 mr-1.5" />
-                    {i18nService.t('coworkMemoryCrudCreate')}
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-3 rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="text-xs font-medium dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('coworkMemoryMetabotPolicyTitle')}
-                  </div>
-                  <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {coworkMetabotMemoryPolicySource === 'metabot'
-                      ? i18nService.t('coworkMemoryMetabotPolicySourceMetabot')
-                      : i18nService.t('coworkMemoryMetabotPolicySourceGlobal')}
-                  </div>
-                </div>
-                {coworkMetabotMemoryPolicyNotice && (
-                  <div className="text-[11px] text-green-600 dark:text-green-400">
-                    {coworkMetabotMemoryPolicyNotice}
-                  </div>
-                )}
-                {coworkMetabotMemoryPolicyLoading ? (
-                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('loading')}
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-xs dark:text-claude-darkText text-claude-text">
-                      <input
-                        type="checkbox"
-                        checked={coworkMetabotMemoryEnabled}
-                        onChange={(event) => setCoworkMetabotMemoryEnabled(event.target.checked)}
-                        disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving}
-                      />
-                      <span>{i18nService.t('coworkMemoryEnabled')}</span>
-                    </label>
-                    <label className="flex items-center gap-2 text-xs dark:text-claude-darkText text-claude-text">
-                      <input
-                        type="checkbox"
-                        checked={coworkMetabotMemoryImplicitUpdateEnabled}
-                        onChange={(event) => setCoworkMetabotMemoryImplicitUpdateEnabled(event.target.checked)}
-                        disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving || !coworkMetabotMemoryEnabled}
-                      />
-                      <span>{i18nService.t('coworkMemoryCaptureEachTurn')}</span>
-                    </label>
-                    <label className="flex items-center gap-2 text-xs dark:text-claude-darkText text-claude-text">
-                      <input
-                        type="checkbox"
-                        checked={coworkMetabotMemoryLlmJudgeEnabled}
-                        onChange={(event) => setCoworkMetabotMemoryLlmJudgeEnabled(event.target.checked)}
-                        disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving || !coworkMetabotMemoryEnabled}
-                      />
-                      <span>{i18nService.t('coworkMemoryLlmJudgeEnabled')}</span>
-                    </label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <label className="text-xs dark:text-claude-darkText text-claude-text">
-                        <span className="block mb-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {i18nService.t('coworkMemoryGuardLevel')}
-                        </span>
-                        <select
-                          value={coworkMetabotMemoryGuardLevel}
-                          onChange={(event) => setCoworkMetabotMemoryGuardLevel(event.target.value as 'strict' | 'standard' | 'relaxed')}
-                          className="w-full rounded border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                          disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving || !coworkMetabotMemoryEnabled}
-                        >
-                          <option value="strict">{i18nService.t('coworkMemoryGuardStrict')}</option>
-                          <option value="standard">{i18nService.t('coworkMemoryGuardStandard')}</option>
-                          <option value="relaxed">{i18nService.t('coworkMemoryGuardRelaxed')}</option>
-                        </select>
-                      </label>
-                      <label className="text-xs dark:text-claude-darkText text-claude-text">
-                        <span className="block mb-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                          {i18nService.t('coworkMemoryMaxResults')}
-                        </span>
-                        <input
-                          type="number"
-                          min={1}
-                          max={60}
-                          value={coworkMetabotMemoryMaxItems}
-                          onChange={(event) => {
-                            const next = Number(event.target.value);
-                            setCoworkMetabotMemoryMaxItems(Number.isFinite(next) ? next : 12);
-                          }}
-                          className="w-full rounded border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                          disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving || !coworkMetabotMemoryEnabled}
-                        />
-                      </label>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleSaveCoworkMetabotMemoryPolicy}
-                      disabled={coworkMemoryMetabotId == null || coworkMetabotMemoryPolicySaving || !hasCoworkMetabotMemoryPolicyChanges}
-                      className="rounded border px-3 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:opacity-60"
-                    >
-                      {coworkMetabotMemoryPolicySaving ? i18nService.t('saving') : i18nService.t('coworkMemoryMetabotPolicySave')}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {coworkMemoryStats && coworkMemorySelectedScope.kind !== 'contact' && (
-                <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  {`${i18nService.t('coworkMemoryTotalLabel')}: ${coworkMemoryStats.created + coworkMemoryStats.stale} · ${i18nService.t('coworkMemoryActiveLabel')}: ${coworkMemoryStats.created} · ${i18nService.t('coworkMemoryInactiveLabel')}: ${coworkMemoryStats.stale}`}
-                </div>
-              )}
-
-              {coworkMemoryMetabotId == null && (
-                <div className="text-xs text-amber-600 dark:text-amber-400">
-                  {i18nService.t('coworkMemoryNoMetabotAvailable')}
-                </div>
-              )}
-
-              {coworkMemorySelectedScope.kind === 'contact' ? (
-                coworkMemoryContactDetailLoading ? (
-                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('loading')}
-                  </div>
-                ) : coworkMemoryContactDetail ? (
-                  <MetaIDContactPanel
-                    detail={coworkMemoryContactDetail}
-                    facts={coworkMemoryEntries}
-                    factsLoading={coworkMemoryListLoading}
-                    onEditFact={handleEditCoworkMemoryEntry}
-                    onDeleteFact={(entry) => { void handleDeleteCoworkMemoryEntry(entry); }}
-                  />
-                ) : (
-                  <div className="rounded-lg border px-3 py-3 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('coworkMemoryEmpty')}
-                  </div>
-                )
-              ) : (
-                <>
-                  <input
-                    type="text"
-                    value={coworkMemoryQuery}
-                    onChange={(event) => setCoworkMemoryQuery(event.target.value)}
-                    placeholder={i18nService.t('coworkMemorySearchPlaceholder')}
-                    disabled={coworkMemoryMetabotId == null}
-                    className="w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                  />
-
-                  <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
-                    {coworkMemoryListLoading ? (
-                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('loading')}
-                      </div>
-                    ) : coworkMemoryEntries.length === 0 ? (
-                      <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('coworkMemoryEmpty')}
-                      </div>
-                    ) : (
-                      <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                        {coworkMemoryEntries.map((entry) => (
-                          <div key={entry.id} className="px-3 py-3 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="flex-1 space-y-1 min-w-0">
-                                <div className="font-medium dark:text-claude-darkText text-claude-text break-words">
-                                  {entry.text}
-                                </div>
-                                <div className="flex flex-wrap items-center gap-2 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                    {getMemoryStatusLabel(entry.status)}
-                                  </span>
-                                  {getMemoryUsageClassLabel(entry.usageClass) && (
-                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border text-claude-accent dark:text-claude-darkAccent">
-                                      {getMemoryUsageClassLabel(entry.usageClass)}
-                                    </span>
-                                  )}
-                                  {entry.visibility === 'external_safe' ? (
-                                    <span className="rounded-full border px-2 py-0.5 border-emerald-500/50 text-emerald-600 dark:text-emerald-400">
-                                      {getMemoryVisibilityLabel(entry.visibility)}
-                                    </span>
-                                  ) : (
-                                    <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                      {getMemoryVisibilityLabel(entry.visibility)}
-                                    </span>
-                                  )}
-                                  <span>
-                                    {`${i18nService.t('coworkMemoryUpdatedAt')}: ${formatMemoryUpdatedAt(entry.updatedAt)}`}
-                                  </span>
-                                </div>
-                              </div>
-                              <div className="flex items-center gap-1 flex-shrink-0">
-                                {entry.usageClass !== 'self_identity' && (
-                                  <>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleEditCoworkMemoryEntry(entry)}
-                                      className="rounded border px-2 py-1 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
-                                    >
-                                      {i18nService.t('edit')}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => { void handleDeleteCoworkMemoryEntry(entry); }}
-                                      className="rounded border px-2 py-1 text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-60 transition-colors"
-                                      disabled={coworkMemoryListLoading}
-                                    >
-                                      {i18nService.t('delete')}
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-
-          </div>
-        );
+        return <MemorySettings onClose={onClose} />;
 
       case 'archivedChats': {
         const totalArchivedChatPages = Math.max(1, Math.ceil(archivedChatsTotal / ARCHIVED_CHATS_PAGE_SIZE));
@@ -3396,190 +2482,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           </div>
         );
       }
-
-      case 'dreamDiary':
-        return (
-          <div className="space-y-6">
-            <div className="space-y-3 rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                    {i18nService.t('dreamDiaryTab')}
-                  </div>
-                  <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('dreamDiaryHint')}
-                  </div>
-                </div>
-                <select
-                  value={dreamDiaryMetabotId ?? ''}
-                  onChange={(event) => {
-                    const next = Number(event.target.value);
-                    setDreamDiaryMetabotId(Number.isFinite(next) && next > 0 ? next : null);
-                  }}
-                  className="min-w-[160px] rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                  disabled={coworkMemoryMetabots.length === 0}
-                >
-                  {coworkMemoryMetabots.length === 0 ? (
-                    <option value="">{i18nService.t('coworkMemoryNoMetabotAvailable')}</option>
-                  ) : (
-                    coworkMemoryMetabots.map((metabot) => (
-                      <option key={metabot.id} value={metabot.id}>
-                        {metabot.name}
-                      </option>
-                    ))
-                  )}
-                </select>
-              </div>
-
-              <div className="flex items-center justify-end gap-2">
-                <input
-                  type="date"
-                  value={dreamDiaryRunDate}
-                  max={formatLocalDateInput(new Date(new Date().getFullYear(), new Date().getMonth(), new Date().getDate() - 1))}
-                  onChange={(event) => setDreamDiaryRunDate(event.target.value)}
-                  aria-label={i18nService.t('dreamDiaryForceDate')}
-                  className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                  disabled={dreamDiaryRunning || coworkMemoryMetabots.length === 0}
-                />
-                <button
-                  type="button"
-                  onClick={() => { void handleForceDream(); }}
-                  title={i18nService.t('dreamDiaryForceHint')}
-                  aria-label={i18nService.t('dreamDiaryForceDream')}
-                  disabled={dreamDiaryRunning || dreamDiaryMetabotId == null || !dreamDiaryRunDate}
-                  className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <ArrowPathIcon className={`h-3.5 w-3.5 ${dreamDiaryRunning ? 'animate-spin' : ''}`} />
-                  <span>{dreamDiaryRunning ? i18nService.t('dreamDiaryForceRunning') : i18nService.t('dreamDiaryForceDream')}</span>
-                </button>
-              </div>
-              {dreamDiaryNotice && (
-                <div className="text-right text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
-                  {dreamDiaryNotice}
-                </div>
-              )}
-
-              <div className="max-h-[500px] overflow-auto rounded-lg border dark:border-claude-darkBorder border-claude-border">
-                {dreamDiaryLoading ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('loading')}
-                  </div>
-                ) : dreamDiaryEntries.length === 0 ? (
-                  <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {i18nService.t('dreamDiaryEmpty')}
-                  </div>
-                ) : (
-                  <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-                    {dreamDiaryEntries.map((entry) => {
-                      if (entry.kind === 'failed') {
-                        const { run } = entry;
-                        const retryPending = run.nextRetryAt == null || run.nextRetryAt <= Date.now();
-                        return (
-                          <div key={`failed-${run.id}`} className="px-3 py-3 text-xs">
-                            <div className="flex items-start gap-2">
-                              <ExclamationTriangleIcon className="h-4 w-4 mt-0.5 flex-shrink-0 text-amber-500" />
-                              <span className="flex-1 min-w-0">
-                                <span className="font-medium dark:text-claude-darkText text-claude-text">{run.dreamDate}</span>
-                                <span className="ml-2 rounded-full border px-2 py-0.5 text-amber-600 border-amber-300 dark:text-amber-400 dark:border-amber-500/40">
-                                  {i18nService.t('dreamDiaryFailedBadge')}
-                                </span>
-                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
-                                  {`${i18nService.t('dreamDiaryFailedAttempts')}: ${run.attemptCount}`}
-                                </span>
-                                {run.error && (
-                                  <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
-                                    {run.error}
-                                  </span>
-                                )}
-                                <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                  {retryPending
-                                    ? i18nService.t('dreamDiaryRetryPending')
-                                    : `${i18nService.t('dreamDiaryNextRetry')}: ${new Date(run.nextRetryAt ?? 0).toLocaleString()}`}
-                                </span>
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setDreamDiaryRunDate(run.dreamDate);
-                                  void handleForceDream(run.dreamDate);
-                                }}
-                                title={i18nService.t('dreamDiaryForceHint')}
-                                aria-label={i18nService.t('dreamDiaryRetryNow')}
-                                disabled={dreamDiaryRunning}
-                                className="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover disabled:cursor-not-allowed disabled:opacity-50"
-                              >
-                                <ArrowPathIcon className={`h-3.5 w-3.5 ${dreamDiaryRunning ? 'animate-spin' : ''}`} />
-                                <span>{i18nService.t('dreamDiaryRetryNow')}</span>
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      }
-                      const summary = entry.summary;
-                      const expanded = dreamDiaryExpandedId === summary.id;
-                      const sectionEntries = Object.entries(summary.sections ?? {}).filter(([, text]) => typeof text === 'string' && text.trim());
-                      return (
-                        <div key={summary.id} className="px-3 py-3 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => setDreamDiaryExpandedId(expanded ? null : summary.id)}
-                            className="w-full flex items-start gap-2 text-left"
-                          >
-                            <ChevronRightIcon className={`h-4 w-4 mt-0.5 flex-shrink-0 transition-transform ${expanded ? 'rotate-90' : ''}`} />
-                            <span className="flex-1 min-w-0">
-                              <span className="font-medium dark:text-claude-darkText text-claude-text">{summary.summaryDate}</span>
-                              <span className="block mt-1 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">
-                                {summary.summaryText}
-                              </span>
-                            </span>
-                          </button>
-                          {expanded && (
-                            <div className="mt-2 ml-6 space-y-2 border-l-2 pl-3 dark:border-claude-darkBorder border-claude-border">
-                              {sectionEntries.map(([key, text]) => (
-                                <div key={key}>
-                                  <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border">
-                                    {i18nService.t(`dreamDiarySection_${key}`)}
-                                  </span>
-                                  <span className="ml-2 dark:text-claude-darkTextSecondary text-claude-textSecondary break-words">{text}</span>
-                                </div>
-                              ))}
-                              <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                {`${i18nService.t('dreamDiaryStatsSessions')}: ${summary.stats?.sessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsOrders')}: ${summary.stats?.orderCount ?? summary.stats?.orderSessionCount ?? 0} · ${i18nService.t('dreamDiaryStatsTasks')}: ${summary.stats?.taskRunCount ?? 0} · ${i18nService.t('dreamDiaryStatsMessages')}: ${summary.stats?.messageCount ?? 0}`}
-                              </div>
-                              {(summary.sessionRefs ?? []).length > 0 && (
-                                <div className="space-y-1">
-                                  <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                    {i18nService.t('dreamDiaryRelatedSessions')}
-                                  </div>
-                                  {(summary.sessionRefs ?? []).map((ref) => (
-                                    <button
-                                      key={ref.sessionId}
-                                      type="button"
-                                      onClick={() => handleOpenCoworkSession(ref.sessionId)}
-                                      className="block text-claude-accent dark:text-claude-darkAccent hover:underline break-all text-left"
-                                      title={i18nService.t('dreamDiaryOpenSessionHint')}
-                                    >
-                                      {`IDBots://${ref.sessionId}${ref.title ? ` ${ref.title}` : ''}`}
-                                    </button>
-                                  ))}
-                                </div>
-                              )}
-                              {summary.llmId && (
-                                <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                                  {`LLM: ${summary.llmId}`}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        );
 
       case 'model':
         return (
@@ -4032,13 +2934,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
-  const coworkMemoryDraftExternalSafeAllowed = (
-    coworkMemoryDraftScope?.kind ?? 'owner'
-  ) === 'owner' && coworkMemoryDraftUsageClass === 'operational_preference';
-  const coworkMemoryEditingTagLabel = coworkMemoryDraftScope
-    ? `${i18nService.t('coworkMemoryEditingTag')} · ${getMemoryScopeLabel(coworkMemoryDraftScope, coworkMemoryScopes)}`
-    : i18nService.t('coworkMemoryEditingTag');
-
   return (
     <div
       className="fixed inset-0 z-50 modal-backdrop flex items-center justify-center"
@@ -4434,147 +3329,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             </div>
           )}
 
-          {/* Memory Modal */}
-          {showMemoryModal && (
-            <div
-              className="absolute inset-0 z-20 flex items-center justify-center bg-black/35 px-4"
-              onClick={resetCoworkMemoryEditor}
-            >
-              <div
-                className="dark:bg-claude-darkSurface bg-claude-surface dark:border-claude-darkBorder border-claude-border border rounded-2xl shadow-xl w-full max-w-md"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="px-5 pt-5 pb-4 border-b dark:border-claude-darkBorder border-claude-border">
-                  <h3 className="text-base font-semibold dark:text-claude-darkText text-claude-text">
-                    {coworkMemoryEditingId ? i18nService.t('coworkMemoryCrudUpdate') : i18nService.t('coworkMemoryCrudCreate')}
-                  </h3>
-                </div>
-
-                <div className="px-5 py-4 space-y-4">
-                  {coworkMemoryEditingId && (
-                    <div className="rounded-lg border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {coworkMemoryEditingTagLabel}
-                    </div>
-                  )}
-                  <textarea
-                    value={coworkMemoryDraftText}
-                    onChange={(event) => setCoworkMemoryDraftText(event.target.value)}
-                    placeholder={i18nService.t('coworkMemoryCrudTextPlaceholder')}
-                    autoFocus
-                    className="min-h-[200px] w-full rounded-lg border px-3 py-2 text-sm dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkText text-claude-text focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30"
-                  />
-                  {!coworkMemoryEditingId && (
-                    <label className="block">
-                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('coworkMemoryScopeSelect')}
-                      </span>
-                      <select
-                        value={`${coworkMemoryDraftScope?.kind ?? 'owner'}:${coworkMemoryDraftScope?.key ?? 'owner:self'}`}
-                        onChange={(event) => {
-                          const [kind, ...keyParts] = event.target.value.split(':');
-                          const key = keyParts.join(':');
-                          if ((kind === 'owner' || kind === 'contact' || kind === 'conversation') && key) {
-                            setCoworkMemoryDraftScope({ kind, key });
-                            if (kind !== 'owner') {
-                              setCoworkMemoryDraftVisibility('local_only');
-                            }
-                          }
-                        }}
-                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                      >
-                        <option value={`owner:${coworkMemoryScopes?.owner?.key ?? 'owner:self'}`}>
-                          {i18nService.t('coworkMemoryScopeOwner')}
-                        </option>
-                        {coworkMemoryScopes && coworkMemoryScopes.contacts.length > 0 && (
-                          coworkMemoryScopes.contacts.map((scope) => {
-                            const peerName = scope.peerName?.trim() || scope.peerGlobalMetaId?.trim() || i18nService.t('coworkMemoryPeerUnknown');
-                            return (
-                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
-                                {`${i18nService.t('coworkMemoryScopeContact')}: ${peerName}`}
-                              </option>
-                            );
-                          })
-                        )}
-                        {coworkMemoryScopes && coworkMemoryScopes.conversations.length > 0 && (
-                          coworkMemoryScopes.conversations.map((scope) => {
-                            const shortKey = scope.key.length > 40 ? `${scope.key.slice(0, 37)}...` : scope.key;
-                            return (
-                              <option key={scope.key} value={`${scope.kind}:${scope.key}`}>
-                                {`${i18nService.t('coworkMemoryScopeConversation')}: ${shortKey}`}
-                              </option>
-                            );
-                          })
-                        )}
-                      </select>
-                    </label>
-                  )}
-                  <div className="grid grid-cols-2 gap-3">
-                    <label className="block">
-                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('coworkMemoryCategoryAll')}
-                      </span>
-                      <select
-                        value={coworkMemoryDraftUsageClass}
-                        onChange={(event) => {
-                          const next = event.target.value as CoworkMemoryEditableUsageClass;
-                          setCoworkMemoryDraftUsageClass(next);
-                          if (next !== 'operational_preference') {
-                            setCoworkMemoryDraftVisibility('local_only');
-                          }
-                        }}
-                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
-                      >
-                        <option value="profile_fact">{i18nService.t('coworkMemoryUsageProfileFact')}</option>
-                        <option value="preference">{i18nService.t('coworkMemoryUsagePreference')}</option>
-                        <option value="operational_preference">{i18nService.t('coworkMemoryUsageOperationalPreference')}</option>
-                        <option value="work_review">{i18nService.t('coworkMemoryUsageWorkReview')}</option>
-                        <option value="value_boundary">{i18nService.t('coworkMemoryUsageValueBoundary')}</option>
-                      </select>
-                    </label>
-                    <label className="block">
-                      <span className="block mb-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {i18nService.t('coworkMemoryVisibility')}
-                      </span>
-                      <select
-                        value={coworkMemoryDraftVisibility}
-                        onChange={(event) => {
-                          setCoworkMemoryDraftVisibility(event.target.value === 'external_safe' ? 'external_safe' : 'local_only');
-                        }}
-                        disabled={!coworkMemoryDraftExternalSafeAllowed}
-                        className="w-full rounded-lg border px-2 py-1.5 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface disabled:opacity-60"
-                      >
-                        <option value="local_only">{i18nService.t('coworkMemoryVisibilityLocalOnly')}</option>
-                        <option value="external_safe">{i18nService.t('coworkMemoryVisibilityExternalSafe')}</option>
-                      </select>
-                    </label>
-                  </div>
-                  {!coworkMemoryDraftExternalSafeAllowed && (
-                    <div className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {i18nService.t('coworkMemoryVisibilityLockedHint')}
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex justify-end space-x-2 px-5 pb-5">
-                  <button
-                    type="button"
-                    onClick={resetCoworkMemoryEditor}
-                    className="px-3 py-1.5 text-sm dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover rounded-xl border dark:border-claude-darkBorder border-claude-border transition-colors"
-                  >
-                    {i18nService.t('cancel')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { void handleSaveCoworkMemoryEntry(); }}
-                    disabled={!coworkMemoryDraftText.trim() || coworkMemoryListLoading}
-                    className="btn-idchat-primary-filled px-3 py-1.5 text-sm disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    {coworkMemoryEditingId ? i18nService.t('save') : i18nService.t('coworkMemoryCrudCreate')}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>
