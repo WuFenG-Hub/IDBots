@@ -3514,7 +3514,7 @@ const startSqliteDaemons = (): void => {
     getOpenTeamMembershipStore,
     orchestrationBridge: getGroupTaskOrchestrationBridge(),
     performChat: performChatCompletionForOrchestrator,
-    postGroupTaskMessage: (taskId, metabotId, content) => postGroupTaskMessage(taskId, metabotId, content),
+    postGroupTaskMessage: (taskId, metabotId, content, opts) => postGroupTaskMessage(taskId, metabotId, content, opts),
     getChatSkillsRoutingPrompt: (input) => skillMgr.buildChatSkillsRoutingPrompt(input),
     runSkillTurn: async (params) => {
       const roots = skillMgr.getAllSkillRoots();

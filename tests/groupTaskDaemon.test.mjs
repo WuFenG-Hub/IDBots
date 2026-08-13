@@ -175,8 +175,8 @@ const createHarness = async (overrides = {}) => {
       }
       return state.chatReply ?? `reply-for-${llmId}`;
     },
-    postGroupTaskMessage: async (taskId, metabotId, content) => {
-      sends.push({ taskId, metabotId, content });
+    postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
+      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
       return { pinId: `send-pin-${sends.length}` };
     },
     getChatSkillsRoutingPrompt: async (input) => {
@@ -432,6 +432,16 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
     assert.match(coderCall.systemPrompt, /the worker of this task group/);
     assert.match(coderCall.userMessage, />>> Twin Bot: Team kickoff\..*<<< \(the message you are responding to\)/);
     assert.match(h.sends.find((s) => s.metabotId === 2).content, /reply-for-llm-2/);
+
+    // R5: worker replies are threaded under the chair message that dispatched
+    // them (replyPin injected by the host from the gating context).
+    for (const workerId of [2, 3]) {
+      assert.equal(
+        h.sends.find((s) => s.metabotId === workerId).replyPin,
+        'kickoff-i0',
+        `worker ${workerId} reply carries the kickoff replyPin`,
+      );
+    }
 
     // sessions: one per (task, worker) on the metaweb_group_task channel
     for (const workerId of [2, 3]) {

@@ -127,6 +127,21 @@ interface GroupTaskMessageItemProps {
   isOwnBotSender?: boolean;
   /** Briefly highlight this row (e.g. when jumped to from an integrity event). */
   highlight?: boolean;
+  /**
+   * R5: the message this one replies to (resolved by replyPin from the loaded
+   * transcript). null = replyPin set but target not in the loaded window (the
+   * bar still shows and clicking jumps/loads it). undefined = no replyPin.
+   */
+  replyTarget?: { senderName: string; preview: string } | null;
+  /** R5: jump to (and load if needed) the replied-to message. */
+  onJumpToReply?: (pinId: string) => void;
+}
+
+/** R5: flatten a referenced message into a short, tag-stripped preview. */
+function previewMessageContent(content: string | null | undefined): string {
+  const text = (content ?? '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
 }
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
@@ -136,6 +151,8 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   isRemoteSender,
   isOwnBotSender,
   highlight,
+  replyTarget,
+  onJumpToReply,
 }) => {
   // Round-4 attribution: the chain-signature GlobalMetaID is the ONLY identity
   // source. A message whose sender is neither a task member nor the owner is
@@ -206,6 +223,21 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           )}
           {txId && <TxIdBadge txId={txId} />}
         </div>
+        {message.replyPin && (
+          <button
+            type="button"
+            onClick={() => onJumpToReply?.(message.replyPin!)}
+            className="mt-1 flex max-w-full items-center gap-1 rounded-md border-l-2 border-claude-accent/50 bg-claude-surfaceHover/40 dark:bg-claude-darkSurfaceHover/40 px-2 py-1 text-left text-[11px] text-claude-textSecondary dark:text-claude-darkTextSecondary/80 hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+            title={message.replyPin}
+          >
+            <span className="shrink-0 text-claude-accent">↩</span>
+            <span className="truncate">
+              {replyTarget
+                ? `${i18nService.t('groupTasksReplyTo')} ${replyTarget.senderName}: ${replyTarget.preview || i18nService.t('groupTasksReplyEmpty')}`
+                : `${i18nService.t('groupTasksReplyTo')} ${i18nService.t('groupTasksReplyNotLoaded')}`}
+            </span>
+          </button>
+        )}
         <div
           className={`mt-1 rounded-lg px-3 py-2 text-sm ${
             isOwnerSender

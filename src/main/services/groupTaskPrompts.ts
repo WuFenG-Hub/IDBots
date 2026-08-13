@@ -70,6 +70,7 @@ const SHARED_PLAYBOOK_RULES = [
   '- Post deliverables with a `[DELIVERABLE]` line, e.g. `[DELIVERABLE] metaapp: metaapp://<pinId>` — one deliverable per line.',
   '- Report truthfully. NEVER fabricate results, pinids, txids, URLs, file contents or tool output, and NEVER claim you performed an action (search, publish, write) that you did not actually execute with your skills. If you could not do it, say so plainly — an honest failure is acceptable, a fabricated success is a critical fault.',
   '- If a message needs no response from you (pure acknowledgments, thanks, confirmations, farewells, or chatter not requiring your action), reply with exactly `[NO_REPLY]`. Silence is correct and expected in those cases.',
+  '- REPLY THREADING: the host automatically attaches your reply to the message you are responding to (a "replyPin"). You do NOT need to write or quote any pinid yourself — never paste a pinid to indicate which message you are replying to; just answer normally and the host threads it.',
 ];
 
 const CHAIR_PLAYBOOK_RULES = [

@@ -655,6 +655,7 @@ export type GroupTaskDaemonSendFn = (
   taskId: number,
   metabotId: number,
   content: string,
+  opts?: { replyPin?: string; mention?: string[] },
 ) => Promise<{ pinId: string }>;
 
 /** Narrow skill-routing seam (mirrors how privateChatDaemon calls skillManager). */
@@ -1241,8 +1242,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     taskId: number,
     metabotId: number,
     content: string,
+    opts?: { replyPin?: string; mention?: string[] },
   ): Promise<{ pinId: string }> => {
-    const result = await deps.postGroupTaskMessage(taskId, metabotId, content);
+    const result = await deps.postGroupTaskMessage(taskId, metabotId, content, opts);
     refreshDriverClaim(taskId);
     return result;
   };
@@ -1315,7 +1317,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       ackText = `[WORKING] 已接单，正在处理「${objective}」，预计需要一些时间。`;
     }
     try {
-      const sent = await postGroupMessage(task.id, bot.id, ackText);
+      const sent = await postGroupMessage(task.id, bot.id, ackText, {
+        // R5: the ACK is a direct response to the chair's assignment message —
+        // thread it under that pin so the group reads as a conversation.
+        replyPin: message.pinId ?? undefined,
+      });
       sqlite.set(ackKey, '1');
       emitLog(`[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} ACK posted (pin ${sent.pinId})`);
     } catch (error) {
@@ -3043,7 +3049,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     let sent: { pinId: string };
     try {
-      sent = await postGroupMessage(task.id, bot.id, reply);
+      // R5: thread this reply under the message that triggered it (the chair's
+      // dispatch for a worker, or the worker's message for a chair response).
+      // The host decides who is being replied to from the gating context — the
+      // LLM never writes pinids itself.
+      sent = await postGroupMessage(task.id, bot.id, reply, {
+        replyPin: message.pinId ?? undefined,
+      });
     } catch (error) {
       failCanonicalAttempt(error);
       emitLog(

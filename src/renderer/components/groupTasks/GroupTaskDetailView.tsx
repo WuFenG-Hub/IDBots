@@ -768,13 +768,29 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 </p>
               </div>
             ) : (
-              messages.map((message) => (
+              messages.map((message) => {
+                // R5: resolve the replied-to message from the loaded transcript
+                // for the reply bar preview (null when the target is on an older
+                // page — clicking still jumps/loads it via jumpToMessage).
+                const replyPin = message.replyPin?.trim();
+                const replyTargetMessage = replyPin
+                  ? messages.find((candidate) => candidate.pinId === replyPin)
+                  : undefined;
+                const replyTarget = replyPin
+                  ? (replyTargetMessage
+                    ? {
+                        senderName: replyTargetMessage.senderName?.trim() || 'Unknown',
+                        preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+                      }
+                    : null)
+                  : undefined;
+                return (
                 <GroupTaskMessageItem
                   key={message.id}
                   message={message}
                   isChairSender={Boolean(
                     chairMember?.globalmetaid
-                    && message.senderGlobalMetaId === chairMember.globalmetaid,
+                    && message.senderGlobalMetaId === chairMember.globalMetaid,
                   )}
                   isOwnerSender={Boolean(
                     ownerGlobalMetaId && message.senderGlobalMetaId === ownerGlobalMetaId,
@@ -784,8 +800,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
                   highlight={highlightPinId != null && message.pinId === highlightPinId}
+                  replyTarget={replyTarget}
+                  onJumpToReply={(pinId) => void jumpToMessage(pinId)}
                 />
-              ))
+                );
+              })
             )}
           </div>
 
