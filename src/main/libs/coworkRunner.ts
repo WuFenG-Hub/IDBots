@@ -2020,7 +2020,18 @@ export class CoworkRunner extends EventEmitter {
     // a turn where almost nothing hit means the prefix itself broke through a
     // path we did not track (e.g. SDK-internal autocompact), and that stays
     // 'unknown' as an investigation signal.
-    const turnInputTotal = inputTokens + cacheReadTokens + cacheCreationTokens;
+    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
+    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
+    // fresh-only with cache partitioned into the cache_* fields. The turn hit
+    // ratio used for miss attribution must respect that split — adding the
+    // cache counters on top of a total that already contains them halves the
+    // ratio and mislabels healthy append-only turns as 'unknown' prefix breaks.
+    const activeForBilling = this.activeSessions.get(sessionId);
+    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
+    const cacheIncludedInInput = billingSource !== 'anthropic';
+    const turnInputTotal = cacheIncludedInInput
+      ? inputTokens
+      : inputTokens + cacheReadTokens + cacheCreationTokens;
     const turnHitRatio = turnInputTotal > 0 ? cacheReadTokens / turnInputTotal : 1;
     const untrackedMissReason = turnHitRatio < 0.3 ? 'unknown' : 'append_only';
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
@@ -2077,12 +2088,6 @@ export class CoworkRunner extends EventEmitter {
         };
       }
     }
-    const activeForBilling = this.activeSessions.get(sessionId);
-    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
-    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
-    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
-    // fresh-only with cache partitioned into the cache_* fields.
-    const cacheIncludedInInput = billingSource !== 'anthropic';
     // lastTurnInputTokens feeds the compaction budget as the REAL context
     // size of the most recent REQUEST. Only the top-level usage carries that
     // (modelUsage is the turn aggregate); keep the top-level values here even
