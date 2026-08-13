@@ -230,11 +230,13 @@ IDBots 当前真实可分享的是：
 
 脚本会输出：
 
-- `pinId`：最新写链 pin
+- `pinId`：最新写链 pin（modify 时是「变更记录」，不是应用本身）
 - `firstPinId`：稳定展示 pin（如果已知）
-- `metaappUri`
-- `shareWebUrl`
+- `metaappUri`：对 modify 操作已指向根 pin（`metaapp://<firstPinId>`），可直接用于对外展示
+- `shareWebUrl`：同上，指向根 pin
 - `runPath`
+
+> 修改（update）后对外展示 / 打开 / 分享一律用根 pin（`firstPinId`，回退 `targetPinId`，再回退 `pinId`）。不要用 modify 回执的 `pinId` 拼展示链接。
 
 homepage 选中与普通 publish 分开。推荐顺序是：
 

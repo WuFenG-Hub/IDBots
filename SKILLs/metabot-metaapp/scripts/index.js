@@ -864,6 +864,12 @@ async function publishPrepared(prepared, metabotId, network, deps = {}) {
   const pinId = normalizePinId(response);
   const txids = Array.isArray(response.txids) ? response.txids.map((item) => cleanString(item)).filter(Boolean) : [];
   const txid = cleanString(response.txid) || txids[0] || '';
+  // R8: for a modify, the STABLE display pin is the create root (firstPinId),
+  // NOT the modify write pin — a modify pin is just a change record. Build the
+  // user-facing URI/URL from the root so links never drift to the latest write.
+  const displayPin = canonical.operation === 'modify'
+    ? (canonical.firstPinId || canonical.targetPinId || pinId)
+    : pinId;
   const result = {
     success: true,
     operation: canonical.operation,
@@ -872,8 +878,8 @@ async function publishPrepared(prepared, metabotId, network, deps = {}) {
     txid: txid || undefined,
     txids,
     totalCost: typeof response.totalCost === 'number' ? response.totalCost : undefined,
-    metaappUri: pinId ? `metaapp://${pinId}` : undefined,
-    shareWebUrl: pinId ? `https://openagentinternet.org/browser/metaapp/${pinId}` : undefined,
+    metaappUri: displayPin ? `metaapp://${displayPin}` : undefined,
+    shareWebUrl: displayPin ? `https://openagentinternet.org/browser/metaapp/${displayPin}` : undefined,
   };
   if (canonical.targetPinId) result.targetPinId = canonical.targetPinId;
   if (canonical.firstPinId) result.firstPinId = canonical.firstPinId;

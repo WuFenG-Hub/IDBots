@@ -15,6 +15,42 @@ export function canAcceptGroupTask(status) {
   return status === 'review';
 }
 
+const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-metaapp):/i;
+
+/** R3: whether a URI opens inside the Bot Browser (vs the external browser). */
+export function isBotBrowserUri(uri) {
+  return BOT_BROWSER_URI_PROTOCOL_RE.test(String(uri ?? '').trim());
+}
+
+/**
+ * R3: open a deliverable/message URI the right way — metaweb schemes
+ * (metaid://, metaapp://, map://, metafile://, pin://, preview-metaapp://) open
+ * in the Bot Browser via the app-wide event MarkdownContent uses; http(s) opens
+ * externally; anything else is copied to the clipboard as the best-effort action.
+ * Never throws.
+ */
+export function openGroupTaskUri(uri) {
+  const value = String(uri ?? '').trim();
+  if (!value) return;
+  try {
+    if (isBotBrowserUri(value)) {
+      window.dispatchEvent(new CustomEvent('botBrowser:openUri', { detail: { uri: value } }));
+      return;
+    }
+    if (/^https?:\/\//i.test(value)) {
+      window.open(value, '_blank', 'noreferrer');
+      return;
+    }
+  } catch {
+      // DOM/window unavailable — fall through to clipboard copy.
+  }
+  try {
+    navigator.clipboard?.writeText(value);
+  } catch {
+      // Clipboard unavailable — silently ignore.
+  }
+}
+
 /**
  * Short display form for a group/room id (the on-chain group_id, a 64-hex pinid
  * with an `i0` output suffix). Long ids are elided to `first8…last6` (keeping
@@ -36,13 +72,15 @@ export function canReopenGroupTask(status) {
   return status === 'review';
 }
 
-/** P1-4: i18n label key for a member workStatus. */
+/** P1-4/R6: i18n label key for a member workStatus. */
 export function groupTaskWorkStatusLabelKey(status) {
   switch (status) {
     case 'working':
       return 'groupTasksWorkStatusWorking';
     case 'error':
       return 'groupTasksWorkStatusError';
+    case 'timeout':
+      return 'groupTasksWorkStatusTimeout';
     case 'idle':
       return 'groupTasksWorkStatusIdle';
     case 'unknown':

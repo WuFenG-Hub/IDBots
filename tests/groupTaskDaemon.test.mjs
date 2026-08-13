@@ -150,6 +150,7 @@ const createHarness = async (overrides = {}) => {
     ownerReportFails: overrides.ownerReportFails ?? false,
     ownerReportResult: overrides.ownerReportResult ?? null,
     pinOutcomes: overrides.pinOutcomes ?? {},
+    sendFailures: overrides.sendFailures ?? null,
   };
   const seenChatErrors = new Set();
   const orchestrationBridge = new GroupTaskOrchestrationBridge({
@@ -175,8 +176,11 @@ const createHarness = async (overrides = {}) => {
       }
       return state.chatReply ?? `reply-for-${llmId}`;
     },
-    postGroupTaskMessage: async (taskId, metabotId, content) => {
-      sends.push({ taskId, metabotId, content });
+    postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
+      sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
+      if (state.sendFailures?.has(metabotId)) {
+        throw new Error(`on-chain send failed for bot ${metabotId}`);
+      }
       return { pinId: `send-pin-${sends.length}` };
     },
     getChatSkillsRoutingPrompt: async (input) => {
@@ -433,6 +437,16 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
     assert.match(coderCall.userMessage, />>> Twin Bot: Team kickoff\..*<<< \(the message you are responding to\)/);
     assert.match(h.sends.find((s) => s.metabotId === 2).content, /reply-for-llm-2/);
 
+    // R5: worker replies are threaded under the chair message that dispatched
+    // them (replyPin injected by the host from the gating context).
+    for (const workerId of [2, 3]) {
+      assert.equal(
+        h.sends.find((s) => s.metabotId === workerId).replyPin,
+        'kickoff-i0',
+        `worker ${workerId} reply carries the kickoff replyPin`,
+      );
+    }
+
     // sessions: one per (task, worker) on the metaweb_group_task channel
     for (const workerId of [2, 3]) {
       const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, workerId);
@@ -458,6 +472,77 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
     assert.deepEqual(steps.map((step) => step.assigneeMetabotId).sort(), [2, 3]);
     assert.ok(steps.every((step) => step.status === 'waiting_input'));
     assert.ok(steps.every((step) => h.orchestrationStore.listAttempts(step.id)[0].status === 'completed'));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R7: a failed on-chain send injects a delivery-failure notice into the sender bot session', async () => {
+  // Coder Bot's sends fail; its reply was already added to its session before
+  // the send, so without R7 it would wrongly think it had spoken.
+  const h = await createHarness({ sendFailures: new Set([2]) });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'kickoff-i0',
+      senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin', senderName: 'Twin Bot',
+      content: 'Team kickoff. @Coder Bot research options.',
+    });
+    await h.loop.runTick();
+
+    // The send was attempted (and threw).
+    assert.ok(h.sends.some((s) => s.metabotId === 2), 'coder reply send attempted');
+
+    // R7: the failure notice is in Coder Bot's task session as a user turn.
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping, 'coder session mapping exists');
+    const session = h.coworkStore.getSession(mapping.coworkSessionId);
+    const messages = h.coworkStore.getSessionMessages(session.id);
+    const notice = messages.find((m) => /delivery-failure/i.test(m.content));
+    assert.ok(notice, 'delivery-failure notice injected');
+    assert.equal(notice.type, 'user');
+    assert.match(notice.content, /NOT delivered to the group/);
+    assert.match(notice.content, /on-chain send failed for bot 2/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idempotent per streak)', async () => {
+  const h = await createHarness({
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    // Fast windows so the test doesn't wait real minutes.
+    deps: { memberTimeoutAfterMinutes: 1, memberEscalateAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    // Worker 2 self-reports [WORKING] with a chain timestamp ~16.7 min in the
+    // past (seconds), so both the L2 timeout window and the L3 escalation window
+    // have already elapsed at the default nowMs (1_000_000_000_000).
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: 999_999_000,
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    // Advance the daemon cursor past the [WORKING] message so the tick doesn't
+    // re-process it via handleMemberProtocolMarkers (which would re-mark working).
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    await h.loop.runTick();
+
+    // L2: authoritative status flipped to unreachable (timeout signal).
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'unreachable');
+
+    // L3: the owner was briefed once about the silent LOCAL member.
+    assert.equal(h.ownerReportCalls.length, 1, 'L3 owner brief fired');
+    assert.match(h.ownerReportCalls[0].text, /has been silent/);
+    assert.match(h.ownerReportCalls[0].text, /Coder Bot/);
+
+    // Idempotent: a second tick does not re-brief (per-streak kv guard).
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'owner brief fires once per streak');
   } finally {
     h.cleanup();
   }
@@ -842,8 +927,18 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
     assert.ok(closing, 'review entry posts the system closing line as the chair');
     assert.match(closing.content, /任务「Build MetaApp」/);
     assert.doesNotMatch(closing.content, /#\d+/, 'R5: the ceremony refers to the task by title, not #id');
-    assert.match(closing.content, /所有步骤已完成/);
-    assert.match(closing.content, /等待人类评审/);
+    // R1: the closing is now the host's deterministic acceptance summary — it
+    // restates the goal and carries the deliverable list + 3-action guidance
+    // ("把菜端上桌"), not the old fixed "所有步骤已完成 / 等待人类评审" string.
+    assert.match(closing.content, /目标：Build and publish the intro MetaApp/);
+    assert.match(closing.content, /成果清单：/);
+    assert.match(closing.content, /无已核验交付物/);
+    assert.match(closing.content, /①[\s\S]*②[\s\S]*③/);
+    // R1: the summary is persisted as the single source of truth (version 1).
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary, 'acceptance summary persisted on review entry');
+    assert.equal(summary.version, 1);
+    assert.equal(summary.goal, 'Build and publish the intro MetaApp');
     // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1);
   } finally {
@@ -891,6 +986,10 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     );
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
     assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
+    // R1: the re-assert re-posts the SAME acceptance summary (re-rendered from
+    // the stored record), not the old fixed string.
+    assert.match(h.sends[h.sends.length - 1].content, /目标：Build and publish the intro MetaApp/);
+    assert.match(h.sends[h.sends.length - 1].content, /成果清单：/);
 
     // Idempotent: a second tick with no NEW straggler does not re-assert again.
     const countAfter = h.sends.length;

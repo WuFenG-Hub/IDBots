@@ -43,6 +43,7 @@ import {
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
+import { buildAcceptanceSummary, buildAcceptanceSummaryMessageText } from './groupTaskAcceptanceSummary';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -211,6 +212,14 @@ const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /**
+ * R6 L2: one re-assign hint per (task, member) timeout streak — mirrors the
+ * ACK_REMINDED kv guard so the chair isn't spammed every tick while a member
+ * stays silent. Cleared when the member speaks again (see handleMemberProtocolMarkers).
+ */
+const GROUP_TASK_TIMEOUT_HINT_PREFIX = 'group_task_timeout_hint:';
+/** R6 L3: one owner brief per (task, member) timeout streak (distinct from the L2 chair hint). */
+const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
+/**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
  * the chair re-posts the closing line. This kv stores the straggler message id
@@ -269,6 +278,10 @@ const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
 const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
+/** R6 L2: minutes a [WORKING] signal may be stale before the timeout re-assign hint. */
+const DEFAULT_MEMBER_TIMEOUT_AFTER_MINUTES = 20;
+/** R6 L3: extra minutes past the L2 timeout window before the owner is briefed. */
+const DEFAULT_MEMBER_ESCALATE_AFTER_MINUTES = 10;
 /** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
 const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
 /** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
@@ -654,6 +667,7 @@ export type GroupTaskDaemonSendFn = (
   taskId: number,
   metabotId: number,
   content: string,
+  opts?: { replyPin?: string; mention?: string[] },
 ) => Promise<{ pinId: string }>;
 
 /** Narrow skill-routing seam (mirrors how privateChatDaemon calls skillManager). */
@@ -861,6 +875,10 @@ export interface GroupTaskDaemonDeps {
    * unreachable (default 30).
    */
   memberUnreachableAfterMinutes?: number;
+  /** R6 L2: minutes a [WORKING] signal may be stale before the timeout re-assign hint (default 20). */
+  memberTimeoutAfterMinutes?: number;
+  /** R6 L3: extra minutes past the L2 window before the owner is briefed (default 10). */
+  memberEscalateAfterMinutes?: number;
   /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
   ackTimeoutMs?: number;
   /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
@@ -1101,6 +1119,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     1,
     Math.trunc(deps.memberUnreachableAfterMinutes ?? DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES),
   );
+  const memberTimeoutAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberTimeoutAfterMinutes ?? DEFAULT_MEMBER_TIMEOUT_AFTER_MINUTES),
+  );
+  const memberEscalateAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberEscalateAfterMinutes ?? DEFAULT_MEMBER_ESCALATE_AFTER_MINUTES),
+  );
   const ackTimeoutMs = Math.max(
     30_000,
     Math.trunc(deps.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS),
@@ -1240,10 +1266,65 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     taskId: number,
     metabotId: number,
     content: string,
+    opts?: { replyPin?: string; mention?: string[] },
   ): Promise<{ pinId: string }> => {
-    const result = await deps.postGroupTaskMessage(taskId, metabotId, content);
-    refreshDriverClaim(taskId);
-    return result;
+    try {
+      const result = await deps.postGroupTaskMessage(taskId, metabotId, content, opts);
+      refreshDriverClaim(taskId);
+      return result;
+    } catch (sendError) {
+      // R7: the sender's reply was already written to its own task session
+      // BEFORE the on-chain send (the daemon adds the assistant message first),
+      // so on failure the bot would wrongly believe it had spoken and the group
+      // never received it (the real-world "chair misjudged worker didn't accept"
+      // case). Inject an explicit delivery-failure notice into the sender's task
+      // session so its NEXT turn knows the message did not land and can retry.
+      // Best-effort: never masks the original error — it is re-thrown so every
+      // caller's existing error handling still runs unchanged.
+      await notifySenderOfDeliveryFailure(taskId, metabotId, content, sendError);
+      throw sendError;
+    }
+  };
+
+  /**
+   * R7: inject a deterministic delivery-failure notice into the sender bot's task
+   * session. The notice is a host-generated user turn (never a participant
+   * message) so the bot's next dispatch reads "your last group message was not
+   * delivered" in context and can retry/rephrase. Failures here only log — they
+   * must never shadow the original send error.
+   */
+  const notifySenderOfDeliveryFailure = async (
+    taskId: number,
+    metabotId: number,
+    content: string,
+    error: unknown,
+  ): Promise<void> => {
+    try {
+      const task = deps.getGroupTaskStore().getTaskById(taskId);
+      if (!task) return;
+      const botName = deps.getMetabotStore().getMetabotById(metabotId)?.name?.trim() || `bot-${metabotId}`;
+      const reason = error instanceof Error ? error.message : String(error);
+      const preview = content.length > 120 ? `${content.slice(0, 120)}…` : content;
+      const coworkStore = deps.getCoworkStore();
+      const session = ensureTaskSession(coworkStore, task, metabotId, botName);
+      coworkStore.addMessage(session.id, {
+        type: 'user',
+        content: [
+          '[SYSTEM delivery-failure notice — generated by the host, not a group participant]',
+          `⚠ Your last group message FAILED to post on-chain and was NOT delivered to the group: ${reason}`,
+          'The group did not receive it — do not assume your previous reply landed. Retry the send on your next turn (rephrase if the failure looks content-related).',
+          `Your intended message was:\n${preview}`,
+        ].join('\n'),
+      });
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: delivery-failure notice injected into bot ${metabotId} session (${reason})`,
+      );
+    } catch (noticeError) {
+      emitLog(
+        `[GroupTaskDaemon] Task ${taskId}: failed to inject delivery-failure notice for bot ${metabotId}: ` +
+        `${noticeError instanceof Error ? noticeError.message : String(noticeError)}`,
+      );
+    }
   };
 
   /**
@@ -1314,7 +1395,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       ackText = `[WORKING] 已接单，正在处理「${objective}」，预计需要一些时间。`;
     }
     try {
-      const sent = await postGroupMessage(task.id, bot.id, ackText);
+      const sent = await postGroupMessage(task.id, bot.id, ackText, {
+        // R5: the ACK is a direct response to the chair's assignment message —
+        // thread it under that pin so the group reads as a conversation.
+        replyPin: message.pinId ?? undefined,
+      });
       sqlite.set(ackKey, '1');
       emitLog(`[GroupTaskDaemon] Task ${task.id}: worker ${bot.id} ACK posted (pin ${sent.pinId})`);
     } catch (error) {
@@ -1919,24 +2004,32 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     return [...new Set(cleaned)].slice(0, MAX_VERIFICATION_CANDIDATES);
   };
 
-  /** System-generated owner-report directive for the review transition. */
+  /**
+   * System-generated owner-report directive for the review transition. R1: the
+   * directive no longer re-assembles the deliverable list itself — it reads the
+   * host's deterministic acceptance summary (already published as the group's
+   * last message) as the single source of truth and asks the chair only to
+   * narrate it into a concise private report. The three channels (group summary
+   * message, this private report, R2 source-session notification) thus render
+   * from one record and cannot drift. Falls back to re-stating goal/criteria
+   * inline when no summary has been persisted yet.
+   */
   const buildOwnerReportDirective = (store: GroupTaskStore, task: GroupTask): string => {
-    const deliverables = store.listDeliverables(task.id);
-    const deliverableLines = deliverables.map(
+    const summary = store.getLatestAcceptanceSummary(task.id);
+    const deliverableLines = (summary?.deliverables ?? []).map(
       (deliverable) =>
-        `- [${deliverable.kind ?? 'text'}] ${deliverable.uri ?? '(no uri)'} (status: ${deliverable.status})`,
+        `- [${deliverable.kind ?? 'text'}] ${deliverable.uri ?? '(no uri)'} (${deliverable.status}, ${deliverable.confirmation}) — ${deliverable.authorName ?? 'unknown'}`,
     );
     return [
       '[SYSTEM owner-report directive — generated by the host, not by a group participant]',
-      `The group task "${task.title}" just moved to REVIEW. Compose a concise PRIVATE report to the owner covering:`,
-      '- The task goal (restated briefly).',
-      '- What each member did (by name).',
-      '- Deliverables with pinids/URLs and any verification outcomes you are aware of.',
-      '- Lead with your conclusion and the action you recommend (accept & close, or request rework — of what). The owner only needs to confirm acceptance in the Tasks UI or send the task back for rework; never end with an open-ended "what would you like to do next?".',
+      `The group task "${task.title}" just moved to REVIEW. The host has already posted a deterministic acceptance summary to the group (goal, deliverable list, verification, guidance) — that summary is reproduced verbatim below as the single source of truth. Compose a concise PRIVATE report to the owner that NARRATES it:`,
+      '- Restate the goal briefly and lead with your conclusion.',
+      '- Say what each member did (by name) and whether the deliverables are on-chain confirmed.',
+      '- Recommend an action (accept & close, or request rework — of what). The owner only needs to confirm acceptance in the Tasks UI or send the task back for rework; never end with an open-ended "what would you like to do next?".',
       '',
-      `Goal: ${task.goal}`,
-      `Acceptance criteria: ${task.acceptanceCriteria?.trim() || '(none specified)'}`,
-      'Deliverables recorded:',
+      `Goal: ${summary?.goal ?? task.goal}`,
+      `Acceptance criteria: ${(summary?.acceptanceCriteria ?? task.acceptanceCriteria)?.trim() || '(none specified)'}`,
+      'Deliverables recorded (from the host acceptance summary):',
       ...(deliverableLines.length > 0 ? deliverableLines : ['(none recorded)']),
     ].join('\n');
   };
@@ -2487,22 +2580,54 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   `${error instanceof Error ? error.message : String(error)}`,
                 );
               }
-              // #14 closing ceremony: the group must never rest on a worker's
-              // [WORKING] when it enters acceptance. Post a system closing line
-              // as the chair so the LAST group message is the closing summary
-              // (the chair's own final summary may precede it). No mentions:
-              // review-phase silence + self-skip keep it reply-free.
+              // R1 closing ceremony: the group must never rest on a worker's
+              // [WORKING] when it enters acceptance. Instead of the old fixed
+              // string, the host now deterministically aggregates a structured
+              // acceptance summary (goal/acceptance criteria/deliverable list/
+              // verification/guidance) and posts it as the LAST group message —
+              // "把菜端上桌". The same record is the single source of truth for
+              // the owner private report (below) and the R2 source-session
+              // notification. Publish failure only logs (the existing ceremony
+              // contract): review never blocks on a chain write.
               try {
-                const closing = buildReviewClosingLine(task);
-                const sent = await postGroupMessage(task.id, chairMember.metabotId!, closing);
+                const deliverables = store.listDeliverables(task.id);
+                const summaryInput = buildAcceptanceSummary({ task, deliverables, members });
+                const saved = store.saveAcceptanceSummary({
+                  taskId: task.id,
+                  goal: summaryInput.goal,
+                  acceptanceCriteria: summaryInput.acceptanceCriteria,
+                  deliverables: summaryInput.deliverables,
+                  members: summaryInput.members,
+                  guidance: summaryInput.guidance,
+                });
+                const sent = await postGroupMessage(task.id, chairMember.metabotId!, summaryInput.messageText);
+                try {
+                  store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
+                } catch (pinError) {
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary published-pin record failed: ` +
+                    `${pinError instanceof Error ? pinError.message : String(pinError)}`,
+                  );
+                }
                 emitLog(
-                  `[GroupTaskDaemon] Task ${task.id}: closing ceremony posted on review entry (pin ${sent.pinId})`,
+                  `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId}, ${deliverables.length} deliverable(s))`,
                 );
               } catch (error) {
                 emitLog(
-                  `[GroupTaskDaemon] Task ${task.id}: review closing post failed: ` +
+                  `[GroupTaskDaemon] Task ${task.id}: acceptance summary post failed, falling back to plain closing line: ` +
                   `${error instanceof Error ? error.message : String(error)}`,
                 );
+                try {
+                  const sent = await postGroupMessage(task.id, chairMember.metabotId!, buildReviewClosingLine(task));
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: plain closing line posted as fallback (pin ${sent.pinId})`,
+                  );
+                } catch (fallbackError) {
+                  emitLog(
+                    `[GroupTaskDaemon] Task ${task.id}: review closing fallback post failed: ` +
+                    `${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+                  );
+                }
               }
               await maybeSendOwnerReport(task, members, botsById, promptMembers);
             }
@@ -3002,7 +3127,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
 
     let sent: { pinId: string };
     try {
-      sent = await postGroupMessage(task.id, bot.id, reply);
+      // R5: thread this reply under the message that triggered it (the chair's
+      // dispatch for a worker, or the worker's message for a chair response).
+      // The host decides who is being replied to from the gating context — the
+      // LLM never writes pinids itself.
+      sent = await postGroupMessage(task.id, bot.id, reply, {
+        replyPin: message.pinId ?? undefined,
+      });
     } catch (error) {
       failCanonicalAttempt(error);
       emitLog(
@@ -3133,6 +3264,110 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
     }
+  };
+
+  /**
+   * R6 L2: once a working/assigned LOCAL worker's [WORKING] signal goes stale
+   * (older than the timeout window), inject a deterministic "re-assign" hint
+   * into the chair's next turn and mark the authoritative state timeout. This
+   * is the escalation ABOVE the existing L1 ACK/delivery reminders: those fire
+   * once per assignment at 3 min; this fires once per (task, member) timeout
+   * streak — the chair gets a concrete "re-assign to a standby member or mark
+   * suspended" suggestion, not just another alert. Best-effort: never blocks
+   * the tick; the store status change is the authoritative signal, the chair
+   * hint is advisory.
+   */
+  const monitorLocalWorkerTimeout = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    ownerGlobalMetaId: string,
+  ): Promise<string> => {
+    if (task.status !== 'executing') return '';
+    if (!task.groupId) return '';
+    const store = deps.getGroupTaskStore();
+    const sqlite = deps.getStore();
+    const workers = members.filter(
+      (member) => member.role === 'worker'
+        && member.metabotId != null
+        && (member.status === 'working' || member.status === 'assigned'),
+    );
+    if (workers.length === 0) return '';
+    const workingMap = store.getMembersWorkingAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
+    const standbyNames = members
+      .filter((member) => member.role === 'worker' && member.status === 'standby')
+      .map((member) => member.name ?? `bot-${member.metabotId}`);
+    const chairMember = members.find((member) => member.role === 'chair');
+
+    const timedOut: string[] = [];
+    for (const member of workers) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const lastWorkingSec = gmid ? workingMap.get(gmid) ?? null : null;
+      if (lastWorkingSec == null) continue;
+      const staleMs = now() - lastWorkingSec * 1000;
+      if (staleMs <= memberTimeoutAfterMinutes * 60_000) continue;
+
+      const name = member.name ?? `bot-${member.metabotId}`;
+
+      // L2: mark the authoritative state timeout + inject a chair re-assign hint
+      // once per (task, member) streak.
+      try {
+        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(hintKey) !== '1') {
+        timedOut.push(name);
+        sqlite.set(hintKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
+          'injecting chair re-assign hint',
+        );
+      }
+
+      // L3: if the member is STILL silent past the escalation window (L2 + lag),
+      // brief the owner ONCE per streak via the private report channel — local
+      // workers previously had no owner touchpoint (only remote teammates did).
+      if (staleMs <= (memberTimeoutAfterMinutes + memberEscalateAfterMinutes) * 60_000) continue;
+      const ownerKey = `${GROUP_TASK_TIMEOUT_OWNER_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(ownerKey) === '1') continue;
+      if (!ownerGlobalMetaId || chairMember?.metabotId == null || !deps.sendOwnerPrivateReport) continue;
+      try {
+        await deps.sendOwnerPrivateReport({
+          taskId: task.id,
+          metabotId: chairMember.metabotId,
+          ownerGlobalMetaId,
+          text:
+            `[GroupTask] Task "${task.title}": local member "${name}" has been silent for ` +
+            `${Math.round(staleMs / 60_000)}+ min (past the [WORKING] window). The chair has a ` +
+            're-assign hint in context; please decide whether to wait, reassign, or close the task.',
+        });
+        sqlite.set(ownerKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: owner briefed about silent local member ${name} (L3)`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: L3 owner brief failed for ${name}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (timedOut.length === 0) return '';
+    const reAssign = standbyNames.length > 0
+      ? `Re-assign to a standby member (${standbyNames.join(', ')}) or mark the step suspended.`
+      : 'Mark the step suspended and tell the owner it is blocked on an unresponsive member.';
+    return [
+      '[SYSTEM member-timeout hint — generated by the host, not a group participant]',
+      `These members have gone silent past the ${memberTimeoutAfterMinutes}-min [WORKING] window: ${timedOut.join(', ')}.`,
+      `${reAssign} Do NOT auto-fail them.`,
+    ].join('\n');
   };
 
   /**
@@ -3308,6 +3543,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
             sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           }
+          // R6 L2: the member recovered — reset the timeout-hint streak so a
+          // future silence window triggers a fresh re-assign hint.
+          sqlite.delete(`${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`);
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} spoke after ` +
             `assignment #${entry.messageId} (implicit ACK); no no-ACK reminder`,
@@ -3700,6 +3938,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       monitorMemberUnreachable(task, members);
     }
 
+    // R6 L2/L3: when a LOCAL working/assigned member's [WORKING] signal goes
+    // stale, mark them timeout + inject a chair re-assign hint (L2), then brief
+    // the owner if still silent past the escalation window (L3). The hint block
+    // rides the existing remoteStatusBlock chair-context channel.
+    if (task.status === 'executing' && !checkpointOpenAtTick) {
+      const timeoutBlock = await monitorLocalWorkerTimeout(task, members, ownerGlobalMetaId);
+      if (timeoutBlock) {
+        remoteStatusBlock = [remoteStatusBlock, timeoutBlock].filter(Boolean).join('\n\n');
+      }
+    }
+
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.
     if (!checkpointOpenAtTick) {
       await monitorAcksAndReminders(task, members);
@@ -4041,7 +4290,15 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (String(sqlite.get(reassertKey) ?? '') !== String(lastRow.id)) {
             sqlite.set(reassertKey, String(lastRow.id));
             try {
-              const sent = await postGroupMessage(task.id, chair.metabotId, buildReviewClosingLine(task));
+              // R1: re-assert the SAME acceptance summary posted at review entry
+              // (re-rendered deterministically from the stored record) so a late
+              // straggler never replaces "把菜端上桌" with a bare [WORKING]. Falls
+              // back to the plain closing line only when no summary exists yet.
+              const latest = deps.getGroupTaskStore().getLatestAcceptanceSummary(task.id);
+              const reassertText = latest
+                ? buildAcceptanceSummaryMessageText(latest, task.title)
+                : buildReviewClosingLine(task);
+              const sent = await postGroupMessage(task.id, chair.metabotId, reassertText);
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: re-asserted chair closing after straggler msg ${lastRow.id} (pin ${sent.pinId})`,
               );

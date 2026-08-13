@@ -22,6 +22,7 @@ import {
   type GroupTaskStatusEventActor,
   type GroupTaskCheckpoint,
   type GroupChatTranscriptMessage,
+  type GroupTaskAcceptanceSummary,
 } from '../groupTaskStore';
 import {
   createGroupChat,
@@ -83,6 +84,12 @@ export interface CreateGroupTaskOptions {
    * the chair's LLM selects the specialist and only its assignment is mentioned. */
   autoSelectWorkers?: boolean;
   createdBy: 'user' | 'twinbot';
+  /**
+   * R2: the originating CoWork session creating this task, so the host can
+   * relay the acceptance result back on close ("哪里发起哪里结束"). Omitted by
+   * the panel IPC (panel-created tasks have no originating session).
+   */
+  sourceSessionId?: string;
 }
 
 export interface GroupTaskDetail extends GroupTask {
@@ -109,6 +116,13 @@ export interface GroupTaskDetail extends GroupTask {
   /** HITL: all human checkpoints of the task, oldest first (open one included). */
   checkpoints: GroupTaskCheckpoint[];
   /**
+   * R1: the host-generated acceptance summary ("把菜端上桌"), the single source
+   * of truth rendered by the group's last review message, the owner private
+   * report, and the R2 source-session notification. Null before the task has
+   * entered review (no summary generated yet).
+   */
+  acceptanceSummary: GroupTaskAcceptanceSummary | null;
+  /**
    * HITL: what the owner must decide right now — the tag-free body of the
    * chair's [CHECKPOINT] message that opened the currently open checkpoint
    * (null when no open checkpoint, the message is unavailable, or it held
@@ -123,11 +137,17 @@ export interface GroupTaskDriverInfo {
   atMs: number;
 }
 
-/** P1-4: host-computed member work state (idle/working/error/unknown). */
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+/** P1-4/R6: host-computed member work state. 'timeout' (R6) = a self-reported
+ * working/assigned member whose [WORKING] signal has gone stale — the
+ * authoritative "went silent" read, distinct from 'idle' (spoke, not currently
+ * working). */
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
 
 /** Minutes a [WORKING] tag stays "working" after its last occurrence. */
 export const GROUP_TASK_WORKING_WINDOW_MINUTES = 20;
+/** R6: minutes a working/assigned member's [WORKING] signal may be stale before
+ * the authoritative state reads 'timeout' (distinct from 'error' = failed attempt). */
+export const GROUP_TASK_TIMEOUT_WINDOW_MINUTES = 20;
 /** Minutes a failed canonical attempt stays "error" after it finished. */
 export const GROUP_TASK_ERROR_WINDOW_MINUTES = 60;
 
@@ -233,6 +253,28 @@ function getCoworkStore(): CoworkStore {
   }
   return coworkStoreGetter();
 }
+
+/**
+ * R2 cross-session relay seam. main.ts wires this to the CoworkRunner's
+ * insertCrossSessionMessageAndQueue (the same ORCH-NOTIFY pipe) so the service
+ * stays decoupled from the runner type. Returns ok:false when the target
+ * session is missing/A2A (the caller degrades to owner-private-only, never
+ * rolls back the task close). null seam = R2 disabled (tests / pre-wire).
+ */
+export type GroupTaskAcceptanceNotifier = (input: {
+  taskId: number;
+  targetSessionId: string;
+  message: string;
+}) => { ok: boolean; warning?: string };
+
+let acceptanceNotifier: GroupTaskAcceptanceNotifier | null = null;
+
+export function setGroupTaskAcceptanceNotifier(notifier: GroupTaskAcceptanceNotifier | null): void {
+  acceptanceNotifier = notifier;
+}
+
+/** R2 kv guard: one acceptance notification per task per terminal outcome. */
+const GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX = 'group_task_acceptance_notified:';
 
 function getKvStore(): GroupTaskServiceKvStore {
   if (!kvStoreGetter) {
@@ -468,6 +510,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
     chairMetabotId,
     createdBy: opts.createdBy,
     createPinId: pinId,
+    sourceSessionId: opts.sourceSessionId?.trim() || null,
   });
 
   try {
@@ -721,6 +764,10 @@ export function computeGroupTaskMemberWorkStatus(input: {
   attemptStatus: 'running' | 'failed' | null;
   attemptAtMs: number | null;
   nowMs?: number;
+  /** R6: the member's self-reported status — lets the host distinguish 'timeout'
+   * (a working/assigned member who went silent) from 'idle' (never expected to
+   * be working). Optional so existing callers/tests keep their behavior. */
+  memberStatus?: GroupTaskMemberStatus;
 }): GroupTaskMemberWorkStatus {
   const nowMs = input.nowMs ?? Date.now();
   if (input.attemptStatus === 'running') return 'working';
@@ -757,6 +804,18 @@ export function computeGroupTaskMemberWorkStatus(input: {
       return 'idle';
     }
     return 'error';
+  }
+  // R6: a working/assigned member whose [WORKING] signal is stale (older than
+  // the timeout window) and who is not mid-attempt or in the error window reads
+  // 'timeout' — the authoritative "went silent" state. This is what replaces the
+  // old "出错" misread: a silently-working member is no longer shown as idle.
+  if (
+    (input.memberStatus === 'working' || input.memberStatus === 'assigned')
+    && input.lastWorkingAt != null
+    && Number.isFinite(input.lastWorkingAt)
+    && nowMs - input.lastWorkingAt > GROUP_TASK_TIMEOUT_WINDOW_MINUTES * 60_000
+  ) {
+    return 'timeout';
   }
   if (input.lastSpeakAt != null) return 'idle';
   return 'unknown';
@@ -841,6 +900,7 @@ export async function getGroupTask(
         lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
         attemptStatus: attempt.status,
         attemptAtMs: attempt.atMs,
+        memberStatus: member.status,
       }),
       inviteStatus: deriveGroupTaskMemberInviteStatus({
         metabotId: member.metabotId,
@@ -867,6 +927,8 @@ export async function getGroupTask(
     driver: readGroupTaskDriver(getKvStore(), id),
     // HITL: human checkpoints (open + past), oldest first.
     checkpoints,
+    // R1: latest host-generated acceptance summary (single source of truth).
+    acceptanceSummary: store.getLatestAcceptanceSummary(id),
     // HITL: what the owner must decide — the tag-free body of the chair's
     // [CHECKPOINT] message that opened the open checkpoint (by pin id), so the
     // detail banner can show it without the owner paging the transcript.
@@ -1463,6 +1525,77 @@ export async function recordGroupTaskIntegrityEvent(
 }
 
 /**
+ * R2: relay the deterministic acceptance notification to the CoWork session that
+ * originated this group task ("哪里发起哪里结束"). The message is host-built (not
+ * LLM) and kv-guarded per (task, outcome) so a close fires exactly once. The
+ * latest acceptance summary (if any) is finalized with the outcome+rating so the
+ * audit record is complete. Best-effort: any failure (missing/notifier unset,
+ * target session gone) only logs — the task is already closed and never rolls
+ * back; NULL sourceSessionId silently skips (degrades to owner-private-only).
+ */
+function notifySourceSession(
+  task: GroupTask,
+  outcome: 'done' | 'cancelled',
+  rating?: number | null,
+  ratingComment?: string | null,
+): void {
+  const targetSessionId = (task.sourceSessionId ?? '').trim();
+  if (!targetSessionId) return; // panel-created / pre-R2 task — no originating session
+  if (!acceptanceNotifier) return; // R2 not wired (tests / pre-init)
+  const kv = getKvStore();
+  const guardKey = `${GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX}${task.id}:${outcome}`;
+  if (kv.get<string>(guardKey) === '1') return; // one notification per task per outcome
+
+  // Finalize the acceptance summary's terminal snapshot (best-effort) so the
+  // audit record carries the outcome+rating alongside the T1 review snapshot.
+  try {
+    getGroupTaskStore().finalizeAcceptanceSummary(task.id, { outcome, rating: rating ?? null, ratingComment: ratingComment ?? null });
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to finalize acceptance summary on close of task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const ratingLine = outcome === 'done' && rating != null ? `｜评分 ${rating}/5` : '';
+  const commentLine = ratingComment?.trim() ? `（${ratingComment.trim()}）` : '';
+  const summary = getGroupTaskStore().getLatestAcceptanceSummary(task.id);
+  const deliverableCount = summary?.deliverables.length ?? 0;
+  const message = [
+    `[GROUP_TASK_ACCEPTANCE] 任务「${task.title}」已完成验收：`,
+    `结果：${outcome}${ratingLine}${commentLine}`,
+    `成果：${deliverableCount} 项${summary ? `（详见验收总结 v${summary.version}）` : '，详见 Tasks 面板'}`,
+  ].join('\n');
+
+  try {
+    const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
+    if (!result.ok) {
+      console.warn(
+        `[GroupTask] Acceptance notification to session ${targetSessionId} not delivered for task ${task.id}` +
+        (result.warning ? ` (${result.warning})` : '') +
+        '; degrading to owner-private-only',
+      );
+      return;
+    }
+    kv.set(guardKey, '1');
+    try {
+      getGroupTaskStore().updateAcceptanceSummaryNotifiedSession(task.id, targetSessionId);
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Failed to record notified session for task ${task.id}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    console.log(`[GroupTask] Acceptance notification delivered to session ${targetSessionId} for task ${task.id} (${outcome})`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Acceptance notification failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Close a task via the store state machine (sets closed_at for terminal states).
  * `reason` is accepted for API completeness but not persisted (no column in M1).
  * When closing as 'done', the owner's acceptance rating (1-5 + optional
@@ -1499,12 +1632,20 @@ export async function closeGroupTask(
     );
   }
   if (closed.status === 'done' && opts.rating != null) {
-    return getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
+    const rated = getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
+    // R2: relay the acceptance result back to the originating CoWork session
+    // (best-effort; never throws into the close flow). Done after the rating is
+    // persisted so the notification carries the final rating.
+    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment);
+    return rated;
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
   // teammate (recorded for cancelled tasks too). Best-effort: the task is
   // already closed; the recorder never throws into this flow.
   recordTaskCloseImpressions(taskId, opts.status, opts.reason);
+  // R2: relay the acceptance result back to the originating CoWork session
+  // (covers cancelled and automated/RPC closes without a rating).
+  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);
   return closed;
 }
 

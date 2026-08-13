@@ -150,6 +150,12 @@ export interface GroupTask {
    * hidden from the UI list but fully preserved; restoring clears it.
    */
   archivedAt: number | null;
+  /**
+   * R2: the originating CoWork session that created this group task (so the
+   * host can relay the acceptance result back on close). NULL for panel-created
+   * tasks and pre-R2 rows (relay degrades to owner-private-only).
+   */
+  sourceSessionId: string | null;
 }
 
 export interface GroupTaskMember {
@@ -224,6 +230,52 @@ export interface GroupChatTranscriptMessage {
   senderSuspect: boolean;
 }
 
+/** One deliverable row inside an acceptance summary (immutable snapshot). */
+export interface GroupTaskAcceptanceSummaryDeliverable {
+  kind: string | null;
+  uri: string | null;
+  status: GroupTaskDeliverableStatus;
+  confirmation: 'unconfirmed' | 'confirmed';
+  authorName: string | null;
+}
+
+/** One member row inside an acceptance summary (immutable snapshot). */
+export interface GroupTaskAcceptanceSummaryMember {
+  name: string | null;
+  role: GroupTaskMemberRole;
+  /** Self-reported status snapshot; host-derived workStatus is a P1/R6 concern. */
+  workStatus: string;
+}
+
+/**
+ * Host-generated, deterministic acceptance summary ("把菜端上桌"). Produced at
+ * review entry (T1) and finalized on close (T2). Single source of truth for the
+ * group's last review message, the owner private report, and the R2 acceptance
+ * notification — all three render from the same record. version increments on
+ * each review-entry regeneration (rework → review yields v2).
+ */
+export interface GroupTaskAcceptanceSummary {
+  id: number;
+  taskId: number;
+  version: number;
+  goal: string;
+  acceptanceCriteria: string | null;
+  deliverables: GroupTaskAcceptanceSummaryDeliverable[];
+  members: GroupTaskAcceptanceSummaryMember[];
+  /** Deterministic acceptance guidance (3 actions). */
+  guidance: string;
+  /** T2 terminal outcome, null until the task closes. */
+  outcome: GroupTaskStatus | null;
+  rating: number | null;
+  ratingComment: string | null;
+  generatedBy: string;
+  generatedAt: string | null;
+  /** Pin of the group message that published this summary (review closing). */
+  publishedGroupPinId: string | null;
+  /** Source session that received the R2 acceptance notification, if any. */
+  notifiedSession: string | null;
+}
+
 export interface CreateGroupTaskInput {
   groupId: string;
   title: string;
@@ -232,6 +284,8 @@ export interface CreateGroupTaskInput {
   chairMetabotId: number;
   createdBy: 'user' | 'twinbot';
   createPinId?: string | null;
+  /** R2: originating CoWork session (relay target on close). */
+  sourceSessionId?: string | null;
 }
 
 export interface AddGroupTaskMemberInput {
@@ -315,6 +369,7 @@ interface GroupTaskRow {
   display_name: string | null;
   pinned: number | null;
   archived_at: number | null;
+  source_session_id: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -391,6 +446,24 @@ interface GroupTaskCheckpointRow {
   resolved_msg_pin_id: string | null;
   created_at: string | null;
   resolved_at: string | null;
+}
+
+interface GroupTaskAcceptanceSummaryRow {
+  id: number;
+  task_id: number;
+  version: number;
+  goal: string;
+  acceptance_criteria: string | null;
+  deliverables_json: string;
+  members_json: string;
+  guidance: string;
+  outcome: string | null;
+  rating: number | null;
+  rating_comment: string | null;
+  generated_by: string;
+  generated_at: string | null;
+  published_group_pin_id: string | null;
+  notified_session: string | null;
 }
 
 interface GroupChatTranscriptRow {
@@ -484,6 +557,52 @@ function rowToGroupTaskCheckpoint(row: GroupTaskCheckpointRow): GroupTaskCheckpo
   };
 }
 
+function isGroupTaskStatusValue(value: unknown): value is GroupTaskStatus {
+  return (
+    value === 'planning'
+    || value === 'executing'
+    || value === 'review'
+    || value === 'done'
+    || value === 'cancelled'
+  );
+}
+
+function rowToGroupTaskAcceptanceSummary(
+  row: GroupTaskAcceptanceSummaryRow,
+): GroupTaskAcceptanceSummary {
+  let deliverables: GroupTaskAcceptanceSummaryDeliverable[] = [];
+  try {
+    const parsed = JSON.parse(row.deliverables_json) as unknown;
+    if (Array.isArray(parsed)) deliverables = parsed as GroupTaskAcceptanceSummaryDeliverable[];
+  } catch {
+    // Malformed snapshot JSON degrades to empty; the row is never fatal.
+  }
+  let members: GroupTaskAcceptanceSummaryMember[] = [];
+  try {
+    const parsed = JSON.parse(row.members_json) as unknown;
+    if (Array.isArray(parsed)) members = parsed as GroupTaskAcceptanceSummaryMember[];
+  } catch {
+    // Malformed snapshot JSON degrades to empty; the row is never fatal.
+  }
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    version: row.version,
+    goal: row.goal,
+    acceptanceCriteria: row.acceptance_criteria ?? null,
+    deliverables,
+    members,
+    guidance: row.guidance,
+    outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
+    rating: row.rating ?? null,
+    ratingComment: row.rating_comment ?? null,
+    generatedBy: row.generated_by ?? 'host',
+    generatedAt: row.generated_at ?? null,
+    publishedGroupPinId: row.published_group_pin_id ?? null,
+    notifiedSession: row.notified_session ?? null,
+  };
+}
+
 function rowToGroupTask(row: GroupTaskRow): GroupTask {
   return {
     id: row.id,
@@ -507,6 +626,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     displayName: row.display_name ?? null,
     pinned: Boolean(row.pinned),
     archivedAt: row.archived_at ?? null,
+    sourceSessionId: row.source_session_id ?? null,
   };
 }
 
@@ -633,8 +753,8 @@ export class GroupTaskStore {
     this.db.run(
       `INSERT INTO group_tasks (
         group_id, title, goal, acceptance_criteria, status, chair_metabot_id, created_by,
-        last_processed_msg_id, create_pin_id
-      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?)`,
+        last_processed_msg_id, create_pin_id, source_session_id
+      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?, ?)`,
       [
         input.groupId,
         input.title,
@@ -643,6 +763,7 @@ export class GroupTaskStore {
         input.chairMetabotId,
         input.createdBy,
         input.createPinId ?? null,
+        input.sourceSessionId?.trim() || null,
       ],
     );
     const id = this.lastInsertId();
@@ -973,6 +1094,117 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskCheckpoint);
+  }
+
+  // --- group_task_acceptance_summaries (R1 验收总结) ---
+
+  /**
+   * Persist a new acceptance-summary version for the task. version is assigned
+   * as latest+1 so rework→review yields v2, v3… (T1 regeneration). The group
+   * message's published pin and the R2 notified session are recorded later via
+   * the dedicated updaters (the post/cross-session insert happens after the
+   * row exists). Callers pass the already-rendered guidance + snapshots so the
+   * aggregator (a pure function) stays the single text-rendering authority.
+   */
+  saveAcceptanceSummary(input: {
+    taskId: number;
+    goal: string;
+    acceptanceCriteria?: string | null;
+    deliverables: GroupTaskAcceptanceSummaryDeliverable[];
+    members: GroupTaskAcceptanceSummaryMember[];
+    guidance: string;
+  }): GroupTaskAcceptanceSummary {
+    const latest = this.getLatestAcceptanceSummary(input.taskId);
+    const version = (latest?.version ?? 0) + 1;
+    this.db.run(
+      `INSERT INTO group_task_acceptance_summaries
+        (task_id, version, goal, acceptance_criteria, deliverables_json, members_json, guidance, generated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'host')`,
+      [
+        input.taskId,
+        version,
+        input.goal,
+        input.acceptanceCriteria?.trim() || null,
+        JSON.stringify(input.deliverables),
+        JSON.stringify(input.members),
+        input.guidance,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const saved = this.getAcceptanceSummaryById(id);
+    if (!saved) throw new Error(`saveAcceptanceSummary failed: summary ${id} not found after insert`);
+    return saved;
+  }
+
+  private getAcceptanceSummaryById(id: number): GroupTaskAcceptanceSummary | null {
+    const row = this.getOne<GroupTaskAcceptanceSummaryRow>(
+      'SELECT * FROM group_task_acceptance_summaries WHERE id = ?',
+      [id],
+    );
+    return row ? rowToGroupTaskAcceptanceSummary(row) : null;
+  }
+
+  /** Newest summary version for the task (null when none has been generated). */
+  getLatestAcceptanceSummary(taskId: number): GroupTaskAcceptanceSummary | null {
+    const row = this.getOne<GroupTaskAcceptanceSummaryRow>(
+      `SELECT * FROM group_task_acceptance_summaries WHERE task_id = ? ORDER BY version DESC LIMIT 1`,
+      [taskId],
+    );
+    return row ? rowToGroupTaskAcceptanceSummary(row) : null;
+  }
+
+  /** All summary versions of a task, oldest first (the acceptance audit trail). */
+  listAcceptanceSummaries(taskId: number): GroupTaskAcceptanceSummary[] {
+    const rows = this.getAll<GroupTaskAcceptanceSummaryRow>(
+      'SELECT * FROM group_task_acceptance_summaries WHERE task_id = ? ORDER BY version ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskAcceptanceSummary);
+  }
+
+  /** Record the pin of the group message that published the latest summary. */
+  updateAcceptanceSummaryPublishedPin(taskId: number, pinId: string): void {
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET published_group_pin_id = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [pinId, taskId],
+    );
+    this.saveDb();
+  }
+
+  /** Record that the R2 acceptance notification reached this source session. */
+  updateAcceptanceSummaryNotifiedSession(taskId: number, sessionId: string): void {
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET notified_session = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [sessionId, taskId],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * T2 finalization: stamp the latest summary with the terminal outcome and the
+   * owner's rating. Creates a no-snapshot placeholder row if review was skipped
+   * (defensive — the aggregator normally produces the row at T1). Idempotent.
+   */
+  finalizeAcceptanceSummary(
+    taskId: number,
+    input: { outcome: GroupTaskStatus; rating?: number | null; ratingComment?: string | null },
+  ): GroupTaskAcceptanceSummary | null {
+    const latest = this.getLatestAcceptanceSummary(taskId);
+    if (!latest) return null;
+    const rating = input.rating != null ? Math.max(0, Math.trunc(input.rating)) : null;
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries
+       SET outcome = ?, rating = ?, rating_comment = ?
+       WHERE id = ?`,
+      [input.outcome, rating, input.ratingComment?.trim() || null, latest.id],
+    );
+    this.saveDb();
+    return this.getAcceptanceSummaryById(latest.id);
   }
 
   /**

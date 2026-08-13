@@ -28,9 +28,20 @@ const AGENT_INTERNET_URI_RE = /\b(?:metaid|metaapp|map|metafile|pin|preview-meta
 const AGENT_INTERNET_URI_HINT_RE = /(?:metaid|metaapp|map|metafile|pin|preview-metaapp):\/\//i;
 const CODE_SEGMENT_RE = /(```[\s\S]*?```|`[^`\n]*`)/g;
 const TRAILING_URI_PUNCTUATION_RE = /[.,;:!?]+$/;
+/**
+ * R3: a bare on-chain pin id (64 hex + the MetaID "i0" suffix) written without a
+ * scheme. Bots paste these constantly; recognise them as pin:// links so they
+ * are clickable + openable in the Bot Browser. The lookbehind excludes ids that
+ * are already part of a scheme:// URI (e.g. the tail of metaapp://…i0).
+ */
+const BARE_PINID_RE = /(?<![/:=\w])([0-9a-f]{64}i0)(?![0-9a-f])/gi;
 
-const linkifyPlainSegment = (segment: string): string => (
-  segment.replace(AGENT_INTERNET_URI_RE, (rawMatch: string, offset: number, full: string) => {
+const linkifyPlainSegment = (segment: string): string => {
+  // R3: first turn bare pin ids into pin:// links (before the scheme pass, so
+  // the subsequent scheme matcher sees them as already-linkified destinations
+  // and skips them via the ']' + '(' guard below).
+  let out = segment.replace(BARE_PINID_RE, (m: string) => `[${m}](pin://${m})`);
+  out = out.replace(AGENT_INTERNET_URI_RE, (rawMatch: string, offset: number, full: string) => {
     // Already a markdown link/image destination — leave it alone.
     if (full.slice(Math.max(0, offset - 2), offset) === '](') return rawMatch;
     // Already inside a <uri> autolink — leave it alone.
@@ -38,8 +49,9 @@ const linkifyPlainSegment = (segment: string): string => (
     const match = rawMatch.replace(TRAILING_URI_PUNCTUATION_RE, '');
     if (!match) return rawMatch;
     return `[${match}](${match})${rawMatch.slice(match.length)}`;
-  })
-);
+  });
+  return out;
+};
 
 /**
  * Turn bare Agent Internet URIs (metaid://, metaapp://, map://, metafile://,
@@ -48,10 +60,22 @@ const linkifyPlainSegment = (segment: string): string => (
  * markdown links and code spans/blocks are left untouched.
  */
 export const linkifyAgentInternetUris = (content: string): string => {
-  if (!content || !AGENT_INTERNET_URI_HINT_RE.test(content)) return content;
+  if (!content) return content;
+  // R3: linkify when there is either a scheme:// URI or a bare pin id present.
+  if (!AGENT_INTERNET_URI_HINT_RE.test(content) && !BARE_PINID_RE.test(content)) return content;
+  BARE_PINID_RE.lastIndex = 0;
   return content
     .split(CODE_SEGMENT_RE)
-    .map((segment) => (segment.startsWith('`') ? segment : linkifyPlainSegment(segment)))
+    .map((segment) => {
+      if (!segment.startsWith('`')) return linkifyPlainSegment(segment);
+      // R3: code BLOCKS (triple backtick) stay verbatim; inline code spans
+      // (`…`) get linkified too, because bots habitually wrap metaweb URIs in
+      // backticks and those must still be clickable.
+      if (segment.startsWith('```')) return segment;
+      const inner = segment.slice(1, -1);
+      const linkified = linkifyPlainSegment(inner);
+      return linkified !== inner ? linkified : segment;
+    })
     .join('');
 };
 

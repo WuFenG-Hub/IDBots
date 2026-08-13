@@ -6,6 +6,7 @@ import type {
   GroupTaskDetail,
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
+import AcceptanceSummaryCard from './AcceptanceSummaryCard';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
@@ -16,6 +17,8 @@ import {
   deliverableVerificationBadgeClass,
   deliverableVerificationState,
   formatGroupTaskTime,
+  isBotBrowserUri,
+  openGroupTaskUri,
   groupTaskMemberStatusBadgeClass,
   groupTaskMemberStatusLabel,
   groupTaskStatusBadgeClass,
@@ -67,6 +70,54 @@ const RoomIdBadge: React.FC<{ groupId: string }> = ({ groupId }) => {
         ? <CheckIcon className="h-3 w-3 text-emerald-500" />
         : <ClipboardDocumentIcon className="h-3 w-3" />}
     </button>
+  );
+};
+
+/**
+ * R3: a deliverable URI rendered in FULL (never abbreviated — bots/owners must be
+ * able to copy the exact id). metaweb schemes (metaapp://, pin://, …) and http(s)
+ * are clickable and open in the right surface (Bot Browser vs external browser);
+ * the copy button always gives the full URI regardless of scheme.
+ */
+const DeliverableUri: React.FC<{ uri: string }> = ({ uri }) => {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(uri);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable — silently ignore.
+    }
+  };
+  const clickable = isBotBrowserUri(uri) || /^https?:\/\//i.test(uri);
+  return (
+    <div className="mt-1 flex items-start gap-1">
+      <button
+        type="button"
+        onClick={() => clickable && openGroupTaskUri(uri)}
+        disabled={!clickable}
+        title={clickable ? uri : i18nService.t('groupTasksAcceptancePublishedPin')}
+        className={`block text-left text-xs break-all ${
+          clickable
+            ? 'text-claude-accent hover:underline cursor-pointer'
+            : 'dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-text'
+        }`}
+      >
+        {uri}
+      </button>
+      <button
+        type="button"
+        onClick={(e) => void handleCopy(e)}
+        className="shrink-0 mt-px inline-flex items-center text-[10px] text-claude-accent hover:underline"
+        title={i18nService.t('copy')}
+      >
+        {copied
+          ? <CheckIcon className="h-3 w-3 text-emerald-500" />
+          : <ClipboardDocumentIcon className="h-3 w-3" />}
+      </button>
+    </div>
   );
 };
 
@@ -399,22 +450,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
-  const [reworking, setReworking] = useState(false);
-  const [reworkError, setReworkError] = useState<string | null>(null);
-  const handleRework = async () => {
-    if (!detail || reworking) return;
-    setReworking(true);
-    setReworkError(null);
-    try {
-      const updated = await groupTaskService.reworkTask({ taskId, reason: 'Owner/chair requested supplementary work' });
-      setDetail(updated);
-    } catch (err) {
-      setReworkError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setReworking(false);
-    }
-  };
-
   const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
     setClosing(true);
@@ -594,16 +629,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   {i18nService.t('groupTasksAcceptClose')}
                 </button>
               )}
-              {canAcceptGroupTask(detail.status) && (
-                <button
-                  type="button"
-                  onClick={() => void handleRework()}
-                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors"
-                  title="Move the task back to executing for supplementary work"
-                >
-                  {i18nService.t('groupTasksRework')}
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}
@@ -615,9 +640,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           )}
           <WindowTitleBar inline />
         </div>
-        {reworkError && (
-          <div className="px-4 py-1 text-xs text-red-500">{reworkError}</div>
-        )}
       </div>
 
       {/* Body: transcript column + right rail */}
@@ -628,6 +650,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             <p className="text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap">
               {detail.goal}
             </p>
+            {detail.stall === true && (
+              <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
+                {i18nService
+                  .t('groupTasksStallBanner')
+                  .replace('{minutes}', String(detail.stallAfterMinutes ?? 30))}
+              </div>
+            )}
             {detail.status === 'review' && (
               <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
                 {i18nService.t('groupTasksReviewSilenceHint')}
@@ -655,6 +684,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     )}
                   </div>
                 )}
+              </div>
+            )}
+            {detail.acceptanceSummary && (
+              <div className="mt-2">
+                <AcceptanceSummaryCard summary={detail.acceptanceSummary} title={detail.title} />
               </div>
             )}
             {detail.acceptanceCriteria && (
@@ -732,13 +766,29 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 </p>
               </div>
             ) : (
-              messages.map((message) => (
+              messages.map((message) => {
+                // R5: resolve the replied-to message from the loaded transcript
+                // for the reply bar preview (null when the target is on an older
+                // page — clicking still jumps/loads it via jumpToMessage).
+                const replyPin = message.replyPin?.trim();
+                const replyTargetMessage = replyPin
+                  ? messages.find((candidate) => candidate.pinId === replyPin)
+                  : undefined;
+                const replyTarget = replyPin
+                  ? (replyTargetMessage
+                    ? {
+                        senderName: replyTargetMessage.senderName?.trim() || 'Unknown',
+                        preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+                      }
+                    : null)
+                  : undefined;
+                return (
                 <GroupTaskMessageItem
                   key={message.id}
                   message={message}
                   isChairSender={Boolean(
                     chairMember?.globalmetaid
-                    && message.senderGlobalMetaId === chairMember.globalmetaid,
+                    && message.senderGlobalMetaId === chairMember.globalMetaid,
                   )}
                   isOwnerSender={Boolean(
                     ownerGlobalMetaId && message.senderGlobalMetaId === ownerGlobalMetaId,
@@ -748,8 +798,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     && remoteMemberGlobalMetaIds.has(message.senderGlobalMetaId),
                   )}
                   highlight={highlightPinId != null && message.pinId === highlightPinId}
+                  replyTarget={replyTarget}
+                  onJumpToReply={(pinId) => void jumpToMessage(pinId)}
                 />
-              ))
+                );
+              })
             )}
           </div>
 
@@ -814,12 +867,21 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   )}
                   {member.workStatus && member.workStatus !== 'unknown' && (
                     <span
+                      title={
+                        member.workStatus === 'error'
+                          ? i18nService.t('groupTasksWorkStatusErrorHint')
+                          : member.workStatus === 'timeout'
+                            ? i18nService.t('groupTasksWorkStatusTimeoutHint')
+                            : undefined
+                      }
                       className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
                         member.workStatus === 'working'
                           ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                           : member.workStatus === 'error'
                             ? 'bg-red-500/15 text-red-600 dark:text-red-400'
-                            : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
+                            : member.workStatus === 'timeout'
+                              ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400'
+                              : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
                       }`}
                     >
                       {i18nService.t(groupTaskWorkStatusLabelKey(member.workStatus))}
@@ -1011,20 +1073,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                       })()}
                     </div>
                     {deliverable.uri ? (
-                      /^https?:\/\//i.test(deliverable.uri) ? (
-                        <a
-                          href={deliverable.uri}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="block mt-1 text-xs text-claude-accent hover:underline break-all"
-                        >
-                          {deliverable.uri}
-                        </a>
-                      ) : (
-                        <code className="block mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary break-all">
-                          {deliverable.uri}
-                        </code>
-                      )
+                      <DeliverableUri uri={deliverable.uri} />
                     ) : (
                       // Text deliverable (no uri): fold the producing message
                       // body so the panel reads as content, not an empty card.

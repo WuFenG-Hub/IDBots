@@ -187,6 +187,36 @@ test('Issue #9: modify — same target + same content twice dedupes to ONE chain
   }
 });
 
+test('R8: updateMetaApp returns firstPinId and builds the DISPLAY URI from the root pin (not the modify pin)', async () => {
+  const h = await openHarness();
+  try {
+    // A valid 64-hex create root, distinct from the mock's generated modify pin.
+    const createRoot = 'b'.repeat(64) + 'i0';
+    const updated = await updateMetaApp(h.metabotStore, 1, createRoot, MANIFEST_B, { confirm: true, firstPinId: createRoot });
+    assert.equal(updated.firstPinId, createRoot, 'update returns the create-root firstPinId');
+    assert.notEqual(updated.pinId, createRoot, 'the modify write pin differs from the root');
+    // The user-facing URI/URL point at the root, not the modify pin.
+    assert.equal(updated.metaappUri, `metaapp://${createRoot}`);
+    assert.equal(updated.shareWebUrl, `https://openagentinternet.org/browser/metaapp/${createRoot}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R8: updateMetaApp without firstPinId falls back to targetPinId for the display URI', async () => {
+  const h = await openHarness();
+  try {
+    const updated = await updateMetaApp(h.metabotStore, 1, TARGET_PIN, MANIFEST_A, { confirm: true });
+    // No firstPinId supplied → the display pin degrades to the target (which for
+    // a fresh update is also the create root in the common case).
+    assert.equal(updated.firstPinId, TARGET_PIN);
+    assert.equal(updated.metaappUri, `metaapp://${TARGET_PIN}`);
+    assert.equal(updated.shareWebUrl, `https://openagentinternet.org/browser/metaapp/${TARGET_PIN}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('Issue #9: modify — two concurrent DIFFERENT-content modifies of the same app both write, serialized', async () => {
   const h = await openHarness();
   try {

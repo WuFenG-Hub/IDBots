@@ -104,7 +104,7 @@ export interface GroupTaskDeliverable {
   sourceSenderName?: string | null;
 }
 
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
 
 export type GroupTaskCheckpointStatus = 'open' | 'resolved' | 'cancelled';
 
@@ -123,6 +123,46 @@ export interface GroupTaskCheckpoint {
   resolvedMsgPinId: string | null;
   createdAt: string | null;
   resolvedAt: string | null;
+}
+
+/** One deliverable row inside an acceptance summary (immutable snapshot). */
+export interface GroupTaskAcceptanceSummaryDeliverable {
+  kind: string | null;
+  uri: string | null;
+  status: GroupTaskDeliverableStatus;
+  confirmation: 'unconfirmed' | 'confirmed';
+  authorName: string | null;
+}
+
+/** One member row inside an acceptance summary (immutable snapshot). */
+export interface GroupTaskAcceptanceSummaryMember {
+  name: string | null;
+  role: 'chair' | 'worker';
+  /** Self-reported status snapshot (host-derived workStatus is a P1/R6 concern). */
+  workStatus: string;
+}
+
+/**
+ * R1: host-generated, deterministic acceptance summary ("把菜端上桌"). Single
+ * source of truth for the group's last review message, the owner private
+ * report, and the R2 source-session notification. Null before review entry.
+ */
+export interface GroupTaskAcceptanceSummary {
+  id: number;
+  taskId: number;
+  version: number;
+  goal: string;
+  acceptanceCriteria: string | null;
+  deliverables: GroupTaskAcceptanceSummaryDeliverable[];
+  members: GroupTaskAcceptanceSummaryMember[];
+  guidance: string;
+  outcome: GroupTaskStatus | null;
+  rating: number | null;
+  ratingComment: string | null;
+  generatedBy: string;
+  generatedAt: string | null;
+  publishedGroupPinId: string | null;
+  notifiedSession: string | null;
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {
@@ -154,6 +194,10 @@ export interface GroupTaskDriverInfo {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** Round-4/R6: true when a non-terminal task has had no host drive recently. */
+  stall?: boolean;
+  /** Round-4/R6: the stall threshold in minutes (30 by default). */
+  stallAfterMinutes?: number;
   /** P0-5: state-transition audit log. */
   transitions?: GroupTaskTransition[];
   /** P0-8: public integrity declarations (honest corrections/reports). */
@@ -164,6 +208,8 @@ export interface GroupTaskDetail extends GroupTask {
   driver?: GroupTaskDriverInfo | null;
   /** HITL: human checkpoints of the task, oldest first. */
   checkpoints?: GroupTaskCheckpoint[];
+  /** R1: latest host-generated acceptance summary (single source of truth). */
+  acceptanceSummary?: GroupTaskAcceptanceSummary | null;
   /**
    * HITL: what the owner must decide right now — the tag-free body of the
    * chair's [CHECKPOINT] message that opened the open checkpoint (null when
