@@ -8,6 +8,7 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
+import CustomProviderDeleteConfirmModal from './CustomProviderDeleteConfirmModal';
 import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, MoonIcon, ChevronRightIcon, PuzzlePieceIcon, ArrowPathIcon, ExclamationTriangleIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
@@ -519,6 +520,8 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   const [customModelName, setCustomModelName] = useState('');
   const [customModelId, setCustomModelId] = useState('');
   const [customProviderError, setCustomProviderError] = useState<string | null>(null);
+  // Pending custom provider scheduled for deletion (holds the confirm dialog open).
+  const [pendingDeleteProvider, setPendingDeleteProvider] = useState<{ key: string; name: string } | null>(null);
 
   const coworkConfig = useSelector((state: RootState) => state.cowork.config);
   const imConfig = useSelector((state: RootState) => state.im.config);
@@ -1971,11 +1974,18 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
     }
   };
 
+  // Opens the delete confirmation dialog for a custom provider. window.confirm is
+  // blocked by Electron in the renderer, so the dialog is state-driven instead.
   const handleDeleteCustomProvider = (providerKey: string) => {
     const displayName = providers[providerKey]?.name?.trim() || providerKey;
-    if (!window.confirm(i18nService.t('deleteCustomProviderConfirm').replace('{name}', displayName))) {
-      return;
-    }
+    setPendingDeleteProvider({ key: providerKey, name: displayName });
+  };
+
+  // Performs the actual deletion after the user confirms in the dialog.
+  const handleConfirmDeleteCustomProvider = () => {
+    const providerKey = pendingDeleteProvider?.key;
+    if (!providerKey) return;
+    setPendingDeleteProvider(null);
     setProviders(prev => {
       const next = { ...prev };
       delete next[providerKey];
@@ -1987,6 +1997,10 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       const firstEnabled = remainingKeys.find(key => visibleProviders[key]?.enabled);
       setActiveProvider((firstEnabled ?? remainingKeys[0]) as ProviderType);
     }
+  };
+
+  const handleCancelDeleteCustomProvider = () => {
+    setPendingDeleteProvider(null);
   };
 
   // 测试 API 连接
@@ -4432,6 +4446,15 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               </div>
             </div>
+          )}
+
+          {/* Delete custom provider confirmation */}
+          {pendingDeleteProvider && (
+            <CustomProviderDeleteConfirmModal
+              name={pendingDeleteProvider.name}
+              onClose={handleCancelDeleteCustomProvider}
+              onConfirm={handleConfirmDeleteCustomProvider}
+            />
           )}
 
           {/* Memory Modal */}
