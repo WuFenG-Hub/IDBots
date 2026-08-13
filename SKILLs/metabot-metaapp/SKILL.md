@@ -125,6 +125,15 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 
 如果用户想“顺手发一条公告 buzz”，保持在本技能里完成：先生成分享 URI/URL，再把它写进 buzz 文案，调用 `metabot-post-buzz/scripts/post-buzz.js`。不要把用户赶去另一个技能重新开始。
 
+### 修改后对外展示用 first pin（重要，容易出错）
+
+- **创建（create）**：回执里的 `pinId` 就是根 pin，`metaapp://<pinId>` 就是稳定展示 URI。
+- **修改（update）**：回执里的 `pinId` 是本次 modify 写链 pin（一条「变更记录」），**不是**应该展示给用户的 pin。对外展示 / 分享 / 打开的 URI 一律用根 pin：
+  - 展示 URI：`metaapp://<firstPinId>`（没有 `firstPinId` 就回退 `targetPinId`）
+  - 分享链接：`https://openagentinternet.org/browser/metaapp/<firstPinId>`
+- 脚本 `--publish-prepared` 对 modify 操作已经自动把回执里的 `metaappUri` / `shareWebUrl` 指向根 pin。**handoff 给用户时直接用回执里的 `metaappUri` / `shareWebUrl`，不要自己拼 `metaapp://<pinId>`（那是 modify 变更 pin，不是应用本身）。**
+- 如果 modify 回执里没有 `firstPinId`（输入侧没带），先回退 `targetPinId`，两者都缺才用 `pinId`。
+
 ## Bot Homepage MetaApp
 
 Bot homepage 是 MetaApp 的一个特例，但 `/info/homepage` 仍然是单独的指针记录，不是 `/protocols/metaapp` 本体的一部分。
