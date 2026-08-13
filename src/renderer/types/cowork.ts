@@ -527,6 +527,29 @@ export interface CoworkMemoryPolicy {
   source: 'global' | 'metabot';
 }
 
+/** Knowledge-point anchored memory entry (Settings → Memory → Knowledge). */
+export type CoworkKnowledgeKind = 'know_how' | 'pitfall' | 'principle';
+export type CoworkKnowledgeStatus = 'active' | 'superseded' | 'archived';
+
+export interface CoworkKnowledgeEntry {
+  id: string;
+  metabotId: number;
+  topic: string;
+  topicFingerprint: string;
+  summary: string;
+  kind: CoworkKnowledgeKind;
+  category: string | null;
+  tags: string[];
+  confidence: number;
+  status: CoworkKnowledgeStatus;
+  origin: 'agent' | 'dream' | 'user';
+  sourceDreamDate: string | null;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+  lastUsedAt: number | null;
+}
+
 // Cowork pending permission request
 export interface CoworkPermissionRequest {
   sessionId: string;

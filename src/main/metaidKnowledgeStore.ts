@@ -738,6 +738,82 @@ export class MetaIDKnowledgeStore {
   }
 
   /**
+   * Human edit of a knowledge point from the Settings UI: rewrite the entry
+   * in place by id (so editing the topic does not fork into a new entry the
+   * way upsert-by-fingerprint would). The prior summary/kind are archived as
+   * a revision and the version is bumped — experience is not immutable.
+   */
+  updateKnowledge(input: {
+    id: string;
+    metabotId: number;
+    topic?: string;
+    summary?: string;
+    kind?: MetaIDKnowledgeKind;
+  }): MetaIDKnowledgeEntry | null {
+    const id = asText(input.id);
+    const metabotId = asInteger(input.metabotId);
+    const existing = this.getKnowledge(id);
+    if (!existing || existing.metabotId !== metabotId) return null;
+
+    const nextTopic = input.topic !== undefined ? boundedRequiredText(input.topic, 'topic', MAX_TOPIC) : existing.topic;
+    const nextSummary = input.summary !== undefined ? boundedRequiredText(input.summary, 'summary', MAX_SUMMARY) : existing.summary;
+    const nextKind = input.kind !== undefined ? normalizeKind(input.kind) : existing.kind;
+    const noChange = nextTopic === existing.topic && nextSummary === existing.summary && nextKind === existing.kind;
+    if (noChange) return existing;
+
+    const nextFingerprint = topicFingerprintOf(nextTopic);
+    const nextVersion = Math.max(1, asInteger(existing.version, 1)) + 1;
+    const now = this.now();
+    try {
+      this.db.run('BEGIN IMMEDIATE');
+      this.db.run(
+        `INSERT INTO metaid_knowledge_revisions (
+           id, knowledge_id, version, summary, kind, origin, source_dream_date, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          id,
+          asInteger(existing.version, 1),
+          existing.summary,
+          normalizeKind(existing.kind),
+          normalizeOrigin(existing.origin),
+          existing.sourceDreamDate ?? null,
+          asInteger(existing.updatedAt, now),
+        ],
+      );
+      this.db.run(
+        `UPDATE metaid_knowledge_entries
+         SET topic = ?, topic_fingerprint = ?, summary = ?, kind = ?, status = 'active',
+             version = ?, updated_at = ?
+         WHERE id = ?`,
+        [nextTopic, nextFingerprint, nextSummary, nextKind, nextVersion, now, id],
+      );
+      this.db.run('COMMIT');
+    } catch (error) {
+      try { this.db.run('ROLLBACK'); } catch { /* keep original error */ }
+      throw error;
+    }
+    this.saveDb();
+    return this.getKnowledge(id);
+  }
+
+  /**
+   * Hard-delete a knowledge point and its sources/revisions (FK ON DELETE
+   * CASCADE handles the children). Returns true when a row was removed.
+   * Note: the nightly dream may regenerate a similar point afterwards — use
+   * archiveKnowledge instead when the goal is "keep this out of recall".
+   */
+  deleteKnowledge(input: { id: string; metabotId: number }): boolean {
+    const id = asText(input.id);
+    const metabotId = asInteger(input.metabotId);
+    const existing = this.getKnowledge(id);
+    if (!existing || existing.metabotId !== metabotId) return false;
+    this.db.run('DELETE FROM metaid_knowledge_entries WHERE id = ?', [id]);
+    this.saveDb();
+    return true;
+  }
+
+  /**
    * Compact active set handed to the dream prompt so the model can decide
    * create-vs-revise: it sees what the bot already believes about each topic
    * and either extends the list or rewrites an existing entry.

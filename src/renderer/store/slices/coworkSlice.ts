@@ -66,7 +66,7 @@ const initialState: CoworkState = {
     memoryImplicitUpdateEnabled: true,
     memoryLlmJudgeEnabled: true,
     memoryGuardLevel: 'strict',
-    memoryUserMemoriesMaxItems: 12,
+    memoryUserMemoriesMaxItems: 20,
   },
 };
 

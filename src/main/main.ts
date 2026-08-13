@@ -9340,6 +9340,26 @@ if (!gotTheLock) {
       };
     }
   });
+
+  // Drop a per-MetaBot memory policy override so the bot follows the global
+  // default again (Settings → Memory → policy card "reset to global").
+  ipcMain.handle('cowork:memory:deletePolicy', async (_event, input: { metabotId?: number }) => {
+    try {
+      const metabotId = typeof input?.metabotId === 'number' && Number.isFinite(input.metabotId) && input.metabotId > 0
+        ? Math.floor(input.metabotId)
+        : null;
+      if (metabotId == null) {
+        return { success: false, error: 'Invalid metabotId for memory policy' };
+      }
+      const deleted = getCoworkStore().getMemoryBackend().deleteMemoryPolicyForMetabot(metabotId);
+      return { success: true, deleted };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to reset memory policy',
+      };
+    }
+  });
   ipcMain.handle('cowork:sandbox:install', async () => {
     const result = await ensureSandboxReady();
     return {
@@ -13081,6 +13101,113 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
       return {
         success: false,
         error: error instanceof Error ? error.message : 'Failed to load MetaID contact detail',
+      };
+    }
+  });
+
+  // Knowledge-point anchored memory browser (Settings → Memory → Knowledge).
+  // The store already supports list/archive; these expose them to the renderer.
+  ipcMain.handle('metaid:knowledge:list', async (_event, input: {
+    metabotId?: number;
+    kind?: string;
+    status?: string;
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    try {
+      const metabotId = Number(input?.metabotId);
+      if (!Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing metabotId' };
+      }
+      const entries = getMetaIDKnowledgeStore().listKnowledge({
+        metabotId,
+        kind: input?.kind as never,
+        status: (input?.status ?? 'active') as never,
+        query: input?.query,
+        limit: input?.limit,
+        offset: input?.offset,
+      });
+      return { success: true, entries };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list knowledge points',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:knowledge:archive', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const entry = getMetaIDKnowledgeStore().archiveKnowledge({ id, metabotId });
+      if (!entry) {
+        return { success: false, error: 'Knowledge point not found' };
+      }
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to archive knowledge point',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:knowledge:update', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+    topic?: string;
+    summary?: string;
+    kind?: string;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const entry = getMetaIDKnowledgeStore().updateKnowledge({
+        id,
+        metabotId,
+        topic: input?.topic,
+        summary: input?.summary,
+        kind: input?.kind as never,
+      });
+      if (!entry) {
+        return { success: false, error: 'Knowledge point not found' };
+      }
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update knowledge point',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:knowledge:delete', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const deleted = getMetaIDKnowledgeStore().deleteKnowledge({ id, metabotId });
+      return { success: true, deleted };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete knowledge point',
       };
     }
   });

@@ -20,6 +20,7 @@ import type {
 import type {
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
+  CoworkKnowledgeEntry,
   CoworkMessageFeedbackRecord,
   CoworkPermissionMode,
 } from './cowork';
@@ -993,6 +994,24 @@ interface IElectronAPI {
       memoryGuardLevel?: 'strict' | 'standard' | 'relaxed';
       memoryUserMemoriesMaxItems?: number;
     }) => Promise<{ success: boolean; policy?: CoworkMemoryPolicy; error?: string }>;
+    listKnowledge: (input: {
+      metabotId: number;
+      kind?: 'know_how' | 'pitfall' | 'principle';
+      status?: 'active' | 'superseded' | 'archived' | 'all';
+      query?: string;
+      limit?: number;
+      offset?: number;
+    }) => Promise<{ success: boolean; entries?: CoworkKnowledgeEntry[]; error?: string }>;
+    archiveKnowledge: (input: { id: string; metabotId: number }) => Promise<{ success: boolean; entry?: CoworkKnowledgeEntry; error?: string }>;
+    updateKnowledge: (input: {
+      id: string;
+      metabotId: number;
+      topic?: string;
+      summary?: string;
+      kind?: 'know_how' | 'pitfall' | 'principle';
+    }) => Promise<{ success: boolean; entry?: CoworkKnowledgeEntry; error?: string }>;
+    deleteKnowledge: (input: { id: string; metabotId: number }) => Promise<{ success: boolean; deleted?: boolean; error?: string }>;
+    deleteMemoryPolicy: (input: { metabotId: number }) => Promise<{ success: boolean; deleted?: boolean; error?: string }>;
     getSandboxStatus: () => Promise<CoworkSandboxStatus>;
     installSandbox: () => Promise<{ success: boolean; status: CoworkSandboxStatus; error?: string }>;
     onSandboxDownloadProgress: (callback: (data: CoworkSandboxProgress) => void) => () => void;
