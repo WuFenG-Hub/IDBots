@@ -110,6 +110,10 @@ import {
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
 import {
+  buildMetabotManageAgentTools,
+  type MetabotManageControl,
+} from './metabotManageAgentTools';
+import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
   ensureCoworkSandboxDirs,
@@ -1465,6 +1469,14 @@ export interface CoworkRunnerOptions {
    */
   metaFileUpload?: MetaFileUploadControl;
   /**
+   * When set, Twin cowork sessions get the metabot_manage tools (metabot_list,
+   * metabot_create, metabot_update, metabot_delete) backed by the shared core
+   * functions in services/metabotManageService.ts — the same code the manual
+   * UI uses. Registered only for Twin sessions (isTwinSession gate); Worker
+   * bots never see these tools.
+   */
+  metabotManage?: MetabotManageControl;
+  /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
    * turn ended without terminal events) and settled so the query can close.
@@ -1498,6 +1510,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metaFileUpload?: MetaFileUploadControl;
+  private metabotManage?: MetabotManageControl;
   private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
@@ -1568,6 +1581,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metaFileUpload = options?.metaFileUpload;
+    this.metabotManage = options?.metabotManage;
     this.sdkCronMirror = options?.sdkCronMirror;
     this.localTurnStallTimeoutMs = Math.max(
       0,
@@ -6859,6 +6873,19 @@ export class CoworkRunner extends EventEmitter {
             upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
             sessionId,
             resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+          })
+        );
+      }
+      // MetaBot management (list/create/update/delete) is registered ONLY for
+      // Twin sessions: the Twin acts as the user's operator over the local bot
+      // roster. Every tool delegates to services/metabotManageService.ts — the
+      // same code the manual UI IPC handlers call — so Twin-assisted management
+      // is identical to hand-editing. Worker bots never see these tools.
+      if (this.metabotManage && this.isTwinSession(sessionId)) {
+        memoryTools.push(
+          ...buildMetabotManageAgentTools({
+            tool,
+            control: this.metabotManage,
           })
         );
       }

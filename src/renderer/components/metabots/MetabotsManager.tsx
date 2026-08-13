@@ -9,7 +9,6 @@ import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
 import MetaBotEditTabs, {
   EDIT_TAB_FIELDS,
-  EDIT_TAB_SYNC_GROUPS,
   normalizeA2AAutoReplyEnabledOption,
   normalizeA2AByeCooldownMsOption,
   normalizeA2AMaxIncomingTurnsOption,
@@ -27,7 +26,15 @@ import { shouldRouteFirstMetabotCreationToOnboarding } from '../onboarding/onboa
 import { DEFAULT_METABOT_LIMIT, METABOT_LIMIT_REACHED_ERROR } from '../../../main/shared/metabotLimit';
 
 type ViewMode = 'list' | 'add' | 'edit';
-interface EditSyncPlan {
+
+/**
+ * The on-chain edit-sync plan is now computed in the MAIN process
+ * (metabotManageService.buildEditSyncFlags / updateMetaBotCore) — the same
+ * single source the Twin metabot_update tool uses. The renderer only mirrors
+ * the "still unsynced" steps so its manual Retry button can republish the
+ * remainder via idbots:syncMetaBotEditChanges.
+ */
+interface EditSyncRemaining {
   metabotId: number;
   syncName: boolean;
   syncAvatar: boolean;
@@ -36,40 +43,50 @@ interface EditSyncPlan {
   syncLlm: boolean;
   syncChatSkills: boolean;
   syncHomepage: boolean;
-  syncOwner?: boolean;
-  syncStepKeys: SyncStepKey[];
+  syncOwner: boolean;
 }
 
-const buildRemainingEditSyncPlan = (
-  plan: EditSyncPlan,
-  syncedSteps: readonly SyncStepKey[]
-): EditSyncPlan => {
-  const synced = new Set(syncedSteps);
-  return {
-    ...plan,
-    syncName: plan.syncName && !synced.has('name'),
-    syncAvatar: plan.syncAvatar && !synced.has('avatar'),
-    syncBio: plan.syncBio && !synced.has('bio'),
-    syncPersona: plan.syncPersona && !synced.has('persona'),
-    syncLlm: plan.syncLlm && !synced.has('llm'),
-    syncChatSkills: plan.syncChatSkills && !synced.has('chatSkills'),
-    syncHomepage: plan.syncHomepage && !synced.has('homepage'),
-    syncOwner: plan.syncOwner === true && !synced.has('owner'),
-    syncStepKeys: plan.syncStepKeys.filter((step) => !synced.has(step)),
-  };
+const EDIT_SYNC_STEP_FLAG_PAIRS: ReadonlyArray<
+  readonly [string, keyof Omit<EditSyncRemaining, 'metabotId'>]
+> = [
+  ['name', 'syncName'],
+  ['avatar', 'syncAvatar'],
+  ['bio', 'syncBio'],
+  ['persona', 'syncPersona'],
+  ['llm', 'syncLlm'],
+  ['chatSkills', 'syncChatSkills'],
+  ['homepage', 'syncHomepage'],
+  ['owner', 'syncOwner'],
+];
+
+/** Normalize main's remainingSyncInput (may leave flags undefined) to booleans. */
+const toEditSyncRemaining = (input: unknown): EditSyncRemaining => {
+  const src = (input ?? {}) as Record<string, unknown>;
+  const next = { metabotId: Number(src.metabotId) || 0 } as EditSyncRemaining;
+  for (const [, flag] of EDIT_SYNC_STEP_FLAG_PAIRS) {
+    next[flag] = src[flag] === true;
+  }
+  return next;
 };
 
-const buildEditSyncIpcInput = (plan: EditSyncPlan) => ({
-  metabotId: plan.metabotId,
-  syncName: plan.syncName,
-  syncAvatar: plan.syncAvatar,
-  syncBio: plan.syncBio,
-  syncPersona: plan.syncPersona,
-  syncLlm: plan.syncLlm,
-  syncChatSkills: plan.syncChatSkills,
-  syncHomepage: plan.syncHomepage,
-  syncOwner: plan.syncOwner === true,
-});
+/** Zero out every step already confirmed, so a retry only republishes the rest. */
+const subtractEditSyncRemaining = (
+  remaining: EditSyncRemaining,
+  syncedSteps: readonly string[],
+): EditSyncRemaining => {
+  const synced = new Set(syncedSteps);
+  const next = { ...remaining };
+  for (const [step, flag] of EDIT_SYNC_STEP_FLAG_PAIRS) {
+    if (synced.has(step)) next[flag] = false;
+  }
+  return next;
+};
+
+const hasEditSyncRemaining = (remaining: EditSyncRemaining): boolean =>
+  EDIT_SYNC_STEP_FLAG_PAIRS.some(([, flag]) => remaining[flag] === true);
+
+const syncStepKeyToFlag = (step: string): keyof Omit<EditSyncRemaining, 'metabotId'> | undefined =>
+  EDIT_SYNC_STEP_FLAG_PAIRS.find(([k]) => k === step)?.[1];
 
 const providerRequiresApiKey = (provider: string) => provider !== 'ollama';
 const providerLabel = (key: string) => key.charAt(0).toUpperCase() + key.slice(1);
@@ -170,7 +187,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     syncStepKeys?: SyncStepKey[];
     showSubsidyStatus?: boolean;
   } | null>(null);
-  const [editSyncPlan, setEditSyncPlan] = useState<EditSyncPlan | null>(null);
+  const [editSyncRemaining, setEditSyncRemaining] = useState<EditSyncRemaining | null>(null);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'success' | 'error'>('idle');
   const [syncError, setSyncError] = useState<string>('');
   const [deleteTarget, setDeleteTarget] = useState<Metabot | null>(null);
@@ -341,8 +358,8 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextBossId = parseOptionalBossId(scopedValues.boss_id);
     const nextBossGlobalMetaId = scopedValues.boss_global_metaid.trim() || null;
     const nextLlmRaw = scopedValues.llm_id.trim();
-    // fallback_llm_id is a first-class Basic-tab field now; the undefined guard
-    // stays so the sync expression below keeps its defensive shape.
+    // fallback_llm_id is a first-class Basic-tab field; only send it when the
+    // Basic tab owns it (other tabs keep it pinned to the current DB value).
     const valuesFallbackLlm = scopedValues.fallback_llm_id;
     const hasFallbackLlmValue = valuesFallbackLlm !== undefined;
     const nextFallbackLlmRaw = hasFallbackLlmValue ? (valuesFallbackLlm ?? '').trim() : '';
@@ -352,52 +369,29 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextA2aAutoReplyEnabled = normalizeA2AAutoReplyEnabledOption(scopedValues.a2a_auto_reply_enabled);
     const nextHomepage = scopedValues.homepage ?? null;
 
-    const oldName = (current.name || '').trim();
-    const oldAvatarRaw = (current.avatar || '').trim();
-    const oldRole = (current.role || '').trim();
-    const oldSoul = (current.soul || '').trim();
-    const oldGoalRaw = (current.goal || '').trim();
-    const oldBioRaw = (current.bio || current.background || '').trim();
-    const oldLlmRaw = (current.llm_id || '').trim();
-    const oldFallbackLlmRaw = (current.fallback_llm_id || '').trim();
-    const oldAllowChatSkills = normalizeAllowChatSkills(current.allow_chat_skills);
-    const oldHomepage = current.homepage ?? null;
-    const oldBossGlobalMetaId = (current.boss_global_metaid ?? '').trim() || null;
-
-    const syncName = nextName !== oldName;
-    const syncAvatar = nextAvatarRaw !== oldAvatarRaw;
-    const syncOwner = nextBossGlobalMetaId !== oldBossGlobalMetaId;
-    const syncBio = nextBioRaw !== oldBioRaw;
-    const syncPersona =
-      nextRole !== oldRole ||
-      nextSoul !== oldSoul ||
-      nextGoalRaw !== oldGoalRaw;
-    const syncLlm = nextLlmRaw !== oldLlmRaw || (hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw);
-    const syncChatSkills = JSON.stringify(nextAllowChatSkills) !== JSON.stringify(oldAllowChatSkills);
-    const syncHomepage = nextHomepage !== oldHomepage;
-    // metabot_type never goes on-chain; it is a local-only change tracked
-    // separately so a Twin transfer alone still counts as a save-worthy edit.
+    // metabot_type is a local-only change (never published on-chain); a Twin
+    // transfer alone still counts as a save-worthy edit.
     const metabotTypeChanged = scopedValues.metabot_type !== current.metabot_type;
-    // A2A chat limits are also local-only runtime knobs (never published on-chain).
-    const a2aChatLimitsChanged =
-      nextA2aMaxIncomingTurns !== normalizeA2AMaxIncomingTurnsOption(current.a2a_max_incoming_turns) ||
-      nextA2aByeCooldownMs !== normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms) ||
-      nextA2aAutoReplyEnabled !== normalizeA2AAutoReplyEnabledOption(current.a2a_auto_reply_enabled);
 
-    const syncStepKeys: SyncStepKey[] = [];
-    if (syncName) syncStepKeys.push('name');
-    if (syncAvatar) syncStepKeys.push('avatar');
-    if (syncBio) syncStepKeys.push('bio');
-    if (syncPersona) syncStepKeys.push('persona');
-    if (syncLlm) syncStepKeys.push('llm');
-    if (syncChatSkills) syncStepKeys.push('chatSkills');
-    if (syncHomepage) syncStepKeys.push('homepage');
-    if (syncOwner) syncStepKeys.push('owner');
-
-    // Gate the sync to the step groups this tab owns. With the value scoping
-    // above the other flags are already false; this makes the contract explicit.
-    const tabSyncStepKeys = syncStepKeys.filter((key) => EDIT_TAB_SYNC_GROUPS[tab].includes(key));
-    if (tabSyncStepKeys.length === 0 && !metabotTypeChanged && !a2aChatLimitsChanged) {
+    // No-op guard: nothing at all changed for this tab. The on-chain sync
+    // plan itself is now computed in the main process (updateMetaBotCore).
+    const nothingChanged =
+      nextName === (current.name || '').trim() &&
+      nextAvatarRaw === (current.avatar || '').trim() &&
+      nextRole === (current.role || '').trim() &&
+      nextSoul === (current.soul || '').trim() &&
+      nextGoalRaw === (current.goal || '').trim() &&
+      nextBioRaw === (current.bio || current.background || '').trim() &&
+      nextBossGlobalMetaId === ((current.boss_global_metaid ?? '').trim() || null) &&
+      nextLlmRaw === (current.llm_id || '').trim() &&
+      (!hasFallbackLlmValue || nextFallbackLlmRaw === (current.fallback_llm_id || '').trim()) &&
+      JSON.stringify(nextAllowChatSkills) === JSON.stringify(normalizeAllowChatSkills(current.allow_chat_skills)) &&
+      nextA2aMaxIncomingTurns === normalizeA2AMaxIncomingTurnsOption(current.a2a_max_incoming_turns) &&
+      nextA2aByeCooldownMs === normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms) &&
+      nextA2aAutoReplyEnabled === normalizeA2AAutoReplyEnabledOption(current.a2a_auto_reply_enabled) &&
+      nextHomepage === (current.homepage ?? null) &&
+      !metabotTypeChanged;
+    if (nothingChanged) {
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotNoChanges') }));
       return;
     }
@@ -452,35 +446,32 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       await loadList();
     }
 
-    if (tabSyncStepKeys.length === 0) {
-      // Local-only change (metabot_type): persisted above, nothing to publish.
+    // metabot:update now performs local write + on-chain sync in ONE call
+    // (updateMetaBotCore) — the exact same path the Twin metabot_update tool
+    // uses. Read the sync outcome from the result instead of re-computing it.
+    const sync = result.sync;
+    if (!sync || sync.skipped) {
+      // Local-only change (metabot_type / A2A knobs / enable): persisted, nothing to publish.
       window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotSaveSuccess') }));
       return;
     }
 
-    const syncPlan: EditSyncPlan = {
-      metabotId: editId,
-      syncName: syncName && tabSyncStepKeys.includes('name'),
-      syncAvatar: syncAvatar && tabSyncStepKeys.includes('avatar'),
-      syncBio: syncBio && tabSyncStepKeys.includes('bio'),
-      syncPersona: syncPersona && tabSyncStepKeys.includes('persona'),
-      syncLlm: syncLlm && tabSyncStepKeys.includes('llm'),
-      syncChatSkills: syncChatSkills && tabSyncStepKeys.includes('chatSkills'),
-      syncHomepage: syncHomepage && tabSyncStepKeys.includes('homepage'),
-      syncOwner: syncOwner === true && tabSyncStepKeys.includes('owner'),
-      syncStepKeys: tabSyncStepKeys,
-    };
-    setSyncStatus('syncing');
-    setSyncError('');
-    setEditSyncPlan(syncPlan);
+    const attemptedStepKeys = (sync.attemptedStepKeys ?? []) as SyncStepKey[];
+    const remaining = toEditSyncRemaining(sync.remainingSyncInput);
+    setEditSyncRemaining(hasEditSyncRemaining(remaining) ? remaining : null);
+    setSyncStatus(sync.success ? 'success' : 'error');
+    setSyncError(sync.success ? '' : (sync.error ?? 'Unknown error'));
     setCreateSuccessModal({
       metabot: updatedMetabot,
       subsidySuccess: true,
       mode: 'editSync',
-      syncStepKeys: tabSyncStepKeys,
+      syncStepKeys: attemptedStepKeys,
       showSubsidyStatus: false,
     });
-    void performEditSyncToChain(syncPlan);
+    if (sync.success) {
+      await loadList();
+      window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('metabotSaveSuccess') }));
+    }
   };
 
   const editMetabot = editId != null ? list.find((m) => m.id === editId) : null;
@@ -612,7 +603,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
 
   function handleCloseSuccessModal() {
     setCreateSuccessModal(null);
-    setEditSyncPlan(null);
+    setEditSyncRemaining(null);
     setSyncStatus('idle');
     setSyncError('');
   }
@@ -705,37 +696,34 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     }
   };
 
-  async function performEditSyncToChain(plan: EditSyncPlan) {
+  /**
+   * Manual Retry for an edit whose on-chain sync is incomplete. Republishes
+   * only the steps still marked unsynced (the plan is computed by the main
+   * process in updateMetaBotCore) — on-chain pins are not idempotent, so we
+   * never re-sync an already-confirmed step.
+   */
+  async function performEditSyncRetry(remaining: EditSyncRemaining) {
     setSyncStatus('syncing');
     setSyncError('');
-    console.log('[MetaBot] edit sync start', plan);
     try {
-      const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-      const SYNC_RETRY_DELAY_MS = 2500;
-      let result = await window.electron.idbots.syncMetaBotEditChanges(buildEditSyncIpcInput(plan));
-      if (!result.success) {
-        const retryPlan = buildRemainingEditSyncPlan(plan, result.syncedSteps ?? []);
-        setEditSyncPlan(retryPlan);
-        setCreateSuccessModal((current) => (
-          current?.mode === 'editSync'
-            ? { ...current, syncStepKeys: retryPlan.syncStepKeys }
-            : current
-        ));
-        if (retryPlan.syncStepKeys.length > 0) {
-          await delay(SYNC_RETRY_DELAY_MS);
-          result = await window.electron.idbots.syncMetaBotEditChanges(buildEditSyncIpcInput(retryPlan));
-          if (!result.success) {
-            const manualRetryPlan = buildRemainingEditSyncPlan(retryPlan, result.syncedSteps ?? []);
-            setEditSyncPlan(manualRetryPlan);
-            setCreateSuccessModal((current) => (
-              current?.mode === 'editSync'
-                ? { ...current, syncStepKeys: manualRetryPlan.syncStepKeys }
-                : current
-            ));
-          }
-        }
-      }
-      console.log('[MetaBot] edit sync result', result);
+      const result = await window.electron.idbots.syncMetaBotEditChanges({
+        metabotId: remaining.metabotId,
+        syncName: remaining.syncName,
+        syncAvatar: remaining.syncAvatar,
+        syncBio: remaining.syncBio,
+        syncPersona: remaining.syncPersona,
+        syncLlm: remaining.syncLlm,
+        syncChatSkills: remaining.syncChatSkills,
+        syncHomepage: remaining.syncHomepage,
+        syncOwner: remaining.syncOwner,
+      });
+      const nextRemaining = subtractEditSyncRemaining(remaining, result.syncedSteps ?? []);
+      setEditSyncRemaining(hasEditSyncRemaining(nextRemaining) ? nextRemaining : null);
+      setCreateSuccessModal((current) =>
+        current?.mode === 'editSync' && current.syncStepKeys?.length
+          ? { ...current, syncStepKeys: current.syncStepKeys.filter((k) => nextRemaining[syncStepKeyToFlag(k)] !== true) }
+          : current,
+      );
       if (result.success) {
         setSyncStatus('success');
         await loadList();
@@ -753,12 +741,12 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   async function handleSyncToChain() {
     if (!createSuccessModal) return;
     if (createSuccessModal.mode === 'editSync') {
-      if (!editSyncPlan) {
+      if (!editSyncRemaining) {
         setSyncStatus('error');
         setSyncError(i18nService.t('metabotSyncError'));
         return;
       }
-      await performEditSyncToChain(editSyncPlan);
+      await performEditSyncRetry(editSyncRemaining);
       return;
     }
     await performSyncToChain(createSuccessModal.metabot);
@@ -772,7 +760,7 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       syncStepKeys: undefined,
       showSubsidyStatus: false,
     });
-    setEditSyncPlan(null);
+    setEditSyncRemaining(null);
     void performSyncToChain(metabot);
   };
 

@@ -76,7 +76,7 @@ import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
 import { shouldAcquireSingleInstanceLock } from './libs/singleInstanceLock';
-import { mockCreateWalletAndFund, mockPushConfigToChain, mockUpdateConfigOnChain } from './services/chainActionMock';
+import { mockCreateWalletAndFund, mockPushConfigToChain } from './services/chainActionMock';
 import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/metabotWalletService';
 import { UserIdentityStore } from './userIdentityStore';
 import type { UserIdentity } from './types/userIdentity';
@@ -111,6 +111,16 @@ import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
+import {
+  createMetaBotOnChainCore,
+  deleteMetaBotCore,
+  listConfiguredLlmProviders,
+  listMetabotsForManagement,
+  requireMetabotLlmIdForCreate,
+  assertCanCreateMetabot,
+  updateMetaBotCore,
+  type MetabotManageDeps,
+} from './services/metabotManageService';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
   startMetaWebListener,
@@ -355,7 +365,6 @@ import {
   extractOrderRawRequest,
   normalizeOrderRawRequest,
 } from './shared/orderMessage.js';
-import { getMetabotLimitError } from './shared/metabotLimit';
 import {
   normalizeGigSquareSettlementDraft,
   parseGigSquareSettlementAsset,
@@ -5011,6 +5020,21 @@ const getCoworkRunner = () => {
           return uploadMetaFile(getMetabotStore(), params);
         },
       },
+      // Twin-only metabot_manage tools (metabot_list/create/update/delete).
+      // Every method delegates to the shared metabotManageService core — the
+      // same code the manual UI IPC handlers call — so Twin-assisted bot
+      // management is identical to hand-editing. Registered only for Twin
+      // sessions via the isTwinSession gate inside coworkRunner.
+      metabotManage: {
+        create: (input) => createMetaBotOnChainCore(input, getMetabotManageDeps()),
+        update: (id, input) => updateMetaBotCore(id, input, getMetabotManageDeps()),
+        delete: (id) => deleteMetaBotCore(id, getMetabotManageDeps()),
+        list: () => listMetabotsForManagement(getMetabotStore()),
+        listProviders: () => {
+          const appConfig = getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string } | undefined> }>('app_config');
+          return listConfiguredLlmProviders(appConfig?.providers);
+        },
+      },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
@@ -5889,6 +5913,26 @@ const signOwnerBindingForLocalUser = async (
     return { error: error instanceof Error ? error.message : String(error) };
   }
 };
+
+/**
+ * Wire the real MetaBot-management dependencies (wallet creation, gas subsidy,
+ * owner-binding signing, on-chain sync, P2P refresh, active owner identity).
+ * Module-level (hoisted) so both the IPC handlers and getCoworkRunner() share
+ * one wiring; the Twin-only metabot_manage tools and the manual UI IPC handlers
+ * therefore run through the exact same code.
+ */
+function getMetabotManageDeps(): MetabotManageDeps {
+  return {
+    store: getMetabotStore(),
+    createWallet: () => createMetaBotWallet({}),
+    requestSubsidy: requestMvcGasSubsidy,
+    signOwnerBinding: signOwnerBindingForLocalUser,
+    syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
+    syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
+    onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
+    getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+  };
+}
 
 function getIdchatPresenceService(): IdchatPresenceService {
   if (!idchatPresenceService) {
@@ -10321,20 +10365,8 @@ if (!gotTheLock) {
     }
   }));
 
-  const requireMetabotLlmIdForCreate = (value: unknown): string => {
-    const llmId = typeof value === 'string' ? value.trim() : '';
-    if (!llmId) {
-      throw new Error('LLM Brain is required when creating a MetaBot');
-    }
-    return llmId;
-  };
-
-  const assertCanCreateMetabot = (store: MetabotStore): void => {
-    const error = getMetabotLimitError(store.listMetabots().length);
-    if (error) {
-      throw new Error(error);
-    }
-  };
+  // getMetabotManageDeps() is defined at module scope (hoisted) so both the IPC
+  // handlers below and getCoworkRunner() can share it.
 
   ipcMain.handle('metabot:create', async (_event, input: {
     name: string;
@@ -10419,31 +10451,11 @@ if (!gotTheLock) {
     homepage?: string | null;
   }) => {
     try {
-      await mockUpdateConfigOnChain();
-      // Owner claims must belong to the local user identity; anything else is
-      // an unsigned unilateral claim, which this feature removes.
-      if (input.boss_global_metaid !== undefined) {
-        const trimmedBoss = (input.boss_global_metaid ?? '').trim();
-        if (trimmedBoss) {
-          const user = getUserIdentityStore().get();
-          if (!user || (user.globalmetaid ?? '').toLowerCase() !== trimmedBoss.toLowerCase()) {
-            return { success: false, error: 'OWNER_IDENTITY_MISMATCH' };
-          }
-        }
-      }
-      const store = getMetabotStore();
-      const metabot = store.updateMetabot(id, {
-        ...input,
-        boss_global_metaid:
-          input.boss_global_metaid === undefined
-            ? undefined
-            : ((input.boss_global_metaid ?? '').trim() || null),
-        fallback_llm_id:
-          input.fallback_llm_id === undefined
-            ? undefined
-            : normalizeMetabotLlmId(input.fallback_llm_id),
-      });
-      return { success: true, metabot };
+      // Single unified path: local DB write + on-chain sync (with one auto-retry
+      // over remaining steps), the exact same updateMetaBotCore the Twin
+      // metabot_update tool calls. Returns the attempted/remaining sync plan so
+      // the renderer can render sync status and offer a manual Retry.
+      return await updateMetaBotCore(id, input, getMetabotManageDeps());
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
@@ -10562,106 +10574,11 @@ if (!gotTheLock) {
     metabot_type?: 'twin' | 'worker';
     homepage?: string | null;
   }) => {
-    const store = getMetabotStore();
-    let walletId: number | null = null;
-    let metabotId: number | null = null;
+    // Thin wrapper over the shared core; the Twin metabot_create tool calls the
+    // same function so manual and Twin-assisted creation are identical.
     try {
-      assertCanCreateMetabot(store);
-      const llmId = requireMetabotLlmIdForCreate(input.llm_id);
-      const fallbackLlmId = normalizeMetabotLlmId(input.fallback_llm_id);
-      // 1. Generate wallet (in-memory)
-      const walletResult = await createMetaBotWallet({});
-      const metabotType = input.metabot_type === 'twin' ? 'twin' : 'worker';
-
-      // 2. Request gas subsidy (best-effort; don't fail creation if subsidy fails)
-      let subsidyResult: { success: boolean; error?: string } = { success: false };
-      try {
-        subsidyResult = await requestMvcGasSubsidy({
-          mvcAddress: walletResult.mvc_address,
-          mnemonic: walletResult.mnemonic,
-          path: walletResult.path,
-        });
-      } catch (e) {
-        subsidyResult = { success: false, error: e instanceof Error ? e.message : String(e) };
-      }
-
-      // 3. Insert wallet + metabot into DB (needed by syncMetaBotToChain which reads from DB)
-      const wallet = store.insertMetabotWallet({
-        mnemonic: walletResult.mnemonic,
-        path: walletResult.path,
-      });
-      walletId = wallet.id;
-
-      const metabot = store.createMetabot({
-        wallet_id: wallet.id,
-        mvc_address: walletResult.mvc_address,
-        btc_address: walletResult.btc_address,
-        doge_address: walletResult.doge_address,
-        public_key: walletResult.public_key,
-        chat_public_key: walletResult.chat_public_key,
-        chat_public_key_pin_id: null,
-        name: input.name,
-        avatar: input.avatar ?? null,
-        enabled: true,
-        metaid: walletResult.metaid,
-        globalmetaid: walletResult.globalmetaid,
-        metabot_info_pinid: null,
-        metabot_type: metabotType,
-        created_by: '0000',
-        // Minimal creation may omit persona fields; store empty strings and let
-        // the sync plan skip the empty persona/bio pins.
-        role: (input.role ?? '').trim(),
-        soul: (input.soul ?? '').trim(),
-        goal: input.goal ?? null,
-        bio: input.bio !== undefined ? input.bio : (input.background ?? null),
-        boss_id: null,
-        boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
-        llm_id: llmId,
-        fallback_llm_id: fallbackLlmId,
-        tools: [],
-        skills: [],
-        allow_chat_skills: input.allow_chat_skills ?? [],
-        homepage: input.homepage ?? null,
-      });
-      metabotId = metabot.id;
-
-      // 4. Sign the owner binding when a boss GlobalMetaID was requested; it
-      // must belong to the local user identity (signed consent).
-      let ownerBindingPayload: string | undefined;
-      const bossGlobalMetaId = (input.boss_global_metaid ?? '').trim();
-      if (bossGlobalMetaId) {
-        const signResult = await signOwnerBindingForLocalUser(bossGlobalMetaId, metabot.globalmetaid);
-        if (signResult.error) {
-          store.deleteMetabot(metabot.id);
-          return { success: false, error: signResult.error, canSkip: false };
-        }
-        ownerBindingPayload = signResult.payload;
-      }
-
-      // 5. Publish to chain (name + avatar + chatpubkey + bio [+ owner])
-      const syncResult = await syncMetaBotToChain(store, metabot.id, {}, { ownerBindingPayload });
-
-      if (!syncResult.success && !syncResult.canSkip) {
-        // Mandatory steps (name) failed — roll back DB records
-        store.deleteMetabot(metabot.id);
-        return { success: false, error: syncResult.error ?? 'Chain publish failed', canSkip: false };
-      }
-
-      // 5. Chain succeeded (or partial with canSkip) — reload metabot with updated pinIds
-      const updatedMetabot = store.getMetabotById(metabot.id) ?? metabot;
-      await syncP2PRuntimeConfigForCurrentMetabots();
-      return {
-        success: true,
-        metabot: updatedMetabot,
-        subsidy: subsidyResult,
-        chainPartial: !syncResult.success && syncResult.canSkip,
-        chainError: syncResult.canSkip ? syncResult.error : undefined,
-      };
+      return await createMetaBotOnChainCore(input, getMetabotManageDeps());
     } catch (error) {
-      // Roll back DB records on unexpected error
-      if (metabotId != null) {
-        try { store.deleteMetabot(metabotId); } catch { /* ignore */ }
-      }
       const errMsg = error instanceof Error ? error.message : String(error);
       console.error('[MetaBot] idbots:createMetaBotOnChain failed:', errMsg);
       return { success: false, error: errMsg };
@@ -11043,15 +10960,13 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle('idbots:deleteMetaBot', async (_event, metabotId: number) => {
+    // Shared with the Twin metabot_delete tool. Also guards against deleting
+    // the last remaining bot so the machine is never left botless.
     try {
-      const store = getMetabotStore();
-      const ok = store.deleteMetabot(metabotId);
-      if (ok) {
-        // Deleting the Twin must transfer Twin status to the earliest remaining bot.
-        store.ensureTwinExists();
-        await syncP2PRuntimeConfigForCurrentMetabots();
-      }
-      return { success: ok };
+      return await deleteMetaBotCore(metabotId, {
+        store: getMetabotStore(),
+        onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
+      });
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete MetaBot' };
     }

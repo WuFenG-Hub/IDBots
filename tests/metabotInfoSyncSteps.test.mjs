@@ -13,6 +13,7 @@ const {
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const metabotsManagerPath = path.join(projectRoot, 'src', 'renderer', 'components', 'metabots', 'MetabotsManager.tsx');
+const metabotManageServicePath = path.join(projectRoot, 'src', 'main', 'services', 'metabotManageService.ts');
 const i18nPath = path.join(projectRoot, 'src', 'renderer', 'services', 'i18n.ts');
 
 const metabot = {
@@ -325,40 +326,37 @@ test('full sync reports partial failure when chatpubkey is missing before bootst
 });
 
 test('renderer edit sync splits Bot Info protocol flags and forwards them to IPC', () => {
-  const source = fs.readFileSync(metabotsManagerPath, 'utf8');
+  // The on-chain sync plan is now computed in the MAIN process
+  // (metabotManageService.buildEditSyncFlags) — the single source shared by
+  // the UI and the Twin metabot_update tool. The renderer only forwards the
+  // edited fields and reads the sync outcome from the metabot:update result.
+  const serviceSource = fs.readFileSync(metabotManageServicePath, 'utf8');
+  const rendererSource = fs.readFileSync(metabotsManagerPath, 'utf8');
 
-  assert.match(source, /syncBio:\s*boolean;\s*syncPersona:\s*boolean;\s*syncLlm:\s*boolean;\s*syncChatSkills:\s*boolean;/);
-  assert.match(source, /const syncBio =\s*nextBioRaw !== oldBioRaw;/);
-  assert.match(source, /const syncPersona =\s*nextRole !== oldRole \|\|\s*nextSoul !== oldSoul \|\|\s*nextGoalRaw !== oldGoalRaw;/);
-  assert.match(source, /const syncLlm =\s*nextLlmRaw !== oldLlmRaw \|\| \(hasFallbackLlmValue && nextFallbackLlmRaw !== oldFallbackLlmRaw\);/);
-  assert.match(source, /const syncChatSkills =\s*JSON\.stringify\(nextAllowChatSkills\) !== JSON\.stringify\(oldAllowChatSkills\);/);
+  assert.match(serviceSource, /const syncBio =\s*\(nextBio \?\? ''\) !== \(before\.bio \?\? ''\);/);
+  assert.match(serviceSource, /const syncPersona = nextRole !== before\.role \|\| nextSoul !== before\.soul \|\| \(nextGoal \?\? ''\) !== \(before\.goal \?\? ''\);/);
+  assert.match(serviceSource, /const syncLlm = nextLlm !== \(before\.llm_id \?\? ''\) \|\| nextFallbackLlm !== \(before\.fallback_llm_id \?\? ''\);/);
+  assert.match(serviceSource, /const syncChatSkills = JSON\.stringify\(nextAllowChatSkills\) !== JSON\.stringify\(normalizedList\(before\.allow_chat_skills\)\);/);
 
-  const syncBioSection = source.slice(source.indexOf('const syncBio ='), source.indexOf('const syncStepKeys'));
-  assert.doesNotMatch(syncBioSection, /nextBossId|oldBossId|nextBossGlobalMetaId|oldBossGlobalMetaId/);
-
-  assert.match(source, /if \(syncPersona\) syncStepKeys\.push\('persona'\);/);
-  assert.match(source, /if \(syncLlm\) syncStepKeys\.push\('llm'\);/);
-  assert.match(source, /if \(syncChatSkills\) syncStepKeys\.push\('chatSkills'\);/);
-  assert.match(source, /syncPersona:\s*plan\.syncPersona/);
-  assert.match(source, /syncLlm:\s*plan\.syncLlm/);
-  assert.match(source, /syncChatSkills:\s*plan\.syncChatSkills/);
+  // The renderer forwards the fields and consumes the returned sync outcome;
+  // it no longer re-computes the plan.
+  assert.match(rendererSource, /const result = await window\.electron\.metabot\.update\(editId, \{/);
+  assert.match(rendererSource, /const sync = result\.sync;/);
+  assert.match(rendererSource, /const attemptedStepKeys = \(sync\.attemptedStepKeys \?\? \[\]\) as SyncStepKey\[\];/);
 });
 
 test('renderer edit sync retry narrows already synced Bot Info steps', () => {
-  const source = fs.readFileSync(metabotsManagerPath, 'utf8');
+  // Retry narrowing now lives in the main process (subtractSyncedFlags) and,
+  // for the renderer's manual Retry button, in subtractEditSyncRemaining.
+  const serviceSource = fs.readFileSync(metabotManageServicePath, 'utf8');
+  const rendererSource = fs.readFileSync(metabotsManagerPath, 'utf8');
 
-  assert.match(source, /const buildRemainingEditSyncPlan =\s*\(\s*plan:\s*EditSyncPlan,\s*syncedSteps:\s*readonly SyncStepKey\[\]/);
-  assert.match(source, /const synced = new Set\(syncedSteps\);/);
-  assert.match(source, /syncName:\s*plan\.syncName && !synced\.has\('name'\)/);
-  assert.match(source, /syncAvatar:\s*plan\.syncAvatar && !synced\.has\('avatar'\)/);
-  assert.match(source, /syncBio:\s*plan\.syncBio && !synced\.has\('bio'\)/);
-  assert.match(source, /syncPersona:\s*plan\.syncPersona && !synced\.has\('persona'\)/);
-  assert.match(source, /syncLlm:\s*plan\.syncLlm && !synced\.has\('llm'\)/);
-  assert.match(source, /syncChatSkills:\s*plan\.syncChatSkills && !synced\.has\('chatSkills'\)/);
-  assert.match(source, /const retryPlan = buildRemainingEditSyncPlan\(plan, result\.syncedSteps \?\? \[\]\);/);
-  assert.match(source, /const manualRetryPlan = buildRemainingEditSyncPlan\(retryPlan, result\.syncedSteps \?\? \[\]\);/);
-  assert.match(source, /if \(retryPlan\.syncStepKeys\.length > 0\)/);
-  assert.match(source, /setEditSyncPlan\(retryPlan\)/);
+  assert.match(serviceSource, /const synced = new Set\(syncedSteps\);/);
+  assert.match(serviceSource, /next\[flag\] = plan\[flag\] === true && !synced\.has\(step\);/);
+  assert.match(rendererSource, /const subtractEditSyncRemaining = \(/);
+  assert.match(rendererSource, /if \(synced\.has\(step\)\) next\[flag\] = false;/);
+  assert.match(rendererSource, /await window\.electron\.idbots\.syncMetaBotEditChanges\(\{/);
+  assert.match(rendererSource, /const nextRemaining = subtractEditSyncRemaining\(remaining, result\.syncedSteps \?\? \[\]\);/);
 });
 
 test('renderer chat skill hint copy references the /info/chatSkills protocol path', () => {
