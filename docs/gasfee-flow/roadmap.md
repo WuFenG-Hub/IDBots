@@ -61,8 +61,8 @@ fallback. Fee-rate injection unified.
 - `[x]` M2.1 Reusable sponsor protocol client extracted (challenge/pre/sign/commit)
 - `[x]` M2.2 `createPinWorker` supports "build unsigned draft" mode
 - `[x]` M2.3 `createPin()` traffic-mode branch + self-pay fallback + toggle setting
-- `[ ]` M2.4 Fee rate explicitly threaded through all createPin call sites
-  → ready to start; work items in `m2-4-fee-rate-threading.md`
+- `[x]` M2.4 Fee rate explicitly threaded through all createPin call sites
+  → done 2026-08-13 (merge 453ff061); audit + resolver notes in `m2-4-fee-rate-threading.md`
 - `[x]` M2.5 Tests: sponsor path for chat pins; fallback matrix
 
 **Acceptance**: with traffic mode on and a funded pool, a bot can chat/buzz/upload

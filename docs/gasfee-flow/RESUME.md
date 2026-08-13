@@ -42,17 +42,17 @@
 
 ## What remains (in order)
 
-1. **M2.4 — fee-rate threading audit** (client, see `m2-4-fee-rate-threading.md`).
-   This is the next development task; follow the branch+worktree rhythm.
-2. **Backend request: ledger API returns `txId`** — prompt handed to the
-   backend team (see `backend-request-ledger-txid.md`); verify on their next
-   delivery, then remove the client-side journal join fallback if desired.
-3. **P2-03 — switch default apiBase to production** before release
+1. **Client follow-up: prefer server-provided ledger `txId`** — backend delivered
+   and live-verified 2026-08-13 (spend/reserve carry txId, recharge/release omit).
+   Update `trafficAccountService.ts` ledger mapping to use the server field and
+   demote the local `traffic_spend_journal` join to a fallback; adjust
+   `tests/trafficAccountService.test.mjs` enrichment cases accordingly.
+2. **P2-03 — switch default apiBase to production** before release
    (currently defaults to the test instance path via `backend-spec`; check
    `trafficSettings` / `getConfiguredTrafficApiBase`).
-4. **Phase 4 real payment** (see `phase4-payment-plan.md`) — blocked on
+3. **Phase 4 real payment** (see `phase4-payment-plan.md`) — blocked on
    company qualifications (Stripe/Alipay merchant accounts).
-5. Known non-blockers: 3 pre-existing test failures on main (mvcSpend pickUtxo
+4. Known non-blockers: 3 pre-existing test failures on main (mvcSpend pickUtxo
    ordering, two metaidCoreMvcRecovery) proven unrelated to this project —
    do not chase them as regressions.
 
