@@ -119,6 +119,7 @@ import {
   listMetabotsForManagement,
   requireMetabotLlmIdForCreate,
   assertCanCreateMetabot,
+  updateMetaBotCore,
   type MetabotManageDeps,
 } from './services/metabotManageService';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
@@ -5020,6 +5021,21 @@ const getCoworkRunner = () => {
           return uploadMetaFile(getMetabotStore(), params);
         },
       },
+      // Twin-only metabot_manage tools (metabot_list/create/update/delete).
+      // Every method delegates to the shared metabotManageService core — the
+      // same code the manual UI IPC handlers call — so Twin-assisted bot
+      // management is identical to hand-editing. Registered only for Twin
+      // sessions via the isTwinSession gate inside coworkRunner.
+      metabotManage: {
+        create: (input) => createMetaBotOnChainCore(input, getMetabotManageDeps()),
+        update: (id, input) => updateMetaBotCore(id, input, getMetabotManageDeps()),
+        delete: (id) => deleteMetaBotCore(id, getMetabotManageDeps()),
+        list: () => listMetabotsForManagement(getMetabotStore()),
+        listProviders: () => {
+          const appConfig = getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string } | undefined> }>('app_config');
+          return listConfiguredLlmProviders(appConfig?.providers);
+        },
+      },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();
         const session = coworkStoreInstance.getSession(sessionId);
@@ -5898,6 +5914,26 @@ const signOwnerBindingForLocalUser = async (
     return { error: error instanceof Error ? error.message : String(error) };
   }
 };
+
+/**
+ * Wire the real MetaBot-management dependencies (wallet creation, gas subsidy,
+ * owner-binding signing, on-chain sync, P2P refresh, active owner identity).
+ * Module-level (hoisted) so both the IPC handlers and getCoworkRunner() share
+ * one wiring; the Twin-only metabot_manage tools and the manual UI IPC handlers
+ * therefore run through the exact same code.
+ */
+function getMetabotManageDeps(): MetabotManageDeps {
+  return {
+    store: getMetabotStore(),
+    createWallet: () => createMetaBotWallet({}),
+    requestSubsidy: requestMvcGasSubsidy,
+    signOwnerBinding: signOwnerBindingForLocalUser,
+    syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
+    syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
+    onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
+    getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+  };
+}
 
 function getIdchatPresenceService(): IdchatPresenceService {
   if (!idchatPresenceService) {
@@ -10309,22 +10345,8 @@ if (!gotTheLock) {
     }
   }));
 
-  /**
-   * Wire the real MetaBot-management dependencies (wallet creation, gas subsidy,
-   * owner-binding signing, on-chain sync, P2P refresh, active owner identity).
-   * Shared by the IPC handlers below and by the Twin-only metabot_manage tools
-   * so manual and Twin-assisted management run through the exact same code.
-   */
-  const getMetabotManageDeps = (): MetabotManageDeps => ({
-    store: getMetabotStore(),
-    createWallet: () => createMetaBotWallet({}),
-    requestSubsidy: requestMvcGasSubsidy,
-    signOwnerBinding: signOwnerBindingForLocalUser,
-    syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
-    syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
-    onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
-    getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
-  });
+  // getMetabotManageDeps() is defined at module scope (hoisted) so both the IPC
+  // handlers below and getCoworkRunner() can share it.
 
   ipcMain.handle('metabot:create', async (_event, input: {
     name: string;
