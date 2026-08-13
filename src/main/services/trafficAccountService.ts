@@ -55,7 +55,9 @@ export type TrafficApiStage =
   | 'ledger'
   | 'usage'
   | 'pricing'
-  | 'recharge';
+  | 'recharge'
+  | 'campaign'
+  | 'redeem';
 
 export class TrafficApiError extends Error {
   readonly code: string;
@@ -64,12 +66,19 @@ export class TrafficApiError extends Error {
   readonly serviceMessage: string;
   /** True when the backend returned 404 for /v1/traffic/* (feature disabled). */
   readonly featureUnavailable: boolean;
+  /**
+   * Backend error code delivered as data.errorCode (e.g. CAMPAIGN_DISABLED,
+   * ALREADY_CLAIMED, CODE_USED), same envelope pattern as TRAFFIC_INSUFFICIENT
+   * (backend-spec §12 errata 1). Empty when the backend sent none.
+   */
+  readonly errorCode: string;
 
   constructor(input: {
     stage: TrafficApiStage;
     message: string;
     status?: number;
     featureUnavailable?: boolean;
+    errorCode?: string;
   }) {
     super(input.message);
     this.name = 'TrafficApiError';
@@ -78,6 +87,7 @@ export class TrafficApiError extends Error {
     if (input.status !== undefined) this.status = input.status;
     this.serviceMessage = input.message;
     this.featureUnavailable = input.featureUnavailable === true;
+    this.errorCode = normalizeText(input.errorCode);
   }
 }
 
@@ -222,6 +232,18 @@ function toNumber(value: unknown): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
+function normalizeBoolean(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value === 1;
+  if (typeof value === 'string') return /^(true|1|yes)$/i.test(normalizeText(value));
+  return false;
+}
+
+function pickErrorCode(data: unknown): string {
+  const record = readObject(data);
+  return record ? normalizeText(record.errorCode ?? record.error_code) : '';
+}
+
 function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -265,6 +287,42 @@ function buildTrafficRechargeMessage(accountId: string, planId: string, timestam
 
 function buildTrafficRechargeConfirmMessage(orderId: string, gatewayTxnId: string, timestamp: number): string {
   return `traffic-recharge-confirm:${orderId}:${gatewayTxnId}:${timestamp}`;
+}
+
+// Phase 3b canonical strings (free-grant campaign + recharge codes). The
+// backend message.go file does not ship these yet, so the client follows the
+// existing traffic-<purpose>:<accountId>:<ts> convention; confirm against the
+// backend deployment doc once it lands.
+function buildTrafficFreeGrantStatusMessage(accountId: string, timestamp: number): string {
+  return `traffic-free-grant-status:${accountId}:${timestamp}`;
+}
+
+function buildTrafficFreeGrantClaimMessage(accountId: string, timestamp: number): string {
+  return `traffic-free-grant-claim:${accountId}:${timestamp}`;
+}
+
+function buildTrafficRedeemCodeMessage(accountId: string, timestamp: number): string {
+  return `traffic-redeem-code:${accountId}:${timestamp}`;
+}
+
+const TRAFFIC_CLIENT_APP_ID = 'idbots';
+const TRAFFIC_CLIENT_VERSION_FALLBACK = 'dev';
+
+/**
+ * App version reported to the free-grant claim endpoint. Electron is loaded
+ * lazily (same pattern as metaidCore.appendMetaidLog) so this service module
+ * stays Electron-free for plain-node tests, where require('electron') resolves
+ * to the binary path string and the optional-chain yields undefined.
+ */
+function getTrafficClientVersion(): string {
+  try {
+    const { app } = require('electron');
+    const version = normalizeText(app?.getVersion?.());
+    if (version) return version;
+  } catch {
+    // electron unavailable — fall through to the dev marker
+  }
+  return TRAFFIC_CLIENT_VERSION_FALLBACK;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,12 +375,14 @@ async function trafficRequestJson(input: {
       });
     }
     if (!response.ok) {
+      const bodyRecord = readObject(body);
       throw new TrafficApiError({
         stage: input.stage,
-        message: pickText(readObject(body) ?? {}, 'message', 'msg', 'error')
+        message: pickText(bodyRecord ?? {}, 'message', 'msg', 'error')
           || `Traffic service request failed with HTTP ${response.status}.`,
         status: response.status,
         featureUnavailable: response.status === 404,
+        errorCode: pickErrorCode(bodyRecord?.data),
       });
     }
     const record = readObject(body);
@@ -342,6 +402,7 @@ async function trafficRequestJson(input: {
       stage: input.stage,
       message: pickText(record, 'message', 'msg', 'error')
         || `Traffic service returned code ${normalizeText(record.code) || 'unknown'}.`,
+      errorCode: pickErrorCode(record.data),
     });
   } catch (error) {
     if (error instanceof TrafficApiError) throw error;
@@ -867,6 +928,110 @@ export async function mockConfirmRechargeOrder(orderId: string): Promise<Traffic
   return status;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3b: free-grant campaign + recharge codes
+// ---------------------------------------------------------------------------
+
+export interface TrafficFreeGrantCampaignStatus {
+  enabled: boolean;
+  grantBytes: number;
+  claimed: boolean;
+  claimable: boolean;
+}
+
+export interface TrafficFreeGrantClaimResult {
+  grantId: number;
+  grantBytes: number;
+  balanceAfter: number;
+}
+
+export interface TrafficRedeemCodeResult {
+  codeId: number;
+  trafficBytes: number;
+  balanceAfter: number;
+}
+
+/** Free-grant campaign state for the local account (signed GET). */
+export async function getFreeGrantCampaignStatus(): Promise<TrafficFreeGrantCampaignStatus> {
+  const identity = requireIdentity();
+  const account = await requireAccount();
+  const timestamp = nowSeconds();
+  const message = buildTrafficFreeGrantStatusMessage(account.accountId, timestamp);
+  const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
+  const data = await trafficRequestJson({
+    stage: 'campaign',
+    method: 'GET',
+    path: '/v1/traffic/campaign/free-grant/status',
+    identity: { address: identity.mvcAddress, timestamp, signature },
+  });
+  const record = data as Record<string, unknown>;
+  return {
+    enabled: normalizeBoolean(record.enabled),
+    grantBytes: toNumber(record.grantBytes ?? record.grant_bytes),
+    claimed: normalizeBoolean(record.claimed),
+    claimable: normalizeBoolean(record.claimable),
+  };
+}
+
+/**
+ * Claim the one-time free traffic grant for the local account. On success the
+ * balance cache is invalidated so the next read refetches from the backend
+ * (same contract as mockConfirmRechargeOrder).
+ */
+export async function claimFreeGrant(): Promise<TrafficFreeGrantClaimResult> {
+  const identity = requireIdentity();
+  const account = await requireAccount();
+  const timestamp = nowSeconds();
+  const message = buildTrafficFreeGrantClaimMessage(account.accountId, timestamp);
+  const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
+  const data = await trafficRequestJson({
+    stage: 'campaign',
+    method: 'POST',
+    path: '/v1/traffic/campaign/free-grant/claim',
+    body: { clientApp: TRAFFIC_CLIENT_APP_ID, clientVersion: getTrafficClientVersion() },
+    identity: { address: identity.mvcAddress, timestamp, signature },
+  });
+  const record = data as Record<string, unknown>;
+  balanceCache = null;
+  return {
+    grantId: toNumber(record.grantId ?? record.grant_id),
+    grantBytes: toNumber(record.grantBytes ?? record.grant_bytes),
+    balanceAfter: toNumber(record.balanceAfter ?? record.balance_after),
+  };
+}
+
+/**
+ * Redeem a one-time recharge code for the local account. The server trims and
+ * uppercases the code itself; the client normalizes too so the request always
+ * carries the canonical IDB-XXXX-XXXX-XXXX shape. On success the balance cache
+ * is invalidated like the other credit paths.
+ */
+export async function redeemTrafficCode(code: string): Promise<TrafficRedeemCodeResult> {
+  const normalizedCode = normalizeText(code).toUpperCase();
+  if (!normalizedCode) {
+    throw new TrafficApiError({ stage: 'redeem', message: 'code is required' });
+  }
+  const identity = requireIdentity();
+  const account = await requireAccount();
+  const timestamp = nowSeconds();
+  const message = buildTrafficRedeemCodeMessage(account.accountId, timestamp);
+  const { signature } = await signWithKey({ mnemonic: identity.mnemonic, path: identity.path, message });
+  const data = await trafficRequestJson({
+    stage: 'redeem',
+    method: 'POST',
+    path: '/v1/traffic/redeem-code',
+    body: { code: normalizedCode },
+    identity: { address: identity.mvcAddress, timestamp, signature },
+  });
+  const record = data as Record<string, unknown>;
+  balanceCache = null;
+  return {
+    codeId: toNumber(record.codeId ?? record.code_id),
+    trafficBytes: toNumber(record.trafficBytes ?? record.traffic_bytes),
+    balanceAfter: toNumber(record.balanceAfter ?? record.balance_after),
+  };
+}
+
 /** Renderer-facing traffic settings (mode + fallback policy). */
 export function getTrafficSettingsSnapshot(): TrafficSettingsSnapshot {
   return getTrafficSettings(getKvStore());
@@ -1068,6 +1233,12 @@ function getErrorMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : String(error);
 }
 
+/** IPC failure payload; carries the backend data.errorCode when present. */
+function getErrorPayload(error: unknown): { error: string; errorCode?: string } {
+  const errorCode = error instanceof TrafficApiError ? error.errorCode : '';
+  return { error: getErrorMessage(error), ...(errorCode ? { errorCode } : {}) };
+}
+
 export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }): void {
   const { ipcMain } = deps;
   ipcMain.handle('traffic:ensureAccount', async () => {
@@ -1152,6 +1323,27 @@ export function registerTrafficAccountIpcHandlers(deps: { ipcMain: IpcMainLike }
       return { success: true, order: await mockConfirmRechargeOrder(String(input?.orderId ?? '')) };
     } catch (error) {
       return { success: false, error: getErrorMessage(error) };
+    }
+  });
+  ipcMain.handle('traffic:getFreeGrantCampaignStatus', async () => {
+    try {
+      return { success: true, campaign: await getFreeGrantCampaignStatus() };
+    } catch (error) {
+      return { success: false, ...getErrorPayload(error) };
+    }
+  });
+  ipcMain.handle('traffic:claimFreeGrant', async () => {
+    try {
+      return { success: true, claim: await claimFreeGrant() };
+    } catch (error) {
+      return { success: false, ...getErrorPayload(error) };
+    }
+  });
+  ipcMain.handle('traffic:redeemCode', async (_event, input: { code?: string }) => {
+    try {
+      return { success: true, result: await redeemTrafficCode(String(input?.code ?? '')) };
+    } catch (error) {
+      return { success: false, ...getErrorPayload(error) };
     }
   });
   ipcMain.handle('traffic:getSettings', async () => {
