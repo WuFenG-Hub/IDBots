@@ -1003,6 +1003,14 @@ interface IElectronAPI {
       offset?: number;
     }) => Promise<{ success: boolean; entries?: CoworkKnowledgeEntry[]; error?: string }>;
     archiveKnowledge: (input: { id: string; metabotId: number }) => Promise<{ success: boolean; entry?: CoworkKnowledgeEntry; error?: string }>;
+    updateKnowledge: (input: {
+      id: string;
+      metabotId: number;
+      topic?: string;
+      summary?: string;
+      kind?: 'know_how' | 'pitfall' | 'principle';
+    }) => Promise<{ success: boolean; entry?: CoworkKnowledgeEntry; error?: string }>;
+    deleteKnowledge: (input: { id: string; metabotId: number }) => Promise<{ success: boolean; deleted?: boolean; error?: string }>;
     deleteMemoryPolicy: (input: { metabotId: number }) => Promise<{ success: boolean; deleted?: boolean; error?: string }>;
     getSandboxStatus: () => Promise<CoworkSandboxStatus>;
     installSandbox: () => Promise<{ success: boolean; status: CoworkSandboxStatus; error?: string }>;

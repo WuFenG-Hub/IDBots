@@ -1089,6 +1089,29 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
+  /** Edit a knowledge point in place (prior text is kept as a revision). */
+  async updateKnowledge(input: {
+    id: string;
+    metabotId: number;
+    topic?: string;
+    summary?: string;
+    kind?: CoworkKnowledgeKind;
+  }): Promise<CoworkKnowledgeEntry | null> {
+    const api = window.electron?.cowork?.updateKnowledge;
+    if (!api) return null;
+    const result = await api(input);
+    if (!result?.success || !result.entry) return null;
+    return result.entry;
+  }
+
+  /** Hard-delete a knowledge point and its sources/revisions. */
+  async deleteKnowledge(input: { id: string; metabotId: number }): Promise<boolean> {
+    const api = window.electron?.cowork?.deleteKnowledge;
+    if (!api) return false;
+    const result = await api(input);
+    return Boolean(result?.success && result.deleted);
+  }
+
   /** Drop a per-MetaBot memory policy override so it follows the global default. */
   async deleteMemoryPolicy(metabotId: number): Promise<boolean> {
     const api = window.electron?.cowork?.deleteMemoryPolicy;

@@ -535,6 +535,16 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaid:knowledge:list', input),
     archiveKnowledge: (input: { id: string; metabotId: number }) =>
       ipcRenderer.invoke('metaid:knowledge:archive', input),
+    updateKnowledge: (input: {
+      id: string;
+      metabotId: number;
+      topic?: string;
+      summary?: string;
+      kind?: 'know_how' | 'pitfall' | 'principle';
+    }) =>
+      ipcRenderer.invoke('metaid:knowledge:update', input),
+    deleteKnowledge: (input: { id: string; metabotId: number }) =>
+      ipcRenderer.invoke('metaid:knowledge:delete', input),
     deleteMemoryPolicy: (input: { metabotId: number }) =>
       ipcRenderer.invoke('cowork:memory:deletePolicy', input),
     isDelegationBlocking: (sessionId: string) =>

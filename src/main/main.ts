@@ -13160,6 +13160,58 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  ipcMain.handle('metaid:knowledge:update', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+    topic?: string;
+    summary?: string;
+    kind?: string;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const entry = getMetaIDKnowledgeStore().updateKnowledge({
+        id,
+        metabotId,
+        topic: input?.topic,
+        summary: input?.summary,
+        kind: input?.kind as never,
+      });
+      if (!entry) {
+        return { success: false, error: 'Knowledge point not found' };
+      }
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update knowledge point',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:knowledge:delete', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const deleted = getMetaIDKnowledgeStore().deleteKnowledge({ id, metabotId });
+      return { success: true, deleted };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to delete knowledge point',
+      };
+    }
+  });
+
   ipcMain.handle('mcp:list', () => {
     try {
       return { success: true, servers: getMcpStore().listServers() };
