@@ -259,6 +259,25 @@ test('computeGroupTaskMemberWorkStatus pure derivation', () => {
     'idle',
     'stale failure falls back to idle',
   );
+  // R6: a working member whose [WORKING] signal is stale (past the timeout
+  // window) reads 'timeout', not idle — the authoritative "went silent" state.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({ ...base, memberStatus: 'working', lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000 }),
+    'timeout',
+    'stale [WORKING] + working member reads timeout',
+  );
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({ ...base, memberStatus: 'working', lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 10 * 60_000 }),
+    'working',
+    'fresh [WORKING] keeps a working member working',
+  );
+  // R6: an idle member (no memberStatus) with a stale [WORKING] stays idle —
+  // timeout only applies to members who self-reported working/assigned.
+  assert.equal(
+    computeGroupTaskMemberWorkStatus({ ...base, memberStatus: undefined, lastWorkingAt: 1_700_000_000_000, nowMs: 1_700_000_000_000 + 30 * 60_000 }),
+    'idle',
+    'stale [WORKING] without a working self-report stays idle (back-compat)',
+  );
 });
 
 test('getGroupTaskMemberStatus surfaces [WORKING]-tag working state from the transcript', async () => {

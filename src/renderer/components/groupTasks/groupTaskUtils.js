@@ -72,13 +72,15 @@ export function canReopenGroupTask(status) {
   return status === 'review';
 }
 
-/** P1-4: i18n label key for a member workStatus. */
+/** P1-4/R6: i18n label key for a member workStatus. */
 export function groupTaskWorkStatusLabelKey(status) {
   switch (status) {
     case 'working':
       return 'groupTasksWorkStatusWorking';
     case 'error':
       return 'groupTasksWorkStatusError';
+    case 'timeout':
+      return 'groupTasksWorkStatusTimeout';
     case 'idle':
       return 'groupTasksWorkStatusIdle';
     case 'unknown':

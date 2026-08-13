@@ -212,6 +212,14 @@ const EXPECTED_DELIVERY_PREFIX = 'group_task_expected_delivery:';
 const DELIVERY_REMINDED_PREFIX = 'group_task_delivery_reminded:';
 const MSG_RETRY_PREFIX = 'group_task_msg_retry:';
 /**
+ * R6 L2: one re-assign hint per (task, member) timeout streak — mirrors the
+ * ACK_REMINDED kv guard so the chair isn't spammed every tick while a member
+ * stays silent. Cleared when the member speaks again (see handleMemberProtocolMarkers).
+ */
+const GROUP_TASK_TIMEOUT_HINT_PREFIX = 'group_task_timeout_hint:';
+/** R6 L3: one owner brief per (task, member) timeout streak (distinct from the L2 chair hint). */
+const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
+/**
  * #14 follow-up: when a worker turn already in flight lands AFTER the chair's
  * closing ceremony (so the last group message is a worker's, not the host's),
  * the chair re-posts the closing line. This kv stores the straggler message id
@@ -270,6 +278,10 @@ const DEFAULT_MAX_REPLIES_PER_TASK_PER_TICK = 3;
 const DEFAULT_CONTEXT_MESSAGE_COUNT = 20;
 /** P0-2: minutes of silence before an assigned/working member is auto-marked unreachable. */
 const DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES = 30;
+/** R6 L2: minutes a [WORKING] signal may be stale before the timeout re-assign hint. */
+const DEFAULT_MEMBER_TIMEOUT_AFTER_MINUTES = 20;
+/** R6 L3: extra minutes past the L2 timeout window before the owner is briefed. */
+const DEFAULT_MEMBER_ESCALATE_AFTER_MINUTES = 10;
 /** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
 const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
 /** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
@@ -863,6 +875,10 @@ export interface GroupTaskDaemonDeps {
    * unreachable (default 30).
    */
   memberUnreachableAfterMinutes?: number;
+  /** R6 L2: minutes a [WORKING] signal may be stale before the timeout re-assign hint (default 20). */
+  memberTimeoutAfterMinutes?: number;
+  /** R6 L3: extra minutes past the L2 window before the owner is briefed (default 10). */
+  memberEscalateAfterMinutes?: number;
   /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
   ackTimeoutMs?: number;
   /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
@@ -1102,6 +1118,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const memberUnreachableAfterMinutes = Math.max(
     1,
     Math.trunc(deps.memberUnreachableAfterMinutes ?? DEFAULT_MEMBER_UNREACHABLE_AFTER_MINUTES),
+  );
+  const memberTimeoutAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberTimeoutAfterMinutes ?? DEFAULT_MEMBER_TIMEOUT_AFTER_MINUTES),
+  );
+  const memberEscalateAfterMinutes = Math.max(
+    1,
+    Math.trunc(deps.memberEscalateAfterMinutes ?? DEFAULT_MEMBER_ESCALATE_AFTER_MINUTES),
   );
   const ackTimeoutMs = Math.max(
     30_000,
@@ -3243,6 +3267,110 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * R6 L2: once a working/assigned LOCAL worker's [WORKING] signal goes stale
+   * (older than the timeout window), inject a deterministic "re-assign" hint
+   * into the chair's next turn and mark the authoritative state timeout. This
+   * is the escalation ABOVE the existing L1 ACK/delivery reminders: those fire
+   * once per assignment at 3 min; this fires once per (task, member) timeout
+   * streak — the chair gets a concrete "re-assign to a standby member or mark
+   * suspended" suggestion, not just another alert. Best-effort: never blocks
+   * the tick; the store status change is the authoritative signal, the chair
+   * hint is advisory.
+   */
+  const monitorLocalWorkerTimeout = async (
+    task: GroupTask,
+    members: GroupTaskMember[],
+    ownerGlobalMetaId: string,
+  ): Promise<string> => {
+    if (task.status !== 'executing') return '';
+    if (!task.groupId) return '';
+    const store = deps.getGroupTaskStore();
+    const sqlite = deps.getStore();
+    const workers = members.filter(
+      (member) => member.role === 'worker'
+        && member.metabotId != null
+        && (member.status === 'working' || member.status === 'assigned'),
+    );
+    if (workers.length === 0) return '';
+    const workingMap = store.getMembersWorkingAt(
+      task.groupId,
+      workers.map((member) => member.globalmetaid),
+    );
+    const standbyNames = members
+      .filter((member) => member.role === 'worker' && member.status === 'standby')
+      .map((member) => member.name ?? `bot-${member.metabotId}`);
+    const chairMember = members.find((member) => member.role === 'chair');
+
+    const timedOut: string[] = [];
+    for (const member of workers) {
+      const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+      const lastWorkingSec = gmid ? workingMap.get(gmid) ?? null : null;
+      if (lastWorkingSec == null) continue;
+      const staleMs = now() - lastWorkingSec * 1000;
+      if (staleMs <= memberTimeoutAfterMinutes * 60_000) continue;
+
+      const name = member.name ?? `bot-${member.metabotId}`;
+
+      // L2: mark the authoritative state timeout + inject a chair re-assign hint
+      // once per (task, member) streak.
+      try {
+        store.setMemberStatus(task.id, member.metabotId, 'unreachable', member.globalmetaid);
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: timeout status write for ${name} failed: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      const hintKey = `${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(hintKey) !== '1') {
+        timedOut.push(name);
+        sqlite.set(hintKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: ${name} [WORKING] signal stale (${memberTimeoutAfterMinutes}+ min); ` +
+          'injecting chair re-assign hint',
+        );
+      }
+
+      // L3: if the member is STILL silent past the escalation window (L2 + lag),
+      // brief the owner ONCE per streak via the private report channel — local
+      // workers previously had no owner touchpoint (only remote teammates did).
+      if (staleMs <= (memberTimeoutAfterMinutes + memberEscalateAfterMinutes) * 60_000) continue;
+      const ownerKey = `${GROUP_TASK_TIMEOUT_OWNER_PREFIX}${task.id}:${member.metabotId}`;
+      if (sqlite.get<string>(ownerKey) === '1') continue;
+      if (!ownerGlobalMetaId || chairMember?.metabotId == null || !deps.sendOwnerPrivateReport) continue;
+      try {
+        await deps.sendOwnerPrivateReport({
+          taskId: task.id,
+          metabotId: chairMember.metabotId,
+          ownerGlobalMetaId,
+          text:
+            `[GroupTask] Task "${task.title}": local member "${name}" has been silent for ` +
+            `${Math.round(staleMs / 60_000)}+ min (past the [WORKING] window). The chair has a ` +
+            're-assign hint in context; please decide whether to wait, reassign, or close the task.',
+        });
+        sqlite.set(ownerKey, '1');
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: owner briefed about silent local member ${name} (L3)`,
+        );
+      } catch (error) {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: L3 owner brief failed for ${name}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (timedOut.length === 0) return '';
+    const reAssign = standbyNames.length > 0
+      ? `Re-assign to a standby member (${standbyNames.join(', ')}) or mark the step suspended.`
+      : 'Mark the step suspended and tell the owner it is blocked on an unresponsive member.';
+    return [
+      '[SYSTEM member-timeout hint — generated by the host, not a group participant]',
+      `These members have gone silent past the ${memberTimeoutAfterMinutes}-min [WORKING] window: ${timedOut.join(', ')}.`,
+      `${reAssign} Do NOT auto-fail them.`,
+    ].join('\n');
+  };
+
+  /**
    * P0-3: per-message protocol markers:
    * - chair message that @mentions a worker = an ASSIGNMENT → record a pending
    *   [WORKING] ACK expectation for that worker (kv, timestamped).
@@ -3415,6 +3543,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (sqlite.get<string>(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`) != null) {
             sqlite.delete(`${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`);
           }
+          // R6 L2: the member recovered — reset the timeout-hint streak so a
+          // future silence window triggers a fresh re-assign hint.
+          sqlite.delete(`${GROUP_TASK_TIMEOUT_HINT_PREFIX}${task.id}:${member.metabotId}`);
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} spoke after ` +
             `assignment #${entry.messageId} (implicit ACK); no no-ACK reminder`,
@@ -3805,6 +3936,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     // P0-2: auto-mark silent assigned/working members unreachable (badge for chair).
     if (task.status === 'executing' && !checkpointOpenAtTick) {
       monitorMemberUnreachable(task, members);
+    }
+
+    // R6 L2/L3: when a LOCAL working/assigned member's [WORKING] signal goes
+    // stale, mark them timeout + inject a chair re-assign hint (L2), then brief
+    // the owner if still silent past the escalation window (L3). The hint block
+    // rides the existing remoteStatusBlock chair-context channel.
+    if (task.status === 'executing' && !checkpointOpenAtTick) {
+      const timeoutBlock = await monitorLocalWorkerTimeout(task, members, ownerGlobalMetaId);
+      if (timeoutBlock) {
+        remoteStatusBlock = [remoteStatusBlock, timeoutBlock].filter(Boolean).join('\n\n');
+      }
     }
 
     // P0-3: once-per-assignment chair reminder for missing [WORKING] ACKs.

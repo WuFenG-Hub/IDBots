@@ -629,15 +629,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   {i18nService.t('groupTasksAcceptClose')}
                 </button>
               )}
-              {canAcceptGroupTask(detail.status) && (
-                <button
-                  type="button"
-                  onClick={() => setConfirmAction('done')}
-                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
-                >
-                  {i18nService.t('groupTasksAcceptClose')}
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => setConfirmAction('cancelled')}
@@ -659,6 +650,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             <p className="text-sm dark:text-claude-darkText text-claude-text whitespace-pre-wrap">
               {detail.goal}
             </p>
+            {detail.stall === true && (
+              <div className="mt-2 rounded-lg border border-orange-300 dark:border-orange-500/40 bg-orange-50 dark:bg-orange-900/20 px-3 py-2 text-xs dark:text-orange-200 text-orange-800">
+                {i18nService
+                  .t('groupTasksStallBanner')
+                  .replace('{minutes}', String(detail.stallAfterMinutes ?? 30))}
+              </div>
+            )}
             {detail.status === 'review' && (
               <div className="mt-2 rounded-lg border border-amber-300 dark:border-amber-500/40 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs dark:text-amber-200 text-amber-800">
                 {i18nService.t('groupTasksReviewSilenceHint')}
@@ -869,12 +867,21 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   )}
                   {member.workStatus && member.workStatus !== 'unknown' && (
                     <span
+                      title={
+                        member.workStatus === 'error'
+                          ? i18nService.t('groupTasksWorkStatusErrorHint')
+                          : member.workStatus === 'timeout'
+                            ? i18nService.t('groupTasksWorkStatusTimeoutHint')
+                            : undefined
+                      }
                       className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
                         member.workStatus === 'working'
                           ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
                           : member.workStatus === 'error'
                             ? 'bg-red-500/15 text-red-600 dark:text-red-400'
-                            : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
+                            : member.workStatus === 'timeout'
+                              ? 'bg-orange-500/15 text-orange-600 dark:text-orange-400'
+                              : 'bg-gray-500/10 text-gray-500 dark:text-gray-400'
                       }`}
                     >
                       {i18nService.t(groupTaskWorkStatusLabelKey(member.workStatus))}

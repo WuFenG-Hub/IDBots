@@ -104,7 +104,7 @@ export interface GroupTaskDeliverable {
   sourceSenderName?: string | null;
 }
 
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
 
 export type GroupTaskCheckpointStatus = 'open' | 'resolved' | 'cancelled';
 
@@ -194,6 +194,10 @@ export interface GroupTaskDriverInfo {
 export interface GroupTaskDetail extends GroupTask {
   members: GroupTaskMemberSummary[];
   deliverables: GroupTaskDeliverable[];
+  /** Round-4/R6: true when a non-terminal task has had no host drive recently. */
+  stall?: boolean;
+  /** Round-4/R6: the stall threshold in minutes (30 by default). */
+  stallAfterMinutes?: number;
   /** P0-5: state-transition audit log. */
   transitions?: GroupTaskTransition[];
   /** P0-8: public integrity declarations (honest corrections/reports). */

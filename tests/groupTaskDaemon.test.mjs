@@ -508,6 +508,46 @@ test('R7: a failed on-chain send injects a delivery-failure notice into the send
   }
 });
 
+test('R6: stale [WORKING] local worker → timeout status + L3 owner brief (idempotent per streak)', async () => {
+  const h = await createHarness({
+    workerCooldownMs: 0,
+    chairCooldownMs: 0,
+    // Fast windows so the test doesn't wait real minutes.
+    deps: { memberTimeoutAfterMinutes: 1, memberEscalateAfterMinutes: 1 },
+  });
+  try {
+    const task = h.createTask([2]);
+    // Worker 2 self-reports [WORKING] with a chain timestamp ~16.7 min in the
+    // past (seconds), so both the L2 timeout window and the L3 escalation window
+    // have already elapsed at the default nowMs (1_000_000_000_000).
+    insertGroupMessage(h.db, {
+      pinId: 'working-stale-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单', chainTimestamp: 999_999_000,
+    });
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-w2');
+    // Advance the daemon cursor past the [WORKING] message so the tick doesn't
+    // re-process it via handleMemberProtocolMarkers (which would re-mark working).
+    const staleId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['working-stale-i0'])[0].values[0][0];
+    h.groupTaskStore.updateLastProcessedMsgId(task.id, staleId);
+    await h.loop.runTick();
+
+    // L2: authoritative status flipped to unreachable (timeout signal).
+    const member = h.groupTaskStore.listMembers(task.id).find((m) => m.metabotId === 2);
+    assert.equal(member.status, 'unreachable');
+
+    // L3: the owner was briefed once about the silent LOCAL member.
+    assert.equal(h.ownerReportCalls.length, 1, 'L3 owner brief fired');
+    assert.match(h.ownerReportCalls[0].text, /has been silent/);
+    assert.match(h.ownerReportCalls[0].text, /Coder Bot/);
+
+    // Idempotent: a second tick does not re-brief (per-streak kv guard).
+    await h.loop.runTick();
+    assert.equal(h.ownerReportCalls.length, 1, 'owner brief fires once per streak');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('cursor advances on no-reply messages; a failing message holds the batch (fail-stop) until it recovers', async () => {
   // Cooldowns off: this test isolates the fail-stop/retry ordering semantics.
   const h = await createHarness({ workerCooldownMs: 0, chairCooldownMs: 0 });

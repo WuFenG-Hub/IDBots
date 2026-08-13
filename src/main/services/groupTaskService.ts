@@ -137,11 +137,17 @@ export interface GroupTaskDriverInfo {
   atMs: number;
 }
 
-/** P1-4: host-computed member work state (idle/working/error/unknown). */
-export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'idle' | 'unknown';
+/** P1-4/R6: host-computed member work state. 'timeout' (R6) = a self-reported
+ * working/assigned member whose [WORKING] signal has gone stale — the
+ * authoritative "went silent" read, distinct from 'idle' (spoke, not currently
+ * working). */
+export type GroupTaskMemberWorkStatus = 'working' | 'error' | 'timeout' | 'idle' | 'unknown';
 
 /** Minutes a [WORKING] tag stays "working" after its last occurrence. */
 export const GROUP_TASK_WORKING_WINDOW_MINUTES = 20;
+/** R6: minutes a working/assigned member's [WORKING] signal may be stale before
+ * the authoritative state reads 'timeout' (distinct from 'error' = failed attempt). */
+export const GROUP_TASK_TIMEOUT_WINDOW_MINUTES = 20;
 /** Minutes a failed canonical attempt stays "error" after it finished. */
 export const GROUP_TASK_ERROR_WINDOW_MINUTES = 60;
 
@@ -758,6 +764,10 @@ export function computeGroupTaskMemberWorkStatus(input: {
   attemptStatus: 'running' | 'failed' | null;
   attemptAtMs: number | null;
   nowMs?: number;
+  /** R6: the member's self-reported status — lets the host distinguish 'timeout'
+   * (a working/assigned member who went silent) from 'idle' (never expected to
+   * be working). Optional so existing callers/tests keep their behavior. */
+  memberStatus?: GroupTaskMemberStatus;
 }): GroupTaskMemberWorkStatus {
   const nowMs = input.nowMs ?? Date.now();
   if (input.attemptStatus === 'running') return 'working';
@@ -794,6 +804,18 @@ export function computeGroupTaskMemberWorkStatus(input: {
       return 'idle';
     }
     return 'error';
+  }
+  // R6: a working/assigned member whose [WORKING] signal is stale (older than
+  // the timeout window) and who is not mid-attempt or in the error window reads
+  // 'timeout' — the authoritative "went silent" state. This is what replaces the
+  // old "出错" misread: a silently-working member is no longer shown as idle.
+  if (
+    (input.memberStatus === 'working' || input.memberStatus === 'assigned')
+    && input.lastWorkingAt != null
+    && Number.isFinite(input.lastWorkingAt)
+    && nowMs - input.lastWorkingAt > GROUP_TASK_TIMEOUT_WINDOW_MINUTES * 60_000
+  ) {
+    return 'timeout';
   }
   if (input.lastSpeakAt != null) return 'idle';
   return 'unknown';
@@ -878,6 +900,7 @@ export async function getGroupTask(
         lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
         attemptStatus: attempt.status,
         attemptAtMs: attempt.atMs,
+        memberStatus: member.status,
       }),
       inviteStatus: deriveGroupTaskMemberInviteStatus({
         metabotId: member.metabotId,
