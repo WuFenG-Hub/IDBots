@@ -84,6 +84,12 @@ export interface CreateGroupTaskOptions {
    * the chair's LLM selects the specialist and only its assignment is mentioned. */
   autoSelectWorkers?: boolean;
   createdBy: 'user' | 'twinbot';
+  /**
+   * R2: the originating CoWork session creating this task, so the host can
+   * relay the acceptance result back on close ("哪里发起哪里结束"). Omitted by
+   * the panel IPC (panel-created tasks have no originating session).
+   */
+  sourceSessionId?: string;
 }
 
 export interface GroupTaskDetail extends GroupTask {
@@ -241,6 +247,28 @@ function getCoworkStore(): CoworkStore {
   }
   return coworkStoreGetter();
 }
+
+/**
+ * R2 cross-session relay seam. main.ts wires this to the CoworkRunner's
+ * insertCrossSessionMessageAndQueue (the same ORCH-NOTIFY pipe) so the service
+ * stays decoupled from the runner type. Returns ok:false when the target
+ * session is missing/A2A (the caller degrades to owner-private-only, never
+ * rolls back the task close). null seam = R2 disabled (tests / pre-wire).
+ */
+export type GroupTaskAcceptanceNotifier = (input: {
+  taskId: number;
+  targetSessionId: string;
+  message: string;
+}) => { ok: boolean; warning?: string };
+
+let acceptanceNotifier: GroupTaskAcceptanceNotifier | null = null;
+
+export function setGroupTaskAcceptanceNotifier(notifier: GroupTaskAcceptanceNotifier | null): void {
+  acceptanceNotifier = notifier;
+}
+
+/** R2 kv guard: one acceptance notification per task per terminal outcome. */
+const GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX = 'group_task_acceptance_notified:';
 
 function getKvStore(): GroupTaskServiceKvStore {
   if (!kvStoreGetter) {
@@ -476,6 +504,7 @@ export async function createGroupTask(opts: CreateGroupTaskOptions): Promise<Gro
     chairMetabotId,
     createdBy: opts.createdBy,
     createPinId: pinId,
+    sourceSessionId: opts.sourceSessionId?.trim() || null,
   });
 
   try {
@@ -1473,6 +1502,77 @@ export async function recordGroupTaskIntegrityEvent(
 }
 
 /**
+ * R2: relay the deterministic acceptance notification to the CoWork session that
+ * originated this group task ("哪里发起哪里结束"). The message is host-built (not
+ * LLM) and kv-guarded per (task, outcome) so a close fires exactly once. The
+ * latest acceptance summary (if any) is finalized with the outcome+rating so the
+ * audit record is complete. Best-effort: any failure (missing/notifier unset,
+ * target session gone) only logs — the task is already closed and never rolls
+ * back; NULL sourceSessionId silently skips (degrades to owner-private-only).
+ */
+function notifySourceSession(
+  task: GroupTask,
+  outcome: 'done' | 'cancelled',
+  rating?: number | null,
+  ratingComment?: string | null,
+): void {
+  const targetSessionId = (task.sourceSessionId ?? '').trim();
+  if (!targetSessionId) return; // panel-created / pre-R2 task — no originating session
+  if (!acceptanceNotifier) return; // R2 not wired (tests / pre-init)
+  const kv = getKvStore();
+  const guardKey = `${GROUP_TASK_ACCEPTANCE_NOTIFIED_KV_PREFIX}${task.id}:${outcome}`;
+  if (kv.get<string>(guardKey) === '1') return; // one notification per task per outcome
+
+  // Finalize the acceptance summary's terminal snapshot (best-effort) so the
+  // audit record carries the outcome+rating alongside the T1 review snapshot.
+  try {
+    getGroupTaskStore().finalizeAcceptanceSummary(task.id, { outcome, rating: rating ?? null, ratingComment: ratingComment ?? null });
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to finalize acceptance summary on close of task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const ratingLine = outcome === 'done' && rating != null ? `｜评分 ${rating}/5` : '';
+  const commentLine = ratingComment?.trim() ? `（${ratingComment.trim()}）` : '';
+  const summary = getGroupTaskStore().getLatestAcceptanceSummary(task.id);
+  const deliverableCount = summary?.deliverables.length ?? 0;
+  const message = [
+    `[GROUP_TASK_ACCEPTANCE] 任务「${task.title}」已完成验收：`,
+    `结果：${outcome}${ratingLine}${commentLine}`,
+    `成果：${deliverableCount} 项${summary ? `（详见验收总结 v${summary.version}）` : '，详见 Tasks 面板'}`,
+  ].join('\n');
+
+  try {
+    const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
+    if (!result.ok) {
+      console.warn(
+        `[GroupTask] Acceptance notification to session ${targetSessionId} not delivered for task ${task.id}` +
+        (result.warning ? ` (${result.warning})` : '') +
+        '; degrading to owner-private-only',
+      );
+      return;
+    }
+    kv.set(guardKey, '1');
+    try {
+      getGroupTaskStore().updateAcceptanceSummaryNotifiedSession(task.id, targetSessionId);
+    } catch (error) {
+      console.warn(
+        `[GroupTask] Failed to record notified session for task ${task.id}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    console.log(`[GroupTask] Acceptance notification delivered to session ${targetSessionId} for task ${task.id} (${outcome})`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Acceptance notification failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/**
  * Close a task via the store state machine (sets closed_at for terminal states).
  * `reason` is accepted for API completeness but not persisted (no column in M1).
  * When closing as 'done', the owner's acceptance rating (1-5 + optional
@@ -1509,12 +1609,20 @@ export async function closeGroupTask(
     );
   }
   if (closed.status === 'done' && opts.rating != null) {
-    return getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
+    const rated = getGroupTaskStore().updateTaskRating(taskId, opts.rating, opts.ratingComment);
+    // R2: relay the acceptance result back to the originating CoWork session
+    // (best-effort; never throws into the close flow). Done after the rating is
+    // persisted so the notification carries the final rating.
+    notifySourceSession(rated, opts.status, opts.rating, opts.ratingComment);
+    return rated;
   }
   // OpenTeam M3: the chair sediments one participation impression per REMOTE
   // teammate (recorded for cancelled tasks too). Best-effort: the task is
   // already closed; the recorder never throws into this flow.
   recordTaskCloseImpressions(taskId, opts.status, opts.reason);
+  // R2: relay the acceptance result back to the originating CoWork session
+  // (covers cancelled and automated/RPC closes without a rating).
+  notifySourceSession(closed, opts.status, opts.rating, opts.ratingComment);
   return closed;
 }
 

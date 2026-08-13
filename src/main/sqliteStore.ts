@@ -809,13 +809,15 @@ export class SqliteStore {
         rated_at TEXT,
         display_name TEXT,
         pinned INTEGER NOT NULL DEFAULT 0,
-        archived_at INTEGER
+        archived_at INTEGER,
+        source_session_id TEXT
       );
     `);
     this.migrateGroupTaskOrchestrationLink();
     this.migrateGroupTasksLastDrivenAt();
     this.migrateGroupTasksRatingColumns();
     this.migrateGroupTasksLocalState();
+    this.migrateGroupTasksSourceSessionId();
     // P0-5: state-transition audit log (who/from/to/reason + timestamp).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_transitions (
@@ -2444,6 +2446,26 @@ export class SqliteStore {
       }
     } catch (e) {
       console.warn('migrateGroupTasksLocalState:', e);
+    }
+  }
+
+  /**
+   * R2: source_session_id column on group_tasks — the originating CoWork
+   * session that created the group task, so the host can relay the acceptance
+   * result back to it on close ("哪里发起哪里结束"). Idempotent PRAGMA-guarded;
+   * existing rows stay NULL (relay degrades to owner-private-only for them,
+   * never retroactively backfilled).
+   */
+  private migrateGroupTasksSourceSessionId(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_tasks)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('source_session_id')) {
+        this.db.run('ALTER TABLE group_tasks ADD COLUMN source_session_id TEXT');
+        this.save();
+      }
+    } catch (e) {
+      console.warn('migrateGroupTasksSourceSessionId:', e);
     }
   }
 

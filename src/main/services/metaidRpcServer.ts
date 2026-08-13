@@ -1176,6 +1176,7 @@ export function startMetaidRpcServer(
         created_by?: string;
         observer_roles?: Record<string, unknown>;
         active_member_names?: unknown[];
+        source_session_id?: unknown;
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1190,6 +1191,30 @@ export function startMetaidRpcServer(
         res.writeHead(400);
         res.end(JSON.stringify({ success: false, error: 'title and goal are required' }));
         return;
+      }
+      // R2: validate the originating CoWork session before recording it as the
+      // relay target. Only a real, non-A2A standard session is acceptable —
+      // a2a/browser/group_task sessions are not "where the human started this".
+      let sourceSessionId: string | undefined;
+      if (parsed.source_session_id != null) {
+        const candidate = String(parsed.source_session_id).trim();
+        if (candidate) {
+          const sessionRow = getStore()
+            .getDatabase()
+            .exec('SELECT session_type FROM cowork_sessions WHERE id = ?', [candidate])[0];
+          const sessionType = sessionRow?.values?.[0]?.[0];
+          if (sessionType !== 'standard') {
+            res.writeHead(400);
+            res.end(JSON.stringify({
+              success: false,
+              error: sessionType == null
+                ? 'source_session_id does not refer to an existing CoWork session'
+                : `source_session_id must be a standard CoWork session (got ${String(sessionType)})`,
+            }));
+            return;
+          }
+          sourceSessionId = candidate;
+        }
       }
       const memberMetabotIds: number[] = [];
       if (Array.isArray(parsed.member_metabot_ids)) {
@@ -1241,6 +1266,7 @@ export function startMetaidRpcServer(
           createdBy: parsed.created_by === 'twinbot' ? 'twinbot' : 'user',
           observerRoles: Object.keys(observerRoles).length > 0 ? observerRoles : undefined,
           activeMemberNames,
+          sourceSessionId,
         });
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, task }));

@@ -156,6 +156,7 @@ import {
   setGroupTaskServiceKvStoreGetter,
   setGroupTaskServiceCoworkStoreGetter,
   setGroupTaskServiceTransport,
+  setGroupTaskAcceptanceNotifier,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
@@ -3194,6 +3195,23 @@ const startSqliteDaemons = (): void => {
       ...input,
       createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     }),
+  });
+  // R2: relay the group-task acceptance result back to the originating CoWork
+  // session on close ("哪里发起哪里结束"). Same ORCH-NOTIFY pipe: insert + emit +
+  // queue the target session to continue. The pseudo chair session id is the
+  // attribution source; the real target is task.sourceSessionId. Returns ok:false
+  // when the target is missing/A2A so the service degrades to owner-private-only.
+  setGroupTaskAcceptanceNotifier(({ taskId, targetSessionId, message }) => {
+    try {
+      const result = getCoworkRunner().insertCrossSessionMessageAndQueue({
+        sourceSessionId: `group-task:${taskId}`,
+        targetSessionId,
+        message,
+      });
+      return { ok: Boolean(result.insert?.ok), warning: result.warning };
+    } catch (error) {
+      return { ok: false, warning: error instanceof Error ? error.message : String(error) };
+    }
   });
   // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
   setOpenTeamImpressionServiceDepsGetter(() => ({

@@ -62,6 +62,8 @@ tests/*
 !tests/groupTaskCheckpoints.test.mjs
 !tests/groupTaskAcceptanceStore.test.mjs
 !tests/groupTaskAcceptanceSummary.test.mjs
+!tests/groupTaskSourceSessionRelay.test.mjs
+!tests/groupTaskSourceSessionRpc.test.mjs
 !tests/openTeamInviteA2ADisplay.test.mjs
 !tests/privateChatAllowChatSkillsPrompt.test.mjs
 !tests/skillManagerOrderSkillPrompt.test.mjs

@@ -150,6 +150,12 @@ export interface GroupTask {
    * hidden from the UI list but fully preserved; restoring clears it.
    */
   archivedAt: number | null;
+  /**
+   * R2: the originating CoWork session that created this group task (so the
+   * host can relay the acceptance result back on close). NULL for panel-created
+   * tasks and pre-R2 rows (relay degrades to owner-private-only).
+   */
+  sourceSessionId: string | null;
 }
 
 export interface GroupTaskMember {
@@ -278,6 +284,8 @@ export interface CreateGroupTaskInput {
   chairMetabotId: number;
   createdBy: 'user' | 'twinbot';
   createPinId?: string | null;
+  /** R2: originating CoWork session (relay target on close). */
+  sourceSessionId?: string | null;
 }
 
 export interface AddGroupTaskMemberInput {
@@ -361,6 +369,7 @@ interface GroupTaskRow {
   display_name: string | null;
   pinned: number | null;
   archived_at: number | null;
+  source_session_id: string | null;
 }
 
 interface GroupTaskMemberRow {
@@ -617,6 +626,7 @@ function rowToGroupTask(row: GroupTaskRow): GroupTask {
     displayName: row.display_name ?? null,
     pinned: Boolean(row.pinned),
     archivedAt: row.archived_at ?? null,
+    sourceSessionId: row.source_session_id ?? null,
   };
 }
 
@@ -743,8 +753,8 @@ export class GroupTaskStore {
     this.db.run(
       `INSERT INTO group_tasks (
         group_id, title, goal, acceptance_criteria, status, chair_metabot_id, created_by,
-        last_processed_msg_id, create_pin_id
-      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?)`,
+        last_processed_msg_id, create_pin_id, source_session_id
+      ) VALUES (?, ?, ?, ?, 'planning', ?, ?, 0, ?, ?)`,
       [
         input.groupId,
         input.title,
@@ -753,6 +763,7 @@ export class GroupTaskStore {
         input.chairMetabotId,
         input.createdBy,
         input.createPinId ?? null,
+        input.sourceSessionId?.trim() || null,
       ],
     );
     const id = this.lastInsertId();
