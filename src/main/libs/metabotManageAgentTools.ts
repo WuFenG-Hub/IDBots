@@ -53,6 +53,44 @@ function asString(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
+// Homepage composition (mirrors the UI's MetaBotHomepageSection.composeHomepageForSave)
+// ---------------------------------------------------------------------------
+
+/** Structured homepage intent the Twin passes to metabot_update. */
+export type MetabotHomepageToolInput =
+  | { source: 'default'; pin?: string; contentType?: string }
+  | { source: 'metafile'; pin: string; contentType?: string }
+  | { source: 'metaapp'; pin: string; contentType?: string };
+
+const stripMetaScheme = (value: string, scheme: 'metaapp://' | 'metafile://'): string => {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.toLowerCase().startsWith(scheme) ? trimmed.slice(scheme.length).trim() : trimmed;
+};
+
+/**
+ * Compose the final homepage JSON string (or null) the same way the manual UI
+ * does. `null` or `{ source: 'default' }` clears the homepage back to the
+ * default template; metafile/metaapp sources validate the pin (no whitespace,
+ * no "://") and produce the `{uri,renderer,contentType}` blob the DB expects.
+ * Throws on an invalid pin.
+ */
+export function composeHomepageForTool(input: MetabotHomepageToolInput | null): string | null {
+  if (input === null || input.source === 'default') return null;
+  const pin = stripMetaScheme(input.pin ?? '', input.source === 'metafile' ? 'metafile://' : 'metaapp://');
+  if (!pin || /\s/u.test(pin) || /:\/\//.test(pin)) {
+    throw new Error(
+      `${input.source} homepage requires a valid pin (no whitespace, no "://").`,
+    );
+  }
+  if (input.source === 'metafile') {
+    const contentType = (input.contentType ?? '').trim() || 'application/octet-stream';
+    return JSON.stringify({ uri: `metafile://${pin}`, renderer: 'auto', contentType });
+  }
+  return JSON.stringify({ uri: `metaapp://${pin}`, renderer: 'metaapp', contentType: 'application/vnd.metaapp' });
+}
+
+// ---------------------------------------------------------------------------
 // Result formatters (machine-readable sheets the Twin can relay to the user)
 // ---------------------------------------------------------------------------
 
@@ -232,10 +270,10 @@ export function buildMetabotManageAgentTools(deps: {
   const metabotUpdate = tool(
     'metabot_update',
     [
-      'Update ONE existing local MetaBot\'s editable fields: basic info (name, avatar, bio, enabled, Twin/Worker type), persona (role, soul, goal), LLM (llm_id, fallback_llm_id), chat skills, and A2A auto-reply knobs. Twin Bot only.',
-      'Use when the user asks to rename, re-describe, re-persona, enable/disable, switch the LLM brain of, or otherwise edit an existing bot. Resolve the target with metabot_list first (the user usually names it by display name).',
-      'When NOT to use: do not update without a confirmed metabot_id; do not edit fields the user did not ask to change (pass only the fields to change); and homepage composition + signed owner-binding are not supported by this tool yet — tell the user to set those in My Bots > Edit > Advanced.',
-      'Rules: metabot_id is required. Pass only the fields that should change; omitted fields keep their current value. Transferring Twin status (metabot_type="twin") demotes the current Twin automatically. Changed info pins are re-published on-chain (best-effort); the result reports txids and any partial status. A2A knobs and enabled/type are local-only (no on-chain publish).',
+      'Update ONE existing local MetaBot\'s editable fields: basic info (name, avatar, bio, enabled, Twin/Worker type), persona (role, soul, goal), LLM (llm_id, fallback_llm_id), chat skills, homepage, and A2A auto-reply knobs. Twin Bot only.',
+      'Use when the user asks to rename, re-describe, re-persona, enable/disable, switch the LLM brain of, change the homepage of, or otherwise edit an existing bot. Resolve the target with metabot_list first (the user usually names it by display name).',
+      'When NOT to use: do not update without a confirmed metabot_id; do not edit fields the user did not ask to change (pass only the fields to change); and signed owner-binding is NOT supported by this tool — for security the user must set a bot\'s owner (boss_global_metaid) themselves in My Bots > Edit, so never attempt to change owner via this tool.',
+      'Rules: metabot_id is required. Pass only the fields that should change; omitted fields keep their current value. Transferring Twin status (metabot_type="twin") demotes the current Twin automatically. Changed info pins are re-published on-chain (best-effort); the result reports txids and any partial status. A2A knobs and enabled/type are local-only (no on-chain publish). Homepage takes a structured object (see schema); pass null or source "default" to reset to the default template.',
       'Returns the updated bot name/id and the on-chain sync outcome.',
     ].join(' '),
     {
@@ -257,6 +295,23 @@ export function buildMetabotManageAgentTools(deps: {
         .array(z.string())
         .optional()
         .describe('Full replacement list of skill ids allowed in this bot\'s private chats.'),
+      homepage: z
+        .object({
+          source: z
+            .enum(['default', 'metafile', 'metaapp'])
+            .describe('Homepage source. "default" resets to the default template; "metaapp" points at a MetaApp pin; "metafile" points at an uploaded MetaFile.'),
+          pin: z
+            .string()
+            .optional()
+            .describe('The metaapp pin or metafile pin (without the metaapp:// / metafile:// prefix). Omit for source "default".'),
+          contentType: z
+            .string()
+            .optional()
+            .describe('MIME type for a metafile homepage; defaults to application/octet-stream. Ignored for metaapp/default.'),
+        })
+        .nullable()
+        .optional()
+        .describe('Homepage override (structured), or null to reset to the default template.'),
       a2a_max_incoming_turns: z
         .number()
         .int()
@@ -302,9 +357,21 @@ export function buildMetabotManageAgentTools(deps: {
           provided += 1;
         }
       }
+      // Homepage needs structured→JSON composition before it is forwarded.
+      if (args.homepage !== undefined) {
+        try {
+          input.homepage = composeHomepageForTool(args.homepage as MetabotHomepageToolInput | null);
+        } catch (error) {
+          return textResult(
+            `metabot_update homepage error: ${error instanceof Error ? error.message : String(error)}`,
+            true,
+          );
+        }
+        provided += 1;
+      }
       if (provided === 0) {
         return textResult(
-          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, ...).',
+          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, ...).',
           true,
         );
       }

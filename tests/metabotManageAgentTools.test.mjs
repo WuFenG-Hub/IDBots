@@ -3,7 +3,10 @@ import test from 'node:test';
 import Module from 'node:module';
 
 const require = Module.createRequire(import.meta.url);
-const { buildMetabotManageAgentTools } = require('../dist-electron/main/libs/metabotManageAgentTools.js');
+const {
+  buildMetabotManageAgentTools,
+  composeHomepageForTool,
+} = require('../dist-electron/main/libs/metabotManageAgentTools.js');
 
 /**
  * Build the 4 tools against a mock control and return them keyed by name.
@@ -229,6 +232,76 @@ test('metabot_update: chain sync failure is surfaced but local write kept', asyn
   // success:true overall (local write ok), but text warns about the failed sync.
   assert.equal(res.isError, undefined);
   assert.match(textOf(res), /pin timeout/);
+});
+
+// ---------------------------------------------------------------------------
+// metabot_update — homepage
+// ---------------------------------------------------------------------------
+
+test('metabot_update: metaapp homepage composes the DB JSON and forwards it', async () => {
+  const { byName, calls } = makeHarness();
+  const res = await byName.metabot_update.handler({
+    metabot_id: 5,
+    homepage: { source: 'metaapp', pin: 'abc123' },
+  });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(calls.update[0].input, {
+    homepage: JSON.stringify({ uri: 'metaapp://abc123', renderer: 'metaapp', contentType: 'application/vnd.metaapp' }),
+  });
+});
+
+test('metabot_update: metafile homepage uses provided contentType with a default fallback', async () => {
+  const { byName, calls } = makeHarness();
+  await byName.metabot_update.handler({
+    metabot_id: 5,
+    homepage: { source: 'metafile', pin: 'filePin1', contentType: 'text/html' },
+  });
+  assert.deepEqual(calls.update[0].input.homepage, JSON.stringify({ uri: 'metafile://filePin1', renderer: 'auto', contentType: 'text/html' }));
+
+  // Default contentType when omitted.
+  const harness2 = makeHarness();
+  await harness2.byName.metabot_update.handler({ metabot_id: 5, homepage: { source: 'metafile', pin: 'filePin2' } });
+  assert.deepEqual(
+    harness2.calls.update[0].input.homepage,
+    JSON.stringify({ uri: 'metafile://filePin2', renderer: 'auto', contentType: 'application/octet-stream' }),
+  );
+});
+
+test('metabot_update: homepage default (or null) resets to null', async () => {
+  const { byName, calls } = makeHarness();
+  await byName.metabot_update.handler({ metabot_id: 5, homepage: { source: 'default' } });
+  assert.equal(calls.update[0].input.homepage, null);
+});
+
+test('metabot_update: homepage strips the protocol prefix if the model includes it', async () => {
+  const { byName, calls } = makeHarness();
+  await byName.metabot_update.handler({ metabot_id: 5, homepage: { source: 'metaapp', pin: 'metaapp://xyz' } });
+  assert.deepEqual(calls.update[0].input.homepage, JSON.stringify({ uri: 'metaapp://xyz', renderer: 'metaapp', contentType: 'application/vnd.metaapp' }));
+});
+
+test('metabot_update: invalid homepage pin is rejected', async () => {
+  const { byName, calls } = makeHarness();
+  const res = await byName.metabot_update.handler({ metabot_id: 5, homepage: { source: 'metaapp', pin: 'bad pin with spaces' } });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /homepage error/);
+  assert.equal(calls.update.length, 0);
+});
+
+test('composeHomepageForTool: unit coverage of the three sources + validation', () => {
+  assert.equal(composeHomepageForTool(null), null);
+  assert.equal(composeHomepageForTool({ source: 'default' }), null);
+  assert.throws(
+    () => composeHomepageForTool({ source: 'metaapp', pin: '' }),
+    /requires a valid pin/,
+  );
+  assert.throws(
+    () => composeHomepageForTool({ source: 'metafile', pin: 'a://b' }),
+    /requires a valid pin/,
+  );
+  assert.equal(
+    composeHomepageForTool({ source: 'metaapp', pin: 'p1' }),
+    JSON.stringify({ uri: 'metaapp://p1', renderer: 'metaapp', contentType: 'application/vnd.metaapp' }),
+  );
 });
 
 // ---------------------------------------------------------------------------
