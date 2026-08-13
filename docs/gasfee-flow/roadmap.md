@@ -100,7 +100,8 @@ Spec: `backend-spec-v2.md`.
 
 - `[x]` M3b.1 Spec written (2026-08-13) — handed to backend team for implementation
 - `[ ]` M3b.2 Backend: free-grant campaign + recharge codes + admin pages
-- `[ ]` M3b.3 IDBots client: claim button, code redeem input, ledger labels
+- `[x]` M3b.3 IDBots client: claim button, code redeem input, ledger labels
+  (done 2026-08-14, merge 0f7276dc)
 - `[ ]` M3b.4 Joint E2E on the test instance (claim once, redeem once, admin
   generate/revoke)
 
