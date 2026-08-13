@@ -99,11 +99,14 @@ Spec: `backend-spec-v2.md`.
 **Milestones**:
 
 - `[x]` M3b.1 Spec written (2026-08-13) — handed to backend team for implementation
-- `[ ]` M3b.2 Backend: free-grant campaign + recharge codes + admin pages
+- `[x]` M3b.2 Backend: free-grant campaign + recharge codes + admin pages
+  (accepted 2026-08-13 on test instance 7882; prod deploy pending backend SOP)
 - `[x]` M3b.3 IDBots client: claim button, code redeem input, ledger labels
   (done 2026-08-14, merge 0f7276dc)
-- `[ ]` M3b.4 Joint E2E on the test instance (claim once, redeem once, admin
-  generate/revoke)
+- `[x]` M3b.4 Joint E2E on the test instance (claim once, redeem once, admin
+  generate/revoke) — passed 2026-08-13: A1–A6 + B1–B7 exercised against the
+  live client code paths; A7/A8/B9/B10 covered by backend unit tests/Swagger/
+  admin UI
 
 **Acceptance**: a fresh install can claim 10 MB without paying; a distributed
 code credits exactly its amount exactly once; admin can generate, export, and

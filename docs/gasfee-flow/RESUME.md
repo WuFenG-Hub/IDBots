@@ -42,12 +42,12 @@
 
 ## What remains (in order)
 
-1. **Phase 3b — free-grant campaign + recharge codes** (spec:
-   `backend-spec-v2.md`, handed to backend team 2026-08-13). Client side
-   DONE and merged (claim button, redeem input, ledger labels, i18n — merge
-   0f7276dc). Remaining: backend implementation (A1–A8 / B1–B10), then joint
-   E2E M3b.4 — including signature canonical alignment for the 3 new
-   endpoints (see `backend-request-phase-3b.md`).
+1. **Phase 3b — free-grant campaign + recharge codes** — DONE on both sides.
+   Spec `backend-spec-v2.md`; client merged (0f7276dc); backend accepted on
+   test instance 7882 (2026-08-13: A1–A6, B1–B7 joint E2E passed; signature
+   canonical strings aligned). Awaiting backend prod deploy + merge per their
+   SOP. Real-device walkthrough: point IDBots at the test instance URL and
+   exercise the claim banner + code redeem in Settings → Traffic.
 2. **Client follow-up: prefer server-provided ledger `txId`** — backend
    delivered and live-verified 2026-08-13. Update `trafficAccountService.ts`
    to use the server field and demote the local journal join to a fallback.
