@@ -150,6 +150,7 @@ const createHarness = async (overrides = {}) => {
     ownerReportFails: overrides.ownerReportFails ?? false,
     ownerReportResult: overrides.ownerReportResult ?? null,
     pinOutcomes: overrides.pinOutcomes ?? {},
+    sendFailures: overrides.sendFailures ?? null,
   };
   const seenChatErrors = new Set();
   const orchestrationBridge = new GroupTaskOrchestrationBridge({
@@ -177,6 +178,9 @@ const createHarness = async (overrides = {}) => {
     },
     postGroupTaskMessage: async (taskId, metabotId, content, opts) => {
       sends.push({ taskId, metabotId, content, replyPin: opts?.replyPin });
+      if (state.sendFailures?.has(metabotId)) {
+        throw new Error(`on-chain send failed for bot ${metabotId}`);
+      }
       return { pinId: `send-pin-${sends.length}` };
     },
     getChatSkillsRoutingPrompt: async (input) => {
@@ -468,6 +472,37 @@ test('happy path: kickoff mentioning two workers triggers both, chair stays sile
     assert.deepEqual(steps.map((step) => step.assigneeMetabotId).sort(), [2, 3]);
     assert.ok(steps.every((step) => step.status === 'waiting_input'));
     assert.ok(steps.every((step) => h.orchestrationStore.listAttempts(step.id)[0].status === 'completed'));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('R7: a failed on-chain send injects a delivery-failure notice into the sender bot session', async () => {
+  // Coder Bot's sends fail; its reply was already added to its session before
+  // the send, so without R7 it would wrongly think it had spoken.
+  const h = await createHarness({ sendFailures: new Set([2]) });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'kickoff-i0',
+      senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin', senderName: 'Twin Bot',
+      content: 'Team kickoff. @Coder Bot research options.',
+    });
+    await h.loop.runTick();
+
+    // The send was attempted (and threw).
+    assert.ok(h.sends.some((s) => s.metabotId === 2), 'coder reply send attempted');
+
+    // R7: the failure notice is in Coder Bot's task session as a user turn.
+    const mapping = h.coworkStore.getConversationMapping('metaweb_group_task', `group-task:${task.id}`, 2);
+    assert.ok(mapping, 'coder session mapping exists');
+    const session = h.coworkStore.getSession(mapping.coworkSessionId);
+    const messages = h.coworkStore.getSessionMessages(session.id);
+    const notice = messages.find((m) => /delivery-failure/i.test(m.content));
+    assert.ok(notice, 'delivery-failure notice injected');
+    assert.equal(notice.type, 'user');
+    assert.match(notice.content, /NOT delivered to the group/);
+    assert.match(notice.content, /on-chain send failed for bot 2/);
   } finally {
     h.cleanup();
   }
