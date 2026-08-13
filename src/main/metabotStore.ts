@@ -712,7 +712,22 @@ export class MetabotStore {
     this.db.run('UPDATE metabots SET boss_id = NULL, updated_at = ? WHERE boss_id = ?', [Date.now(), id]);
     // Deliberately no cascade into cowork_sessions / user_memories: those rows
     // keep the deleted bot's metabot_id as the historical record of which bot
-    // produced them (experience data survives the bot itself).
+    // produced them (experience data survives the bot itself). But the native
+    // database opens with foreign_keys = ON, and user_memories.metabot_id /
+    // metaid_knowledge_entries.metabot_id reference metabots(id) with NO ACTION,
+    // so a bare DELETE fails with FOREIGN KEY constraint failed whenever the bot
+    // has any memory / knowledge rows (the UI then shows no reaction). Detach
+    // those rows first — user_memories keeps its content with metabot_id nulled,
+    // metaid_knowledge_entries is deleted (its metabot_id is NOT NULL) — so
+    // deletion always succeeds and leaves no orphaned references.
+    this.db.run('UPDATE user_memories SET metabot_id = NULL WHERE metabot_id = ?', [id]);
+    // metaid_knowledge_entries is SDK-managed and may not exist on every install;
+    // keep the cleanup best-effort so a missing table cannot break bot deletion.
+    try {
+      this.db.run('DELETE FROM metaid_knowledge_entries WHERE metabot_id = ?', [id]);
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such table/i.test(error.message)) throw error;
+    }
     this.db.run('DELETE FROM metabots WHERE id = ?', [id]);
     this.saveDb();
     return true;
