@@ -21,6 +21,7 @@ import type {
   CoworkKnowledgeKind,
 } from '../../types/cowork';
 import MetaIDContactPanel from './MetaIDContactPanel';
+import BrainIcon from '../icons/BrainIcon';
 
 type MetabotOption = {
   id: number;
@@ -143,6 +144,9 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [factsLoading, setFactsLoading] = useState(false);
   const [factsQuery, setFactsQuery] = useState('');
   const [scopes, setScopes] = useState<CoworkMemoryScopesOverview | null>(null);
+
+  // --- Self-identity (the bot's self-cognition; dream-managed) ---
+  const [selfIdentity, setSelfIdentity] = useState<CoworkUserMemoryEntry | null>(null);
 
   // --- Contacts (ID-anchored impressions) ---
   const [contacts, setContacts] = useState<CoworkMetaIDContactSummary[]>([]);
@@ -314,6 +318,30 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       console.error('Failed to delete knowledge:', deleteError);
     }
   };
+
+  // ---- Self-identity loading (bot's self-cognition, dream-managed) ----
+  const loadSelfIdentity = useCallback(async () => {
+    if (metabotId == null) {
+      setSelfIdentity(null);
+      return;
+    }
+    try {
+      const entries = await coworkService.listMemoryEntries({
+        metabotId,
+        scopeKind: 'owner',
+        scopeKey: scopes?.owner?.key ?? 'owner:self',
+        status: 'created',
+      });
+      setSelfIdentity(entries.find((entry) => entry.usageClass === 'self_identity') ?? null);
+    } catch (loadError) {
+      console.error('Failed to load self-identity:', loadError);
+      setSelfIdentity(null);
+    }
+  }, [metabotId, scopes]);
+
+  useEffect(() => {
+    void loadSelfIdentity();
+  }, [loadSelfIdentity]);
 
   // ---- Facts loading ----
   const loadFacts = useCallback(async () => {
@@ -1364,6 +1392,31 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
       </div>
 
       {renderPolicy()}
+
+      {/* Self-cognition (dream-managed self-identity), surfaced on its own */}
+      {metabotId != null && (
+        <div className="rounded-xl border px-4 py-4 dark:border-claude-darkBorder border-claude-border">
+          <div className="flex items-center gap-2">
+            <BrainIcon className="h-4 w-4 text-claude-accent dark:text-claude-darkAccent" />
+            <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('memorySelfIdentityTitle')}</span>
+          </div>
+          <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {i18nService.t('memorySelfIdentityHint')}
+          </div>
+          <div className="mt-3 text-sm dark:text-claude-darkText text-claude-text break-words whitespace-pre-wrap">
+            {selfIdentity?.text?.trim() || (
+              <span className="text-xs italic dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                {i18nService.t('memorySelfIdentityEmpty')}
+              </span>
+            )}
+          </div>
+          {selfIdentity && (
+            <div className="mt-2 text-[10px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+              {formatTimestamp(selfIdentity.updatedAt)}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Section tabs */}
       <div className="flex flex-wrap items-center gap-2">
