@@ -6,6 +6,7 @@ import type {
   GroupTaskDetail,
 } from '../../types/groupTask';
 import GroupTaskMessageItem from './GroupTaskMessageItem';
+import AcceptanceSummaryCard from './AcceptanceSummaryCard';
 import GroupTaskCloseConfirmModal from './GroupTaskCloseConfirmModal';
 import GroupTaskRatingStars from './GroupTaskRatingStars';
 import GroupTaskKickConfirmModal from './GroupTaskKickConfirmModal';
@@ -655,6 +656,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     )}
                   </div>
                 )}
+              </div>
+            )}
+            {detail.acceptanceSummary && (
+              <div className="mt-2">
+                <AcceptanceSummaryCard summary={detail.acceptanceSummary} title={detail.title} />
               </div>
             )}
             {detail.acceptanceCriteria && (

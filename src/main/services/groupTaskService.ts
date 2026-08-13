@@ -22,6 +22,7 @@ import {
   type GroupTaskStatusEventActor,
   type GroupTaskCheckpoint,
   type GroupChatTranscriptMessage,
+  type GroupTaskAcceptanceSummary,
 } from '../groupTaskStore';
 import {
   createGroupChat,
@@ -108,6 +109,13 @@ export interface GroupTaskDetail extends GroupTask {
   driver: GroupTaskDriverInfo | null;
   /** HITL: all human checkpoints of the task, oldest first (open one included). */
   checkpoints: GroupTaskCheckpoint[];
+  /**
+   * R1: the host-generated acceptance summary ("把菜端上桌"), the single source
+   * of truth rendered by the group's last review message, the owner private
+   * report, and the R2 source-session notification. Null before the task has
+   * entered review (no summary generated yet).
+   */
+  acceptanceSummary: GroupTaskAcceptanceSummary | null;
   /**
    * HITL: what the owner must decide right now — the tag-free body of the
    * chair's [CHECKPOINT] message that opened the currently open checkpoint
@@ -867,6 +875,8 @@ export async function getGroupTask(
     driver: readGroupTaskDriver(getKvStore(), id),
     // HITL: human checkpoints (open + past), oldest first.
     checkpoints,
+    // R1: latest host-generated acceptance summary (single source of truth).
+    acceptanceSummary: store.getLatestAcceptanceSummary(id),
     // HITL: what the owner must decide — the tag-free body of the chair's
     // [CHECKPOINT] message that opened the open checkpoint (by pin id), so the
     // detail banner can show it without the owner paging the transcript.
