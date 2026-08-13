@@ -89,6 +89,27 @@ see 100 MB balance → send messages → watch per-bot usage update.
 
 ---
 
+## Phase 3b — Onboarding: Free-Grant Campaign & Recharge Codes
+
+**Goal**: brand-new users can claim a one-time free traffic grant (default
+10 MB, admin-configurable, admin on/off switch); before real payment lands,
+recharge happens via single-use recharge codes managed in the admin console.
+Spec: `backend-spec-v2.md`.
+
+**Milestones**:
+
+- `[x]` M3b.1 Spec written (2026-08-13) — handed to backend team for implementation
+- `[ ]` M3b.2 Backend: free-grant campaign + recharge codes + admin pages
+- `[ ]` M3b.3 IDBots client: claim button, code redeem input, ledger labels
+- `[ ]` M3b.4 Joint E2E on the test instance (claim once, redeem once, admin
+  generate/revoke)
+
+**Acceptance**: a fresh install can claim 10 MB without paying; a distributed
+code credits exactly its amount exactly once; admin can generate, export, and
+revoke batches and toggle the campaign off.
+
+---
+
 ## Phase 4 — Real Payment Integration
 
 **Goal**: replace mock gateway with Stripe + Alipay (both together), after company

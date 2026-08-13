@@ -42,19 +42,18 @@
 
 ## What remains (in order)
 
-1. **Client follow-up: prefer server-provided ledger `txId`** — backend delivered
-   and live-verified 2026-08-13 (spend/reserve carry txId, recharge/release omit).
-   Update `trafficAccountService.ts` ledger mapping to use the server field and
-   demote the local `traffic_spend_journal` join to a fallback; adjust
-   `tests/trafficAccountService.test.mjs` enrichment cases accordingly.
-2. **P2-03 — switch default apiBase to production** before release
-   (currently defaults to the test instance path via `backend-spec`; check
-   `trafficSettings` / `getConfiguredTrafficApiBase`).
-3. **Phase 4 real payment** (see `phase4-payment-plan.md`) — blocked on
-   company qualifications (Stripe/Alipay merchant accounts).
-4. Known non-blockers: 3 pre-existing test failures on main (mvcSpend pickUtxo
-   ordering, two metaidCoreMvcRecovery) proven unrelated to this project —
-   do not chase them as regressions.
+1. **Phase 3b — free-grant campaign + recharge codes** (spec:
+   `backend-spec-v2.md`, handed to backend team 2026-08-13). Client side:
+   claim button under the balance card, redeem-code input replacing the
+   mock-pay recharge flow, ledger labels for `free_grant` / `recharge_code`.
+2. **Client follow-up: prefer server-provided ledger `txId`** — backend
+   delivered and live-verified 2026-08-13. Update `trafficAccountService.ts`
+   to use the server field and demote the local journal join to a fallback.
+3. **P2-03 — switch default apiBase to production** before release.
+4. **Phase 4 real payment** (see `phase4-payment-plan.md`) — blocked on
+   company qualifications.
+5. Known non-blockers: 3 pre-existing test failures on main (mvcSpend pickUtxo
+   ordering, two metaidCoreMvcRecovery) proven unrelated — do not chase them.
 
 ## Gotchas (cost us real time — read before testing)
 
