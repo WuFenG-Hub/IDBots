@@ -2329,6 +2329,31 @@ export class CoworkStore implements MemoryBackend {
     };
   }
 
+  /**
+   * Remove a per-MetaBot memory policy override so the bot falls back to the
+   * global default again. Returns true when a row was actually deleted.
+   * Idempotent: returns false (no throw) when no override existed.
+   */
+  deleteMemoryPolicyForMetabot(metabotId: number): boolean {
+    const resolvedMetabotId = parseIdNumber(metabotId);
+    if (resolvedMetabotId == null || resolvedMetabotId <= 0) {
+      return false;
+    }
+    const existing = this.getOne<{ metabot_id: number }>(
+      'SELECT metabot_id FROM metabot_memory_policies WHERE metabot_id = ? LIMIT 1',
+      [resolvedMetabotId],
+    );
+    if (!existing) {
+      return false;
+    }
+    this.db.run(
+      'DELETE FROM metabot_memory_policies WHERE metabot_id = ?',
+      [resolvedMetabotId],
+    );
+    this.saveDb();
+    return true;
+  }
+
   private normalizeConversationChannel(channel: string): string {
     return String(channel || '').trim().toLowerCase();
   }

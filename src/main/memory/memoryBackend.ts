@@ -187,6 +187,7 @@ export interface MemoryBackend {
   getEffectiveMemoryPolicyForMetabot(metabotId?: number | null): MemoryEffectivePolicy;
   getEffectiveMemoryPolicyForSession(sessionId?: string | null): MemoryEffectivePolicy;
   setMemoryPolicyForMetabot(metabotId: number, updates: MemoryPolicyUpdates): MemoryPolicy;
+  deleteMemoryPolicyForMetabot(metabotId: number): boolean;
   listUserMemories(options: MemoryListUserMemoriesOptions): MemoryUserMemory[];
   createUserMemory(input: MemoryCreateUserMemoryInput): MemoryUserMemory;
   updateUserMemory(input: MemoryUpdateUserMemoryInput): MemoryUserMemory | null;

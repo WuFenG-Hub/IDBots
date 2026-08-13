@@ -9340,6 +9340,26 @@ if (!gotTheLock) {
       };
     }
   });
+
+  // Drop a per-MetaBot memory policy override so the bot follows the global
+  // default again (Settings → Memory → policy card "reset to global").
+  ipcMain.handle('cowork:memory:deletePolicy', async (_event, input: { metabotId?: number }) => {
+    try {
+      const metabotId = typeof input?.metabotId === 'number' && Number.isFinite(input.metabotId) && input.metabotId > 0
+        ? Math.floor(input.metabotId)
+        : null;
+      if (metabotId == null) {
+        return { success: false, error: 'Invalid metabotId for memory policy' };
+      }
+      const deleted = getCoworkStore().getMemoryBackend().deleteMemoryPolicyForMetabot(metabotId);
+      return { success: true, deleted };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to reset memory policy',
+      };
+    }
+  });
   ipcMain.handle('cowork:sandbox:install', async () => {
     const result = await ensureSandboxReady();
     return {

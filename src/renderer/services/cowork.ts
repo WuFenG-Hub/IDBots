@@ -1089,6 +1089,14 @@ class CoworkService {
     return Boolean(result?.success);
   }
 
+  /** Drop a per-MetaBot memory policy override so it follows the global default. */
+  async deleteMemoryPolicy(metabotId: number): Promise<boolean> {
+    const api = window.electron?.cowork?.deleteMemoryPolicy;
+    if (!api) return false;
+    const result = await api({ metabotId });
+    return Boolean(result?.success);
+  }
+
   onSandboxDownloadProgress(callback: (progress: CoworkSandboxProgress) => void): () => void {
     if (!window.electron?.cowork?.onSandboxDownloadProgress) {
       return () => {};

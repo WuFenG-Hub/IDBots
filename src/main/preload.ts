@@ -535,6 +535,8 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('metaid:knowledge:list', input),
     archiveKnowledge: (input: { id: string; metabotId: number }) =>
       ipcRenderer.invoke('metaid:knowledge:archive', input),
+    deleteMemoryPolicy: (input: { metabotId: number }) =>
+      ipcRenderer.invoke('cowork:memory:deletePolicy', input),
     isDelegationBlocking: (sessionId: string) =>
       ipcRenderer.invoke('cowork:isDelegationBlocking', sessionId) as Promise<boolean>,
     getDelegationInfo: (sessionId: string) =>
