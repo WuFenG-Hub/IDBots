@@ -524,6 +524,17 @@ contextBridge.exposeInMainWorld('electron', {
       memoryUserMemoriesMaxItems?: number;
     }) =>
       ipcRenderer.invoke('cowork:memory:setPolicy', input),
+    listKnowledge: (input: {
+      metabotId: number;
+      kind?: 'know_how' | 'pitfall' | 'principle';
+      status?: 'active' | 'superseded' | 'archived' | 'all';
+      query?: string;
+      limit?: number;
+      offset?: number;
+    }) =>
+      ipcRenderer.invoke('metaid:knowledge:list', input),
+    archiveKnowledge: (input: { id: string; metabotId: number }) =>
+      ipcRenderer.invoke('metaid:knowledge:archive', input),
     isDelegationBlocking: (sessionId: string) =>
       ipcRenderer.invoke('cowork:isDelegationBlocking', sessionId) as Promise<boolean>,
     getDelegationInfo: (sessionId: string) =>

@@ -13085,6 +13085,61 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     }
   });
 
+  // Knowledge-point anchored memory browser (Settings → Memory → Knowledge).
+  // The store already supports list/archive; these expose them to the renderer.
+  ipcMain.handle('metaid:knowledge:list', async (_event, input: {
+    metabotId?: number;
+    kind?: string;
+    status?: string;
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    try {
+      const metabotId = Number(input?.metabotId);
+      if (!Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing metabotId' };
+      }
+      const entries = getMetaIDKnowledgeStore().listKnowledge({
+        metabotId,
+        kind: input?.kind as never,
+        status: (input?.status ?? 'active') as never,
+        query: input?.query,
+        limit: input?.limit,
+        offset: input?.offset,
+      });
+      return { success: true, entries };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to list knowledge points',
+      };
+    }
+  });
+
+  ipcMain.handle('metaid:knowledge:archive', async (_event, input: {
+    id?: string;
+    metabotId?: number;
+  }) => {
+    try {
+      const id = toSafeString(input?.id).trim();
+      const metabotId = Number(input?.metabotId);
+      if (!id || !Number.isFinite(metabotId) || metabotId <= 0) {
+        return { success: false, error: 'Missing knowledge id or metabotId' };
+      }
+      const entry = getMetaIDKnowledgeStore().archiveKnowledge({ id, metabotId });
+      if (!entry) {
+        return { success: false, error: 'Knowledge point not found' };
+      }
+      return { success: true, entry };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to archive knowledge point',
+      };
+    }
+  });
+
   ipcMain.handle('mcp:list', () => {
     try {
       return { success: true, servers: getMcpStore().listServers() };

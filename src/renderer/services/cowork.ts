@@ -41,6 +41,9 @@ import type {
   CoworkSessionMemoryScope,
   CoworkMetaIDContactSummary,
   CoworkMetaIDContactDetail,
+  CoworkKnowledgeEntry,
+  CoworkKnowledgeKind,
+  CoworkKnowledgeStatus,
   CoworkPermissionResult,
   CoworkA2AGuidanceRequest,
   CoworkA2AGuidanceResult,
@@ -1060,6 +1063,30 @@ class CoworkService {
     const result = await api(input);
     if (!result?.success || !result.detail) return null;
     return result.detail;
+  }
+
+  /** List knowledge-point anchored memories for a MetaBot (Settings → Memory → Knowledge). */
+  async listKnowledge(input: {
+    metabotId: number;
+    kind?: CoworkKnowledgeKind;
+    status?: CoworkKnowledgeStatus | 'all';
+    query?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<CoworkKnowledgeEntry[]> {
+    const api = window.electron?.cowork?.listKnowledge;
+    if (!api) return [];
+    const result = await api(input);
+    if (!result?.success || !Array.isArray(result.entries)) return [];
+    return result.entries;
+  }
+
+  /** Archive a knowledge point (soft-delete: hidden from active recall). */
+  async archiveKnowledge(input: { id: string; metabotId: number }): Promise<boolean> {
+    const api = window.electron?.cowork?.archiveKnowledge;
+    if (!api) return false;
+    const result = await api(input);
+    return Boolean(result?.success);
   }
 
   onSandboxDownloadProgress(callback: (progress: CoworkSandboxProgress) => void): () => void {
