@@ -450,22 +450,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
     }
   };
 
-  const [reworking, setReworking] = useState(false);
-  const [reworkError, setReworkError] = useState<string | null>(null);
-  const handleRework = async () => {
-    if (!detail || reworking) return;
-    setReworking(true);
-    setReworkError(null);
-    try {
-      const updated = await groupTaskService.reworkTask({ taskId, reason: 'Owner/chair requested supplementary work' });
-      setDetail(updated);
-    } catch (err) {
-      setReworkError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setReworking(false);
-    }
-  };
-
   const handleConfirmClose = async (rating?: number, ratingComment?: string) => {
     if (!confirmAction || !detail) return;
     setClosing(true);
@@ -648,11 +632,10 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
               {canAcceptGroupTask(detail.status) && (
                 <button
                   type="button"
-                  onClick={() => void handleRework()}
-                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-amber-500 text-white hover:bg-amber-600 transition-colors"
-                  title="Move the task back to executing for supplementary work"
+                  onClick={() => setConfirmAction('done')}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
                 >
-                  {i18nService.t('groupTasksRework')}
+                  {i18nService.t('groupTasksAcceptClose')}
                 </button>
               )}
               <button
@@ -666,9 +649,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
           )}
           <WindowTitleBar inline />
         </div>
-        {reworkError && (
-          <div className="px-4 py-1 text-xs text-red-500">{reworkError}</div>
-        )}
       </div>
 
       {/* Body: transcript column + right rail */}
