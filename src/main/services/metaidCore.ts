@@ -42,12 +42,11 @@ import {
   getTrafficPinMode,
   type TrafficSettingsReader,
 } from './trafficSettings';
+import { resolveCreatePinFeeRate } from './feeRateStore';
 
 const MANAPI_BASE = 'https://manapi.metaid.io';
 
 const METAID_RPC_LOG = 'metaid-rpc.log';
-
-const FALLBACK_FEE_RATES: Record<string, number> = { mvc: 1, btc: 2, doge: 5000000, opcat: 0.001 };
 
 function appendMetaidLog(level: string, message: string, details?: object): void {
   try {
@@ -570,7 +569,7 @@ export async function spawnCreatePinWorker(params: SpawnCreatePinWorkerParams): 
 
   const network = resolveCreatePinNetwork(options?.network);
   const payloadStr = JSON.stringify({
-    feeRate: options?.feeRate ?? FALLBACK_FEE_RATES[network] ?? 1,
+    feeRate: resolveCreatePinFeeRate(network, options?.feeRate),
     network,
     ...(options?.mode === 'draft' ? { mode: 'draft' } : {}),
     metaidData: {
@@ -796,7 +795,7 @@ export async function createPin(
             mnemonic,
             walletPath,
             mvcAddress: sponsorMvcAddress,
-            feeRate: options?.feeRate ?? FALLBACK_FEE_RATES.mvc,
+            feeRate: resolveCreatePinFeeRate('mvc', options?.feeRate),
             fallbackPolicy: options?.sponsorFallbackPolicy ?? getTrafficFallbackPolicy(getMetaidCoreKvReader()),
             baseUrl: options?.sponsorBaseUrl ?? getConfiguredTrafficApiBase(),
             fetchImpl: options?.sponsorFetchImpl,

@@ -48,7 +48,7 @@ import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
-import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers } from './feeRateStore';
+import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, resolveCreatePinFeeRate } from './feeRateStore';
 import { listenWithRetry } from './httpListenWithRetry';
 import { DEFAULT_METAID_RPC_HOST, getMetaidRpcBase, resolveMetaidRpcPort } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
@@ -1919,7 +1919,7 @@ export function startMetaidRpcServer(
       body += chunk;
     }
 
-    let payload: { metabot_id: number; metaidData: MetaidDataPayload; network?: string };
+    let payload: { metabot_id: number; metaidData: MetaidDataPayload; network?: string; fee_rate?: number };
     try {
       payload = JSON.parse(body);
     } catch {
@@ -1945,9 +1945,21 @@ export function startMetaidRpcServer(
       ? String(networkRaw).toLowerCase().trim()
       : 'mvc';
 
+    let feeRate: number;
+    if (payload.fee_rate != null) {
+      const feeRateValue = Number(payload.fee_rate);
+      if (!Number.isFinite(feeRateValue) || feeRateValue <= 0) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ success: false, error: 'fee_rate must be positive' }));
+        return;
+      }
+      feeRate = feeRateValue;
+    } else {
+      feeRate = resolveCreatePinFeeRate(network);
+    }
+
     try {
       const store = getMetabotStore();
-      const feeRate = getGlobalFeeRate(network);
       const result = await createPin(store, metabot_id, metaidData as MetaidDataPayload, {
         network: network as 'mvc' | 'doge' | 'btc',
         feeRate,

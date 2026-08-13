@@ -3192,7 +3192,7 @@ const startSqliteDaemons = (): void => {
     fetchGroupMembers,
     sendEncryptedSimplemsg: (input) => sendEncryptedSimplemsg({
       ...input,
-      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload),
+      createPin: async (id, payload) => createPin(getMetabotStore(), id, payload, { feeRate: getGlobalFeeRate('mvc') }),
     }),
   });
   // OpenTeam M3: collaboration-impression sedimentation (chair -> remote teammate).
