@@ -494,13 +494,22 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
 
   const llmOptions = useMemo((): LlmOption[] => {
     const config = configService.getConfig();
-    const providers = (config.providers ?? {}) as Record<string, { enabled?: boolean; apiKey?: string }>;
+    const providers = (config.providers ?? {}) as Record<string, { enabled?: boolean; apiKey?: string; name?: string }>;
     const configured: LlmOption[] = [];
     for (const key of ALL_PROVIDER_KEYS) {
       const p = providers[key];
       if (!p?.enabled) continue;
       if (providerRequiresApiKey(key) && !(p.apiKey ?? '').trim()) continue;
       configured.push({ id: key, label: providerLabel(key) });
+    }
+    // Append user-created custom providers (key prefix `custom-*`), which are
+    // not part of the built-in ALL_PROVIDER_KEYS registry. Prefer the configured
+    // display name and fall back to the derived provider label.
+    for (const [key, p] of Object.entries(providers)) {
+      if ((ALL_PROVIDER_KEYS as readonly string[]).includes(key)) continue;
+      if (!p?.enabled) continue;
+      if (providerRequiresApiKey(key) && !(p.apiKey ?? '').trim()) continue;
+      configured.push({ id: key, label: p.name?.trim() || providerLabel(key) });
     }
     return configured;
   }, [settingsClosedTrigger]);
