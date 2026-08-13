@@ -423,11 +423,17 @@ export function anthropicToOpenAI(body: unknown): Record<string, unknown> {
     // byte-identical across turns regardless of map iteration order. DeepSeek's
     // automatic context cache matches the longest common prefix, so an unstable
     // tool list would invalidate the entire cached prefix every turn. Mirrors
-    // Reasonix cache_shape.go normalizeToolSchemas.
+    // Reasonix cache_shape.go normalizeToolSchemas. Duplicate names tie-break
+    // on the serialized function object so their relative order is also
+    // byte-deterministic (two MCP servers can expose the same tool name and
+    // would otherwise keep a source-order that can shift between turns).
     .sort((a, b) => {
       const nameA = toString(a.function?.name);
       const nameB = toString(b.function?.name);
       if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+      const serializedA = JSON.stringify(a.function ?? null);
+      const serializedB = JSON.stringify(b.function ?? null);
+      if (serializedA !== serializedB) return serializedA < serializedB ? -1 : 1;
       return 0;
     });
 

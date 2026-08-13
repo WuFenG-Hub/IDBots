@@ -1123,9 +1123,20 @@ function convertChatCompletionsRequestToResponsesRequest(
   // DeepSeek Responses API: inject the built-in web_search tool (server-side
   // executed) so the agent can search the web. It must stay FIRST and stable
   // across turns to keep the cacheable tools prefix byte-identical (mirrors
-  // Reasonix responses.go web-search handling). For non-DeepSeek we leave the
-  // tools list to the caller.
-  const normalizedTools = normalizeResponsesToolsFromChat(chatRequest.tools);
+  // Reasonix responses.go web-search handling). The remaining tools are sorted
+  // deterministically by name so the prefix never depends on the caller's
+  // array order (defense-in-depth: the chat-format converter already sorts,
+  // but the invariant must hold locally for every Responses request).
+  const normalizedTools = [...normalizeResponsesToolsFromChat(chatRequest.tools)]
+    .sort((a, b) => {
+      const nameA = toString(a?.name);
+      const nameB = toString(b?.name);
+      if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+      const serializedA = JSON.stringify(a ?? null);
+      const serializedB = JSON.stringify(b ?? null);
+      if (serializedA !== serializedB) return serializedA < serializedB ? -1 : 1;
+      return 0;
+    });
   const responseTools = isDeepSeek
     ? [{ type: 'web_search' }, ...normalizedTools]
     : normalizedTools;
