@@ -12,6 +12,19 @@
  */
 export const DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER = '[reasoning unavailable]';
 
+/**
+ * Cue fed back to the model when an empty terminal turn is auto-continued
+ * (DeepSeek emitted only a reasoning block, then `end_turn`, with no text and
+ * no tool_use). Mirrors the manual "继续" workaround: resume the session (full
+ * history preserved) with a minimal instruction so the model performs the step
+ * it clearly intended. This is real answer text — NOT the DeepSeek
+ * `[reasoning unavailable]` placeholder — so `isNonAnswerAssistantReply` must
+ * treat it as a genuine message and it can never itself look like another
+ * empty terminal turn.
+ */
+export const EMPTY_TERMINAL_TURN_CONTINUE_PROMPT =
+  'The previous turn ended without producing any output or tool action. Continue the task from where you left off and perform the next step.';
+
 const NON_ANSWER_PLACEHOLDERS = new Set<string>([
   DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER,
 ]);

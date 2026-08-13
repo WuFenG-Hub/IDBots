@@ -18,7 +18,7 @@ import {
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
-import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, isEmptyTerminalSdkResult } from './coworkAssistantReply';
+import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
@@ -7006,19 +7006,46 @@ export class CoworkRunner extends EventEmitter {
         return;
       }
 
+      // Empty terminal turn auto-continue: DeepSeek occasionally ends a turn
+      // after emitting only a reasoning block (the `[reasoning unavailable]`
+      // placeholder) with no text and no tool_use — a transient ~1/10 behavior
+      // of the upstream, not a real "done". The task is still in progress, so
+      // resume the session (claudeSessionId kept -> full history preserved,
+      // exactly like the normal continue path) with a minimal continue cue,
+      // mirroring the manual "继续" workaround. Guarded by `!isRetry` so this
+      // fires at most once: a second consecutive empty turn falls through to
+      // the idle + diagnostic path below instead of looping.
+      if (activeSession.emptyTerminalTurnDetected && !isRetry) {
+        coworkLog(
+          'INFO',
+          'runClaudeCodeLocal',
+          'Empty terminal turn (DeepSeek reasoning-only end_turn) — auto-continuing once via resume',
+          { sessionId }
+        );
+        this.transitionLocalTurnForRetry(activeSession, 'automatic empty-terminal-turn continue');
+        await this.runClaudeCodeLocal(
+          activeSession,
+          EMPTY_TERMINAL_TURN_CONTINUE_PROMPT,
+          cwd,
+          systemPrompt,
+          true
+        );
+        return;
+      }
+
       // Ensure any remaining streaming content is saved to database
       this.finalizeStreamingContent(activeSession);
 
       const session = this.store.getSession(sessionId);
       if (session?.status !== 'error') {
-        // Empty terminal turn: the SDK reported success but the final assistant
-        // message had no usable text (DeepSeek thinking-placeholder truncation,
-        // etc.). Do NOT falsely report `completed` — the task list would show
-        // "done" while the final handoff is missing. Surface a clear diagnostic
-        // and leave the session `idle` so the user can re-send the last message
-        // to continue. Still emit `complete` so any automation waiter resolves
-        // (the orchestrator bridge already treats an empty reply as a
-        // non-answer via isNonAnswerAssistantReply).
+        // Empty terminal turn fallback: reached only when the auto-continue
+        // above already ran once (isRetry=true) AND the resumed turn was again
+        // empty, i.e. DeepSeek returned an empty result twice in a row. Do NOT
+        // falsely report `completed` — surface a clear diagnostic and leave the
+        // session `idle` so the user can re-send the last message to continue.
+        // Still emit `complete` so any automation waiter resolves (the
+        // orchestrator bridge already treats an empty reply as a non-answer via
+        // isNonAnswerAssistantReply).
         if (activeSession.emptyTerminalTurnDetected) {
           this.reportEmptyTerminalTurn(sessionId);
           this.store.updateSession(sessionId, { status: 'idle' });

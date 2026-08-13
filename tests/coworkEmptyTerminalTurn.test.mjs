@@ -48,3 +48,28 @@ test('DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER is the exact sentinel the hygiene
   // Real reasoning text is left untouched.
   assert.equal(isNonAnswerAssistantReply('分析 fee 结构后，发现...'), false);
 });
+
+// The auto-continue cue fed back to the model on an empty terminal turn
+// (DeepSeek reasoning-only end_turn). It MUST be a genuine, non-empty
+// instruction — if it ever drifted to empty/whitespace or to the placeholder
+// sentinel, the continue retry would itself look like another empty turn and
+// the one-shot `!isRetry` guard could not reliably break the cycle.
+test('EMPTY_TERMINAL_TURN_CONTINUE_PROMPT is a real instruction, never a non-answer', async () => {
+  const { EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isNonAnswerAssistantReply, isEmptyTerminalSdkResult } =
+    await importCompiled('coworkAssistantReply');
+
+  assert.equal(typeof EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, 'string');
+  assert.ok(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT.trim().length > 0, 'continue cue must be non-empty');
+  // It must read as a genuine assistant/user message, NOT as the DeepSeek
+  // placeholder or blank — otherwise the recovery turn would be re-flagged.
+  assert.equal(isNonAnswerAssistantReply(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT), false);
+  // Sanity: the continue cue is distinct from the placeholder sentinel.
+  assert.notEqual(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, '[reasoning unavailable]');
+  // A success result carrying this cue as its reply text would be a normal,
+  // non-empty turn — not an empty terminal turn.
+  assert.equal(
+    isEmptyTerminalSdkResult({ subtype: 'success', result: EMPTY_TERMINAL_TURN_CONTINUE_PROMPT }),
+    false
+  );
+});
+
