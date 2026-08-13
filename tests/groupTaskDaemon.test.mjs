@@ -842,8 +842,18 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
     assert.ok(closing, 'review entry posts the system closing line as the chair');
     assert.match(closing.content, /任务「Build MetaApp」/);
     assert.doesNotMatch(closing.content, /#\d+/, 'R5: the ceremony refers to the task by title, not #id');
-    assert.match(closing.content, /所有步骤已完成/);
-    assert.match(closing.content, /等待人类评审/);
+    // R1: the closing is now the host's deterministic acceptance summary — it
+    // restates the goal and carries the deliverable list + 3-action guidance
+    // ("把菜端上桌"), not the old fixed "所有步骤已完成 / 等待人类评审" string.
+    assert.match(closing.content, /目标：Build and publish the intro MetaApp/);
+    assert.match(closing.content, /成果清单：/);
+    assert.match(closing.content, /无已核验交付物/);
+    assert.match(closing.content, /①[\s\S]*②[\s\S]*③/);
+    // R1: the summary is persisted as the single source of truth (version 1).
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary, 'acceptance summary persisted on review entry');
+    assert.equal(summary.version, 1);
+    assert.equal(summary.goal, 'Build and publish the intro MetaApp');
     // The closing (chair identity) is the LAST posted message — never a worker [WORKING].
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1);
   } finally {
@@ -891,6 +901,10 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     );
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
     assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
+    // R1: the re-assert re-posts the SAME acceptance summary (re-rendered from
+    // the stored record), not the old fixed string.
+    assert.match(h.sends[h.sends.length - 1].content, /目标：Build and publish the intro MetaApp/);
+    assert.match(h.sends[h.sends.length - 1].content, /成果清单：/);
 
     // Idempotent: a second tick with no NEW straggler does not re-assert again.
     const countAfter = h.sends.length;
