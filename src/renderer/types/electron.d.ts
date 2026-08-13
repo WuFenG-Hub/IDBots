@@ -135,6 +135,26 @@ interface TrafficRechargeOrderStatusInfo {
   creditedAt?: number;
 }
 
+/** Free-grant campaign state for the local traffic account. */
+interface TrafficFreeGrantCampaignStatusInfo {
+  enabled: boolean;
+  grantBytes: number;
+  claimed: boolean;
+  claimable: boolean;
+}
+
+interface TrafficFreeGrantClaimInfo {
+  grantId: number;
+  grantBytes: number;
+  balanceAfter: number;
+}
+
+interface TrafficRedeemCodeInfo {
+  codeId: number;
+  trafficBytes: number;
+  balanceAfter: number;
+}
+
 interface TrafficSettingsInfo {
   mode: 'traffic' | 'selfpay';
   fallbackPolicy: 'selfpay' | 'strict';
@@ -1045,6 +1065,9 @@ interface IElectronAPI {
     createRechargeOrder: (input: { planId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderInfo; error?: string }>;
     getRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
     mockConfirmRechargeOrder: (input: { orderId: string }) => Promise<{ success: boolean; order?: TrafficRechargeOrderStatusInfo; error?: string }>;
+    getFreeGrantCampaignStatus: () => Promise<{ success: boolean; campaign?: TrafficFreeGrantCampaignStatusInfo; error?: string; errorCode?: string }>;
+    claimFreeGrant: () => Promise<{ success: boolean; claim?: TrafficFreeGrantClaimInfo; error?: string; errorCode?: string }>;
+    redeemCode: (input: { code: string }) => Promise<{ success: boolean; result?: TrafficRedeemCodeInfo; error?: string; errorCode?: string }>;
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };

@@ -12,9 +12,11 @@ const { SqliteStore } = require('../dist-electron/main/sqliteStore.js');
 const {
   TrafficApiError,
   bindAllLocalBots,
+  claimFreeGrant,
   createRechargeOrder,
   ensureTrafficAccount,
   getConfiguredTrafficApiBase,
+  getFreeGrantCampaignStatus,
   getLocalTrafficAccount,
   getRechargeOrder,
   getTrafficBalance,
@@ -25,6 +27,7 @@ const {
   listLocalTrafficJournal,
   mockConfirmRechargeOrder,
   recordLocalTrafficSpend,
+  redeemTrafficCode,
   resetTrafficAccountServiceForTests,
   resolveSponsorTrafficAccount,
   setTrafficSettingsSnapshot,
@@ -625,6 +628,141 @@ test('mockConfirmRechargeOrder signs traffic-recharge-confirm and invalidates th
   const polled = await getRechargeOrder('recharge-order-1');
   assert.equal(polled.orderId, 'recharge-order-1');
   assert.equal(polled.status, 1);
+});
+
+test('getFreeGrantCampaignStatus signs the canonical message and parses the campaign state', async () => {
+  let captured = null;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/status', (init) => {
+      captured = { headers: init.headers };
+      return { enabled: true, grantBytes: 10000000, claimed: false, claimable: true };
+    }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  const status = await getFreeGrantCampaignStatus();
+  assert.deepEqual(status, { enabled: true, grantBytes: 10000000, claimed: false, claimable: true });
+
+  assert.ok(captured);
+  assert.equal(captured.headers['X-Identity-Address'], IDENTITY_ADDRESS);
+  const timestamp = Number(captured.headers['X-Timestamp']);
+  assert.ok(
+    verifyMessage(
+      IDENTITY_ADDRESS,
+      `traffic-free-grant-status:${SERVER_ACCOUNT_ID}:${timestamp}`,
+      captured.headers['X-Signature'],
+    ),
+    'X-Signature must verify against traffic-free-grant-status:<accountId>:<ts>',
+  );
+});
+
+test('claimFreeGrant signs traffic-free-grant-claim, sends idbots client, and invalidates the balance cache', async () => {
+  let captured = null;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/claim', (init) => {
+      captured = { headers: init.headers, body: JSON.parse(init.body) };
+      return { grantId: 1, grantBytes: 10000000, balanceAfter: 10001000 };
+    }],
+    ['/v1/traffic/accounts', (init) => (
+      String(init.method) === 'GET' ? accountPayload({ balanceBytes: 10001000 }) : accountPayload()
+    )],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  // Prime the cache via ensure (balance 1000), then claim and confirm the next
+  // balance read refetches from the backend.
+  await ensureTrafficAccount();
+  const claim = await claimFreeGrant();
+  assert.deepEqual(claim, { grantId: 1, grantBytes: 10000000, balanceAfter: 10001000 });
+
+  assert.ok(captured);
+  assert.equal(captured.body.clientApp, 'idbots');
+  assert.equal(captured.body.clientVersion, 'dev'); // electron unavailable in plain node
+  const timestamp = Number(captured.headers['X-Timestamp']);
+  assert.ok(
+    verifyMessage(
+      IDENTITY_ADDRESS,
+      `traffic-free-grant-claim:${SERVER_ACCOUNT_ID}:${timestamp}`,
+      captured.headers['X-Signature'],
+    ),
+    'X-Signature must verify against traffic-free-grant-claim:<accountId>:<ts>',
+  );
+
+  const balance = await getTrafficBalance();
+  assert.equal(balance.balanceBytes, 10001000);
+  assert.equal(callsToPath(fetchImpl, `/v1/traffic/accounts/${SERVER_ACCOUNT_ID}/balance`).length, 1);
+});
+
+test('claimFreeGrant surfaces the backend data.errorCode (ALREADY_CLAIMED)', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/campaign/free-grant/claim', { code: 1, message: 'already claimed', data: { errorCode: 'ALREADY_CLAIMED' } }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  await assert.rejects(claimFreeGrant(), (error) => {
+    assert.ok(error instanceof TrafficApiError);
+    assert.equal(error.errorCode, 'ALREADY_CLAIMED');
+    assert.equal(error.stage, 'campaign');
+    return true;
+  });
+});
+
+test('redeemTrafficCode normalizes the code, signs traffic-redeem-code, and invalidates the balance cache', async () => {
+  let captured = null;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/redeem-code', (init) => {
+      captured = { headers: init.headers, body: JSON.parse(init.body) };
+      return { codeId: 7, trafficBytes: 100000000, balanceAfter: 101000000 };
+    }],
+    ['/v1/traffic/accounts', (init) => (
+      String(init.method) === 'GET' ? accountPayload({ balanceBytes: 101000000 }) : accountPayload()
+    )],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  await ensureTrafficAccount();
+  const result = await redeemTrafficCode('idb-abcd-efgh-jklm');
+  assert.deepEqual(result, { codeId: 7, trafficBytes: 100000000, balanceAfter: 101000000 });
+
+  assert.ok(captured);
+  assert.deepEqual(captured.body, { code: 'IDB-ABCD-EFGH-JKLM' });
+  const timestamp = Number(captured.headers['X-Timestamp']);
+  assert.ok(
+    verifyMessage(
+      IDENTITY_ADDRESS,
+      `traffic-redeem-code:${SERVER_ACCOUNT_ID}:${timestamp}`,
+      captured.headers['X-Signature'],
+    ),
+    'X-Signature must verify against traffic-redeem-code:<accountId>:<ts>',
+  );
+
+  const balance = await getTrafficBalance();
+  assert.equal(balance.balanceBytes, 101000000);
+  assert.equal(callsToPath(fetchImpl, `/v1/traffic/accounts/${SERVER_ACCOUNT_ID}/balance`).length, 1);
+});
+
+test('redeemTrafficCode surfaces the backend data.errorCode (CODE_USED) and rejects empty codes', async () => {
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/redeem-code', { code: 1, message: 'code already used', data: { errorCode: 'CODE_USED' } }],
+    ['/v1/traffic/accounts', accountPayload()],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  await assert.rejects(redeemTrafficCode('IDB-USED-CODE-0000'), (error) => {
+    assert.ok(error instanceof TrafficApiError);
+    assert.equal(error.errorCode, 'CODE_USED');
+    assert.equal(error.stage, 'redeem');
+    return true;
+  });
+
+  await assert.rejects(redeemTrafficCode('   '), (error) => {
+    assert.ok(error instanceof TrafficApiError);
+    assert.equal(error.stage, 'redeem');
+    return true;
+  });
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/redeem-code').length, 1);
 });
 
 test('traffic settings snapshot round-trips through the kv store', async () => {
