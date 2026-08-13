@@ -39,6 +39,12 @@ go test ./... 全绿；验收按 Spec 的 A1–A8、B1–B10 逐条自测并在�
 标注实现位置；沿用老规矩（分支开发、commit + 链上日志、完成后通知我们
 验收、先不合 main、测试实例发布后给验收路径）。
 
+签名 canonical 约定（IDBots 客户端已按此实现，代码注释已标注，请对齐）：
+三个新端点的签名 message 沿用现有 `traffic-<purpose>:<accountId>:<ts>`
+约定，purpose 分别为 `traffic-free-grant-status`、`traffic-free-grant-claim`、
+`traffic-redeem-code`。若你们的 message.go 落地时口径不同，请按你们文档
+口径实现并告知我们，客户端只需改三个 buildTraffic*Message 函数即可对齐。
+
 ## Client-side follow-up once delivered
 
 - IDBots client lands in parallel: claim button, redeem input, ledger labels
