@@ -15,6 +15,13 @@ import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER } from './coworkAssistantReply
 import { writeFileAtomicSync } from './atomicFile';
 import { snipStaleToolResultBlocks } from './coworkToolResultSnip';
 import { foldLowValueToolResults } from './coworkToolResultFold';
+import {
+  compareRequestHead,
+  fingerprintRequestHead,
+  isMainLoopRequestHead,
+  type RequestHeadDrift,
+  type RequestHeadFingerprint,
+} from './coworkRequestHeadWatch';
 import { modelSupportsVision } from './coworkModelLimits';
 import type { ScheduledTaskStore, ScheduledTaskInput } from '../scheduledTaskStore';
 import type { Scheduler } from './scheduler';
@@ -282,6 +289,111 @@ export function resetCoworkSnipHeadTokens(sessionKey: string): void {
   if (snipHeadTokensBySession.delete(sessionKey)) {
     persistSnipHeadTokens();
   }
+}
+
+// --- Per-session request-head baselines ---
+// Fingerprint of the (system, tools) wire bytes for each session's main loop,
+// persisted so a restart-resume that serializes the head differently is
+// detected (first-request cache miss attribution) instead of staying silent.
+const requestHeadBaselineBySession = new Map<string, RequestHeadFingerprint>();
+let requestHeadBaselinesLoaded = false;
+let requestHeadBaselinesFilePath: string | null = null;
+
+function ensureRequestHeadBaselinesLoaded(): void {
+  if (requestHeadBaselinesLoaded) {
+    return;
+  }
+  requestHeadBaselinesLoaded = true;
+  try {
+    requestHeadBaselinesFilePath = path.join(app.getPath('userData'), 'cowork', 'request-head-hashes.json');
+    const parsed = JSON.parse(fs.readFileSync(requestHeadBaselinesFilePath, 'utf8')) as { sessions?: unknown };
+    const sessions = parsed?.sessions;
+    if (sessions && typeof sessions === 'object' && !Array.isArray(sessions)) {
+      for (const [key, value] of Object.entries(sessions as Record<string, unknown>)) {
+        const entry = value as { systemHash?: unknown; toolsHash?: unknown } | null;
+        const systemHash = typeof entry?.systemHash === 'string' ? entry.systemHash : '';
+        const toolsHash = typeof entry?.toolsHash === 'string' ? entry.toolsHash : '';
+        if (key && systemHash && toolsHash) {
+          requestHeadBaselineBySession.set(key, { systemHash, toolsHash });
+        }
+      }
+    }
+  } catch {
+    // Missing/corrupt file or non-Electron host: memory-only, start empty.
+  }
+}
+
+function persistRequestHeadBaselines(): void {
+  if (!requestHeadBaselinesFilePath) {
+    return;
+  }
+  try {
+    const sessions: Record<string, RequestHeadFingerprint> = {};
+    for (const [key, value] of requestHeadBaselineBySession) {
+      sessions[key] = value;
+    }
+    fs.mkdirSync(path.dirname(requestHeadBaselinesFilePath), { recursive: true });
+    writeFileAtomicSync(requestHeadBaselinesFilePath, Buffer.from(JSON.stringify({ sessions })));
+  } catch {
+    // Best effort; the in-memory map still serves this run.
+  }
+}
+
+/** Extract the Anthropic request's system field as plain text (string or text blocks). */
+function extractAnthropicSystemText(systemField: unknown): string {
+  if (typeof systemField === 'string') {
+    return systemField;
+  }
+  const parts: string[] = [];
+  for (const block of toArray(systemField)) {
+    const blockObj = toOptionalObject(block);
+    if (toString(blockObj?.type) === 'text') {
+      parts.push(toString(blockObj?.text));
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Watch the (system, tools) request head of a session's main-loop requests.
+ * Subagent/side-job calls (agent-definition systems without the IDBots safety
+ * signature) are skipped so their alternating prompts cannot pollute the
+ * baseline. Drift — including a KNOWN reset that propagated to the wire bytes
+ * — is logged with both fingerprints for correlation with the runner's
+ * cache-miss attribution labels.
+ */
+function trackRequestHeadStability(
+  sessionKey: string,
+  anthropicRequestBody: Record<string, unknown>
+): RequestHeadDrift | null {
+  const systemText = extractAnthropicSystemText(anthropicRequestBody.system);
+  if (!isMainLoopRequestHead(systemText)) {
+    return null;
+  }
+  const next = fingerprintRequestHead(systemText, anthropicRequestBody.tools);
+  ensureRequestHeadBaselinesLoaded();
+  const baseline = requestHeadBaselineBySession.get(sessionKey);
+  if (!baseline) {
+    requestHeadBaselineBySession.set(sessionKey, next);
+    persistRequestHeadBaselines();
+    return null;
+  }
+  const drift = compareRequestHead(baseline, next);
+  if (!drift) {
+    return null;
+  }
+  requestHeadBaselineBySession.set(sessionKey, next);
+  persistRequestHeadBaselines();
+  console.warn('[cowork-openai-compat-proxy] Request head drift detected (cached prefix break)', {
+    sessionKey,
+    kind: drift.kind,
+    previousSystemHash: drift.previous.systemHash,
+    nextSystemHash: drift.next.systemHash,
+    previousToolsHash: drift.previous.toolsHash,
+    nextToolsHash: drift.next.toolsHash,
+    note: 'Known resets (system_prompt_changed/compaction/... ) also show here; cross-check the runner cache-miss attribution.',
+  });
+  return drift;
 }
 
 // --- Scheduled task API dependencies ---
@@ -1123,9 +1235,20 @@ function convertChatCompletionsRequestToResponsesRequest(
   // DeepSeek Responses API: inject the built-in web_search tool (server-side
   // executed) so the agent can search the web. It must stay FIRST and stable
   // across turns to keep the cacheable tools prefix byte-identical (mirrors
-  // Reasonix responses.go web-search handling). For non-DeepSeek we leave the
-  // tools list to the caller.
-  const normalizedTools = normalizeResponsesToolsFromChat(chatRequest.tools);
+  // Reasonix responses.go web-search handling). The remaining tools are sorted
+  // deterministically by name so the prefix never depends on the caller's
+  // array order (defense-in-depth: the chat-format converter already sorts,
+  // but the invariant must hold locally for every Responses request).
+  const normalizedTools = [...normalizeResponsesToolsFromChat(chatRequest.tools)]
+    .sort((a, b) => {
+      const nameA = toString(a?.name);
+      const nameB = toString(b?.name);
+      if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+      const serializedA = JSON.stringify(a ?? null);
+      const serializedB = JSON.stringify(b ?? null);
+      if (serializedA !== serializedB) return serializedA < serializedB ? -1 : 1;
+      return 0;
+    });
   const responseTools = isDeepSeek
     ? [{ type: 'web_search' }, ...normalizedTools]
     : normalizedTools;
@@ -3234,6 +3357,16 @@ async function handleRequest(
     }
   }
 
+  if (messagesRouteSessionKey) {
+    // Watch the (system, tools) request head for silent byte drift. This is a
+    // read-only observability path: known resets show up here too, but the
+    // fingerprints make every prefix break attributable instead of 'unknown'.
+    trackRequestHeadStability(
+      messagesRouteSessionKey,
+      anthropicRequestBody as Record<string, unknown>
+    );
+  }
+
   const openAIRequest = anthropicToOpenAI(anthropicRequestBody);
   openAIRequest.model = resolveEffectiveUpstreamModel(
     toString(openAIRequest.model),
@@ -3455,6 +3588,8 @@ export const __openAICompatProxyTestUtils = {
   hydrateDeepSeekReasoningForRequest,
   resolveEffectiveUpstreamModel,
   parseMessagesRouteSessionKey,
+  extractAnthropicSystemText,
+  trackRequestHeadStability,
   injectResponsesWebSearchBlocks,
   extractResponsesOutputText,
   resetDeepSeekReasoningCache: () => {

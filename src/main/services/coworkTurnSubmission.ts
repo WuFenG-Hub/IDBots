@@ -3,6 +3,7 @@ import type {
   CoworkMessageMetadata,
   CoworkSession,
 } from '../coworkStore';
+import { resolveContinueSystemPrompt } from '../libs/coworkPromptStrategy';
 
 export type CoworkSubmitInput = {
   sessionId: string;
@@ -421,9 +422,21 @@ export class CoworkTurnSubmissionController {
     );
 
     try {
+      // Guard the cacheable prompt head: the renderer's rebuilt combined
+      // prompt embeds the LIVE MetaApp/Skill catalogs, so forwarding it every
+      // turn would let catalog drift reset the SDK session and re-cache the
+      // whole context. Keep the persisted prompt unless the skill set actually
+      // changed this turn (see coworkPromptStrategy). currentSession is the
+      // freshest read — the steer wait above can span a whole prior turn.
+      const resolvedSystemPrompt = resolveContinueSystemPrompt({
+        persistedSystemPrompt: currentSession.systemPrompt,
+        requestedSystemPrompt: input.systemPrompt,
+        activeSkillIds: input.activeSkillIds,
+        persistedActiveSkillIds: currentSession.activeSkillIds,
+      });
       await this.runner.continueSession(sessionId, text, {
         skipUserMessage: true,
-        systemPrompt: input.systemPrompt,
+        systemPrompt: resolvedSystemPrompt,
         skillIds: input.activeSkillIds,
       });
     } catch (error) {

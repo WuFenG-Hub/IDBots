@@ -2984,7 +2984,7 @@ export class CoworkStore implements MemoryBackend {
 
   updateSession(
     id: string,
-    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId'>>
+    updates: Partial<Pick<CoworkSession, 'title' | 'claudeSessionId' | 'status' | 'cwd' | 'systemPrompt' | 'executionMode' | 'browserUri' | 'browserTitle' | 'permissionMode' | 'parentSessionId' | 'forkPointMessageId' | 'activeSkillIds'>>
   ): void {
     const now = Date.now();
     const setClauses: string[] = ['updated_at = ?'];
@@ -3033,6 +3033,10 @@ export class CoworkStore implements MemoryBackend {
     if (updates.forkPointMessageId !== undefined) {
       setClauses.push('fork_point_message_id = ?');
       values.push(updates.forkPointMessageId);
+    }
+    if (updates.activeSkillIds !== undefined) {
+      setClauses.push('active_skill_ids = ?');
+      values.push(JSON.stringify(updates.activeSkillIds));
     }
 
     values.push(id);

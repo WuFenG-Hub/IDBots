@@ -64,6 +64,12 @@ import { ensureSandboxReady, getSandboxRuntimeInfoIfReady, type SandboxRuntimeIn
 import { isPathWithin, resolveElectronExecutablePath } from './runtimePaths';
 import { buildScopedMemoryPromptBlocks } from '../memory/memoryPromptBlocks';
 import { createOwnerMemoryScope } from '../memory/memoryScope';
+import {
+  applyVolatileDedup,
+  createVolatileDedupState,
+  type VolatileDedupState,
+  type VolatileSection,
+} from './coworkVolatileDedup';
 import { resolveMemoryScopes } from '../memory/memoryScopeResolver';
 import {
   CoworkCrossSessionService,
@@ -1515,6 +1521,14 @@ export class CoworkRunner extends EventEmitter {
    * the button again.
    */
   private pendingManualCompactSessions: Set<string> = new Set();
+  /**
+   * Per-session volatile-context dedup state, keyed by sessionId and invalidated
+   * by an SDK-session generation change (see coworkVolatileDedup). Independent
+   * of the activeSessions lifecycle for the same reason as usageStatsBySessionId:
+   * the injected blocks live in the SDK history between turns, so the dedup
+   * hashes must survive the per-turn activeSession cleanup.
+   */
+  private volatileDedupBySessionId: Map<string, VolatileDedupState> = new Map();
   /** Latest estimated thinking-token count from SDK thinking_tokens events. */
   private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
@@ -2020,7 +2034,18 @@ export class CoworkRunner extends EventEmitter {
     // a turn where almost nothing hit means the prefix itself broke through a
     // path we did not track (e.g. SDK-internal autocompact), and that stays
     // 'unknown' as an investigation signal.
-    const turnInputTotal = inputTokens + cacheReadTokens + cacheCreationTokens;
+    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
+    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
+    // fresh-only with cache partitioned into the cache_* fields. The turn hit
+    // ratio used for miss attribution must respect that split — adding the
+    // cache counters on top of a total that already contains them halves the
+    // ratio and mislabels healthy append-only turns as 'unknown' prefix breaks.
+    const activeForBilling = this.activeSessions.get(sessionId);
+    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
+    const cacheIncludedInInput = billingSource !== 'anthropic';
+    const turnInputTotal = cacheIncludedInInput
+      ? inputTokens
+      : inputTokens + cacheReadTokens + cacheCreationTokens;
     const turnHitRatio = turnInputTotal > 0 ? cacheReadTokens / turnInputTotal : 1;
     const untrackedMissReason = turnHitRatio < 0.3 ? 'unknown' : 'append_only';
     const cacheMissEvents = prev.cacheMissEvents ? [...prev.cacheMissEvents] : [];
@@ -2077,12 +2102,6 @@ export class CoworkRunner extends EventEmitter {
         };
       }
     }
-    const activeForBilling = this.activeSessions.get(sessionId);
-    const billingSource = activeForBilling?.billingSource ?? (prev.source === 'none' ? 'other' : prev.source);
-    // input_tokens semantics depend on provider: non-Anthropic (DeepSeek,
-    // OpenAI-compat) report TOTAL input (cache included); Anthropic reports
-    // fresh-only with cache partitioned into the cache_* fields.
-    const cacheIncludedInInput = billingSource !== 'anthropic';
     // lastTurnInputTokens feeds the compaction budget as the REAL context
     // size of the most recent REQUEST. Only the top-level usage carries that
     // (modelUsage is the turn aggregate); keep the top-level values here even
@@ -4369,6 +4388,14 @@ export class CoworkRunner extends EventEmitter {
    * can change: memory entries are re-ranked by the current user text and new
    * memories are written after each reply; browser tabs and remote-services
    * discovery are live data.
+   *
+   * Content dedup: every injected token is a guaranteed cache miss (request
+   * tail), so a section whose bytes are identical to the previous turn's
+   * injection is omitted — the model can still read it in history. The dedup
+   * hashes are bound to the current SDK session generation; a reset session
+   * (claudeSessionId cleared) has no history to fall back on, so everything is
+   * injected again. The memory block is exempt (alwaysInject): it is re-ranked
+   * by the current user text and carries user facts.
    */
   private async buildVolatileContextPrompt(
     sessionId: string,
@@ -4377,29 +4404,54 @@ export class CoworkRunner extends EventEmitter {
     profile: SystemPromptProfile,
     disableRemoteServicesPrompt: boolean
   ): Promise<string> {
-    const sections: Array<string | null> = [];
+    const sections: VolatileSection[] = [];
     if (profile.includeMemoryPromptBlocks) {
-      sections.push(this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }));
+      sections.push({
+        key: 'memory',
+        text: this.buildScopedMemoryPromptBlocksXml(sessionId, prompt, { enabled: sessionMemoryEnabled }),
+        alwaysInject: true,
+      });
       // Hot-layer experience injection (self-identity + recent dream summaries).
       // The dream service rewrites these nightly and the summary window rolls
       // daily, so they can never live in the system prompt — they belong here
       // in the request tail with the other volatile blocks.
       if (sessionMemoryEnabled) {
-        sections.push(this.buildExperiencePromptBlocksXml(sessionId));
+        sections.push({
+          key: 'experience',
+          text: this.buildExperiencePromptBlocksXml(sessionId),
+        });
         // Twin-side distilled impressions of local Workers also ride the
         // per-turn tail: the dream layer rewrites them nightly, so they must
         // never enter the cached system-prompt prefix.
-        sections.push(await this.buildTwinLocalImpressionPrompt(sessionId));
+        sections.push({
+          key: 'twin-impression',
+          text: await this.buildTwinLocalImpressionPrompt(sessionId),
+        });
       }
     }
     if (this.getBrowserContextPrompt) {
       // Browser tab state is live; fetch async and degrade silently on failure.
-      sections.push(await this.getBrowserContextPrompt(sessionId).catch(() => null));
+      sections.push({
+        key: 'browser',
+        text: await this.getBrowserContextPrompt(sessionId).catch(() => ''),
+      });
     }
     if (!disableRemoteServicesPrompt) {
-      sections.push(this.getRemoteServicesPrompt?.() ?? null);
+      sections.push({
+        key: 'remote-services',
+        text: this.getRemoteServicesPrompt?.() ?? '',
+      });
     }
-    return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
+
+    const activeForDedup = this.activeSessions.get(sessionId);
+    const generation = activeForDedup?.claudeSessionId ?? null;
+    let dedupState = this.volatileDedupBySessionId.get(sessionId);
+    if (!dedupState || dedupState.generation !== generation) {
+      // Fresh or reset SDK session: previous injections are not in history.
+      dedupState = createVolatileDedupState(generation);
+      this.volatileDedupBySessionId.set(sessionId, dedupState);
+    }
+    return applyVolatileDedup(sections, dedupState).join('\n\n');
   }
 
   private extractToolCommand(toolInput: Record<string, unknown>): string {
@@ -4778,9 +4830,13 @@ export class CoworkRunner extends EventEmitter {
       persistedSystemPrompt = options.systemPrompt;
       persistedClaudeSessionId = null;
       systemPromptChanged = true;
+      // Persist the skill set the NEW prompt was built for so the continue
+      // policy can distinguish a deliberate skill change from live-catalog
+      // drift (which must never rewrite the cacheable prompt head).
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
+        ...(options.skillIds !== undefined ? { activeSkillIds: options.skillIds } : {}),
       });
       coworkLog('INFO', 'startSession', 'System prompt changed, reset claudeSessionId', {
         sessionId,
@@ -4973,9 +5029,12 @@ export class CoworkRunner extends EventEmitter {
       persistedSystemPrompt = options.systemPrompt;
       activeSession.claudeSessionId = null;
       activeSession.pendingCacheBreakReason = 'system_prompt_changed';
+      // Persist the skill set the NEW prompt was built for so the continue
+      // policy can tell a deliberate skill change from live-catalog drift.
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
+        ...(options.skillIds !== undefined ? { activeSkillIds: options.skillIds } : {}),
       });
       coworkLog('INFO', 'continueSession', 'System prompt changed, reset claudeSessionId', {
         sessionId,

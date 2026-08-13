@@ -7678,6 +7678,7 @@ if (!gotTheLock) {
         persistedSystemPrompt: session?.systemPrompt,
         requestedSystemPrompt: options.systemPrompt,
         activeSkillIds: options.activeSkillIds,
+        persistedActiveSkillIds: session?.activeSkillIds,
       });
       runner.continueSession(options.sessionId, options.prompt, { systemPrompt, skillIds: options.activeSkillIds, permissionMode: options.permissionMode }).catch(error => {
         console.error('Cowork continue error:', error);

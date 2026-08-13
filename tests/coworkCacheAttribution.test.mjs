@@ -78,3 +78,17 @@ test('untracked misses are labeled append_only vs unknown by the turn hit ratio'
   assert.match(source, /turnHitRatio < 0\.3 \? 'unknown' : 'append_only'/);
   assert.match(source, /pendingCacheBreakReason \?\? untrackedMissReason/);
 });
+
+test('turn hit ratio never double-counts cache tokens for cache-inclusive providers', () => {
+  const source = read('src/main/libs/coworkRunner.ts');
+
+  // Non-Anthropic upstreams (DeepSeek, OpenAI-compat) report input_tokens as
+  // TOTAL input (cache included). The attribution ratio must use that total
+  // directly instead of adding the cache counters on top — the old
+  // double-counted denominator halved the ratio and mislabeled healthy
+  // append-only turns as 'unknown' prefix breaks.
+  assert.match(
+    source,
+    /const turnInputTotal = cacheIncludedInInput\s*\?\s*inputTokens\s*:\s*inputTokens \+ cacheReadTokens \+ cacheCreationTokens;/,
+  );
+});
