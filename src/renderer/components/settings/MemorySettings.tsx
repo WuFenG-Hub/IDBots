@@ -132,6 +132,10 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
   const [knowledgeKind, setKnowledgeKind] = useState<CoworkKnowledgeKind | 'all'>('all');
   const [knowledgeQuery, setKnowledgeQuery] = useState('');
   const [knowledgeCounts, setKnowledgeCounts] = useState<number>(0);
+  const [editingKnowledgeId, setEditingKnowledgeId] = useState<string | null>(null);
+  const [knowledgeDraftTopic, setKnowledgeDraftTopic] = useState('');
+  const [knowledgeDraftSummary, setKnowledgeDraftSummary] = useState('');
+  const [knowledgeDraftKind, setKnowledgeDraftKind] = useState<CoworkKnowledgeKind>('know_how');
 
   // --- Facts (owner-scope user_memories) ---
   const [facts, setFacts] = useState<CoworkUserMemoryEntry[]>([]);
@@ -263,15 +267,51 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
     return () => clearTimeout(debounce);
   }, [activeSection, loadKnowledge]);
 
-  const handleArchiveKnowledge = async (entry: CoworkKnowledgeEntry) => {
-    if (metabotId == null) return;
+  const startEditKnowledge = (entry: CoworkKnowledgeEntry) => {
+    setEditingKnowledgeId(entry.id);
+    setKnowledgeDraftTopic(entry.topic);
+    setKnowledgeDraftSummary(entry.summary);
+    setKnowledgeDraftKind(entry.kind);
+  };
+
+  const cancelEditKnowledge = () => {
+    setEditingKnowledgeId(null);
+  };
+
+  const handleSaveKnowledgeEdit = async () => {
+    if (metabotId == null || editingKnowledgeId == null) return;
+    const topic = knowledgeDraftTopic.trim();
+    const summary = knowledgeDraftSummary.trim();
+    if (!topic || !summary) return;
     try {
-      const ok = await coworkService.archiveKnowledge({ id: entry.id, metabotId });
-      if (ok) {
+      const updated = await coworkService.updateKnowledge({
+        id: editingKnowledgeId,
+        metabotId,
+        topic,
+        summary,
+        kind: knowledgeDraftKind,
+      });
+      if (updated) {
+        setEditingKnowledgeId(null);
         await loadKnowledge();
       }
-    } catch (archiveError) {
-      console.error('Failed to archive knowledge:', archiveError);
+    } catch (saveError) {
+      console.error('Failed to update knowledge:', saveError);
+    }
+  };
+
+  const handleDeleteKnowledge = async (entry: CoworkKnowledgeEntry) => {
+    if (metabotId == null) return;
+    // eslint-disable-next-line no-alert
+    if (!window.confirm(i18nService.t('memoryKnowledgeDeleteHint'))) return;
+    try {
+      const ok = await coworkService.deleteKnowledge({ id: entry.id, metabotId });
+      if (ok) {
+        if (editingKnowledgeId === entry.id) setEditingKnowledgeId(null);
+        await loadKnowledge();
+      }
+    } catch (deleteError) {
+      console.error('Failed to delete knowledge:', deleteError);
     }
   };
 
@@ -612,6 +652,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
 
   useEffect(() => {
     resetEditor();
+    setEditingKnowledgeId(null);
   }, [metabotId]);
 
   const draftExternalSafeAllowed = draftUsageClass === 'operational_preference';
@@ -756,42 +797,107 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
           <div className="px-3 py-3 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryKnowledgeEmpty')}</div>
         ) : (
           <div className="divide-y dark:divide-claude-darkBorder divide-claude-border">
-            {knowledge.map((entry) => (
-              <div key={entry.id} className="px-3 py-2.5 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0 space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={`rounded-full border px-2 py-0.5 ${KNOWLEDGE_KIND_ACCENT[entry.kind]}`}>
-                        {getKnowledgeKindLabel(entry.kind)}
-                      </span>
-                      <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                        {getKnowledgeOriginLabel(entry.origin)}
-                      </span>
-                      {entry.status === 'archived' && (
-                        <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border opacity-60">
-                          {i18nService.t('memoryKnowledgeArchived')}
-                        </span>
-                      )}
-                      <span className="dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-                        {`${i18nService.t('memoryKnowledgeVersion')} v${entry.version}`}
-                      </span>
+            {knowledge.map((entry) => {
+              const isEditing = editingKnowledgeId === entry.id;
+              return (
+                <div key={entry.id} className="px-3 py-2.5 text-xs hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors">
+                  {isEditing ? (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2">
+                        <label className="block">
+                          <span className="block mb-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryKnowledgeTopicLabel')}</span>
+                          <input
+                            type="text"
+                            value={knowledgeDraftTopic}
+                            onChange={(event) => setKnowledgeDraftTopic(event.target.value)}
+                            className="w-full rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                          />
+                        </label>
+                        <label className="block">
+                          <span className="block mb-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('coworkMemoryCategoryAll')}</span>
+                          <select
+                            value={knowledgeDraftKind}
+                            onChange={(event) => setKnowledgeDraftKind(event.target.value as CoworkKnowledgeKind)}
+                            className="w-full rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                          >
+                            <option value="know_how">{i18nService.t('memoryKnowledgeKindKnowHow')}</option>
+                            <option value="pitfall">{i18nService.t('memoryKnowledgeKindPitfall')}</option>
+                            <option value="principle">{i18nService.t('memoryKnowledgeKindPrinciple')}</option>
+                          </select>
+                        </label>
+                      </div>
+                      <label className="block">
+                        <span className="block mb-1 text-[10px] dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('memoryKnowledgeSummaryLabel')}</span>
+                        <textarea
+                          value={knowledgeDraftSummary}
+                          onChange={(event) => setKnowledgeDraftSummary(event.target.value)}
+                          className="min-h-[100px] w-full rounded border px-2 py-1 text-xs dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkSurface bg-claude-surface"
+                        />
+                      </label>
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={cancelEditKnowledge}
+                          className="rounded border px-2 py-1 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                        >
+                          {i18nService.t('cancel')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { void handleSaveKnowledgeEdit(); }}
+                          disabled={!knowledgeDraftTopic.trim() || !knowledgeDraftSummary.trim()}
+                          className="btn-idchat-primary-filled rounded px-2 py-1 text-[10px] disabled:opacity-60"
+                        >
+                          {i18nService.t('save')}
+                        </button>
+                      </div>
                     </div>
-                    <div className="font-medium dark:text-claude-darkText text-claude-text break-words">{entry.topic}</div>
-                    <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary break-words whitespace-pre-wrap">{entry.summary}</div>
-                    <div className="text-[10px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-                      {formatTimestamp(entry.updatedAt)}
+                  ) : (
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="flex-1 min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-full border px-2 py-0.5 ${KNOWLEDGE_KIND_ACCENT[entry.kind]}`}>
+                            {getKnowledgeKindLabel(entry.kind)}
+                          </span>
+                          <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            {getKnowledgeOriginLabel(entry.origin)}
+                          </span>
+                          {entry.status === 'archived' && (
+                            <span className="rounded-full border px-2 py-0.5 dark:border-claude-darkBorder border-claude-border opacity-60">
+                              {i18nService.t('memoryKnowledgeArchived')}
+                            </span>
+                          )}
+                          <span className="dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                            {`${i18nService.t('memoryKnowledgeVersion')} v${entry.version}`}
+                          </span>
+                        </div>
+                        <div className="font-medium dark:text-claude-darkText text-claude-text break-words">{entry.topic}</div>
+                        <div className="dark:text-claude-darkTextSecondary text-claude-textSecondary break-words whitespace-pre-wrap">{entry.summary}</div>
+                        <div className="text-[10px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                          {formatTimestamp(entry.updatedAt)}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => startEditKnowledge(entry)}
+                          className="rounded border px-2 py-1 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors"
+                        >
+                          {i18nService.t('edit')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { void handleDeleteKnowledge(entry); }}
+                          className="rounded border px-2 py-1 text-[10px] text-red-500 dark:border-claude-darkBorder border-claude-border hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        >
+                          {i18nService.t('delete')}
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => { void handleArchiveKnowledge(entry); }}
-                    className="rounded border px-2 py-1 text-[10px] dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text hover:bg-claude-surfaceHover dark:hover:bg-claude-darkSurfaceHover transition-colors flex-shrink-0"
-                  >
-                    {i18nService.t('memoryKnowledgeArchive')}
-                  </button>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
