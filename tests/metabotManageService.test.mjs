@@ -64,6 +64,21 @@ const seedMetabot = (store, { name, type = 'worker', llm_id = 'deepseek', n = Ma
   });
 };
 
+/** Map an edit-sync input's true flags to real step keys (matches main's syncedSteps format). */
+const STEP_FLAG_PAIRS = [
+  ['name', 'syncName'],
+  ['avatar', 'syncAvatar'],
+  ['bio', 'syncBio'],
+  ['persona', 'syncPersona'],
+  ['llm', 'syncLlm'],
+  ['chatSkills', 'syncChatSkills'],
+  ['homepage', 'syncHomepage'],
+  ['owner', 'syncOwner'],
+];
+
+const stepsFromInput = (input) =>
+  STEP_FLAG_PAIRS.filter(([, flag]) => input[flag] === true).map(([step]) => step);
+
 /** Mock chain deps; each field is overridable per-test. */
 const mockDeps = (store, overrides = {}) => ({
   store,
@@ -79,7 +94,7 @@ const mockDeps = (store, overrides = {}) => ({
     (async (_store, input) => ({
       success: true,
       txids: ['tx-edit-1'],
-      syncedSteps: Object.keys(input).filter((k) => k.startsWith('sync') && input[k]),
+      syncedSteps: stepsFromInput(input),
     })),
   onAfterMutation: overrides.onAfterMutation ?? (() => {}),
   getOwnerGlobalMetaId: overrides.getOwnerGlobalMetaId ?? (() => 'owner_gmid'),
@@ -238,6 +253,7 @@ test('updateMetaBotCore: local-only change (metabot_type) skips chain sync', asy
   const res = await updateMetaBotCore(m.id, { metabot_type: 'worker' }, deps);
   assert.equal(res.success, true);
   assert.equal(res.sync.skipped, true);
+  assert.deepEqual(res.sync.attemptedStepKeys, []);
   assert.equal(syncCalls, 0);
 });
 
@@ -246,13 +262,67 @@ test('updateMetaBotCore: name change triggers edit sync with syncName', async ()
   const m = seedMetabot(store, { name: 'Gio' });
   let captured = null;
   const deps = mockDeps(store, {
-    syncEditChanges: async (_s, input) => { captured = input; return { success: true, txids: ['t1'] }; },
+    syncEditChanges: async (_s, input) => { captured = input; return { success: true, txids: ['t1'], syncedSteps: stepsFromInput(input) }; },
   });
   const res = await updateMetaBotCore(m.id, { name: 'GioRenamed' }, deps);
   assert.equal(res.success, true);
   assert.equal(res.sync.skipped, false);
   assert.equal(captured.syncName, true);
   assert.equal(res.metabot.name, 'GioRenamed');
+  // New unified-path fields: the plan surfaces what it attempted and nothing remains.
+  assert.deepEqual(res.sync.attemptedStepKeys, ['name']);
+  const remaining = res.sync.remainingSyncInput;
+  assert.equal(remaining.syncName, false);
+});
+
+test('updateMetaBotCore: auto-retries only the still-unsynced steps', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Gio', llm_id: 'deepseek' });
+  const calls = [];
+  const deps = mockDeps(store, {
+    // Change name + llm. First attempt publishes name only and fails; the
+    // retry must republish ONLY the remaining llm step, then succeed.
+    syncEditChanges: async (_s, input) => {
+      calls.push({ ...input });
+      if (calls.length === 1) {
+        return { success: false, syncedSteps: ['name'], error: 'llm pin failed' };
+      }
+      return { success: true, syncedSteps: stepsFromInput(input), txids: ['t-retry'] };
+    },
+  });
+  const res = await updateMetaBotCore(m.id, { name: 'GioRenamed', llm_id: 'openai' }, deps);
+  assert.equal(res.success, true);
+  assert.equal(calls.length, 2);
+  // First attempt: name + llm both requested.
+  assert.equal(calls[0].syncName, true);
+  assert.equal(calls[0].syncLlm, true);
+  // Retry: name already synced, so only llm remains.
+  assert.equal(calls[1].syncName, false);
+  assert.equal(calls[1].syncLlm, true);
+  assert.deepEqual(res.sync.attemptedStepKeys, ['name', 'llm']);
+  assert.equal(res.sync.remainingSyncInput.syncName, false);
+  assert.equal(res.sync.remainingSyncInput.syncLlm, false);
+});
+
+test('updateMetaBotCore: remaining steps survive a failed auto-retry for the manual Retry', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Gio', llm_id: 'deepseek' });
+  const deps = mockDeps(store, {
+    // Both attempts fail to publish llm; name confirms on the first.
+    syncEditChanges: async (_s, input) => ({
+      success: false,
+      syncedSteps: input.syncName && input.syncLlm ? ['name'] : [],
+      error: 'llm pin failed',
+    }),
+  });
+  const res = await updateMetaBotCore(m.id, { name: 'GioRenamed', llm_id: 'openai' }, deps);
+  assert.equal(res.success, false);
+  assert.equal(res.metabot.name, 'GioRenamed'); // local write persisted
+  // The remaining plan should still flag llm (so the UI's manual Retry re-publishes only llm).
+  const remaining = res.sync.remainingSyncInput;
+  assert.equal(remaining.syncName, false);
+  assert.equal(remaining.syncLlm, true);
+  assert.deepEqual(res.sync.attemptedStepKeys, ['name', 'llm']);
 });
 
 // ---------------------------------------------------------------------------

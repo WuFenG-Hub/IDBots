@@ -1358,7 +1358,22 @@ interface IElectronAPI {
     list: () => Promise<{ success: boolean; list?: Metabot[]; error?: string }>;
     get: (id: number) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     create: (input: MetabotCreateInput) => Promise<{ success: boolean; metabot?: Metabot; error?: string }>;
-    update: (id: number, input: MetabotUpdateInput) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
+    update: (id: number, input: MetabotUpdateInput) => Promise<{
+      success: boolean;
+      metabot?: Metabot | null;
+      /** On-chain sync outcome; absent when nothing was published (local-only change). */
+      sync?: {
+        skipped: boolean;
+        success: boolean;
+        canSkip?: boolean;
+        error?: string;
+        txids?: string[];
+        syncedSteps?: string[];
+        attemptedStepKeys?: Array<'name' | 'avatar' | 'bio' | 'persona' | 'llm' | 'chatSkills' | 'homepage' | 'owner'>;
+        remainingSyncInput?: Record<string, unknown>;
+      };
+      error?: string;
+    }>;
     setEnabled: (id: number, enabled: boolean) => Promise<{ success: boolean; metabot?: Metabot | null; error?: string }>;
     /** Per-metabot kv settings; key must be whitelisted in src/main/services/metabotSettingsService.ts. */
     getSetting: (id: number, key: string) => Promise<{ success: boolean; value?: string | null; error?: string }>;

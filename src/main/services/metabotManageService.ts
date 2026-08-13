@@ -159,6 +159,14 @@ export interface UpdateMetaBotResult {
     error?: string;
     txids?: string[];
     syncedSteps?: string[];
+    /** Steps this update tried to publish (for the modal's checkmark display). */
+    attemptedStepKeys?: SyncStepKey[];
+    /**
+     * Steps still unpublished after the core's auto-retry. The renderer's manual
+     * Retry button forwards this to idbots:syncMetaBotEditChanges so re-sync only
+     * republishes what is left (on-chain pins are NOT idempotent).
+     */
+    remainingSyncInput?: EditSyncInput;
   };
   error?: string;
 }
@@ -453,10 +461,78 @@ export function buildEditSyncFlags(
   };
 }
 
+/** On-chain info steps an update can publish (mirrors the modal's SyncStepKey). */
+export type SyncStepKey =
+  | 'name'
+  | 'avatar'
+  | 'bio'
+  | 'persona'
+  | 'llm'
+  | 'chatSkills'
+  | 'homepage'
+  | 'owner';
+
+/** Boolean sync flags on EditSyncInput (everything except metabotId). */
+type EditSyncFlagKey = Exclude<keyof EditSyncInput, 'metabotId' | 'ownerBindingPayload'>;
+
+/** Ordered step↔flag pairs driving the plan ↔ display-key mapping below. */
+const STEP_TO_FLAG: ReadonlyArray<readonly [SyncStepKey, EditSyncFlagKey]> = [
+  ['name', 'syncName'],
+  ['avatar', 'syncAvatar'],
+  ['bio', 'syncBio'],
+  ['persona', 'syncPersona'],
+  ['llm', 'syncLlm'],
+  ['chatSkills', 'syncChatSkills'],
+  ['homepage', 'syncHomepage'],
+  ['owner', 'syncOwner'],
+];
+
+const EDIT_SYNC_RETRY_DELAY_MS = 2500;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** True flags → ordered display step keys (for the modal's checkmarks). */
+function flagsToStepKeys(plan: EditSyncInput): SyncStepKey[] {
+  return STEP_TO_FLAG.filter(([, flag]) => plan[flag] === true).map(([step]) => step);
+}
+
+/** Whether a plan still has any step left to publish. */
+function hasAnySyncFlag(plan: EditSyncInput): boolean {
+  return flagsToStepKeys(plan).length > 0;
+}
+
+/**
+ * Return a copy of `plan` with every step listed in `syncedSteps` zeroed out.
+ * Used so a retry only republishes the steps that did NOT confirm — on-chain
+ * pins are not idempotent, so re-publishing a synced step would create a
+ * duplicate pin and waste gas.
+ */
+function subtractSyncedFlags(plan: EditSyncInput, syncedSteps: string[]): EditSyncInput {
+  const synced = new Set(syncedSteps);
+  const next: EditSyncInput = { metabotId: plan.metabotId };
+  for (const [step, flag] of STEP_TO_FLAG) {
+    next[flag] = plan[flag] === true && !synced.has(step);
+  }
+  return next;
+}
+
+/** A fully-formed plan with every sync flag false (nothing left to publish). */
+function emptyEditSyncPlan(metabotId: number): EditSyncInput {
+  const plan: EditSyncInput = { metabotId };
+  for (const [, flag] of STEP_TO_FLAG) {
+    plan[flag] = false;
+  }
+  return plan;
+}
+
 /**
  * Apply a metabot update locally and then publish the changed info pins to the
- * chain (best-effort; partial publish still counts as success locally, like
- * the UI's two-step save + sync). Used by the Twin update tool.
+ * chain. Single source of truth for the on-chain sync plan (buildEditSyncFlags)
+ * — called by BOTH the metabot:update IPC handler (manual UI path) and the Twin
+ * metabot_update tool, so the two paths are identical. Best-effort: a partial
+ * publish still counts as success locally. Includes one auto-retry over the
+ * still-unpublished steps. Returns the attempted step keys (for display) and
+ * the remaining plan (for the UI's manual Retry button).
  */
 export async function updateMetaBotCore(
   id: number,
@@ -475,50 +551,77 @@ export async function updateMetaBotCore(
   }
 
   const flags = buildEditSyncFlags(before, input);
-  const hasAnySyncFlag =
-    flags.syncName ||
-    flags.syncAvatar ||
-    flags.syncBio ||
-    flags.syncPersona ||
-    flags.syncLlm ||
-    flags.syncChatSkills ||
-    flags.syncHomepage ||
-    flags.syncOwner;
+  const attemptedStepKeys = flagsToStepKeys(flags);
+  const emptyRemaining: EditSyncInput = emptyEditSyncPlan(id);
 
-  if (!hasAnySyncFlag) {
+  if (attemptedStepKeys.length === 0) {
     // Local-only change (metabot_type transfer, A2A knobs, enable toggle).
-    return { success: true, metabot: local.metabot, sync: { skipped: true, success: true } };
+    return {
+      success: true,
+      metabot: local.metabot,
+      sync: { skipped: true, success: true, attemptedStepKeys, remainingSyncInput: emptyRemaining },
+    };
   }
 
+  // Resolve a signed owner payload once; reused across the initial attempt and
+  // the auto-retry (the signed string does not change between attempts).
+  let ownerBindingPayload: string | null | undefined;
+  if (flags.syncOwner) {
+    const bossGlobalMetaId = (input.boss_global_metaid ?? '').trim();
+    if (bossGlobalMetaId) {
+      const signResult = await deps.signOwnerBinding(bossGlobalMetaId, before.globalmetaid);
+      if (signResult.error) {
+        return { success: false, error: signResult.error };
+      }
+      ownerBindingPayload = signResult.payload ?? null;
+    } else {
+      // Unbind: empty payload clears the on-chain /info/owner pin.
+      ownerBindingPayload = '';
+    }
+  }
+
+  let plan: EditSyncInput = { ...flags, ownerBindingPayload };
   let syncResult: ChainSyncResult;
   try {
-    // Resolve a signed owner payload when an owner change is being published.
-    let ownerBindingPayload: string | null | undefined;
-    if (flags.syncOwner) {
-      const bossGlobalMetaId = (input.boss_global_metaid ?? '').trim();
-      if (bossGlobalMetaId) {
-        const signResult = await deps.signOwnerBinding(bossGlobalMetaId, before.globalmetaid);
-        if (signResult.error) {
-          return { success: false, error: signResult.error };
-        }
-        ownerBindingPayload = signResult.payload ?? null;
-      } else {
-        // Unbind: empty payload clears the on-chain /info/owner pin.
-        ownerBindingPayload = '';
+    syncResult = await syncEditChanges(store, plan);
+
+    // Auto-retry once over the steps that did not confirm (transient indexer
+    // timing / UTXO races). Only remaining steps are re-published.
+    if (!syncResult.success) {
+      const remaining = subtractSyncedFlags(plan, syncResult.syncedSteps ?? []);
+      if (hasAnySyncFlag(remaining)) {
+        await sleep(EDIT_SYNC_RETRY_DELAY_MS);
+        plan = { ...remaining, ownerBindingPayload: remaining.syncOwner ? ownerBindingPayload : undefined };
+        const retryResult = await syncEditChanges(store, plan);
+        // Fold the retry's outcome into the running result: combine txids and
+        // synced steps so the caller sees the full picture.
+        syncResult = {
+          success: retryResult.success,
+          canSkip: retryResult.canSkip,
+          error: retryResult.error ?? syncResult.error,
+          txids: [...(syncResult.txids ?? []), ...(retryResult.txids ?? [])],
+          syncedSteps: [...(syncResult.syncedSteps ?? []), ...(retryResult.syncedSteps ?? [])],
+        };
       }
     }
-    syncResult = await syncEditChanges(store, { ...flags, ownerBindingPayload });
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
     return {
       success: true,
       metabot: local.metabot,
-      sync: { skipped: false, success: false, error: errMsg },
+      sync: {
+        skipped: false,
+        success: false,
+        error: errMsg,
+        attemptedStepKeys,
+        remainingSyncInput: plan,
+      },
     };
   }
 
   const updated = store.getMetabotById(id) ?? local.metabot;
   const overallSuccess = syncResult.success || Boolean(syncResult.canSkip);
+  const remainingAfter = subtractSyncedFlags({ ...flags, ownerBindingPayload }, syncResult.syncedSteps ?? []);
   return {
     success: overallSuccess,
     metabot: updated,
@@ -529,6 +632,10 @@ export async function updateMetaBotCore(
       error: syncResult.error,
       txids: syncResult.txids,
       syncedSteps: syncResult.syncedSteps,
+      attemptedStepKeys,
+      remainingSyncInput: hasAnySyncFlag(remainingAfter)
+        ? { ...remainingAfter, ownerBindingPayload: remainingAfter.syncOwner ? ownerBindingPayload : undefined }
+        : emptyRemaining,
     },
   };
 }

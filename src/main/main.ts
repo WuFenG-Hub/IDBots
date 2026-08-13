@@ -76,7 +76,7 @@ import { Scheduler } from './libs/scheduler';
 import { initLogger, getLogFilePath } from './logger';
 import { resolveRuntimeDataPaths } from './libs/runtimeDataPaths';
 import { shouldAcquireSingleInstanceLock } from './libs/singleInstanceLock';
-import { mockCreateWalletAndFund, mockPushConfigToChain, mockUpdateConfigOnChain } from './services/chainActionMock';
+import { mockCreateWalletAndFund, mockPushConfigToChain } from './services/chainActionMock';
 import { createMetaBotWallet, getPrivateKeyBufferForEcdh } from './services/metabotWalletService';
 import { UserIdentityStore } from './userIdentityStore';
 import type { UserIdentity } from './types/userIdentity';
@@ -112,7 +112,6 @@ import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
-  applyMetabotUpdateLocal,
   createMetaBotOnChainCore,
   deleteMetaBotCore,
   listConfiguredLlmProviders,
@@ -10431,14 +10430,11 @@ if (!gotTheLock) {
     homepage?: string | null;
   }) => {
     try {
-      await mockUpdateConfigOnChain();
-      // Local DB write shared with the Twin metabot_update tool (same owner
-      // identity check + normalization). The renderer triggers on-chain sync
-      // separately via idbots:syncMetaBotEditChanges; the tool does both in one shot.
-      const result = applyMetabotUpdateLocal(getMetabotStore(), id, input, {
-        getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
-      });
-      return result;
+      // Single unified path: local DB write + on-chain sync (with one auto-retry
+      // over remaining steps), the exact same updateMetaBotCore the Twin
+      // metabot_update tool calls. Returns the attempted/remaining sync plan so
+      // the renderer can render sync status and offer a manual Retry.
+      return await updateMetaBotCore(id, input, getMetabotManageDeps());
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update metabot' };
     }
