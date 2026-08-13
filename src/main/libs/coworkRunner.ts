@@ -4778,9 +4778,13 @@ export class CoworkRunner extends EventEmitter {
       persistedSystemPrompt = options.systemPrompt;
       persistedClaudeSessionId = null;
       systemPromptChanged = true;
+      // Persist the skill set the NEW prompt was built for so the continue
+      // policy can distinguish a deliberate skill change from live-catalog
+      // drift (which must never rewrite the cacheable prompt head).
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
+        ...(options.skillIds !== undefined ? { activeSkillIds: options.skillIds } : {}),
       });
       coworkLog('INFO', 'startSession', 'System prompt changed, reset claudeSessionId', {
         sessionId,
@@ -4973,9 +4977,12 @@ export class CoworkRunner extends EventEmitter {
       persistedSystemPrompt = options.systemPrompt;
       activeSession.claudeSessionId = null;
       activeSession.pendingCacheBreakReason = 'system_prompt_changed';
+      // Persist the skill set the NEW prompt was built for so the continue
+      // policy can tell a deliberate skill change from live-catalog drift.
       this.store.updateSession(sessionId, {
         systemPrompt: options.systemPrompt,
         claudeSessionId: null,
+        ...(options.skillIds !== undefined ? { activeSkillIds: options.skillIds } : {}),
       });
       coworkLog('INFO', 'continueSession', 'System prompt changed, reset claudeSessionId', {
         sessionId,

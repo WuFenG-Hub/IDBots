@@ -378,7 +378,14 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
     const submittedSessionId = currentSession.id;
     const sessionSkillIds = isStreaming ? [] : [...activeSkillIds];
-    const systemPrompt = isStreaming ? undefined : await buildCombinedSystemPrompt(skillPrompt);
+    // Only build/forward a fresh system prompt when the user picked skills for
+    // this turn. Ordinary turns reuse the session's persisted prompt so the
+    // LIVE MetaApp/Skill catalogs (which change whenever any bot publishes a
+    // MetaApp or a skill updates) can never rewrite the cacheable prompt head
+    // mid-session and reset DeepSeek's cached prefix.
+    const systemPrompt = isStreaming || sessionSkillIds.length === 0
+      ? undefined
+      : await buildCombinedSystemPrompt(skillPrompt);
     if (
       activeSessionIdRef.current === submittedSessionId
       && !isStreaming
