@@ -17,6 +17,7 @@
 import { configService } from './config';
 import { localStore } from './store';
 import type { AppConfig } from '../config';
+import { welcomeBotAvatarUrl } from '../assets/welcomeBotAvatar';
 import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
@@ -24,7 +25,7 @@ import {
   planFreeQuotaProvisioning,
 } from './llmFreeQuotaGate.js';
 
-const WELCOME_BOT_NAME = 'Welcome Bot';
+const WELCOME_BOT_NAME = 'I.D';
 const WELCOME_BOT_ROLE = 'IDBots welcome guide';
 const WELCOME_BOT_SOUL =
   'You are the built-in welcome guide of IDBots, a warm concierge for brand-new users. ' +
@@ -104,6 +105,7 @@ async function createOrAdoptWelcomeBot(existingBots: Array<{ id: number; name?: 
   if (existing) return existing.id;
   const result = await window.electron.idbots.addMetaBot({
     name: WELCOME_BOT_NAME,
+    avatar: welcomeBotAvatarUrl,
     role: WELCOME_BOT_ROLE,
     soul: WELCOME_BOT_SOUL,
     goal: WELCOME_BOT_GOAL,
