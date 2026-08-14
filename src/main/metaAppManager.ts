@@ -687,7 +687,7 @@ export class MetaAppManager {
       '## MetaApps (Cowork)',
       'Before replying: scan <available_metaapps> entries only when the current user turn explicitly asks to open/use/start a local app or MetaApp.',
       '- Generic confirmations ("好的" / "确定" / "继续") and approvals of a previously proposed remote service or delegation are not app requests.',
-      '- For an explicit open/use/start request, evaluate <available_metaapps> before any SKILL routing: read the matching app\'s APP.md at <location> and use `open_metaapp`.',
+      '- For an explicit open/use/start request, evaluate <available_metaapps> before skill routing: read the matching app\'s APP.md at <location> and use `open_metaapp`.',
       '- If several match, open the most specific one — at most one unless the user asks for more; for explanation/analysis only, do not open anything.',
       '- Never invent external URLs; use only the local metaapp entry/paths from APP.md.',
       '',

@@ -52,6 +52,17 @@ export const PROMPT_SECTION_ORDER = {
   PROJECTS: 30,
   /** Memory strategy prose (volatile memory blocks ride the user turn). */
   MEMORY_STRATEGY: 40,
+  /**
+   * Local-app routing block (`## MetaApps`). Reserved order slot: the
+   * MetaApps and Skills blocks are still carried inside the renderer-combined
+   * base prompt today, but their relative precedence — MetaApp routing wins
+   * over skill routing — is pinned here (METAAPPS < SKILLS < BASE) so the two
+   * blocks no longer assert it via prose cross-references. When those blocks
+   * are split into their own sections, these slots are already reserved.
+   */
+  METAAPPS: 44,
+  /** Skill routing block (`## Skills`). Rendered after METAAPPS; see METAAPPS. */
+  SKILLS: 46,
   /** Caller-provided base prompt (renderer-combined routing + user config). */
   BASE: 50,
   /** Tail guard rails that must stay last (e.g. cron user-priority guard). */

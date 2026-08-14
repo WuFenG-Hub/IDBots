@@ -1007,7 +1007,7 @@ export class SkillManager {
     const promptBody = [
       '## Skills (mandatory)',
       'Before replying: scan <available_skills> <description> entries.',
-      '- If the current turn explicitly asks to open/use/start a local app or MetaApp, apply the MetaApp routing rules above first; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
+      '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
       '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location> with the Read tool, and follow it; if none clearly applies, do not read any SKILL.md.',
       '- Execute skills only via Read + Bash as documented in each SKILL.md; never call a "Skill" tool — it is not wired to this registry.',
       '- A skill command that exits with code 0 is successful: do not bypass it with ad-hoc fallback logic. If it fails, diagnose and retry within the same skill workflow before considering alternatives.',

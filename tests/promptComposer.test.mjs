@@ -87,6 +87,11 @@ test('order grid keeps the stable spine: identity < persona < channel < safety <
   assert.ok(PROMPT_SECTION_ORDER.BASE < PROMPT_SECTION_ORDER.TAIL_GUARD);
 });
 
+test('MetaApp routing slot precedes the skill routing slot (precedence by order, not prose)', () => {
+  assert.ok(PROMPT_SECTION_ORDER.METAAPPS < PROMPT_SECTION_ORDER.SKILLS);
+  assert.ok(PROMPT_SECTION_ORDER.SKILLS < PROMPT_SECTION_ORDER.BASE);
+});
+
 test('interpolate substitutes known variables and does not rescan values', () => {
   const out = interpolatePromptVariables(
     'You are {{name}} (#{{id}}).',
