@@ -3284,10 +3284,15 @@ const startSqliteDaemons = (): void => {
             role: m.role ?? '',
             soul: m.soul ?? '',
             llm_id: m.llm_id ?? null,
+            fallback_llm_id: m.fallback_llm_id ?? null,
             globalmetaid: m.globalmetaid ?? null,
             metaid: m.metaid,
             boss_global_metaid: m.boss_global_metaid ?? null,
             allow_chat_skills: m.allow_chat_skills ?? [],
+            goal: m.goal ?? null,
+            bio: m.bio ?? null,
+            background: m.background ?? null,
+            mvc_address: m.mvc_address ?? null,
           }
         : null;
     },

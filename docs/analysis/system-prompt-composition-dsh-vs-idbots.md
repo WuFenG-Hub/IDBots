@@ -150,6 +150,12 @@ The cowork path has independently converged on DSH's core caching ideas, in plac
 - **Keep the `claude_code` preset for coding-flavored sessions, consider a slim IDBots base prompt for chat-flavored channels** (IM/private/group/Twin orchestration turns that don't code). This is the single biggest token lever, but it forfeits the default's tool-use discipline — needs A/B measurement before rolling out.
 - **One persona builder, channel-flavored via sections, not four builders**: the persona *facts* (name/role/soul/goal/bio + on-chain IDs) come from one section; channel framing ("you are in a group task…", "you are on Telegram…") is a separate section. This also fixes IM's missing persona for free.
 
+### Corrections discovered during Phase 2 (2026-08-14)
+
+- **IM persona was already present on the primary path.** `imCoworkHandler` creates cowork sessions with `targetMetabotId`, so `coworkRunner` injects the persona XML automatically; the gateway always prefers cowork mode. Only the degraded fallback (`imChatHandler`, used when cowork deps are unavailable) lacks persona — left as-is deliberately.
+- **Group chat had a double persona on the cowork skill-turn path.** `orchestratorCoworkBridge` passes `metabotId` to the cowork session (persona XML injected by coworkRunner) while the orchestrator's own system prompt restated a second, different persona ("你是名为 X 的 Web3 数字生命…"). Fixed in Phase 2: the cowork prompt now carries channel framing + skills only.
+- **A fifth persona shape existed** in `dreamPrompt.ts` (Chinese self-reflection framing for the nightly dream). Deliberately left: the dream is an internal monologue exercise, not a channel, and its observer framing is load-bearing.
+
 ---
 
 ## 4. Proposed target architecture (for this branch)

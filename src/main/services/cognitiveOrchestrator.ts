@@ -18,6 +18,7 @@ import {
 } from './cognitiveChatCompletion';
 import { getMetaidRpcBase } from './metaidRpcEndpoint';
 import { getEnhancedEnv } from '../libs/coworkUtil';
+import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
 import { isPathWithin } from '../libs/runtimePaths';
 
 const TICK_INTERVAL_MS = 10_000;
@@ -78,6 +79,12 @@ export interface MetabotInfo {
   boss_global_metaid?: string | null;
   /** Skills allowed for ordinary chat skill turns. */
   allow_chat_skills?: string[];
+  /** Optional persona facts rendered by the shared persona builder. */
+  goal?: string | null;
+  bio?: string | null;
+  /** Deprecated compatibility field; use bio. */
+  background?: string | null;
+  mvc_address?: string | null;
 }
 
 type GetMetabotByIdFn = (id: number) => MetabotInfo | null;
@@ -209,82 +216,79 @@ function getRecentMessages(
 }
 
 /**
- * Build system prompt per SDD. Task 12.4: inject Boss (supervisor) and human owner authority.
- * When latest message is from supervisor or configured owner GlobalMetaID, LLM must prioritize Boss instructions.
+ * Group-chat channel framing for the STABLE system prompt. Persona facts and
+ * chat history are deliberately absent: the persona comes from the shared
+ * metabotPersonaPrompt builder (one identity across channels), and recent
+ * chat history rides the user message (see buildChatHistoryBlock) so the
+ * system prompt stays byte-stable across turns — it leads the provider's
+ * cacheable prefix, and any per-turn change there (history, timestamps) is a
+ * full-prefix cache miss.
  */
-function buildSystemPrompt(
-  name: string,
-  role: string,
-  soul: string,
+export function buildGroupChatChannelPrompt(
   discussionBackground: string | null,
   participationGoal: string | null,
-  contextLines: string[],
   supervisorMetaid: string | null,
-  latestMessageSenderMetaid: string | null,
   ownerGlobalMetaid: string | null
 ): string {
-  const background = discussionBackground?.trim() || '自由参与，无特定背景';
-  const goal = participationGoal?.trim() || '自由参与群聊，根据上下文自然回复或调用技能';
-  const contextBlock =
-    contextLines.length > 0
-      ? contextLines.join('\n')
-      : '(No recent messages)';
+  const background = discussionBackground?.trim() || 'Free participation, no specific background.';
+  const goal = participationGoal?.trim() || 'Participate in the group chat freely; reply naturally from context or invoke skills.';
 
   const sup = (supervisorMetaid ?? '').trim();
   const own = (ownerGlobalMetaid ?? '').trim();
   const ownerDistinct = own !== '' && own !== sup;
 
-  let bossBlock = '';
+  const authorityLines: string[] = [];
   if (sup) {
-    bossBlock += `[Status]
-当前群聊中，GlobalMetaID 为 ${sup} 的用户是你的最高长官 (Boss)。
-如果当前最新消息是由 Boss (${sup}) 发出的，你必须以最高优先级执行其要求，并优先调用 Tools 来完成任务。
-
-`;
+    authorityLines.push(
+      `- The user with GlobalMetaID ${sup} is your Boss (highest authority in this group). When the latest message is from your Boss, execute their request with top priority and prefer calling Tools to complete the task.`,
+    );
   }
   if (ownerDistinct) {
-    bossBlock += `GlobalMetaID 为 ${own} 的用户是你配置的主人 (人类)；如果当前最新消息是由该主人发出的，你必须以与 Boss 相同的最高优先级执行其要求，并优先调用 Tools 来完成任务。
-
-`;
+    authorityLines.push(
+      `- The user with GlobalMetaID ${own} is your configured owner (a human). When the latest message is from your owner, execute their request with the same top priority as your Boss.`,
+    );
   }
 
-  const latest = (latestMessageSenderMetaid ?? '').trim();
-  const isLatestFromPrivileged =
-    !!latest &&
-    ((sup !== '' && latest === sup) || (own !== '' && latest === own));
+  return [
+    '## Group Chat Channel',
+    'You are a MetaBot participating in a group chat on MetaWeb.',
+    `- Background: ${background}`,
+    `- Goal: ${goal}`,
+    ...(authorityLines.length > 0 ? ['', '### Authority', ...authorityLines] : []),
+    '',
+    '### Reply Protocol',
+    '1. Stay in character per your persona block; answer questions directly and keep casual chat in persona.',
+    '2. Reply in the language of the recent chat messages whenever it is clear.',
+    '3. Your reply is posted to the group verbatim: output ONLY the reply text — no prefixes, explanations, or action descriptions.',
+  ].join('\n');
+}
 
-  return `[System Role]
-你是名为 ${name} 的 Web3 数字生命。你的人设是: ${role}
-${soul}
-${bossBlock}[Current Mission]
-你正在参与一个群聊。
-讨论背景 (Background): ${background}
-你的目标 (Goal): ${goal}
-
-[Strict Rules]
-1. 必须完全沉浸在人设中，绝不能承认自己是 AI 或语言模型。
-2. 根据上下文和你的目标进行回复。如果有人问你问题，请直接回答；如果是闲聊，请符合你的人设。
-3. 你的回复将直接发送到群聊，**只输出你回复的文本内容，不要包含任何前缀、解释或动作描写**。
-
-[Chat Context (Recent Messages)]
-${contextBlock}
-`;
+/**
+ * Recent chat history as a user-message block (the volatile turn tail). Kept
+ * out of the system prompt on purpose: history changes every turn and would
+ * bust the provider's prefix cache.
+ */
+export function buildChatHistoryBlock(contextLines: string[]): string {
+  if (contextLines.length === 0) {
+    return '[Chat Context (Recent Messages)]\n(No recent messages)';
+  }
+  return ['[Chat Context (Recent Messages)]', ...contextLines].join('\n');
 }
 
 /** Trigger reason for this reply (used to tailor user message). */
 export type TriggerReason = 'Mention' | 'Boss' | 'Probability';
 
-/** Assemble user message by trigger reason; model should reply. */
+/** Assemble the trigger instruction that follows the chat history block. */
 function buildUserMessage(triggerReason: TriggerReason): string {
   switch (triggerReason) {
     case 'Mention':
-      return '你被群友 @ 了，请根据以上群聊上下文直接回复一条消息。只输出回复内容，不要解释。';
+      return 'You were @-mentioned in the group chat. Reply directly based on the chat context above. Output only your reply text, no explanations.';
     case 'Boss':
-      return '你的 Boss 刚发了消息，请以最高优先级理解并执行其要求；如需调用技能请按 SKILL.md 执行后简要回复群聊。只输出回复内容或执行结果，不要解释。';
+      return 'Your Boss just sent a message. Treat it with top priority: understand and execute the request; if a skill applies, follow its SKILL.md and reply to the group with a concise summary. Output only the reply or execution result, no explanations.';
     case 'Probability':
-      return '请根据以上群聊上下文，以你的人设自由参与回复一条消息。只输出回复内容，不要解释。';
+      return 'Based on the chat context above, participate naturally in character with one reply. Output only your reply text, no explanations.';
     default:
-      return '请根据以上群聊上下文，以你的人设回复一条消息。只输出回复内容，不要解释。';
+      return 'Based on the chat context above, reply with one message in character. Output only your reply text, no explanations.';
   }
 }
 
@@ -608,15 +612,13 @@ async function runReplyPipeline(
       (ownerGlobalMetaid != null && ownerGlobalMetaid !== '' && latestTrim === ownerGlobalMetaid))
   );
 
-  let systemPrompt = buildSystemPrompt(
-    metabot.name,
-    metabot.role ?? '',
-    metabot.soul ?? '',
+  // Stable prompt spine: shared persona + group-chat channel framing. Chat
+  // history rides the user message (below), never the system prompt.
+  const personaPrompt = buildMetabotPersonaPrompt(metabot);
+  const channelPrompt = buildGroupChatChannelPrompt(
     task.discussion_background,
     task.participation_goal,
-    contextLines,
     supervisorGlobalmetaid,
-    latestMessageSenderGlobalmetaid ?? null,
     ownerGlobalMetaid
   );
 
@@ -637,11 +639,26 @@ async function runReplyPipeline(
   const activeSkillIds = chatSkillRouting?.activeSkillIds ?? deprecatedAllowedSkillIds;
   const useToolLoop = Boolean(skillsPrompt);
 
-  if (useToolLoop) {
-    systemPrompt += '\n\n' + skillsPrompt! + '\n\nAfter using Read/Bash to run a skill, reply with a concise summary to the group (do not paste full skill output).';
-  }
+  const skillsSection = useToolLoop
+    ? `${skillsPrompt}\n\nAfter using Read/Bash to run a skill, reply with a concise summary to the group (do not paste full skill output).`
+    : '';
 
-  const userMessage = buildUserMessage(triggerReason);
+  // Cowork skill turns inject the shared persona themselves (the session
+  // carries metabotId and coworkRunner renders the same persona block), so
+  // the cowork prompt carries only channel framing + skills — a second
+  // persona copy here would double the identity and invite layer conflicts.
+  const coworkSystemPrompt = [channelPrompt, skillsSection]
+    .filter((section) => section.trim())
+    .join('\n\n');
+  // Direct LLM paths (in-orchestrator tool loop, plain completion) have no
+  // coworkRunner to inject the persona, so it leads the system prompt.
+  const directSystemPrompt = [personaPrompt, channelPrompt, skillsSection]
+    .filter((section) => section.trim())
+    .join('\n\n');
+
+  const userMessage = [buildChatHistoryBlock(contextLines), buildUserMessage(triggerReason)]
+    .filter((part) => part.trim())
+    .join('\n\n');
 
   let replyText: string;
 
@@ -659,7 +676,7 @@ async function runReplyPipeline(
         }
         console.log('[Orchestrator] Using Cowork for skill turn');
         replyText = await runSkillTurnViaCowork({
-          systemPrompt,
+          systemPrompt: coworkSystemPrompt,
           userMessage,
           cwd: cwdForCowork,
           metabotId: task.metabot_id,
@@ -676,7 +693,7 @@ async function runReplyPipeline(
       }
     } else {
       const chatMessages: ChatMessage[] = [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: directSystemPrompt },
         { role: 'user', content: userMessage },
       ];
       const tools: OpenAITool[] = [READ_TOOL, BASH_TOOL];
@@ -751,7 +768,7 @@ async function runReplyPipeline(
     }
   } else {
     try {
-      replyText = await performChatCompletion(systemPrompt, userMessage, metabot.llm_id ?? undefined, {
+      replyText = await performChatCompletion(directSystemPrompt, userMessage, metabot.llm_id ?? undefined, {
         fallbackLlmId: metabot.fallback_llm_id ?? undefined,
         thinking: 'enabled',
       });
