@@ -998,23 +998,21 @@ export class SkillManager {
   ): string | null {
     if (skills.length === 0) return null;
 
+    // Token-diet rewrite (Phase 3): 17 rule lines -> 7. Every hard-won
+    // semantic guard survives (selection discipline, Read+Bash-only
+    // execution, exit-0 = success, dirname resolution, precompiled
+    // entrypoints, one-skill-up-front); the MetaApp precedence now lives here
+    // as ONE line instead of four — the detailed rules stay in the MetaApp
+    // block that immediately precedes this one when MetaApps exist.
     const promptBody = [
       '## Skills (mandatory)',
-      'Before replying: scan <available_skills> <description> entries, but only after applying any higher-priority MetaApp routing rules already present in the system prompt.',
-      '- Treat MetaApps as higher priority only when the current user turn explicitly asks to open/use/start a local MetaApp or application.',
-      '- Generic confirmations such as "好的" / "确定" / "继续" are not MetaApp requests.',
-      '- If the request is to open/use/start a local MetaApp or application, evaluate MetaApps first and do not select a SKILL unless the user is asking for a workflow beyond opening the app.',
-      '- If exactly one skill clearly applies: read its SKILL.md at <location> with the Read tool, then follow it.',
-      '- If multiple could apply: choose the most specific one, then read/follow it.',
-      '- If none clearly apply: do not read any SKILL.md.',
-      '- Do not call the "Skill" tool. It is not wired to this SKILLs registry in this environment.',
-      '- Execute selected skills only via Read + Bash as documented in each SKILL.md.',
-      '- If a skill command exits with code 0, treat that execution as successful (do not bypass it with ad-hoc fallback logic).',
-      '- If a skill command fails, diagnose and retry within the same skill workflow before considering alternatives.',
-      '- For the selected skill, treat <location> as the canonical SKILL.md path.',
-      '- Resolve relative paths mentioned by that SKILL.md against its directory (dirname(<location>)), not the workspace root.',
-      '- Prefer precompiled JavaScript entrypoints (scripts/*.js or scripts/dist/*.js); avoid npx ts-node unless absolutely required.',
-      'Constraints: never read more than one skill up front; only read additional skills if the first one explicitly references them.',
+      'Before replying: scan <available_skills> <description> entries.',
+      '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
+      '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location> with the Read tool, and follow it; if none clearly applies, do not read any SKILL.md.',
+      '- Execute skills only via Read + Bash as documented in each SKILL.md; never call a "Skill" tool — it is not wired to this registry.',
+      '- A skill command that exits with code 0 is successful: do not bypass it with ad-hoc fallback logic. If it fails, diagnose and retry within the same skill workflow before considering alternatives.',
+      '- Resolve relative paths in a SKILL.md against its own directory (dirname(<location>)), not the workspace root; prefer precompiled JavaScript entrypoints (scripts/*.js or scripts/dist/*.js) over npx ts-node unless absolutely required.',
+      '- Never read more than one skill up front; read another only if the first one explicitly references it.',
       ...(options?.extraRules ?? []).filter(Boolean),
       '',
       '<available_skills>',

@@ -679,16 +679,17 @@ export class MetaAppManager {
       ].join('\n'))
       .join('\n');
 
+    // Token-diet rewrite (Phase 3): 7 rule lines -> 5. Every guard survives
+    // (open only on explicit app/open intent, no-op on approvals/confirmations,
+    // prefer MetaApp over SKILL routing, most-specific single open, local
+    // paths only).
     return [
       '## MetaApps (Cowork)',
       'Before replying: scan <available_metaapps> entries only when the current user turn explicitly asks to open/use/start a local app or MetaApp.',
-      '- Generic confirmations such as "好的" / "确定" / "继续" are not MetaApp requests.',
-      '- If the current turn is approving a previously proposed remote service or delegation, do not call `open_metaapp` or `resolve_metaapp_url`.',
-      '- If the user asks to open/use/start a local app or MetaApp, evaluate <available_metaapps> before any SKILL routing.',
-      '- If one metaapp clearly matches, read its APP.md at <location> and use `open_metaapp`; do not route that request to a SKILL first.',
-      '- If multiple metaapps could match, choose the most specific one and open at most one unless the user explicitly asks for more.',
-      '- If user asks for explanation/analysis only, do not open a metaapp.',
-      '- Never invent external URLs; only use local metaapp entry/paths from APP.md.',
+      '- Generic confirmations ("好的" / "确定" / "继续") and approvals of a previously proposed remote service or delegation are not app requests.',
+      '- For an explicit open/use/start request, evaluate <available_metaapps> before skill routing: read the matching app\'s APP.md at <location> and use `open_metaapp`.',
+      '- If several match, open the most specific one — at most one unless the user asks for more; for explanation/analysis only, do not open anything.',
+      '- Never invent external URLs; use only the local metaapp entry/paths from APP.md.',
       '',
       '<available_metaapps>',
       entries,
