@@ -52,6 +52,10 @@ import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, resolveC
 import { listenWithRetry } from './httpListenWithRetry';
 import { DEFAULT_METAID_RPC_HOST, getMetaidRpcBase, resolveMetaidRpcPort } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
+import {
+  handlePrivateHistoryRoute,
+  handlePrivateSendRoute,
+} from './chatGatewayRoutes';
 import { sendBotBrowserOpenUri } from './botBrowserOpenUriService';
 import { uploadMetaFile } from './metaFileUploadService';
 import { buildMvcFtTransferRawTx, buildMvcOrderedRawTxBundle, buildMvcTransferRawTx } from './walletRawTxService';
@@ -100,6 +104,8 @@ const GROUP_TASK_EXPORT_PATH = '/api/idbots/group-task/export';
 const GROUP_TASK_SEARCH_REMOTE_PATH = '/api/idbots/group-task/search-remote-candidates';
 const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
+const PRIVATE_SEND_PATH = '/api/idbots/chat/private-send';
+const PRIVATE_HISTORY_PATH = '/api/idbots/chat/private-history';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
 export type BotBrowserRpcOpenRequest = {
@@ -1926,6 +1932,97 @@ export function startMetaidRpcServer(
         const metabots = buildMetabotDirectory(getMetabotStore());
         res.writeHead(200);
         res.end(JSON.stringify({ success: true, metabots }));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    // Mega-Phase M4 (R-M4.1): encrypted private messaging + history via the
+    // gateway so an external harness (botos-runner / DSH) can act as the bot.
+    // The wallet mnemonic is fetched internally and never appears in a response.
+    const chatGatewayDeps = {
+      getWalletMnemonic: (id: number) => getMetabotStore().getMetabotWalletByMetabotId(id)?.mnemonic ?? '',
+      resolvePeerChatPubkey: async (peer: string): Promise<string> => {
+        const db = getStore().getDatabase();
+        try {
+          const local = db.exec(
+            `SELECT from_chat_pubkey FROM private_chat_messages
+             WHERE from_global_metaid = ? AND from_chat_pubkey IS NOT NULL AND from_chat_pubkey != ''
+             ORDER BY id DESC LIMIT 1`,
+            [peer]
+          );
+          const row = local[0]?.values?.[0];
+          if (typeof row?.[0] === 'string' && row[0].trim()) return row[0].trim();
+        } catch {
+          /* local lookup unavailable — fall through to the chain API */
+        }
+        try {
+          const res = await fetch(
+            `https://file.metaid.io/metafile-indexer/api/v1/info/metaid/${encodeURIComponent(peer)}`,
+            { headers: { Accept: 'application/json' } }
+          );
+          if (!res.ok) return '';
+          const json = (await res.json()) as Record<string, unknown>;
+          const data = (json.data && typeof json.data === 'object' ? json.data : json) as Record<string, unknown>;
+          for (const candidate of [data.chatpubkey, data.chatPubkey, data.chatPublicKey, data.pubkey]) {
+            if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+          }
+        } catch {
+          /* chain API unavailable */
+        }
+        return '';
+      },
+      createSimplemsgPin: (id: number, payload: MetaidDataPayload) =>
+        createPin(getMetabotStore(), id, payload, { network: 'mvc', feeRate: getGlobalFeeRate('mvc') }),
+      readHistory: async (id: number, peer: string, limit: number) => {
+        const bot = getMetabotStore().getMetabotById(id)?.globalmetaid ?? '';
+        const db = getStore().getDatabase();
+        const rows = db.exec(
+          `SELECT id, from_global_metaid, to_global_metaid, content, chain_timestamp
+           FROM private_chat_messages
+           WHERE (from_global_metaid = ? AND to_global_metaid = ?) OR (from_global_metaid = ? AND to_global_metaid = ?)
+           ORDER BY id DESC LIMIT ?`,
+          [peer, bot, bot, peer, limit]
+        );
+        const values = rows[0]?.values ?? [];
+        return values.reverse().map((v) => ({
+          id: Number(v[0] ?? 0),
+          direction: (String(v[1] ?? '') === peer ? 'in' : 'out') as 'in' | 'out',
+          content: String(v[3] ?? ''),
+          timestamp: Number(v[4] ?? 0),
+        }));
+      },
+    };
+
+    if (req.method === 'POST' && pathname === PRIVATE_SEND_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      try {
+        const result = await handlePrivateSendRoute(chatGatewayDeps, body);
+        res.writeHead(result.status);
+        res.end(JSON.stringify(result.body));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === PRIVATE_HISTORY_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      try {
+        const result = await handlePrivateHistoryRoute(chatGatewayDeps, body);
+        res.writeHead(result.status);
+        res.end(JSON.stringify(result.body));
       } catch (err) {
         const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
         res.writeHead(500);
