@@ -32,6 +32,7 @@
     "build:skill:web-search": "node scripts/build-web-search-skill.js",
     "start:electron": "cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5175 electron .",
     "electron:dev": "npx rimraf dist-electron && npm run compile:electron && npm run build:skills && concurrently \"vite --host 127.0.0.1 --port 5175\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5175 && node scripts/wait-electron-dev-build.mjs dist-electron && npm run start:electron\"",
+    "electron:dev:fresh": "npx rimraf .dev-userdata-fresh .dev-appdata-fresh && cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-fresh IDBOTS_APP_DATA_PATH=./.dev-appdata-fresh npm run electron:dev",
     "postinstall": "patch-package && electron-builder install-app-deps && npm install --prefix SKILLs/web-search",
     "pack": "npm run setup:mingit && npm run build && npm run compile:electron && npm run build:skills && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
     "dist": "npm run setup:mingit && npm run build && npm run compile:electron && npm run build:skills && electron-builder",
