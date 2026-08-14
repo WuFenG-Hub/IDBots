@@ -42,6 +42,7 @@ import {
   setGroupTaskMemberStatus,
   reworkGroupTask,
   exportGroupTask,
+  listGroupChatMessagesForGateway,
 } from './groupTaskService';
 import { gateChairDrivingSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
@@ -53,6 +54,7 @@ import { listenWithRetry } from './httpListenWithRetry';
 import { DEFAULT_METAID_RPC_HOST, getMetaidRpcBase, resolveMetaidRpcPort } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
 import {
+  handleGroupHistoryRoute,
   handlePrivateHistoryRoute,
   handlePrivateSendRoute,
 } from './chatGatewayRoutes';
@@ -106,6 +108,7 @@ const GROUP_TASK_INVITE_REMOTE_PATH = '/api/idbots/group-task/invite-remote';
 const LIST_METABOTS_PATH = '/api/idbots/list-metabots';
 const PRIVATE_SEND_PATH = '/api/idbots/chat/private-send';
 const PRIVATE_HISTORY_PATH = '/api/idbots/chat/private-history';
+const GROUP_HISTORY_PATH = '/api/idbots/chat/group-history';
 const BOT_BROWSER_URI_SCHEMES = new Set(['metaid', 'pin', 'metaapp', 'map', 'metafile']);
 
 export type BotBrowserRpcOpenRequest = {
@@ -1995,6 +1998,11 @@ export function startMetaidRpcServer(
           timestamp: Number(v[4] ?? 0),
         }));
       },
+      listGroupChatMessages: (groupId: string, opts?: { beforeId?: number; limit?: number }) => {
+        // Same transcript reader the UI uses (main.ts listRecentGroupMessages);
+        // no wallet, no chain write.
+        return listGroupChatMessagesForGateway(groupId, opts);
+      },
     };
 
     if (req.method === 'POST' && pathname === PRIVATE_SEND_PATH) {
@@ -2021,6 +2029,23 @@ export function startMetaidRpcServer(
       }
       try {
         const result = await handlePrivateHistoryRoute(chatGatewayDeps, body);
+        res.writeHead(result.status);
+        res.end(JSON.stringify(result.body));
+      } catch (err) {
+        const message = err && typeof err === 'object' && 'message' in err ? String((err as Error).message) : String(err);
+        res.writeHead(500);
+        res.end(JSON.stringify({ success: false, error: message }));
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === GROUP_HISTORY_PATH) {
+      let body = '';
+      for await (const chunk of req) {
+        body += chunk;
+      }
+      try {
+        const result = await handleGroupHistoryRoute(chatGatewayDeps, body);
         res.writeHead(result.status);
         res.end(JSON.stringify(result.body));
       } catch (err) {

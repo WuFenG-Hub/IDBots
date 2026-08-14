@@ -613,6 +613,18 @@ export async function listGroupTasks(filter?: { status?: GroupTaskStatus }): Pro
   return getGroupTaskStore().listTasks(filter);
 }
 
+/**
+ * Recent group-chat transcript for a group (newest last, oldest-first paging
+ * via beforeId). Read-only gateway accessor used by the chat gateway routes
+ * (Mega-Phase M4 R-M4.1); same reader as the UI transcript surface.
+ */
+export function listGroupChatMessagesForGateway(
+  groupId: string,
+  opts?: { beforeId?: number; limit?: number }
+): GroupChatTranscriptMessage[] {
+  return getGroupTaskStore().listGroupChatMessages(groupId, opts);
+}
+
 export interface GroupTaskSummary extends GroupTask {
   memberCount: number;
   chairName: string | null;

@@ -1,11 +1,13 @@
 /**
  * Chat gateway route logic — pure functions, no Electron, no direct I/O.
  *
- * Backs the two HTTP routes registered in metaidRpcServer.ts:
+ * Backs the three HTTP routes registered in metaidRpcServer.ts:
  *   POST /api/idbots/chat/private-send     (Mega-Phase M4 R-M4.1 — send an
  *                                           encrypted simplemsg to a peer)
  *   POST /api/idbots/chat/private-history  (Mega-Phase M4 R-M4.1 — recent
  *                                           messages with a peer, read-only)
+ *   POST /api/idbots/chat/group-history    (Mega-Phase M4 R-M4.1 — recent
+ *                                           group-chat transcript, read-only)
  *
  * The handlers validate + map; all I/O (wallet, chain API, db, create-pin)
  * arrives through injected deps so the logic is unit-testable under plain
@@ -16,6 +18,7 @@ import {
   type SendEncryptedSimplemsgResult,
 } from './encryptedSimplemsg';
 import type { MetaidDataPayload } from './metaidCore';
+import type { GroupChatTranscriptMessage } from '../groupTaskStore';
 
 export type ChatGatewayRouteResult = {
   status: number;
@@ -161,6 +164,40 @@ export async function handlePrivateHistoryRoute(
   try {
     const messages = await deps.readHistory(metabotId, peer, limit);
     return jsonOk({ peer, messages });
+  } catch (error) {
+    return jsonError(500, error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * POST /api/idbots/chat/group-history — recent group-chat transcript for a
+ * group (read-only; no wallet, no chain write). Mirrors the group-task
+ * transcript reader used by the UI, exposed over the gateway so a DSH-side
+ * consumer can observe group conversations.
+ */
+export async function handleGroupHistoryRoute(
+  deps: { listGroupChatMessages: (groupId: string, opts?: { beforeId?: number; limit?: number }) => GroupChatTranscriptMessage[] },
+  rawBody: string
+): Promise<ChatGatewayRouteResult> {
+  const parsed = parseJsonBody(rawBody);
+  if (!parsed) return jsonError(400, 'Invalid JSON body');
+
+  const groupId = requireNonEmptyString(parsed.group_id, 'group_id');
+  if (!groupId) return jsonError(400, 'group_id is required');
+
+  const limitRaw = Number(parsed.limit);
+  const limit = Number.isInteger(limitRaw) && limitRaw > 0
+    ? Math.min(limitRaw, MAX_HISTORY_LIMIT)
+    : 50;
+  const beforeIdRaw = Number(parsed.before_id);
+  const beforeId = Number.isInteger(beforeIdRaw) && beforeIdRaw > 0 ? beforeIdRaw : undefined;
+
+  try {
+    const messages = deps.listGroupChatMessages(
+      groupId,
+      beforeId === undefined ? { limit } : { beforeId, limit }
+    );
+    return jsonOk({ group_id: groupId, messages });
   } catch (error) {
     return jsonError(500, error instanceof Error ? error.message : String(error));
   }

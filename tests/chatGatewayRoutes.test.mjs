@@ -27,7 +27,7 @@ function resolveCompiledModulePath(relative) {
   throw new Error(`cannot resolve compiled module: ${relative}`);
 }
 
-const { handlePrivateSendRoute, handlePrivateHistoryRoute } = require(
+const { handlePrivateSendRoute, handlePrivateHistoryRoute, handleGroupHistoryRoute } = require(
   resolveCompiledModulePath('services/chatGatewayRoutes.js')
 );
 
@@ -128,4 +128,45 @@ test('history: validation + mapping', async () => {
   assert.equal(ok.body.messages.length, 2);
   assert.equal(ok.body.messages[1].content, 'to peer');
   assert.equal(ok.body.peer, PEER_GMID);
+});
+
+test('group-history: validation errors', async () => {
+  const deps = { listGroupChatMessages: () => [] };
+  assert.equal((await handleGroupHistoryRoute(deps, '{not json')).status, 400);
+  assert.equal((await handleGroupHistoryRoute(deps, '{}')).status, 400);
+  assert.equal((await handleGroupHistoryRoute(deps, JSON.stringify({ group_id: '  ' }))).status, 400);
+});
+
+test('group-history: passes through transcript with limit + beforeId', async () => {
+  const messages = [
+    { id: 10, pinId: 'pin-a', senderName: '小红', senderGlobalMetaId: PEER_GMID, content: 'hello', chainTimestamp: 5000 },
+    { id: 11, pinId: 'pin-b', senderName: 'chair', senderGlobalMetaId: null, content: 'task', chainTimestamp: 6000 },
+  ];
+  let called = null;
+  const deps = { listGroupChatMessages: (groupId, opts) => { called = { groupId, opts }; return messages; } };
+  const result = await handleGroupHistoryRoute(
+    deps,
+    JSON.stringify({ group_id: 'grp-1', limit: 10, before_id: 20 })
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.body.group_id, 'grp-1');
+  assert.equal(result.body.messages.length, 2);
+  assert.equal(result.body.messages[1].content, 'task');
+  assert.deepEqual(called, { groupId: 'grp-1', opts: { beforeId: 20, limit: 10 } });
+});
+
+test('group-history: defaults limit to 50 and omits beforeId when absent', async () => {
+  let called = null;
+  const deps = { listGroupChatMessages: (groupId, opts) => { called = { groupId, opts }; return []; } };
+  const result = await handleGroupHistoryRoute(deps, JSON.stringify({ group_id: 'grp-2' }));
+  assert.equal(result.status, 200);
+  assert.deepEqual(called, { groupId: 'grp-2', opts: { limit: 50 } });
+});
+
+test('group-history: caps limit at MAX_HISTORY_LIMIT (200)', async () => {
+  let called = null;
+  const deps = { listGroupChatMessages: (groupId, opts) => { called = opts; return []; } };
+  const result = await handleGroupHistoryRoute(deps, JSON.stringify({ group_id: 'grp-3', limit: 9999 }));
+  assert.equal(result.status, 200);
+  assert.equal(called.limit, 200);
 });
