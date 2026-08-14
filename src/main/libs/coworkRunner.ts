@@ -41,6 +41,7 @@ import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
+import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
@@ -4134,7 +4135,9 @@ export class CoworkRunner extends EventEmitter {
    * Build MetaBot persona block for system prompt using structured XML.
    * Returns empty string if session has no metabot_id or MetaBot not found (silent fallback).
    * Scoped to current session to avoid persona cross-contamination between MetaBots.
-   * Always injects the executable metabot_id; nullable DB fields are skipped when empty.
+   * Delegates to the shared persona builder (metabotPersonaPrompt.ts) so every
+   * channel renders the same identity; channels add framing around it, never
+   * a second persona.
    */
   private buildMetabotPersonaBlock(sessionId: string): string {
     if (!this.getMetabotById) return '';
@@ -4143,37 +4146,7 @@ export class CoworkRunner extends EventEmitter {
     if (metabotId == null || typeof metabotId !== 'number') return '';
     const metabot = this.getMetabotById(metabotId);
     if (!metabot) return '';
-
-    const tags: string[] = [];
-    if (metabot.name?.trim()) {
-      tags.push(`  <name>${this.escapeXmlText(metabot.name.trim())}</name>`);
-    }
-    tags.push(`  <metabot_id>${this.escapeXmlText(String(metabotId))}</metabot_id>`);
-    if (metabot.mvc_address?.trim()) {
-      tags.push(`  <mvc_address>${this.escapeXmlText(metabot.mvc_address.trim())}</mvc_address>`);
-    }
-    if (metabot.globalmetaid?.trim()) {
-      tags.push(`  <globalmetaid>${this.escapeXmlText(metabot.globalmetaid.trim())}</globalmetaid>`);
-    }
-    if (metabot.role?.trim()) {
-      tags.push(`  <role>${this.escapeXmlText(metabot.role.trim())}</role>`);
-    }
-    const metabotBio = metabot.bio ?? metabot.background;
-    if (metabotBio?.trim()) {
-      tags.push(`  <bio>${this.escapeXmlText(metabotBio.trim())}</bio>`);
-    }
-    if (metabot.soul?.trim()) {
-      tags.push(`  <soul>${this.escapeXmlText(metabot.soul.trim())}</soul>`);
-    }
-    if (metabot.goal?.trim()) {
-      tags.push(`  <goal>${this.escapeXmlText(metabot.goal.trim())}</goal>`);
-    }
-    if (tags.length === 0) return '';
-
-    const identityBlock = ['<metabot_identity>', ...tags, '</metabot_identity>'].join('\n');
-    const instructionBlock =
-      '<instruction>\nYou must strictly adhere to the persona, soul, and bio defined in the &lt;metabot_identity&gt; block above for all responses in this session.\n</instruction>';
-    return `${identityBlock}\n${instructionBlock}`;
+    return buildMetabotPersonaPrompt({ ...metabot, id: metabotId });
   }
 
   /**
@@ -4317,15 +4290,6 @@ export class CoworkRunner extends EventEmitter {
     const metabot = this.getMetabotById(metabotId);
     const llmId = metabot?.llm_id?.trim();
     return llmId || null;
-  }
-
-  private escapeXmlText(value: string): string {
-    return value
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&apos;');
   }
 
   /**
