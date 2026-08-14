@@ -51,7 +51,7 @@ const OPENTEAM_ALLOW_REMOTE_COLLAB_KEY = 'openteam.allowRemoteCollab';
 export interface MetaBotEditValues {
   name: string;
   avatar: string;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal: string;

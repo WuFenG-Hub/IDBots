@@ -179,7 +179,7 @@ export interface DeleteMetaBotResult {
 export interface ManagedMetabotSummary {
   id: number;
   name: string;
-  type: 'twin' | 'worker';
+  type: 'twin' | 'worker' | 'welcome';
   enabled: boolean;
   llm_id: string | null;
   fallback_llm_id: string | null;

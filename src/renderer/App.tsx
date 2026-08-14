@@ -15,6 +15,7 @@ import CoworkPermissionModal from './components/cowork/CoworkPermissionModal';
 import AgentGameConsentCard from './components/agentGame/AgentGameConsentCard';
 import CoworkQuestionWizard from './components/cowork/CoworkQuestionWizard';
 import { configService } from './services/config';
+import { ensureFreeQuotaProvisioning } from './services/llmFreeQuotaBootstrap';
 import { apiService } from './services/api';
 import { themeService } from './services/theme';
 import { coworkService } from './services/cowork';
@@ -25,6 +26,7 @@ import { groupTaskService } from './services/groupTaskService';
 import { checkForAppUpdate, type AppUpdateInfo, type AppUpdateDownloadProgress, type ChangeLogEntry, UPDATE_POLL_INTERVAL_MS, UPDATE_HEARTBEAT_INTERVAL_MS } from './services/appUpdate';
 import { defaultConfig, type ModelOptions } from './config';
 import { setAvailableModels, setSelectedModel } from './store/slices/modelSlice';
+import { setPreferredMetabotId } from './store/slices/coworkSlice';
 import { clearSelection } from './store/slices/quickActionSlice';
 import { setActiveSkillIds } from './store/slices/skillSlice';
 import { selectTask as selectGroupTask } from './store/slices/groupTasksSlice';
@@ -41,7 +43,6 @@ import UpdateChangeLogPanel from './components/update/UpdateChangeLogPanel';
 import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
 import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
-import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
 import {
   clampSidebarWidth,
@@ -203,7 +204,14 @@ const App: React.FC = () => {
 
         // 初始化配置
         await configService.init();
-        
+
+        // First-run free-quota bootstrap: provisions the built-in metaid-free
+        // provider (identity-signed relay key) and the welcome bot before the
+        // model list / onboarding decision, so a fresh install lands directly
+        // in the welcome chat. Never throws; any failure keeps the classic
+        // onboarding path as fallback.
+        const freeQuotaProvision = await ensureFreeQuotaProvisioning();
+
         // 初始化主题
         themeService.initialize();
 
@@ -259,19 +267,14 @@ const App: React.FC = () => {
         await scheduledTaskService.init();
         await groupTaskService.init();
 
-        // Onboarding visibility: only first-run users without local MetaBots
-        // should land in onboarding. Existing users must enter the app directly,
-        // even if their current LLM config is empty or needs migration.
-        let metabotCount = 0;
-        try {
-          const metabotResult = await window.electron.metabot.list();
-          if (metabotResult?.success && Array.isArray(metabotResult.list)) {
-            metabotCount = metabotResult.list.length;
-          }
-        } catch {
-          metabotCount = 0;
+        // Onboarding is no longer shown to first-run users: fresh installs are
+        // provisioned with the free-quota welcome bot and land directly in the
+        // cowork chat. Deep-link into the welcome chat only on the run that
+        // actually provisioned it; later launches leave the user's bot
+        // selection alone.
+        if (freeQuotaProvision.justProvisioned && freeQuotaProvision.welcomeBotId != null) {
+          dispatch(setPreferredMetabotId(freeQuotaProvision.welcomeBotId));
         }
-        setShowOnboarding(shouldShowInitialOnboarding(metabotCount));
         setIsInitialized(true);
         void reportRendererStartupComplete();
       } catch (error) {

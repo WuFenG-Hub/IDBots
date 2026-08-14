@@ -11,7 +11,7 @@ export interface Metabot {
   avatar: string | null;
   enabled: boolean;
   globalmetaid: string | null;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal: string | null;

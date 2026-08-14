@@ -21,7 +21,6 @@ import type { SettingsOpenOptions } from '../Settings';
 import type { CoworkSession, CoworkPermissionMode } from '../../types/cowork';
 import type { LocalizedPrompt } from '../../types/quickAction';
 import { resolveQuickActionPromptSkillMapping } from '../quick-actions/quickActionPresentation.js';
-import { shouldRouteFirstMetabotCreationToOnboarding } from '../onboarding/onboardingGate.js';
 import MetaBotSelector, { type MetaBotForSelector } from './MetaBotSelector';
 
 export interface CoworkViewProps {
@@ -43,7 +42,6 @@ export interface CoworkViewProps {
 
 const CoworkView: React.FC<CoworkViewProps> = ({
   onRequestAppSettings,
-  onRequestOnboarding,
   onShowSkills,
   onOpenBotInBrowser,
   focusedOrderTxid,
@@ -57,7 +55,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const isMac = window.electron.platform === 'darwin';
   const [isInitialized, setIsInitialized] = useState(false);
   const [metabots, setMetabots] = useState<Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>>([]);
-  const [localMetabotCount, setLocalMetabotCount] = useState(0);
+  const [, setLocalMetabotCount] = useState(0);
   // The New Task page is a single instance: its MetaBot selection lives in
   // the global store so it survives navigating to conversations or other
   // columns and back.
@@ -272,10 +270,6 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     };
 
     try {
-      if (shouldRouteFirstMetabotCreationToOnboarding(localMetabotCount)) {
-        onRequestOnboarding?.();
-        return;
-      }
       try {
         const apiConfig = await coworkService.checkApiConfig();
         if (apiConfig && !apiConfig.hasConfig) {
@@ -370,8 +364,6 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       isStartingRef.current = false;
     }
   };
-
-  const shouldPromptCreateMetabot = shouldRouteFirstMetabotCreationToOnboarding(localMetabotCount);
 
   const handleContinueSession = async (prompt: string, skillPrompt?: string) => {
     if (!currentSession) return false;
@@ -518,6 +510,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
           onToggleSidebar={onToggleSidebar}
           onNewChat={onNewChat}
           onOpenBotInBrowser={onOpenBotInBrowser}
+          onRequestAppSettings={onRequestAppSettings}
           updateBadge={updateBadge}
         />
       </>
@@ -581,15 +574,6 @@ const CoworkView: React.FC<CoworkViewProps> = ({
                     placeholder={i18nService.t('coworkMetaBotPlaceholder')}
                   />
                 </div>
-              )}
-              {shouldPromptCreateMetabot && (
-                <button
-                  type="button"
-                  onClick={() => onRequestOnboarding?.()}
-                  className="text-sm font-medium text-red-500 transition-colors hover:text-red-400"
-                >
-                  {i18nService.t('metabotCreateFirstPrompt')}
-                </button>
               )}
             </div>
           </div>

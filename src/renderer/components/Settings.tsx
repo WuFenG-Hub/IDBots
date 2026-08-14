@@ -8,11 +8,12 @@ import { coworkService } from '../services/cowork';
 import { imService } from '../services/im';
 import { APP_ID, EXPORT_FORMAT_TYPE, EXPORT_PASSWORD } from '../constants/app';
 import ErrorMessage from './ErrorMessage';
+import FreeQuotaCard from './FreeQuotaCard';
 import { XMarkIcon, Cog6ToothIcon, PlusCircleIcon, TrashIcon, PencilIcon, SignalIcon, CheckCircleIcon, XCircleIcon, CubeIcon, ChatBubbleLeftIcon, ShieldCheckIcon, UserCircleIcon, ArchiveBoxIcon, PuzzlePieceIcon, BriefcaseIcon, BoltIcon } from '@heroicons/react/24/outline';
 import BrainIcon from './icons/BrainIcon';
 import { CustomProviderIcon, OpenCodeIcon } from './icons/providers';
 import { useDispatch, useSelector } from 'react-redux';
-import { setAvailableModels } from '../store/slices/modelSlice';
+import { setAvailableModels, setSelectedModel } from '../store/slices/modelSlice';
 import { RootState } from '../store';
 import ThemedSelect from './ui/ThemedSelect';
 import type {
@@ -51,6 +52,7 @@ const ARCHIVED_CHATS_PAGE_SIZE = 20;
 
 
 const providerKeys = [
+  'metaid-free',
   'openai',
   'gemini',
   'anthropic',
@@ -125,6 +127,12 @@ interface ProvidersImportPayload {
 }
 
 const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode }> = {
+  'metaid-free': {
+    label: 'MetaID Free',
+    icon: (
+      <svg height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>MetaID Free</title><path fill="currentColor" d="M12 1.5l2.1 6.4 6.4 2.1-6.4 2.1L12 18.5l-2.1-6.4-6.4-2.1 6.4-2.1L12 1.5zM19.2 14.8l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9.9-2.7z"></path></svg>
+    ),
+  },
   openai: {
     label: 'OpenAI',
     icon: (
@@ -903,7 +911,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             id: item.id,
             name: item.name,
             avatar: item.avatar ?? null,
-            metabot_type: item.metabot_type === 'worker' ? 'worker' : 'twin',
+            metabot_type: item.metabot_type === 'worker' ? 'worker' : item.metabot_type === 'welcome' ? 'welcome' : 'twin',
             globalmetaid: item.globalmetaid ?? null,
           }))
         : [];
@@ -1103,6 +1111,36 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
       }
     }));
   };
+
+  // Free-quota card: after a manual enable, reload providers from the freshly
+  // written config and rebuild the redux model list so the metaid-free models
+  // appear everywhere without a restart.
+  const handleFreeQuotaProvisioned = useCallback(() => {
+    const config = configService.getConfig();
+    setProviders(mergeProvidersConfig(undefined, config.providers) as ProvidersConfig);
+    const allModels: { id: string; name: string; provider?: string; providerKey?: string; supportsImage?: boolean; options?: AppConfig['model']['availableModels'][number]['options'] }[] = [];
+    Object.entries(config.providers ?? {}).forEach(([providerName, providerConfig]) => {
+      if (providerConfig.enabled && providerConfig.models) {
+        providerConfig.models.forEach((model) => {
+          allModels.push({
+            id: model.id,
+            name: model.name,
+            provider: providerName.charAt(0).toUpperCase() + providerName.slice(1),
+            providerKey: providerName,
+            supportsImage: model.supportsImage ?? false,
+            options: model.options,
+          });
+        });
+      }
+    });
+    if (allModels.length > 0) {
+      dispatch(setAvailableModels(allModels));
+      const preferred = allModels.find(
+        (model) => model.id === config.model.defaultModel && model.providerKey === config.model.defaultProvider
+      ) ?? allModels.find((model) => model.id === config.model.defaultModel) ?? allModels[0];
+      dispatch(setSelectedModel(preferred));
+    }
+  }, [dispatch]);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -2488,6 +2526,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           <div className="flex h-full">
             {/* Provider List - Left Side */}
             <div className="w-2/5 border-r dark:border-claude-darkBorder border-claude-border pr-3 space-y-1.5 overflow-y-auto">
+              <FreeQuotaCard providers={providers} onProvisioned={handleFreeQuotaProvisioned} />
               <div className="mb-1.5 px-1">
                 <div className="flex items-center justify-between mb-1.5">
                   <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">

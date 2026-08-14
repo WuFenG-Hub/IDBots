@@ -394,12 +394,34 @@ export function normalizeDeepSeekAppConfig(config: AppConfig): AppConfig {
     : config.providers;
   const normalizedProvidersWithLegacyApi = normalizeLegacyApiBackfill(normalizedProviders, config.api);
 
+  // The default model must resolve against the configured default provider's
+  // catalog, not only the legacy app-level availableModels list. Otherwise a
+  // provider whose models are absent from that list (e.g. the built-in
+  // metaid-free relay serving deepseek-chat) gets its default rewritten to
+  // the deepseek default on every config write, producing a defaultModel /
+  // defaultProvider pair that can never resolve.
+  const defaultProviderKey = config.model.defaultProvider?.trim().toLowerCase();
+  const defaultProvider = defaultProviderKey
+    ? Object.entries(normalizedProvidersWithLegacyApi ?? {}).find(
+        ([providerKey]) => providerKey.toLowerCase() === defaultProviderKey,
+      )?.[1]
+    : undefined;
+  const defaultProviderModels = defaultProvider?.enabled ? (defaultProvider.models ?? []) : [];
+  const defaultModelUniverse = [
+    ...(defaultProviderModels as Array<{ id: string; name: string }>),
+    ...normalizedAvailableModels,
+  ];
+  let nextDefaultModel = normalizeDeepSeekDefaultModel(config.model.defaultModel, defaultModelUniverse);
+  if (defaultProviderModels.length > 0 && !defaultProviderModels.some((model) => model.id === nextDefaultModel)) {
+    nextDefaultModel = defaultProviderModels[0].id;
+  }
+
   return {
     ...config,
     model: {
       ...config.model,
       availableModels: normalizedAvailableModels,
-      defaultModel: normalizeDeepSeekDefaultModel(config.model.defaultModel, normalizedAvailableModels),
+      defaultModel: nextDefaultModel,
     },
     providers: normalizedProvidersWithLegacyApi,
   };
@@ -416,6 +438,16 @@ export const defaultConfig: AppConfig = {
     defaultModel: DEEPSEEK_DEFAULT_MODEL_ID,
   },
   providers: {
+    // Built-in free-quota relay provider (assist-base-service llm relay).
+    // Stays inert until the first-run bootstrap provisions baseUrl+apiKey+models.
+    'metaid-free': {
+      enabled: false,
+      apiKey: '',
+      baseUrl: '',
+      apiFormat: 'openai',
+      models: [],
+      name: 'MetaID Free',
+    },
     openai: {
       enabled: false,
       apiKey: '',
@@ -580,7 +612,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
+  'metaid-free', 'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
 ] as const;
 
 /**

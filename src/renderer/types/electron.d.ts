@@ -163,6 +163,32 @@ interface TrafficSettingsInfo {
   apiBase: string;
 }
 
+interface LlmRelayModelInfo {
+  id: string;
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
+interface LlmRelayBootstrapInfo {
+  /** Raw relay key; returned by bootstrap only (server stores only its hash). */
+  apiKey: string;
+  keyPrefix: string;
+  baseUrl: string;
+  models: LlmRelayModelInfo[];
+  quotaTotal: number;
+  quotaUsed: number;
+  quotaRemaining: number;
+}
+
+interface LlmRelayQuotaInfo {
+  keyPrefix: string;
+  baseUrl: string;
+  models: LlmRelayModelInfo[];
+  quotaTotal: number;
+  quotaUsed: number;
+  quotaRemaining: number;
+}
+
 interface ApiStreamResponse {
   ok: boolean;
   status: number;
@@ -536,7 +562,7 @@ interface Metabot {
   avatar: string | null;
   enabled: boolean;
   globalmetaid: string | null;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal: string | null;
@@ -566,7 +592,7 @@ interface Metabot {
 interface MetabotCreateInput {
   name: string;
   avatar?: string | null;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal?: string | null;
@@ -583,7 +609,7 @@ interface MetabotUpdateInput {
   name?: string;
   avatar?: string | null;
   enabled?: boolean;
-  metabot_type?: 'twin' | 'worker';
+  metabot_type?: 'twin' | 'worker' | 'welcome';
   role?: string;
   soul?: string;
   goal?: string | null;
@@ -1090,6 +1116,11 @@ interface IElectronAPI {
     getSettings: () => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
     setSettings: (input: { mode?: string; fallbackPolicy?: string; apiBase?: string }) => Promise<{ success: boolean; settings?: TrafficSettingsInfo; error?: string }>;
   };
+  llmRelay: {
+    bootstrap: () => Promise<{ success: boolean; result?: LlmRelayBootstrapInfo; error?: string }>;
+    getQuota: (input: { apiKey: string; forceRefresh?: boolean }) => Promise<{ success: boolean; quota?: LlmRelayQuotaInfo; error?: string }>;
+    setApiBase: (input: { apiBase: string }) => Promise<{ success: boolean; apiBase?: string; error?: string }>;
+  };
   appInfo: {
     getVersion: () => Promise<string>;
     getSystemLocale: () => Promise<string>;
@@ -1192,7 +1223,7 @@ interface IElectronAPI {
       boss_global_metaid?: string | null;
       llm_id?: string | null;
       allow_chat_skills?: string[];
-      metabot_type?: 'twin' | 'worker';
+      metabot_type?: 'twin' | 'worker' | 'welcome';
     }) => Promise<{
       success: boolean;
       metabot?: Metabot;
@@ -1333,7 +1364,7 @@ interface IElectronAPI {
       a2a_max_incoming_turns?: number | null;
       a2a_bye_cooldown_ms?: number | null;
       a2a_auto_reply_enabled?: boolean | null;
-      metabot_type?: 'twin' | 'worker';
+      metabot_type?: 'twin' | 'worker' | 'welcome';
       homepage?: string | null;
     }) => Promise<{
       success: boolean;

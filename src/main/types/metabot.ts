@@ -3,7 +3,7 @@
  * DB stores tools/skills as JSON TEXT; these interfaces use string[] with serialization in store layer.
  */
 
-export type MetabotType = 'twin' | 'worker';
+export type MetabotType = 'twin' | 'worker' | 'welcome';
 
 /** MetaBot base info and soul (matches metabots table) */
 export interface Metabot {

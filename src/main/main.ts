@@ -109,6 +109,7 @@ import {
 } from './services/metabotTokenTransferService';
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
+import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
@@ -10517,7 +10518,7 @@ if (!gotTheLock) {
     boss_global_metaid?: string | null;
     llm_id?: string | null;
     allow_chat_skills?: string[];
-    metabot_type?: 'twin' | 'worker';
+    metabot_type?: 'twin' | 'worker' | 'welcome';
   }) => {
     try {
       const store = getMetabotStore();
@@ -10528,7 +10529,8 @@ if (!gotTheLock) {
         mnemonic: walletResult.mnemonic,
         path: walletResult.path,
       });
-      const metabotType = input.metabot_type === 'twin' ? 'twin' : 'worker';
+      const metabotType =
+        input.metabot_type === 'twin' || input.metabot_type === 'welcome' ? input.metabot_type : 'worker';
       const metabot = store.createMetabot({
         wallet_id: wallet.id,
         mvc_address: walletResult.mvc_address,
@@ -12244,6 +12246,14 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerTrafficAccountIpcHandlers({ ipcMain });
+
+  // Free LLM quota relay: identity-signed bootstrap issues the relay key for
+  // the built-in `metaid-free` provider (first-run welcome experience).
+  initLlmRelayService({
+    getStore,
+    getUserIdentityStore,
+  });
+  registerLlmRelayIpcHandlers({ ipcMain });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {

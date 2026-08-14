@@ -24,6 +24,7 @@ type ChangePayload<T = unknown> = {
 
 const USER_MEMORIES_MIGRATION_KEY = 'userMemories.migration.v1.completed';
 const METABOT_TWIN_BACKFILL_MIGRATION_KEY = 'metabot_twin_backfill_migrated';
+const METABOT_WELCOME_TYPE_MIGRATION_KEY = 'metabot_welcome_type_migrated';
 const SQL_JS_WASM_RELATIVE_PATH = path.join('node_modules', 'sql.js', 'dist', 'sql-wasm.wasm');
 
 // Get the path to sql.js WASM file
@@ -1433,7 +1434,7 @@ export class SqliteStore {
         metaid TEXT UNIQUE NOT NULL,
         globalmetaid TEXT UNIQUE,
         metabot_info_pinid TEXT,
-        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker')) NOT NULL,
+        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker', 'welcome')) NOT NULL,
         created_by TEXT NOT NULL,
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
@@ -1616,6 +1617,9 @@ export class SqliteStore {
     this.migrateMetabotA2AChatLimits();
     // Migration: clear legacy local boss_id values that point at missing/self rows.
     this.migrateOrphanMetabotBossIds();
+    // Migration: rebuild metabots so the CHECK admits the 'welcome' system bot
+    // type (existing databases baked the twin/worker-only CHECK constraint).
+    this.migrateMetabotWelcomeType();
     // One-shot migration: normalize metabot_type, collapse duplicate twins, and
     // promote the earliest bot when no twin exists (unique-Twin backfill).
     this.migrateMetabotTwinBackfill();
@@ -2582,7 +2586,7 @@ export class SqliteStore {
         metaid TEXT UNIQUE NOT NULL,
         globalmetaid TEXT UNIQUE,
         metabot_info_pinid TEXT,
-        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker')) NOT NULL,
+        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker', 'welcome')) NOT NULL,
         created_by TEXT NOT NULL,
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
@@ -2654,7 +2658,7 @@ export class SqliteStore {
         metaid TEXT UNIQUE NOT NULL,
         globalmetaid TEXT UNIQUE,
         metabot_info_pinid TEXT,
-        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker')) NOT NULL,
+        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker', 'welcome')) NOT NULL,
         created_by TEXT NOT NULL,
         role TEXT NOT NULL,
         soul TEXT NOT NULL,
@@ -2680,6 +2684,83 @@ export class SqliteStore {
       this.db.run('PRAGMA foreign_keys = ON');
     } catch (e) {
       console.warn('migrateChatPublicKeyPinIdOptional:', e);
+      this.db.run('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  /**
+   * Migration: Recreate metabots with the 'welcome' system bot type admitted
+   * by the CHECK constraint. Existing databases baked the old
+   * CHECK(metabot_type IN ('twin','worker')), and SQLite cannot alter a CHECK,
+   * so the table is rebuilt in place (same pattern as
+   * migrateChatPublicKeyPinIdOptional). Guarded by a kv flag; the rebuilt
+   * table carries every column the source table currently has.
+   */
+  private migrateMetabotWelcomeType(): void {
+    try {
+      const migrated = this.get<boolean>(METABOT_WELCOME_TYPE_MIGRATION_KEY);
+      if (migrated) return;
+
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('metabot_type')) {
+        this.set(METABOT_WELCOME_TYPE_MIGRATION_KEY, true);
+        return;
+      }
+
+      const hasAvatarBlob = columns.includes('avatar_blob');
+      const hasHomepage = columns.includes('homepage');
+      const hasBossGlobalMetaid = columns.includes('boss_global_metaid');
+      const hasOwnerBindingPinid = columns.includes('owner_binding_pinid');
+      const hasFallbackLlmId = columns.includes('fallback_llm_id');
+      const hasA2aMaxIncomingTurns = columns.includes('a2a_max_incoming_turns');
+      const hasA2aByeCooldownMs = columns.includes('a2a_bye_cooldown_ms');
+      const hasA2aAutoReplyEnabled = columns.includes('a2a_auto_reply_enabled');
+      // A leftover metabots_new can only be debris from an earlier failed run
+      // of this migration; drop it before recreating.
+      this.db.run('DROP TABLE IF EXISTS metabots_new');
+      this.db.run('PRAGMA foreign_keys = OFF');
+      this.db.run(`CREATE TABLE IF NOT EXISTS metabots_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wallet_id INTEGER NOT NULL,
+        mvc_address TEXT UNIQUE NOT NULL,
+        btc_address TEXT UNIQUE NOT NULL,
+        doge_address TEXT UNIQUE NOT NULL,
+        public_key TEXT UNIQUE NOT NULL,
+        chat_public_key TEXT UNIQUE NOT NULL,
+        chat_public_key_pin_id TEXT,
+        name TEXT UNIQUE NOT NULL,
+        avatar BLOB,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        metaid TEXT UNIQUE NOT NULL,
+        globalmetaid TEXT UNIQUE,
+        metabot_info_pinid TEXT,
+        metabot_type TEXT CHECK(metabot_type IN ('twin', 'worker', 'welcome')) NOT NULL,
+        created_by TEXT NOT NULL,
+        role TEXT NOT NULL,
+        soul TEXT NOT NULL,
+        goal TEXT,
+        bio TEXT,
+        background TEXT,
+        boss_id INTEGER,
+        llm_id TEXT,
+        tools TEXT DEFAULT '[]',
+        skills TEXT DEFAULT '[]',
+        allow_chat_skills TEXT DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL${hasAvatarBlob ? ', avatar_blob BLOB' : ''}${hasHomepage ? ', homepage TEXT' : ''}${hasBossGlobalMetaid ? ', boss_global_metaid TEXT' : ''}${hasOwnerBindingPinid ? ', owner_binding_pinid TEXT' : ''}${hasFallbackLlmId ? ', fallback_llm_id TEXT' : ''}${hasA2aMaxIncomingTurns ? ', a2a_max_incoming_turns INTEGER' : ''}${hasA2aByeCooldownMs ? ', a2a_bye_cooldown_ms INTEGER' : ''}${hasA2aAutoReplyEnabled ? ', a2a_auto_reply_enabled INTEGER' : ''},
+        FOREIGN KEY (wallet_id) REFERENCES metabot_wallets(id) ON DELETE RESTRICT,
+        FOREIGN KEY (boss_id) REFERENCES metabots_new(id)
+      )`);
+
+      const colList = columns.join(', ');
+      this.db.run(`INSERT INTO metabots_new (${colList}) SELECT ${colList} FROM metabots`);
+      this.db.run('DROP TABLE metabots');
+      this.db.run('ALTER TABLE metabots_new RENAME TO metabots');
+      this.set(METABOT_WELCOME_TYPE_MIGRATION_KEY, true);
+      this.db.run('PRAGMA foreign_keys = ON');
+    } catch (e) {
+      console.warn('migrateMetabotWelcomeType:', e);
       this.db.run('PRAGMA foreign_keys = ON');
     }
   }
@@ -2810,7 +2891,7 @@ export class SqliteStore {
         return;
       }
       this.db.run(
-        "UPDATE metabots SET metabot_type = 'worker' WHERE metabot_type IS NULL OR metabot_type NOT IN ('twin', 'worker')"
+        "UPDATE metabots SET metabot_type = 'worker' WHERE metabot_type IS NULL OR metabot_type NOT IN ('twin', 'worker', 'welcome')"
       );
       this.db.run(`
         UPDATE metabots SET metabot_type = 'worker'
