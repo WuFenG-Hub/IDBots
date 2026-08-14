@@ -41,6 +41,7 @@ docs/*
 !docs/analysis/**
 tests/*
 !tests/runtimeDependencyContract.test.mjs
+!tests/promptComposer.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs
 !tests/chatSkillAuthorization.test.mjs
 !tests/orchestratorCoworkBridgeSkillIds.test.mjs

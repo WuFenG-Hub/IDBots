@@ -40,6 +40,7 @@ import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindo
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
+import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
@@ -4338,6 +4339,11 @@ export class CoworkRunner extends EventEmitter {
    * by the current user text, live browser tabs, live remote-services discovery)
    * are injected into the CURRENT user message instead (see
    * buildVolatileContextPrompt), so they never touch the cacheable head.
+   *
+   * Blocks are named sections on the shared order grid in promptComposer; the
+   * persona bundle (persona + Twin orchestration + Twin roster) arrives here
+   * pre-joined and will be split into individual grid slots when the other
+   * channels migrate onto the same composer.
    */
   private composeEffectiveSystemPrompt(
     baseSystemPrompt: string,
@@ -4348,26 +4354,33 @@ export class CoworkRunner extends EventEmitter {
     personaBlock?: string,
     profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE
   ): string {
-    const safetyPrompt = this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode);
-    const memoryStrategyPrompt = this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy);
-    const projectsPrompt = this.buildProjectsPrompt();
-    const trimmedBasePrompt = baseSystemPrompt?.trim();
-    const sections = [
-      personaBlock,
-      safetyPrompt,
+    return composePromptSections([
+      { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
+      {
+        name: 'safety:workspace',
+        order: PROMPT_SECTION_ORDER.SAFETY,
+        text: this.buildWorkspaceSafetyPrompt(workspaceRoot, cwd, confirmationMode, profile.workspaceSafetyMode),
+      },
       // Projects sit ahead of the memory strategy/base prompt on purpose: the
       // section is small, changes rarely, and early placement makes weak models
       // noticeably more likely to honor it.
-      projectsPrompt,
-      memoryStrategyPrompt,
-      trimmedBasePrompt,
+      { name: 'idbots:projects', order: PROMPT_SECTION_ORDER.PROJECTS, text: this.buildProjectsPrompt() },
+      {
+        name: 'idbots:memory-strategy',
+        order: PROMPT_SECTION_ORDER.MEMORY_STRATEGY,
+        text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy),
+      },
+      { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
       // R4 防护（追加在末尾，避免破坏 DeepSeek 前缀缓存的首段）：
       // SDK 定时任务触发（cron prompt）与用户消息在同一会话队列竞争（8/8 事故根因，
       // SDK 无优先级配置），此约束让模型在 cron 唤醒轮优先处理未响应的用户消息。
       // 常量文本，字节级稳定，不随会话变化。
-      SDK_CRON_USER_PRIORITY_GUARD,
-    ];
-    return sections.filter((section): section is string => Boolean(section?.trim())).join('\n\n');
+      {
+        name: 'idbots:cron-user-priority-guard',
+        order: PROMPT_SECTION_ORDER.TAIL_GUARD,
+        text: SDK_CRON_USER_PRIORITY_GUARD,
+      },
+    ]);
   }
 
   /**
