@@ -1177,7 +1177,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
             id: item.id,
             name: item.name,
             avatar: item.avatar ?? null,
-            metabot_type: item.metabot_type === 'worker' ? 'worker' : 'twin',
+            metabot_type: item.metabot_type === 'worker' ? 'worker' : item.metabot_type === 'welcome' ? 'welcome' : 'twin',
             globalmetaid: item.globalmetaid ?? null,
           }))
         : [];

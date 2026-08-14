@@ -108,7 +108,7 @@ async function createOrAdoptWelcomeBot(existingBots: Array<{ id: number; name?: 
     soul: WELCOME_BOT_SOUL,
     goal: WELCOME_BOT_GOAL,
     bio: WELCOME_BOT_BIO,
-    metabot_type: 'worker',
+    metabot_type: 'welcome',
     llm_id: LLM_FREE_PROVIDER_KEY,
   });
   if (result?.success && result.metabot?.id) {

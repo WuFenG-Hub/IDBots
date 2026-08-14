@@ -31,7 +31,7 @@ const NewGroupTaskModal: React.FC<NewGroupTaskModalProps> = ({ onClose, onCreate
         const result = await window.electron?.metabot?.list?.();
         if (cancelled || !result?.success || !Array.isArray(result.list)) return;
         // The twin bot chairs automatically; only workers are selectable members.
-        setWorkerBots(result.list.filter((bot: Metabot) => bot.enabled && bot.metabot_type !== 'twin'));
+        setWorkerBots(result.list.filter((bot: Metabot) => bot.enabled && bot.metabot_type === 'worker'));
       } catch {
         // Member list stays empty; chair-only creation remains possible.
       }

@@ -10264,7 +10264,7 @@ if (!gotTheLock) {
     boss_global_metaid?: string | null;
     llm_id?: string | null;
     allow_chat_skills?: string[];
-    metabot_type?: 'twin' | 'worker';
+    metabot_type?: 'twin' | 'worker' | 'welcome';
   }) => {
     try {
       const store = getMetabotStore();
@@ -10275,7 +10275,8 @@ if (!gotTheLock) {
         mnemonic: walletResult.mnemonic,
         path: walletResult.path,
       });
-      const metabotType = input.metabot_type === 'twin' ? 'twin' : 'worker';
+      const metabotType =
+        input.metabot_type === 'twin' || input.metabot_type === 'welcome' ? input.metabot_type : 'worker';
       const metabot = store.createMetabot({
         wallet_id: wallet.id,
         mvc_address: walletResult.mvc_address,

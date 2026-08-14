@@ -535,7 +535,7 @@ interface Metabot {
   avatar: string | null;
   enabled: boolean;
   globalmetaid: string | null;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal: string | null;
@@ -565,7 +565,7 @@ interface Metabot {
 interface MetabotCreateInput {
   name: string;
   avatar?: string | null;
-  metabot_type: 'twin' | 'worker';
+  metabot_type: 'twin' | 'worker' | 'welcome';
   role: string;
   soul: string;
   goal?: string | null;
@@ -582,7 +582,7 @@ interface MetabotUpdateInput {
   name?: string;
   avatar?: string | null;
   enabled?: boolean;
-  metabot_type?: 'twin' | 'worker';
+  metabot_type?: 'twin' | 'worker' | 'welcome';
   role?: string;
   soul?: string;
   goal?: string | null;
@@ -1152,7 +1152,7 @@ interface IElectronAPI {
       boss_global_metaid?: string | null;
       llm_id?: string | null;
       allow_chat_skills?: string[];
-      metabot_type?: 'twin' | 'worker';
+      metabot_type?: 'twin' | 'worker' | 'welcome';
     }) => Promise<{
       success: boolean;
       metabot?: Metabot;
@@ -1293,7 +1293,7 @@ interface IElectronAPI {
       a2a_max_incoming_turns?: number | null;
       a2a_bye_cooldown_ms?: number | null;
       a2a_auto_reply_enabled?: boolean | null;
-      metabot_type?: 'twin' | 'worker';
+      metabot_type?: 'twin' | 'worker' | 'welcome';
       homepage?: string | null;
     }) => Promise<{
       success: boolean;

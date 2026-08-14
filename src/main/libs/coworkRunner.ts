@@ -1253,7 +1253,7 @@ type CoworkMetabotIdentity = {
   mvc_address?: string | null;
   globalmetaid?: string | null;
   enabled?: boolean | null;
-  metabot_type?: 'twin' | 'worker' | null;
+  metabot_type?: 'twin' | 'worker' | 'welcome' | null;
   boss_global_metaid?: string | null;
   skills?: string[] | null;
   allow_chat_skills?: string[] | null;
