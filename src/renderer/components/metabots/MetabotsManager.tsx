@@ -23,7 +23,6 @@ import MetaBotDeleteConfirmModal from './MetaBotDeleteConfirmModal';
 import MetaBotRestoreMnemonicModal from './MetaBotRestoreMnemonicModal';
 import MetaBotListCard from './MetaBotListCard';
 import { normalizeAllowChatSkills } from './allowChatSkills.ts';
-import { shouldRouteFirstMetabotCreationToOnboarding } from '../onboarding/onboardingGate.js';
 import { DEFAULT_METABOT_LIMIT, METABOT_LIMIT_REACHED_ERROR } from '../../../main/shared/metabotLimit';
 
 type ViewMode = 'list' | 'add' | 'edit';
@@ -149,7 +148,6 @@ interface MetabotsManagerProps {
 
 const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   onRequestModelSettings,
-  onRequestOnboarding,
   onOpenMetabotInBrowser,
   onPreviewMetaAppHomepage,
   onRequestMetaApps,
@@ -248,11 +246,6 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   const handleAdd = () => {
     if (list.length >= DEFAULT_METABOT_LIMIT) {
       setShowLimitModal(true);
-      return;
-    }
-    if (shouldRouteFirstMetabotCreationToOnboarding(list.length)) {
-      setActionError('');
-      onRequestOnboarding?.();
       return;
     }
     setActionError('');

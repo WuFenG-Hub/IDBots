@@ -43,7 +43,6 @@ import UpdateChangeLogPanel from './components/update/UpdateChangeLogPanel';
 import AppUpdateModal, { type UpdateModalState } from './components/update/AppUpdateModal';
 import Onboarding from './components/onboarding/Onboarding';
 import { openSelectedMetaApp } from './components/metaapps/metaAppLaunch.js';
-import { shouldShowInitialOnboarding } from './components/onboarding/onboardingGate.js';
 import { normalizePreselectedSkillId } from './utils/newChatPreselect';
 import {
   clampSidebarWidth,
@@ -268,21 +267,11 @@ const App: React.FC = () => {
         await scheduledTaskService.init();
         await groupTaskService.init();
 
-        // Onboarding visibility: only first-run users without local MetaBots
-        // should land in onboarding. Existing users must enter the app directly,
-        // even if their current LLM config is empty or needs migration.
-        let metabotCount = 0;
-        try {
-          const metabotResult = await window.electron.metabot.list();
-          if (metabotResult?.success && Array.isArray(metabotResult.list)) {
-            metabotCount = metabotResult.list.length;
-          }
-        } catch {
-          metabotCount = 0;
-        }
-        setShowOnboarding(shouldShowInitialOnboarding(metabotCount));
-        // Deep-link into the welcome chat only on the run that actually
-        // provisioned it; later launches leave the user's bot selection alone.
+        // Onboarding is no longer shown to first-run users: fresh installs are
+        // provisioned with the free-quota welcome bot and land directly in the
+        // cowork chat. Deep-link into the welcome chat only on the run that
+        // actually provisioned it; later launches leave the user's bot
+        // selection alone.
         if (freeQuotaProvision.justProvisioned && freeQuotaProvision.welcomeBotId != null) {
           dispatch(setPreferredMetabotId(freeQuotaProvision.welcomeBotId));
         }
