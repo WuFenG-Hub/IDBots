@@ -252,6 +252,24 @@ function resolveMatchedProvider(
 
   let resolvedModelId: string = modelId;
 
+  // Fallback: when the configured default provider is enabled but does not
+  // offer the default model (provider catalog changed, or the built-in
+  // metaid-free relay serving a single model), use that provider's own first
+  // model instead of failing. The default provider is the user's explicit
+  // choice and must win over a hard error.
+  if (!providerEntry && defaultProviderKey) {
+    const byDefaultProvider = Object.entries(providers).find(
+      ([name, provider]) =>
+        name.toLowerCase() === defaultProviderKey && provider?.enabled && provider.models?.length
+    ) as [string, ProviderConfig] | undefined;
+    if (byDefaultProvider) {
+      const [providerName, providerConfig] = byDefaultProvider;
+      const providerModels = providerConfig.models as Array<{ id: string }>;
+      providerEntry = [providerName, providerConfig];
+      resolvedModelId = providerModels.find((model) => model.id === modelId)?.id ?? providerModels[0].id;
+    }
+  }
+
   // When overrideModelId is given (e.g. MetaBot llm_id "deepseek"), exact model id may not match.
   // Fallback 1: treat as provider key (e.g. "deepseek" -> provider "deepseek", use its first or default model).
   if (!providerEntry && requestedOverride && !isDeepSeekAutomationProviderKey) {
