@@ -42,12 +42,11 @@
 
 ## What remains (in order)
 
-1. **Phase 3b — free-grant campaign + recharge codes** — DONE on both sides.
-   Spec `backend-spec-v2.md`; client merged (0f7276dc); backend accepted on
-   test instance 7882 (2026-08-13: A1–A6, B1–B7 joint E2E passed; signature
-   canonical strings aligned). Awaiting backend prod deploy + merge per their
-   SOP. Real-device walkthrough: point IDBots at the test instance URL and
-   exercise the claim banner + code redeem in Settings → Traffic.
+1. **Phase 3b — free-grant campaign + recharge codes** — SHIPPED to production
+   (2026-08-14: prod smoke 26/26 PASS, campaign left OFF behind the admin
+   switch; opening it requires no release). Acceptance runner committed:
+   `scripts/traffic-e2e/run-phase3b-acceptance.mjs`. Ops guide:
+   `operator-manual.md`.
 2. **Client follow-up: prefer server-provided ledger `txId`** — backend
    delivered and live-verified 2026-08-13. Update `trafficAccountService.ts`
    to use the server field and demote the local journal join to a fallback.
