@@ -5663,6 +5663,17 @@ export class CoworkRunner extends EventEmitter {
    * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
    * renderer permission dialog works unchanged.
    */
+  /** Subagent panel: child agent ids of a DSH session (post-hoc safe). */
+  dshListSubagents(sessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
+    if (!this.dshTurnHub) return Promise.resolve([])
+    return this.dshTurnHub.listSubagents(sessionId)
+  }
+
+  dshGetSubagentMessages(sessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
+    if (!this.dshTurnHub) return Promise.resolve([])
+    return this.dshTurnHub.getSubagentMessages(sessionId, agentId, limit)
+  }
+
   private async runDshSessionLocal(
     activeSession: ActiveSession,
     prompt: string,

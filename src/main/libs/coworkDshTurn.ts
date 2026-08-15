@@ -121,6 +121,8 @@ export class DshTurnHub {
   private dshByCowork = new Map<string, string>()
   /** Reverse mapping for tool-request routing. */
   private coworkByDsh = new Map<string, string>()
+  /** cowork id → dsh id, kept across turns for post-hoc panel lookups. */
+  private pinnedDshIds = new Map<string, string>()
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
@@ -136,6 +138,7 @@ export class DshTurnHub {
     this.controllersByDsh.set(input.dshSessionId, controller)
     this.dshByCowork.set(input.sessionId, input.dshSessionId)
     this.coworkByDsh.set(input.dshSessionId, input.sessionId)
+    this.pinnedDshIds.set(input.sessionId, input.dshSessionId)
 
     try {
       await kernel.ensureSession({
@@ -175,6 +178,23 @@ export class DshTurnHub {
     const controller = this.controllerOfCowork(sessionId)
     if (!controller || !this.kernel) return
     await this.kernel.cancel(controller.dshSessionId, cause)
+  }
+
+  /** Subagent panel (cowork session id in, DSH routing inside). */
+  async listSubagents(coworkSessionId: string): Promise<Array<{ agentId: string; status: string; startedAt: number }>> {
+    if (!this.kernel) return []
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) return []
+    const result = await this.kernel.listSubagents(dshId)
+    return result.agents ?? []
+  }
+
+  async getSubagentMessages(coworkSessionId: string, agentId: string, limit?: number): Promise<Array<{ id: string; type: string; content: string; timestamp: number }>> {
+    if (!this.kernel) return []
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) return []
+    const result = await this.kernel.getSubagentMessages(dshId, agentId, limit)
+    return result.messages ?? []
   }
 
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {

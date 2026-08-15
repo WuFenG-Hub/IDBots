@@ -98,6 +98,10 @@ export function generateRuntimeConfig(input) {
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
+    // Model-facing subagent delegation (in-process spawn provider, foreground).
+    { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
+    { id: 'subagent-spawn-in-process', name: '@deepseek-ai/dsh-subagent-spawn-in-process', config: { providerName: 'spawn' } },
+    { id: 'tool-subagent', name: '@deepseek-ai/dsh-tool-subagent', config: { provider: 'spawn', toolName: 'subagent', enableRunInBackground: false } },
     {
       id: 'idbots-prompt-sections',
       name: plugin('idbots-prompt-sections.mjs'),

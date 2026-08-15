@@ -160,6 +160,19 @@ export class DshKernel {
     return this.client.request('idbots/approval/respond', { id, outcome })
   }
 
+  /** Subagent panel: children of a DSH session. */
+  async listSubagents(dshSessionId: string): Promise<{ agents: Array<{ agentId: string; status: string; startedAt: number }> }> {
+    this.requireClient()
+    return this.client.request('idbots/subagents/list', { sessionId: dshSessionId })
+  }
+
+  /** Subagent panel: transcript view of one child. */
+  async getSubagentMessages(dshSessionId: string, agentId: string, limit?: number): Promise<{ messages: Array<{ id: string; type: string; content: string; timestamp: number }> }> {
+    void dshSessionId
+    this.requireClient()
+    return this.client.request('idbots/subagents/messages', { sessionId: dshSessionId, agentId, limit })
+  }
+
   /** Answer a runtime-native tool policy check. */
   async respondPolicy(id: string, decision: 'allow' | 'deny' | 'ask', reason?: string): Promise<{ answered: boolean }> {
     this.requireClient()

@@ -51,10 +51,38 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsToolSeq = 0
     this.idbotsPolicyPending = new Map() // id → { resolve }
     this.idbotsPolicySeq = 0
+    // Subagent lineage for the panel: parent dsh id → [{agentId, status, startedAt}]
+    this.idbotsSubagentChildren = new Map()
+    // Ring buffers of child session events for transcript viewing.
+    this.idbotsChildEvents = new Map()
 
     ctx.on('agent/created', ({ agent }) => {
       this.idbotsAgents.set(String(agent.id), agent)
+      // Subagent lineage lives FLATTENED on the session header (not under a
+      // meta subobject): header.origin === 'subagent' + header.parentSession.
+      const header = agent?.session?.header
+      if (header?.origin === 'subagent' && header?.parentSession !== undefined) {
+        const parent = String(header.parentSession)
+        const children = this.idbotsSubagentChildren.get(parent) ?? []
+        children.push({ agentId: String(agent.id), status: 'running', startedAt: Date.now() })
+        this.idbotsSubagentChildren.set(parent, children)
+        this.idbotsChildEvents.set(String(agent.id), [])
+      }
     }, { global: true })
+    ctx.on('agent/disposed', ({ agent }) => {
+      for (const children of this.idbotsSubagentChildren.values()) {
+        const entry = children.find((c) => c.agentId === String(agent.id))
+        if (entry) entry.status = 'done'
+      }
+    }, { global: true })
+    // Buffer child session events for the panel transcript view.
+    ctx.on('session/event', (session, event) => {
+      const sid = typeof session === 'string' ? session : String(session?.id ?? '')
+      if (!sid || !this.idbotsChildEvents.has(sid)) return
+      const buffer = this.idbotsChildEvents.get(sid)
+      buffer.push(event)
+      if (buffer.length > 500) buffer.splice(0, buffer.length - 500)
+    })
     ctx.on('agent/disposed', ({ agent }) => {
       this.idbotsAgents.delete(String(agent.id))
     }, { global: true })
@@ -78,6 +106,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
       case 'idbots/policy/respond': return this.idbotsPolicyRespond(params)
+      case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
+      case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
       case 'idbots/ping': {
         return {
           pong: true,
@@ -270,6 +300,29 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       if (decision.decision === 'ask') return { kind: 'ask', reason: decision.reason }
       return { kind: 'deny', reason: decision.reason ?? 'denied by host policy' }
     }, { global: true })
+  }
+
+  idbotsSubagentsList({ sessionId }) {
+    const children = this.idbotsSubagentChildren.get(String(sessionId ?? '')) ?? []
+    return { agents: children.map((c) => ({ ...c })) }
+  }
+
+  idbotsSubagentsMessages({ sessionId, agentId, limit }) {
+    void sessionId
+    const buffer = this.idbotsChildEvents.get(String(agentId ?? '')) ?? []
+    const messages = []
+    for (const event of buffer) {
+      const data = event.data ?? {}
+      if (event.type === 'user/message' && (data.source ?? data.message?.source)?.kind === 'user') {
+        const text = (data.content ?? data.message?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+        messages.push({ id: `${agentId}-u-${messages.length}`, type: 'user', content: text, timestamp: event.time })
+      } else if (event.type === 'assistant/message') {
+        const text = (data.message?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('')
+        if (text) messages.push({ id: `${agentId}-a-${messages.length}`, type: 'assistant', content: text, timestamp: event.time })
+      }
+    }
+    const capped = Number.isFinite(limit) && limit > 0 ? messages.slice(-limit) : messages
+    return { messages: capped }
   }
 
   async idbotsPolicyRespond({ id, decision, reason }) {
