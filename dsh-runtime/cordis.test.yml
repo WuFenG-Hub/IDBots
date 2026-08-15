@@ -17,6 +17,8 @@
 
 - id: system-prompt
   name: '@deepseek-ai/dsh-system-prompt'
+  config:
+    includeHarnessIdentity: false
 
 - id: agent
   name: '@deepseek-ai/dsh-agent'

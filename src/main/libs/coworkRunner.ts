@@ -5759,7 +5759,6 @@ export class CoworkRunner extends EventEmitter {
           // preset; the DSH base prompt has none, and without it the model
           // chats about tasks instead of acting on them.
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
-          { name: 'idbots:identity', order: -90, text: 'Runtime note: "DeepSeek Harness" is the name of your agent runtime framework, not your model provider. Do not describe yourself as made by DeepSeek unless your configured provider actually is DeepSeek.' },
         ],
         provider: {
           key: route.provider,

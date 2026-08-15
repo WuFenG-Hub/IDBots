@@ -84,7 +84,13 @@ export function generateRuntimeConfig(input) {
     { id: 'sessions', name: '@deepseek-ai/dsh-session' },
     { id: 'tools', name: '@deepseek-ai/dsh-tools' },
     { id: 'llm', name: '@deepseek-ai/dsh-llm' },
-    { id: 'system-prompt', name: '@deepseek-ai/dsh-system-prompt' },
+    {
+      id: 'system-prompt',
+      name: '@deepseek-ai/dsh-system-prompt',
+      // IDBots personas own the identity voice; the harness line would sit
+      // above them and leak "DeepSeek" into self-descriptions.
+      config: { includeHarnessIdentity: false },
+    },
     { id: 'agent', name: '@deepseek-ai/dsh-agent' },
     { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
     // Transient provider failures (timeouts, 5xx) retry instead of killing the turn.
