@@ -63,6 +63,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : null
+      let reply = ''
       if (toolCallFor !== null && !alreadyHasToolResult) {
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'bash' ? { command: 'echo BASH_WORKS && date', description: 'echo test' } : { note: 'please dump the big blob' })
         frame({
@@ -75,14 +76,18 @@ export function startMockServer(port = 48787) {
         })
         frame({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })
       } else {
-        const reply = alreadyHasToolResult ? 'mock says: tool finished, result was huge but bounded' : `mock says: ${lastUserText.slice(0, 40)}`
+        reply = alreadyHasToolResult ? 'mock says: tool finished, result was huge but bounded' : `mock says: ${lastUserText.slice(0, 40)}`
         frame({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] })
         for (const part of [reply.slice(0, Math.ceil(reply.length / 2)), reply.slice(Math.ceil(reply.length / 2))]) {
           frame({ ...base, choices: [{ index: 0, delta: { content: part }, finish_reason: null }] })
         }
         frame({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })
       }
-      frame({ ...base, choices: [], usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 } })
+      // Realistic usage so token-meter accounting can cross compaction
+      // thresholds: ~4 chars per token over the actual payload sizes.
+      const requestChars = (parsed.messages ?? []).reduce((sum, m) => sum + String(m.content ?? '').length + String(JSON.stringify(m.tool_calls ?? '')).length, 0)
+      const usage = { prompt_tokens: Math.max(1, Math.ceil(requestChars / 4)), completion_tokens: Math.max(1, Math.ceil(reply.length / 4)) }
+      frame({ ...base, choices: [], usage: { ...usage, total_tokens: usage.prompt_tokens + usage.completion_tokens } })
       res.write('data: [DONE]\n\n')
       res.end()
     })

@@ -87,6 +87,11 @@ export function generateRuntimeConfig(input) {
     { id: 'llm-retry', name: '@deepseek-ai/dsh-llm-retry' },
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
+      id: 'compaction-basic',
+      name: '@deepseek-ai/dsh-compaction-basic',
+      config: { thresholdRatio: 0.8, retainRatio: 0.16, maxTokens: 8192, compactionRetries: 1 },
+    },
+    {
       id: 'persistence',
       name: '@deepseek-ai/dsh-session-persistence-jsonl',
       config: { root: input.sessionRoot, compression: 'none' },

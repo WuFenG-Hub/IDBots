@@ -8,13 +8,14 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node test/wire-extension.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs"
+    "test": "node test/wire-extension.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs && node test/compaction.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
     "@deepseek-ai/dsh-agent-loop": "0.1.0-rc.6",
     "@deepseek-ai/dsh-app-boot": "0.1.0-rc.6",
     "@deepseek-ai/dsh-bash-local": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-compaction-basic": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-fs-local": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-fs-observation-policy": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-launch-environment": "^0.1.0-rc.6",
