@@ -5890,6 +5890,13 @@ export class CoworkRunner extends EventEmitter {
         if (values.length > 0 && values.some(isZodValue)) {
           return z.toJSONSchema(z.object(parameters as any), { target: 'draft-7' }) as Record<string, unknown>
         }
+        // The SDK's tool() accepts a bare {} (or a shape without top-level
+        // type) as "no parameters"; providers require an explicit object
+        // schema ("must be of type 'object', got 'type: null'").
+        const record = parameters as Record<string, unknown>
+        if (record.type !== 'object') {
+          return { type: 'object', properties: {}, ...record }
+        }
         return parameters as Record<string, unknown>
       } catch (error) {
         coworkLog('WARN', 'buildDshHostTools', 'zod schema conversion failed; falling back to empty schema', {
