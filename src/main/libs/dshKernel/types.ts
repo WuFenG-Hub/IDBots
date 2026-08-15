@@ -65,7 +65,7 @@ export interface DshPromptSectionInput {
 export interface DshRuntimeConfigInput {
   sessionRoot: string
   providers: DshProviderRoute[]
-  sections: DshPromptSectionInput[]
+  sections?: DshPromptSectionInput[]
   shaping?: { maxChars?: number; tailChars?: number }
   hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   workspace?: { cwd: string }

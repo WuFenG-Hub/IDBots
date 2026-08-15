@@ -85,6 +85,9 @@ export class DshKernel {
     return this.client !== null && !this.closed
   }
 
+  /** Diagnostics/tests: how many times the runtime process was restarted. */
+  restartCount = 0
+
   /** Generate config, spawn the runtime, and perform the wire handshake. */
   async ensureRuntime(config: DshRuntimeConfigInput): Promise<void> {
     if (this.closed) throw new Error('DshKernel: closed')
@@ -136,6 +139,8 @@ export class DshKernel {
     provider?: string
     model?: string
     maxTokens?: number
+    sections?: Array<{ name: string; order: number; text: string }>
+    hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   }): Promise<{ resumed: boolean }> {
     this.requireClient()
     return this.client.request('session/ensure', input)
@@ -205,7 +210,10 @@ export class DshKernel {
     this.mappers.clear()
     this.slotIds.clear()
     this.runtimeConfig = null
-    if (config) await this.ensureRuntime(config)
+    if (config) {
+      this.restartCount += 1
+      await this.ensureRuntime(config)
+    }
   }
 
   async close(): Promise<void> {
@@ -231,7 +239,12 @@ export class DshKernel {
           try {
             this.applyEvent(params.sessionId, params.event as DshSessionEventEnvelope)
           } catch (error) {
-            this.opts.handlers.onError?.(error instanceof Error ? error : new Error(String(error)))
+            // Contained per-event failure: log and keep pumping. onError is
+            // the FATAL channel (transport death) that settles in-flight turns.
+            this.opts.log?.('error', 'dshKernel.eventError', {
+              message: error instanceof Error ? error.message : String(error),
+              type: (params.event as DshSessionEventEnvelope)?.type,
+            })
           }
         } else if (method === 'idbots/approval/request') {
           this.opts.handlers.onApprovalRequest(params.sessionId, params as DshApprovalAsk)

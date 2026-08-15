@@ -144,7 +144,7 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
       permissionMode: 'default',
     }
     runner.activeSessions.set(sessionId, activeSession)
-    store.sessions.set(sessionId, { id: sessionId, executionMode: 'local', ...extra })
+    store.sessions.set(sessionId, { id: sessionId, executionMode: 'local', messages: [], ...extra })
     return { sessionId, activeSession }
   }
 
@@ -174,6 +174,32 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
     // metabot 42 is twin in this scenario's store state (set by makeSession #2)
     assert.ok(twinTools.some((t) => t.name.startsWith('metabot_')), 'twin session exposes metabot-manage tools')
     void nonTwinTools
+
+    // ---- 3b. shared-runtime stability --------------------------------------
+    // A NEW session with a DIFFERENT system prompt must NOT restart the
+    // runtime (prompt sections ride session/ensure now, not the config).
+    const s3 = makeSession({ sessionType: 'standard', metabotId: 7 })
+    s3.activeSession.claudeSessionId = null
+    const before = runner.dshTurnHub.restartCount
+    await runner.runDshSessionLocal(s3.activeSession, 'HELLO_OTHER_PROMPT', process.cwd(), 'A completely different persona prompt.')
+    assert.equal(runner.dshTurnHub.restartCount, before, 'new session with a different prompt does not restart the runtime')
+
+    // Cross-provider interleave: session A mid-turn (slow tool) while session
+    // B starts a turn on the OTHER provider — A must complete unharmed (the
+    // restart, if any, waits for quiescence).
+    const sA = makeSession({ sessionType: 'standard', metabotId: 7, model: 'mock-1' })
+    sA.activeSession.claudeSessionId = null
+    const sB = makeSession({ sessionType: 'a2a', metabotId: 42 }) // llm_id → mockgw2
+    sB.activeSession.claudeSessionId = null
+    serverB.seen.length = 0
+    const turnA = runner.runDshSessionLocal(sA.activeSession, 'STEER_TEST', process.cwd(), 'Persona A.')
+    await waitFor(() => store.messages.some((m) => m.sessionId === 'session-types' && m.type === 'tool_use' && m.metadata?.toolName === 'slow_tool'), 25000, 'turn A slow_tool')
+    const turnB = runner.runDshSessionLocal(sB.activeSession, 'HELLO_CROSS_PROVIDER', process.cwd(), 'Persona B.')
+    await turnA
+    await turnB
+    assert.ok(serverB.seen.some((r) => r.body?.messages?.some((m) => String(m.content).includes('HELLO_CROSS_PROVIDER'))), 'cross-provider turn B reached provider B')
+    const aAssistant = store.messages.filter((m) => m.sessionId === 'session-types' && m.type === 'assistant')
+    assert.ok(aAssistant.length > 0, 'turn A still produced its reply despite the concurrent other-provider turn')
 
     // ---- 4. permission event shape (IM handler contract) ------------------
     const permission = events.permissions[0]

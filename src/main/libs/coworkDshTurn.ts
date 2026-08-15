@@ -146,6 +146,8 @@ export class DshTurnHub {
         provider: input.provider.key,
         model: input.provider.model,
         ...Number.isFinite(input.provider.maxOutputTokens) ? { maxTokens: input.provider.maxOutputTokens } : {},
+        sections: input.sections,
+        hostTools: input.hostTools,
       })
       await kernel.prompt(input.dshSessionId, input.prompt)
       return await controller.done()
@@ -209,13 +211,23 @@ export class DshTurnHub {
     this.dshByCowork.clear()
   }
 
+  /** First workspace seen pins the mounted fs/bash cwd (per-session cwd churn
+   * would restart the runtime; a follow-up mounts per-agent workspaces). */
+  private workspaceSeen: DshRuntimeConfigInput['workspace']
+  private lastConfigJson: string | undefined
+  /** Provider routes accumulated across sessions — the runtime serves a UNION
+   * so a new provider never rewrites (and restarts over) an existing one. */
+  private providersSeen = new Map<string, DshProviderRoute & { apiKeyEnvName?: string }>()
+
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
+    this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
     const config: DshRuntimeConfigInput = {
       sessionRoot: this.opts.sessionRoot,
-      providers: [providerRouteOf(input.provider)],
-      sections: input.sections,
-      hostTools: input.hostTools,
-      workspace: input.workspace,
+      providers: [...this.providersSeen.values()],
+      // sections/hostTools are PER-SESSION and ride session/ensure (agent-
+      // scoped registration) — keeping them out of the config is what stops
+      // every new session's prompt from restarting the shared runtime.
+      workspace: this.workspaceSeen ?? input.workspace,
       extraEntries: this.opts.extraEntries,
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —
@@ -223,6 +235,7 @@ export class DshTurnHub {
         [input.provider.apiKeyEnvName ?? 'IDBOTS_DSH_API_KEY']: input.provider.apiKey,
       },
     }
+    if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace
     if (!this.kernel) {
       this.kernel = new DshKernel({
         runtimeDir: this.opts.runtimeDir,
@@ -230,7 +243,19 @@ export class DshTurnHub {
         log: this.opts.log,
       })
     }
+    // A config change restarts the runtime; never do that while OTHER
+    // sessions have turns in flight — wait for quiescence first (bounded).
+    if (this.kernel?.running && this.lastConfigJson !== undefined) {
+      const nextJson = JSON.stringify(config)
+      if (nextJson !== this.lastConfigJson && this.controllersByDsh.size > 0) {
+        const deadline = Date.now() + 90000
+        while (this.controllersByDsh.size > 0 && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      }
+    }
     await this.kernel.ensureRuntime(config)
+    this.lastConfigJson = JSON.stringify(config)
     return this.kernel
   }
 
@@ -261,7 +286,15 @@ export class DshTurnHub {
       onApprovalCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
       },
-      onError: (error) => this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message }),
+      onError: (error) => {
+        this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message })
+        // The runtime stream died (crash or restart): settle every in-flight
+        // turn with an error outcome so sessions fail loudly instead of
+        // hanging in "running" until manually stopped.
+        for (const controller of this.controllersByDsh.values()) {
+          controller.handleTurnEnd({ kind: 'error', reason: `DSH runtime stream closed: ${error.message}` })
+        }
+      },
       onPolicyRequest: (request) => {
         const coworkId = this.coworkByDsh.get(request.sessionId)
         if (!coworkId || !this.opts.evaluatePolicy) {

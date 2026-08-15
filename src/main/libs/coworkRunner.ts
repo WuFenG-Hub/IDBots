@@ -5759,6 +5759,7 @@ export class CoworkRunner extends EventEmitter {
           // preset; the DSH base prompt has none, and without it the model
           // chats about tasks instead of acting on them.
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
+          { name: 'idbots:identity', order: -90, text: 'Runtime note: "DeepSeek Harness" is the name of your agent runtime framework, not your model provider. Do not describe yourself as made by DeepSeek unless your configured provider actually is DeepSeek.' },
         ],
         provider: {
           key: route.provider,
@@ -5786,6 +5787,16 @@ export class CoworkRunner extends EventEmitter {
           },
           onUsage: (usage) => {
             activeSession.lastDshUsage = usage;
+            // Feed the renderer's usage ring the same shape the Claude path
+            // produces from getContextUsage().
+            const contextWindow = modelLimits?.contextWindow ?? 64000;
+            const usedTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0);
+            activeSession.realContextUsage = {
+              usedTokens,
+              contextWindow,
+              usageRatio: Math.min(1, usedTokens / Math.max(1, contextWindow)),
+              isRealUsage: true,
+            };
           },
           onApprovalRequest: (ask) => {
             const request: PermissionRequest = {
@@ -10200,7 +10211,7 @@ export class CoworkRunner extends EventEmitter {
 
   private getMessageById(sessionId: string, messageId: string): CoworkMessage | undefined {
     const session = this.store.getSession(sessionId);
-    return session?.messages.find((message) => message.id === messageId);
+    return session?.messages?.find((message) => message.id === messageId);
   }
 
   private updateMessageMerged(

@@ -118,7 +118,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
   }
 
-  async idbotsEnsureSession({ sessionId, provider, model, maxTokens }) {
+  async idbotsEnsureSession(hostParams) {
+    const { sessionId, provider, model, maxTokens } = hostParams ?? {}
     const id = String(sessionId ?? '')
     if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
     if (this.idbotsAgents.has(id)) return { ensured: true, resumed: false }
@@ -141,6 +142,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       handle = await this.ctx.agents.create({ sessionId: id, meta: { cwd: this.cwd }, agentOptions })
       resumed = false
     }
+    // Per-session surface: prompt sections and host tools registered on the
+    // agent's scoped context (shadowing globals, unwound on disposal).
+    this.idbotsRegisterSections(hostParams.sections, handle.agent?.ctx)
+    this.idbotsRegisterHostTools(hostParams.hostTools, handle.agent?.ctx)
     // Register with the stock server's bookkeeping (private at the type level,
     // present at runtime) so its lazy session/prompt create reuses this agent
     // instead of colliding on the registry id.
@@ -214,12 +219,10 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // idbots/tool/respond back, idbots/tool/cancelled when the turn aborts
   // mid-call (the tool MUST settle on abort; that contract is enforced here).
 
-  idbotsRegisterHostTools(tools) {
-    // Arrow-bound so the proxy's execute() reaches the server's transport and
-    // pending map (method shorthand would rebind `this` to the proxy object).
+  /** Build one host-bridged tool proxy (shared by global and agent-scoped registration). */
+  idbotsMakeHostTool(definition) {
     const server = this
-    for (const definition of tools ?? []) {
-      const proxy = {
+    return {
         name: definition.name,
         description: definition.description,
         parameters: definition.parameters,
@@ -227,28 +230,50 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
           schema: { type: 'object', additionalProperties: true },
           render: (args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }],
         },
-        execute: async (args, exec) => {
-          const id = `tool-${Date.now().toString(36)}-${++server.idbotsToolSeq}`
-          const pending = new Promise((resolve, reject) => {
-            server.idbotsToolPending.set(id, { resolve, reject })
-          })
-          server.idbotsTransport.notify('idbots/tool/request', {
-            id,
-            sessionId: String(exec.agent?.id ?? ''),
-            name: definition.name,
-            arguments: args,
-          })
-          exec.signal?.addEventListener('abort', () => {
-            const entry = server.idbotsToolPending.get(id)
-            if (entry === undefined) return
-            server.idbotsToolPending.delete(id)
-            entry.reject(new Error('host tool call aborted'))
-            server.idbotsTransport.notify('idbots/tool/cancelled', { id })
-          }, { once: true })
-          return pending // { text } on success; throws on host error/abort
-        },
-      }
-      this.ctx.tools.register(proxy)
+      execute: async (args, exec) => {
+        const id = `tool-${Date.now().toString(36)}-${++server.idbotsToolSeq}`
+        const pending = new Promise((resolve, reject) => {
+          server.idbotsToolPending.set(id, { resolve, reject })
+        })
+        server.idbotsTransport.notify('idbots/tool/request', {
+          id,
+          sessionId: String(exec.agent?.id ?? ''),
+          name: definition.name,
+          arguments: args,
+        })
+        exec.signal?.addEventListener('abort', () => {
+          const entry = server.idbotsToolPending.get(id)
+          if (entry === undefined) return
+          server.idbotsToolPending.delete(id)
+          entry.reject(new Error('host tool call aborted'))
+          server.idbotsTransport.notify('idbots/tool/cancelled', { id })
+        }, { once: true })
+        return pending // { text } on success; throws on host error/abort
+      },
+    }
+  }
+
+  idbotsRegisterHostTools(tools, scopeCtx) {
+    for (const definition of tools ?? []) {
+      (scopeCtx ?? this.ctx).tools.register(this.idbotsMakeHostTool(definition))
+    }
+  }
+
+  /**
+   * Agent-scoped prompt sections: DSH systemPrompt sections registered on the
+   * agent's own context SHADOW same-named global sections for that agent
+   * alone — per-session prompts ride here instead of the runtime config, so
+   * differing system prompts never restart the runtime.
+   */
+  idbotsRegisterSections(sections, scopeCtx) {
+    const systemPrompt = (scopeCtx ?? this.ctx).get('systemPrompt')
+    if (!systemPrompt) return
+    for (const section of sections ?? []) {
+      systemPrompt.section({
+        name: section.name,
+        order: Number.isFinite(section.order) ? section.order : 0,
+        text: section.text,
+      })
     }
   }
 
