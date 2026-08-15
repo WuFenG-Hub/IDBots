@@ -50,6 +50,10 @@ export interface DshTurnCallbacks {
 export interface DshTurnInput {
   /** Cowork session id (store key). */
   sessionId: string
+  /** Host-bridged tool schemas to expose to the model this turn. */
+  hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+  /** Workspace mount for DSH-native bash/fs tools. */
+  workspace?: { cwd: string }
   /** DSH session id (without the dsh: prefix). */
   dshSessionId: string
   provider: DshTurnProviderRoute
@@ -99,6 +103,8 @@ export interface DshHubOptions {
   runtimeDir?: string
   /** Session-root directory under userData (versioned per format). */
   sessionRoot: string
+  /** Execute a host-bridged tool call; resolves {ok,text} or rejects. */
+  executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -111,6 +117,8 @@ export class DshTurnHub {
   private controllersByDsh = new Map<string, DshTurnController>()
   /** cowork session id → DSH session id (steer/cancel look up by cowork id). */
   private dshByCowork = new Map<string, string>()
+  /** Reverse mapping for tool-request routing. */
+  private coworkByDsh = new Map<string, string>()
   private readonly opts: DshHubOptions
 
   constructor(opts: DshHubOptions) {
@@ -125,6 +133,7 @@ export class DshTurnHub {
     // turn that never settled) must not swallow events.
     this.controllersByDsh.set(input.dshSessionId, controller)
     this.dshByCowork.set(input.sessionId, input.dshSessionId)
+    this.coworkByDsh.set(input.dshSessionId, input.sessionId)
 
     try {
       await kernel.ensureSession({
@@ -138,6 +147,7 @@ export class DshTurnHub {
     } finally {
       this.controllersByDsh.delete(input.dshSessionId)
       this.dshByCowork.delete(input.sessionId)
+      this.coworkByDsh.delete(input.dshSessionId)
     }
   }
 
@@ -182,6 +192,8 @@ export class DshTurnHub {
       sessionRoot: this.opts.sessionRoot,
       providers: [providerRouteOf(input.provider)],
       sections: input.sections,
+      hostTools: input.hostTools,
+      workspace: input.workspace,
       extraEntries: this.opts.extraEntries,
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —
@@ -228,6 +240,14 @@ export class DshTurnHub {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
       },
       onError: (error) => this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message }),
+      onToolRequest: (request) => {
+        // Map the DSH session id back to the cowork id for the executor.
+        const coworkId = this.coworkByDsh.get(request.sessionId)
+        if (!coworkId || !this.opts.executeTool) return
+        void this.opts.executeTool(coworkId, request.name, request.arguments ?? {})
+          .then((result) => this.kernel?.respondTool(request.id, result))
+          .catch((error) => this.kernel?.respondTool(request.id, { ok: false, error: error instanceof Error ? error.message : String(error) }))
+      },
     }
   }
 }

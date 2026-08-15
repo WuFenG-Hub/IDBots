@@ -1557,6 +1557,8 @@ export class CoworkRunner extends EventEmitter {
   private dshActiveTurns = new Set<string>();
   /** Test seam: extra runtime composition entries (fixture tools). */
   dshRuntimeExtraEntries?: Array<Record<string, unknown>>;
+  /** name → { parameters, execute } for the current DSH turn's host tools. */
+  private dshHostToolRegistry: Map<string, { name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
   private turnMemoryQueue: QueuedTurnMemoryUpdate[] = [];
@@ -5626,6 +5628,7 @@ export class CoworkRunner extends EventEmitter {
       this.dshTurnHub = new DshTurnHub({
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
+        executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -5678,10 +5681,14 @@ export class CoworkRunner extends EventEmitter {
     };
 
     try {
+      const hostTools = this.buildDshHostTools(sessionId)
+      this.dshHostToolRegistry = new Map(hostTools.map((tool) => [tool.name, tool]))
       const outcome = await hub.runTurn({
         sessionId,
         dshSessionId,
         prompt,
+        hostTools,
+        workspace: { cwd },
         sections: [{ name: 'idbots:base', order: 0, text: systemPrompt }],
         provider: {
           key: route.provider,
@@ -5768,6 +5775,63 @@ export class CoworkRunner extends EventEmitter {
       this.clearPendingPermissions(sessionId);
       this.removeActiveSession(sessionId, activeSession);
       this.dshActiveTurns.delete(sessionId);
+    }
+  }
+
+  /**
+   * Host-bridged tool surface for DSH turns: the same minimal-shape factory
+   * modules the Claude path mounts, built with a passthrough factory — schemas
+   * travel to the runtime, execution round-trips back here.
+   */
+  private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
+    const passthrough = (
+      name: string,
+      description: string,
+      parameters: Record<string, unknown>,
+      execute: (args: any) => Promise<unknown>
+    ) => ({ name, description, parameters, execute })
+    const tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> = []
+    const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser'
+    const isTwin = this.isTwinSession(sessionId)
+    const typed = (values: unknown[]) => tools.push(...(values as Array<typeof tools[number]>))
+    if (this.metaIdSearch) {
+      typed(buildMetaIdSearchAgentTools({ tool: passthrough as any, metaIdSearch: this.metaIdSearch, openBestMatchInBrowser: isBrowserSession }))
+    }
+    if (this.socialRecall) {
+      typed(buildSocialRecallAgentTools({ tool: passthrough as any, socialRecall: this.socialRecall, openBestMatchInBrowser: isBrowserSession }))
+    }
+    if (this.projects) {
+      typed(buildProjectsAgentTools({ tool: passthrough as any, control: this.projects }))
+    }
+    if (this.controlBotBrowser) {
+      typed(buildBotBrowserScreenshotTool({ tool: passthrough as any, controlBotBrowser: this.controlBotBrowser, sessionId }))
+    }
+    if (isTwin && this.metabotManage) {
+      typed(buildMetabotManageAgentTools({ tool: passthrough as any, control: this.metabotManage }))
+    }
+    return tools
+  }
+
+  /** Execute a host-bridged tool call from the runtime. */
+  private async executeDshHostTool(
+    coworkSessionId: string,
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+    const tool = this.dshHostToolRegistry.get(name)
+    if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
+    try {
+      const result = await tool.execute(args)
+      // Minimal-shape handlers return { content: [{type:'text',text}], isError? }.
+      const blocks = (result as any)?.content
+      if (Array.isArray(blocks)) {
+        const text = blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
+        if ((result as any)?.isError) return { ok: false, error: text || 'tool error' }
+        return { ok: true, text }
+      }
+      return { ok: true, text: JSON.stringify(result ?? null) }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
 

@@ -160,6 +160,12 @@ export class DshKernel {
     return this.client.request('idbots/approval/respond', { id, outcome })
   }
 
+  /** Answer a host tool bridge call. */
+  async respondTool(id: string, result: { ok: true; text: string } | { ok: false; error: string }): Promise<{ answered: boolean }> {
+    this.requireClient()
+    return this.client.request('idbots/tool/respond', { id, ...result })
+  }
+
   /** Latest usage snapshot for a session (getContextUsage equivalent). */
   usage(sessionId: string) {
     return this.mappers.get(sessionId)?.usage() ?? null
@@ -208,6 +214,8 @@ export class DshKernel {
           this.opts.handlers.onApprovalRequest(params.sessionId, params as DshApprovalAsk)
         } else if (method === 'idbots/approval/cancelled') {
           this.opts.handlers.onApprovalCancelled(params.id)
+        } else if (method === 'idbots/tool/request') {
+          this.opts.handlers.onToolRequest?.(params)
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }

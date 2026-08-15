@@ -19,6 +19,8 @@
 //   }],
 //   sections: [{ name, order, text }], // stable prompt layers (promptComposer)
 //   shaping?: { maxChars?, tailChars? },
+//   hostTools?: [{ name, description, parameters }], // proxies bridged to the host
+//   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
 //
@@ -103,7 +105,23 @@ export function generateRuntimeConfig(input) {
       name: '@deepseek-ai/dsh-llm-pi-ai',
       config: { providers: routes },
     },
-    { id: 'idbots-sdk-server', name: plugin('idbots-sdk-server.mjs') },
+    {
+      id: 'idbots-sdk-server',
+      name: plugin('idbots-sdk-server.mjs'),
+      ...(input.hostTools ? { config: { tools: input.hostTools } } : {}),
+    },
+    ...(input.workspace ? [
+      { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
+      {
+        id: 'bash',
+        name: '@deepseek-ai/dsh-bash-local',
+        config: { cwd: input.workspace.cwd, timeoutMs: 60000 },
+      },
+      { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace.cwd } },
+      { id: 'fs-observation-policy', name: '@deepseek-ai/dsh-fs-observation-policy' },
+      { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
+      { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+    ] : []),
     ...(input.extraEntries ?? []),
   ]
 }

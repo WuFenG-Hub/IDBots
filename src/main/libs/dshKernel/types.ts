@@ -67,9 +67,18 @@ export interface DshRuntimeConfigInput {
   providers: DshProviderRoute[]
   sections: DshPromptSectionInput[]
   shaping?: { maxChars?: number; tailChars?: number }
+  hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
+  workspace?: { cwd: string }
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>
+}
+
+export interface DshHostToolRequest {
+  id: string
+  sessionId: string
+  name: string
+  arguments: Record<string, unknown>
 }
 
 export interface DshApprovalAsk {
@@ -89,6 +98,7 @@ export interface DshKernelHandlers {
   onUsage: (sessionId: string, usage: DshUsageSnapshot) => void
   onApprovalRequest: (sessionId: string, ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
+  onToolRequest: (request: DshHostToolRequest) => void
   onStatus?: (sessionId: string, status: 'idle' | 'running') => void
   onError?: (error: Error) => void
 }

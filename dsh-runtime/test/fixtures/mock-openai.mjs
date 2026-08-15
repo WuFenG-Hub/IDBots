@@ -19,7 +19,10 @@ export function startMockServer(port = 48787) {
       seen.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '(none)', body: parsed, finished: false })
       const record = seen[seen.length - 1]
       res.on('finish', () => { record.finished = true })
-      const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')
+      // Skip plugin runtime-context snapshots (they can land before OR after
+      // the real prompt depending on the create path) — markers key on the
+      // actual human input only.
+      const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user' && !String(m.content).startsWith('Current runtime context.'))
       const lastUserText = typeof lastUser?.content === 'string' ? lastUser.content : ''
       // A tool result rides as role 'tool'; only the FIRST request of a
       // CALL_BIG_TOOL turn asks for the tool — afterwards answer in plain text
@@ -48,9 +51,10 @@ export function startMockServer(port = 48787) {
       const toolCallFor = lastUserText.includes('CALL_BIG_TOOL') ? 'big_output_tool'
         : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
         : lastUserText.includes('STEER_TEST') ? 'slow_tool'
+        : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : null
       if (toolCallFor !== null && !alreadyHasToolResult) {
-        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : { note: 'please dump the big blob' })
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : { note: 'please dump the big blob' })
         frame({
           ...base,
           choices: [{
