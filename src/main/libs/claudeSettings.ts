@@ -524,6 +524,9 @@ export function resolveDshProviderRoute(modelId?: string | null): DshProviderRou
  * cowork defaults; default off.
  */
 export function isDshKernelEnabled(): boolean {
+  // Env override wins so a DSH-kernel dev/test instance can be launched with
+  // one command (electron:dev:dsh) without touching persisted config.
+  if (process.env.IDBOTS_DSH_KERNEL === '1') return true;
   const sqliteStore = getStore();
   return sqliteStore?.get<AppConfig>('app_config')?.dshKernelEnabled === true;
 }
