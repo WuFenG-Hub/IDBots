@@ -5044,11 +5044,12 @@ const getCoworkRunner = () => {
           return uploadMetaFile(getMetabotStore(), params);
         },
       },
-      // Twin-only metabot_manage tools (metabot_list/create/update/delete).
-      // Every method delegates to the shared metabotManageService core — the
-      // same code the manual UI IPC handlers call — so Twin-assisted bot
-      // management is identical to hand-editing. Registered only for Twin
-      // sessions via the isTwinSession gate inside coworkRunner.
+      // metabot_manage tools (metabot_list/create/update/delete). Every method
+      // delegates to the shared metabotManageService core — the same code the
+      // manual UI IPC handlers call — so bot-assisted bot management is
+      // identical to hand-editing. Registered inside coworkRunner for Twin
+      // sessions (full suite) and Welcome Bot sessions during initial setup
+      // (list/create only, so it can create the user's first Twin Bot).
       metabotManage: {
         create: (input) => createMetaBotOnChainCore(input, getMetabotManageDeps()),
         update: (id, input) => updateMetaBotCore(id, input, getMetabotManageDeps()),

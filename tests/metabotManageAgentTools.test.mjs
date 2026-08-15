@@ -13,7 +13,7 @@ const {
  * The mock `tool` factory captures each tool's handler so tests can invoke it
  * directly and assert on the returned text content.
  */
-function makeHarness(controlOverrides = {}) {
+function makeHarness(controlOverrides = {}, options = {}) {
   const calls = { create: [], update: [], delete: [], list: 0, listProviders: 0 };
   const control = {
     create: async (input) => {
@@ -80,6 +80,7 @@ function makeHarness(controlOverrides = {}) {
   const tools = buildMetabotManageAgentTools({
     tool: (name, description, schema, handler) => ({ name, description, handler }),
     control,
+    ...(options.viewer ? { viewer: options.viewer } : {}),
   });
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
   return { calls, byName };
@@ -179,6 +180,55 @@ test('metabot_create: core failure is an error result', async () => {
   const res = await byName.metabot_create.handler({ name: 'X', llm_id: 'openai' });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /boom/);
+});
+
+// ---------------------------------------------------------------------------
+// welcome viewer (initial-setup Welcome Bot suite)
+// ---------------------------------------------------------------------------
+
+test('welcome viewer: builds only list + create (update/delete stay Twin-only)', () => {
+  const { byName } = makeHarness({}, { viewer: 'welcome' });
+  assert.ok(byName.metabot_list, 'metabot_list tool must exist');
+  assert.ok(byName.metabot_create, 'metabot_create tool must exist');
+  assert.equal(byName.metabot_update, undefined, 'metabot_update must NOT be exposed to the Welcome Bot');
+  assert.equal(byName.metabot_delete, undefined, 'metabot_delete must NOT be exposed to the Welcome Bot');
+});
+
+test('welcome viewer: create with no Twin on the machine creates the first Twin', async () => {
+  const { byName, calls } = makeHarness({
+    listResult: [],
+    createResult: {
+      success: true,
+      metabot: { id: 7, name: 'Twi', metabot_type: 'twin', llm_id: 'metaid-free', globalmetaid: 'g-7' },
+    },
+  }, { viewer: 'welcome' });
+  const res = await byName.metabot_create.handler({ name: 'Twi', llm_id: 'metaid-free' });
+  assert.equal(res.isError, undefined);
+  assert.equal(calls.create[0].metabot_type, 'twin');
+  const text = textOf(res);
+  assert.match(text, /type=twin/);
+  assert.match(text, /first Twin Bot is ready/);
+});
+
+test('welcome viewer: create after a Twin exists stays a Worker', async () => {
+  // Default listResult contains Alice (type: 'twin').
+  const { byName, calls } = makeHarness({}, { viewer: 'welcome' });
+  const res = await byName.metabot_create.handler({ name: 'Bob', llm_id: 'deepseek' });
+  assert.equal(res.isError, undefined);
+  assert.equal(calls.create[0].metabot_type, 'worker');
+});
+
+test('welcome viewer: name and llm_id guards still apply', async () => {
+  const { byName } = makeHarness({ listResult: [] }, { viewer: 'welcome' });
+  const res = await byName.metabot_create.handler({ name: '', llm_id: 'metaid-free' });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /non-empty `name`/);
+});
+
+test('twin viewer (default): create passes no metabot_type (core defaults to Worker)', async () => {
+  const { byName, calls } = makeHarness();
+  await byName.metabot_create.handler({ name: 'Bob', llm_id: 'deepseek' });
+  assert.equal('metabot_type' in calls.create[0], false);
 });
 
 // ---------------------------------------------------------------------------

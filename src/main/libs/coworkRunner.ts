@@ -5330,12 +5330,20 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
-  private isTwinSession(sessionId: string): boolean {
+  private isMetabotTypeSession(sessionId: string, metabotType: 'twin' | 'welcome'): boolean {
     if (!this.getMetabotById) return false;
     const metabotId = this.store.getSession(sessionId)?.metabotId;
     if (!Number.isInteger(metabotId) || Number(metabotId) <= 0) return false;
     const metabot = this.getMetabotById(Number(metabotId));
-    return metabot?.enabled !== false && metabot?.metabot_type === 'twin';
+    return metabot?.enabled !== false && metabot?.metabot_type === metabotType;
+  }
+
+  private isTwinSession(sessionId: string): boolean {
+    return this.isMetabotTypeSession(sessionId, 'twin');
+  }
+
+  private isWelcomeSession(sessionId: string): boolean {
+    return this.isMetabotTypeSession(sessionId, 'welcome');
   }
 
   private async handleHostToolExecution(payload: Record<string, unknown>, sessionId: string): Promise<{ success: boolean; text: string }> {
@@ -6853,16 +6861,21 @@ export class CoworkRunner extends EventEmitter {
           })
         );
       }
-      // MetaBot management (list/create/update/delete) is registered ONLY for
-      // Twin sessions: the Twin acts as the user's operator over the local bot
-      // roster. Every tool delegates to services/metabotManageService.ts — the
-      // same code the manual UI IPC handlers call — so Twin-assisted management
-      // is identical to hand-editing. Worker bots never see these tools.
-      if (this.metabotManage && this.isTwinSession(sessionId)) {
+      // MetaBot management tools are registered for Twin sessions (full
+      // list/create/update/delete suite — the Twin acts as the user's operator
+      // over the local bot roster) and for the built-in Welcome Bot's sessions
+      // during initial setup (reduced list/create suite so it can create the
+      // user's first Twin Bot on request). Every tool delegates to
+      // services/metabotManageService.ts — the same code the manual UI IPC
+      // handlers call — so bot-assisted management is identical to
+      // hand-editing. Worker bots never see these tools.
+      const welcomeSession = this.isWelcomeSession(sessionId);
+      if (this.metabotManage && (this.isTwinSession(sessionId) || welcomeSession)) {
         memoryTools.push(
           ...buildMetabotManageAgentTools({
             tool,
             control: this.metabotManage,
+            viewer: welcomeSession ? 'welcome' : 'twin',
           })
         );
       }
