@@ -2,7 +2,12 @@
 // alive. Spawned and supervised by the Electron main process; stdin/stdout
 // belong to the JSON-RPC protocol owned by idbots-sdk-server.
 //
-// Usage: node bin.mjs <path-to-cordis.yml>
+// Usage: node bin.mjs <path-to-cordis.yml|json>
+//
+// The config path may live anywhere (the app writes generated configs into
+// userData): bare package names resolve against THIS directory's node_modules
+// via bareModuleBaseUrl, and generated configs reference our plugins by
+// absolute path.
 
 import path from 'node:path'
 import { boot } from '@deepseek-ai/dsh-app-boot'
@@ -13,7 +18,8 @@ if (!configPath) {
   process.exit(2)
 }
 
-const ctx = await boot('idbots-dsh-runtime', path.resolve(configPath))
+const moduleBase = new URL('.', import.meta.url)
+const ctx = await boot('idbots-dsh-runtime', path.resolve(configPath), undefined, undefined, moduleBase)
 process.stderr.write(`[idbots-dsh-runtime] booted ${path.resolve(configPath)}\n`)
 
 const keepalive = setInterval(() => {}, 1 << 30)

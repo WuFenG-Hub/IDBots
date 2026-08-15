@@ -24,10 +24,28 @@ see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
   session feed), fail-closed semantics, and the scope-filtered `approval/request`
   answerer waterfall. Our server plugin registers the (global) answerer that bridges
   asks to the wire. We wrote zero approval logic.
+- `plugins/idbots-prompt-sections.mjs` (M3) — config-driven stable prompt layers on
+  `ctx.systemPrompt.section` (the app's promptComposer section list passes through
+  verbatim; volatile per-turn context stays on the user-message path as today)
+- `plugins/idbots-tool-result-shaping.mjs` (M3) — bounds oversized tool results at
+  commit time via `tools/post-execute` (head+tail + marker). This replaces the
+  OpenAICompatProxy's per-session tool_result trimming with an architectural
+  correction: DSH deep-freezes loop-built requests (`llm/stream` listeners read,
+  never rewrite — the request must stay a pure function of the session log), so
+  shaping happens where the result is produced, keeping log and model view consistent.
+- `lib/generate-runtime-config.mjs` (M3) — provider table → bootable JSON composition.
+  All providers ride one `dsh-llm-pi-ai` entry; pi-ai covers all three IDBots
+  apiFormats (`openai`→`openai-completions`, `responses`→`openai-responses`,
+  `anthropic`→`anthropic-messages`), resolving the Phase 0 Responses-API question.
+  Plugin paths are absolute and the bin passes `bareModuleBaseUrl`, so the generated
+  config is location-independent (the app writes it into userData).
 - `cordis.test.yml` — M1/M2 test composition (core services, JSONL persistence,
   user-approval, fake LLM fixture, fixture tools, our server)
 - `test/wire-extension.test.mjs` — steer/cancel wire test (8 checks)
 - `test/approval-channel.test.mjs` — approval round-trip wire test (12 checks)
+- `test/m3-config.test.mjs` — generated-config E2E against a mock OpenAI gateway:
+  sections in the system prompt, real pi-ai tool round trip, shaping bounds the
+  60k blob before history (12 checks)
 
 ## Notes for later milestones
 
@@ -52,5 +70,5 @@ directory ships inside the app bundle.
 
 ```bash
 npm install
-npm test          # 20 checks: steer/cancel wire (8) + approval channel (12)
+npm test          # 32 checks: steer/cancel (8) + approval (12) + generated config E2E (12)
 ```

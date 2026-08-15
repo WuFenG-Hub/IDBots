@@ -83,9 +83,14 @@ buzz journal entry. Phase 0 leftovers (report §4) are folded in.
   `idbots/approval/request` notification → Electron permission dialog →
   `idbots/approval/respond`; `idbots/approval/cancelled` dismisses the dialog when the
   turn aborts. Porting the app-side `enforceToolSafetyPolicy` flow rides M4's adapter.
-- **M3 — Provider mapping + prompt sections**: provider table → generated adapter config;
-  `promptComposer` named sections → `idbots-prompt-sections`; `agent/pre-step` plugin for
-  per-session `tool_result` trimming (replaces the `/s/<sessionId>` proxy route for DSH sessions).
+- **M3 — Provider mapping + prompt sections** ✅ (delivered): `lib/generate-runtime-config.mjs`
+  maps the provider table onto one `dsh-llm-pi-ai` entry covering all three IDBots apiFormats
+  (openai-completions / openai-responses / anthropic-messages — the Phase 0 Responses-API
+  question is resolved); `promptComposer` sections ride `idbots-prompt-sections` verbatim.
+  Architectural correction on trimming: DSH deep-freezes loop-built requests (request-time
+  rewrite is forbidden by the reconstructability invariant), so per-session `tool_result`
+  trimming became commit-time shaping in `idbots-tool-result-shaping` (`tools/post-execute`)
+  — log and model view stay consistent by construction.
 - **M4 — `KernelAdapter` + coworkRunner integration**: adapter interface extraction, DSH
   implementation, session-event → `CoworkMessage` mapping, context usage from
   `request/header`, subagent transcript feasibility (list/read parity check), resume of
