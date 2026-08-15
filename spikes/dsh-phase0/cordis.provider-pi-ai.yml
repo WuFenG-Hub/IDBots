@@ -1,0 +1,49 @@
+# IDBots DSH Phase 0 spike: provider routing through dsh-llm-pi-ai with a
+# hand-declared `openai-completions` route pointing at the local mock gateway.
+# This is the exact shape IDBots would generate for any third-party
+# OpenAI-compatible provider configured in its SQLite provider table.
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session'
+
+- id: tools
+  name: '@deepseek-ai/dsh-tools'
+
+- id: llm
+  name: '@deepseek-ai/dsh-llm'
+
+- id: system-prompt
+  name: '@deepseek-ai/dsh-system-prompt'
+
+- id: agent
+  name: '@deepseek-ai/dsh-agent'
+
+- id: agent-loop
+  name: '@deepseek-ai/dsh-agent-loop'
+
+- id: token-meter
+  name: '@deepseek-ai/dsh-token-meter'
+
+- id: persistence
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: './.spike-sessions'
+    compression: 'none'
+
+- id: checkpoint-policy
+  name: '@deepseek-ai/dsh-session-checkpoint-policy'
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      mock-gw:
+        displayName: Mock Gateway
+        apiKeyEnv: MOCK_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:48787/v1
+        models:
+          - id: mock-1
+            name: Mock Model 1
+            contextWindow: 32768
+            maxTokens: 4096
