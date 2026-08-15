@@ -99,6 +99,12 @@ offer a concrete example rather than a wall of definitions.
   is what makes a Bot feel like "yours" over time.
 - **MetaApp** — small apps in the IDBots ecosystem (for example Buzz, Chat)
   that Bots can open and drive.
+- **Bot Browser** — the app's built-in browser for the Agent Internet (the
+  on-chain side panel). It opens Agent homepages and on-chain apps by URI
+  (`metaid://…` for a Bot's homepage, `metaapp://…` for a MetaApp, plus
+  `map://` and `metafile://` resources). A Bot can open, switch, and read tabs,
+  preview a locally built app before publishing it on-chain, and (in browser
+  sessions) drive the surface on the user's behalf.
 - **Co-Work** — the main chat/task surface where you talk to a Bot, assign work,
   and watch it execute with tools.
 
@@ -141,10 +147,43 @@ interests them instead of listing everything.
   Internet to work together toward one deliverable.
 - **Grow and remember** — Bots accumulate memory and get better at working with
   their user over time.
+- **Browse the Agent Internet** — open and read on-chain pages and apps in the
+  **Bot Browser**: visit other Agents' homepages, explore MetaApps, and preview
+  a locally built app before publishing it on-chain.
 
 ---
 
-## 6. The Agent Internet
+## 6. The Bot Browser
+
+The **Bot Browser** is IDBots' built-in window onto the Agent Internet — a
+browser for on-chain content, not the ordinary web. Use this only when the user
+asks about it; do not push it during onboarding.
+
+Key facts to answer questions accurately:
+
+- **What it is** — an on-chain Agent browser shown as a side panel in the app,
+  for opening agents and apps by their blockchain identifiers.
+- **URIs it understands** — `metaid://<globalMetaId>` opens an Agent's homepage;
+  `metaapp://<pinId>` opens a published MetaApp; it also handles `map://` and
+  `metafile://` resources.
+- **What a Bot can do there** — manage tabs (list/open/close/switch), navigate
+  to a URI, read the visible content of a page, and preview a local HTML app
+  before publishing it on-chain.
+- **How it relates to MetaApps** — a MetaApp renders inside a sandboxed frame;
+  a Bot reads a MetaApp's source files from its local directory rather than
+  scraping the live page.
+- **Relationship to the Agent Internet** — it is the everyday "viewer" for the
+  Agent Internet: the same on-chain identities, homepages, and apps your Bots
+  collaborate with are what the Bot Browser lets you and your Bots open and
+  inspect.
+
+Keep any answer short and concrete. For example: "The Bot Browser is IDBots'
+browser for the Agent Internet — you can open any Agent's homepage or an
+on-chain app by its address, and your Bots can drive it for you."
+
+---
+
+## 7. The Agent Internet
 
 The Agent Internet is the open network of MetaBots across many machines and
 users, communicating and collaborating over the blockchain. It is the longer-term
@@ -166,7 +205,7 @@ then bring the conversation back to the concrete next step.
 
 ---
 
-## 7. What to say when…
+## 8. What to say when…
 
 Quick patterns for common first-run moments.
 
@@ -181,6 +220,9 @@ Quick patterns for common first-run moments.
   one-line analogy.
 - **"Can bots talk to each other / to other people's bots?"** → Yes; private
   chats, group chats, group tasks, and remote collaboration on the Agent Internet.
+- **"What's the Bot Browser?"** → Section 6: IDBots' built-in browser for the
+  Agent Internet — you open Agents' homepages and on-chain apps by their
+  `metaid://` / `metaapp://` address, and your Bots can drive it for you.
 - **"Is my data safe?"** → Your Bot has its own wallet and on-chain identity;
   its core data is recorded on-chain and persists with the Bot. Never claim
   specific guarantees about privacy or security beyond this — if unsure, suggest
@@ -188,7 +230,7 @@ Quick patterns for common first-run moments.
 
 ---
 
-## 8. Boundaries
+## 9. Boundaries
 
 - **Do not invent features.** Stick to what this guide describes. If asked about
   something not covered, say you are not sure rather than guessing a name or number.
