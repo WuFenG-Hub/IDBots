@@ -688,7 +688,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             )}
             {detail.acceptanceSummary && (
               <div className="mt-2">
-                <AcceptanceSummaryCard summary={detail.acceptanceSummary} title={detail.title} />
+                <AcceptanceSummaryCard summary={detail.acceptanceSummary} />
               </div>
             )}
             {detail.acceptanceCriteria && (
@@ -788,7 +788,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   message={message}
                   isChairSender={Boolean(
                     chairMember?.globalmetaid
-                    && message.senderGlobalMetaId === chairMember.globalMetaid,
+                    && message.senderGlobalMetaId === chairMember.globalmetaid,
                   )}
                   isOwnerSender={Boolean(
                     ownerGlobalMetaId && message.senderGlobalMetaId === ownerGlobalMetaId,

@@ -16,9 +16,8 @@ import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
  * metaweb URIs clickable everywhere is R3 (P1). The card is read-only: the
  * owner accepts/reworks via the header buttons, not from this card.
  */
-const AcceptanceSummaryCard: React.FC<{ summary: GroupTaskAcceptanceSummary; title: string }> = ({
+const AcceptanceSummaryCard: React.FC<{ summary: GroupTaskAcceptanceSummary }> = ({
   summary,
-  title,
 }) => {
   return (
     <div className="rounded-xl border border-emerald-300/60 dark:border-emerald-500/30 bg-emerald-50/60 dark:bg-emerald-900/10 p-3 mb-3">
