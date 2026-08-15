@@ -193,6 +193,15 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     await turn3
     await waitFor(() => events.messages.some((m) => m.type === 'tool_result' && m.content.includes('"executed":true')), 25000, 'approved execution')
 
+    // Policy chain: plan mode blocks mutating runtime tools through the host
+    // permission gate (idbots/policy round trip).
+    activeSession.permissionMode = 'plan'
+    const planTurn = runner.runDshSessionLocal(activeSession, 'RUN_BASH', process.cwd(), 'You are Alice.')
+    await planTurn
+    const deniedResult = store.messages.filter((m) => m.type === 'tool_result').at(-1)
+    assert.match(String(deniedResult?.content ?? ''), /plan mode/, 'plan mode denies bash via host policy gate')
+    activeSession.permissionMode = 'default'
+
     // Native cancel: fourth turn aborted mid-tool.
     events.messages.length = 0
     const turn4 = runner.runDshSessionLocal(activeSession, 'STEER_TEST', process.cwd(), 'You are Alice.')

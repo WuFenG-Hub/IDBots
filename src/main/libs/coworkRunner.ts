@@ -5629,6 +5629,7 @@ export class CoworkRunner extends EventEmitter {
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
+        evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -5843,6 +5844,50 @@ export class CoworkRunner extends EventEmitter {
     return this.buildSessionInlineTools(sessionId, passthrough)
   }
 
+  /**
+   * Host permission chain for DSH tool calls — the port of canUseTool's
+   * kernel-specific decisions: plan-mode blocking, delete-class human
+   * confirmation (stays reachable under full trust, matching the Claude
+   * path), and permission-mode/auto-approve allowances. Skill authorization
+   * is prompt-side (skillManager filters available_skills per session) and
+   * carries over through the composed system prompt unchanged.
+   */
+  private async evaluateDshToolPolicy(
+    sessionId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>
+  ): Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }> {
+    const activeSession = this.activeSessions.get(sessionId)
+    const normalized = String(toolName ?? '').toLowerCase()
+    try {
+      if (this.isBlockedBuiltinWebTool(normalized)) {
+        return { decision: 'deny', reason: 'Tool blocked by app policy: WebSearch/WebFetch are disabled in this environment.' }
+      }
+      if (activeSession?.permissionMode === 'plan' && !this.isReadOnlyTool(normalized)) {
+        return {
+          decision: 'deny',
+          reason: `Tool "${toolName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
+        }
+      }
+      if (this.isDeleteOperation(normalized, toolInput)) {
+        const commandPreview = normalized === 'bash'
+          ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
+          : ''
+        const deleteDetail = commandPreview ? ` 命令: ${commandPreview}` : ''
+        return {
+          decision: 'ask',
+          reason: `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
+        }
+      }
+      return { decision: 'allow' }
+    } catch (error) {
+      coworkLog('ERROR', 'evaluateDshToolPolicy', 'policy evaluation failed; failing closed', {
+        sessionId, toolName, error: error instanceof Error ? error.message : String(error),
+      })
+      return { decision: 'deny', reason: 'permission policy evaluation failed' }
+    }
+  }
+
   /** Execute a host-bridged tool call from the runtime. */
   private async executeDshHostTool(
     coworkSessionId: string,
@@ -5851,6 +5896,27 @@ export class CoworkRunner extends EventEmitter {
   ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
     const tool = this.dshHostToolRegistry.get(name)
     if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
+    const policy = await this.evaluateDshToolPolicy(coworkSessionId, name, args)
+    if (policy.decision === 'deny') return { ok: false, error: policy.reason ?? 'denied by permission policy' }
+    if (policy.decision === 'ask') {
+      // Surface the confirmation through the same pendingPermissions dialog
+      // the renderer already knows.
+      const request: PermissionRequest = {
+        requestId: `dsh-policy-${Date.now().toString(36)}`,
+        toolName: name,
+        toolInput: { reason: policy.reason ?? '' },
+      }
+      const approved = await new Promise<boolean>((resolve) => {
+        this.pendingPermissions.set(request.requestId, {
+          sessionId: coworkSessionId,
+          resolve: (result) => resolve(result.behavior === 'allow'),
+        })
+        const activeSession = this.activeSessions.get(coworkSessionId)
+        if (activeSession) activeSession.pendingPermission = request
+        this.emit('permissionRequest', coworkSessionId, request)
+      })
+      if (!approved) return { ok: false, error: 'Delete operation denied by user.' }
+    }
     try {
       const result = await tool.execute(args)
       // Minimal-shape handlers return { content: [{type:'text',text}], isError? }.

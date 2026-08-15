@@ -8,7 +8,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node test/wire-extension.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/llm-retry.test.mjs"
+    "test": "node test/wire-extension.test.mjs && node test/approval-channel.test.mjs && node test/m3-config.test.mjs && node test/host-tool-bridge.test.mjs && node test/llm-retry.test.mjs && node test/policy-bridge.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",

@@ -77,6 +77,16 @@ const main = async () => {
   const watcher = (async () => { for (;;) { const e = await new Promise((r) => { const w = (p) => { if (p?.type) { waiters.delete(w); r(p) } }; waiters.add(w) }); logEvent(e) } })()
   watcher.catch(() => {})
 
+  // Host policy gate: answer allow for every runtime-native tool call.
+  const policyRace = (async () => {
+    for (;;) {
+      try {
+        const request = await waitFor((n) => n.method === 'idbots/policy/request', 60000)
+        await client.request('idbots/policy/respond', { id: request.params.id, decision: 'allow' })
+      } catch { return }
+    }
+  })()
+  policyRace.catch(() => undefined)
   // If the bash policy asks for approval, answer allow automatically.
   const approvalRace = (async () => {
     try {

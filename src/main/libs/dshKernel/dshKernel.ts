@@ -160,6 +160,12 @@ export class DshKernel {
     return this.client.request('idbots/approval/respond', { id, outcome })
   }
 
+  /** Answer a runtime-native tool policy check. */
+  async respondPolicy(id: string, decision: 'allow' | 'deny' | 'ask', reason?: string): Promise<{ answered: boolean }> {
+    this.requireClient()
+    return this.client.request('idbots/policy/respond', { id, decision, reason })
+  }
+
   /** Answer a host tool bridge call. */
   async respondTool(id: string, result: { ok: true; text: string } | { ok: false; error: string }): Promise<{ answered: boolean }> {
     this.requireClient()
@@ -216,6 +222,8 @@ export class DshKernel {
           this.opts.handlers.onApprovalCancelled(params.id)
         } else if (method === 'idbots/tool/request') {
           this.opts.handlers.onToolRequest?.(params)
+        } else if (method === 'idbots/policy/request') {
+          this.opts.handlers.onPolicyRequest?.(params)
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }

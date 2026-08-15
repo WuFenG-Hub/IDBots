@@ -99,6 +99,7 @@ export interface DshKernelHandlers {
   onApprovalRequest: (sessionId: string, ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
   onToolRequest: (request: DshHostToolRequest) => void
+  onPolicyRequest?: (request: { id: string; sessionId: string; name: string; arguments: Record<string, unknown> }) => void
   onStatus?: (sessionId: string, status: 'idle' | 'running') => void
   onError?: (error: Error) => void
 }

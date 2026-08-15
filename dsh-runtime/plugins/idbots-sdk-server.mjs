@@ -49,6 +49,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsApprovalSeq = 0
     this.idbotsToolPending = new Map() // id → { resolve, reject }
     this.idbotsToolSeq = 0
+    this.idbotsPolicyPending = new Map() // id → { resolve }
+    this.idbotsPolicySeq = 0
 
     ctx.on('agent/created', ({ agent }) => {
       this.idbotsAgents.set(String(agent.id), agent)
@@ -75,6 +77,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'session/ensure': return this.idbotsEnsureSession(params)
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
+      case 'idbots/policy/respond': return this.idbotsPolicyRespond(params)
       case 'idbots/ping': {
         return {
           pong: true,
@@ -232,6 +235,52 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
     return { answered: true, id }
   }
+
+  // ---- host policy bridge ----------------------------------------------------
+  //
+  // Runtime-native tools (bash/write/edit…) route their pre-execute decision
+  // through the host's permission chain: idbots/policy/request notification
+  // out, idbots/policy/respond back with allow | deny | ask. 'ask' returns to
+  // the tools pipeline as a normal ask, flowing through user-approval and the
+  // M2 approval bridge into the renderer permission dialog.
+
+  idbotsRegisterPolicyGate(policyTools) {
+    const gated = new Set(policyTools ?? ['bash', 'write', 'edit'])
+    const server = this
+    this.ctx.on('tools/pre-execute', async (exec, next) => {
+      if (!gated.has(exec?.name)) return next()
+      const id = `policy-${Date.now().toString(36)}-${++server.idbotsPolicySeq}`
+      const pending = new Promise((resolve) => {
+        server.idbotsPolicyPending.set(id, { resolve })
+      })
+      server.idbotsTransport.notify('idbots/policy/request', {
+        id,
+        sessionId: String(exec.agent?.id ?? ''),
+        name: exec.name,
+        arguments: exec.arguments,
+      })
+      exec.signal?.addEventListener('abort', () => {
+        const entry = server.idbotsPolicyPending.get(id)
+        if (entry === undefined) return
+        server.idbotsPolicyPending.delete(id)
+        entry.resolve({ decision: 'deny', reason: 'session aborted' })
+      }, { once: true })
+      const decision = await pending
+      if (decision.decision === 'allow') return next()
+      if (decision.decision === 'ask') return { kind: 'ask', reason: decision.reason }
+      return { kind: 'deny', reason: decision.reason ?? 'denied by host policy' }
+    }, { global: true })
+  }
+
+  async idbotsPolicyRespond({ id, decision, reason }) {
+    const entry = this.idbotsPolicyPending.get(String(id))
+    if (entry === undefined) {
+      throw new Error(`idbots-sdk-server: no pending policy decision ${JSON.stringify(id)}`)
+    }
+    this.idbotsPolicyPending.delete(String(id))
+    entry.resolve({ decision: decision === 'allow' || decision === 'ask' ? decision : 'deny', reason })
+    return { answered: true, id }
+  }
 }
 
 export function apply(ctx, config = {}) {
@@ -245,6 +294,7 @@ export function apply(ctx, config = {}) {
     maxTokensAsSuccess: config.maxTokensAsSuccess !== false,
   })
   server.idbotsRegisterHostTools(config.tools)
+  server.idbotsRegisterPolicyGate(config.policyTools)
 
   let exitTask
   const disposeAndExit = () => {

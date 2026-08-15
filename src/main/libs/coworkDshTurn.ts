@@ -105,6 +105,8 @@ export interface DshHubOptions {
   sessionRoot: string
   /** Execute a host-bridged tool call; resolves {ok,text} or rejects. */
   executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /** Host permission chain for runtime-native tools (bash/write/edit…). */
+  evaluatePolicy?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }>
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -240,6 +242,17 @@ export class DshTurnHub {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
       },
       onError: (error) => this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message }),
+      onPolicyRequest: (request) => {
+        const coworkId = this.coworkByDsh.get(request.sessionId)
+        if (!coworkId || !this.opts.evaluatePolicy) {
+          // No host policy: default-allow so ungated deployments keep working.
+          void this.kernel?.respondPolicy(request.id, 'allow')
+          return
+        }
+        void this.opts.evaluatePolicy(coworkId, request.name, request.arguments ?? {})
+          .then((result) => this.kernel?.respondPolicy(request.id, result.decision, result.reason))
+          .catch(() => this.kernel?.respondPolicy(request.id, 'deny', 'policy evaluation failed'))
+      },
       onToolRequest: (request) => {
         // Map the DSH session id back to the cowork id for the executor.
         const coworkId = this.coworkByDsh.get(request.sessionId)
