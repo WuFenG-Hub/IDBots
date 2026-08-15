@@ -5689,7 +5689,13 @@ export class CoworkRunner extends EventEmitter {
         prompt,
         hostTools,
         workspace: { cwd },
-        sections: [{ name: 'idbots:base', order: 0, text: systemPrompt }],
+        sections: [
+          { name: 'idbots:base', order: 0, text: systemPrompt },
+          // The Claude path inherits tool-use discipline from the claude_code
+          // preset; the DSH base prompt has none, and without it the model
+          // chats about tasks instead of acting on them.
+          { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
+        ],
         provider: {
           key: route.provider,
           apiFormat,
@@ -5784,6 +5790,18 @@ export class CoworkRunner extends EventEmitter {
       this.dshActiveTurns.delete(sessionId);
     }
   }
+
+  private static readonly DSH_TOOL_USE_GUIDANCE = [
+    '## Acting with tools (mandatory)',
+    '',
+    'You are an acting agent with real tools wired to this machine. When the user asks you to create, read, or modify files, run commands, search, or otherwise DO something, you MUST use the available tools instead of only describing what you would do.',
+    '',
+    '- Create a file with `write`; inspect it first with `read`; modify it with `edit`.',
+    '- Track multi-step work with `todo_write` as you go.',
+    '- Use the search tools for information you do not have; never invent results.',
+    '- A file or change only exists after the corresponding tool returned success. Never claim work you did not perform.',
+    '- After acting, report the outcome briefly. Pure questions may be answered directly.',
+  ].join('\n');
 
   /**
    * Host-bridged tool surface for DSH turns: the same minimal-shape factory
