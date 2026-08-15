@@ -65,6 +65,10 @@ export class DshKernel {
     // dist-electron/main/libs/dshKernel/. Probe instead of guessing, with
     // app.getAppPath() (project root in dev) first.
     const candidates = [
+      // Packaged builds ship dsh-runtime as an extra resource next to the
+      // asar archive — real files on disk, which the spawned runtime needs
+      // (asar paths would break module resolution inside the child).
+      ...(app.isPackaged ? [join(process.resourcesPath, 'dsh-runtime')] : []),
       join(app.getAppPath(), 'dsh-runtime'),
       join(__dirname, 'dsh-runtime'),
       join(__dirname, '..', 'dsh-runtime'),
