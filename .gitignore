@@ -146,6 +146,7 @@ SKILLs/metaid-master-wiki/
 
 # Local generated skills for development only; never bundled into release.
 .local-skills/
+SKILLs/edge-tts-mf/
 
 # Local MetaApp installs/generated apps (bundled buzz/chat remain tracked)
 METAAPPs/*
