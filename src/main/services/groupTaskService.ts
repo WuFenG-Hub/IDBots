@@ -1435,6 +1435,18 @@ export async function reworkGroupTask(
     actor,
     reason: opts.reason?.trim() || null,
   });
+  // Ledger fix (#14→#16): the chair's reject (rework) is a verdict on the
+  // CURRENT deliverables — pending rows become 'rejected' so the acceptance
+  // history stays traceable in the ledger; a corrected re-delivery re-opens
+  // the row to 'pending' (see the daemon correction path). Best-effort.
+  try {
+    store.updateDeliverablesStatusByTask(taskId, 'pending', 'rejected');
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Deliverable reject backfill failed for task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (orchestrationBridgeGetter) {
     try {
       orchestrationBridgeGetter().syncStatus(taskId);

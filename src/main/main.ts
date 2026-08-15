@@ -3604,6 +3604,13 @@ const startSqliteDaemons = (): void => {
       };
     })(),
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
+    // Ledger fix (#14→#16): local file deliverables are uploaded on-chain as
+    // metafiles paid by the AUTHOR bot's wallet — same metaFileUploadService
+    // seam the OpenTeam guest daemon uses.
+    uploadDeliverableFile: async ({ metabotId, filePath, contentType }) => {
+      const { uploadMetaFile } = await import('./services/metaFileUploadService');
+      return uploadMetaFile(getMetabotStore(), { metabotId, filePath, contentType, network: 'mvc' });
+    },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
     // (idchat online-status API, shared lazy singleton).
     fetchRemotePresence: async (globalMetaIds) => {

@@ -304,3 +304,45 @@ test('P0-8: isIntegrityDeclaration recognizes honest correction language', () =>
   assert.equal(isIntegrityDeclaration('如实说明：该 pinid 未发布成功'), true);
   assert.equal(isIntegrityDeclaration('普通消息没有任何关键词'), false);
 });
+
+// ---------------------------------------------------------------------------
+// Ledger fix (#14→#16): local-file path extraction + segment alignment
+// ---------------------------------------------------------------------------
+
+test('ledger fix: parseDeliverableSegments aligns 1:1 with parseDeliverableLines', () => {
+  const { parseDeliverableLines, parseDeliverableSegments } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  const content = [
+    '① 完成。',
+    `**[DELIVERABLE] metaapp: metaapp://${PIN_A}**`,
+    `**[DELIVERABLE] 视觉规范文档：\`/Users/tusm/work/spec.md\`（含参数表）**`,
+    `**[DELIVERABLE] 架构文档**`,
+    '',
+  ].join('\n');
+  const candidates = parseDeliverableLines(content);
+  const segments = parseDeliverableSegments(content);
+  assert.equal(candidates.length, 3);
+  assert.equal(segments.length, 3);
+  assert.match(segments[0], /metaapp:\/\/[0-9a-f]{64}i0/);
+  assert.match(segments[1], /spec\.md/);
+  assert.match(segments[2], /架构文档/);
+  // A message without the tag yields empty segments.
+  assert.deepEqual(parseDeliverableSegments('no tag here'), []);
+});
+
+test('ledger fix: extractLocalFilePaths returns absolute/~ paths, skips schemes and prose', () => {
+  const { extractLocalFilePaths } = require('../dist-electron/main/services/groupTaskDeliverableParser.js');
+  // Absolute path in backticks with a full-width-paren annotation.
+  assert.deepEqual(
+    extractLocalFilePaths('视觉规范文档：`/Users/tusm/work/电影化视觉规范-v1.md`（含 §7 参数速查表）'),
+    ['/Users/tusm/work/电影化视觉规范-v1.md'],
+  );
+  // Home-relative path.
+  assert.deepEqual(extractLocalFilePaths('数据源：~/projects/film-data.js'), ['~/projects/film-data.js']);
+  // On-chain schemes and protocol routes are never local files.
+  assert.deepEqual(extractLocalFilePaths(`metaapp://${PIN_A} 与 /protocols/simplebuzz 与 https://a.b/c`), []);
+  // A bare filename is not a path.
+  assert.deepEqual(extractLocalFilePaths('文件：index.html'), []);
+  // Multiple distinct paths, deduped, punctuation trimmed.
+  const multi = extractLocalFilePaths('`/a/b/f1.md` 与 `/a/b/f2.md`，以及 /a/b/f1.md');
+  assert.deepEqual(multi, ['/a/b/f1.md', '/a/b/f2.md']);
+});

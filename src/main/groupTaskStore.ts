@@ -1897,6 +1897,27 @@ export class GroupTaskStore {
   }
 
   /**
+   * Ledger fix (#14→#16): bulk acceptance backfill for a task's deliverables.
+   * Only rows currently in `fromStatus` move — a corrected/re-delivered row
+   * keeps its verdict. The chair's reject (rework) marks pending rows
+   * 'rejected' so the verdict is traceable; acceptance later moves the
+   * remaining pending rows 'accepted'. Returns the number of rows updated.
+   */
+  updateDeliverablesStatusByTask(
+    taskId: number,
+    fromStatus: GroupTaskDeliverableStatus,
+    toStatus: GroupTaskDeliverableStatus,
+  ): number {
+    this.db.run(
+      'UPDATE group_task_deliverables SET status = ? WHERE task_id = ? AND status = ?',
+      [toStatus, taskId, fromStatus],
+    );
+    const changes = this.db.getRowsModified?.() ?? 0;
+    this.saveDb();
+    return changes;
+  }
+
+  /**
    * Issue #8: the ledger's on-chain confirmation state, driven by the daemon's
    * multi-source verification (verifyPinSources). 'confirmed' means the
    * deliverable's pin is verifiably present on-chain; it is ORTHOGONAL to

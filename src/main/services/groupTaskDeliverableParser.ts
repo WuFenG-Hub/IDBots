@@ -159,29 +159,105 @@ function parseSegment(segment: string): ParsedDeliverable {
 }
 
 /**
- * Parse a full group message: every [DELIVERABLE] tag line, one candidate per
- * tag occurrence, in document order. Invalid candidates are returned with
- * valid=false so callers can skip them without losing the valid siblings.
+ * Scan a full group message for every [DELIVERABLE] tag occurrence and return
+ * the trimmed segment text AFTER each tag, in document order. One entry per
+ * tag occurrence (a line with two tags yields two entries); empty segments
+ * are skipped. Index-aligned with parseDeliverableLines — candidate[i] is the
+ * parse of segment[i] — so callers can inspect the raw segment of any
+ * candidate (e.g. the daemon's local-file delivery enhancement).
  */
-export function parseDeliverableLines(content: string): ParsedDeliverable[] {
+function scanDeliverableSegments(content: string): string[] {
   const text = String(content ?? '');
   if (!DELIVERABLE_TAG_TEST.test(text)) return [];
-  const results: ParsedDeliverable[] = [];
+  const segments: string[] = [];
   for (const line of text.split('\n')) {
     if (!DELIVERABLE_TAG_TEST.test(line)) continue;
     const parts = line.split(DELIVERABLE_TAG_SPLIT);
     for (const part of parts.slice(1)) {
       const segment = part.trim();
       if (!segment) continue;
-      results.push(parseSegment(segment));
+      segments.push(segment);
     }
   }
-  return results;
+  return segments;
+}
+
+/**
+ * Parse a full group message: every [DELIVERABLE] tag line, one candidate per
+ * tag occurrence, in document order. Invalid candidates are returned with
+ * valid=false so callers can skip them without losing the valid siblings.
+ */
+export function parseDeliverableLines(content: string): ParsedDeliverable[] {
+  return scanDeliverableSegments(content).map(parseSegment);
+}
+
+/**
+ * Raw segment text behind each parsed candidate, index-aligned with
+ * parseDeliverableLines (same document order, same skipping rules). Empty
+ * when the message carries no [DELIVERABLE] tag.
+ */
+export function parseDeliverableSegments(content: string): string[] {
+  return scanDeliverableSegments(content);
 }
 
 /** Text deliverables (valid, uri null) only — helper for callers that skip them. */
 export function isTextDeliverable(candidate: ParsedDeliverable): boolean {
   return candidate.valid && candidate.kind === 'text' && candidate.uri === null;
+}
+
+// ---------------------------------------------------------------------------
+// Local-file delivery enhancement (ledger fix, #14→#16 heritage)
+// ---------------------------------------------------------------------------
+// A worker often delivers a LOCAL file path (e.g. `/Users/me/work/index.html`
+// or `~/notes/spec.md`) instead of an on-chain uri. The daemon upgrades such
+// text deliverables to metafile:// on-chain evidence by uploading the file —
+// this extractor isolates the path tokens so the daemon only has to verify
+// existence and upload. Pure string extraction: no fs, no resolution.
+
+// Full-width parens terminate a path token (a `（…` right after a path is
+// almost always a prose annotation, e.g. `spec.md（含参数速查表）`). The
+// lookbehind excludes anything that is NOT a standalone absolute path: the
+// second slash of `scheme://…` (`/` or `:` before), URL path segments
+// (`https://host/path` — `.` before), and relative tokens (`foo/bar` —
+// word char before).
+const LOCAL_PATH_TOKEN_RE = /(?<![:/.\w])(~\/|\/(?!\/))[^\s"'`<>[\]{}|*（）]+/g;
+/** Paths that are NOT local files: on-chain schemes and protocol routes. */
+const NON_LOCAL_PATH_PREFIXES = [
+  'metaapp:', 'metafile:', 'metaid:', 'http:', 'https:', 'pin:', 'map:',
+  'buzz:', 'nostr:', 'ftp:',
+  '/protocols/', '/api/', '/browser/', '/buzz/', '/metaapp/', '/metaid/',
+];
+/** File tokens without a directory separator are not paths. */
+const HAS_SEPARATOR_RE = /\//;
+
+/** True when the token is a plausible LOCAL file path (absolute or ~/). */
+function looksLikeLocalPath(token: string): boolean {
+  if (NON_LOCAL_PATH_PREFIXES.some((prefix) => token.startsWith(prefix))) return false;
+  if (!HAS_SEPARATOR_RE.test(token)) return false;
+  if (token.endsWith('/') || token.endsWith('\\')) return false;
+  // `foo/bar` relative tokens resolve nowhere without a base — only absolute
+  // or home-relative paths are actionable for the uploader.
+  return token.startsWith('/') || token.startsWith('~/');
+}
+
+/**
+ * Extract local file path candidates from a [DELIVERABLE] segment (absolute
+ * or `~/`-rooted only; scheme URIs, `/protocols/…` routes and API paths are
+ * excluded). Trailing punctuation is trimmed. Existence is NOT checked here —
+ * the caller (daemon) stats the files and uploads the first hit.
+ */
+export function extractLocalFilePaths(text: string): string[] {
+  const content = String(text ?? '');
+  const tokens: string[] = [];
+  const seen = new Set<string>();
+  for (const match of content.matchAll(LOCAL_PATH_TOKEN_RE)) {
+    const token = stripTrailingPunct(match[0]);
+    if (!looksLikeLocalPath(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    tokens.push(token);
+  }
+  return tokens;
 }
 
 // ---------------------------------------------------------------------------
