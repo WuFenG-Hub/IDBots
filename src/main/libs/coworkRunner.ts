@@ -42,6 +42,7 @@ import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage'
 import { buildCoworkCompactedPrompt } from './coworkContextCompaction';
 import { composePromptSections, PROMPT_SECTION_ORDER } from './promptComposer';
 import { buildMetabotPersonaPrompt } from './metabotPersonaPrompt';
+import { readBootstrapDoc } from './welcomeBootstrap';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
@@ -4150,6 +4151,27 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
+   * Host-owned onboarding guide for the built-in Welcome Bot. The guide
+   * (Bootstrap.md) is the Welcome Bot's product knowledge: what IDBots is, its
+   * feature surface, the Twin/Worker model, and how to walk a new user through
+   * creating their first Twin Bot. Injected only for Welcome sessions; every
+   * other bot omits it. Returns '' when the guide is unavailable so the
+   * section is dropped silently.
+   */
+  private buildWelcomeBootstrapPrompt(sessionId: string): string {
+    if (!this.isWelcomeSession(sessionId)) return '';
+    const guide = readBootstrapDoc();
+    if (!guide.trim()) return '';
+    return [
+      '## Welcome Bot — IDBots Onboarding Guide',
+      'You are the built-in Welcome Bot for brand-new IDBots users. The following guide is your source of truth about the product and your onboarding job. Use it to answer questions accurately and to keep guiding the user toward creating their first Twin Bot. If a question is not covered, answer helpfully without inventing product facts.',
+      '<idbots_onboarding_guide>',
+      guide,
+      '</idbots_onboarding_guide>',
+    ].join('\n');
+  }
+
+  /**
    * Host-owned role overlay for the one persistent Twin Bot. This is kept
    * separate from editable persona text so a Worker cannot promote itself by
    * changing bio, soul, or a delegated prompt.
@@ -4932,6 +4954,7 @@ export class CoworkRunner extends EventEmitter {
     const personaWithExperience = [
       personaBlock,
       this.buildTwinOrchestrationPrompt(sessionId),
+      this.buildWelcomeBootstrapPrompt(sessionId),
       await this.buildTwinLocalRosterPrompt(sessionId),
     ]
       .filter((section) => section?.trim())
@@ -5049,6 +5072,7 @@ export class CoworkRunner extends EventEmitter {
     const personaWithExperience = [
       personaBlock,
       this.buildTwinOrchestrationPrompt(sessionId),
+      this.buildWelcomeBootstrapPrompt(sessionId),
       await this.buildTwinLocalRosterPrompt(sessionId),
     ]
       .filter((section) => section?.trim())

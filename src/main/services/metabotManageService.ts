@@ -125,6 +125,8 @@ export interface MetabotManageDeps {
   syncEditChanges: (store: MetabotStore, input: EditSyncInput) => Promise<ChainSyncResult>;
   /** Refresh P2P runtime config after a create/delete (best-effort). */
   onAfterMutation?: () => Promise<void> | void;
+  /** Optional post-delete hook receiving the deleted bot (e.g. cleanup side-effects). */
+  onAfterDelete?: (deletedMetabot: Metabot) => Promise<void> | void;
   /** Active owner GlobalMetaID; used for the owner-binding identity check. */
   getOwnerGlobalMetaId?: () => string | null;
 }
@@ -651,9 +653,9 @@ export async function updateMetaBotCore(
  */
 export async function deleteMetaBotCore(
   id: number,
-  deps: Pick<MetabotManageDeps, 'store' | 'onAfterMutation'>,
+  deps: Pick<MetabotManageDeps, 'store' | 'onAfterMutation' | 'onAfterDelete'>,
 ): Promise<DeleteMetaBotResult> {
-  const { store, onAfterMutation } = deps;
+  const { store, onAfterMutation, onAfterDelete } = deps;
   const existing = store.getMetabotById(id);
   if (!existing) {
     return { success: false, error: `MetaBot ${id} not found` };
@@ -666,6 +668,7 @@ export async function deleteMetaBotCore(
     // Deleting the Twin must transfer Twin status to the earliest remaining bot.
     store.ensureTwinExists();
     await onAfterMutation?.();
+    await onAfterDelete?.(existing);
   }
   return { success: ok };
 }

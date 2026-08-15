@@ -122,6 +122,7 @@ import {
   updateMetaBotCore,
   type MetabotManageDeps,
 } from './services/metabotManageService';
+import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
   startMetaWebListener,
@@ -5955,6 +5956,13 @@ function getMetabotManageDeps(): MetabotManageDeps {
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
     onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
+    onAfterDelete: (deletedMetabot) => {
+      // The Welcome Bot's onboarding guide (Bootstrap.md) is only meaningful
+      // during initial setup; drop it once the Welcome Bot retires.
+      if (deletedMetabot.metabot_type === 'welcome') {
+        deleteBootstrapDoc();
+      }
+    },
     getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
   };
 }
@@ -10989,10 +10997,7 @@ if (!gotTheLock) {
     // Shared with the Twin metabot_delete tool. Also guards against deleting
     // the last remaining bot so the machine is never left botless.
     try {
-      return await deleteMetaBotCore(metabotId, {
-        store: getMetabotStore(),
-        onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
-      });
+      return await deleteMetaBotCore(metabotId, getMetabotManageDeps());
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete MetaBot' };
     }
