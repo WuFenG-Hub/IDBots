@@ -5611,7 +5611,7 @@ export class CoworkRunner extends EventEmitter {
    */
   private shouldRunDshKernel(activeSession: ActiveSession): boolean {
     try {
-      const route = resolveDshProviderRoute();
+      const route = this.resolveSessionDshRoute(activeSession.sessionId);
       const choice = resolveKernelChoice({
         enabled: isDshKernelEnabled(),
         apiType: route?.apiFormat ?? null,
@@ -5621,6 +5621,26 @@ export class CoworkRunner extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Session-scoped DSH provider route — the same three-tier model resolution
+   * the Claude path uses: the session's own model selector, then the metabot's
+   * llm_id, then the global default. Falls back to the default when an
+   * llm_id does not resolve (matching runClaudeCodeLocal's fallback).
+   */
+  private resolveSessionDshRoute(sessionId: string): ReturnType<typeof resolveDshProviderRoute> {
+    const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null
+    const automationModelOverride = sessionModel || this.getSessionAutomationModelOverride(sessionId)
+    let route = resolveDshProviderRoute(automationModelOverride)
+    if (!route && automationModelOverride) {
+      coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
+        sessionId,
+        override: automationModelOverride,
+      })
+      route = resolveDshProviderRoute()
+    }
+    return route
   }
 
   private ensureDshTurnHub(): DshTurnHub {
@@ -5652,7 +5672,7 @@ export class CoworkRunner extends EventEmitter {
     const { sessionId } = activeSession;
     // Direct upstream route: the DSH runtime speaks the provider's native
     // protocol (pi-ai) and bypasses the OpenAI-compat proxy entirely.
-    const route = resolveDshProviderRoute();
+    const route = this.resolveSessionDshRoute(sessionId);
     if (!route?.baseUrl || !route.apiKey) {
       this.handleError(sessionId, 'DSH kernel requires a configured API provider (base URL and key).');
       this.clearPendingPermissions(sessionId);
