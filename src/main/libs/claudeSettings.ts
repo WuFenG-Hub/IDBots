@@ -52,7 +52,12 @@ type AppConfig = {
     fallbackModel?: string;
     availableModels?: ProviderModel[];
   };
-  providers?: Record<string, ProviderConfig>;
+  providers?: Record<string, ProviderConfig>;  /**
+   * Phase 1 M5 rollout flag: cowork sessions on OpenAI-compatible provider
+   * routes may run on the DSH kernel (dsh-runtime subprocess). Default off.
+   */
+  dshKernelEnabled?: boolean;
+
 };
 
 export type ApiConfigResolution = {
@@ -482,6 +487,48 @@ export function resolveCurrentApiConfig(target: OpenAICompatProxyTarget = 'local
 
 export function getCurrentApiConfig(target: OpenAICompatProxyTarget = 'local'): CoworkApiConfig | null {
   return resolveCurrentApiConfig(target).config;
+}
+
+/**
+ * Direct-upstream provider route for the DSH kernel (Phase 1 M5): same
+ * provider matching as the Claude path, but WITHOUT the OpenAI-compat proxy —
+ * the DSH runtime speaks the provider's native protocol directly, so this
+ * exposes the raw apiFormat and true upstream baseUrl/key.
+ */
+export interface DshProviderRouteInfo {
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: 'anthropic' | 'openai' | 'responses' | 'native';
+}
+
+export function resolveDshProviderRoute(modelId?: string | null): DshProviderRouteInfo | null {
+  const sqliteStore = getStore();
+  const appConfig = sqliteStore?.get<AppConfig>('app_config');
+  if (!appConfig) return null;
+  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined);
+  if (!matched) return null;
+  return {
+    provider: matched.providerName,
+    baseUrl: matched.providerConfig.baseUrl.trim(),
+    apiKey: matched.providerConfig.apiKey?.trim() || '',
+    model: matched.modelId,
+    apiFormat: matched.apiFormat,
+  };
+}
+
+/**
+ * Phase 1 M5 rollout flag: cowork sessions on OpenAI-compatible provider
+ * routes may run on the DSH kernel. Persisted in app_config like the other
+ * cowork defaults; default off.
+ */
+export function isDshKernelEnabled(): boolean {
+  // Env override wins so a DSH-kernel dev/test instance can be launched with
+  // one command (electron:dev:dsh) without touching persisted config.
+  if (process.env.IDBOTS_DSH_KERNEL === '1') return true;
+  const sqliteStore = getStore();
+  return sqliteStore?.get<AppConfig>('app_config')?.dshKernelEnabled === true;
 }
 
 /**

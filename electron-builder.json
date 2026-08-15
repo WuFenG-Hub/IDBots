@@ -42,6 +42,17 @@
     {
       "from": "src/main/agentGame/adapterSandboxWorker.cjs",
       "to": "agentGame/adapterSandboxWorker.cjs"
+    },
+    {
+      "from": "dsh-runtime",
+      "to": "dsh-runtime",
+      "filter": [
+        "**/*",
+        "!**/.test-sessions/**",
+        "!**/.spike-sessions/**",
+        "!**/*.log",
+        "!**/.DS_Store"
+      ]
     }
   ],
   "mac": {

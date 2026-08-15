@@ -164,11 +164,13 @@ export interface AppConfig {
    * selection is persisted here and inherited by every new session (and Bot).
    */
   coworkPermissionMode?: CoworkPermissionMode;
-  /**
-   * Global default effort level for cowork sessions ('low'|'medium'|'high'|
-   * 'max', or null/undefined for auto). Persisted like coworkPermissionMode.
-   */
   coworkEffortLevel?: string | null;
+  /**
+   * Phase 1 M5 rollout flag: run cowork sessions on the DSH kernel when the
+   * resolved provider route is OpenAI-compatible. Opt-in; sessions that have
+   * already run on DSH stay pinned to it via the `dsh:` session-handle prefix.
+   */
+  dshKernelEnabled?: boolean;
 }
 
 type ModelDefinition = AppConfig['model']['availableModels'][number];
