@@ -137,12 +137,6 @@ interface GroupTaskMessageItemProps {
   onJumpToReply?: (pinId: string) => void;
 }
 
-/** R5: flatten a referenced message into a short, tag-stripped preview. */
-function previewMessageContent(content: string | null | undefined): string {
-  const text = (content ?? '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  return text.length > 80 ? `${text.slice(0, 80)}…` : text;
-}
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   message,

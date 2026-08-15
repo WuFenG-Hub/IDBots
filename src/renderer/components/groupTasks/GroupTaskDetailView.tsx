@@ -788,7 +788,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   message={message}
                   isChairSender={Boolean(
                     chairMember?.globalmetaid
-                    && message.senderGlobalMetaId === chairMember.globalMetaid,
+                    && message.senderGlobalMetaId === chairMember.globalmetaid,
                   )}
                   isOwnerSender={Boolean(
                     ownerGlobalMetaId && message.senderGlobalMetaId === ownerGlobalMetaId,
