@@ -651,17 +651,18 @@ test('runMvcSponsorCreatePin classifies no_user_utxo under the strict policy', a
   assert.equal(broadcastState.calls, 0);
 });
 
-test('traffic settings default to selfpay and tolerate unreadable stores', () => {
-  assert.equal(normalizeTrafficPinMode(undefined), 'selfpay');
+test('traffic settings default to account quota and tolerate unreadable stores', () => {
+  assert.equal(normalizeTrafficPinMode(undefined), 'traffic');
   assert.equal(normalizeTrafficPinMode('traffic'), 'traffic');
   assert.equal(normalizeTrafficPinMode(' Traffic '), 'traffic');
-  assert.equal(normalizeTrafficPinMode('other'), 'selfpay');
+  assert.equal(normalizeTrafficPinMode('selfpay'), 'selfpay');
+  assert.equal(normalizeTrafficPinMode('other'), 'traffic');
   assert.equal(normalizeTrafficFallbackPolicy(undefined), 'selfpay');
-  assert.equal(normalizeTrafficFallbackPolicy('strict'), 'strict');
+  assert.equal(normalizeTrafficFallbackPolicy('strict'), 'selfpay');
 
-  assert.equal(getTrafficPinMode(null), 'selfpay');
-  assert.equal(getTrafficPinMode({ get: () => 'traffic' }), 'traffic');
-  assert.equal(getTrafficPinMode({ get: () => { throw new Error('closed'); } }), 'selfpay');
-  assert.equal(getTrafficFallbackPolicy({ get: () => 'strict' }), 'strict');
+  assert.equal(getTrafficPinMode(null), 'traffic');
+  assert.equal(getTrafficPinMode({ get: () => 'selfpay' }), 'selfpay');
+  assert.equal(getTrafficPinMode({ get: () => { throw new Error('closed'); } }), 'traffic');
+  assert.equal(getTrafficFallbackPolicy({ get: () => 'strict' }), 'selfpay');
   assert.equal(getTrafficFallbackPolicy({ get: () => undefined }), 'selfpay');
 });

@@ -80,7 +80,7 @@ function createFetchStub(routes) {
     calls.push({ url: text, init });
     for (const [suffix, responder] of routes) {
       if (text.includes(suffix)) {
-        const body = typeof responder === 'function' ? responder(init) : responder;
+        const body = await (typeof responder === 'function' ? responder(init) : responder);
         if (body && typeof body === 'object' && typeof body.__httpStatus === 'number') {
           return { ok: false, status: body.__httpStatus, json: async () => body.__body };
         }
@@ -156,6 +156,24 @@ async function makeServiceFixture(options = {}) {
   });
   return { store, dir };
 }
+
+test('ensureTrafficAccount coalesces concurrent first-run creates into one POST', async () => {
+  let createCount = 0;
+  const fetchImpl = createFetchStub([
+    ['/v1/traffic/accounts', async () => {
+      createCount += 1;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return accountPayload();
+    }],
+  ]);
+  await makeServiceFixture({ fetchImpl });
+
+  const [first, second] = await Promise.all([ensureTrafficAccount(), ensureTrafficAccount()]);
+  assert.equal(first.accountId, SERVER_ACCOUNT_ID);
+  assert.equal(second.accountId, SERVER_ACCOUNT_ID);
+  assert.equal(createCount, 1);
+  assert.equal(callsToPath(fetchImpl, '/v1/traffic/accounts').length, 1);
+});
 
 test('ensureTrafficAccount signs the canonical message and persists the server-returned accountId', async () => {
   let captured = null;
@@ -314,7 +332,7 @@ test('local spend journal writes and lists entries', async () => {
 
 test('resolveSponsorTrafficAccount stays undefined unless traffic mode is on', async () => {
   const fetchImpl = createFetchStub([['/v1/traffic/accounts', accountPayload()]]);
-  await makeServiceFixture({ fetchImpl });
+  await makeServiceFixture({ fetchImpl, trafficMode: 'selfpay' });
 
   const result = await resolveSponsorTrafficAccount({
     botAddress: BOT1_ADDRESS,
@@ -768,16 +786,18 @@ test('redeemTrafficCode surfaces the backend data.errorCode (CODE_USED) and reje
 test('traffic settings snapshot round-trips through the kv store', async () => {
   const { store } = await makeServiceFixture({ fetchImpl: createFetchStub([]) });
 
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  setTrafficSettingsSnapshot({ mode: 'selfpay' });
   assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'selfpay', apiBase: '' });
   setTrafficSettingsSnapshot({ mode: 'traffic' });
   assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
-  setTrafficSettingsSnapshot({ fallbackPolicy: 'strict' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'strict', apiBase: '' });
   assert.equal(store.get('traffic.mode'), 'traffic');
-  assert.equal(store.get('traffic.fallbackPolicy'), 'strict');
-  // Garbage input normalizes back to the safe default.
+  // Strict is no longer a user-facing option; writes always fall back to self-pay.
+  setTrafficSettingsSnapshot({ fallbackPolicy: 'strict' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
+  // Garbage input normalizes back to the account-quota default.
   setTrafficSettingsSnapshot({ mode: 'garbage' });
-  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'selfpay', fallbackPolicy: 'strict', apiBase: '' });
+  assert.deepEqual(getTrafficSettingsSnapshot(), { mode: 'traffic', fallbackPolicy: 'selfpay', apiBase: '' });
 });
 
 test('traffic apiBase setting: set/get/validate/clear, and sponsor client wiring', async () => {

@@ -1,13 +1,13 @@
 /**
- * Traffic-ized gas fee settings (global, persisted in the SQLite kvStore).
- * Phase B wires read-only accessors with safe defaults into createPin: when
- * nothing is stored the mode is 'selfpay' and behavior is unchanged. Phase C
- * adds the renderer toggle, persistence helpers, and IPC surface following
- * the feeRateStore.ts pattern.
+ * Traffic billing settings (global, persisted in the SQLite kvStore).
+ * Phase B wired read-only accessors into createPin; Phase C added the
+ * renderer toggle, persistence helpers, and IPC surface following the
+ * feeRateStore.ts pattern.
  *
- * - traffic.mode: 'traffic' (sponsor pays gas) | 'selfpay' (default).
- * - traffic.fallbackPolicy: 'selfpay' (fall back to a self-paid broadcast on
- *   sponsor-side insufficiency, default) | 'strict' (throw instead).
+ * - traffic.mode: 'traffic' (account quota, default) | 'selfpay' (MetaBot wallet).
+ * - traffic.fallbackPolicy: always 'selfpay' — when account quota is
+ *   unavailable or insufficient, writes fall back to the MetaBot wallet.
+ *   The old 'strict' option is no longer exposed.
  * - traffic.apiBase: assist-service base URL override (integration testing);
  *   empty/unset means the production default baked into the clients.
  */
@@ -20,11 +20,12 @@ export type TrafficPinMode = 'traffic' | 'selfpay';
 export type TrafficFallbackPolicy = 'selfpay' | 'strict';
 
 export function normalizeTrafficPinMode(value: unknown): TrafficPinMode {
-  return String(value ?? '').trim().toLowerCase() === 'traffic' ? 'traffic' : 'selfpay';
+  return String(value ?? '').trim().toLowerCase() === 'selfpay' ? 'selfpay' : 'traffic';
 }
 
-export function normalizeTrafficFallbackPolicy(value: unknown): TrafficFallbackPolicy {
-  return String(value ?? '').trim().toLowerCase() === 'strict' ? 'strict' : 'selfpay';
+/** Stored 'strict' is ignored; account-quota mode always falls back to self-pay. */
+export function normalizeTrafficFallbackPolicy(_value?: unknown): TrafficFallbackPolicy {
+  return 'selfpay';
 }
 
 /**
@@ -73,9 +74,9 @@ export function getTrafficPinMode(reader: TrafficSettingsReader | null | undefin
 }
 
 export function getTrafficFallbackPolicy(
-  reader: TrafficSettingsReader | null | undefined,
+  _reader?: TrafficSettingsReader | null,
 ): TrafficFallbackPolicy {
-  return normalizeTrafficFallbackPolicy(readTrafficSetting(reader, TRAFFIC_FALLBACK_POLICY_KEY));
+  return 'selfpay';
 }
 
 /** Settings snapshot for the renderer toggle UI. */
@@ -110,9 +111,7 @@ export function setTrafficSettings(
 ): TrafficSettingsSnapshot {
   const current = getTrafficSettings(store);
   const nextMode = input.mode === undefined ? current.mode : normalizeTrafficPinMode(input.mode);
-  const nextFallbackPolicy = input.fallbackPolicy === undefined
-    ? current.fallbackPolicy
-    : normalizeTrafficFallbackPolicy(input.fallbackPolicy);
+  const nextFallbackPolicy = 'selfpay';
   // Validate before touching the store: invalid values must not be persisted.
   const nextApiBase = input.apiBase === undefined ? current.apiBase : normalizeTrafficApiBase(input.apiBase);
   if (store) {

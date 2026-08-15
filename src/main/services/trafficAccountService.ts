@@ -1,5 +1,5 @@
 /**
- * Traffic account service client (traffic-ized gas fee, Phase D).
+ * Traffic account service client (account-quota billing, Phase D).
  * Talks to the backend traffic APIs (/v1/traffic/*) with identity-signed
  * requests, manages the local account record and bot-address bindings, keeps
  * a ~30s in-memory balance cache (decremented locally on each sponsored
@@ -178,6 +178,8 @@ export interface TrafficAccountServiceDeps {
 
 let depsRef: TrafficAccountServiceDeps | null = null;
 let balanceCache: (TrafficAccountRecord & { fetchedAt: number }) | null = null;
+/** Coalesces concurrent first-run POSTs so a fresh install does not race-create. */
+let ensureAccountInFlight: Promise<TrafficAccountRecord> | null = null;
 
 export function initTrafficAccountService(deps: TrafficAccountServiceDeps): void {
   depsRef = deps;
@@ -186,6 +188,7 @@ export function initTrafficAccountService(deps: TrafficAccountServiceDeps): void
 export function resetTrafficAccountServiceForTests(): void {
   depsRef = null;
   balanceCache = null;
+  ensureAccountInFlight = null;
 }
 
 function getDeps(): TrafficAccountServiceDeps {
@@ -546,9 +549,20 @@ function normalizeAccountRecord(data: Record<string, unknown>, stage: TrafficApi
 /**
  * Get-or-create the traffic account for the local user identity. The accountId
  * in the response is authoritative (the backend derives it from the identity
- * address) and is persisted locally.
+ * address) and is persisted locally. Concurrent callers share one in-flight
+ * POST so a fresh install (balance + campaign + usage + ledger all calling
+ * requireAccount at once) cannot lose the campaign status request to a
+ * create-conflict on the backend.
  */
 export async function ensureTrafficAccount(): Promise<TrafficAccountRecord> {
+  if (ensureAccountInFlight) return ensureAccountInFlight;
+  ensureAccountInFlight = createTrafficAccount().finally(() => {
+    ensureAccountInFlight = null;
+  });
+  return ensureAccountInFlight;
+}
+
+async function createTrafficAccount(): Promise<TrafficAccountRecord> {
   const identity = requireIdentity();
   const timestamp = nowSeconds();
   const message = buildTrafficAccountMessage(identity.globalMetaId, timestamp);
