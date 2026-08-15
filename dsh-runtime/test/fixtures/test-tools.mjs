@@ -19,11 +19,14 @@ export default {
         render: (args, value) => [{ type: 'text', text: JSON.stringify(value) }],
       },
       async execute(args, exec) {
+        // Contract: a tool MUST settle when exec.signal aborts — the registry
+        // neither abandons the promise nor hard-kills same-process code, so a
+        // tool that ignores abort hangs the whole turn drain.
         await new Promise((resolve) => {
           const timer = setTimeout(resolve, 1500)
-          exec.signal?.addEventListener('abort', () => clearTimeout(timer), { once: true })
+          exec.signal?.addEventListener('abort', () => { clearTimeout(timer); resolve() }, { once: true })
         })
-        return { slept: true, note: args.note ?? '' }
+        return { slept: !exec.signal?.aborted, note: args.note ?? '' }
       },
     }))
 

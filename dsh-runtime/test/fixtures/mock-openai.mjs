@@ -22,7 +22,11 @@ export function startMockServer(port = 48787) {
       // A tool result rides as role 'tool'; only the FIRST request of a
       // CALL_BIG_TOOL turn asks for the tool — afterwards answer in plain text
       // so the turn terminates.
-      const alreadyHasToolResult = (parsed.messages ?? []).some((m) => m.role === 'tool')
+      // Tool results ride as role 'tool'; only the CURRENT turn's window
+      // (after the last user message) matters — earlier turns already settled.
+      const msgs = parsed.messages ?? []
+      const lastUserIdx = msgs.map((m) => m.role === 'user' ? 1 : 0).lastIndexOf(1)
+      const alreadyHasToolResult = msgs.slice(Math.max(lastUserIdx, 0)).some((m) => m.role === 'tool')
 
       if (req.method === 'GET' && req.url === '/v1/models') {
         res.writeHead(200, { 'content-type': 'application/json' })
@@ -39,13 +43,17 @@ export function startMockServer(port = 48787) {
       const frame = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
       const base = { id: 'chatcmpl-mock', object: 'chat.completion.chunk', created: Date.now() / 1000 | 0, model: 'mock-1' }
 
-      if (lastUserText.includes('CALL_BIG_TOOL') && !alreadyHasToolResult) {
-        const args = JSON.stringify({ note: 'please dump the big blob' })
+      const toolCallFor = lastUserText.includes('CALL_BIG_TOOL') ? 'big_output_tool'
+        : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
+        : lastUserText.includes('STEER_TEST') ? 'slow_tool'
+        : null
+      if (toolCallFor !== null && !alreadyHasToolResult) {
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : { note: 'please dump the big blob' })
         frame({
           ...base,
           choices: [{
             index: 0,
-            delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_big_1', type: 'function', function: { name: 'big_output_tool', arguments: args } }] },
+            delta: { role: 'assistant', tool_calls: [{ index: 0, id: `call_${toolCallFor}_1`, type: 'function', function: { name: toolCallFor, arguments: args } }] },
             finish_reason: null,
           }],
         })

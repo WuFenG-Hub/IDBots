@@ -9,6 +9,11 @@
 //
 //   session/steer          { sessionId, contentBlocks } → step-boundary steering mid-turn
 //   session/cancel         { sessionId, cause?, keepInbox? } → abort active turn with cause
+//   session/ensure         { sessionId, provider?, model?, maxTokens? } → live agent for the
+//                           session: create fresh, or RESUME when a persisted log exists
+//                           (the stock server only lazily creates and would fail on an
+//                           existing log after a runtime restart). Also the per-session
+//                           provider/model override the stock wire lacks.
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ping            → extension presence canary
 //
@@ -65,15 +70,46 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     switch (method) {
       case 'session/steer': return this.idbotsSteer(params)
       case 'session/cancel': return this.idbotsCancel(params)
+      case 'session/ensure': return this.idbotsEnsureSession(params)
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'idbots/approval/respond'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/approval/respond'],
         }
       }
       default: return super.handleRequest(method, params)
     }
+  }
+
+  async idbotsEnsureSession({ sessionId, provider, model, maxTokens }) {
+    const id = String(sessionId ?? '')
+    if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
+    if (this.idbotsAgents.has(id)) return { ensured: true, resumed: false }
+
+    const agentOptions = {
+      provider: provider ?? this.provider,
+      model: model ?? this.model,
+      ...Number.isFinite(maxTokens) ? { maxTokens } : {},
+    }
+    // Resume-first: agents.create does NOT consult the persisted log (it mints
+    // a fresh in-memory session), so a restart would silently overwrite
+    // history instead of resuming. resume throws `session "<id>" not found`
+    // when no log exists — that is the fresh-create signal.
+    let handle
+    let resumed = true
+    try {
+      handle = await this.ctx.agents.resume({ resumeSessionId: id, agentOptions })
+    } catch (error) {
+      if (!/not found/.test(String(error?.message ?? error))) throw error
+      handle = await this.ctx.agents.create({ sessionId: id, meta: { cwd: this.cwd }, agentOptions })
+      resumed = false
+    }
+    // Register with the stock server's bookkeeping (private at the type level,
+    // present at runtime) so its lazy session/prompt create reuses this agent
+    // instead of colliding on the registry id.
+    this.sessions.set(id, { handle })
+    return { ensured: true, resumed }
   }
 
   async idbotsSteer({ sessionId, contentBlocks }) {

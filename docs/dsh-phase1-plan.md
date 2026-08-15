@@ -91,10 +91,17 @@ buzz journal entry. Phase 0 leftovers (report §4) are folded in.
   rewrite is forbidden by the reconstructability invariant), so per-session `tool_result`
   trimming became commit-time shaping in `idbots-tool-result-shaping` (`tools/post-execute`)
   — log and model view stay consistent by construction.
-- **M4 — `KernelAdapter` + coworkRunner integration**: adapter interface extraction, DSH
-  implementation, session-event → `CoworkMessage` mapping, context usage from
-  `request/header`, subagent transcript feasibility (list/read parity check), resume of
-  DSH sessions across runtime restarts (JSONL under versioned userData dir).
+- **M4 — `KernelAdapter` + coworkRunner integration** ✅ (delivered, runtime+adapter+mapper
+  layer): `src/main/libs/dshKernel/` (types / `DshEventMapper` / `DshKernel`) is a complete,
+  kernel-agnostic adapter — it spawns the runtime bin (`ELECTRON_RUN_AS_NODE=1`), generates
+  the composition from the provider table, and maps `session/event` envelopes into the exact
+  `CoworkMessage` streaming contract `handleClaudeEvent` produces (same-message-id text/thinking
+  streams, tool_use/tool_result metadata, usage, turnEnd). Two wire gaps were closed in
+  `idbots-sdk-server`: `session/ensure` (resume-first create-or-resume, per-session provider
+  route) — needed because `agents.create` does NOT consult the persisted log and would silently
+  overwrite history on restart — and cross-restart resume is proven E2E (history survives a
+  runtime restart). The coworkRunner integration itself (routing a real session through
+  `DshKernel` behind a per-session flag) is the M5 cutover, still pending.
 - **M5 — Rollout + hardening**: per-session kernel flag (DSH default for DeepSeek-compatible
   providers first), stall watchdog port, sandbox-mode decision, Electron packaging of the
   runtime (asar.unpacked, auto-update pinning, Windows dispose-ladder check), real-model

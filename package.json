@@ -50,7 +50,8 @@
     "generate:tray-icons": "node scripts/generate-tray-icons.js",
     "setup:mingit": "node scripts/setup-mingit.js",
     "regenerate:icon": "bash scripts/regenerate-mac-icon.sh",
-    "fix:mac-icon": "bash scripts/fix-mac-icon-display.sh"
+    "fix:mac-icon": "bash scripts/fix-mac-icon-display.sh",
+    "test:dsh": "npx rimraf dist-electron && npm run compile:electron && node --test tests/dshKernelEventMapper.test.mjs tests/dshKernelRuntime.test.mjs && cd dsh-runtime && npm test"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.221",

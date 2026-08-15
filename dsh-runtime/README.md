@@ -15,6 +15,9 @@ see `spikes/dsh-phase0/PHASE0_REPORT.md` F1). No forks.
   dispatch through the agent's scope carrier). Unknown methods still fall through to
   the stock `-32603`. Wire surface:
   - `session/steer`, `session/cancel` (M1) — control-plane parity
+  - `session/ensure` (M4) — resume-first create-or-resume with per-session provider/model
+    override (agents.create never consults the persisted log, so resume must be attempted
+    first; `session "<id>" not found` is the fresh-create signal)
   - `idbots/approval/respond {id, outcome}` (M2) — answer a pending approval ask;
     notifications `idbots/approval/request {id, sessionId, toolName, callId?, reason?}`
     and `idbots/approval/cancelled {id}` (dismiss the host dialog when the turn aborts)
