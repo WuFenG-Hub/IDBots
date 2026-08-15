@@ -17,6 +17,15 @@ export function startMockServer(port = 48787) {
       let parsed = {}
       try { parsed = JSON.parse(body) } catch { /* ignore */ }
       seen.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '(none)', body: parsed, finished: false })
+      // RETRY_ME prompts: fail the first attempt with a transient 503 so retry
+      // policies are exercised end to end.
+      const isRetryProbe = (parsed.messages ?? []).some((m) => typeof m.content === 'string' && m.content.includes('RETRY_ME'))
+      if (isRetryProbe && !startMockServer.retryServed) {
+        startMockServer.retryServed = true
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: { message: 'transient upstream failure', type: 'server_error' } }))
+        return
+      }
       const record = seen[seen.length - 1]
       res.on('finish', () => { record.finished = true })
       // Skip plugin runtime-context snapshots (they can land before OR after
@@ -52,9 +61,10 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
         : lastUserText.includes('STEER_TEST') ? 'slow_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
+        : lastUserText.includes('RUN_BASH') ? 'bash'
         : null
       if (toolCallFor !== null && !alreadyHasToolResult) {
-        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : { note: 'please dump the big blob' })
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'bash' ? { command: 'echo BASH_WORKS && date', description: 'echo test' } : { note: 'please dump the big blob' })
         frame({
           ...base,
           choices: [{

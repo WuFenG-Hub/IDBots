@@ -64,6 +64,7 @@ export function generateRuntimeConfig(input) {
       displayName: provider.key,
       apiKeyEnv: provider.apiKeyEnv,
       api: protocol,
+      retryPolicy: { mode: 'normal', maxRetries: 2 },
       baseURL: provider.baseUrl,
       models: provider.models.map((model) => ({
         id: model.id,
@@ -82,6 +83,8 @@ export function generateRuntimeConfig(input) {
     { id: 'system-prompt', name: '@deepseek-ai/dsh-system-prompt' },
     { id: 'agent', name: '@deepseek-ai/dsh-agent' },
     { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
+    // Transient provider failures (timeouts, 5xx) retry instead of killing the turn.
+    { id: 'llm-retry', name: '@deepseek-ai/dsh-llm-retry' },
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
       id: 'persistence',
