@@ -5756,7 +5756,14 @@ export class CoworkRunner extends EventEmitter {
         return;
       }
       if (outcome.kind === 'error') {
-        this.handleError(sessionId, `DSH turn failed: ${outcome.reason ?? 'unknown error'}`);
+        // turn/end error reasons carry the details in `failure` (status,
+        // message, code) — surface everything we have.
+        const failureDetail = (outcome as any)?.failure?.message
+          ?? (outcome as any)?.failure?.code
+          ?? outcome.reason
+          ?? JSON.stringify(outcome).slice(0, 300);
+        coworkLog('ERROR', 'runDshSessionLocal', 'DSH turn failed', { outcome });
+        this.handleError(sessionId, `DSH turn failed: ${failureDetail}`);
         this.clearPendingPermissions(sessionId);
         this.removeActiveSession(sessionId, activeSession);
         this.dshActiveTurns.delete(sessionId);
