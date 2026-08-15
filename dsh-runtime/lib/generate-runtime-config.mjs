@@ -72,7 +72,11 @@ export function generateRuntimeConfig(input) {
         contextWindow: model.contextWindow,
         ...Number.isFinite(model.maxOutputTokens) ? { maxTokens: model.maxOutputTokens } : {},
       })),
-      ...provider.thinkingFormat ? { compat: { thinkingFormat: provider.thinkingFormat } } : {},
+      // thinkingFormat compat exists ONLY on the openai-completions protocol;
+      // attaching it to a responses/anthropic route fails provider resolution.
+      ...(provider.thinkingFormat && protocol === 'openai-completions')
+        ? { compat: { thinkingFormat: provider.thinkingFormat } }
+        : {},
     }
   }
 

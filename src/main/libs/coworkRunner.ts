@@ -5768,7 +5768,7 @@ export class CoworkRunner extends EventEmitter {
           model: route.model,
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
-          thinkingFormat: route.provider === 'deepseek' ? 'deepseek' : undefined,
+          thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
         },
         callbacks: {
           onMessage: (message, slot) => {
