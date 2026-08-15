@@ -51,6 +51,7 @@ import {
   XMarkIcon,
   PaperAirplaneIcon,
   ArrowUturnLeftIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline';
 import { FolderIcon } from '@heroicons/react/24/solid';
 import { coworkService } from '../../services/cowork';
@@ -2432,7 +2433,15 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
   const ignoreNextBlurRef = useRef(false);
-  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; globalmetaid: string | null } | null>(null);
+  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
+  // Whether any local Twin Bot exists yet. Drives the Welcome Bot's handoff
+  // hint (no Twin → keep nudging) and its retirement banner (Twin exists →
+  // offer to retire). Refreshed when a turn settles so a Twin created mid-chat
+  // by the Welcome Bot flips the UI without a manual reload. `null` = not yet
+  // loaded, so neither banner flashes before the roster resolves.
+  const [hasTwinBot, setHasTwinBot] = useState<boolean | null>(null);
+  const [isRetiringWelcome, setIsRetiringWelcome] = useState(false);
+  const [retireWelcomeError, setRetireWelcomeError] = useState<string | null>(null);
   const [fetchedPeerAvatar, setFetchedPeerAvatar] = useState<string | null>(null);
   const [isProcessingRefund, setIsProcessingRefund] = useState(false);
   const [refundActionError, setRefundActionError] = useState<string | null>(null);
@@ -2551,11 +2560,58 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
         avatar: result.metabot.avatar ?? null,
         llm_id: result.metabot.llm_id ?? null,
         globalmetaid: result.metabot.globalmetaid ?? null,
+        metabot_type: result.metabot.metabot_type ?? 'worker',
       });
     };
     void fetchMetaBot();
     return () => { cancelled = true; };
   }, [currentSession?.metabotId]);
+
+  // Track whether a local Twin Bot exists, refreshing whenever a turn settles
+  // (isStreaming → false) so the Welcome Bot's handoff hint and retirement
+  // banner react to a Twin created mid-conversation.
+  useEffect(() => {
+    let cancelled = false;
+    const loadHasTwin = async () => {
+      try {
+        const result = await window.electron?.metabot?.list?.();
+        if (cancelled || !result?.success || !result.list) return;
+        setHasTwinBot(result.list.some((metabot) => metabot.metabot_type === 'twin'));
+      } catch {
+        // Keep the previous value; this is a best-effort UI hint.
+      }
+    };
+    void loadHasTwin();
+    return () => { cancelled = true; };
+  }, [currentSession?.id, isStreaming]);
+
+  const isWelcomeSession = sessionMetabot?.metabot_type === 'welcome';
+  const showWelcomeRetirement = isWelcomeSession && hasTwinBot === true;
+  const showWelcomeHandoff = isWelcomeSession && hasTwinBot === false;
+
+  // Retire the Welcome Bot: delete it now that a Twin Bot exists and return to
+  // the New Task home. Historical sessions are preserved (sessions do not
+  // cascade-delete with the bot), and the free-quota provisioning gate keeps
+  // the welcome bot from being recreated afterwards.
+  const handleRetireWelcome = async () => {
+    const metabotId = currentSession?.metabotId;
+    if (metabotId == null || isRetiringWelcome) return;
+    setIsRetiringWelcome(true);
+    setRetireWelcomeError(null);
+    try {
+      const result = await window.electron.idbots.deleteMetaBot(metabotId);
+      if (result?.success) {
+        window.dispatchEvent(new CustomEvent('app:showToast', { detail: i18nService.t('coworkWelcomeRetiredToast') }));
+        onNavigateHome?.();
+      } else {
+        setRetireWelcomeError(result?.error || i18nService.t('coworkWelcomeRetireFailed'));
+      }
+    } catch (error) {
+      setRetireWelcomeError(error instanceof Error ? error.message : i18nService.t('coworkWelcomeRetireFailed'));
+    } finally {
+      setIsRetiringWelcome(false);
+    }
+  };
 
   // Fetch peer avatar for A2A sessions when peerAvatar is missing or not directly renderable.
   // Falls back to senderGlobalMetaId from the first incoming message if peerGlobalMetaId is missing.
@@ -3314,6 +3370,18 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               />
             </div>
           )}
+          {showWelcomeHandoff && hasRenderableAssistantContent(turn) && (
+            <div className="px-4 pb-2">
+              <div className="max-w-3xl mx-auto">
+                <div className="flex items-start gap-2.5 rounded-xl border border-claude-accent/20 bg-claude-accent/5 px-3.5 py-2.5">
+                  <SparklesIcon className="h-4 w-4 mt-0.5 shrink-0 text-claude-accent" />
+                  <p className="text-xs leading-5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('coworkWelcomeHandoffHint')}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
         </React.Fragment>
       );
     });
@@ -3745,6 +3813,34 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                   >
                     {i18nService.t('freeQuotaGoSettings')}
                   </button>
+                )}
+              </div>
+            </div>
+          )}
+          {showWelcomeRetirement && (
+            <div className="max-w-3xl mx-auto mb-2">
+              <div className="flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3">
+                <div className="flex items-start gap-2.5">
+                  <CheckIcon className="h-4 w-4 mt-0.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <p className="text-xs leading-5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('coworkWelcomeRetirePrompt')}
+                  </p>
+                </div>
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={handleRetireWelcome}
+                    disabled={isRetiringWelcome}
+                    className="inline-flex h-8 items-center gap-1.5 rounded-md bg-emerald-600 px-3 text-xs font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <CheckIcon className="h-4 w-4" />
+                    {isRetiringWelcome ? i18nService.t('coworkWelcomeRetireConfirming') : i18nService.t('coworkWelcomeRetireConfirm')}
+                  </button>
+                </div>
+                {retireWelcomeError && (
+                  <div className="text-[11px] text-red-600 dark:text-red-400" role="alert">
+                    {retireWelcomeError}
+                  </div>
                 )}
               </div>
             </div>

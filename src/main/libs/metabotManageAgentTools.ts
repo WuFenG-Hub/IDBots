@@ -26,6 +26,7 @@ export type MetabotManageControl = {
     goal?: string | null;
     bio?: string | null;
     avatar?: string | null;
+    metabot_type?: 'twin' | 'worker';
   }): Promise<CreateMetaBotOnChainResult>;
   update(id: number, input: UpdateMetaBotInput): Promise<UpdateMetaBotResult>;
   delete(id: number): Promise<DeleteMetaBotResult>;
@@ -137,7 +138,11 @@ function formatCreateResult(result: CreateMetaBotOnChainResult): string {
   if (subsidy && !subsidy.success) {
     lines.push(`Note: gas subsidy was not applied (${subsidy.error ?? 'reason unknown'}); creation proceeded with the bot's own wallet.`);
   }
-  lines.push('The new bot is a Worker by default. Tell the user they can keep chatting with you; the new bot appears in My Bots.');
+  if (m.metabot_type === 'twin') {
+    lines.push('The new bot is the user\'s Twin Bot (their personal on-chain digital twin). Tell the user their first Twin Bot is ready and appears in My Bots; new tasks can now be assigned to it.');
+  } else {
+    lines.push('The new bot is a Worker by default. Tell the user they can keep chatting with you; the new bot appears in My Bots.');
+  }
   return lines.join('\n');
 }
 
@@ -169,27 +174,44 @@ function formatDeleteResult(id: number, result: DeleteMetaBotResult): string {
 // Tool builder
 // ---------------------------------------------------------------------------
 
+/** Which operator persona the tool suite is registered for. */
+export type MetabotManageViewer = 'twin' | 'welcome';
+
 /**
- * Inline MCP tools that let the Twin Bot manage the local MetaBot roster:
- * list, create, update, and delete. Registered ONLY for Twin sessions in
- * coworkRunner (isTwinSession gate) — Worker bots never see these tools.
+ * Inline MCP tools that let the host's operator bots manage the local MetaBot
+ * roster: list, create, update, and delete.
+ *
+ * - viewer 'twin' (default): the full four-tool suite, registered ONLY for
+ *   Twin sessions in coworkRunner (isTwinSession gate) — Worker bots never
+ *   see these tools.
+ * - viewer 'welcome': a reduced list+create suite for the built-in Welcome
+ *   Bot during initial setup (the machine has no Twin Bot yet). metabot_create
+ *   enforces the "exactly one Twin" invariant centrally: while no Twin exists
+ *   the created bot becomes the user's first Twin Bot; afterwards Workers.
  *
  * Every tool delegates to services/metabotManageService.ts, the same code the
- * manual UI uses, so Twin-assisted management is identical to hand-editing.
+ * manual UI uses, so bot-assisted management is identical to hand-editing.
  */
 export function buildMetabotManageAgentTools(deps: {
   tool: SdkToolFactory;
   control: MetabotManageControl;
+  viewer?: MetabotManageViewer;
 }): unknown[] {
   const { tool, control } = deps;
+  const isWelcomeViewer = deps.viewer === 'welcome';
+  const audience = isWelcomeViewer
+    ? 'Welcome Bot during initial setup (this machine has no Twin Bot yet).'
+    : 'Twin Bot only.';
 
   const metabotList = tool(
     'metabot_list',
     [
-      'List every local MetaBot with its editable fields (id, name, Twin/Worker type, enabled, llm, role, bio, goal, chat skills) plus the LLM providers available for new/edited bots. Twin Bot only.',
+      `List every local MetaBot with its editable fields (id, name, Twin/Worker type, enabled, llm, role, bio, goal, chat skills) plus the LLM providers available for new/edited bots. ${audience}`,
       'Use BEFORE creating a bot (to show the user which LLM brains they can pick from) and to resolve a bot the user names by its display name into a metabot_id before updating or deleting it.',
       'When NOT to use: do not call this just to identify yourself (you already know your own identity); and do not call it in a tight loop — call once, then act on the returned ids.',
-      'Rules: the metabot_id returned here is the exact value metabot_update and metabot_delete expect. The Twin is the single bot whose type is "twin". Provider ids in the available-provider list are the values metabot_create expects as llm_id.',
+      isWelcomeViewer
+        ? 'Rules: provider ids in the available-provider list are the values metabot_create expects as llm_id. While you are the Welcome Bot no Twin Bot exists yet — the first bot you create becomes the user\'s Twin Bot.'
+        : 'Rules: the metabot_id returned here is the exact value metabot_update and metabot_delete expect. The Twin is the single bot whose type is "twin". Provider ids in the available-provider list are the values metabot_create expects as llm_id.',
       'Returns one line per bot plus the available LLM provider list.',
     ].join(' '),
     {},
@@ -207,13 +229,21 @@ export function buildMetabotManageAgentTools(deps: {
 
   const metabotCreate = tool(
     'metabot_create',
-    [
-      'Create ONE new local MetaBot (a Worker by default) end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. Twin Bot only.',
-      'Use when the user asks to create / add / hire a new bot, assistant, employee, agent, or AI (e.g. "帮我创建一个新员工", "add a new assistant").',
-      'When NOT to use: do not create a bot without first collecting a name AND an llm_id from the user (both are required) — call metabot_list to show the available llm_id choices and ask; and do not use this to edit an existing bot (use metabot_update) or to restore a bot from a mnemonic.',
-      'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional and can be set later via metabot_update. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status. The new bot is always a Worker (the machine keeps exactly one Twin).',
-      'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
-    ].join(' '),
+    isWelcomeViewer
+      ? [
+          `Create the user's first local MetaBot end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. ${audience}`,
+          'Use when the user asks to create / set up their first Bot or Twin (e.g. "帮我创建第一个 Bot", "create my first bot", "帮我建一个数字分身"). While no Twin Bot exists the new bot automatically becomes the user\'s first Twin Bot (their personal on-chain digital twin); if a Twin already exists the new bot is a Worker.',
+          'When NOT to use: do not create a bot without first collecting a name from the user — ask what they want to call their Bot if they did not say; and do not create a bot with an llm_id you made up — call metabot_list first and use one of the reported provider ids (when several are configured, confirm the choice with the user briefly; when only the free MetaID provider exists, just use it).',
+          'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional — the user can fill persona details in later by hand in My Bots. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status.',
+          'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
+        ].join(' ')
+      : [
+          'Create ONE new local MetaBot (a Worker by default) end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. Twin Bot only.',
+          'Use when the user asks to create / add / hire a new bot, assistant, employee, agent, or AI (e.g. "帮我创建一个新员工", "add a new assistant").',
+          'When NOT to use: do not create a bot without first collecting a name AND an llm_id from the user (both are required) — call metabot_list to show the available llm_id choices and ask; and do not use this to edit an existing bot (use metabot_update) or to restore a bot from a mnemonic.',
+          'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional and can be set later via metabot_update. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status. The new bot is always a Worker (the machine keeps exactly one Twin).',
+          'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
+        ].join(' '),
     {
       name: z.string().min(1).describe('Display name for the new bot (required).'),
       llm_id: z
@@ -253,7 +283,17 @@ export function buildMetabotManageAgentTools(deps: {
           true,
         );
       }
-      const result = await control.create({
+      const createInput: {
+        name: string;
+        llm_id: string;
+        fallback_llm_id: string | null;
+        role?: string;
+        soul?: string;
+        goal?: string;
+        bio?: string;
+        avatar?: string;
+        metabot_type?: 'twin' | 'worker';
+      } = {
         name,
         llm_id: llmId,
         fallback_llm_id: args.fallback_llm_id ? asString(args.fallback_llm_id) : null,
@@ -262,7 +302,16 @@ export function buildMetabotManageAgentTools(deps: {
         goal: args.goal,
         bio: args.bio,
         avatar: args.avatar,
-      });
+      };
+      if (isWelcomeViewer) {
+        // Bootstrap invariant: while the machine has no Twin, the bot the
+        // Welcome Bot creates becomes the user's first Twin Bot; afterwards
+        // every Welcome-Bot creation is a plain Worker like the Twin's own.
+        createInput.metabot_type = control.list().some((m) => m.type === 'twin')
+          ? 'worker'
+          : 'twin';
+      }
+      const result = await control.create(createInput);
       return textResult(formatCreateResult(result), !result.success);
     },
   );
@@ -402,5 +451,11 @@ export function buildMetabotManageAgentTools(deps: {
     },
   );
 
+  if (isWelcomeViewer) {
+    // The Welcome Bot only needs discovery + creation during initial setup;
+    // update/delete stay Twin-only so the free-quota guide cannot mutate or
+    // remove existing bots.
+    return [metabotList, metabotCreate];
+  }
   return [metabotList, metabotCreate, metabotUpdate, metabotDelete];
 }

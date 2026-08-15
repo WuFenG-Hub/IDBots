@@ -10,7 +10,8 @@
   "files": [
     "dist/**/*",
     "dist-electron/**/*",
-    "sandbox/agent-runner/AGENT_SYSTEM_PROMPT.md"
+    "sandbox/agent-runner/AGENT_SYSTEM_PROMPT.md",
+    "sandbox/agent-runner/Bootstrap.md"
   ],
   "extraResources": [
     {

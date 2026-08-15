@@ -122,6 +122,7 @@ import {
   updateMetaBotCore,
   type MetabotManageDeps,
 } from './services/metabotManageService';
+import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
   startMetaWebListener,
@@ -5044,11 +5045,12 @@ const getCoworkRunner = () => {
           return uploadMetaFile(getMetabotStore(), params);
         },
       },
-      // Twin-only metabot_manage tools (metabot_list/create/update/delete).
-      // Every method delegates to the shared metabotManageService core — the
-      // same code the manual UI IPC handlers call — so Twin-assisted bot
-      // management is identical to hand-editing. Registered only for Twin
-      // sessions via the isTwinSession gate inside coworkRunner.
+      // metabot_manage tools (metabot_list/create/update/delete). Every method
+      // delegates to the shared metabotManageService core — the same code the
+      // manual UI IPC handlers call — so bot-assisted bot management is
+      // identical to hand-editing. Registered inside coworkRunner for Twin
+      // sessions (full suite) and Welcome Bot sessions during initial setup
+      // (list/create only, so it can create the user's first Twin Bot).
       metabotManage: {
         create: (input) => createMetaBotOnChainCore(input, getMetabotManageDeps()),
         update: (id, input) => updateMetaBotCore(id, input, getMetabotManageDeps()),
@@ -5954,6 +5956,13 @@ function getMetabotManageDeps(): MetabotManageDeps {
     syncToChain: (store, metabotId, options) => syncMetaBotToChain(store, metabotId, {}, options),
     syncEditChanges: (store, input) => syncMetaBotEditChangesToChain(store, input),
     onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
+    onAfterDelete: (deletedMetabot) => {
+      // The Welcome Bot's onboarding guide (Bootstrap.md) is only meaningful
+      // during initial setup; drop it once the Welcome Bot retires.
+      if (deletedMetabot.metabot_type === 'welcome') {
+        deleteBootstrapDoc();
+      }
+    },
     getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
   };
 }
@@ -10988,10 +10997,7 @@ if (!gotTheLock) {
     // Shared with the Twin metabot_delete tool. Also guards against deleting
     // the last remaining bot so the machine is never left botless.
     try {
-      return await deleteMetaBotCore(metabotId, {
-        store: getMetabotStore(),
-        onAfterMutation: () => syncP2PRuntimeConfigForCurrentMetabots(),
-      });
+      return await deleteMetaBotCore(metabotId, getMetabotManageDeps());
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete MetaBot' };
     }

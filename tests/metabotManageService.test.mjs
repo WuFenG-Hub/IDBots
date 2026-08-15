@@ -356,6 +356,25 @@ test('deleteMetaBotCore: missing bot reports not found', async () => {
   assert.match(res.error, /not found/);
 });
 
+test('deleteMetaBotCore: invokes onAfterDelete with the deleted bot', async () => {
+  const store = await openStore();
+  const welcome = seedMetabot(store, { name: 'I.D', type: 'welcome', n: 1 });
+  seedMetabot(store, { name: 'Twin', type: 'twin', n: 2 });
+  let deletedType = null;
+  let deletedId = null;
+  const res = await deleteMetaBotCore(welcome.id, {
+    store,
+    onAfterMutation: async () => {},
+    onAfterDelete: async (deletedMetabot) => {
+      deletedType = deletedMetabot.metabot_type;
+      deletedId = deletedMetabot.id;
+    },
+  });
+  assert.equal(res.success, true);
+  assert.equal(deletedType, 'welcome');
+  assert.equal(deletedId, welcome.id);
+});
+
 // ---------------------------------------------------------------------------
 // list + providers
 // ---------------------------------------------------------------------------

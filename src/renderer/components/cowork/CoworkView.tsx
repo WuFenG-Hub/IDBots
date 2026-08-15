@@ -12,6 +12,7 @@ import { quickActionService } from '../../services/quickAction';
 import { i18nService } from '../../services/i18n';
 import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
 import CoworkSessionDetail from './CoworkSessionDetail';
+import BootstrapShortcuts from './BootstrapShortcuts';
 import ModelSelector from '../ModelSelector';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -56,6 +57,11 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const [isInitialized, setIsInitialized] = useState(false);
   const [metabots, setMetabots] = useState<Array<{ id: number; name: string; avatar: string | null; metabot_type: string }>>([]);
   const [, setLocalMetabotCount] = useState(0);
+  // Bootstrap state: the machine has no Twin Bot yet (first-run welcome
+  // experience). Tracked from the full local roster, not the llm-filtered
+  // selectable list, so bootstrap ends as soon as any Twin Bot exists.
+  const [hasTwin, setHasTwin] = useState(false);
+  const hasTwinRef = useRef(false);
   // The New Task page is a single instance: its MetaBot selection lives in
   // the global store so it survives navigating to conversations or other
   // columns and back.
@@ -103,18 +109,22 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   const selectedActionId = useSelector((state: RootState) => state.quickAction.selectedActionId);
   const selectedPromptId = useSelector((state: RootState) => state.quickAction.selectedPromptId);
 
-  const loadSelectableMetaBots = useCallback(async (): Promise<{ selectable: MetaBotForSelector[]; localCount: number }> => {
+  const loadSelectableMetaBots = useCallback(async (): Promise<{ selectable: MetaBotForSelector[]; localCount: number; hasTwin: boolean }> => {
     const [selectorResult, fullListResult] = await Promise.all([
       window.electron?.idbots?.getMetaBots?.(),
       window.electron?.metabot?.list?.(),
     ]);
     const localList = fullListResult?.success && fullListResult.list ? fullListResult.list : [];
     const localCount = localList.length;
+    const twinProbeList = localList.length > 0
+      ? localList
+      : (selectorResult?.success && selectorResult.list ? selectorResult.list : []);
+    const hasTwin = twinProbeList.some((metabot) => metabot.metabot_type === 'twin');
     if (!selectorResult?.success || !selectorResult.list) {
-      return { selectable: [], localCount };
+      return { selectable: [], localCount, hasTwin };
     }
     if (!fullListResult?.success || !fullListResult.list) {
-      return { selectable: selectorResult.list, localCount: selectorResult.list.length };
+      return { selectable: selectorResult.list, localCount: selectorResult.list.length, hasTwin };
     }
     const llmConfiguredIds = new Set(
       localList
@@ -124,8 +134,27 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     return {
       selectable: selectorResult.list.filter((metabot) => llmConfiguredIds.has(metabot.id)),
       localCount,
+      hasTwin,
     };
   }, []);
+
+  // Apply one loaded roster snapshot to local state. When bootstrap just ended
+  // (the first Twin Bot appeared, e.g. created by the Welcome Bot mid-chat),
+  // auto-select that Twin for the New Task composer.
+  const applyLoadedMetaBots = useCallback((loaded: { selectable: MetaBotForSelector[]; localCount: number; hasTwin: boolean }) => {
+    const bootstrapEnded = !hasTwinRef.current && loaded.hasTwin;
+    setMetabots(loaded.selectable);
+    setLocalMetabotCount(loaded.localCount);
+    setHasTwin(loaded.hasTwin);
+    hasTwinRef.current = loaded.hasTwin;
+    setMetabotsLoaded(true);
+    if (bootstrapEnded) {
+      const twin = loaded.selectable.find((metabot) => metabot.metabot_type === 'twin');
+      if (twin) {
+        setSelectedMetabotId(twin.id);
+      }
+    }
+  }, [setSelectedMetabotId]);
 
   const buildApiConfigNotice = (error?: string) => {
     const baseNotice = i18nService.t('coworkModelSettingsRequired');
@@ -144,39 +173,35 @@ const CoworkView: React.FC<CoworkViewProps> = ({
 
   useEffect(() => {
     const loadMetaBots = async () => {
-      const { selectable, localCount } = await loadSelectableMetaBots();
-      setMetabots(selectable);
-      setLocalMetabotCount(localCount);
-      setMetabotsLoaded(true);
-      if (selectable.length > 0) {
+      const loaded = await loadSelectableMetaBots();
+      applyLoadedMetaBots(loaded);
+      if (loaded.selectable.length > 0) {
         const preferred = store.getState().cowork.preferredMetabotId;
-        if (preferred != null && selectable.some((m) => m.id === preferred)) {
+        if (preferred != null && loaded.selectable.some((m) => m.id === preferred)) {
           setSelectedMetabotId(preferred);
           dispatch(clearPreferredMetabotId());
         }
       }
     };
     void loadMetaBots();
-  }, [dispatch, loadSelectableMetaBots]);
+  }, [dispatch, loadSelectableMetaBots, applyLoadedMetaBots, setSelectedMetabotId]);
 
   // When user just restored a MetaBot (preferredMetabotId set), refetch list and select it so the new bot appears and is selected
   useEffect(() => {
     if (preferredMetabotId == null) return;
     let cancelled = false;
     const refetchAndSelect = async () => {
-      const { selectable, localCount } = await loadSelectableMetaBots();
+      const loaded = await loadSelectableMetaBots();
       if (cancelled) return;
-      setMetabots(selectable);
-      setLocalMetabotCount(localCount);
-      setMetabotsLoaded(true);
-      if (selectable.some((m) => m.id === preferredMetabotId)) {
+      applyLoadedMetaBots(loaded);
+      if (loaded.selectable.some((m) => m.id === preferredMetabotId)) {
         setSelectedMetabotId(preferredMetabotId);
       }
       dispatch(clearPreferredMetabotId());
     };
     void refetchAndSelect();
     return () => { cancelled = true; };
-  }, [preferredMetabotId, dispatch, loadSelectableMetaBots]);
+  }, [preferredMetabotId, dispatch, loadSelectableMetaBots, applyLoadedMetaBots, setSelectedMetabotId]);
 
   useEffect(() => {
     if (!metabotsLoaded) return;
@@ -206,6 +231,24 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     void fetchMetaBot();
     return () => { cancelled = true; };
   }, [selectedMetabotId]);
+
+  // Returning from a session to the New Task home: the session may have
+  // changed the roster (e.g. the Welcome Bot created the user's first Twin Bot
+  // mid-chat), so reload instead of showing a stale bootstrap state.
+  const hadCurrentSessionRef = useRef(false);
+  useEffect(() => {
+    if (currentSession) {
+      hadCurrentSessionRef.current = true;
+      return;
+    }
+    if (!hadCurrentSessionRef.current) return;
+    hadCurrentSessionRef.current = false;
+    const reload = async () => {
+      const loaded = await loadSelectableMetaBots();
+      applyLoadedMetaBots(loaded);
+    };
+    void reload();
+  }, [currentSession, loadSelectableMetaBots, applyLoadedMetaBots]);
 
   useEffect(() => {
     const init = async () => {
@@ -429,6 +472,18 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     dispatch(clearActiveSkills());
   };
 
+  // Bootstrap = no Twin Bot exists yet (first-run welcome experience): the New
+  // Task composer offers first-Bot shortcuts instead of the full quick action
+  // bar. Gated on metabotsLoaded so a veteran user never sees a bootstrap
+  // flash while the roster IPC is still in flight.
+  const isBootstrap = metabotsLoaded && !hasTwin;
+
+  // Fill (without sending) one of the bootstrap shortcuts into the composer.
+  const handleBootstrapShortcut = (text: string) => {
+    promptInputRef.current?.setValue(text);
+    promptInputRef.current?.focus();
+  };
+
   // When the prompt-mapped skill is deactivated from input area, restore the QuickActionBar.
   useEffect(() => {
     if (!selectedActionId || !selectedPromptId) return;
@@ -586,6 +641,13 @@ const CoworkView: React.FC<CoworkViewProps> = ({
                 onPromptSelect={handleQuickActionPromptSelect}
                 onBack={handleQuickActionBack}
               />
+            ) : isBootstrap ? (
+              <BootstrapShortcuts
+                greetLabel={i18nService.t('coworkBootstrapGreetShortcut')}
+                createLabel={i18nService.t('coworkBootstrapCreateShortcut')}
+                onGreet={() => handleBootstrapShortcut(i18nService.t('coworkBootstrapGreetPrompt'))}
+                onCreateBot={() => handleBootstrapShortcut(i18nService.t('coworkBootstrapCreatePrompt'))}
+              />
             ) : (
               <QuickActionBar actions={quickActions} onActionSelect={handleActionSelect} />
             )}
@@ -601,7 +663,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
             onSubmit={handleStartSession}
             onStop={handleStopSession}
             isStreaming={isStreaming}
-            placeholder={i18nService.t('coworkPlaceholder')}
+            placeholder={i18nService.t(isBootstrap ? 'coworkBootstrapPlaceholder' : 'coworkPlaceholder')}
             size="large"
             workingDirectory={config.workingDirectory}
             onWorkingDirectoryChange={async (dir: string) => {
