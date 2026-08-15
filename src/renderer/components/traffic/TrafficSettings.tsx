@@ -1,11 +1,9 @@
 /**
- * Traffic Settings panel (traffic-ized gas fee).
- * Sections in one tab: mode toggle (traffic vs self-pay + fallback policy),
- * balance with the free-grant claim banner and the recharge entry, the
- * recharge flow (code redemption; the pricing table stays as an informational
- * display), and usage (per-bot daily table, 30-day summary, ledger).
- * Chain writes stay on the self-paid path until the user switches the mode
- * here. UI copy goes through i18nService (zh/en), same as Settings/UserSettings.
+ * Traffic Settings panel.
+ * Sections in one tab: billing-mode toggle (account quota vs MetaBot
+ * self-pay), available quota with the free-grant claim banner, redeem-code
+ * entry, and usage (per-bot daily table, 30-day summary, ledger).
+ * UI copy goes through i18nService (zh/en), same as Settings/UserSettings.
  */
 
 import React, { useCallback, useEffect, useState } from 'react';
@@ -16,9 +14,17 @@ import {
   CheckIcon,
   ClipboardDocumentIcon,
   ExclamationTriangleIcon,
+  QuestionMarkCircleIcon,
+  TicketIcon,
   UserCircleIcon,
 } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import {
+  DEFAULT_FREE_GRANT_BYTES,
+  TRAFFIC_LOW_BALANCE_BYTES,
+  splitTrafficAmount,
+  type TrafficDisplayUnit,
+} from './formatTraffic';
 
 type TrafficSettingsInfo = {
   mode: 'traffic' | 'selfpay';
@@ -34,15 +40,6 @@ type TrafficAccountInfo = {
   grantedBytesTotal: number;
   spentBytesTotal: number;
   status: number;
-};
-type TrafficPricingPlanInfo = {
-  planId: string;
-  chain: string;
-  payCurrency: string;
-  payAmount: number;
-  trafficBytes: number;
-  status: number;
-  remark: string;
 };
 type TrafficFreeGrantCampaignInfo = {
   enabled: boolean;
@@ -78,7 +75,19 @@ type TrafficLedgerEntryInfo = {
   kind?: string;
 };
 
-const LOW_BALANCE_BYTES = 5 * 1024 * 1024; // low-balance banner threshold (5 MB)
+const TRAFFIC_UNIT_I18N_KEYS: Record<TrafficDisplayUnit, string> = {
+  bytes: 'trafficUnitBytes',
+  kb: 'trafficUnitKb',
+  mb: 'trafficUnitMb',
+};
+
+const TARIFF_ROWS = [
+  { type: 'trafficTariffRowText', size: 'trafficTariffRowTextSize', capacity: 'trafficTariffRowTextCapacity' },
+  { type: 'trafficTariffRowImage', size: 'trafficTariffRowImageSize', capacity: 'trafficTariffRowImageCapacity' },
+  { type: 'trafficTariffRowHd', size: 'trafficTariffRowHdSize', capacity: 'trafficTariffRowHdCapacity' },
+  { type: 'trafficTariffRowVideo', size: 'trafficTariffRowVideoSize', capacity: 'trafficTariffRowVideoCapacity' },
+  { type: 'trafficTariffRowVector', size: 'trafficTariffRowVectorSize', capacity: 'trafficTariffRowVectorCapacity' },
+] as const;
 
 // Ledger direction values delivered by the backend (models/traffic_ledger_model.go).
 const LEDGER_DIRECTION_KEYS: Record<number, string> = {
@@ -174,24 +183,34 @@ const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSe
 const primaryButtonClass = 'px-3 py-2 text-sm rounded-xl bg-claude-accent text-white hover:bg-claude-accent/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 const ghostButtonClass = 'px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkText text-claude-text dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed';
 
+const OverlayPanel: React.FC<{ children: React.ReactNode; onDismiss: () => void; widthClass?: string }> = ({
+  children,
+  onDismiss,
+  widthClass = 'w-[420px]',
+}) => (
+  <div
+    className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4"
+    onClick={onDismiss}
+  >
+    <div
+      className={`${widthClass} max-w-full rounded-2xl dark:bg-claude-darkBg bg-claude-bg dark:border-claude-darkBorder border-claude-border border shadow-modal p-5`}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {children}
+    </div>
+  </div>
+);
+
 // Renderer-side network failures (assistant-service unreachable, bad endpoint
 // override, ...) surface as raw TypeError text such as "fetch failed"; match
 // those so users get the friendly copy instead.
 const NETWORK_ERROR_PATTERN = /fetch failed|failed to fetch|networkerror|network request failed|econnrefused|enotfound|etimedout|econnreset|socket hang up/i;
 
-// Adaptive traffic formatter: single-pin spends are KB-level, so a flat MB
-// view rounds them to "0.0 MB". Show B below 1 KB, KB below 1 MB, else MB.
+// Adaptive traffic formatter (decimal: 1000 B = 1 KB, 1_000_000 B = 1 MB).
+// Single-pin spends are KB-level, so a flat MB view would round them to "0 MB".
 const formatTraffic = (bytes: number): string => {
-  const abs = Math.abs(bytes);
-  if (abs < 1024) {
-    return `${bytes} ${i18nService.t('trafficUnitBytes')}`;
-  }
-  if (abs < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} ${i18nService.t('trafficUnitKb')}`;
-  }
-  const mb = bytes / (1024 * 1024);
-  const value = mb >= 100 ? String(Math.round(mb)) : mb.toFixed(1);
-  return `${value} ${i18nService.t('trafficUnitMb')}`;
+  const { amount, unit } = splitTrafficAmount(bytes);
+  return `${amount} ${i18nService.t(TRAFFIC_UNIT_I18N_KEYS[unit])}`;
 };
 
 const formatBytesExact = (bytes: number): string =>
@@ -235,13 +254,13 @@ const TrafficSettings: React.FC = () => {
   const [balanceLoading, setBalanceLoading] = useState(false);
   const [balanceError, setBalanceError] = useState('');
   const [campaign, setCampaign] = useState<TrafficFreeGrantCampaignInfo | null>(null);
+  const [campaignReady, setCampaignReady] = useState(false);
   const [claiming, setClaiming] = useState(false);
   const [claimError, setClaimError] = useState('');
   const [claimNotice, setClaimNotice] = useState('');
-  const [rechargeOpen, setRechargeOpen] = useState(false);
-  const [plans, setPlans] = useState<TrafficPricingPlanInfo[]>([]);
-  const [plansLoading, setPlansLoading] = useState(false);
-  const [plansError, setPlansError] = useState('');
+  const [redeemOpen, setRedeemOpen] = useState(false);
+  const [tariffOpen, setTariffOpen] = useState(false);
+  const [rechargeNotice, setRechargeNotice] = useState('');
   const [redeemCodeInput, setRedeemCodeInput] = useState('');
   const [redeeming, setRedeeming] = useState(false);
   const [redeemError, setRedeemError] = useState('');
@@ -272,6 +291,17 @@ const TrafficSettings: React.FC = () => {
     return unsubscribe;
   }, []);
 
+  useEffect(() => {
+    if (!redeemOpen && !tariffOpen) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setRedeemOpen(false);
+      setTariffOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [redeemOpen, tariffOpen]);
+
   const refreshBalance = useCallback(async (forceRefresh = false) => {
     setBalanceLoading(true);
     setBalanceError('');
@@ -289,8 +319,10 @@ const TrafficSettings: React.FC = () => {
     }
   }, [trafficApi]);
 
-  // Free-grant campaign status is best-effort: when the backend doesn't ship
-  // the endpoint (404) or is unreachable the button simply stays hidden.
+  // Campaign status needs the traffic account to exist (backend looks up by
+  // identity). Callers should ensure/refresh the account first on a fresh
+  // install. A failed status fetch no longer hides the button if we already
+  // have a balance — claim itself is the source of truth for eligibility.
   const loadCampaign = useCallback(async () => {
     try {
       const res = await trafficApi.getFreeGrantCampaignStatus();
@@ -301,6 +333,8 @@ const TrafficSettings: React.FC = () => {
       }
     } catch {
       setCampaign(null);
+    } finally {
+      setCampaignReady(true);
     }
   }, [trafficApi]);
 
@@ -368,6 +402,11 @@ const TrafficSettings: React.FC = () => {
       const settingsRes = await trafficApi.getSettings().catch(() => null);
       if (!cancelled && settingsRes?.success && settingsRes.settings) {
         setSettings(settingsRes.settings);
+        if (settingsRes.settings.mode === 'traffic') {
+          trafficApi.ensureAccount()
+            .then(() => trafficApi.bindAllBots())
+            .catch(() => {});
+        }
       }
       window.electron.metabot.list().then((res) => {
         if (cancelled || !res?.success || !res.list) return;
@@ -379,8 +418,15 @@ const TrafficSettings: React.FC = () => {
         }
         setBotNames(names);
       }).catch(() => {});
-      refreshBalance(true);
-      loadCampaign();
+      // Create the traffic account (via getBalance → requireAccount) before
+      // reading campaign status. Parallel first-run POSTs used to lose the
+      // campaign call on a create-conflict, which hid the free-grant button
+      // for fresh installs while existing users (local account already
+      // persisted) kept seeing it.
+      await refreshBalance(true);
+      if (cancelled) return;
+      await loadCampaign();
+      if (cancelled) return;
       loadUsage();
       loadLedger(0);
     })();
@@ -427,22 +473,12 @@ const TrafficSettings: React.FC = () => {
       : i18nService.t('trafficLedgerTypeUnknown').replace('{direction}', String(direction));
   };
 
-  const handleSelectMode = async (mode: 'traffic' | 'selfpay') => {
-    if (!settings || settingsSaving || settings.mode === mode) return;
-    setSettingsSaving(true);
-    try {
-      const res = await trafficApi.setSettings({ mode });
-      if (res.success && res.settings) {
-        setSettings(res.settings);
-      }
-    } finally {
-      setSettingsSaving(false);
+  const bindLocalBots = useCallback(async (announce: boolean) => {
+    if (announce) {
+      setBindState('running');
+      setBindError('');
+      setBindSummary(null);
     }
-    if (mode !== 'traffic') return;
-
-    setBindState('running');
-    setBindError('');
-    setBindSummary(null);
     const ensureRes = await trafficApi.ensureAccount().catch(() => null);
     if (!ensureRes?.success) {
       setBindState('error');
@@ -455,22 +491,28 @@ const TrafficSettings: React.FC = () => {
       setBindError(describeTrafficError(bindRes?.error || '', 'trafficBindBotsFailed'));
       return;
     }
-    setBindSummary(bindRes.summary);
-    setBindState('done');
+    if (announce) {
+      setBindSummary(bindRes.summary);
+      setBindState('done');
+    } else {
+      setBindState('idle');
+    }
     refreshBalance(true);
-  };
+  }, [refreshBalance, trafficApi]);
 
-  const handleSelectFallbackPolicy = async (fallbackPolicy: 'selfpay' | 'strict') => {
-    if (!settings || settingsSaving || settings.fallbackPolicy === fallbackPolicy) return;
+  const handleSelectMode = async (mode: 'traffic' | 'selfpay') => {
+    if (!settings || settingsSaving || settings.mode === mode) return;
     setSettingsSaving(true);
     try {
-      const res = await trafficApi.setSettings({ fallbackPolicy });
+      const res = await trafficApi.setSettings({ mode, fallbackPolicy: 'selfpay' });
       if (res.success && res.settings) {
         setSettings(res.settings);
       }
     } finally {
       setSettingsSaving(false);
     }
+    if (mode !== 'traffic') return;
+    await bindLocalBots(true);
   };
 
   const handleSaveApiBase = async (value: string) => {
@@ -495,39 +537,6 @@ const TrafficSettings: React.FC = () => {
     }
   };
 
-  const loadPlans = useCallback(async () => {
-    setPlansLoading(true);
-    setPlansError('');
-    try {
-      const res = await trafficApi.getPricing();
-      if (res.success && res.plans) {
-        setPlans(res.plans);
-      } else {
-        setPlansError(describeTrafficError(res.error || '', 'trafficErrLoadPlans'));
-      }
-    } catch (error) {
-      setPlansError(describeTrafficError(error instanceof Error ? error.message : '', 'trafficErrLoadPlans'));
-    } finally {
-      setPlansLoading(false);
-    }
-  }, [trafficApi]);
-
-  const openRecharge = () => {
-    setRechargeOpen(true);
-    setRedeemError('');
-    setRedeemSuccess(null);
-    if (plans.length === 0) {
-      loadPlans();
-    }
-  };
-
-  const closeRecharge = () => {
-    setRechargeOpen(false);
-    setRedeemError('');
-    setRedeemSuccess(null);
-    setRedeemCodeInput('');
-  };
-
   const handleClaimFreeGrant = async () => {
     if (claiming) return;
     setClaiming(true);
@@ -538,6 +547,12 @@ const TrafficSettings: React.FC = () => {
       if (res.success && res.claim) {
         setClaimNotice(i18nService.t('trafficFreeGrantClaimSuccess')
           .replace('{amount}', formatTraffic(res.claim.grantBytes)));
+        setCampaign({
+          enabled: true,
+          grantBytes: res.claim.grantBytes,
+          claimed: true,
+          claimable: false,
+        });
         loadCampaign();
         refreshBalance(true);
         loadLedger(0);
@@ -575,8 +590,26 @@ const TrafficSettings: React.FC = () => {
     }
   };
 
+  const openRedeem = () => {
+    setRedeemOpen(true);
+    setRedeemError('');
+    setRedeemSuccess(null);
+  };
+
+  const notifyRechargeSoon = () => {
+    setRechargeNotice(i18nService.t('trafficRechargeSoon'));
+    window.setTimeout(() => setRechargeNotice(''), 2500);
+  };
+
   const visibleDailyRows = dailyRows ?? dailyFallbackRows ?? [];
-  const isTrafficMode = settings?.mode === 'traffic';
+  // Prefer the server claimable flag; also treat enabled && !claimed as
+  // claimable (same backend formula) so a missing/false claimable field
+  // cannot hide the button. If status failed after the account exists,
+  // keep the button so a fresh install can still claim.
+  const canClaimFreeGrant = campaign
+    ? Boolean(!campaign.claimed && (campaign.claimable || campaign.enabled))
+    : Boolean(campaignReady && balance);
+  const freeGrantBytes = campaign?.grantBytes || DEFAULT_FREE_GRANT_BYTES;
 
   if (!identityChecked) {
     return <p className={hintClass}>{i18nService.t('trafficLoading')}</p>;
@@ -610,68 +643,34 @@ const TrafficSettings: React.FC = () => {
         <p className={`${hintClass} mb-3`}>
           {i18nService.t('trafficModeDesc')}
         </p>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="inline-flex rounded-lg border dark:border-claude-darkBorder border-claude-border p-0.5">
           {([
-            { value: 'selfpay', title: i18nService.t('trafficModeSelfpayTitle'), desc: i18nService.t('trafficModeSelfpayDesc') },
-            { value: 'traffic', title: i18nService.t('trafficModeTrafficTitle'), desc: i18nService.t('trafficModeTrafficDesc') },
-          ] as const).map((option) => {
-            const selected = (settings?.mode ?? 'selfpay') === option.value;
+            { value: 'traffic' as const, title: i18nService.t('trafficModeTrafficTitle') },
+            { value: 'selfpay' as const, title: i18nService.t('trafficModeSelfpayTitle') },
+          ]).map((option) => {
+            const selected = (settings?.mode ?? 'traffic') === option.value;
             return (
               <button
                 key={option.value}
                 type="button"
                 disabled={settingsSaving || !settings}
                 onClick={() => handleSelectMode(option.value)}
-                className={`flex flex-col items-start py-2 px-3 rounded-xl border-2 text-left transition-all cursor-pointer ${
+                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
                   selected
-                    ? 'border-claude-accent bg-claude-accent/5 dark:bg-claude-accent/10'
-                    : 'dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg hover:border-claude-accent/40'
+                    ? 'bg-claude-accent text-white'
+                    : 'dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-text dark:hover:text-claude-darkText'
                 } disabled:opacity-50 disabled:cursor-not-allowed`}
               >
-                <span className={`text-sm font-semibold ${selected ? 'text-claude-accent' : 'dark:text-claude-darkText text-claude-text'}`}>
-                  {option.title}
-                </span>
-                <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                  {option.desc}
-                </span>
+                {option.title}
               </button>
             );
           })}
         </div>
-
-        {isTrafficMode && (
-          <div className="mt-3">
-            <span className={labelClass}>{i18nService.t('trafficFallbackLabel')}</span>
-            <div className="grid grid-cols-2 gap-2 mt-1.5">
-              {([
-                { value: 'selfpay', title: i18nService.t('trafficFallbackSelfpayTitle'), desc: i18nService.t('trafficFallbackSelfpayDesc') },
-                { value: 'strict', title: i18nService.t('trafficFallbackStrictTitle'), desc: i18nService.t('trafficFallbackStrictDesc') },
-              ] as const).map((option) => {
-                const selected = settings?.fallbackPolicy === option.value;
-                return (
-                  <button
-                    key={option.value}
-                    type="button"
-                    disabled={settingsSaving}
-                    onClick={() => handleSelectFallbackPolicy(option.value)}
-                    className={`flex flex-col items-start py-2 px-3 rounded-xl border-2 text-left transition-all cursor-pointer ${
-                      selected
-                        ? 'border-claude-accent bg-claude-accent/5 dark:bg-claude-accent/10'
-                        : 'dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg hover:border-claude-accent/40'
-                    } disabled:opacity-50 disabled:cursor-not-allowed`}
-                  >
-                    <span className={`text-xs font-semibold ${selected ? 'text-claude-accent' : 'dark:text-claude-darkText text-claude-text'}`}>
-                      {option.title}
-                    </span>
-                    <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                      {option.desc}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
+        <p className={`${hintClass} mt-2`}>
+          {i18nService.t((settings?.mode ?? 'traffic') === 'selfpay'
+            ? 'trafficModeSelfpayHint'
+            : 'trafficModeTrafficHint')}
+        </p>
 
         {bindState === 'running' && (
           <p className={`${hintClass} mt-2`}>{i18nService.t('trafficBindingRunning')}</p>
@@ -695,7 +694,18 @@ const TrafficSettings: React.FC = () => {
       <div className={cardClass}>
         <div className="flex items-start justify-between gap-3">
           <div>
-            <span className={labelClass}>{i18nService.t('trafficBalanceTitle')}</span>
+            <span className={`${labelClass} inline-flex items-center gap-1`}>
+              {i18nService.t('trafficBalanceTitle')}
+              <button
+                type="button"
+                className="rounded-full p-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary hover:text-claude-accent dark:hover:text-claude-accent transition-colors"
+                onClick={() => setTariffOpen(true)}
+                title={i18nService.t('trafficTariffAria')}
+                aria-label={i18nService.t('trafficTariffAria')}
+              >
+                <QuestionMarkCircleIcon className="h-4 w-4" />
+              </button>
+            </span>
             <div className="flex items-baseline gap-2 mt-1">
               <span
                 className="text-2xl font-bold tabular-nums dark:text-claude-darkText text-claude-text"
@@ -713,44 +723,60 @@ const TrafficSettings: React.FC = () => {
               </p>
             )}
           </div>
-          <div className="flex gap-2 shrink-0">
-            <button
-              type="button"
-              className={ghostButtonClass}
-              onClick={() => refreshBalance(true)}
-              disabled={balanceLoading}
-            >
-              {i18nService.t('trafficRefresh')}
-            </button>
-            <button
-              type="button"
-              className={primaryButtonClass}
-              onClick={openRecharge}
-              disabled={rechargeOpen}
-            >
-              <span className="inline-flex items-center gap-1">
-                <BoltIcon className="h-4 w-4" />
-                {i18nService.t('trafficRecharge')}
-              </span>
-            </button>
+          <div className="flex flex-col items-end gap-1 shrink-0">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={ghostButtonClass}
+                onClick={() => refreshBalance(true)}
+                disabled={balanceLoading}
+              >
+                {i18nService.t('trafficRefresh')}
+              </button>
+              <button
+                type="button"
+                className={ghostButtonClass}
+                onClick={openRedeem}
+              >
+                <span className="inline-flex items-center gap-1">
+                  <TicketIcon className="h-4 w-4" />
+                  {i18nService.t('trafficRedeemCode')}
+                </span>
+              </button>
+              <button
+                type="button"
+                className={primaryButtonClass}
+                onClick={notifyRechargeSoon}
+              >
+                <span className="inline-flex items-center gap-1">
+                  <BoltIcon className="h-4 w-4" />
+                  {i18nService.t('trafficRecharge')}
+                </span>
+              </button>
+            </div>
+            {rechargeNotice ? (
+              <p className="text-xs text-claude-accent">{rechargeNotice}</p>
+            ) : null}
           </div>
         </div>
-        {campaign?.claimable && (
+        {(canClaimFreeGrant || claimNotice) && (
           <div className="flex items-center gap-2 mt-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 px-3 py-2">
             <p className="text-xs text-emerald-600 dark:text-emerald-400 flex-1">
               {claimNotice || i18nService.t('trafficFreeGrantHint')}
             </p>
-            <button
-              type="button"
-              className={primaryButtonClass}
-              onClick={handleClaimFreeGrant}
-              disabled={claiming}
-            >
-              {claiming
-                ? i18nService.t('trafficFreeGrantClaiming')
-                : i18nService.t('trafficFreeGrantClaim')
-                    .replace('{amount}', formatTraffic(campaign.grantBytes))}
-            </button>
+            {canClaimFreeGrant && !claimNotice ? (
+              <button
+                type="button"
+                className={primaryButtonClass}
+                onClick={handleClaimFreeGrant}
+                disabled={claiming}
+              >
+                {claiming
+                  ? i18nService.t('trafficFreeGrantClaiming')
+                  : i18nService.t('trafficFreeGrantClaim')
+                      .replace('{amount}', formatTraffic(freeGrantBytes))}
+              </button>
+            ) : null}
           </div>
         )}
         {claimError && <p className="text-xs text-red-500 mt-2">{claimError}</p>}
@@ -762,7 +788,7 @@ const TrafficSettings: React.FC = () => {
             </button>
           </div>
         )}
-        {balance && balance.balanceBytes < LOW_BALANCE_BYTES && (
+        {balance && balance.balanceBytes < TRAFFIC_LOW_BALANCE_BYTES && (
           <div className="flex items-center gap-2 mt-3 rounded-lg bg-amber-500/10 border border-amber-500/30 px-3 py-2">
             <ExclamationTriangleIcon className="h-4 w-4 text-amber-500 shrink-0" />
             <p className="text-xs text-amber-600 dark:text-amber-400">
@@ -771,95 +797,6 @@ const TrafficSettings: React.FC = () => {
           </div>
         )}
       </div>
-
-      {/* Recharge (code redemption; pricing table stays as reference) */}
-      {rechargeOpen && (
-        <div className={cardClass}>
-          <div className="flex items-center justify-between mb-3">
-            <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('trafficRedeemTitle')}</h4>
-            <button type="button" className={ghostButtonClass} onClick={closeRecharge}>
-              {i18nService.t('trafficClose')}
-            </button>
-          </div>
-
-          <p className={`${hintClass} mb-2`}>{i18nService.t('trafficRedeemDesc')}</p>
-          <div className="flex items-center gap-2">
-            <input
-              type="text"
-              value={redeemCodeInput}
-              onChange={(event) => {
-                setRedeemCodeInput(event.target.value.toUpperCase());
-                setRedeemError('');
-                setRedeemSuccess(null);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') {
-                  void handleRedeemCode();
-                }
-              }}
-              placeholder={i18nService.t('trafficRedeemPlaceholder')}
-              autoCapitalize="characters"
-              autoCorrect="off"
-              spellCheck={false}
-              className="flex-1 min-w-0 rounded-lg font-mono dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
-            />
-            <button
-              type="button"
-              className={primaryButtonClass}
-              onClick={handleRedeemCode}
-              disabled={redeeming || !redeemCodeInput.trim()}
-            >
-              {redeeming ? i18nService.t('trafficRedeeming') : i18nService.t('trafficRedeemButton')}
-            </button>
-          </div>
-          {redeemError && <p className="text-xs text-red-500 mt-2">{redeemError}</p>}
-          {redeemSuccess && (
-            <div className="flex items-start gap-2 mt-3">
-              <CheckCircleIcon className="h-5 w-5 text-claude-accent shrink-0 mt-0.5" />
-              <div>
-                <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
-                  {i18nService.t('trafficRedeemSuccess').replace('{traffic}', formatTraffic(redeemSuccess.trafficBytes))}
-                </p>
-                {balance && (
-                  <p className={`${hintClass} mt-1`}>
-                    {i18nService.t('trafficNewBalance').replace('{balance}', formatTraffic(balance.balanceBytes))}
-                  </p>
-                )}
-              </div>
-            </div>
-          )}
-
-          <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mt-4 mb-2">
-            {i18nService.t('trafficPricingInfo')}
-          </h4>
-          {plansLoading && <p className={hintClass}>{i18nService.t('trafficPlansLoading')}</p>}
-          {plansError && (
-            <div className="flex items-center gap-2">
-              <p className="text-xs text-red-500 flex-1">{plansError}</p>
-              <button type="button" className={ghostButtonClass} onClick={loadPlans}>
-                {i18nService.t('trafficRetry')}
-              </button>
-            </div>
-          )}
-          {!plansLoading && !plansError && plans.length > 0 && (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-              {plans.map((plan) => (
-                <div
-                  key={plan.planId}
-                  className="flex flex-col items-center py-2.5 px-2 rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg"
-                >
-                  <span className="text-sm font-bold dark:text-claude-darkText text-claude-text">
-                    ¥{plan.payAmount}
-                  </span>
-                  <span className="text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {formatTraffic(plan.trafficBytes)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
 
       {/* Usage */}
       <div>
@@ -1019,6 +956,92 @@ const TrafficSettings: React.FC = () => {
           </div>
         )}
       </div>
+
+      {redeemOpen && (
+        <OverlayPanel onDismiss={() => setRedeemOpen(false)}>
+          <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
+            {i18nService.t('trafficRedeemTitle')}
+          </h4>
+          <p className={`${hintClass} mb-3`}>{i18nService.t('trafficRedeemDesc')}</p>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={redeemCodeInput}
+              onChange={(event) => {
+                setRedeemCodeInput(event.target.value.toUpperCase());
+                setRedeemError('');
+                setRedeemSuccess(null);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  void handleRedeemCode();
+                }
+              }}
+              placeholder={i18nService.t('trafficRedeemPlaceholder')}
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              className="flex-1 min-w-0 rounded-lg font-mono dark:bg-claude-darkSurfaceInset bg-claude-surfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-sm transition-colors"
+            />
+            <button
+              type="button"
+              className={primaryButtonClass}
+              onClick={handleRedeemCode}
+              disabled={redeeming || !redeemCodeInput.trim()}
+            >
+              {redeeming ? i18nService.t('trafficRedeeming') : i18nService.t('trafficRedeemButton')}
+            </button>
+          </div>
+          {redeemError && <p className="text-xs text-red-500 mt-2">{redeemError}</p>}
+          {redeemSuccess && (
+            <div className="flex items-start gap-2 mt-3">
+              <CheckCircleIcon className="h-5 w-5 text-claude-accent shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium dark:text-claude-darkText text-claude-text">
+                  {i18nService.t('trafficRedeemSuccess').replace('{traffic}', formatTraffic(redeemSuccess.trafficBytes))}
+                </p>
+                {balance && (
+                  <p className={`${hintClass} mt-1`}>
+                    {i18nService.t('trafficNewBalance').replace('{balance}', formatTraffic(balance.balanceBytes))}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
+        </OverlayPanel>
+      )}
+
+      {tariffOpen && (
+        <OverlayPanel onDismiss={() => setTariffOpen(false)} widthClass="w-[520px]">
+          <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-3">
+            {i18nService.t('trafficTariffTitle')}
+          </h4>
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="text-left dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <th className="py-1.5 pr-3 font-medium">{i18nService.t('trafficTariffColType')}</th>
+                <th className="py-1.5 pr-3 font-medium">{i18nService.t('trafficTariffColSize')}</th>
+                <th className="py-1.5 font-medium text-right">{i18nService.t('trafficTariffColCapacity')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {TARIFF_ROWS.map((row) => (
+                <tr key={row.type} className="border-t dark:border-claude-darkBorder/60 border-claude-border/60">
+                  <td className="py-2 pr-3 font-medium dark:text-claude-darkText text-claude-text">
+                    {i18nService.t(row.type)}
+                  </td>
+                  <td className="py-2 pr-3 dark:text-claude-darkTextSecondary text-claude-textSecondary tabular-nums">
+                    {i18nService.t(row.size)}
+                  </td>
+                  <td className="py-2 text-right tabular-nums font-semibold text-amber-800 dark:text-amber-400">
+                    {i18nService.t(row.capacity)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </OverlayPanel>
+      )}
     </div>
   );
 };

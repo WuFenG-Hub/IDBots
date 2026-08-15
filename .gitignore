@@ -185,6 +185,7 @@ man_base_data_pebble/
 !tests/metabotManageAgentTools.test.mjs
 !tests/browserCoworkSlice.test.ts
 !tests/sidebarWidth.test.ts
+!tests/formatTraffic.test.ts
 !tests/botBrowserMetaAppFork.test.mjs
 !tests/botBrowserMetaAppPublish.test.mjs
 !tests/botBrowserCoworkPanel.test.ts
