@@ -5659,6 +5659,9 @@ export class CoworkRunner extends EventEmitter {
     const modelLimits = resolveCurrentModelLimits(route.model);
     const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
     const hub = this.ensureDshTurnHub();
+    // Re-register: steer/cancel plumbing looks the session up in
+    // activeSessions, and turn N+1 arrives after turn N's teardown removed it.
+    this.activeSessions.set(sessionId, activeSession);
     this.dshActiveTurns.add(sessionId);
     // Stop/abort maps to the runtime's native turn cancel; the turn promise
     // then settles with an aborted reason.
@@ -5741,6 +5744,8 @@ export class CoworkRunner extends EventEmitter {
         this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
         finish('idle');
         this.emit('complete', sessionId, activeSession.claudeSessionId);
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
         return;
       }
       if (outcome.kind === 'error') {
@@ -5752,6 +5757,11 @@ export class CoworkRunner extends EventEmitter {
       }
       finish('completed');
       this.emit('complete', sessionId, activeSession.claudeSessionId);
+      // Same teardown the Claude path performs: without removing the active
+      // session, the next submission is classified as a pending steer against
+      // a turn that already ended ("引导 等待送达" that never delivers).
+      this.clearPendingPermissions(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
     } catch (error) {
       coworkLog('ERROR', 'runDshSessionLocal', 'turn crashed', { sessionId, error: String(error) });
       this.handleError(sessionId, error instanceof Error ? error.message : String(error));

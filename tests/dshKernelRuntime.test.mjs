@@ -92,7 +92,9 @@ test('DshKernel E2E', { skip: runtimeReady ? false : 'dsh-runtime/node_modules n
     // ---- 1. plain turn ---------------------------------------------------
     await kernel.prompt(sessionId, 'HELLO_MOCK')
     await waitFor(() => turnEnds.some((t) => t.sessionId === sessionId && t.reason.kind === 'completed'), 25000, 'turn 1 completion')
-    assert.ok(messages.some((m) => m.type === 'user' && m.content === 'HELLO_MOCK'), 'user bubble emitted')
+    // User bubbles come from the host's submission path — the kernel/mapper
+    // must not echo them (that duplicated messages in the live app).
+    assert.ok(!messages.some((m) => m.type === 'user'), 'no user echo from the kernel')
     const assistant = messages.find((m) => m.type === 'assistant' && !m.metadata?.isThinking)
     assert.ok(assistant, 'assistant message emitted')
     assert.equal(assistant.metadata.isStreaming, true, 'assistant opened as streaming')
@@ -105,7 +107,8 @@ test('DshKernel E2E', { skip: runtimeReady ? false : 'dsh-runtime/node_modules n
     await waitFor(() => messages.some((m) => m.type === 'tool_use' && m.metadata.toolName === 'slow_tool'), 25000, 'slow_tool call')
     const steerReceipt = await kernel.steer(sessionId, 'STEERED_NOW drop it')
     assert.equal(steerReceipt.steered, true)
-    await waitFor(() => messages.some((m) => m.type === 'user' && m.content.includes('STEERED_NOW')), 25000, 'steer consumed as user message')
+    // Consumption is proven by the steer text reaching the next model request.
+    await waitFor(() => seen.some((r) => r.body?.messages?.some((m) => String(m.content).includes('STEERED_NOW'))), 25000, 'steer reached the model')
     await waitFor(() => turnEnds.filter((t) => t.sessionId === sessionId).length >= 2, 25000, 'steer turn completion')
 
     // ---- 3. approval round trip -------------------------------------------
@@ -146,7 +149,7 @@ test('DshKernel E2E', { skip: runtimeReady ? false : 'dsh-runtime/node_modules n
     const resumed = await kernel.ensureSession({ sessionId, provider: 'mockgw', model: 'mock-1' })
     assert.equal(resumed.resumed, true, 'session resumed from persisted log after restart')
     await kernel.prompt(sessionId, 'AFTER_RESTART')
-    await waitFor(() => messages.some((m) => m.type === 'user' && m.content === 'AFTER_RESTART'), 25000, 'post-restart user bubble')
+    await waitFor(() => turnEnds.filter((t) => t.sessionId === sessionId && t.reason.kind === 'completed').length >= 4, 25000, 'post-restart turn completion')
     await waitFor(
       () => turnEnds.filter((t) => t.sessionId === sessionId && t.reason.kind === 'completed').length >= 4,
       25000,

@@ -11,31 +11,19 @@ const { DshEventMapper } = require('../dist-electron/main/libs/dshKernel/dshEven
 
 const kinds = (actions) => actions.map((a) => a.kind)
 
-test('real user message maps to a user bubble; plugin snapshots are filtered out', () => {
+test('user/message events map to nothing — the host records user bubbles', () => {
   const mapper = new DshEventMapper()
-  const real = mapper.consume({
-    type: 'user/message',
-    seq: 4,
-    data: {
-      id: 'u1', role: 'user',
-      content: [{ type: 'text', text: 'HELLO_MOCK' }],
-      source: { kind: 'user' },
-    },
-  })
-  assert.deepEqual(kinds(real), ['message'])
-  assert.equal(real[0].message.type, 'user')
-  assert.equal(real[0].message.content, 'HELLO_MOCK')
-
-  const plugin = mapper.consume({
-    type: 'user/message',
-    seq: 5,
-    data: {
-      role: 'user',
-      content: [{ type: 'text', text: 'Approval policy: ask…' }],
-      source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
-    },
-  })
-  assert.deepEqual(plugin, [])
+  // Human input, plugin runtime-context snapshots, and tool carries are all
+  // model-facing facts; echoing them would duplicate the submission path's
+  // own user messages (prompts and steers alike).
+  for (const source of [{ kind: 'user' }, { kind: 'plugin', form: 'snapshot' }, { kind: 'tool', callId: 'c1' }]) {
+    const actions = mapper.consume({
+      type: 'user/message',
+      seq: 4,
+      data: { id: 'u1', role: 'user', content: [{ type: 'text', text: 'x' }], source },
+    })
+    assert.deepEqual(actions, [])
+  }
 })
 
 test('text deltas open a streaming slot and update with accumulated content', () => {

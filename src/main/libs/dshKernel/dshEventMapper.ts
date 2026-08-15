@@ -31,17 +31,11 @@ export class DshEventMapper {
     const data = envelope.data ?? {}
     switch (envelope.type) {
       case 'user/message': {
-        // Envelope payload is flat on data (id/role/content/source); defend
-        // against a nested message copy too.
-        const source = data.source ?? data.message?.source
-        // user: real human input. plugin: runtime-context snapshots (approval
-        // policy etc.) — model-facing only. tool: covered by tool/result.
-        if (source?.kind === 'user') {
-          actions.push({
-            kind: 'message',
-            message: { type: 'user', content: textOf(data.content ?? data.message?.content) },
-          })
-        }
+        // NOT mapped: the host's submission path already records user bubbles
+        // for prompts and steers (same as handleClaudeEvent never echoes user
+        // input back). All user-role events here — human input, plugin runtime
+        // snapshots (approval policy), tool-result carries — are model-facing
+        // facts only; tool results arrive as their own tool/result events.
         break
       }
 

@@ -144,11 +144,14 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     const turn = runner.runDshSessionLocal(activeSession, 'HELLO_MOCK', process.cwd(), 'You are Alice, an on-chain assistant.')
     await turn
     assert.ok(!failure, `turn should not fail: ${failure}`)
-    assert.ok(events.messages.some((m) => m.type === 'user' && m.content === 'HELLO_MOCK'), 'user message emitted')
+    // The host records user bubbles on submission — the mapper must NOT echo
+    // them back (that duplicated every message in the live app).
+    assert.ok(!events.messages.some((m) => m.type === 'user'), 'mapper does not echo user input')
     // Streaming fills content via updateMessage (the emitted snapshot is the
     // empty open), so assert on the store's mutated copies.
     assert.ok(store.messages.some((m) => m.type === 'assistant' && m.content.includes('mock says')), 'assistant reply stored')
     assert.ok(events.completes.length === 1, 'complete emitted')
+    assert.ok(!runner.activeSessions.has(sessionId), 'active session torn down after turn completion')
     assert.ok(activeSession.claudeSessionId?.startsWith('dsh:'), `session handle pinned: ${activeSession.claudeSessionId}`)
     const firstRequest = seen.find((r) => r.body?.messages?.some((m) => m.role === 'system'))
     assert.match(firstRequest.body.messages.find((m) => m.role === 'system').content, /You are Alice/)
@@ -163,16 +166,17 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     const turn2 = runner.runDshSessionLocal(activeSession, 'STEER_TEST', process.cwd(), 'You are Alice.')
     await waitFor(() => events.messages.some((m) => m.type === 'tool_use' && m.metadata?.toolName === 'slow_tool'), 25000, 'slow_tool via runner')
     const steerResult = runner.trySubmitSteer(sessionId, 'sub-1', 'STEERED_IN_RUNNER')
-    if (steerResult?.accepted === false) {
-      console.log('[dbg] steer rejected:', steerResult.reason)
-      console.log('[dbg] dshActiveTurns:', [...runner.dshActiveTurns])
-      console.log('[dbg] messages:', JSON.stringify(store.messages.slice(-4).map((m) => ({ type: m.type, name: m.metadata?.toolName, content: String(m.content).slice(0, 50) }))))
-      const cfg = JSON.parse(require('fs').readFileSync(path.join(process.cwd(), '.cowork-temp', 'dsh-integration-userData', 'dsh-sessions', 'v0', 'cordis.runtime.json'), 'utf8'))
-      console.log('[dbg] cfg has fixtures:', cfg.some(e => String(e.name).includes('test-tools')))
-    }
     assert.ok(steerResult?.accepted !== false, `steer accepted: ${JSON.stringify(steerResult && { reason: steerResult.reason })}`)
+    // Steer bubbles come from the submission path; consumption is proven by
+    // the delivered promise settling AND the follow-up model request carrying
+    // the steer text to the gateway.
+    await Promise.race([
+      steerResult.delivered,
+      sleep(15000).then(() => { throw new Error('steer delivery timed out') }),
+    ])
     await turn2
-    await waitFor(() => store.messages.some((m) => m.type === 'user' && m.content.includes('STEERED_IN_RUNNER')), 25000, 'steer consumed')
+    const steerRequest = seen.filter((r) => r.body?.messages?.some((m) => String(m.content).includes('STEERED_IN_RUNNER'))).at(-1)
+    assert.ok(steerRequest, 'steer text reached the model on the follow-up request')
 
     // Approval: third turn triggers dangerous_tool ask → respond allow.
     const turn3 = runner.runDshSessionLocal(activeSession, 'CALL_DANGEROUS', process.cwd(), 'You are Alice.')
