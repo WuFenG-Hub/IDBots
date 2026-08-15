@@ -3762,6 +3762,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onManageSkills={onManageSkills}
               size="large"
               showModelSelector={true}
+              sessionKernel={currentSession.claudeSessionId?.startsWith('dsh:') ? 'dsh' : 'claude'}
               restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
               modelValue={sessionModelObject}
               onModelChange={handleSessionModelChange}

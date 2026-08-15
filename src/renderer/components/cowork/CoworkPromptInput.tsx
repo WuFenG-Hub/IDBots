@@ -7,6 +7,7 @@ import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
 import PermissionModeSelector from './PermissionModeSelector';
 import { SkillsButton, ActiveSkillBadge } from '../skills';
+import KernelSelector from './KernelSelector';
 import { i18nService } from '../../services/i18n';
 import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
@@ -166,6 +167,8 @@ interface CoworkPromptInputProps {
   suggestedPrompts?: string[];
   /** Show the permission-mode selector in the footer (new-session creation). */
   showPermissionModeSelector?: boolean;
+  /** Kernel the current session runs on ('dsh' when its handle is dsh:-prefixed). */
+  sessionKernel?: 'dsh' | 'claude';
   /** Controlled permission-mode value for the footer selector. */
   permissionMode?: CoworkPermissionMode;
   /** Callback when the footer permission-mode selector changes. */
@@ -195,6 +198,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       onManageSkills,
       suggestedPrompts,
       showPermissionModeSelector = false,
+      sessionKernel,
       permissionMode,
       onPermissionModeChange,
     } = props;
@@ -871,6 +875,7 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   onManageSkills={handleManageSkills}
                 />
                 <ActiveSkillBadge />
+                <KernelSelector sessionKernel={sessionKernel} />
                 {showPermissionModeSelector && onPermissionModeChange && (
                   <PermissionModeSelector
                     currentMode={permissionMode ?? 'default'}
