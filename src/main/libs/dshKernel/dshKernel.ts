@@ -17,6 +17,7 @@
 // handlers — the same message/streaming/turn contract handleClaudeEvent
 // produces for the Claude kernel.
 
+import { app } from 'electron'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { pathToFileURL } from 'url'
@@ -58,8 +59,22 @@ export class DshKernel {
 
   get runtimeDir(): string {
     if (this.opts.runtimeDir) return this.opts.runtimeDir
-    // dist-electron/main/libs/dshKernel/ → repo root → dsh-runtime/
-    return join(__dirname, '..', '..', '..', '..', 'dsh-runtime')
+    if (process.env.IDBOTS_DSH_RUNTIME_DIR) return process.env.IDBOTS_DSH_RUNTIME_DIR
+    // The main bundle lands at different depths depending on the build: the
+    // vite dev bundle sits at dist-electron/main.js while tsc output lives at
+    // dist-electron/main/libs/dshKernel/. Probe instead of guessing, with
+    // app.getAppPath() (project root in dev) first.
+    const candidates = [
+      join(app.getAppPath(), 'dsh-runtime'),
+      join(__dirname, 'dsh-runtime'),
+      join(__dirname, '..', 'dsh-runtime'),
+      join(__dirname, '..', '..', '..', 'dsh-runtime'),
+      join(__dirname, '..', '..', '..', '..', 'dsh-runtime'),
+    ]
+    for (const candidate of candidates) {
+      if (existsSync(join(candidate, 'bin.mjs'))) return candidate
+    }
+    return candidates[0]
   }
 
   get running(): boolean {
