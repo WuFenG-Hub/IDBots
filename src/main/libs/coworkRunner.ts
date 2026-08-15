@@ -5795,22 +5795,30 @@ export class CoworkRunner extends EventEmitter {
     // raw zod objects (the SDK digests zod itself; pi-ai does not — leaking
     // zod internals got the whole request rejected with a 400). Normalize to
     // JSON schema at the bridge boundary.
+    const isZodValue = (value: unknown): boolean =>
+      Boolean(value) && typeof value === 'object'
+      && (Object.hasOwn(value as object, '_def') || Object.hasOwn(value as object, 'def')
+        || typeof (value as any).parse === 'function' || typeof (value as any).safeParse === 'function')
     const normalizeToolSchema = (parameters: unknown): Record<string, unknown> => {
       if (!parameters || typeof parameters !== 'object') return { type: 'object', properties: {} }
-      const maybeZod = parameters as Record<string, unknown>
-      const looksLikeZod = '_def' in maybeZod || 'def' in maybeZod
-        || typeof (parameters as any).parse === 'function' || typeof (parameters as any).safeParse === 'function'
-      if (looksLikeZod) {
-        try {
+      try {
+        // Three conventions reach the SDK's tool(): a full zod schema, a zod
+        // RAW SHAPE ({key: ZodType} — plain object shell with zod values, the
+        // shape bot_browser_screenshot uses), or plain JSON schema.
+        if (isZodValue(parameters)) {
           return z.toJSONSchema(parameters as any, { target: 'draft-7' }) as Record<string, unknown>
-        } catch (error) {
-          coworkLog('WARN', 'buildDshHostTools', 'zod schema conversion failed; falling back to empty schema', {
-            error: error instanceof Error ? error.message : String(error),
-          })
-          return { type: 'object', properties: {} }
         }
+        const values = Object.values(parameters as Record<string, unknown>)
+        if (values.length > 0 && values.some(isZodValue)) {
+          return z.toJSONSchema(z.object(parameters as any), { target: 'draft-7' }) as Record<string, unknown>
+        }
+        return parameters as Record<string, unknown>
+      } catch (error) {
+        coworkLog('WARN', 'buildDshHostTools', 'zod schema conversion failed; falling back to empty schema', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        return { type: 'object', properties: {} }
       }
-      return parameters as Record<string, unknown>
     }
     const passthrough = (
       name: string,
