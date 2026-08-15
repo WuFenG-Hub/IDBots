@@ -5804,15 +5804,11 @@ export class CoworkRunner extends EventEmitter {
   ].join('\n');
 
   /**
-   * Host-bridged tool surface for DSH turns: the same minimal-shape factory
-   * modules the Claude path mounts, built with a passthrough factory — schemas
-   * travel to the runtime, execution round-trips back here.
+   * Host-bridged tool surface for DSH turns: the shared inline builder with a
+   * passthrough factory — schemas travel to the runtime, execution
+   * round-trips back to the host bridge.
    */
   private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
-    // Factory modules hand the Claude SDK's tool() either plain JSON schema or
-    // raw zod objects (the SDK digests zod itself; pi-ai does not — leaking
-    // zod internals got the whole request rejected with a 400). Normalize to
-    // JSON schema at the bridge boundary.
     const isZodValue = (value: unknown): boolean =>
       Boolean(value) && typeof value === 'object'
       && (Object.hasOwn(value as object, '_def') || Object.hasOwn(value as object, 'def')
@@ -5820,9 +5816,9 @@ export class CoworkRunner extends EventEmitter {
     const normalizeToolSchema = (parameters: unknown): Record<string, unknown> => {
       if (!parameters || typeof parameters !== 'object') return { type: 'object', properties: {} }
       try {
-        // Three conventions reach the SDK's tool(): a full zod schema, a zod
-        // RAW SHAPE ({key: ZodType} — plain object shell with zod values, the
-        // shape bot_browser_screenshot uses), or plain JSON schema.
+        // The SDK's tool() accepts a full zod schema, a zod RAW SHAPE
+        // ({key: ZodType} — plain shell with zod values), or plain JSON
+        // schema; pi-ai needs the JSON form.
         if (isZodValue(parameters)) {
           return z.toJSONSchema(parameters as any, { target: 'draft-7' }) as Record<string, unknown>
         }
@@ -5844,26 +5840,7 @@ export class CoworkRunner extends EventEmitter {
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
     ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
-    const tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> = []
-    const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser'
-    const isTwin = this.isTwinSession(sessionId)
-    const typed = (values: unknown[]) => tools.push(...(values as Array<typeof tools[number]>))
-    if (this.metaIdSearch) {
-      typed(buildMetaIdSearchAgentTools({ tool: passthrough as any, metaIdSearch: this.metaIdSearch, openBestMatchInBrowser: isBrowserSession }))
-    }
-    if (this.socialRecall) {
-      typed(buildSocialRecallAgentTools({ tool: passthrough as any, socialRecall: this.socialRecall, openBestMatchInBrowser: isBrowserSession }))
-    }
-    if (this.projects) {
-      typed(buildProjectsAgentTools({ tool: passthrough as any, control: this.projects }))
-    }
-    if (this.controlBotBrowser) {
-      typed(buildBotBrowserScreenshotTool({ tool: passthrough as any, controlBotBrowser: this.controlBotBrowser, sessionId }))
-    }
-    if (isTwin && this.metabotManage) {
-      typed(buildMetabotManageAgentTools({ tool: passthrough as any, control: this.metabotManage }))
-    }
-    return tools
+    return this.buildSessionInlineTools(sessionId, passthrough)
   }
 
   /** Execute a host-bridged tool call from the runtime. */
@@ -5887,6 +5864,510 @@ export class CoworkRunner extends EventEmitter {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+/**
+   * Session-scoped inline tool surface (memory recalls, session steering,
+   * twin orchestration, upload, search, browser, metabot manage). Shared by
+   * both kernels: the Claude path passes the SDK tool() factory, the DSH path
+   * passes a passthrough that also normalizes zod schemas to JSON schema.
+   */
+  private buildSessionInlineTools(sessionId: string, tool: any, activeSession?: ActiveSession): any[] {
+    const sessionMemoryEnabled = this.isSessionMemoryEnabled(sessionId, activeSession);
+    const memoryTools: any[] = [
+      tool(
+        'conversation_search',
+        'Search the user\'s prior conversations across all sessions by keyword/phrase and return matching chats as Claude-style <chat> blocks (id, title, snippet, time). Use when the user references a past conversation ("我们之前聊过...", "the chat where we discussed X", "上次说的那个") or you need to recall what was decided/built before. When NOT to use: not for the current session (its history is already in context), and not for on-chain posts/social content — use search_social_posts for that. Supports max_results (1-10) and before/after cursors for paging. Returns zero or more <chat> blocks; an empty result means no match, not an error.',
+        {
+          query: z.string().min(1),
+          max_results: z.number().int().min(1).max(10).optional(),
+          before: z.string().optional(),
+          after: z.string().optional(),
+        },
+        async (args: {
+          query: string;
+          max_results?: number;
+          before?: string;
+          after?: string;
+        }) => {
+          const text = this.runConversationSearchTool(args, sessionId);
+          return {
+            content: [
+              {
+                type: 'text',
+                text,
+              },
+            ],
+          } as any;
+        }
+      ),
+      tool(
+        'recent_chats',
+        'List the user\'s most recent conversations as Claude-style <chat> blocks (id, title, time). Use when the user wants an overview of recent chats without a specific keyword ("最近有哪些对话", "what have I been working on lately", "show my recent sessions"). When NOT to use: if the user is looking for a specific topic, use conversation_search with a query instead — this tool is keyword-free and lists purely by recency. Supports n (1-20), sort_order (asc/desc), and before/after cursors.',
+        {
+          n: z.number().int().min(1).max(20).optional(),
+          sort_order: z.enum(['asc', 'desc']).optional(),
+          before: z.string().optional(),
+          after: z.string().optional(),
+        },
+        async (args: {
+          n?: number;
+          sort_order?: 'asc' | 'desc';
+          before?: string;
+          after?: string;
+        }) => {
+          const text = this.runRecentChatsTool(args, sessionId);
+          return {
+            content: [{ type: 'text', text }],
+          } as any;
+        }
+      ),
+      tool(
+        'idbots_session_read_all',
+        'Read ALL messages from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only — never modifies the target. Use when you need the full history of another session (reviewing what a delegated Worker did, catching up on an A2A task). When NOT to use: for just the last message use idbots_session_read_latest (cheaper); and not for the CURRENT session (already in context). Returns the session message log as text; an error if the session does not exist.',
+        {
+          sessionId: z.string().min(1),
+        },
+        async (args: { sessionId: string }) => {
+          const result = this.runIdbotsSessionReadAllTool(args);
+          return {
+            content: [{ type: 'text', text: result.text }],
+            isError: !result.success,
+          } as any;
+        }
+      ),
+      tool(
+        'idbots_session_read_latest',
+        'Read only the LATEST message from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only. Use for a quick status check on another session ("did the Worker finish?", "what is the latest in that task") without pulling the whole history. When NOT to use: if you need full context/decisions, use idbots_session_read_all instead. Returns the single latest message as text; an error if the session does not exist.',
+        {
+          sessionId: z.string().min(1),
+        },
+        async (args: { sessionId: string }) => {
+          const result = this.runIdbotsSessionReadLatestTool(args);
+          return {
+            content: [{ type: 'text', text: result.text }],
+            isError: !result.success,
+          } as any;
+        }
+      ),
+      tool(
+        'idbots_session_insert_user_message',
+        'Send an instruction (as a user message) into ANOTHER local IDBots Cowork session and queue that session to continue processing it. Use to steer or hand off work to a parallel session the user has open. When NOT to use: do not write into the CURRENT session (reply normally instead), and never use this to spam or loop messages between sessions. A2A sessions are read-only targets — writes to them are rejected. Returns a confirmation, or an error if the target is missing or not a Cowork session.',
+        {
+          targetSessionId: z.string().min(1),
+          message: z.string().min(1),
+        },
+        async (args: { targetSessionId: string; message: string }) => {
+          const result = this.runIdbotsSessionInsertUserMessageTool(args, sessionId);
+          return {
+            content: [{ type: 'text', text: result.text }],
+            isError: !result.success,
+          } as any;
+        }
+      ),
+    ];
+    if (this.listLocalWorkers && this.isTwinSession(sessionId)) {
+      memoryTools.push(
+        tool(
+          'local_workers_list',
+          'List all local MetaBots available as Workers for Twin orchestration — sanitized identity, persona, skills, capability evidence, and availability. Twin Bot only. Use BEFORE delegating, to pick a Worker whose skills match the step. When NOT to use: not in non-Twin sessions (the tool is absent there anyway); and not for browsing bots socially — use search_metaids for that. Returns one entry per local bot; select on the capability evidence, not the display name.',
+          {},
+          async () => {
+            const result = await this.handleHostToolExecution({ toolName: 'local_workers_list', toolInput: {} }, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: !result.success,
+            } as any;
+          }
+        )
+      );
+    }
+    if (this.delegateLocalWorker && this.isTwinSession(sessionId)) {
+      memoryTools.push(
+        tool(
+          'local_worker_delegate',
+          'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns only after the Worker handoff is collected. Twin Bot only. Use when a step is well-defined enough to hand off (clear objective + acceptance criteria); call local_workers_list first to choose by capability evidence. When NOT to use: do not delegate vague or multi-step blobs (break them down first), and do not delegate trivial steps you can do faster yourself — delegation has overhead. Provide workerMetabotId + objective at minimum; acceptanceCriteria/context/permissionScope make the handoff verifiable. Returns the attempt/handoff result; verify the Worker actual output via twin_task_status before reporting done.',
+          {
+            workerMetabotId: z.number().int().positive(),
+            objective: z.string().min(1),
+            acceptanceCriteria: z.array(z.unknown()).optional(),
+            context: z.string().optional(),
+            permissionScope: z.record(z.string(), z.unknown()).optional(),
+            taskId: z.string().optional(),
+            stepId: z.string().optional(),
+            taskIntent: z.string().optional(),
+            idempotencyKey: z.string().optional(),
+          },
+          async (args) => {
+            const result = await this.handleHostToolExecution({ toolName: 'local_worker_delegate', toolInput: args }, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: !result.success,
+            } as any;
+          }
+        )
+      );
+    }
+    if (this.isTwinSession(sessionId) && (this.twinTaskStatus || this.twinTaskCancel || this.twinTaskReassign)) {
+      memoryTools.push(
+        tool(
+          'twin_task_status',
+          'Read the durable status of one Twin orchestration task: steps, attempts, Worker sessions, and handoff evidence. Twin Bot only. Use to track delegated work ("how is the task going?", "did the Worker finish?") and to verify actual output before reporting completion. When NOT to use: do not poll in a tight loop — check once after meaningful time has passed. Returns the full task state; a "completed" task should still have its handoff inspected, not assumed correct.',
+          { taskId: z.string().min(1) },
+          async (args) => {
+            const result = await this.handleHostToolExecution({ toolName: 'twin_task_status', toolInput: args }, sessionId);
+            return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+          }
+        ),
+        tool(
+          'twin_task_cancel',
+          'Cancel a durable Twin orchestration task, including its queued or running Worker attempts. Twin Bot only. Use when a task is no longer needed or was started by mistake. When NOT to use: do not cancel just because a step is slow — check twin_task_status first; and prefer twin_task_reassign to retry a failed step on another Worker rather than killing the whole task. Returns a confirmation; cancellation stops further Worker work on this task.',
+          { taskId: z.string().min(1) },
+          async (args) => {
+            const result = await this.handleHostToolExecution({ toolName: 'twin_task_cancel', toolInput: args }, sessionId);
+            return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+          }
+        ),
+        tool(
+          'twin_task_reassign',
+          'Reassign ONE orchestration step (failed or in-progress) to another persistent Worker Bot, creating a new idempotent attempt. Twin Bot only. Use to retry a step on a better-suited Worker after a failure, without canceling the whole task. When NOT to use: do not reassign repeatedly without new information (it fails the same way) — fix the objective/context first; and do not use this to cancel (use twin_task_cancel). Requires stepId + workerMetabotId; returns the new attempt result.',
+          {
+            stepId: z.string().min(1),
+            workerMetabotId: z.number().int().positive(),
+            objective: z.string().optional(),
+            acceptanceCriteria: z.array(z.unknown()).optional(),
+            context: z.string().optional(),
+            permissionScope: z.record(z.string(), z.unknown()).optional(),
+            idempotencyKey: z.string().optional(),
+          },
+          async (args) => {
+            const result = await this.handleHostToolExecution({ toolName: 'twin_task_reassign', toolInput: args }, sessionId);
+            return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+          }
+        )
+      );
+    }
+    if (sessionMemoryEnabled) {
+      memoryTools.push(
+        tool(
+          'memory_user_edits',
+          'Manage the current user\'s long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. Use when the user states a durable fact ("I always want X", "记住我做的是 Y") or you discover one worth persisting. When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.',
+          {
+            action: z.enum(['list', 'add', 'update', 'delete']),
+            id: z.string().optional(),
+            text: z.string().optional(),
+            confidence: z.number().min(0).max(1).optional(),
+            status: z.enum(['created', 'stale', 'deleted']).optional(),
+            is_explicit: z.boolean().optional(),
+            limit: z.number().int().min(1).max(200).optional(),
+            query: z.string().optional(),
+          },
+          async (args: {
+            action: 'list' | 'add' | 'update' | 'delete';
+            id?: string;
+            text?: string;
+            confidence?: number;
+            status?: 'created' | 'stale' | 'deleted';
+            is_explicit?: boolean;
+            limit?: number;
+            query?: string;
+          }) => {
+            try {
+              const result = this.runMemoryUserEditsTool(args, sessionId);
+              return {
+                content: [{
+                  type: 'text',
+                  text: result.text,
+                }],
+                isError: result.isError,
+              } as any;
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: this.formatMemoryUserEditsResult({
+                    action: args.action,
+                    successCount: 0,
+                    failedCount: 1,
+                    changedIds: [],
+                    reason: error instanceof Error ? error.message : String(error),
+                  }),
+                }],
+                isError: true,
+              } as any;
+            }
+          }
+        )
+      );
+    }
+    if (sessionMemoryEnabled && this.experienceStore) {
+      memoryTools.push(
+        tool(
+          'experience_recall',
+          'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
+          {
+            query: z.string().optional(),
+            date_from: z.string().optional(),
+            date_to: z.string().optional(),
+            granularity: z.enum(['day', 'week', 'month']).optional(),
+            limit: z.number().int().min(1).max(30).optional(),
+          },
+          async (args: ExperienceRecallArgs) => {
+            const result = this.runExperienceRecallTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+    }
+    if (sessionMemoryEnabled && this.knowledgeStore) {
+      memoryTools.push(
+        tool(
+          'knowledge_recall',
+          'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work that will help the current task. A query does a keyword search over topic+summary; kind filters to know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles something you have done before, to reuse what worked and avoid traps you already hit. When NOT to use: this is your reusable TASK know-how, not facts about the user (use memory_user_edits) and not a log of past days (use experience_recall). Returns labeled knowledge entries; an empty result means you have not distilled a point about this yet.',
+          {
+            query: z.string().optional(),
+            kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
+            category: z.string().optional(),
+            limit: z.number().int().min(1).max(50).optional(),
+          },
+          async (args: { query?: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; limit?: number }) => {
+            const result = this.runKnowledgeRecallTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+      memoryTools.push(
+        tool(
+          'knowledge_upsert',
+          'Save or update ONE reusable knowledge point (经验/知识点) you want to apply to future tasks. topic is a reusable theme written so it can be found again (e.g. "fastest path to a high-quality web 3D game", "design style this user likes", "SSR build crashes on window access"); summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — so update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. When NOT to use: do not save one-off ephemeral facts, user-profile facts (use memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
+          {
+            topic: z.string().min(1),
+            summary: z.string().min(1),
+            kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
+            category: z.string().optional(),
+            tags: z.array(z.string()).optional(),
+          },
+          async (args: { topic: string; summary: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; tags?: string[] }) => {
+            const result = this.runKnowledgeUpsertTool(args, sessionId);
+            return {
+              content: [{ type: 'text', text: result.text }],
+              isError: result.isError,
+            } as any;
+          }
+        )
+      );
+    }
+    // Local MetaApp launcher tools are retired for browser-type sessions:
+    // in that surface apps open on-chain via search_metaapps + metaapp:// URIs.
+    const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser';
+    if (this.openMetaApp && !isBrowserSession) {
+      memoryTools.push(
+        tool(
+          'open_metaapp',
+          'Open a LOCAL MetaApp (one installed/published on this machine) by app id, optionally targeting a specific sub-path. Use when the user explicitly names a local app to open. When NOT to use: do not open an app the user did not ask for (the host guards against unprompted opens); for on-chain app discovery use search_metaapps + bot_browser_open_uri instead. Not available in browser-type sessions. Returns the opened app URL, or an error if the app id is unknown.',
+          {
+            appId: z.string().min(1),
+            targetPath: z.string().optional(),
+          },
+          async (args: { appId: string; targetPath?: string }) => {
+            const displayName = String(args.appId || '').trim() || 'unknown';
+            const latestUserText = this.getLatestUserMessageText(sessionId);
+            if (!isExplicitMetaAppUserRequest(latestUserText, displayName)) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: this.buildMetaAppGuardRejectionText('open_metaapp', displayName),
+                }],
+                isError: true,
+              } as any;
+            }
+            try {
+              const result = await this.openMetaApp?.({
+                appId: args.appId,
+                targetPath: args.targetPath,
+              });
+              const resolvedDisplayName = String(result?.name || args.appId).trim() || args.appId;
+              const text = result?.success
+                ? (result.url
+                  ? `Opened metaapp "${resolvedDisplayName}" at ${result.url}`
+                  : `Opened metaapp "${resolvedDisplayName}"`)
+                : `Failed to open metaapp "${resolvedDisplayName}": ${result?.error || 'Unknown error'}`;
+              const response: any = {
+                content: [{ type: 'text', text }],
+              };
+              if (!result?.success) {
+                response.isError = true;
+              }
+              return response;
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Failed to open metaapp "${args.appId}": ${error instanceof Error ? error.message : String(error)}`,
+                }],
+                isError: true,
+              } as any;
+            }
+          }
+        )
+      );
+    }
+    if (this.requestIMSessionReset) {
+    memoryTools.push(
+      tool(
+        'start_new_im_session',
+        'Open a brand-new chat session for the current IM conversation. Use ONLY when the user explicitly asks for a new session/window (e.g. "新建会话", "新窗口", "重开会话", "new session", "new chat"). Do NOT call it just because the context feels long. The current reply still streams back through this session; subsequent inbound IM messages will land in a freshly created session automatically. Has no effect when called from a non-IM session.',
+        {
+          reason: z.string().optional(),
+        },
+        async (_args: { reason?: string }) => {
+          const ok = this.requestIMSessionReset?.(sessionId) ?? false;
+          return {
+            content: [{
+              type: 'text',
+              text: ok
+                ? 'New IM session staged. After this reply, the next inbound message will start a fresh session window. Briefly confirm to the user.'
+                : 'Not in an IM session; this tool has no effect here.',
+            }],
+            isError: !ok,
+          } as any;
+        }
+      )
+    );
+    }
+    if (this.resolveMetaAppUrl && !isBrowserSession) {
+    memoryTools.push(
+      tool(
+        'resolve_metaapp_url',
+          'Resolve a LOCAL MetaApp URL (by app id, optional sub-path) WITHOUT opening it — returns the URL you would open. Use when you need the URL to embed or reference a local app without launching it. When NOT to use: if the user wants to actually view the app, use open_metaapp instead. Not available in browser-type sessions. Returns the resolved URL, or an error if the app id is unknown.',
+          {
+            appId: z.string().min(1),
+            targetPath: z.string().optional(),
+          },
+          async (args: { appId: string; targetPath?: string }) => {
+            const displayName = String(args.appId || '').trim() || 'unknown';
+            const latestUserText = this.getLatestUserMessageText(sessionId);
+            if (!isExplicitMetaAppUserRequest(latestUserText, displayName)) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: this.buildMetaAppGuardRejectionText('resolve_metaapp_url', displayName),
+                }],
+                isError: true,
+              } as any;
+            }
+            try {
+              const result = await this.resolveMetaAppUrl?.({
+                appId: args.appId,
+                targetPath: args.targetPath,
+              });
+              const resolvedDisplayName = String(result?.name || args.appId).trim() || args.appId;
+              const text = result?.success
+                ? (result.url
+                  ? `Resolved metaapp "${resolvedDisplayName}" to ${result.url}`
+                  : `Resolved metaapp "${resolvedDisplayName}"`)
+                : `Failed to resolve metaapp "${resolvedDisplayName}": ${result?.error || 'Unknown error'}`;
+              const response: any = {
+                content: [{ type: 'text', text }],
+              };
+              if (!result?.success) {
+                response.isError = true;
+              }
+              return response;
+            } catch (error) {
+              return {
+                content: [{
+                  type: 'text',
+                  text: `Failed to resolve metaapp "${args.appId}": ${error instanceof Error ? error.message : String(error)}`,
+                }],
+                isError: true,
+              } as any;
+            }
+          }
+        )
+      );
+    }
+    if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
+      memoryTools.push(
+        ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+      );
+    }
+    // Bot Browser screenshot is registered for EVERY cowork surface (not only
+    // browser sessions) so any MetaBot can capture the active tab. When the
+    // surface is not visible the tool returns a graceful hint instead of
+    // erroring — matching the posture of the other browser tools.
+    if (this.controlBotBrowser) {
+      memoryTools.push(
+        ...buildBotBrowserScreenshotTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
+      );
+    }
+    // MetaID search is registered for every cowork surface: browser sessions
+    // open the best match in the Bot Browser directly; other sessions only
+    // present clickable metaid:// links so the user stays in their flow.
+    if (this.metaIdSearch) {
+      memoryTools.push(
+        ...buildMetaIdSearchAgentTools({
+          tool,
+          metaIdSearch: this.metaIdSearch,
+          openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // Local Projects query is registered for every cowork surface so any
+    // MetaBot can resolve a project name to its guidelines and paths.
+    if (this.projects) {
+      memoryTools.push(
+        ...buildProjectsAgentTools({ tool, control: this.projects })
+      );
+    }
+    // On-chain social post search (MetaSo social recall) is registered for
+    // every cowork surface with the same posture as MetaID search: browser
+    // sessions may open an author's page; other sessions keep metaid://
+    // author links clickable only.
+    if (this.socialRecall) {
+      memoryTools.push(
+        ...buildSocialRecallAgentTools({
+          tool,
+          socialRecall: this.socialRecall,
+          openBestMatchInBrowser: isBrowserSession,
+        })
+      );
+    }
+    // Local file upload to MetaWeb is registered for every cowork surface so
+    // any MetaBot can publish a local file on-chain via uploadMetaFile()
+    // (direct vs chunked, MVC sponsor-first with self-paid fallback). The
+    // acting MetaBot is resolved from the session so the right wallet/identity
+    // pays; replaces the external metabot-upload-file skill.
+    if (this.metaFileUpload) {
+      memoryTools.push(
+        ...buildMetaFileUploadAgentTools({
+          tool,
+          upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
+          sessionId,
+          resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
+      );
+    }
+    // MetaBot management (list/create/update/delete) is registered ONLY for
+    // Twin sessions: the Twin acts as the user's operator over the local bot
+    // roster. Every tool delegates to services/metabotManageService.ts — the
+    // same code the manual UI IPC handlers call — so Twin-assisted management
+    // is identical to hand-editing. Worker bots never see these tools.
+    if (this.metabotManage && this.isTwinSession(sessionId)) {
+      memoryTools.push(
+        ...buildMetabotManageAgentTools({
+          tool,
+          control: this.metabotManage,
+        })
+      );
+    }
+    return memoryTools;
   }
 
   private async runClaudeCodeLocal(
@@ -6682,499 +7163,8 @@ export class CoworkRunner extends EventEmitter {
       coworkLog('INFO', 'runClaudeCodeLocal', 'Claude SDK loaded successfully');
 
       const memoryServerName = `user-memory-${sessionId.slice(0, 8)}`;
-      const memoryTools: any[] = [
-        tool(
-          'conversation_search',
-          'Search the user\'s prior conversations across all sessions by keyword/phrase and return matching chats as Claude-style <chat> blocks (id, title, snippet, time). Use when the user references a past conversation ("我们之前聊过...", "the chat where we discussed X", "上次说的那个") or you need to recall what was decided/built before. When NOT to use: not for the current session (its history is already in context), and not for on-chain posts/social content — use search_social_posts for that. Supports max_results (1-10) and before/after cursors for paging. Returns zero or more <chat> blocks; an empty result means no match, not an error.',
-          {
-            query: z.string().min(1),
-            max_results: z.number().int().min(1).max(10).optional(),
-            before: z.string().optional(),
-            after: z.string().optional(),
-          },
-          async (args: {
-            query: string;
-            max_results?: number;
-            before?: string;
-            after?: string;
-          }) => {
-            const text = this.runConversationSearchTool(args, sessionId);
-            return {
-              content: [
-                {
-                  type: 'text',
-                  text,
-                },
-              ],
-            } as any;
-          }
-        ),
-        tool(
-          'recent_chats',
-          'List the user\'s most recent conversations as Claude-style <chat> blocks (id, title, time). Use when the user wants an overview of recent chats without a specific keyword ("最近有哪些对话", "what have I been working on lately", "show my recent sessions"). When NOT to use: if the user is looking for a specific topic, use conversation_search with a query instead — this tool is keyword-free and lists purely by recency. Supports n (1-20), sort_order (asc/desc), and before/after cursors.',
-          {
-            n: z.number().int().min(1).max(20).optional(),
-            sort_order: z.enum(['asc', 'desc']).optional(),
-            before: z.string().optional(),
-            after: z.string().optional(),
-          },
-          async (args: {
-            n?: number;
-            sort_order?: 'asc' | 'desc';
-            before?: string;
-            after?: string;
-          }) => {
-            const text = this.runRecentChatsTool(args, sessionId);
-            return {
-              content: [{ type: 'text', text }],
-            } as any;
-          }
-        ),
-        tool(
-          'idbots_session_read_all',
-          'Read ALL messages from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only — never modifies the target. Use when you need the full history of another session (reviewing what a delegated Worker did, catching up on an A2A task). When NOT to use: for just the last message use idbots_session_read_latest (cheaper); and not for the CURRENT session (already in context). Returns the session message log as text; an error if the session does not exist.',
-          {
-            sessionId: z.string().min(1),
-          },
-          async (args: { sessionId: string }) => {
-            const result = this.runIdbotsSessionReadAllTool(args);
-            return {
-              content: [{ type: 'text', text: result.text }],
-              isError: !result.success,
-            } as any;
-          }
-        ),
-        tool(
-          'idbots_session_read_latest',
-          'Read only the LATEST message from another local IDBots Cowork or A2A session, given a raw session id or an IDBots:// link. Read-only. Use for a quick status check on another session ("did the Worker finish?", "what is the latest in that task") without pulling the whole history. When NOT to use: if you need full context/decisions, use idbots_session_read_all instead. Returns the single latest message as text; an error if the session does not exist.',
-          {
-            sessionId: z.string().min(1),
-          },
-          async (args: { sessionId: string }) => {
-            const result = this.runIdbotsSessionReadLatestTool(args);
-            return {
-              content: [{ type: 'text', text: result.text }],
-              isError: !result.success,
-            } as any;
-          }
-        ),
-        tool(
-          'idbots_session_insert_user_message',
-          'Send an instruction (as a user message) into ANOTHER local IDBots Cowork session and queue that session to continue processing it. Use to steer or hand off work to a parallel session the user has open. When NOT to use: do not write into the CURRENT session (reply normally instead), and never use this to spam or loop messages between sessions. A2A sessions are read-only targets — writes to them are rejected. Returns a confirmation, or an error if the target is missing or not a Cowork session.',
-          {
-            targetSessionId: z.string().min(1),
-            message: z.string().min(1),
-          },
-          async (args: { targetSessionId: string; message: string }) => {
-            const result = this.runIdbotsSessionInsertUserMessageTool(args, sessionId);
-            return {
-              content: [{ type: 'text', text: result.text }],
-              isError: !result.success,
-            } as any;
-          }
-        ),
-      ];
-      if (this.listLocalWorkers && this.isTwinSession(sessionId)) {
-        memoryTools.push(
-          tool(
-            'local_workers_list',
-            'List all local MetaBots available as Workers for Twin orchestration — sanitized identity, persona, skills, capability evidence, and availability. Twin Bot only. Use BEFORE delegating, to pick a Worker whose skills match the step. When NOT to use: not in non-Twin sessions (the tool is absent there anyway); and not for browsing bots socially — use search_metaids for that. Returns one entry per local bot; select on the capability evidence, not the display name.',
-            {},
-            async () => {
-              const result = await this.handleHostToolExecution({ toolName: 'local_workers_list', toolInput: {} }, sessionId);
-              return {
-                content: [{ type: 'text', text: result.text }],
-                isError: !result.success,
-              } as any;
-            }
-          )
-        );
-      }
-      if (this.delegateLocalWorker && this.isTwinSession(sessionId)) {
-        memoryTools.push(
-          tool(
-            'local_worker_delegate',
-            'Delegate ONE concrete, acceptance-tested step to a persistent local Worker Bot. The host creates durable task/step/attempt records and returns only after the Worker handoff is collected. Twin Bot only. Use when a step is well-defined enough to hand off (clear objective + acceptance criteria); call local_workers_list first to choose by capability evidence. When NOT to use: do not delegate vague or multi-step blobs (break them down first), and do not delegate trivial steps you can do faster yourself — delegation has overhead. Provide workerMetabotId + objective at minimum; acceptanceCriteria/context/permissionScope make the handoff verifiable. Returns the attempt/handoff result; verify the Worker actual output via twin_task_status before reporting done.',
-            {
-              workerMetabotId: z.number().int().positive(),
-              objective: z.string().min(1),
-              acceptanceCriteria: z.array(z.unknown()).optional(),
-              context: z.string().optional(),
-              permissionScope: z.record(z.string(), z.unknown()).optional(),
-              taskId: z.string().optional(),
-              stepId: z.string().optional(),
-              taskIntent: z.string().optional(),
-              idempotencyKey: z.string().optional(),
-            },
-            async (args) => {
-              const result = await this.handleHostToolExecution({ toolName: 'local_worker_delegate', toolInput: args }, sessionId);
-              return {
-                content: [{ type: 'text', text: result.text }],
-                isError: !result.success,
-              } as any;
-            }
-          )
-        );
-      }
-      if (this.isTwinSession(sessionId) && (this.twinTaskStatus || this.twinTaskCancel || this.twinTaskReassign)) {
-        memoryTools.push(
-          tool(
-            'twin_task_status',
-            'Read the durable status of one Twin orchestration task: steps, attempts, Worker sessions, and handoff evidence. Twin Bot only. Use to track delegated work ("how is the task going?", "did the Worker finish?") and to verify actual output before reporting completion. When NOT to use: do not poll in a tight loop — check once after meaningful time has passed. Returns the full task state; a "completed" task should still have its handoff inspected, not assumed correct.',
-            { taskId: z.string().min(1) },
-            async (args) => {
-              const result = await this.handleHostToolExecution({ toolName: 'twin_task_status', toolInput: args }, sessionId);
-              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
-            }
-          ),
-          tool(
-            'twin_task_cancel',
-            'Cancel a durable Twin orchestration task, including its queued or running Worker attempts. Twin Bot only. Use when a task is no longer needed or was started by mistake. When NOT to use: do not cancel just because a step is slow — check twin_task_status first; and prefer twin_task_reassign to retry a failed step on another Worker rather than killing the whole task. Returns a confirmation; cancellation stops further Worker work on this task.',
-            { taskId: z.string().min(1) },
-            async (args) => {
-              const result = await this.handleHostToolExecution({ toolName: 'twin_task_cancel', toolInput: args }, sessionId);
-              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
-            }
-          ),
-          tool(
-            'twin_task_reassign',
-            'Reassign ONE orchestration step (failed or in-progress) to another persistent Worker Bot, creating a new idempotent attempt. Twin Bot only. Use to retry a step on a better-suited Worker after a failure, without canceling the whole task. When NOT to use: do not reassign repeatedly without new information (it fails the same way) — fix the objective/context first; and do not use this to cancel (use twin_task_cancel). Requires stepId + workerMetabotId; returns the new attempt result.',
-            {
-              stepId: z.string().min(1),
-              workerMetabotId: z.number().int().positive(),
-              objective: z.string().optional(),
-              acceptanceCriteria: z.array(z.unknown()).optional(),
-              context: z.string().optional(),
-              permissionScope: z.record(z.string(), z.unknown()).optional(),
-              idempotencyKey: z.string().optional(),
-            },
-            async (args) => {
-              const result = await this.handleHostToolExecution({ toolName: 'twin_task_reassign', toolInput: args }, sessionId);
-              return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
-            }
-          )
-        );
-      }
-      if (sessionMemoryEnabled) {
-        memoryTools.push(
-          tool(
-            'memory_user_edits',
-            'Manage the current user\'s long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. Use when the user states a durable fact ("I always want X", "记住我做的是 Y") or you discover one worth persisting. When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.',
-            {
-              action: z.enum(['list', 'add', 'update', 'delete']),
-              id: z.string().optional(),
-              text: z.string().optional(),
-              confidence: z.number().min(0).max(1).optional(),
-              status: z.enum(['created', 'stale', 'deleted']).optional(),
-              is_explicit: z.boolean().optional(),
-              limit: z.number().int().min(1).max(200).optional(),
-              query: z.string().optional(),
-            },
-            async (args: {
-              action: 'list' | 'add' | 'update' | 'delete';
-              id?: string;
-              text?: string;
-              confidence?: number;
-              status?: 'created' | 'stale' | 'deleted';
-              is_explicit?: boolean;
-              limit?: number;
-              query?: string;
-            }) => {
-              try {
-                const result = this.runMemoryUserEditsTool(args, sessionId);
-                return {
-                  content: [{
-                    type: 'text',
-                    text: result.text,
-                  }],
-                  isError: result.isError,
-                } as any;
-              } catch (error) {
-                return {
-                  content: [{
-                    type: 'text',
-                    text: this.formatMemoryUserEditsResult({
-                      action: args.action,
-                      successCount: 0,
-                      failedCount: 1,
-                      changedIds: [],
-                      reason: error instanceof Error ? error.message : String(error),
-                    }),
-                  }],
-                  isError: true,
-                } as any;
-              }
-            }
-          )
-        );
-      }
-      if (sessionMemoryEnabled && this.experienceStore) {
-        memoryTools.push(
-          tool(
-            'experience_recall',
-            'Recall YOUR OWN past experiences as daily summaries — what you learned and did on past days. A bare call returns the last 30 days; a query does a full-history keyword search; date_from/date_to (YYYY-MM-DD) pin a range; granularity groups results by day (default), week, or month to compress a long range ("what happened last month"); limit caps the count (1-30). Use when reflecting on past work to inform the current task ("have I dealt with this before?", "what did I learn last week", "what did I do last month"). When NOT to use: this is your OWN experience log, not user memories (use memory_user_edits for facts about the user) and not chat history (use conversation_search). Returns daily summary blocks (grouped when granularity is set); for a pinned range with no summary yet it falls back to the raw activity timeline; an empty result means nothing was recorded for the range/query.',
-            {
-              query: z.string().optional(),
-              date_from: z.string().optional(),
-              date_to: z.string().optional(),
-              granularity: z.enum(['day', 'week', 'month']).optional(),
-              limit: z.number().int().min(1).max(30).optional(),
-            },
-            async (args: ExperienceRecallArgs) => {
-              const result = this.runExperienceRecallTool(args, sessionId);
-              return {
-                content: [{ type: 'text', text: result.text }],
-                isError: result.isError,
-              } as any;
-            }
-          )
-        );
-      }
-      if (sessionMemoryEnabled && this.knowledgeStore) {
-        memoryTools.push(
-          tool(
-            'knowledge_recall',
-            'Recall YOUR OWN reusable knowledge points (经验/知识点) — distilled know-how, pitfalls (坑) and principles from your past work that will help the current task. A query does a keyword search over topic+summary; kind filters to know_how/pitfall/principle; category filters a grouping; limit caps the count (1-50). Use before starting a task that resembles something you have done before, to reuse what worked and avoid traps you already hit. When NOT to use: this is your reusable TASK know-how, not facts about the user (use memory_user_edits) and not a log of past days (use experience_recall). Returns labeled knowledge entries; an empty result means you have not distilled a point about this yet.',
-            {
-              query: z.string().optional(),
-              kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
-              category: z.string().optional(),
-              limit: z.number().int().min(1).max(50).optional(),
-            },
-            async (args: { query?: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; limit?: number }) => {
-              const result = this.runKnowledgeRecallTool(args, sessionId);
-              return {
-                content: [{ type: 'text', text: result.text }],
-                isError: result.isError,
-              } as any;
-            }
-          )
-        );
-        memoryTools.push(
-          tool(
-            'knowledge_upsert',
-            'Save or update ONE reusable knowledge point (经验/知识点) you want to apply to future tasks. topic is a reusable theme written so it can be found again (e.g. "fastest path to a high-quality web 3D game", "design style this user likes", "SSR build crashes on window access"); summary is the actionable conclusion; kind is know_how (do this) / pitfall (坑, do NOT do this) / principle; category and tags are optional grouping. Reusing an existing topic REWRITES it (version bump, prior text archived) — so update a point when you learn something better, do not create near-duplicates. Use when the human asks you to remember something reusable, or you distill a generalizable lesson from an article/task. When NOT to use: do not save one-off ephemeral facts, user-profile facts (use memory_user_edits), or conduct rules. Returns the saved topic with its new version.',
-            {
-              topic: z.string().min(1),
-              summary: z.string().min(1),
-              kind: z.enum(['know_how', 'pitfall', 'principle']).optional(),
-              category: z.string().optional(),
-              tags: z.array(z.string()).optional(),
-            },
-            async (args: { topic: string; summary: string; kind?: 'know_how' | 'pitfall' | 'principle'; category?: string; tags?: string[] }) => {
-              const result = this.runKnowledgeUpsertTool(args, sessionId);
-              return {
-                content: [{ type: 'text', text: result.text }],
-                isError: result.isError,
-              } as any;
-            }
-          )
-        );
-      }
-      // Local MetaApp launcher tools are retired for browser-type sessions:
-      // in that surface apps open on-chain via search_metaapps + metaapp:// URIs.
-      const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser';
-      if (this.openMetaApp && !isBrowserSession) {
-        memoryTools.push(
-          tool(
-            'open_metaapp',
-            'Open a LOCAL MetaApp (one installed/published on this machine) by app id, optionally targeting a specific sub-path. Use when the user explicitly names a local app to open. When NOT to use: do not open an app the user did not ask for (the host guards against unprompted opens); for on-chain app discovery use search_metaapps + bot_browser_open_uri instead. Not available in browser-type sessions. Returns the opened app URL, or an error if the app id is unknown.',
-            {
-              appId: z.string().min(1),
-              targetPath: z.string().optional(),
-            },
-            async (args: { appId: string; targetPath?: string }) => {
-              const displayName = String(args.appId || '').trim() || 'unknown';
-              const latestUserText = this.getLatestUserMessageText(sessionId);
-              if (!isExplicitMetaAppUserRequest(latestUserText, displayName)) {
-                return {
-                  content: [{
-                    type: 'text',
-                    text: this.buildMetaAppGuardRejectionText('open_metaapp', displayName),
-                  }],
-                  isError: true,
-                } as any;
-              }
-              try {
-                const result = await this.openMetaApp?.({
-                  appId: args.appId,
-                  targetPath: args.targetPath,
-                });
-                const resolvedDisplayName = String(result?.name || args.appId).trim() || args.appId;
-                const text = result?.success
-                  ? (result.url
-                    ? `Opened metaapp "${resolvedDisplayName}" at ${result.url}`
-                    : `Opened metaapp "${resolvedDisplayName}"`)
-                  : `Failed to open metaapp "${resolvedDisplayName}": ${result?.error || 'Unknown error'}`;
-                const response: any = {
-                  content: [{ type: 'text', text }],
-                };
-                if (!result?.success) {
-                  response.isError = true;
-                }
-                return response;
-              } catch (error) {
-                return {
-                  content: [{
-                    type: 'text',
-                    text: `Failed to open metaapp "${args.appId}": ${error instanceof Error ? error.message : String(error)}`,
-                  }],
-                  isError: true,
-                } as any;
-              }
-            }
-          )
-        );
-      }
-    if (this.requestIMSessionReset) {
-      memoryTools.push(
-        tool(
-          'start_new_im_session',
-          'Open a brand-new chat session for the current IM conversation. Use ONLY when the user explicitly asks for a new session/window (e.g. "新建会话", "新窗口", "重开会话", "new session", "new chat"). Do NOT call it just because the context feels long. The current reply still streams back through this session; subsequent inbound IM messages will land in a freshly created session automatically. Has no effect when called from a non-IM session.',
-          {
-            reason: z.string().optional(),
-          },
-          async (_args: { reason?: string }) => {
-            const ok = this.requestIMSessionReset?.(sessionId) ?? false;
-            return {
-              content: [{
-                type: 'text',
-                text: ok
-                  ? 'New IM session staged. After this reply, the next inbound message will start a fresh session window. Briefly confirm to the user.'
-                  : 'Not in an IM session; this tool has no effect here.',
-              }],
-              isError: !ok,
-            } as any;
-          }
-        )
-      );
-    }
-    if (this.resolveMetaAppUrl && !isBrowserSession) {
-      memoryTools.push(
-        tool(
-          'resolve_metaapp_url',
-            'Resolve a LOCAL MetaApp URL (by app id, optional sub-path) WITHOUT opening it — returns the URL you would open. Use when you need the URL to embed or reference a local app without launching it. When NOT to use: if the user wants to actually view the app, use open_metaapp instead. Not available in browser-type sessions. Returns the resolved URL, or an error if the app id is unknown.',
-            {
-              appId: z.string().min(1),
-              targetPath: z.string().optional(),
-            },
-            async (args: { appId: string; targetPath?: string }) => {
-              const displayName = String(args.appId || '').trim() || 'unknown';
-              const latestUserText = this.getLatestUserMessageText(sessionId);
-              if (!isExplicitMetaAppUserRequest(latestUserText, displayName)) {
-                return {
-                  content: [{
-                    type: 'text',
-                    text: this.buildMetaAppGuardRejectionText('resolve_metaapp_url', displayName),
-                  }],
-                  isError: true,
-                } as any;
-              }
-              try {
-                const result = await this.resolveMetaAppUrl?.({
-                  appId: args.appId,
-                  targetPath: args.targetPath,
-                });
-                const resolvedDisplayName = String(result?.name || args.appId).trim() || args.appId;
-                const text = result?.success
-                  ? (result.url
-                    ? `Resolved metaapp "${resolvedDisplayName}" to ${result.url}`
-                    : `Resolved metaapp "${resolvedDisplayName}"`)
-                  : `Failed to resolve metaapp "${resolvedDisplayName}": ${result?.error || 'Unknown error'}`;
-                const response: any = {
-                  content: [{ type: 'text', text }],
-                };
-                if (!result?.success) {
-                  response.isError = true;
-                }
-                return response;
-              } catch (error) {
-                return {
-                  content: [{
-                    type: 'text',
-                    text: `Failed to resolve metaapp "${args.appId}": ${error instanceof Error ? error.message : String(error)}`,
-                  }],
-                  isError: true,
-                } as any;
-              }
-            }
-          )
-        );
-      }
-      if (this.controlBotBrowser && this.store.getSession(sessionId)?.sessionType === 'browser') {
-        memoryTools.push(
-          ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
-        );
-      }
-      // Bot Browser screenshot is registered for EVERY cowork surface (not only
-      // browser sessions) so any MetaBot can capture the active tab. When the
-      // surface is not visible the tool returns a graceful hint instead of
-      // erroring — matching the posture of the other browser tools.
-      if (this.controlBotBrowser) {
-        memoryTools.push(
-          ...buildBotBrowserScreenshotTool({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
-        );
-      }
-      // MetaID search is registered for every cowork surface: browser sessions
-      // open the best match in the Bot Browser directly; other sessions only
-      // present clickable metaid:// links so the user stays in their flow.
-      if (this.metaIdSearch) {
-        memoryTools.push(
-          ...buildMetaIdSearchAgentTools({
-            tool,
-            metaIdSearch: this.metaIdSearch,
-            openBestMatchInBrowser: isBrowserSession,
-          })
-        );
-      }
-      // Local Projects query is registered for every cowork surface so any
-      // MetaBot can resolve a project name to its guidelines and paths.
-      if (this.projects) {
-        memoryTools.push(
-          ...buildProjectsAgentTools({ tool, control: this.projects })
-        );
-      }
-      // On-chain social post search (MetaSo social recall) is registered for
-      // every cowork surface with the same posture as MetaID search: browser
-      // sessions may open an author's page; other sessions keep metaid://
-      // author links clickable only.
-      if (this.socialRecall) {
-        memoryTools.push(
-          ...buildSocialRecallAgentTools({
-            tool,
-            socialRecall: this.socialRecall,
-            openBestMatchInBrowser: isBrowserSession,
-          })
-        );
-      }
-      // Local file upload to MetaWeb is registered for every cowork surface so
-      // any MetaBot can publish a local file on-chain via uploadMetaFile()
-      // (direct vs chunked, MVC sponsor-first with self-paid fallback). The
-      // acting MetaBot is resolved from the session so the right wallet/identity
-      // pays; replaces the external metabot-upload-file skill.
-      if (this.metaFileUpload) {
-        memoryTools.push(
-          ...buildMetaFileUploadAgentTools({
-            tool,
-            upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
-            sessionId,
-            resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
-          })
-        );
-      }
-      // MetaBot management (list/create/update/delete) is registered ONLY for
-      // Twin sessions: the Twin acts as the user's operator over the local bot
-      // roster. Every tool delegates to services/metabotManageService.ts — the
-      // same code the manual UI IPC handlers call — so Twin-assisted management
-      // is identical to hand-editing. Worker bots never see these tools.
-      if (this.metabotManage && this.isTwinSession(sessionId)) {
-        memoryTools.push(
-          ...buildMetabotManageAgentTools({
-            tool,
-            control: this.metabotManage,
-          })
-        );
-      }
+      const memoryTools: any[] = this.buildSessionInlineTools(sessionId, tool, activeSession);
+
       options.mcpServers = {
         ...(options.mcpServers as Record<string, unknown> | undefined),
         [memoryServerName]: createSdkMcpServer({

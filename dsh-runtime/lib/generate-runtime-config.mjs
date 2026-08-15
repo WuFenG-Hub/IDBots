@@ -111,6 +111,7 @@ export function generateRuntimeConfig(input) {
       ...(input.hostTools ? { config: { tools: input.hostTools } } : {}),
     },
     ...(input.workspace ? [
+      { id: 'shell-env', name: '@deepseek-ai/dsh-shell-env' },
       { id: 'subprocess', name: '@deepseek-ai/dsh-subprocess-local' },
       {
         id: 'bash',
@@ -119,6 +120,7 @@ export function generateRuntimeConfig(input) {
       },
       { id: 'fs-local', name: '@deepseek-ai/dsh-fs-local', config: { cwd: input.workspace.cwd } },
       { id: 'fs-observation-policy', name: '@deepseek-ai/dsh-fs-observation-policy' },
+      { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
       { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
       { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
     ] : []),

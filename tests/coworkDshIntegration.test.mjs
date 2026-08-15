@@ -69,6 +69,13 @@ class RecordingStore {
     this.messages.push({ sessionId, ...stored })
     return stored
   }
+  getMemoryBackend() {
+    return {
+      getEffectiveMemoryPolicyForSession: () => ({ memoryEnabled: true }),
+      resolveMetabotIdForMemory: () => 1,
+      applyTurnMemoryUpdates: async () => ({}),
+    }
+  }
   updateMessage(sessionId, messageId, updates) {
     const entry = this.messages.find((m) => m.sessionId === sessionId && m.id === messageId)
     if (!entry) return
