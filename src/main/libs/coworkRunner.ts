@@ -5791,12 +5791,33 @@ export class CoworkRunner extends EventEmitter {
    * travel to the runtime, execution round-trips back here.
    */
   private buildDshHostTools(sessionId: string): Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> {
+    // Factory modules hand the Claude SDK's tool() either plain JSON schema or
+    // raw zod objects (the SDK digests zod itself; pi-ai does not — leaking
+    // zod internals got the whole request rejected with a 400). Normalize to
+    // JSON schema at the bridge boundary.
+    const normalizeToolSchema = (parameters: unknown): Record<string, unknown> => {
+      if (!parameters || typeof parameters !== 'object') return { type: 'object', properties: {} }
+      const maybeZod = parameters as Record<string, unknown>
+      const looksLikeZod = '_def' in maybeZod || 'def' in maybeZod
+        || typeof (parameters as any).parse === 'function' || typeof (parameters as any).safeParse === 'function'
+      if (looksLikeZod) {
+        try {
+          return z.toJSONSchema(parameters as any, { target: 'draft-7' }) as Record<string, unknown>
+        } catch (error) {
+          coworkLog('WARN', 'buildDshHostTools', 'zod schema conversion failed; falling back to empty schema', {
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return { type: 'object', properties: {} }
+        }
+      }
+      return parameters as Record<string, unknown>
+    }
     const passthrough = (
       name: string,
       description: string,
       parameters: Record<string, unknown>,
       execute: (args: any) => Promise<unknown>
-    ) => ({ name, description, parameters, execute })
+    ) => ({ name, description, parameters: normalizeToolSchema(parameters), execute })
     const tools: Array<{ name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> = []
     const isBrowserSession = this.store.getSession(sessionId)?.sessionType === 'browser'
     const isTwin = this.isTwinSession(sessionId)
