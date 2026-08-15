@@ -31,7 +31,12 @@ function textOf(message) {
 
 function lastUserMessage(messages) {
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') return messages[i]
+    const m = messages[i]
+    if (m.role !== 'user') continue
+    // dsh-user-approval (and other plugins) inject runtime-context snapshots as
+    // plugin-source user messages; marker detection must skip them.
+    if (m.source?.kind === 'plugin') continue
+    return m
   }
   return undefined
 }
@@ -121,6 +126,10 @@ class FakeAdapter extends LlmAdapter {
 
     if (userText.includes('STEER_TEST')) {
       yield* this.toolCallStream(options, 'slow_tool', { note: 'sleep so the driver can steer' })
+      return
+    }
+    if (userText.includes('TOOL:DANGEROUS')) {
+      yield* this.toolCallStream(options, 'dangerous_tool', { payload: 42 })
       return
     }
     if (userText.includes('TOOL:WALLET')) {

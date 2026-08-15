@@ -8,7 +8,7 @@
     "node": ">=22.19"
   },
   "scripts": {
-    "test": "node test/wire-extension.test.mjs"
+    "test": "node test/wire-extension.test.mjs && node test/approval-channel.test.mjs"
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
@@ -23,6 +23,7 @@
     "@deepseek-ai/dsh-system-prompt": "0.1.0-rc.6",
     "@deepseek-ai/dsh-token-meter": "0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "0.1.0-rc.6",
+    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6",
     "node-addon-require-builtin": "^0.1.4"
   },
   "devDependencies": {

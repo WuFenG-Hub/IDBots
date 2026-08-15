@@ -42,5 +42,11 @@
 - id: idbots-test-tools
   name: './test/fixtures/test-tools.mjs'
 
+# Owns the `approval` seam: audit events (approval/asked + approval/decided in
+# the session feed), the answerer waterfall, and fail-closed semantics.
+# idbots-sdk-server registers the answerer that bridges asks to the wire.
+- id: user-approval
+  name: '@deepseek-ai/dsh-user-approval'
+
 - id: idbots-sdk-server
   name: './plugins/idbots-sdk-server.mjs'

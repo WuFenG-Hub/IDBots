@@ -77,8 +77,12 @@ buzz journal entry. Phase 0 leftovers (report §4) are folded in.
   `dsh-runtime/` with `bin.mjs`, `idbots-sdk-server` (subclass of the stock server adding
   `session/steer` + `session/cancel`, unknown methods still `-32603`), dev composition with a
   fake LLM fixture, and a wire test proving steer/cancel over stdio end-to-end.
-- **M2 — Approval channel**: `ask` decisions → `approval/request` notification →
-  Electron permission dialog → `approval/respond`; port `enforceToolSafetyPolicy` destructive-op flow.
+- **M2 — Approval channel** ✅ (delivered): mounts `@deepseek-ai/dsh-user-approval`
+  (it owns the `approval` service, audit events, fail-closed semantics — we wrote zero
+  approval logic) and bridges its `approval/request` answerer waterfall to the wire:
+  `idbots/approval/request` notification → Electron permission dialog →
+  `idbots/approval/respond`; `idbots/approval/cancelled` dismisses the dialog when the
+  turn aborts. Porting the app-side `enforceToolSafetyPolicy` flow rides M4's adapter.
 - **M3 — Provider mapping + prompt sections**: provider table → generated adapter config;
   `promptComposer` named sections → `idbots-prompt-sections`; `agent/pre-step` plugin for
   per-session `tool_result` trimming (replaces the `/s/<sessionId>` proxy route for DSH sessions).
