@@ -1001,7 +1001,7 @@ function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: s
  * at https://api-docs.deepseek.com/zh-cn/guides/responses_api. OpenAI and
  * other OpenAI-compatible providers use the conventional `/v1/responses`.
  */
-function buildOpenAIResponsesURL(baseURL: string, provider?: string): string {
+export function buildOpenAIResponsesURL(baseURL: string, provider?: string): string {
   let normalized = baseURL.trim().replace(/\/+$/, '');
   const isDeepSeekHost = normalized.toLowerCase().includes('api.deepseek.com')
     || provider?.toLowerCase() === 'deepseek';

@@ -10,7 +10,8 @@ import {
   getCoworkOpenAICompatProxyBaseURL,
   getCoworkOpenAICompatProxyStatus,
 } from './coworkOpenAICompatProxy';
-import { normalizeProviderApiFormat, type AnthropicApiFormat } from './coworkFormatTransform';
+import { normalizeProviderApiFormat, buildOpenAIChatCompletionsURL, type AnthropicApiFormat } from './coworkFormatTransform';
+import { buildOpenAIResponsesURL } from './coworkOpenAICompatProxy';
 import { resolveCoworkModelLimits, type CoworkModelLimits } from './coworkModelLimits';
 
 type ProviderModel = {
@@ -511,11 +512,31 @@ export function resolveDshProviderRoute(modelId?: string | null): DshProviderRou
   if (!matched) return null;
   return {
     provider: matched.providerName,
-    baseUrl: matched.providerConfig.baseUrl.trim(),
+    baseUrl: dshApiRootOf(matched.providerConfig.baseUrl.trim(), matched.apiFormat, matched.providerName),
     apiKey: matched.providerConfig.apiKey?.trim() || '',
     model: matched.modelId,
     apiFormat: matched.apiFormat,
   };
+}
+
+/**
+ * pi-ai adapters hand baseURL to the OpenAI SDK, which appends the endpoint
+ * path itself — so the DSH route needs the API ROOT, while the stored provider
+ * baseUrl may be any compatibility shape. Derive the root with the exact URL
+ * knowledge the cowork proxy accumulated (DeepSeek serves /responses at the
+ * host root; gateways use /v1/...; chat shape appends /v1/chat/completions).
+ */
+function dshApiRootOf(baseUrl: string, apiFormat: AnthropicApiFormat, providerName: string): string {
+  const trimmed = baseUrl.replace(/\/+$/, '');
+  if (apiFormat === 'responses') {
+    const endpoint = buildOpenAIResponsesURL(trimmed, providerName);
+    return endpoint.replace(/\/responses$/, '');
+  }
+  if (apiFormat === 'openai') {
+    const endpoint = buildOpenAIChatCompletionsURL(trimmed);
+    return endpoint.replace(/\/chat\/completions$/, '');
+  }
+  return trimmed;
 }
 
 /**
