@@ -16,7 +16,9 @@ export function startMockServer(port = 48787) {
       const body = Buffer.concat(chunks).toString('utf8')
       let parsed = {}
       try { parsed = JSON.parse(body) } catch { /* ignore */ }
-      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '(none)', body: parsed })
+      seen.push({ method: req.method, url: req.url, auth: req.headers.authorization ?? '(none)', body: parsed, finished: false })
+      const record = seen[seen.length - 1]
+      res.on('finish', () => { record.finished = true })
       const lastUser = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')
       const lastUserText = typeof lastUser?.content === 'string' ? lastUser.content : ''
       // A tool result rides as role 'tool'; only the FIRST request of a

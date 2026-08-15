@@ -182,7 +182,13 @@ export class DshKernel {
         const notification = await subscription.next()
         const { method, params } = notification
         if (method === 'session.event') {
-          this.applyEvent(params.sessionId, params.event as DshSessionEventEnvelope)
+          // One bad handler must never kill the whole event stream: contain
+          // per-event failures and keep the pump alive.
+          try {
+            this.applyEvent(params.sessionId, params.event as DshSessionEventEnvelope)
+          } catch (error) {
+            this.opts.handlers.onError?.(error instanceof Error ? error : new Error(String(error)))
+          }
         } else if (method === 'idbots/approval/request') {
           this.opts.handlers.onApprovalRequest(params.sessionId, params as DshApprovalAsk)
         } else if (method === 'idbots/approval/cancelled') {

@@ -102,10 +102,19 @@ buzz journal entry. Phase 0 leftovers (report §4) are folded in.
   overwrite history on restart — and cross-restart resume is proven E2E (history survives a
   runtime restart). The coworkRunner integration itself (routing a real session through
   `DshKernel` behind a per-session flag) is the M5 cutover, still pending.
-- **M5 — Rollout + hardening**: per-session kernel flag (DSH default for DeepSeek-compatible
-  providers first), stall watchdog port, sandbox-mode decision, Electron packaging of the
-  runtime (asar.unpacked, auto-update pinning, Windows dispose-ladder check), real-model
-  behavior comparison on group-task and A2A corpora, compaction quality check.
+- **M5 — Rollout + hardening** (cutover core delivered): real cowork turns now run on the
+  DSH kernel behind `app_config.dshKernelEnabled` — routing lives in `coworkKernelRouting`
+  (flag + OpenAI-compatible eligibility + `dsh:` handle stickiness), the turn orchestrator in
+  `coworkDshTurn` (DshTurnHub multiplexes one runtime across sessions), and `coworkRunner`
+  gained `runDshSessionLocal` wired into the executionMode dispatch with native steer
+  (`trySubmitSteer` branch), abort→cancel, and approvals riding the existing
+  `pendingPermissions` machinery verbatim. Provider resolution is direct-upstream
+  (`resolveDshProviderRoute` — no OpenAICompatProxy on the DSH path). Proven by an
+  end-to-end CoworkRunner integration test (4 turns: plain/steer/approval/cancel against a
+  mock gateway on the real pi-ai path). Still open under M5: sandbox-mode decision, Electron
+  packaging (asar.unpacked, version pinning, Windows dispose ladder), real-model behavior
+  comparison on group-task/A2A corpora, compaction quality check, and threading the
+  `responses` provider format through the resolved route.
 
 ## Risks (carried from Phase 0)
 

@@ -9,7 +9,9 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools } from './claudeSettings';
+import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
+import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
+import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkSteerChannel,
@@ -999,6 +1001,8 @@ interface ActiveSession {
    */
   emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
+  /** Latest DSH usage snapshot for context reporting (DSH-kernel turns). */
+  lastDshUsage?: { inputTokens: number; outputTokens: number; provider?: string; model?: string };
   localInputChannel?: CoworkSteerChannel;
   /**
    * Steers accepted while the CLI is mid-turn. The native SDK runtime drops
@@ -1547,6 +1551,12 @@ export class CoworkRunner extends EventEmitter {
   /** Latest estimated thinking-token count from SDK thinking_tokens events. */
   private thinkingTokensBySessionId: Map<string, number> = new Map();
   private pendingPermissions: Map<string, PendingPermission> = new Map();
+  /** DSH runtime hub (M5): lazily created on the first DSH-routed session. */
+  private dshTurnHub: DshTurnHub | null = null;
+  /** Cowork session ids with an active DSH turn (native steer path). */
+  private dshActiveTurns = new Set<string>();
+  /** Test seam: extra runtime composition entries (fixture tools). */
+  dshRuntimeExtraEntries?: Array<Record<string, unknown>>;
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
   private turnMemoryQueue: QueuedTurnMemoryUpdate[] = [];
@@ -1774,6 +1784,16 @@ export class CoworkRunner extends EventEmitter {
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) return { accepted: false, reason: 'inactive' };
     if (activeSession.executionMode !== 'local') return { accepted: false, reason: 'sandbox' };
+    // DSH-kernel turns steer natively at the next step boundary — no channel
+    // and no interrupt-on-steer; delivery settles when the runtime accepted it.
+    if (this.dshActiveTurns.has(sessionId)) {
+      const hub = this.dshTurnHub;
+      if (!hub) return { accepted: false, reason: 'closing' };
+      const delivered = hub.waitForSteerDelivery(sessionId).then(() => undefined);
+      void delivered.then(undefined, () => undefined);
+      void hub.steer(sessionId, text).catch(() => undefined);
+      return { accepted: true, delivered };
+    }
     if (!activeSession.localInputChannel?.isOpen || activeSession.localTurnState !== 'open') {
       return { accepted: false, reason: 'closing' };
     }
@@ -5580,6 +5600,167 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  // ---- DSH kernel (Phase 1 M5) ---------------------------------------------
+
+  /**
+   * Per-turn kernel routing: the `dsh:` session-handle prefix pins an existing
+   * session to the DSH runtime; otherwise the opt-in flag plus an
+   * OpenAI-compatible provider route makes a new session DSH-eligible.
+   */
+  private shouldRunDshKernel(activeSession: ActiveSession): boolean {
+    try {
+      const route = resolveDshProviderRoute();
+      const choice = resolveKernelChoice({
+        enabled: isDshKernelEnabled(),
+        apiType: route?.apiFormat ?? null,
+        sessionHandle: activeSession.claudeSessionId,
+      });
+      return choice === 'dsh';
+    } catch {
+      return false;
+    }
+  }
+
+  private ensureDshTurnHub(): DshTurnHub {
+    if (!this.dshTurnHub) {
+      this.dshTurnHub = new DshTurnHub({
+        sessionRoot: dshSessionRootFor(app.getPath('userData')),
+        extraEntries: this.dshRuntimeExtraEntries,
+        log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
+      });
+    }
+    return this.dshTurnHub;
+  }
+
+  /**
+   * One cowork turn on the DSH runtime: resolve the provider route from the
+   * current API config, run the turn through the shared hub, and land every
+   * event through the same store writes and runner events the Claude path
+   * emits. Approvals reuse the pendingPermissions machinery verbatim, so the
+   * renderer permission dialog works unchanged.
+   */
+  private async runDshSessionLocal(
+    activeSession: ActiveSession,
+    prompt: string,
+    cwd: string,
+    systemPrompt: string
+  ): Promise<void> {
+    const { sessionId } = activeSession;
+    // Direct upstream route: the DSH runtime speaks the provider's native
+    // protocol (pi-ai) and bypasses the OpenAI-compat proxy entirely.
+    const route = resolveDshProviderRoute();
+    if (!route?.baseUrl || !route.apiKey) {
+      this.handleError(sessionId, 'DSH kernel requires a configured API provider (base URL and key).');
+      this.clearPendingPermissions(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
+      return;
+    }
+    const apiFormat = route.apiFormat === 'responses' ? 'responses' : 'openai';
+    const modelLimits = resolveCurrentModelLimits(route.model);
+    const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
+    const hub = this.ensureDshTurnHub();
+    this.dshActiveTurns.add(sessionId);
+    // Stop/abort maps to the runtime's native turn cancel; the turn promise
+    // then settles with an aborted reason.
+    const onAbort = () => { void hub.cancel(sessionId, 'user stop').catch(() => undefined); };
+    activeSession.abortController.signal.addEventListener('abort', onAbort, { once: true });
+
+    const finish = (status: CoworkSessionStatus) => {
+      this.dshActiveTurns.delete(sessionId);
+      activeSession.claudeSessionId = makeDshSessionHandle(dshSessionId);
+      this.store.updateSession(sessionId, {
+        claudeSessionId: activeSession.claudeSessionId,
+        status,
+      });
+    };
+
+    try {
+      const outcome = await hub.runTurn({
+        sessionId,
+        dshSessionId,
+        prompt,
+        sections: [{ name: 'idbots:base', order: 0, text: systemPrompt }],
+        provider: {
+          key: route.provider,
+          apiFormat,
+          baseUrl: route.baseUrl,
+          apiKey: route.apiKey,
+          model: route.model,
+          contextWindow: modelLimits?.contextWindow,
+          maxOutputTokens: modelLimits?.maxOutputTokens,
+          thinkingFormat: route.provider === 'deepseek' ? 'deepseek' : undefined,
+        },
+        callbacks: {
+          onMessage: (message, slot) => {
+            const stored = this.store.addMessage(sessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
+            this.emit('message', sessionId, stored);
+            return stored.id;
+          },
+          onMessageUpdate: (messageId, content) => {
+            this.updateMessageMerged(sessionId, messageId, { content, metadata: { isStreaming: true } });
+            this.emit('messageUpdate', sessionId, messageId, content);
+          },
+          onMessageFinalize: (messageId, content) => {
+            this.updateMessageMerged(sessionId, messageId, { content, metadata: { isStreaming: false, isFinal: true } });
+            this.emit('messageUpdate', sessionId, messageId, content);
+          },
+          onUsage: (usage) => {
+            activeSession.lastDshUsage = usage;
+          },
+          onApprovalRequest: (ask) => {
+            const request: PermissionRequest = {
+              requestId: ask.id,
+              toolName: ask.toolName,
+              toolInput: { reason: ask.reason ?? '' },
+            };
+            this.pendingPermissions.set(ask.id, {
+              sessionId,
+              resolve: (result) => {
+                void hub.respondApproval(ask.id, result.behavior === 'allow' ? 'allowed-once' : 'rejected')
+                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'approval respond failed', { error: String(error) }));
+              },
+            });
+            activeSession.pendingPermission = request;
+            this.emit('permissionRequest', sessionId, request);
+          },
+          onApprovalCancelled: (askId) => {
+            const pending = this.pendingPermissions.get(askId);
+            if (pending) {
+              this.pendingPermissions.delete(askId);
+              pending.resolve({ behavior: 'deny', message: 'Approval cancelled' });
+            }
+            if (activeSession.pendingPermission?.requestId === askId) {
+              activeSession.pendingPermission = null;
+            }
+          },
+          onError: (error) => coworkLog('ERROR', 'runDshSessionLocal', 'runtime stream error', { error: error.message }),
+        },
+      });
+
+      if (activeSession.abortController.signal.aborted) {
+        this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
+        finish('idle');
+        this.emit('complete', sessionId, activeSession.claudeSessionId);
+        return;
+      }
+      if (outcome.kind === 'error') {
+        this.handleError(sessionId, `DSH turn failed: ${outcome.reason ?? 'unknown error'}`);
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        this.dshActiveTurns.delete(sessionId);
+        return;
+      }
+      finish('completed');
+      this.emit('complete', sessionId, activeSession.claudeSessionId);
+    } catch (error) {
+      coworkLog('ERROR', 'runDshSessionLocal', 'turn crashed', { sessionId, error: String(error) });
+      this.handleError(sessionId, error instanceof Error ? error.message : String(error));
+      this.clearPendingPermissions(sessionId);
+      this.removeActiveSession(sessionId, activeSession);
+      this.dshActiveTurns.delete(sessionId);
+    }
+  }
+
   private async runClaudeCodeLocal(
     activeSession: ActiveSession,
     prompt: string,
@@ -7342,6 +7523,13 @@ export class CoworkRunner extends EventEmitter {
           activeSession.localTurnState = 'none';
         }
       }
+      return;
+    }
+
+    if (executionMode === 'local' && this.shouldRunDshKernel(activeSession)) {
+      activeSession.executionMode = 'local';
+      this.store.updateSession(sessionId, { executionMode: 'local' });
+      await this.runDshSessionLocal(activeSession, effectivePrompt, resolvedCwd, systemPrompt);
       return;
     }
 
