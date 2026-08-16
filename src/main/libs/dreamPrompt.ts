@@ -1,4 +1,9 @@
-import type { DreamDayActivity, DreamGroupTaskEvaluation, DreamSessionActivity } from '../dreamStore';
+import type {
+  DreamDayActivity,
+  DreamGroupChatActivity,
+  DreamGroupTaskEvaluation,
+  DreamSessionActivity,
+} from '../dreamStore';
 import { formatBotWorkspaceDate } from './botWorkspace';
 import { estimateCoworkTextTokens } from './coworkContextBudget';
 import type { DreamActivityChunk } from './dreamFragments';
@@ -31,7 +36,7 @@ export const MAX_KNOWLEDGE_UPDATES = 6;
  * prompt, budgeting, stats or write semantics — completed in-window dates with
  * an older version are then re-dreamed automatically (limited per night).
  * Rows written before versioning existed read as 0. */
-export const DREAM_VERSION = 7;
+export const DREAM_VERSION = 8;
 
 const DREAM_SECTION_KEYS = ['human', 'a2a', 'orders', 'tasks', 'group_tasks'] as const;
 export type DreamSectionKey = (typeof DREAM_SECTION_KEYS)[number];
@@ -301,6 +306,14 @@ export function getDayBoundsMs(dateStr: string): { startMs: number; endMs: numbe
  * 1-5 star rating + free-text review are the ground truth the bot's
  * work_review must align with (high score → keep the practice, low → adjust).
  */
+function groupTaskRoleLabel(role: string): string {
+  return role === 'chair' ? '主持(chair)' : '执行(worker)';
+}
+
+function isActiveGroupTask(task: DreamGroupTaskEvaluation): boolean {
+  return task.phase === 'active';
+}
+
 function formatGroupTaskEvaluation(task: DreamGroupTaskEvaluation): string {
   const stars = task.rating != null
     ? `${'★'.repeat(task.rating)}${'☆'.repeat(Math.max(0, 5 - task.rating))}(${task.rating}/5)`
@@ -308,10 +321,28 @@ function formatGroupTaskEvaluation(task: DreamGroupTaskEvaluation): string {
   return [
     `【任务:${truncateText(task.title, 80)}】`,
     `目标:${truncateText(task.goal, 200)}`,
-    `我在任务中的角色:${task.memberRole === 'chair' ? '主持(chair)' : '执行(worker)'}`,
+    `我在任务中的角色:${groupTaskRoleLabel(task.memberRole)}`,
     `人类验收评分:${stars}`,
     task.ratingComment ? `人类具体评价:${truncateText(task.ratingComment, 400)}` : '人类具体评价:(未填写)',
   ].join('\n');
+}
+
+function formatGroupTaskActive(task: DreamGroupTaskEvaluation): string {
+  const status = (task.status ?? 'executing').trim() || 'executing';
+  return [
+    `【任务:${truncateText(task.title, 80)}】`,
+    `目标:${truncateText(task.goal, 200)}`,
+    `当前状态:${status}(尚未验收,只复盘当天进展,不要当成已交付)`,
+    `我在任务中的角色:${groupTaskRoleLabel(task.memberRole)}`,
+    task.dayMessageCount != null ? `当日链上群聊:${task.dayMessageCount} 条` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function formatGroupChatActivity(chat: DreamGroupChatActivity): string {
+  return chat.messages.map((message) => {
+    const speaker = truncateText(message.senderName, 40);
+    return `${speaker}: ${message.content.replace(/\s+/g, ' ').trim()}`;
+  }).join('\n');
 }
 
 export function buildDreamPrompt(input: {
@@ -340,6 +371,7 @@ export function buildDreamPrompt(input: {
   const humanSessions: string[] = [];
   const a2aSessions: string[] = [];
   const groupTaskSessions: string[] = [];
+  const groupChatSessions: string[] = [];
   const orderSessions: string[] = [];
   const fragmentSessions: string[] = [];
 
@@ -362,8 +394,18 @@ export function buildDreamPrompt(input: {
           ? a2aSessions
           : session.sessionType === 'group_task'
             ? groupTaskSessions
-            : humanSessions;
+            : session.sessionType === 'group_chat'
+              ? groupChatSessions
+              : humanSessions;
     entries.push({ bucket, header, body });
+  }
+  for (const chat of input.activity.groupChats ?? []) {
+    if (chat.messages.length === 0) continue;
+    entries.push({
+      bucket: groupChatSessions,
+      header: `【群聊:${truncateText(chat.title, 80)}】(任务#${chat.taskId},状态:${chat.taskStatus},角色:${groupTaskRoleLabel(chat.memberRole)})`,
+      body: formatGroupChatActivity(chat),
+    });
   }
 
   // Fair-share budgeting: every session gets an equal slice of the total
@@ -387,6 +429,7 @@ export function buildDreamPrompt(input: {
   if (humanSessions.length > 0) sections.push(`## 与人类用户的对话\n${humanSessions.join('\n\n')}`);
   if (a2aSessions.length > 0) sections.push(`## 与其他 Bot 的对话\n${a2aSessions.join('\n\n')}`);
   if (groupTaskSessions.length > 0) sections.push(`## 群任务协作\n${groupTaskSessions.join('\n\n')}`);
+  if (groupChatSessions.length > 0) sections.push(`## 群任务链上群聊\n${groupChatSessions.join('\n\n')}`);
   if (orderSessions.length > 0) sections.push(`## 服务订单\n${orderSessions.join('\n\n')}`);
   if (input.activity.taskRuns.length > 0) {
     const taskLines = input.activity.taskRuns
@@ -394,10 +437,16 @@ export function buildDreamPrompt(input: {
       .join('\n');
     sections.push(`## 定时任务\n${taskLines}`);
   }
-  const groupTaskEvaluations = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
-  if (groupTaskEvaluations.length > 0) {
-    const evaluationLines = groupTaskEvaluations.map(formatGroupTaskEvaluation).join('\n\n');
+  const groupTaskItems = sourceMode === 'fragment' ? [] : (input.activity.groupTasks ?? []);
+  const acceptedGroupTasks = groupTaskItems.filter((task) => !isActiveGroupTask(task));
+  const activeGroupTasks = groupTaskItems.filter((task) => isActiveGroupTask(task));
+  if (acceptedGroupTasks.length > 0) {
+    const evaluationLines = acceptedGroupTasks.map(formatGroupTaskEvaluation).join('\n\n');
     sections.push(`## 群任务验收评价(人类对任务结果的打分与评价,work_reviews 必须逐条对齐复盘)\n${evaluationLines}`);
+  }
+  if (activeGroupTasks.length > 0) {
+    const activeLines = activeGroupTasks.map(formatGroupTaskActive).join('\n\n');
+    sections.push(`## 进行中的群任务(当天有进展但尚未验收,只记当日事实,不要写成已经交付)\n${activeLines}`);
   }
 
   if (sourceMode !== 'fragment' && input.impressionSubjects && input.impressionSubjects.length > 0) {
@@ -451,10 +500,17 @@ export function buildDreamPrompt(input: {
     }
   }
   const ratedTotal = ratedUpCount + ratedDownCount;
+  const groupChatCount = (input.activity.groupChats ?? []).length;
+  const groupChatMessageCount = (input.activity.groupChats ?? []).reduce(
+    (sum, chat) => sum + chat.messages.length,
+    0,
+  );
   const inventory =
     `当天共有 ${input.activity.sessions.length} 段会话:${sessionTitles || '(无)'};` +
     `服务订单共 ${input.activity.orderCount} 笔;定时任务执行 ${input.activity.taskRuns.length} 次;` +
-    `群任务验收评价 ${(input.activity.groupTasks ?? []).length} 项。` +
+    `群任务验收评价 ${acceptedGroupTasks.length} 项;` +
+    `进行中群任务 ${activeGroupTasks.length} 项;` +
+    `链上群聊 ${groupChatCount} 段(${groupChatMessageCount} 条)。` +
     (ratedTotal > 0 ? `人类逐条评价 ${ratedTotal} 条(赞 ${ratedUpCount},踩 ${ratedDownCount})。` : '') +
     (sourceMode === 'fragment_summaries'
       ? '以下内容是从当天真实记录中分块提炼出的证据摘要,请综合摘要而不是臆造未展示的原文细节。'

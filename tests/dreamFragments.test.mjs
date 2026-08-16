@@ -91,3 +91,31 @@ test('chunkDreamActivity and summariesToActivity carry group task evaluations', 
   assert.equal(chunkDreamActivity(legacy, 500).length, 0);
   assert.ok(estimateDreamActivityTokens(legacy) >= 0);
 });
+
+test('chunkDreamActivity splits same-day group chat into resumable fragments', () => {
+  const huge = '群'.repeat(1800);
+  const activity = {
+    sessions: [],
+    taskRuns: [],
+    orderCount: 0,
+    groupTasks: [{
+      taskId: 21, title: '官网方案', goal: 'G', memberRole: 'chair',
+      rating: null, ratingComment: null, phase: 'active', status: 'review',
+    }],
+    groupChats: [{
+      taskId: 21,
+      title: '官网方案',
+      groupId: 'gid-21',
+      taskStatus: 'review',
+      memberRole: 'chair',
+      messages: [
+        { senderName: 'A', senderGlobalMetaID: null, content: huge, occurredAt: 1 },
+        { senderName: 'B', senderGlobalMetaID: null, content: huge, occurredAt: 2 },
+      ],
+    }],
+  };
+  const chunks = chunkDreamActivity(activity, 500);
+  assert.ok(chunks.length > 1);
+  assert.ok(chunks.every((chunk) => chunk.sessionType === 'group_chat'));
+  assert.ok(estimateDreamActivityTokens(activity) > 500);
+});

@@ -586,7 +586,13 @@ export class DreamService {
       const activity = this.deps.dreamStore.getActivityForDate(metabotId, startMs, endMs);
       const impressionSubjects = this.buildDreamImpressionSubjects(metabot, date);
       const existingKnowledge = this.buildExistingKnowledge(metabot);
-      if (activity.sessions.length === 0 && activity.taskRuns.length === 0 && activity.groupTasks.length === 0 && impressionSubjects.length === 0) {
+      if (
+        activity.sessions.length === 0
+        && activity.taskRuns.length === 0
+        && activity.groupTasks.length === 0
+        && (activity.groupChats?.length ?? 0) === 0
+        && impressionSubjects.length === 0
+      ) {
         // Nothing happened that day — no LLM call, no summary, still recorded.
         this.deps.dreamStore.finishRun(metabotId, date, 'completed');
         return;
@@ -700,7 +706,10 @@ export class DreamService {
         orderSessionCount: activity.sessions.filter((session) => session.isOrder).length,
         orderCount: activity.orderCount,
         taskRunCount: activity.taskRuns.length,
-        groupTaskEvaluationCount: activity.groupTasks.length,
+        groupTaskEvaluationCount: activity.groupTasks.filter((task) => task.phase !== 'active').length,
+        groupTaskActiveCount: activity.groupTasks.filter((task) => task.phase === 'active').length,
+        groupChatCount: activity.groupChats?.length ?? 0,
+        groupChatMessageCount: (activity.groupChats ?? []).reduce((sum, chat) => sum + chat.messages.length, 0),
         messageCount: activity.sessions.reduce((sum, session) => sum + session.messages.length, 0),
         activityCharCount: activity.sessions.reduce(
           (sum, session) => sum + session.messages.reduce((sessionSum, message) => sessionSum + message.content.length, 0),

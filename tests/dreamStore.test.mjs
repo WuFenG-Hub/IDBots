@@ -323,3 +323,99 @@ test('getActivityForDate surfaces human feedback on rated assistant messages', a
     cleanup();
   }
 });
+
+const insertGroupTask = (db, {
+  id, groupId, title, goal, status, role = 'chair', metabotId = 5,
+  ratedAt = null, closedAt = null, rating = null, ratingComment = null,
+}) => {
+  db.run(
+    `INSERT INTO group_tasks (
+      id, group_id, title, goal, status, chair_metabot_id, created_by,
+      rating, rating_comment, rated_at, closed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 'user', ?, ?, ?, ?)`,
+    [id, groupId, title, goal, status, metabotId, rating, ratingComment, ratedAt, closedAt],
+  );
+  db.run(
+    'INSERT INTO group_task_members (task_id, metabot_id, role) VALUES (?, ?, ?)',
+    [id, metabotId, role],
+  );
+};
+
+const insertGroupChat = (db, { pinId, groupId, senderName, content, occurredAtMs, senderGlobalMetaId = null }) => {
+  db.run(
+    `INSERT INTO group_chat_messages (
+      pin_id, group_id, sender_metaid, sender_global_metaid, sender_name,
+      protocol, content, chain_timestamp
+    ) VALUES (?, ?, 'mid-1', ?, ?, 'simplemsg', ?, ?)`,
+    [pinId, groupId, senderGlobalMetaId, senderName, content, Math.floor(occurredAtMs / 1000)],
+  );
+};
+
+test('getActivityForDate includes same-day group chat and in-progress group tasks', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const coworkStore = createCoworkStore(db);
+    const dreamStore = new DreamStore(db, () => {});
+
+    insertGroupTask(db, {
+      id: 20, groupId: 'gid-20', title: '西游记动画', goal: '做三维动画',
+      status: 'done', ratedAt: '2026-07-30 10:00:00', closedAt: '2026-07-30 10:00:00',
+      rating: 5, ratingComment: '完成度很高',
+    });
+    insertGroupChat(db, {
+      pinId: 'pin-20-1', groupId: 'gid-20', senderName: 'PeerBot',
+      content: '我先出分镜', occurredAtMs: DAY_START + 8_000,
+      senderGlobalMetaId: 'idq1peer',
+    });
+    insertGroupChat(db, {
+      pinId: 'pin-20-old', groupId: 'gid-20', senderName: 'PeerBot',
+      content: '昨天的群聊不该出现', occurredAtMs: PREV_DAY,
+    });
+
+    insertGroupTask(db, {
+      id: 21, groupId: 'gid-21', title: '官网方案', goal: '讨论定稿',
+      status: 'review',
+    });
+    insertGroupChat(db, {
+      pinId: 'pin-21-1', groupId: 'gid-21', senderName: 'Chair',
+      content: '今天继续改第二稿', occurredAtMs: DAY_START + 9_000,
+    });
+
+    insertGroupTask(db, {
+      id: 22, groupId: 'gid-22', title: '过期复盘', goal: '停在 review 但当天没动静',
+      status: 'review',
+    });
+
+    insertGroupTask(db, {
+      id: 23, groupId: 'gid-23', title: '只有技能回合', goal: '无群聊也要进当日摘要',
+      status: 'executing',
+    });
+    const skillSession = coworkStore.createSession('Group Task #23', '/tmp/gt23', '', 'local', [], 5, 'group_task');
+    insertMessage(db, skillSession.id, 'user', '群里有人在等你', DAY_START + 10_000, 1);
+    insertMessage(db, skillSession.id, 'assistant', '我先回一条进度', DAY_START + 11_000, 2);
+    db.run(
+      `INSERT INTO cowork_conversation_mappings (
+        channel, external_conversation_id, metabot_id, cowork_session_id, created_at, last_active_at
+      ) VALUES ('metaweb_group_task', 'group-task:23', 5, ?, ?, ?)`,
+      [skillSession.id, DAY_START, DAY_START],
+    );
+
+    const activity = dreamStore.getActivityForDate(5, DAY_START, DAY_END);
+    assert.equal(activity.groupChats.length, 2);
+    const byTitle = new Map(activity.groupChats.map((chat) => [chat.title, chat]));
+    assert.deepEqual(byTitle.get('西游记动画').messages.map((message) => message.content), ['我先出分镜']);
+    assert.equal(byTitle.get('官网方案').messages[0].senderName, 'Chair');
+
+    const tasks = new Map(activity.groupTasks.map((task) => [task.taskId, task]));
+    assert.equal(tasks.get(20).phase, 'accepted');
+    assert.equal(tasks.get(20).rating, 5);
+    assert.equal(tasks.get(20).dayMessageCount, 1);
+    assert.equal(tasks.get(21).phase, 'active');
+    assert.equal(tasks.get(21).status, 'review');
+    assert.equal(tasks.get(23).phase, 'active');
+    assert.equal(tasks.has(22), false, 'stale in-progress task with no same-day activity stays out');
+    assert.equal(activity.sessions.some((session) => session.sessionType === 'group_task'), true);
+  } finally {
+    cleanup();
+  }
+});

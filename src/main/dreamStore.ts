@@ -101,9 +101,13 @@ export interface DreamTaskRunActivity {
   sessionId: string | null;
 }
 
+/** accepted = closed/rated that day; active = still open with same-day activity. */
+export type DreamGroupTaskPhase = 'accepted' | 'active';
+
 /**
- * One group task the bot participated in that reached owner acceptance — the
- * human's star rating + review are the alignment signal for the dream review.
+ * One group task the bot participated in that belongs on this day's review —
+ * either owner acceptance (rating/review) or still-open work with same-day
+ * activity (on-chain chat or a skill-turn session).
  */
 export interface DreamGroupTaskEvaluation {
   taskId: number;
@@ -114,6 +118,29 @@ export interface DreamGroupTaskEvaluation {
   /** 1-5 stars; null when the task was closed without a rating (automation). */
   rating: number | null;
   ratingComment: string | null;
+  /** Task status at query time. Optional on older fixtures. */
+  status?: string;
+  /** Defaults to 'accepted' when omitted so older fixtures keep working. */
+  phase?: DreamGroupTaskPhase;
+  /** Same-day on-chain group-chat message count, when known. */
+  dayMessageCount?: number;
+}
+
+export interface DreamGroupChatMessage {
+  senderName: string;
+  senderGlobalMetaID: string | null;
+  content: string;
+  occurredAt: number;
+}
+
+/** One group-task's on-chain group chat for the local day. */
+export interface DreamGroupChatActivity {
+  taskId: number;
+  title: string;
+  groupId: string;
+  taskStatus: string;
+  memberRole: string;
+  messages: DreamGroupChatMessage[];
 }
 
 export interface DreamDayActivity {
@@ -121,8 +148,10 @@ export interface DreamDayActivity {
   taskRuns: DreamTaskRunActivity[];
   /** service_orders rows created that day (raw order count, not sessions). */
   orderCount: number;
-  /** Group tasks accepted/rated that day where this bot was a member. */
+  /** Group tasks accepted or still active that day where this bot was a member. */
   groupTasks: DreamGroupTaskEvaluation[];
+  /** On-chain group-chat transcripts for member tasks that had messages that day. */
+  groupChats?: DreamGroupChatActivity[];
 }
 
 interface DreamRunRow {
@@ -171,6 +200,9 @@ interface DailySummaryRow {
   created_at: number | string;
   updated_at: number | string;
 }
+
+/** Bound one task's on-chain transcript so a busy group cannot flood the dream. */
+const MAX_GROUP_CHAT_MESSAGES_PER_TASK = 400;
 
 const parseIdNumber = (value: unknown): number | null => {
   const parsed = Number(value);
@@ -723,9 +755,11 @@ export class DreamStore {
 
   /**
    * Everything the bot did on [dayStartMs, dayEndMs): cowork sessions with
-   * user/assistant messages that day (orders flagged via service_orders) plus
-   * scheduled task runs. Hidden sessions are included on purpose — order
-   * execution sessions are hidden from the UI list but are still experience.
+   * user/assistant messages that day (orders flagged via service_orders),
+   * scheduled task runs, same-day group-task acceptances / in-progress
+   * summaries, and on-chain group-chat transcripts for member tasks.
+   * Hidden sessions are included on purpose — order execution sessions are
+   * hidden from the UI list but are still experience.
    */
   getActivityForDate(metabotId: number, dayStartMs: number, dayEndMs: number): DreamDayActivity {
     const sessionRows = this.getAll<{
@@ -811,25 +845,77 @@ export class DreamStore {
       [metabotId, dayStartMs, dayEndMs]
     );
 
-    // Group tasks accepted that day where this bot was a member — the owner's
-    // star rating + review feed the dream's work-review alignment. Day
-    // attribution uses rated_at, falling back to closed_at for unrated
-    // (automation-closed) tasks; both are UTC datetime('now') strings.
+    // group_chat_messages.chain_timestamp is unix seconds (see sqliteStore).
+    // Day attribution for acceptances uses rated_at, falling back to closed_at;
+    // both are UTC datetime('now') strings.
     const dayStartSec = Math.floor(dayStartMs / 1000);
     const dayEndSec = Math.floor(dayEndMs / 1000);
-    const groupTasks = this.getAll<{
+
+    const groupChatRows = this.getAll<{
+      task_id: number;
+      title: string;
+      group_id: string;
+      status: string;
+      role: string;
+      sender_name: string | null;
+      sender_global_metaid: string | null;
+      content: string;
+      chain_timestamp: number | string;
+    }>(`
+      SELECT t.id AS task_id, t.title, t.group_id, t.status, m.role,
+        g.sender_name, g.sender_global_metaid, g.content, g.chain_timestamp
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      JOIN group_chat_messages g ON g.group_id = t.group_id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.group_id IS NOT NULL AND TRIM(t.group_id) != ''
+        AND g.chain_timestamp IS NOT NULL
+        AND g.content IS NOT NULL AND TRIM(g.content) != ''
+        AND g.chain_timestamp >= ? AND g.chain_timestamp < ?
+      ORDER BY t.id ASC, g.chain_timestamp ASC, g.id ASC
+    `, [metabotId, dayStartSec, dayEndSec]);
+
+    const groupChatsByTask = new Map<number, DreamGroupChatActivity>();
+    for (const row of groupChatRows) {
+      const taskId = parseIdNumber(row.task_id);
+      if (taskId == null) continue;
+      const existing = groupChatsByTask.get(taskId) ?? {
+        taskId,
+        title: row.title,
+        groupId: row.group_id,
+        taskStatus: row.status,
+        memberRole: row.role === 'chair' ? 'chair' : 'worker',
+        messages: [],
+      };
+      if (existing.messages.length >= MAX_GROUP_CHAT_MESSAGES_PER_TASK) continue;
+      const occurredSec = parseIdNumber(row.chain_timestamp);
+      existing.messages.push({
+        senderName: (row.sender_name ?? '').trim() || 'unknown',
+        senderGlobalMetaID: (row.sender_global_metaid ?? '').trim() || null,
+        content: row.content,
+        occurredAt: occurredSec == null ? dayStartMs : occurredSec * 1000,
+      });
+      groupChatsByTask.set(taskId, existing);
+    }
+    const groupChats = [...groupChatsByTask.values()];
+    const dayMessageCountByTask = new Map(
+      groupChats.map((chat) => [chat.taskId, chat.messages.length]),
+    );
+
+    const acceptedTasks = this.getAll<{
       id: number;
       title: string;
       goal: string;
+      status: string;
       role: string;
       rating: number | null;
       rating_comment: string | null;
     }>(`
-      SELECT t.id, t.title, t.goal, m.role, t.rating, t.rating_comment
+      SELECT t.id, t.title, t.goal, t.status, m.role, t.rating, t.rating_comment
       FROM group_tasks t
       JOIN group_task_members m ON m.task_id = t.id
       WHERE m.metabot_id = ? AND m.removed_at IS NULL
-        AND t.status = 'done'
+        AND t.status IN ('done', 'cancelled')
         AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) >= ?
         AND CAST(strftime('%s', COALESCE(t.rated_at, t.closed_at)) AS INTEGER) < ?
       ORDER BY t.id ASC
@@ -840,8 +926,63 @@ export class DreamStore {
       memberRole: row.role === 'chair' ? 'chair' : 'worker',
       rating: row.rating ?? null,
       ratingComment: row.rating_comment ?? null,
+      status: row.status,
+      phase: 'accepted' as const,
+      dayMessageCount: dayMessageCountByTask.get(row.id),
     }));
+    const acceptedIds = new Set(acceptedTasks.map((task) => task.taskId));
 
-    return { sessions, taskRuns, orderCount: parseIdNumber(orderCountRow?.n) ?? 0, groupTasks };
+    // Still-open tasks appear only when this bot had same-day activity:
+    // on-chain group chat, or a mapped group-task cowork skill turn.
+    const activeTasks = this.getAll<{
+      id: number;
+      title: string;
+      goal: string;
+      status: string;
+      role: string;
+    }>(`
+      SELECT t.id, t.title, t.goal, t.status, m.role
+      FROM group_tasks t
+      JOIN group_task_members m ON m.task_id = t.id
+      WHERE m.metabot_id = ? AND m.removed_at IS NULL
+        AND t.status IN ('planning', 'executing', 'review')
+        AND (
+          EXISTS (
+            SELECT 1 FROM group_chat_messages g
+            WHERE g.group_id = t.group_id
+              AND g.chain_timestamp IS NOT NULL
+              AND g.chain_timestamp >= ? AND g.chain_timestamp < ?
+          )
+          OR EXISTS (
+            SELECT 1 FROM cowork_conversation_mappings map
+            JOIN cowork_messages cm ON cm.session_id = map.cowork_session_id
+            WHERE map.channel = 'metaweb_group_task'
+              AND map.external_conversation_id = 'group-task:' || t.id
+              AND map.metabot_id = ?
+              AND cm.created_at >= ? AND cm.created_at < ?
+          )
+        )
+      ORDER BY t.id ASC
+    `, [metabotId, dayStartSec, dayEndSec, metabotId, dayStartMs, dayEndMs])
+      .filter((row) => !acceptedIds.has(row.id))
+      .map((row) => ({
+        taskId: row.id,
+        title: row.title,
+        goal: row.goal,
+        memberRole: row.role === 'chair' ? 'chair' : 'worker',
+        rating: null,
+        ratingComment: null,
+        status: row.status,
+        phase: 'active' as const,
+        dayMessageCount: dayMessageCountByTask.get(row.id),
+      }));
+
+    return {
+      sessions,
+      taskRuns,
+      orderCount: parseIdNumber(orderCountRow?.n) ?? 0,
+      groupTasks: [...acceptedTasks, ...activeTasks],
+      groupChats,
+    };
   }
 }
