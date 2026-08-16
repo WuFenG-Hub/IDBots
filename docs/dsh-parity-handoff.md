@@ -1,6 +1,6 @@
 # DSH Kernel Migration — Handoff Document
 
-Last updated: 2026-08-16 (session 3, P1 complete) · Branch: `feat/dsh-p1-parity` (unpushed; P0 merged to main as `0ffbd3e4`) · Author: ZCode sessions 2026-08-15~16
+Last updated: 2026-08-16 (session 4) · Branch: `feat/dsh-p2-parity` (unpushed; P0+P1 merged to main as `0ffbd3e4`/`6dd518a7`) · Author: ZCode sessions 2026-08-15~16
 Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 
 ## 1. Where we are
@@ -103,17 +103,32 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    (metadata `dshTurnStalled` + i18n key `coworkDshTurnStalled`), never a
    hollow completed. App-side E2E with a wedged-provider mock fixture.
 
+**Done in session 4 (branch `feat/dsh-p2-parity`):**
+
+9. ✅ **P2 — DSH plugin install flow** (`f69675e0`): dshPluginManager owns
+   `userData/dsh-plugins` — npm install with --legacy-peer-deps (no nested
+   cordis), a peer-symlink farm pointing peers at the runtime's copies, a
+   registry.json beside the packages (the DIRECTORY is the source of truth —
+   a manually populated dir works without npm), and a resolver emitting
+   entries that reference the package ENTRY FILE (a package dir is not an
+   importable ES module). The hub re-reads entries every turn via
+   extraEntriesProvider — installs apply next turn, config restart waits for
+   quiescence. Official-package validation vs the rc.6 runtime:
+   **dsh-time-context@0.0.1-rc.3 ✅ (fully verified, section reaches
+   provider)**; **dsh-jobs-local@0.0.1-rc.3 ✅ boots + turns fine** (NOTE:
+   dsh-jobs itself is an abstract seam — mounting it as an entry fails the
+   boot; mount ONLY dsh-jobs-local); **dsh-web@0.0.1-rc.1 ✅ boots + turns
+   fine** (tools untested without search credentials); dsh-fs-search does
+   not exist on npm; dsh-terminal untested (node-pty native — pairs with the
+   Windows item). Nothing is mounted by default — which packages to enable is
+   a user decision (each adds tools/schema cost to every DSH session).
+   Known gaps: system npm only (packaged app has no bundled node; manual dir
+   population works), symlinks need privileges on Windows.
+
 **Remaining backlog (next session):**
-9. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
-   only; map `subagent.started/finished` → the renderer's task Redux channel
-   (find the task event channel in main.ts).
-10. **P2 — DSH plugin install flow** (Phase 2 opener): npm-install into
-    `userData/dsh-plugins`, absolute-path entries via `extraEntries`,
-    persisted list in app_config, config-change auto-restart already works.
-    Use it to mount official non-overlapping packages: web, fs-search,
-    time-context, jobs, terminal (needs node-pty). Deliberately NOT mounting:
-    dsh-skill/dsh-schedule/dsh-plan-mode/dsh-cmdline (overlap with IDBots
-    systems — IDBots stays authoritative).
+10. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
+    only; map `subagent.started/finished` → the renderer's task Redux channel
+    (find the task event channel in main.ts).
 11. **P2 — Behavioral foundation decision**: claude path sits on the full
     claude_code preset; DSH has DSH tool docs + our ~10-line guidance. If
     soak shows quality gaps on complex tasks, distill an IDBots behavioral
