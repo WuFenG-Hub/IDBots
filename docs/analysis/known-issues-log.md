@@ -182,5 +182,35 @@ Builder阿码 处理「快捷入口重构」单（task e15778fe）时，会话�
 
 ---
 
+---
+
+## 修复记录 — 2026-08-17 外部开发 session（fix/dsh-integration-issues 分支）
+
+> 对应 `docs/analysis/2026-08-17-dsh-integration-issues-fix-list.md` 的 5 项任务，同一 session 内按序处理。本记录为开发侧回填，验收以 Owner 实测为准。（注：fix-list 中 Task 编号与本簿问题编号存在错位 —— fix-list Task 2/3/4 对应本簿问题 3/4/5，fix-list Task 5 对应本簿问题 2。）
+
+### 问题 1（Steer 不即时打断）— 已修复
+- 根因：DSH 路径 `hub.steer()` 只调 runtime `session/steer`（next-step 边界投递），无 interrupt；本地路径的 `interruptLocalTurnForSteers` 语义未移植。
+- 修法：`DshTurnHub.steer()` 现在先 `kernel.steer()` 入 inbox，再 `kernel.cancel(cause:'steer', {keepInbox:true})` 立即中止当前 step —— inbox 中保留的 steer 按 waking-input 语义立即唤醒后续 turn 消费纠偏指令。`DshTurnController` 吞没恰好一个 steer 相关的 turn 边界，使「打断 + 续跑」对上层表现为同一个逻辑 turn；error/用户停止/看门狗中止仍正常落定。
+- 验证：`tests/coworkDshIntegration.test.mjs` 扩展断言 —— steer 提交后 slow_tool 被 abort（`slept:false`），steer 文本随紧随其后的请求到达模型。
+
+### 问题 3（删除确认永久卡死）— 已修复（双层）
+- 根因 A：`evaluateDshToolPolicy` 对删除无条件 `ask`，注释声称与 Claude 路径对齐，实际 Claude 路径（canUseTool）在 acceptEdits/bypassPermissions 下**跳过**删除确认 —— worker（acceptEdits）换 DSH 后被这处语义差异卡死。
+- 根因 B：DSH `onApprovalRequest` 直接写 `pendingPermissions`，完全没挂 60s 超时（本地路径的 `waitForPermissionResponse` 才有）；且 stall watchdog 遇 pendingPermission 无限延期 → 永久挂起。
+- 修法：A) 删除确认收敛为仅 `default` 模式触发（对齐 Claude 路径；无 active session 时 fail-closed 仍 ask）；B) DSH 审批复用 `waitForPermissionResponse`（60s 超时 + abort 联动 + 清 pendingPermission）。
+- 验证：新增 `tests/coworkDshDeletePolicy.test.mjs`（模式 × 命令矩阵）。
+
+### 问题 4（取消后 UI 仍显 running）— 已修复
+- 根因：`twin_task_cancel` → `cancelTaskCascade` 只改编排库记录，不动真正在跑的 worker cowork 会话。
+- 修法：`cancelTask` 在级联取消前捕获存活 attempt 的 workerSessionId，级联后对仍在 running 的会话调 `coworkRunner.stopSession(..., {finalStatus:'stopped'})`（中止回合 + 自动拒绝挂起审批 + 状态落定）；新增 `'stopped'` 会话终态（UI 标签 已终止/Stopped）；`orchestratorCoworkBridge` 非恢复态收到 stopped 事件时落定 promise 且**不**改写会话状态为 error；executeAttempt 成功路径补终态守卫（已取消 attempt 的迟到回复不再复活为 completed）。
+- 验证：`tests/twinOrchestrationService.test.mjs` 新增 cancelTask 停会话用例。
+
+### 问题 5（Twin 无停止 worker 会话能力）— 已实现
+- 新增 Twin 专属内置工具 `worker_session_stop`（sessionId 入参）：校验 Twin 身份 + 目标会话属 worker 类型 MetaBot，然后 stopSession 到 `'stopped'` 终态（中止回合、自动拒绝挂起审批）。Twin 系统提示词同步更新（工具清单 + 「卡死先 stop 再 cancel/reassign」处置指引）。
+- 验证：新增 `tests/twinWorkerSessionStop.test.mjs`（授权矩阵）。
+
+### 问题 2（未隔离 dev 实例重置 worker）— 流程防护已加
+- dev 启动脚本（`start:electron`）禁用单实例锁且默认共享主应用 user-data；第二实例启动恢复逻辑会把活跃 worker attempt 判为 `RECOVERED_AFTER_RESTART` 并重置 running 会话。
+- 修法（警告级）：main.ts 在 `NODE_ENV=development` 且未设置 `IDBOTS_USER_DATA_PATH` 时打醒目告警，指引用 `electron:dev:fresh`。结构性隔离（如共享数据目录下跳过启动恢复）未做，避免引入真重启恢复盲区，留待评估。
+
 <!-- 后续问题在此追加 -->
 ## 问题 6 · 保留位

@@ -795,3 +795,63 @@ test('P-A: store read failure degrades gracefully to plain WORKER_EMPTY_HANDOFF'
     sqliteStore.close();
   }
 });
+
+test('cancelTask stops the live worker sessions of the cancelled attempts (UI never shows them running)', async () => {
+  // Worker turn never settles: the session stays "running" inside the runner
+  // exactly like a real stuck worker (e.g. wedged on a permission).
+  let releaseWorker;
+  const workerGate = new Promise((resolve) => { releaseWorker = resolve; });
+  const stopped = [];
+  const sessions = new Map([['worker-session-2', { id: 'worker-session-2', status: 'running' }]]);
+  const { sqliteStore, orchestrationStore, service } = await makeService(async (params) => {
+    await params.onSessionCreated('worker-session-2');
+    return workerGate;
+  }, {
+    coworkStore: {
+      getSession: (id) => sessions.get(id) ?? null,
+    },
+    coworkRunner: {
+      insertCrossSessionMessageAndQueue(input) {
+        return {
+          insert: { ok: true, sourceSessionId: input.sourceSessionId, targetSessionId: input.targetSessionId, message: { id: 'm', type: 'user', content: input.message, timestamp: 1700000000000, metadata: null } },
+          runQueued: true,
+          queueDepth: 1,
+        };
+      },
+      stopSession(sessionId, options) {
+        stopped.push({ sessionId, options });
+        // Mirror the real runner: the stop settles the session store status.
+        sessions.set(sessionId, { id: sessionId, status: options?.finalStatus ?? 'idle' });
+      },
+    },
+  });
+  try {
+    const result = await service.delegateLocalWorker('twin-session', {
+      workerMetabotId: 2, objective: 'long work', idempotencyKey: 'cancel-stop-1',
+    });
+    await waitFor(() => assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'running'));
+
+    const cancelledTask = service.cancelTask('twin-session', result.task.id);
+    assert.equal(cancelledTask.status, 'cancelled');
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'cancelled');
+    // The live worker session was stopped with the deliberate terminal state.
+    assert.deepEqual(stopped, [{ sessionId: 'worker-session-2', options: { finalStatus: 'stopped' } }]);
+    assert.equal(sessions.get('worker-session-2').status, 'stopped');
+
+    // A second cancel of the same task stops nothing: the attempt is already
+    // terminal, so no live session is captured.
+    service.cancelTask('twin-session', result.task.id);
+    assert.equal(stopped.length, 1);
+
+    // Let the worker turn settle so the fire-and-forget attempt task ends:
+    // the late reply hits the terminal-state guard (attempt already
+    // cancelled) and is discarded. Drain the continuation BEFORE closing the
+    // store — the guard reads the DB in the microtask after the gate opens.
+    releaseWorker('late reply after cancel');
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(orchestrationStore.getAttempt(result.attempt.id).status, 'cancelled');
+  } finally {
+    sqliteStore.close();
+  }
+});

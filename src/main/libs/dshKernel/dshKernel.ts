@@ -180,9 +180,17 @@ export class DshKernel {
     })
   }
 
-  async cancel(sessionId: string, cause?: string): Promise<{ cancelled: boolean }> {
+  async cancel(
+    sessionId: string,
+    cause?: string,
+    options?: { keepInbox?: boolean }
+  ): Promise<{ cancelled: boolean }> {
     this.requireClient()
-    return this.client.request('session/cancel', { sessionId, cause })
+    return this.client.request('session/cancel', {
+      sessionId,
+      cause,
+      keepInbox: options?.keepInbox === true,
+    })
   }
 
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<{ answered: boolean }> {

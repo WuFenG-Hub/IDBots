@@ -24,6 +24,9 @@ const statusLabels: Record<CoworkSessionStatus, string> = {
   // 清单 #12: failed attempt already superseded by a retry — distinct from an
   // unattended 'error' so users don't mistake it for a hanging task.
   error_retried: 'coworkStatusErrorRetried',
+  // Deliberately terminated (task cancelled / Twin stopped the worker) —
+  // never masquerades as running.
+  stopped: 'coworkStatusStopped',
 };
 
 const PushPinIcon: React.FC<React.SVGProps<SVGSVGElement> & { slashed?: boolean }> = ({

@@ -484,7 +484,10 @@ export function buildA2AParticipantPairKey(localGlobalMetaId: string, peerGlobal
 // 'error_retried' (清单 #12): an orchestration attempt failed AND the step was
 // already retried with a fresh attempt — the session is a historical failure,
 // distinguishable from an un-attended 'error'.
-export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried';
+// 'stopped': the session was terminated before finishing (task cancelled, or
+// stopped via the Twin's worker_session_stop) — a deliberate terminal state,
+// never shown as 'running' again.
+export type CoworkSessionStatus = 'idle' | 'running' | 'completed' | 'error' | 'error_retried' | 'stopped';
 export type CoworkMessageType = 'user' | 'assistant' | 'tool_use' | 'tool_result' | 'system';
 export type CoworkExecutionMode = 'auto' | 'local' | 'sandbox';
 export type CoworkSessionType = 'standard' | 'a2a' | 'browser' | 'group_task';

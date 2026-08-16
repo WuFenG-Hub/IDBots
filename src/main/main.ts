@@ -6860,6 +6860,22 @@ const scheduleReload = (reason: string, webContents?: WebContents) => {
 const shouldUseSingleInstanceLock = shouldAcquireSingleInstanceLock();
 const gotTheLock = shouldUseSingleInstanceLock ? app.requestSingleInstanceLock() : true;
 
+// Un-isolated dev instance hazard (DSH integration fix list Task 5): dev
+// start scripts disable the single-instance lock, and without an
+// IDBOTS_USER_DATA_PATH override this instance shares the regular app's
+// user-data directory. Its startup recovery (orchestration
+// recoverAfterRestart + resetRunningSessions) then marks the LIVE instance's
+// in-flight worker attempts RECOVERED_AFTER_RESTART and interrupts them.
+// `electron:dev:fresh` / `electron:dev:dsh` isolate the data dir and are the
+// correct preview entry points — warn loudly when that isolation is missing.
+if (process.env.NODE_ENV === 'development' && !process.env.IDBOTS_USER_DATA_PATH) {
+  console.warn(
+    '[Main] ⚠️  DEV INSTANCE WITHOUT ISOLATED USER DATA: this instance shares the regular app data directory.\n' +
+    '    If another IDBots instance is running, its in-flight worker sessions WILL be reset (RECOVERED_AFTER_RESTART).\n' +
+    '    Use `npm run electron:dev:fresh` (isolated .dev-userdata-fresh) for previews.'
+  );
+}
+
 if (!gotTheLock) {
   app.quit();
 } else {

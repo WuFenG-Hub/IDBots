@@ -51,7 +51,8 @@
     "setup:mingit": "node scripts/setup-mingit.js",
     "regenerate:icon": "bash scripts/regenerate-mac-icon.sh",
     "fix:mac-icon": "bash scripts/fix-mac-icon-display.sh",
-    "test:dsh": "npx rimraf dist-electron && npm run compile:electron && node --test --test-concurrency=1 tests/dshStreamUiGate.test.mjs tests/dshReasoningEffort.test.mjs tests/dshKernelEventMapper.test.mjs tests/dshKernelRuntime.test.mjs tests/coworkKernelRouting.test.mjs tests/coworkDshIntegration.test.mjs tests/coworkDshSessionTypes.test.mjs tests/coworkDshStallWatchdog.test.mjs tests/dshUsageProjection.test.mjs tests/dshPluginManager.test.mjs tests/dshKernelDefault.test.mjs && cd dsh-runtime && npm test",
+    "test:dsh": "npx rimraf dist-electron && npm run compile:electron && node --test --test-concurrency=1 tests/dshStreamUiGate.test.mjs tests/dshReasoningEffort.test.mjs tests/dshKernelEventMapper.test.mjs tests/dshKernelRuntime.test.mjs tests/coworkKernelRouting.test.mjs tests/coworkDshIntegration.test.mjs tests/coworkDshSessionTypes.test.mjs tests/coworkDshStallWatchdog.test.mjs tests/coworkDshDeletePolicy.test.mjs tests/dshUsageProjection.test.mjs tests/dshPluginManager.test.mjs tests/dshKernelDefault.test.mjs && cd dsh-runtime && npm test",
+    "test:twin-orchestration": "npm run compile:electron && node --test tests/twinOrchestrationService.test.mjs tests/twinWorkerSessionStop.test.mjs tests/orchestratorCoworkBridgeSkillIds.test.mjs",
     "electron:dev:dsh": "cross-env IDBOTS_USER_DATA_PATH=./.dev-userdata-dsh IDBOTS_APP_DATA_PATH=./.dev-appdata-dsh concurrently \"vite --host 127.0.0.1 --port 5185\" \"wait-on -v -t 120000 -d 10000 http://127.0.0.1:5185 && node scripts/wait-electron-dev-build.mjs dist-electron && cross-env NODE_ENV=development IDBOTS_DISABLE_SINGLE_INSTANCE_LOCK=1 ELECTRON_START_URL=http://127.0.0.1:5185 electron .\""
   },
   "dependencies": {

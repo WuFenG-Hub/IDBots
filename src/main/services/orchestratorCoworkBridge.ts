@@ -241,7 +241,7 @@ export async function runOrchestratorSkillTurn(
     const cleanup = () => {
       runner.off('complete', onComplete);
       runner.off('error', onError);
-      runner.off('stopped', onRecoveryStopped);
+      runner.off('stopped', onStopped);
       if (timeoutId != null) clearTimeout(timeoutId);
       if (recoveryWindowTimer != null) clearTimeout(recoveryWindowTimer);
     };
@@ -330,16 +330,27 @@ export async function runOrchestratorSkillTurn(
       fail(errorMessage);
     };
 
-    const onRecoveryStopped = (sid: string) => {
-      if (sid !== sessionId || !recoveryActive) return;
-      reportLateTermination('stopped');
+    // A stopped session settles the caller's promise WITHOUT rewriting the
+    // session status (stopSession already recorded the deliberate 'stopped'
+    // terminal state; fail() would clobber it with 'error'). Covers both the
+    // pre-watchdog phase (Twin cancelled the task / stopped the worker) and
+    // the recovery window via recoveryActive.
+    const onStopped = (sid: string) => {
+      if (sid !== sessionId) return;
+      if (recoveryActive) {
+        reportLateTermination('stopped');
+        return;
+      }
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('WORKER_SESSION_STOPPED'));
     };
 
     const enterRecovery = () => {
       recoveryActive = true;
       // Keep listening for a late 'complete'/'error' — the worker session is
       // still alive inside CoworkRunner and its eventual result is recoverable.
-      runner.on('stopped', onRecoveryStopped);
       recoveryWindowTimer = setTimeout(() => {
         recoveryWindowTimer = null;
         reportRecoveryExpired();
@@ -360,6 +371,7 @@ export async function runOrchestratorSkillTurn(
 
     runner.on('complete', onComplete);
     runner.on('error', onError);
+    runner.on('stopped', onStopped);
 
     runner
       .startSession(sessionId, userMessage, {

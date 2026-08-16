@@ -326,6 +326,16 @@ export class TwinOrchestrationService {
         throw new Error(await this.buildEmptyHandoffError(attempt, worker));
       }
       const result = { replyText: replyText.trim(), verified: false };
+      // Terminal-state guard (mirrors applyLateAttemptResult): a task
+      // cancelled while this worker ran must stay cancelled — a late reply
+      // never resurrects it, and the step/task must not move either.
+      const fresh = this.deps.orchestrationStore.getAttempt(attempt.id);
+      if (!fresh || !['queued', 'running', 'timed_out'].includes(fresh.status)) {
+        console.log(
+          `[TwinOrchestration] Worker attempt ${attempt.id} reply arrived after terminal state ${fresh?.status ?? 'missing'}; discarded`,
+        );
+        return;
+      }
       this.deps.orchestrationStore.updateAttempt(attempt.id, 'completed', { result });
       this.deps.orchestrationStore.updateStepStatus(step.id, 'completed', { acceptedResult: result });
       this.deps.orchestrationStore.updateTaskStatus(task.id, 'review');
@@ -603,7 +613,38 @@ export class TwinOrchestrationService {
 
   cancelTask(sourceSessionId: string, taskId: string): OrchestrationTask {
     const status = this.getTaskStatus(sourceSessionId, taskId);
-    return this.deps.orchestrationStore.cancelTaskCascade(status.task.id);
+    // Capture the live worker sessions BEFORE the cascade flips their attempt
+    // records to 'cancelled' — after the store write they are no longer
+    // distinguishable from long-dead ones.
+    const liveWorkerSessions = new Set(
+      status.steps
+        .flatMap((step) => step.attempts)
+        .filter((attempt) => ['queued', 'running', 'timed_out'].includes(attempt.status))
+        .map((attempt) => (attempt.workerSessionId ?? '').trim())
+        .filter((sessionId) => sessionId.length > 0),
+    );
+    const cancelled = this.deps.orchestrationStore.cancelTaskCascade(status.task.id);
+    // Cancel the attempt records alone used to orphan the live worker
+    // sessions: they kept streaming (or sat wedged on a pending permission)
+    // while the UI showed them as 'running' forever. Stopping them here
+    // aborts the in-flight turn, cancels pending approvals, and settles the
+    // session in a deliberate terminal state.
+    for (const workerSessionId of liveWorkerSessions) {
+      try {
+        const session = this.deps.coworkStore.getSession?.(workerSessionId);
+        if (!session || session.status !== 'running') continue;
+        this.deps.coworkRunner.stopSession(workerSessionId, { finalStatus: 'stopped' });
+        console.log(
+          `[TwinOrchestration] Stopped live worker session ${workerSessionId} of cancelled task ${status.task.id}`,
+        );
+      } catch (error) {
+        console.warn(
+          `[TwinOrchestration] Failed to stop worker session ${workerSessionId} of cancelled task ${status.task.id}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return cancelled;
   }
 
   async reassignLocalWorker(sourceSessionId: string, input: {
