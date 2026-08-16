@@ -1,6 +1,6 @@
 # DSH Kernel Migration — Handoff Document
 
-Last updated: 2026-08-16 (session 4) · Branch: `feat/dsh-p2-parity` (unpushed; P0+P1 merged to main as `0ffbd3e4`/`6dd518a7`) · Author: ZCode sessions 2026-08-15~16
+Last updated: 2026-08-16 (final) · Branch: `main` (P0/P1/P2 merged as `0ffbd3e4`/`6dd518a7`/`cac8db29`; all local, unpushed) · Author: ZCode sessions 2026-08-15~16
 Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 
 ## 1. Where we are
@@ -166,9 +166,9 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ## 5. Testing infrastructure & gotchas
 
-- App-side: `npm run test:dsh` (rimraf dist → compile:electron → 6 test
+- App-side: `npm run test:dsh` (rimraf dist → compile:electron → 7 test
   files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test`
-  (11 files now — attachment-store, mcp-bridge, ask-bridge joined;
+  (12 files — attachment-store, mcp-bridge, ask-bridge, plugin-mount;
   mock-gateway based, no keys needed).
 - **Run node --test with `--test-concurrency=1`** for the cowork suites;
   parallel files flake on ports.
@@ -193,15 +193,51 @@ post an English dev-journal buzz via the `metabot-post-buzz` skill for every
 commit; no push without instruction; merge with `--no-ff`; direct-to-main
 only for small soak fixes (precedent set this session).
 
-## 7. Suggested opening move for the next session
+## 7. Where the program stands (final) — and how to install a plugin today
 
-The full P1 tier is DONE on `feat/dsh-p1-parity` (§3 items 5–8: prompt
-image attachments, ask_user_question, Read guards, stall watchdog) — the
-branch awaits merge review. Next session: the P2 tier (§3 items 9–12),
-opening with the DSH plugin install flow (npm-install into userData,
-absolute-path extraEntries, persisted list in app_config — the config-change
-auto-restart already works). Watch out when testing:
-orphan mock/runtime processes on 487xx poison later runs (`lsof -ti :4879x |
-xargs kill; pkill -f cordis.runtime`), and the interleave-test race fix
-(c4984c85) documents why two concurrent turns must never share one DSH
-session id.
+The structural parity program is COMPLETE: every implementable backlog item
+(P0 1–3, P1 4–8, P2 9–10) is on `main`. No further development is scheduled.
+What remains is deliberately usage-driven:
+
+- **Soak**: run real workloads on BOTH kernels (complex multi-file coding,
+  long tool chains) and compare quality. If DSH lags on complex tasks, that
+  data drives the behavioral-foundation decision (§3 item 11) — distill an
+  IDBots behavioral layer from memory `claude-code-prompt-engineering-techniques`.
+- **Windows** (§3 item 12) when an environment exists; plugin `dsh-terminal`
+  (node-pty) rides that track.
+- Bugs found in use go through the normal branch+worktree+commit flow.
+
+### Installing a DSH plugin today (no UI yet — command line)
+
+The consumption side is fully live: every DSH turn re-resolves
+`<userData>/dsh-plugins` (dev instance: `.dev-userdata-dsh/dsh-plugins`;
+packaged app: `~/Library/Application Support/IDBots/dsh-plugins`) and mounts
+each installed `@deepseek-ai/*` package as a composition entry — installs
+apply on the next turn; a config change restarts the runtime only after
+in-flight turns settle. The write side (`installDshPlugin` in
+`src/main/libs/dshPluginManager.ts`) is library-only for now — no IPC/UI.
+
+Manual install (validated end-to-end with dsh-time-context):
+
+```bash
+PLUGINS="$HOME/Library/Application Support/IDBots/dsh-plugins"   # or .dev-userdata-dsh/dsh-plugins
+RUNTIME_NM="<repo>/dsh-runtime/node_modules"                     # packaged: IDBots.app/Contents/Resources/dsh-runtime/node_modules
+mkdir -p "$PLUGINS" && cd "$PLUGINS"
+[ -f package.json ] || echo '{"name":"idbots-dsh-plugins","private":true,"version":"0.0.1"}' > package.json
+npm install @deepseek-ai/dsh-time-context --legacy-peer-deps --no-audit --no-fund
+# Peer symlinks — the external package MUST resolve peers against the runtime's copies:
+for pj in node_modules/@deepseek-ai/*/package.json; do
+  node -e "console.log(Object.keys(require('./' + process.argv[1]).peerDependencies || {}).join('\n'))" "$pj"
+done | sort -u | while read -r peer; do
+  [ -e "node_modules/$peer" ] || { mkdir -p "node_modules/$(dirname "$peer")"; ln -s "$RUNTIME_NM/$peer" "node_modules/$peer"; }
+done
+```
+
+Uninstall = delete the package folder under `node_modules/@deepseek-ai/`
+(possibly `npm uninstall` too); it disappears from the composition on the
+next turn. WARNING: a plugin that fails to load kills the runtime BOOT for
+every DSH session — remove it from the directory and the next turn recovers.
+Known-good: dsh-time-context (fully verified), dsh-jobs-local, dsh-web.
+Never mount dsh-jobs alone (abstract seam — boot failure). Nothing is
+mounted by default; each enabled package adds tool-schema cost to every DSH
+session.
