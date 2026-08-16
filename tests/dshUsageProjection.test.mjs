@@ -9,7 +9,7 @@ import test from 'node:test'
 import Module from 'node:module'
 
 const require = Module.createRequire(import.meta.url)
-const { foldDshUsageProjection } = require('../dist-electron/main/libs/dshUsageProjection.js')
+const { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } = require('../dist-electron/main/libs/dshUsageProjection.js')
 
 const projection = (tokenUsage, contextPressure) => ({
   available: true,
@@ -166,4 +166,25 @@ test('a Claude-kernel stats row (no raw buckets) refreshes counters without fabr
   assert.equal(folded.stats.inputTokens, 900)
   assert.equal(folded.stats.turnCount, 4)
   assert.equal(folded.stats.turnStats.length, 1)
+})
+
+test('dshPromptSideTokens sums uncached input + both cache buckets, output excluded', () => {
+  assert.equal(dshPromptSideTokens({ inputTokens: 300, outputTokens: 120, cacheReadTokens: 700, cacheWriteTokens: 10 }), 1010)
+  // Non-finite legacy fields heal to zero.
+  assert.equal(dshPromptSideTokens({ inputTokens: 500 }), 500)
+})
+
+test('dshContextUsageFromPressure prefers projected, official window; falls back in order', () => {
+  assert.deepEqual(
+    dshContextUsageFromPressure({ pressureTokens: 600, projectedTokens: 640, contextWindow: 8000 }, 64000),
+    { usedTokens: 640, contextWindow: 8000, usageRatio: 0.08, isRealUsage: true },
+  )
+  // No projected figure yet → the last request's real prompt size.
+  assert.deepEqual(
+    dshContextUsageFromPressure({ pressureTokens: 600 }, 64000),
+    { usedTokens: 600, contextWindow: 64000, usageRatio: 600 / 64000, isRealUsage: true },
+  )
+  // No sample at all → undefined (caller keeps its instant approximation).
+  assert.equal(dshContextUsageFromPressure({}, 64000), undefined)
+  assert.equal(dshContextUsageFromPressure(null), undefined)
 })

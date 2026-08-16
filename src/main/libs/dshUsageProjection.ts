@@ -11,7 +11,7 @@
 // input with cache writes in the creation bucket — so the mapping restores
 // each source's convention from the disjoint buckets.
 
-import type { DshUsageProjectionResult } from './dshKernel/types'
+import type { DshUsageProjectionResult, DshUsageSnapshot } from './dshKernel/types'
 import type { CoworkContextUsage } from './coworkContextUsage'
 
 /** Raw disjoint projection buckets, persisted on the stats row for delta math. */
@@ -74,6 +74,46 @@ export interface DshUsageFoldResult {
 
 const finiteOrZero = (value: unknown): number =>
   typeof value === 'number' && Number.isFinite(value) ? value : 0
+
+/**
+ * Prompt-side pressure of one raw per-request usage snapshot: uncached input
+ * plus cache read/write, output excluded — the same semantics the official
+ * contextPressure.pressureTokens carries. Instant live approximation for the
+ * context ring before the projection round-trip refines it.
+ */
+export function dshPromptSideTokens(usage: DshUsageSnapshot): number {
+  return finiteOrZero(usage.inputTokens)
+    + finiteOrZero(usage.cacheReadTokens)
+    + finiteOrZero(usage.cacheWriteTokens)
+}
+
+/**
+ * Context-ring value from the official contextPressure projection.
+ * projectedTokens is the occupancy display value (provider-anchored estimate
+ * of what the NEXT request's prompt would cost); pressureTokens (the last
+ * request's real prompt size) is the fallback. The window prefers the
+ * runtime's own contextWindow record, falling back to the caller's
+ * model-config value. Undefined when the projection carries no sample yet.
+ */
+export function dshContextUsageFromPressure(
+  pressure: DshUsageProjectionResult['contextPressure'],
+  contextWindowFallback?: number
+): CoworkContextUsage | undefined {
+  if (!pressure) return undefined
+  const ringTokens = Number.isFinite(pressure.projectedTokens) ? pressure.projectedTokens
+    : Number.isFinite(pressure.pressureTokens) ? pressure.pressureTokens
+    : undefined
+  const contextWindow = Number.isFinite(pressure.contextWindow)
+    ? pressure.contextWindow
+    : (Number.isFinite(contextWindowFallback) ? contextWindowFallback : undefined)
+  if (ringTokens === undefined || contextWindow === undefined) return undefined
+  return {
+    usedTokens: ringTokens,
+    contextWindow,
+    usageRatio: Math.min(1, ringTokens / Math.max(1, contextWindow)),
+    isRealUsage: true,
+  }
+}
 
 const rawOf = (stats: DshUsageStatsRow | null): DshRawBuckets | null => {
   const raw = stats?.dshRawBuckets
@@ -180,27 +220,14 @@ export function foldDshUsageProjection(input: DshUsageFoldInput): DshUsageFoldRe
   // reports (uncached input + cache read/write, output excluded).
   const pressure = projection.contextPressure
   const pressureTokens = Number.isFinite(pressure?.pressureTokens) ? pressure?.pressureTokens : undefined
-  const projectedTokens = Number.isFinite(pressure?.projectedTokens) ? pressure?.projectedTokens : undefined
   const lastTurnInputTokens = pressureTokens !== undefined
     ? pressureTokens
     : prev?.lastTurnInputTokens
 
   // Persisted real-context snapshot for the ring (the Claude path stores the
-  // same slot via persistRealContextUsage). projectedTokens is the occupancy
-  // display value: the provider-anchored estimate of what the NEXT request's
-  // prompt would cost.
-  const ringTokens = projectedTokens ?? pressureTokens
-  const contextWindow = Number.isFinite(pressure?.contextWindow)
-    ? pressure?.contextWindow
-    : (input.contextWindowFallback ?? prev?.lastRealContextUsage?.contextWindow)
-  const lastRealContextUsage: CoworkContextUsage | undefined = ringTokens !== undefined && contextWindow !== undefined
-    ? {
-        usedTokens: ringTokens,
-        contextWindow,
-        usageRatio: Math.min(1, ringTokens / Math.max(1, contextWindow)),
-        isRealUsage: true,
-      }
-    : undefined
+  // same slot via persistRealContextUsage).
+  const lastRealContextUsage = dshContextUsageFromPressure(pressure,
+    input.contextWindowFallback ?? prev?.lastRealContextUsage?.contextWindow)
 
   const stats: DshUsageStatsRow = {
     inputTokens,
