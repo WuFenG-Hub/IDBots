@@ -7,7 +7,7 @@ const require = createRequire(import.meta.url);
 const {
   runOrchestratorSkillTurn,
   runSkillTurnInExistingSession,
-} = require('../dist-electron/services/orchestratorCoworkBridge.js');
+} = require('../dist-electron/main/services/orchestratorCoworkBridge.js');
 
 test('runOrchestratorSkillTurn persists active skill ids and disables remote services prompt', async () => {
   const runner = new EventEmitter();
@@ -17,6 +17,7 @@ test('runOrchestratorSkillTurn persists active skill ids and disables remote ser
     messages: [],
   };
   const store = {
+    getAppLanguage() { return 'en'; },
     createSession(title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId) {
       calls.push({ type: 'createSession', title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId });
       return session;
@@ -77,6 +78,7 @@ test('runOrchestratorSkillTurn tags private chat turns with metaweb_private and 
     messages: [],
   };
   const store = {
+    getAppLanguage() { return 'en'; },
     createSession(title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId) {
       calls.push({ type: 'createSession', title, cwd, systemPrompt, executionMode, activeSkillIds, metabotId });
       return session;
@@ -152,6 +154,7 @@ test('runSkillTurnInExistingSession reuses the private A2A session without creat
     ],
   };
   const store = {
+    getAppLanguage() { return 'en'; },
     createSession() {
       calls.push({ type: 'createSession' });
       throw new Error('private chat skill turns must not create a new session');
@@ -223,6 +226,7 @@ test('runSkillTurnInExistingSession calls onSkillExecutionStart when a local too
     ],
   };
   const store = {
+    getAppLanguage() { return 'en'; },
     getSession(sessionId) {
       assert.equal(sessionId, session.id);
       return session;
@@ -290,6 +294,7 @@ test('runSkillTurnInExistingSession waits for slow local skill completion before
     ],
   };
   const store = {
+    getAppLanguage() { return 'en'; },
     getSession(sessionId) {
       assert.equal(sessionId, session.id);
       return session;
