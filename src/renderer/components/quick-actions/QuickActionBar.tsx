@@ -5,6 +5,9 @@ import {
   BookOpenIcon,
   ChatBubbleLeftRightIcon,
   Squares2X2Icon,
+  GlobeAltIcon,
+  UsersIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline';
 
 interface QuickActionBarProps {
@@ -18,6 +21,9 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   BookOpenIcon,
   ChatBubbleLeftRightIcon,
   Squares2X2Icon,
+  GlobeAltIcon,
+  UsersIcon,
+  SparklesIcon,
 };
 
 const QuickActionBar: React.FC<QuickActionBarProps> = ({ actions, onActionSelect }) => {
