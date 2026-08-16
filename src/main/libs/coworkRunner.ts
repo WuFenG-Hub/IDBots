@@ -5765,10 +5765,10 @@ export class CoworkRunner extends EventEmitter {
         .filter((section) => section?.trim())
         .join('\n\n')
       const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
-      const outcome = await hub.runTurn({
+      const runTurnToOutcome = (turnPrompt: string) => hub.runTurn({
         sessionId,
         dshSessionId,
-        prompt: effectiveDshPrompt,
+        prompt: turnPrompt,
         hostTools,
         workspace: { cwd },
         sections: [
@@ -5849,6 +5849,25 @@ export class CoworkRunner extends EventEmitter {
         },
       });
 
+      let outcome = await runTurnToOutcome(effectiveDshPrompt);
+
+      // Empty terminal turn auto-continue (parity with the Claude path's
+      // bf15f63d fix): DeepSeek occasionally ends a turn after emitting only a
+      // reasoning block — no text, no tool calls — a transient upstream
+      // behavior, not a real "done". Resume the same DSH session (full history
+      // preserved) with the shared continue cue, exactly like the manual
+      // "继续" workaround. At most once: a second consecutive empty turn falls
+      // through to the idle + diagnostic settlement below instead of looping.
+      if (outcome.emptyTerminal && !activeSession.abortController.signal.aborted) {
+        coworkLog(
+          'INFO',
+          'runDshSessionLocal',
+          'Empty terminal turn (DSH reasoning-only stop) — auto-continuing once',
+          { sessionId }
+        );
+        outcome = await runTurnToOutcome(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
+      }
+
       if (activeSession.abortController.signal.aborted) {
         this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
         finish('idle');
@@ -5871,7 +5890,18 @@ export class CoworkRunner extends EventEmitter {
         this.dshActiveTurns.delete(sessionId);
         return;
       }
-      finish('completed');
+      // Empty terminal turn fallback: reached only when the auto-continue
+      // above already ran and the resumed turn was again empty. Do NOT falsely
+      // report `completed` — surface the same diagnostic the Claude path uses
+      // and leave the session `idle` so the user can re-send to continue.
+      // Still emit `complete` so automation waiters resolve (the orchestrator
+      // bridge treats an empty reply as a non-answer).
+      if (outcome.emptyTerminal) {
+        this.reportEmptyTerminalTurn(sessionId);
+        finish('idle');
+      } else {
+        finish('completed');
+      }
       this.emit('complete', sessionId, activeSession.claudeSessionId);
       // Same teardown the Claude path performs: without removing the active
       // session, the next submission is classified as a pending steer against
