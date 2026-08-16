@@ -15,9 +15,12 @@ skills (bash-executed), permission chain, compaction, retry, session-scoped
 provider routing, subagents + panel, kernel-switch UI, electron-builder
 packaging, persona-owned prompts, volatile context injection.
 
-Flag `dshKernelEnabled` is **default off**; the UI toggle (Claude/DSH pills in
-the cowork prompt controls) governs NEW sessions; existing sessions pin their
-kernel via the `dsh:` session-handle prefix.
+Flag `dshKernelEnabled` is **default ON** (flipped 2026-08-16 after the
+parity program completed): UNSET config adopts DSH, an explicit `false` (the
+user switched the pill to Claude) keeps Claude; anthropic-direct routes stay
+on Claude regardless (eligibility gate); the UI toggle still governs NEW
+sessions and existing sessions pin their kernel via the `dsh:` session-handle
+prefix.
 
 ## 2. Architecture map (files that matter)
 

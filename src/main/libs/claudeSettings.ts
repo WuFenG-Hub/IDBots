@@ -540,16 +540,19 @@ function dshApiRootOf(baseUrl: string, apiFormat: AnthropicApiFormat, providerNa
 }
 
 /**
- * Phase 1 M5 rollout flag: cowork sessions on OpenAI-compatible provider
- * routes may run on the DSH kernel. Persisted in app_config like the other
- * cowork defaults; default off.
+ * Cowork kernel default: NEW sessions on OpenAI-compatible provider routes
+ * run on the DSH kernel. Persisted in app_config like the other cowork
+ * defaults. UNSET adopts the default (DSH) — only an explicit `false` (the
+ * user switched the pill to Claude) keeps the Claude kernel; anthropic-direct
+ * routes stay on Claude regardless (eligibility gate in coworkKernelRouting).
  */
 export function isDshKernelEnabled(): boolean {
   // Env override wins so a DSH-kernel dev/test instance can be launched with
   // one command (electron:dev:dsh) without touching persisted config.
   if (process.env.IDBOTS_DSH_KERNEL === '1') return true;
   const sqliteStore = getStore();
-  return sqliteStore?.get<AppConfig>('app_config')?.dshKernelEnabled === true;
+  const stored = sqliteStore?.get<AppConfig>('app_config')?.dshKernelEnabled;
+  return stored === undefined ? true : stored === true;
 }
 
 /**

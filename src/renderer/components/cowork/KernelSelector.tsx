@@ -28,7 +28,8 @@ const KernelSelector: React.FC<KernelSelectorProps> = ({ sessionKernel }) => {
 
   useEffect(() => {
     const config = configService.getConfig();
-    setDefaultKernel(config?.dshKernelEnabled ? 'dsh' : 'claude');
+    // Unset adopts the DSH default (parity with isDshKernelEnabled).
+    setDefaultKernel(config?.dshKernelEnabled === false ? 'claude' : 'dsh');
   }, []);
 
   const switchKernel = async (next: KernelChoice) => {
