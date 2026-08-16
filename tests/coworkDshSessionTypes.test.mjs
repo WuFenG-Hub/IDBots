@@ -80,11 +80,18 @@ class RecordingStore {
     if (updates.content !== undefined) entry.content = updates.content
     if (updates.metadata !== undefined) entry.metadata = { ...(entry.metadata ?? {}), ...updates.metadata }
   }
+  getConversationSourceContextBySession() {
+    return { hasSourceContext: false }
+  }
   getMemoryBackend() {
+    const noMemories = () => []
     return {
       getEffectiveMemoryPolicyForSession: () => ({ memoryEnabled: true }),
       resolveMetabotIdForMemory: () => 1,
       applyTurnMemoryUpdates: async () => ({}),
+      listUserMemories: noMemories,
+      listDailySummaries: noMemories,
+      searchDailySummaries: noMemories,
     }
   }
   getSessionUsageStats() { return null }
@@ -113,6 +120,10 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
   const { startMockServer } = await import(path.join(runtimeDir, 'test', 'fixtures', 'mock-openai.mjs'))
   const serverA = await startMockServer(48798)
   const serverB = await startMockServer(48799)
+
+  // Clean BEFORE the run: a previously hung run never reaches its finally,
+  // and resume-first would adopt its poisoned session log forever after.
+  fs.rmSync(path.join(process.cwd(), '.cowork-temp', 'dsh-sessiontypes-userData'), { recursive: true, force: true })
 
   const fakeStore = makeFakeStore(true)
   claudeSettings.setStoreGetter(() => fakeStore)

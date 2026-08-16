@@ -69,11 +69,18 @@ class RecordingStore {
     this.messages.push({ sessionId, ...stored })
     return stored
   }
+  getConversationSourceContextBySession() {
+    return { hasSourceContext: false }
+  }
   getMemoryBackend() {
+    const noMemories = () => []
     return {
       getEffectiveMemoryPolicyForSession: () => ({ memoryEnabled: true }),
       resolveMetabotIdForMemory: () => 1,
       applyTurnMemoryUpdates: async () => ({}),
+      listUserMemories: noMemories,
+      listDailySummaries: noMemories,
+      searchDailySummaries: noMemories,
     }
   }
   updateMessage(sessionId, messageId, updates) {

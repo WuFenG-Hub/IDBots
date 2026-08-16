@@ -5747,10 +5747,27 @@ export class CoworkRunner extends EventEmitter {
     try {
       const hostTools = this.buildDshHostTools(sessionId)
       this.dshHostToolRegistry = new Map(hostTools.map((tool) => [tool.name, tool]))
+      // Volatile context (memory projections, time, browser tabs, remote
+      // services) rides the user-message tail on BOTH kernels — the claude
+      // path builds it inside runClaudeCodeLocal; replicate here so DSH
+      // sessions get the same proactive injection.
+      const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
+      const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode)
+      const volatileBlocks = await this.buildVolatileContextPrompt(
+        sessionId,
+        prompt,
+        this.isSessionMemoryEnabled(sessionId, activeSession),
+        systemPromptProfile,
+        activeSession.disableRemoteServicesPrompt
+      )
+      const volatileHead = [localTimePrompt, volatileBlocks]
+        .filter((section) => section?.trim())
+        .join('\n\n')
+      const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
       const outcome = await hub.runTurn({
         sessionId,
         dshSessionId,
-        prompt,
+        prompt: effectiveDshPrompt,
         hostTools,
         workspace: { cwd },
         sections: [
