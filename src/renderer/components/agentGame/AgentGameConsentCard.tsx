@@ -2,7 +2,7 @@
  * Agent-Game-v2 task authorization card (docs/14 §3). Surfaces a start-time
  * consent request — actor, MetaApp, groupId, gameId, rules/Adapter hash,
  * protocol paths, TTL, budget — and lets the user approve or deny. Deny maps
- * to consent_denied on the host. Mirrors the CoworkPermissionModal overlay
+ * to consent_denied on the host. Mirrors the CoworkPermissionPanel confirmation
  * pattern (Tailwind + heroicons).
  */
 
