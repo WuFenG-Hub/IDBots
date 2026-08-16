@@ -3871,13 +3871,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               contextUsage={currentSession.contextUsage}
               suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
             />
-            {isStreaming && (
-              <div className="mt-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                {i18nService.t(steerDisabled
-                  ? 'coworkSteerSandboxUnavailableHint'
-                  : 'coworkSteerLocalOnlyHint')}
-              </div>
-            )}
             {submitError && (
               <div className="mt-2 text-xs text-red-500 dark:text-red-400" role="alert">
                 {submitError}
