@@ -68,6 +68,13 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
+      // HANG_TEST: open the SSE stream, emit one delta, and never finish —
+      // simulates a wedged provider for the stall-watchdog app test. (Headers
+      // were already written above; just never end the stream.)
+      if (lastUserText.includes('HANG_TEST')) {
+        frame({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'hanging' }, finish_reason: null }] })
+        return
+      }
       let reply = ''
       if (toolCallFor !== null && !alreadyHasToolResult) {
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }

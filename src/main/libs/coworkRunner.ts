@@ -280,6 +280,16 @@ const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:�
  */
 export const COWORK_LOCAL_TURN_STALL_TIMEOUT_MS = 180_000;
 
+/**
+ * Turn-level stall deadline for DSH sessions: when a turn makes no progress
+ * for this long (runtime wedged, provider hang beyond every tool's own
+ * timeout), the watchdog cancels it so the session cannot sit in "running"
+ * forever. Generous by design — bash/MCP tool budgets are 60s and the Claude
+ * path has no turn deadline at all; a pending permission dialog (a human is
+ * the slow party) extends the deadline, it never fires through one.
+ */
+export const DSH_TURN_STALL_TIMEOUT_MS = 10 * 60_000;
+
 export function isSdkResultEvent(event: unknown): event is { type: 'result' } & Record<string, unknown> {
   return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
 }
@@ -1507,6 +1517,13 @@ export interface CoworkRunnerOptions {
    * value <= 0 disables the watchdog.
    */
   localTurnStallTimeoutMs?: number;
+  /**
+   * Turn-level stall deadline for DSH turns; on fire the turn is cancelled
+   * (runtime native cancel) and the session returns to idle with a
+   * diagnostic. Defaults to DSH_TURN_STALL_TIMEOUT_MS; tests override it.
+   * A value <= 0 disables the watchdog.
+   */
+  dshTurnStallTimeoutMs?: number;
 }
 
 export class CoworkRunner extends EventEmitter {
@@ -1536,6 +1553,7 @@ export class CoworkRunner extends EventEmitter {
   private metabotManage?: MetabotManageControl;
   private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
+  private readonly dshTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
@@ -1617,6 +1635,10 @@ export class CoworkRunner extends EventEmitter {
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
+    );
+    this.dshTurnStallTimeoutMs = Math.max(
+      0,
+      options?.dshTurnStallTimeoutMs ?? DSH_TURN_STALL_TIMEOUT_MS
     );
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
@@ -5787,7 +5809,43 @@ export class CoworkRunner extends EventEmitter {
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
-      const runTurnToOutcome = (turnPrompt: string, images?: DshHostToolImagePayload[]) => hub.runTurn({
+      // Turn-level stall watchdog: cancel a turn that made no progress for
+      // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
+      // own timeout). A pending permission dialog means a human is the slow
+      // party — the deadline extends instead of firing through it. The
+      // non-user-aborted settlement below turns the cancel into idle + a
+      // localized diagnostic.
+      let dshStallTimer: NodeJS.Timeout | null = null;
+      const clearDshStallWatchdog = () => {
+        if (dshStallTimer) {
+          clearTimeout(dshStallTimer);
+          dshStallTimer = null;
+        }
+      };
+      const armDshStallWatchdog = () => {
+        clearDshStallWatchdog();
+        if (this.dshTurnStallTimeoutMs <= 0) return;
+        dshStallTimer = setTimeout(() => {
+          dshStallTimer = null;
+          if (activeSession.abortController.signal.aborted) return;
+          if (activeSession.pendingPermission) {
+            armDshStallWatchdog();
+            return;
+          }
+          coworkLog(
+            'WARN',
+            'runDshSessionLocal',
+            'DSH turn stalled with no progress; cancelling via the stall watchdog',
+            { sessionId, stallMs: this.dshTurnStallTimeoutMs }
+          );
+          void hub.cancel(sessionId, 'turn stall watchdog').catch(() => undefined);
+        }, this.dshTurnStallTimeoutMs);
+        dshStallTimer.unref?.();
+      };
+      const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[]) => {
+        armDshStallWatchdog();
+        try {
+          return await hub.runTurn({
         sessionId,
         dshSessionId,
         prompt: turnPrompt,
@@ -5937,10 +5995,14 @@ export class CoworkRunner extends EventEmitter {
             }
           },
           onError: (error) => coworkLog('ERROR', 'runDshSessionLocal', 'runtime stream error', { error: error.message }),
-        },
-      });
+          },
+        });
+      } finally {
+        clearDshStallWatchdog();
+      }
+      };
 
-      let outcome = await runTurnToOutcome(effectiveDshPrompt, promptImages);
+      let outcome = await runGuardedTurn(effectiveDshPrompt, promptImages);
 
       // Empty terminal turn auto-continue (parity with the Claude path's
       // bf15f63d fix): DeepSeek occasionally ends a turn after emitting only a
@@ -5956,7 +6018,7 @@ export class CoworkRunner extends EventEmitter {
           'Empty terminal turn (DSH reasoning-only stop) — auto-continuing once',
           { sessionId }
         );
-        outcome = await runTurnToOutcome(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
+        outcome = await runGuardedTurn(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
       }
 
       if (activeSession.abortController.signal.aborted) {
@@ -5981,6 +6043,19 @@ export class CoworkRunner extends EventEmitter {
         this.dshActiveTurns.delete(sessionId);
         return;
       }
+      // Stall-watchdog cancellation (the only non-user abort source on this
+      // path): the turn made no progress for the whole deadline and was
+      // cancelled. Surface a localized diagnostic and leave the session idle
+      // so the user can re-send; never report a hollow `completed`.
+      if (outcome.kind === 'aborted') {
+        this.addSystemMessage(sessionId, '', { dshTurnStalled: true });
+        finish('idle');
+        this.emit('complete', sessionId, activeSession.claudeSessionId);
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        return;
+      }
+
       // Empty terminal turn fallback: reached only when the auto-continue
       // above already ran and the resumed turn was again empty. Do NOT falsely
       // report `completed` — surface the same diagnostic the Claude path uses
