@@ -6000,6 +6000,36 @@ export class CoworkRunner extends EventEmitter {
               activeSession.pendingPermission = null;
             }
           },
+          // Live subagent rows: the runtime's lineage notifications map onto
+          // the SAME task_started/task_progress/task_notification channel the
+          // Claude path emits — the panel's Redux consumes them unchanged.
+          onSubagentEvent: (event) => {
+            if (event.kind === 'started') {
+              this.emitSubagentEvent(sessionId, {
+                event: 'task_started',
+                taskId: event.agentId,
+                subagentType: 'subagent',
+                status: 'running',
+                startedAt: Date.now(),
+              });
+            } else if (event.kind === 'progress') {
+              this.emitSubagentEvent(sessionId, {
+                event: 'task_progress',
+                taskId: event.agentId,
+                subagentType: 'subagent',
+                summary: event.summary,
+                status: 'running',
+                updatedAt: Date.now(),
+              });
+            } else if (event.kind === 'finished') {
+              this.emitSubagentEvent(sessionId, {
+                event: 'task_notification',
+                taskId: event.agentId,
+                subagentType: 'subagent',
+                status: 'completed',
+              });
+            }
+          },
           onError: (error) => coworkLog('ERROR', 'runDshSessionLocal', 'runtime stream error', { error: error.message }),
           },
         });

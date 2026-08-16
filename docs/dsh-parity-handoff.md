@@ -125,10 +125,14 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    Known gaps: system npm only (packaged app has no bundled node; manual dir
    population works), symlinks need privileges on Windows.
 
-**Remaining backlog (next session):**
-10. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
-    only; map `subagent.started/finished` → the renderer's task Redux channel
-    (find the task event channel in main.ts).
+10. ✅ **P2 — Subagent live task rows** (session 4): the runtime notifies
+    the host on child lifecycle (idbots/subagent/started|progress|finished —
+    started carries the parent session id, progress rides the delegation
+    prompt as the row summary, finished keys the same agent id); the runner
+    maps them onto the SAME emitSubagentEvent task channel the Claude path
+    uses, so the panel's Redux consumes them unchanged (zero renderer edits).
+
+**Remaining backlog:**
 11. **P2 — Behavioral foundation decision**: claude path sits on the full
     claude_code preset; DSH has DSH tool docs + our ~10-line guidance. If
     soak shows quality gaps on complex tasks, distill an IDBots behavioral

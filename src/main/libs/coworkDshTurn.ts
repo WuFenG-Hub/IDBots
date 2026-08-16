@@ -51,6 +51,13 @@ export interface DshTurnCallbacks {
   onApprovalCancelled: (askId: string) => void
   onAskRequest?: (ask: DshUserQuestionAsk) => void
   onAskCancelled?: (askId: string) => void
+  onSubagentEvent?: (event: {
+    kind: 'started' | 'progress' | 'finished'
+    sessionId: string
+    agentId: string
+    summary?: string
+    status?: string
+  }) => void
   onError?: (error: Error) => void
 }
 
@@ -329,6 +336,9 @@ export class DshTurnHub {
       },
       onAskCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onAskCancelled?.(askId)
+      },
+      onSubagentEvent: (event) => {
+        controllerOf(event.sessionId)?.cb.onSubagentEvent?.(event)
       },
       onError: (error) => {
         this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message })

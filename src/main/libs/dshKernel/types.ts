@@ -153,6 +153,14 @@ export interface DshKernelHandlers {
   onApprovalCancelled: (askId: string) => void
   onAskRequest?: (ask: DshUserQuestionAsk) => void
   onAskCancelled?: (askId: string) => void
+  /** Live subagent lifecycle rows (parent DSH session id in the payload). */
+  onSubagentEvent?: (event: {
+    kind: 'started' | 'progress' | 'finished'
+    sessionId: string
+    agentId: string
+    summary?: string
+    status?: string
+  }) => void
   onToolRequest: (request: DshHostToolRequest) => void
   onPolicyRequest?: (request: { id: string; sessionId: string; name: string; arguments: Record<string, unknown> }) => void
   onStatus?: (sessionId: string, status: 'idle' | 'running') => void
