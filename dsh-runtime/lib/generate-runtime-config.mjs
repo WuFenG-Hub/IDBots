@@ -164,6 +164,11 @@ export function generateRuntimeConfig(input) {
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
+    // Model-facing ask_user_question: the service seam plus its tool consumer.
+    // The provider (UI side) is registered by idbots-sdk-server and bridges
+    // each ask to the Electron host's AskUserQuestion permission modal.
+    { id: 'user-questions', name: '@deepseek-ai/dsh-user-questions' },
+    { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
     // Durable image storage: read_image and host-bridged image tool results
     // commit bytes here before any image block enters session history.
     {

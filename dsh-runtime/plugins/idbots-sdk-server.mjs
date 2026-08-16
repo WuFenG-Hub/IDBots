@@ -15,6 +15,7 @@
 //                           existing log after a runtime restart). Also the per-session
 //                           provider/model override the stock wire lacks.
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
+//   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/ping            → extension presence canary
 //
 // Notifications we emit (beyond the stock session.event / session.status /
@@ -22,6 +23,8 @@
 //
 //   idbots/approval/request   { id, sessionId, toolName, callId?, reason? }
 //   idbots/approval/cancelled { id }
+//   idbots/ask/request        { id, sessionId, questions } (ask_user_question)
+//   idbots/ask/cancelled      { id }
 //
 // Approval bridging: the dsh-user-approval service owns the `approval` seam,
 // audit events (approval/asked + approval/decided ride the session feed), and
@@ -51,6 +54,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsToolSeq = 0
     this.idbotsPolicyPending = new Map() // id → { resolve }
     this.idbotsPolicySeq = 0
+    this.idbotsAsks = new Map() // id → { resolve, reject }
+    this.idbotsAskSeq = 0
     // Subagent lineage for the panel: parent dsh id → [{agentId, status, startedAt}]
     this.idbotsSubagentChildren = new Map()
     // Ring buffers of child session events for transcript viewing.
@@ -88,6 +93,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
+    // inject (not effect): the service may mount after this plugin; the
+    // fiber activates whenever `userQuestions` becomes available.
+    ctx.inject(['userQuestions'], () => this.idbotsRegisterAskProvider())
   }
 
   liveAgent(sessionId) {
@@ -107,12 +115,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
       case 'idbots/policy/respond': return this.idbotsPolicyRespond(params)
+      case 'idbots/ask/respond': return this.idbotsAskRespond(params)
       case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
       case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -394,6 +403,65 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       }))
     }
     return saved.length > 0 ? { ...value, images: saved } : value
+  }
+
+  // ---- user-questions bridge ---------------------------------------------------
+  //
+  // The dsh-user-questions service seam + dsh-tool-ask-user expose the
+  // model-facing ask_user_question tool; the UI-side PROVIDER is deployment
+  // ownership. This bridge forwards each ask to the Electron host
+  // (idbots/ask/request out, idbots/ask/respond back) whose renderer renders
+  // it through the same AskUserQuestion modal the Claude path uses. The turn
+  // signal settles unanswered asks (the tool contract requires settling).
+
+  idbotsRegisterAskProvider() {
+    const service = this.ctx.get('userQuestions')
+    if (service === undefined) return () => undefined
+    return service.registerProvider({
+      ask: async (request) => {
+        const id = `ask-${Date.now().toString(36)}-${++this.idbotsAskSeq}`
+        const questions = Array.isArray(request?.questions) ? request.questions : []
+        const pending = new Promise((resolve, reject) => {
+          this.idbotsAsks.set(id, { resolve, reject })
+        })
+        this.idbotsTransport.notify('idbots/ask/request', {
+          id,
+          sessionId: String(request?.agent?.id ?? ''),
+          questions,
+        })
+        request?.signal?.addEventListener('abort', () => {
+          const entry = this.idbotsAsks.get(id)
+          if (entry === undefined) return
+          this.idbotsAsks.delete(id)
+          entry.reject(new Error('ask_user_question was aborted before the user answered'))
+          this.idbotsTransport.notify('idbots/ask/cancelled', { id })
+        }, { once: true })
+        return pending
+      },
+    })
+  }
+
+  async idbotsAskRespond({ id, answers, error }) {
+    const entry = this.idbotsAsks.get(String(id))
+    if (entry === undefined) {
+      throw new Error(`idbots-sdk-server: no pending user question ${JSON.stringify(id)}`)
+    }
+    this.idbotsAsks.delete(String(id))
+    if (error !== undefined) {
+      entry.reject(new Error(typeof error === 'string' && error ? error : 'ask failed'))
+    } else {
+      entry.resolve({
+        answers: Array.isArray(answers)
+          ? answers.filter((a) => a && typeof a === 'object' && typeof a.id === 'string')
+              .map((a) => ({
+                id: a.id,
+                selected: Array.isArray(a.selected) ? a.selected.map(String) : [],
+                ...typeof a.custom === 'string' && a.custom.length > 0 ? { custom: a.custom } : {},
+              }))
+          : [],
+      })
+    }
+    return { answered: true, id }
   }
 
   // ---- host policy bridge ----------------------------------------------------

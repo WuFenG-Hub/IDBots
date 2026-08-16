@@ -5868,6 +5868,74 @@ export class CoworkRunner extends EventEmitter {
               activeSession.pendingPermission = null;
             }
           },
+          // ask_user_question (DSH user-questions bridge): render through the
+          // SAME AskUserQuestion modal the Claude path uses (toolName is the
+          // modal's trigger); answers map back by question text → wire ids.
+          onAskRequest: (ask) => {
+            const modalQuestions = (ask.questions ?? []).map((q) => ({
+              question: q.question,
+              ...(q.header !== undefined ? { header: q.header } : {}),
+              ...(Array.isArray(q.options) ? { options: q.options } : { options: [] }),
+              ...(q.multiSelect !== undefined ? { multiSelect: q.multiSelect } : {}),
+            }));
+            const wireAnswersFromModal = (modalAnswers: Record<string, unknown> | undefined) =>
+              (ask.questions ?? []).map((q) => {
+                const raw = modalAnswers?.[q.question];
+                if (typeof raw !== 'string' || raw.trim().length === 0) {
+                  return { id: q.id, selected: [], custom: 'The user declined to answer.' };
+                }
+                return {
+                  id: q.id,
+                  selected: raw.split('|||').map((v) => v.trim()).filter(Boolean),
+                };
+              });
+            // Full-trust parity: questions explicitly marked low-risk
+            // (single-select, header 'auto-confirm') answer themselves with
+            // their first option — same helper the Claude path applies.
+            if (activeSession.permissionMode === 'bypassPermissions') {
+              const autoAnswers = tryAutoAnswerLowRiskQuestion({ questions: modalQuestions });
+              if (autoAnswers) {
+                coworkLog('INFO', 'runDshSessionLocal', 'Auto-approved low-risk question under full trust', { sessionId });
+                void hub.respondAsk(ask.id, wireAnswersFromModal(autoAnswers))
+                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
+                return;
+              }
+            }
+            const request: PermissionRequest = {
+              requestId: ask.id,
+              toolName: 'AskUserQuestion',
+              toolInput: { questions: modalQuestions },
+            };
+            this.pendingPermissions.set(ask.id, {
+              sessionId,
+              resolve: (result) => {
+                if (result.behavior !== 'allow') {
+                  void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
+                    id: q.id,
+                    selected: [],
+                    custom: 'The user declined to answer.',
+                  })))
+                    .catch(() => undefined);
+                  return;
+                }
+                const answers = (result.updatedInput as Record<string, unknown> | undefined)?.answers;
+                void hub.respondAsk(ask.id, wireAnswersFromModal(answers as Record<string, unknown> | undefined))
+                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
+              },
+            });
+            activeSession.pendingPermission = request;
+            this.emit('permissionRequest', sessionId, request);
+          },
+          onAskCancelled: (askId) => {
+            const pending = this.pendingPermissions.get(askId);
+            if (pending) {
+              this.pendingPermissions.delete(askId);
+              pending.resolve({ behavior: 'deny', message: 'Question cancelled' });
+            }
+            if (activeSession.pendingPermission?.requestId === askId) {
+              activeSession.pendingPermission = null;
+            }
+          },
           onError: (error) => coworkLog('ERROR', 'runDshSessionLocal', 'runtime stream error', { error: error.message }),
         },
       });

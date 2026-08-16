@@ -26,6 +26,7 @@ import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
   DshKernelHandlers,
+  DshUserQuestionAsk,
   DshMapperAction,
   DshRuntimeConfigInput,
   DshSessionEventEnvelope,
@@ -196,6 +197,15 @@ export class DshKernel {
     return this.client.request('idbots/subagents/messages', { sessionId: dshSessionId, agentId, limit })
   }
 
+  /** Answer a pending ask_user_question bridged from the runtime. */
+  async respondAsk(
+    id: string,
+    answers: Array<{ id: string; selected: string[]; custom?: string }>
+  ): Promise<{ answered: boolean }> {
+    this.requireClient()
+    return this.client.request('idbots/ask/respond', { id, answers })
+  }
+
   /** Answer a runtime-native tool policy check. */
   async respondPolicy(id: string, decision: 'allow' | 'deny' | 'ask', reason?: string): Promise<{ answered: boolean }> {
     this.requireClient()
@@ -272,6 +282,10 @@ export class DshKernel {
           this.opts.handlers.onToolRequest?.(params)
         } else if (method === 'idbots/policy/request') {
           this.opts.handlers.onPolicyRequest?.(params)
+        } else if (method === 'idbots/ask/request') {
+          this.opts.handlers.onAskRequest?.(params as DshUserQuestionAsk)
+        } else if (method === 'idbots/ask/cancelled') {
+          this.opts.handlers.onAskCancelled?.(params.id)
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }

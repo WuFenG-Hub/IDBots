@@ -129,6 +129,19 @@ export interface DshApprovalAsk {
   reason?: string
 }
 
+/** A pending ask_user_question bridged from the runtime's user-questions service. */
+export interface DshUserQuestionAsk {
+  id: string
+  sessionId: string
+  questions: Array<{
+    id: string
+    question: string
+    header?: string
+    options?: Array<{ label: string; description?: string }>
+    multiSelect?: boolean
+  }>
+}
+
 /** Event callbacks the host (coworkRunner adapter wiring) subscribes to. */
 export interface DshKernelHandlers {
   onMessage: (sessionId: string, message: CoworkMessageInput, slot?: DshStreamSlot) => string
@@ -138,6 +151,8 @@ export interface DshKernelHandlers {
   onUsage: (sessionId: string, usage: DshUsageSnapshot) => void
   onApprovalRequest: (sessionId: string, ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
+  onAskRequest?: (ask: DshUserQuestionAsk) => void
+  onAskCancelled?: (askId: string) => void
   onToolRequest: (request: DshHostToolRequest) => void
   onPolicyRequest?: (request: { id: string; sessionId: string; name: string; arguments: Record<string, unknown> }) => void
   onStatus?: (sessionId: string, status: 'idle' | 'running') => void
