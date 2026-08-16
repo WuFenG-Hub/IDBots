@@ -6048,15 +6048,23 @@ export class CoworkRunner extends EventEmitter {
               toolName: ask.toolName,
               toolInput: { reason: ask.reason ?? '' },
             };
-            this.pendingPermissions.set(ask.id, {
-              sessionId,
-              resolve: (result) => {
-                void hub.respondApproval(ask.id, result.behavior === 'allow' ? 'allowed-once' : 'rejected')
-                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'approval respond failed', { error: String(error) }));
-              },
-            });
             activeSession.pendingPermission = request;
             this.emit('permissionRequest', sessionId, request);
+            // Route through the shared 60s permission timeout (abort-wired):
+            // an approval nobody answers — a background worker session or one
+            // switched away in the UI — auto-rejects so the blocked tool call
+            // returns instead of wedging the turn in "running" forever. The
+            // bare pendingPermissions.set this replaces had no timeout at
+            // all, and the stall watchdog extends through pendingPermission,
+            // making the hang permanent.
+            void this.waitForPermissionResponse(sessionId, ask.id, activeSession.abortController.signal)
+              .then((result) => {
+                if (activeSession.pendingPermission?.requestId === ask.id) {
+                  activeSession.pendingPermission = null;
+                }
+                return hub.respondApproval(ask.id, result.behavior === 'allow' ? 'allowed-once' : 'rejected');
+              })
+              .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'approval respond failed', { error: String(error) }));
           },
           onApprovalCancelled: (askId) => {
             const pending = this.pendingPermissions.get(askId);
@@ -6326,10 +6334,12 @@ export class CoworkRunner extends EventEmitter {
   /**
    * Host permission chain for DSH tool calls — the port of canUseTool's
    * kernel-specific decisions: plan-mode blocking, delete-class human
-   * confirmation (stays reachable under full trust, matching the Claude
-   * path), and permission-mode/auto-approve allowances. Skill authorization
-   * is prompt-side (skillManager filters available_skills per session) and
-   * carries over through the composed system prompt unchanged.
+   * confirmation ('default' mode only — acceptEdits/bypassPermissions skip
+   * it exactly like the Claude path, so unattended worker sessions never
+   * block on a confirmation no human will answer), and permission-mode/
+   * auto-approve allowances. Skill authorization is prompt-side (skillManager
+   * filters available_skills per session) and carries over through the
+   * composed system prompt unchanged.
    */
   private async evaluateDshToolPolicy(
     sessionId: string,
@@ -6348,7 +6358,14 @@ export class CoworkRunner extends EventEmitter {
           reason: `Tool "${toolName}" is blocked in plan mode (read-only). Switch to default or acceptEdits mode to execute it.`,
         }
       }
-      if (this.isDeleteOperation(normalized, toolInput)) {
+      // Delete-class confirmation, Claude-path parity (canUseTool skips the
+      // delete-safety question under acceptEdits/bypassPermissions — the mode
+      // already answers it): only 'default' mode asks. Unconditional asking
+      // hung unattended sessions forever — a background worker (acceptEdits)
+      // executing `rm -rf` on its own temp files blocked on a confirmation no
+      // human would ever see.
+      if (this.isDeleteOperation(normalized, toolInput)
+        && (!activeSession || activeSession.permissionMode === 'default')) {
         const commandPreview = normalized === 'bash'
           ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
           : ''

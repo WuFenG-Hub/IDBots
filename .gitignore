@@ -49,6 +49,8 @@ tests/*
 !tests/coworkDshIntegration.test.mjs
 !tests/coworkDshSessionTypes.test.mjs
 !tests/coworkDshStallWatchdog.test.mjs
+!tests/coworkDshDeletePolicy.test.mjs
+!tests/twinWorkerSessionStop.test.mjs
 !tests/dshUsageProjection.test.mjs
 !tests/dshPluginManager.test.mjs
 !tests/dshKernelDefault.test.mjs
