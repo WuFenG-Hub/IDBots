@@ -345,3 +345,59 @@ test('self_identity survives the generic 360-char memory cap intact', async () =
     cleanup();
   }
 });
+
+test('restoreMissingSelfIdentities revives the newest deleted identity only', async () => {
+  const { db, cleanup } = await createSqliteStore();
+  try {
+    const store = createCoworkStore(db);
+    const older = store.createUserMemory({
+      metabotId: 1,
+      text: '旧的自我认知，已经被后续梦境覆盖。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'self_identity',
+      origin: 'dream',
+      forceNew: true,
+    });
+    store.deleteUserMemory({ id: older.id, metabotId: 1, allowProtected: true });
+
+    const newer = store.createUserMemory({
+      metabotId: 1,
+      text: '我是 AI_Sunny，一个靠一手证据把事情推到闭环的推进者。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'self_identity',
+      origin: 'dream',
+      forceNew: true,
+    });
+    store.deleteUserMemory({ id: newer.id, metabotId: 1, allowProtected: true });
+
+    const otherBot = store.createUserMemory({
+      metabotId: 2,
+      text: '我是另一个还活着的自我认知。',
+      scopeKind: 'owner',
+      scopeKey: 'owner:self',
+      usageClass: 'self_identity',
+      origin: 'dream',
+      forceNew: true,
+    });
+
+    assert.equal(store.restoreMissingSelfIdentities(), 1);
+    assert.equal(store.restoreMissingSelfIdentities(), 0, 'second restore is a no-op');
+
+    const restored = store.listUserMemories({
+      metabotId: 1, scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', status: 'created',
+    });
+    assert.deepEqual(restored.map((entry) => entry.id), [newer.id]);
+    assert.match(restored[0].text, /AI_Sunny/);
+
+    const stillLive = store.listUserMemories({
+      metabotId: 2, scopeKind: 'owner', scopeKey: 'owner:self',
+      usageClass: 'self_identity', status: 'created',
+    });
+    assert.deepEqual(stillLive.map((entry) => entry.id), [otherBot.id]);
+  } finally {
+    cleanup();
+  }
+});

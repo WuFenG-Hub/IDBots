@@ -7,7 +7,6 @@ import type { SqliteDatabase as Database } from './sqliteTypes';
 import { v4 as uuidv4 } from 'uuid';
 import {
   extractTurnMemoryChanges,
-  isQuestionLikeMemoryText,
   type CoworkMemoryGuardLevel,
 } from './libs/coworkMemoryExtractor';
 import { judgeMemoryCandidate } from './libs/coworkMemoryJudge';
@@ -85,8 +84,6 @@ const DEFAULT_MEMORY_USER_MEMORIES_MAX_ITEMS = 20;
 const MIN_MEMORY_USER_MEMORIES_MAX_ITEMS = 1;
 const MAX_MEMORY_USER_MEMORIES_MAX_ITEMS = 60;
 const MEMORY_NEAR_DUPLICATE_MIN_SCORE = 0.82;
-const MEMORY_PROCEDURAL_TEXT_RE = /(执行以下命令|run\s+(?:the\s+)?following\s+command|\b(?:cd|npm|pnpm|yarn|node|python|bash|sh|git|curl|wget)\b|\$[A-Z_][A-Z0-9_]*|&&|--[a-z0-9-]+|\/tmp\/|\.sh\b|\.bat\b|\.ps1\b)/i;
-const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:技能|skill)/i;
 const MEMORY_OPERATIONAL_PREFERENCE_RE = /(默认语言|回复格式|输出风格|回复风格|尽量简洁|保持简短|reply(?:\s+in)?|respond(?:\s+in)?|language|format|style|tone|markdown|concise|brief)/i;
 const MEMORY_PREFERENCE_RE = /(偏好|喜欢|prefer|preference|likes?|dislikes?)/i;
 const SCOPED_USER_MEMORIES_BACKFILL_KEY = 'userMemories.scopeBackfill.v1.completed';
@@ -388,14 +385,6 @@ function normalizeDbBoolean(value: unknown, fallback: boolean): boolean {
     }
   }
   return fallback;
-}
-
-function shouldAutoDeleteMemoryText(text: string): boolean {
-  const normalized = normalizeMemoryText(text);
-  if (!normalized) return false;
-  return MEMORY_ASSISTANT_STYLE_TEXT_RE.test(normalized)
-    || MEMORY_PROCEDURAL_TEXT_RE.test(normalized)
-    || isQuestionLikeMemoryText(normalized);
 }
 
 function normalizeMemoryUsageClass(value?: string | null): MemoryUsageClass {
@@ -1043,6 +1032,7 @@ export class CoworkStore implements MemoryBackend {
     this.ensureCoworkMessageIndexes();
     this.ensureCoworkSessionIndexes();
     this.backfillScopedMemoryMetadata();
+    this.restoreMissingSelfIdentities();
     if (deferHeavyStartupMaintenance) {
       return;
     }
@@ -5966,6 +5956,61 @@ export class CoworkStore implements MemoryBackend {
   }
 
   /**
+   * First-run / startup repair: if a bot has no live self-identity but still
+   * has a dream-written one that the conversation sweeper soft-deleted, bring
+   * the newest deleted copy back. Idempotent — no-op when a live entry exists
+   * or the bot has never formed an identity.
+   */
+  restoreMissingSelfIdentities(): number {
+    if (!this.tableExists('user_memories')) {
+      return 0;
+    }
+    const deleted = this.getAll<{ id: string; metabot_id: number | string; created_at: number | string }>(`
+      SELECT id, metabot_id, created_at
+      FROM user_memories
+      WHERE usage_class = 'self_identity'
+        AND status = 'deleted'
+        AND NOT EXISTS (
+          SELECT 1
+          FROM user_memories live
+          WHERE live.metabot_id = user_memories.metabot_id
+            AND live.usage_class = 'self_identity'
+            AND live.status != 'deleted'
+        )
+      ORDER BY created_at DESC
+    `);
+    if (deleted.length === 0) return 0;
+
+    const seenMetabots = new Set<number>();
+    const restoreIds: string[] = [];
+    for (const row of deleted) {
+      const metabotId = parseIdNumber(row.metabot_id);
+      if (metabotId == null || seenMetabots.has(metabotId)) continue;
+      seenMetabots.add(metabotId);
+      restoreIds.push(row.id);
+    }
+    if (restoreIds.length === 0) return 0;
+
+    const now = Date.now();
+    const placeholders = restoreIds.map(() => '?').join(', ');
+    this.db.run(`
+      UPDATE user_memories
+      SET status = 'created', updated_at = ?
+      WHERE id IN (${placeholders})
+    `, [now, ...restoreIds]);
+    if (this.tableExists('user_memory_sources')) {
+      this.db.run(`
+        UPDATE user_memory_sources
+        SET is_active = 1
+        WHERE memory_id IN (${placeholders})
+      `, [...restoreIds]);
+    }
+    this.saveDb();
+    console.info(`[CoworkStore] Restored ${restoreIds.length} missing self-identity entr${restoreIds.length === 1 ? 'y' : 'ies'}`);
+    return restoreIds.length;
+  }
+
+  /**
    * Dream pipeline: the newest dream date that produced the bot's current
    * self-identity entry, or null when it predates dream-date tagging. The
    * dream service only lets identity move forward in time.
@@ -6110,47 +6155,6 @@ export class CoworkStore implements MemoryBackend {
       peerName,
       peerAvatar,
     };
-  }
-
-  autoDeleteNonPersonalMemories(metabotId?: number, scopeSelector?: MemoryScopeSelectorInput): number {
-    const scope = metabotId == null ? null : this.resolveMemoryScopeSelector(scopeSelector ?? {});
-    const rows = metabotId == null
-      ? this.getAll<Pick<CoworkUserMemoryRow, 'id' | 'text'>>(
-          `SELECT id, text FROM user_memories WHERE status = 'created'`
-        )
-      : this.getAll<Pick<CoworkUserMemoryRow, 'id' | 'text'>>(
-          `
-            SELECT id, text
-            FROM user_memories
-            WHERE status = 'created' AND metabot_id = ? AND scope_kind = ? AND scope_key = ?
-          `,
-          [metabotId, scope?.kind ?? 'owner', scope?.key ?? OWNER_SCOPE_KEY]
-        );
-    if (rows.length === 0) return 0;
-
-    const now = Date.now();
-    let deleted = 0;
-    for (const row of rows) {
-      if (!shouldAutoDeleteMemoryText(row.text)) {
-        continue;
-      }
-      this.db.run(`
-        UPDATE user_memories
-        SET status = 'deleted', updated_at = ?
-        WHERE id = ?
-      `, [now, row.id]);
-      this.db.run(`
-        UPDATE user_memory_sources
-        SET is_active = 0
-        WHERE memory_id = ?
-      `, [row.id]);
-      deleted += 1;
-    }
-
-    if (deleted > 0) {
-      this.saveDb();
-    }
-    return deleted;
   }
 
   markMemorySourcesInactiveBySession(sessionId: string): void {

@@ -109,6 +109,12 @@ export interface ListMetaIDExperienceEpisodesOptions {
   limit?: number;
 }
 
+export interface ListMetaIDExperienceEvidenceOptions {
+  fromTime?: number;
+  toTime?: number;
+  limit?: number;
+}
+
 interface EpisodeRow {
   id: string;
   owner_globalmetaid: string;
@@ -611,17 +617,39 @@ export class MetaIDExperienceStore {
         createdAt,
       ],
     );
+    this.db.run(
+      'UPDATE metaid_experience_episodes SET updated_at = ? WHERE id = ?',
+      [createdAt, episodeId],
+    );
     this.saveDb();
     const evidence = this.getOne<EvidenceRow>('SELECT * FROM metaid_experience_evidence WHERE id = ? LIMIT 1', [id]);
     if (!evidence) throw new Error(`Failed to create experience evidence: ${id}`);
     return rowToEvidence(evidence);
   }
 
-  listEvidence(episodeId: string): MetaIDExperienceEvidence[] {
+  listEvidence(episodeId: string, options: ListMetaIDExperienceEvidenceOptions = {}): MetaIDExperienceEvidence[] {
+    const clauses = ['episode_id = ?'];
+    const params: unknown[] = [asText(episodeId)];
+    if (options.fromTime != null) {
+      clauses.push('occurred_at >= ?');
+      params.push(asTimestamp(options.fromTime, 0));
+    }
+    if (options.toTime != null) {
+      clauses.push('occurred_at < ?');
+      params.push(asTimestamp(options.toTime, Number.MAX_SAFE_INTEGER));
+    }
+    const windowed = options.fromTime != null || options.toTime != null;
+    const order = windowed
+      ? 'occurred_at DESC, created_at DESC, id DESC'
+      : 'occurred_at ASC, created_at ASC, id ASC';
+    const limit = options.limit == null ? null : normalizeLimit(options.limit, options.limit);
+    const limitSql = limit == null ? '' : ' LIMIT ?';
+    if (limit != null) params.push(limit);
     return this.getAll<EvidenceRow>(
       `SELECT * FROM metaid_experience_evidence
-       WHERE episode_id = ? ORDER BY occurred_at ASC, created_at ASC, id ASC`,
-      [asText(episodeId)],
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY ${order}${limitSql}`,
+      params,
     ).map(rowToEvidence);
   }
 
@@ -640,13 +668,33 @@ export class MetaIDExperienceStore {
       )`);
       params.push(subjectGlobalMetaID);
     }
-    if (options.fromTime != null) {
-      clauses.push('e.started_at >= ?');
-      params.push(asTimestamp(options.fromTime, 0));
-    }
-    if (options.toTime != null) {
-      clauses.push('e.started_at < ?');
-      params.push(asTimestamp(options.toTime, Number.MAX_SAFE_INTEGER));
+    if (options.fromTime != null || options.toTime != null) {
+      // Long-lived A2A episodes keep the original started_at. A later day's
+      // dream / contact view must still see them when new evidence arrived
+      // in the window — otherwise ongoing peers vanish after day one.
+      const fromMs = options.fromTime == null ? null : asTimestamp(options.fromTime, 0);
+      const toMs = options.toTime == null ? null : asTimestamp(options.toTime, Number.MAX_SAFE_INTEGER);
+      const evidenceParts: string[] = [];
+      const startedParts: string[] = [];
+      const windowParams: unknown[] = [];
+      if (fromMs != null) {
+        evidenceParts.push('ev.occurred_at >= ?');
+        startedParts.push('e.started_at >= ?');
+        windowParams.push(fromMs);
+      }
+      if (toMs != null) {
+        evidenceParts.push('ev.occurred_at < ?');
+        startedParts.push('e.started_at < ?');
+        windowParams.push(toMs);
+      }
+      clauses.push(`(
+        EXISTS (
+          SELECT 1 FROM metaid_experience_evidence ev
+          WHERE ev.episode_id = e.id AND ${evidenceParts.join(' AND ')}
+        )
+        OR (${startedParts.join(' AND ')})
+      )`);
+      params.push(...windowParams, ...windowParams);
     }
     params.push(normalizeLimit(options.limit));
     return this.getAll<EpisodeRow>(

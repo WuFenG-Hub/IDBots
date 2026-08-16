@@ -1,6 +1,7 @@
 import type {
   DreamActivityMessage,
   DreamDayActivity,
+  DreamGroupChatActivity,
   DreamGroupTaskEvaluation,
   DreamSessionActivity,
   DreamTaskRunActivity,
@@ -40,6 +41,23 @@ export function estimateDreamMessageTokens(message: DreamActivityMessage): numbe
   return estimateCoworkTextTokens(message.content) + MESSAGE_FRAME_TOKENS;
 }
 
+function groupChatsToSessions(chats: DreamGroupChatActivity[]): DreamSessionActivity[] {
+  return chats
+    .filter((chat) => chat.messages.length > 0)
+    .map((chat) => ({
+      sessionId: `group-chat:${chat.taskId}`,
+      title: `链上群聊:${chat.title}`,
+      sessionType: 'group_chat',
+      peerName: null,
+      isOrder: false,
+      messages: chat.messages.map((message) => ({
+        type: 'user' as const,
+        content: `${message.senderName}: ${message.content}`,
+        createdAt: message.occurredAt,
+      })),
+    }));
+}
+
 export function estimateDreamActivityTokens(activity: DreamDayActivity): number {
   let tokens = 32 + estimateCoworkTextTokens(
     activity.taskRuns.map((run) => `${run.taskName} ${run.status}`).join(' ')
@@ -49,7 +67,7 @@ export function estimateDreamActivityTokens(activity: DreamDayActivity): number 
       .map((task) => `${task.title} ${task.goal} ${task.rating ?? ''} ${task.ratingComment ?? ''}`)
       .join(' ')
   );
-  for (const session of activity.sessions) {
+  for (const session of [...activity.sessions, ...groupChatsToSessions(activity.groupChats ?? [])]) {
     tokens += SESSION_FRAME_TOKENS + estimateCoworkTextTokens(`${session.title} ${session.peerName ?? ''}`);
     for (const message of session.messages) {
       tokens += estimateDreamMessageTokens(message);
@@ -147,7 +165,10 @@ function chunkSession(
 export function chunkDreamActivity(activity: DreamDayActivity, maxInputTokens: number): DreamActivityChunk[] {
   const budget = Math.max(256, Math.floor(maxInputTokens));
   const chunks: DreamActivityChunk[] = [];
-  const sessions = activity.sessions.filter((session) => session.messages.length > 0);
+  const sessions = [
+    ...activity.sessions.filter((session) => session.messages.length > 0),
+    ...groupChatsToSessions(activity.groupChats ?? []),
+  ];
   const groupTasks = activity.groupTasks ?? [];
 
   for (const session of sessions) {

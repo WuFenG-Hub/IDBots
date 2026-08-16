@@ -453,3 +453,45 @@ test('buildDreamPrompt omits the rated-message inventory when nothing was rated'
   });
   assert.ok(!user.includes('人类逐条评价'), 'no inventory mention without rated messages');
 });
+
+test('buildDreamPrompt renders same-day group chat and in-progress group tasks', () => {
+  const { user } = buildDreamPrompt({
+    botName: '小火',
+    date: '2026-08-01',
+    activity: {
+      sessions: [],
+      taskRuns: [],
+      orderCount: 0,
+      groupTasks: [{
+        taskId: 21,
+        title: '官网方案',
+        goal: '讨论定稿',
+        memberRole: 'chair',
+        rating: null,
+        ratingComment: null,
+        status: 'review',
+        phase: 'active',
+        dayMessageCount: 2,
+      }],
+      groupChats: [{
+        taskId: 21,
+        title: '官网方案',
+        groupId: 'gid-21',
+        taskStatus: 'review',
+        memberRole: 'chair',
+        messages: [
+          { senderName: 'PeerBot', senderGlobalMetaID: 'idq1peer', content: '第二稿发了', occurredAt: 1 },
+          { senderName: '小火', senderGlobalMetaID: 'idq1me', content: '我来收口结构', occurredAt: 2 },
+        ],
+      }],
+    },
+  });
+  assert.ok(user.includes('## 群任务链上群聊'), 'on-chain group chat gets its own section');
+  assert.ok(user.includes('第二稿发了'));
+  assert.ok(user.includes('我来收口结构'));
+  assert.ok(user.includes('## 进行中的群任务'), 'in-progress tasks get a same-day summary');
+  assert.ok(user.includes('尚未验收'));
+  assert.ok(!user.includes('## 群任务验收评价'), 'active tasks must not look like acceptances');
+  assert.ok(user.includes('进行中群任务 1 项'));
+  assert.ok(user.includes('链上群聊 1 段(2 条)'));
+});

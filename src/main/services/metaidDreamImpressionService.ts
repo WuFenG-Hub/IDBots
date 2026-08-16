@@ -65,7 +65,11 @@ export function buildMetaIDDreamImpressionContext(
       .map((participant) => normalizeGlobalMetaID(participant.globalMetaID))
       .filter((subject): subject is GlobalMetaID => Boolean(subject && subject !== observer)))];
     if (subjects.length === 0) continue;
-    const evidence = input.experienceStore.listEvidence(episode.id);
+    const evidence = input.experienceStore.listEvidence(episode.id, {
+      fromTime: input.fromTime,
+      toTime: input.toTime,
+      limit: MAX_EVIDENCE_PER_SUBJECT,
+    });
     for (const subject of subjects) {
       const accumulator = accumulators.get(subject) ?? {
         subjectGlobalMetaID: subject,
@@ -73,14 +77,14 @@ export function buildMetaIDDreamImpressionContext(
         evidence: [],
         interactionCount: 0,
         directInteractionCount: 0,
-        lastSeenAt: episode.startedAt,
+        lastSeenAt: 0,
       };
       addUnique(accumulator.episodeIds, episode.id);
       accumulator.interactionCount += 1;
       if (episode.episodeType === 'direct_interaction') accumulator.directInteractionCount += 1;
-      accumulator.lastSeenAt = Math.max(accumulator.lastSeenAt, episode.startedAt);
       for (const item of evidence) {
-        if (accumulator.evidence.length >= MAX_EVIDENCE_PER_SUBJECT) break;
+        accumulator.lastSeenAt = Math.max(accumulator.lastSeenAt, item.occurredAt);
+        if (accumulator.evidence.length >= MAX_EVIDENCE_PER_SUBJECT) continue;
         if (accumulator.evidence.some((existing) => existing.id === item.id)) continue;
         accumulator.evidence.push({
           id: item.id,

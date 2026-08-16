@@ -77,20 +77,6 @@ test('scoped stats and housekeeping stay inside the requested scope bucket', asy
   const db = await createLegacyMemoryDb();
   const store = createCoworkStore(db);
 
-  const ownerToolMemory = store.createUserMemory({
-    metabotId: 1,
-    text: 'use memory skill',
-    isExplicit: false,
-    scopeKind: 'owner',
-    scopeKey: 'owner:self',
-  });
-  const contactToolMemory = store.createUserMemory({
-    metabotId: 1,
-    text: 'use memory skill',
-    isExplicit: false,
-    scopeKind: 'contact',
-    scopeKey: 'metaweb_private:peer:peer-123',
-  });
   const ownerImplicit = store.createUserMemory({
     metabotId: 1,
     text: 'I prefer concise replies',
@@ -106,20 +92,10 @@ test('scoped stats and housekeeping stay inside the requested scope bucket', asy
     scopeKey: 'metaweb_private:peer:peer-123',
   });
 
-  db.run('DELETE FROM user_memory_sources WHERE memory_id IN (?, ?, ?, ?)', [
-    ownerToolMemory.id,
-    contactToolMemory.id,
+  db.run('DELETE FROM user_memory_sources WHERE memory_id IN (?, ?)', [
     ownerImplicit.id,
     contactImplicit.id,
   ]);
-
-  const deleted = store.autoDeleteNonPersonalMemories(1, {
-    scopeKind: 'owner',
-    scopeKey: 'owner:self',
-  });
-  assert.equal(deleted, 1);
-  assert.equal(getRow(db, 'SELECT status FROM user_memories WHERE id = ?', [ownerToolMemory.id])?.status, 'deleted');
-  assert.equal(getRow(db, 'SELECT status FROM user_memories WHERE id = ?', [contactToolMemory.id])?.status, 'created');
 
   store.markOrphanImplicitMemoriesStale(1, {
     scopeKind: 'owner',
@@ -139,7 +115,6 @@ test('scoped stats and housekeeping stay inside the requested scope bucket', asy
     scopeKey: 'metaweb_private:peer:peer-123',
   });
 
-  assert.equal(ownerStats.deleted, 1);
   assert.equal(ownerStats.stale, 1);
-  assert.equal(contactStats.created, 2);
+  assert.equal(contactStats.created, 1);
 });

@@ -233,3 +233,54 @@ test('DreamService applies validated impression updates at the completion bounda
     harness.cleanup();
   }
 });
+
+test('dream impression context keeps only evidence from the requested day window', async () => {
+  const db = await createLegacyMemoryDb();
+  try {
+    const experience = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+    const impressions = new MetaIDImpressionStore(db, () => {}, () => 1_800_000_000_000);
+    const episode = experience.createEpisode({
+      ownerGlobalMetaID: OWNER,
+      episodeType: 'direct_interaction',
+      sourceChannel: 'metaweb_private',
+      sourceKey: 'a2a:long-lived',
+      startedAt: Date.UTC(2026, 3, 28),
+    }).episode;
+    experience.addParticipant({ episodeId: episode.id, globalMetaID: OWNER, role: 'observer', source: 'test' });
+    experience.addParticipant({ episodeId: episode.id, globalMetaID: SUBJECT, role: 'counterparty', source: 'test' });
+    for (let index = 0; index < 40; index += 1) {
+      experience.addEvidence({
+        episodeId: episode.id,
+        evidenceType: 'message',
+        sourceKey: `old-${index}`,
+        pinId: `old-pin-${index}`,
+        publisherGlobalMetaID: SUBJECT,
+        contentHash: hash('o'),
+        occurredAt: Date.UTC(2026, 3, 28, 12) + index * 1_000,
+      });
+    }
+    const dayEvidence = experience.addEvidence({
+      episodeId: episode.id,
+      evidenceType: 'message',
+      sourceKey: 'day-only',
+      pinId: 'day-pin',
+      publisherGlobalMetaID: SUBJECT,
+      contentHash: hash('d'),
+      occurredAt: DREAM_DAY_START + 3_600_000,
+    });
+
+    const subjects = buildMetaIDDreamImpressionContext({
+      experienceStore: experience,
+      impressionStore: impressions,
+      observerGlobalMetaID: OWNER,
+      fromTime: DREAM_DAY_START,
+      toTime: DREAM_DAY_START + 86_400_000,
+    });
+    assert.equal(subjects.length, 1);
+    assert.deepEqual(subjects[0].evidenceIds, [dayEvidence.id]);
+    assert.equal(subjects[0].evidence[0].pinId, 'day-pin');
+    assert.ok(subjects[0].evidence.every((item) => item.occurredAt >= DREAM_DAY_START));
+  } finally {
+    db.close();
+  }
+});

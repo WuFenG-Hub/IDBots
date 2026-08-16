@@ -997,6 +997,7 @@ interface IElectronAPI {
       metabotId?: number;
       scopeKind?: 'owner' | 'contact' | 'conversation';
       scopeKey?: string;
+      usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review' | 'value_boundary';
       query?: string;
       status?: 'created' | 'stale' | 'deleted' | 'all';
       includeDeleted?: boolean;

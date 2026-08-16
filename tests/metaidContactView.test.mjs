@@ -326,6 +326,36 @@ test('getContactDetail falls back to pin_id when message_id is missing', async (
   assert.equal(detail.episodes[0].evidenceTexts[0].content, '靠 pin 找回的消息');
 });
 
+test('listContacts ranks by latest evidence, not episode start', async () => {
+  const SQL = await getSqlJs();
+  const db = new SQL.Database();
+  createSchema(db);
+  const { service, experienceStore } = makeService(db);
+
+  await seedPrivateChatEpisode(db, {
+    store: experienceStore, pinId: 'pin-old', messageId: 1, content: 'old', fromName: 'Old Peer', occurredAt: 1_000,
+  });
+  const recent = experienceStore.createEpisode({
+    ownerGlobalMetaID: OBSERVER,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: `a2a:metaweb-private:${OTHER}`,
+    startedAt: 500,
+  }).episode;
+  experienceStore.addParticipant({ episodeId: recent.id, globalMetaID: OTHER, role: 'peer', source: 'test' });
+  experienceStore.addEvidence({
+    episodeId: recent.id,
+    evidenceType: 'message',
+    sourceKey: 'message:recent',
+    publisherGlobalMetaID: OTHER,
+    occurredAt: 9_000,
+  });
+
+  const contacts = service.listContacts(OBSERVER);
+  assert.deepEqual(contacts.map((contact) => contact.globalMetaID), [OTHER, SUBJECT]);
+  assert.equal(contacts[0].lastSeenAt, 9_000);
+});
+
 test('getContactDetail rejects self-impressions', async () => {
   const SQL = await getSqlJs();
   const db = new SQL.Database();
