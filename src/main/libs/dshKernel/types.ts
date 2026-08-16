@@ -43,6 +43,35 @@ export interface DshUsageSnapshot {
   model?: string
 }
 
+/**
+ * Official token-meter session projections, read over the wire via the
+ * idbots/usage extension. Mirrors @deepseek-ai/dsh-token-meter's
+ * TokenUsageProjection / ContextPressureProjection / ContextBreakdown
+ * projection contracts (all four usage buckets are DISJOINT — reasoning is
+ * already inside outputTokens, uncached input excludes cache reads/writes).
+ */
+export interface DshUsageProjectionResult {
+  available: boolean
+  reason?: string
+  asOfSeq?: number
+  tokenUsage?: {
+    uncachedInputTokens: number
+    outputTokens: number
+    cacheReadTokens: number
+    cacheWriteTokens: number
+  } | null
+  contextPressure?: {
+    pressureTokens?: number
+    projectedTokens?: number
+    contextWindow?: number
+  } | null
+  contextBreakdown?: {
+    systemTokens: number
+    toolsTokens: number
+    messageTokens: number
+  } | null
+}
+
 /** Loose envelope of the wire `session.event` notification payload. */
 export interface DshSessionEventEnvelope {
   type: string

@@ -16,6 +16,7 @@ import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
   DshMcpServerDefinition,
+  DshUsageProjectionResult,
   DshUserQuestionAsk,
   DshPromptSectionInput,
   DshProviderRoute,
@@ -228,6 +229,18 @@ export class DshTurnHub {
     if (!dshId) return []
     const result = await this.kernel.getSubagentMessages(dshId, agentId, limit)
     return result.messages ?? []
+  }
+
+  /**
+   * Official token-meter projections for the usage panel (cowork session id
+   * in, DSH routing inside; post-turn safe via the pinned-id fallback).
+   * Null when the runtime is down or the cowork session never ran on DSH.
+   */
+  async usageProjection(coworkSessionId: string): Promise<DshUsageProjectionResult | null> {
+    if (!this.kernel) return null
+    const dshId = this.dshByCowork.get(coworkSessionId) ?? this.pinnedDshIds.get(coworkSessionId)
+    if (!dshId) return null
+    return this.kernel.usageProjection(dshId)
   }
 
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {
