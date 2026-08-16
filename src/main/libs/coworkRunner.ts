@@ -6106,6 +6106,47 @@ export class CoworkRunner extends EventEmitter {
           reason: `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
         }
       }
+      // Read guards (GT#12 parity with the Claude path's canUseTool block):
+      // N1 a non-vision model never reads image files; N2 the SAME unchanged
+      // image/large file is not re-read within one session. The pure decision
+      // logic is the shared, unit-tested evaluateReadImageGuard; read_image
+      // passes as 'read' (the guard's tool vocabulary only distinguishes
+      // read tools, and its messages never name the tool).
+      if (normalized === 'read' || normalized === 'read_image') {
+        const guardCwd = activeSession?.workspaceRoot ?? process.cwd();
+        const guardFilePath = this.resolveToolFilePathFromInput(toolInput, guardCwd);
+        if (guardFilePath) {
+          const absoluteGuardPath = path.resolve(guardFilePath);
+          const guardStat = safeFileStat(absoluteGuardPath);
+          const route = this.resolveSessionDshRoute(sessionId);
+          const guardModelLimits = route ? resolveCurrentModelLimits(route.model) : null;
+          const guardDecision = evaluateReadImageGuard({
+            toolName: 'read',
+            absolutePath: absoluteGuardPath,
+            fileStat: guardStat,
+            supportsVision: guardModelLimits?.supportsVision ?? true,
+            priorReads: activeSession?.readFiles ?? null,
+          });
+          if (guardDecision.action === 'deny') {
+            coworkLog(
+              guardDecision.reason === 'no-vision-image' ? 'WARN' : 'INFO',
+              'evaluateDshToolPolicy',
+              guardDecision.reason === 'no-vision-image'
+                ? 'Blocked Read image for non-vision model'
+                : 'Deduplicated repeated Read of unchanged file',
+              { sessionId, toolName, filePath: absoluteGuardPath }
+            );
+            return { decision: 'deny', reason: guardDecision.message };
+          }
+          if (guardDecision.register && activeSession) {
+            activeSession.readFiles ??= new Map();
+            activeSession.readFiles.set(guardDecision.register.path, {
+              mtimeMs: guardDecision.register.mtimeMs,
+              size: guardDecision.register.size,
+            });
+          }
+        }
+      }
       return { decision: 'allow' }
     } catch (error) {
       coworkLog('ERROR', 'evaluateDshToolPolicy', 'policy evaluation failed; failing closed', {

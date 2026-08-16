@@ -473,7 +473,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // M2 approval bridge into the renderer permission dialog.
 
   idbotsRegisterPolicyGate(policyTools) {
-    const gated = new Set(policyTools ?? ['bash', 'write', 'edit'])
+    // read/read_image ride the gate so the host can apply its Read guards
+    // (non-vision image block, unchanged-file re-read dedup).
+    const gated = new Set(policyTools ?? ['bash', 'write', 'edit', 'read', 'read_image'])
     const server = this
     this.ctx.on('tools/pre-execute', async (exec, next) => {
       if (!gated.has(exec?.name)) return next()
