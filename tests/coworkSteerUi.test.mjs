@@ -335,7 +335,11 @@ test('running sandbox disables steer text and send while keeping Stop active', (
   assert.match(detailSource, /window\.electron(?:\?|)\.cowork\?\.getSession\?\.\(currentSession\.id\)/);
   assert.match(detailSource, /if \(!isStreaming \|\| !currentSession\?\.id\) \{[\s\S]*?setLiveExecutionMode\(null\)/);
   assert.match(detailSource, /resolvedExecutionMode !== 'local'/);
-  assert.match(detailSource, /coworkSteerSandboxUnavailableHint/);
+  // The streaming hint row below the input was removed entirely (layout
+  // space); sandbox/Local-only messaging lives in the input placeholder and
+  // the typed submit-error codes instead.
+  assert.doesNotMatch(detailSource, /coworkSteerSandboxUnavailableHint/);
+  assert.doesNotMatch(i18nSource, /coworkSteerSandboxUnavailableHint/);
   assert.match(i18nSource, /coworkSteerSandboxUnavailablePlaceholder/);
 });
 
@@ -347,7 +351,6 @@ test('timeline labels every honest steer state and explains the local-only bound
     'coworkSteerStatusSettled',
     'coworkSteerStatusFailed',
     'coworkSteerStatusCancelled',
-    'coworkSteerLocalOnlyHint',
   ]) {
     assert.match(i18nSource, new RegExp(key));
   }

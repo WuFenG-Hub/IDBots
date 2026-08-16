@@ -13,7 +13,7 @@ import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resol
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
-import { foldDshUsageProjection } from './dshUsageProjection';
+import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressure } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
@@ -5908,6 +5908,9 @@ export class CoworkRunner extends EventEmitter {
       // non-user-aborted settlement below turns the cancel into idle + a
       // localized diagnostic.
       let dshStallTimer: NodeJS.Timeout | null = null;
+      // Watermark of the newest usage-projection snapshot applied to the live
+      // ring value (onUsage refines it over the wire; guards out-of-order).
+      let liveUsageAsOfSeq = -1;
       const clearDshStallWatchdog = () => {
         if (dshStallTimer) {
           clearTimeout(dshStallTimer);
@@ -5996,21 +5999,30 @@ export class CoworkRunner extends EventEmitter {
               const soFar = this.thinkingTokensBySessionId.get(sessionId) ?? 0;
               this.thinkingTokensBySessionId.set(sessionId, soFar + (usage.reasoningTokens ?? 0));
             }
-            // Feed the renderer's usage ring the same shape the Claude path
-            // produces from getContextUsage(). The snapshot's input excludes
-            // cache read/write (disjoint buckets), so the prompt-side pressure
-            // is input + both cache buckets.
+            // Ring value, two rungs. Instant: prompt-side pressure of this
+            // request (uncached input + both cache buckets, output excluded —
+            // official pressure semantics). Refined: the official token-meter
+            // projection one RPC later, whose projectedTokens is the
+            // provider-anchored next-request estimate and whose contextWindow
+            // is the runtime's own record. The asOfSeq guard keeps an
+            // out-of-order fetch from regressing the value.
             const contextWindow = modelLimits?.contextWindow ?? 64000;
-            const usedTokens = usage.inputTokens
-              + (usage.cacheReadTokens ?? 0)
-              + (usage.cacheWriteTokens ?? 0)
-              + usage.outputTokens;
+            const usedTokens = dshPromptSideTokens(usage);
             activeSession.realContextUsage = {
               usedTokens,
               contextWindow,
               usageRatio: Math.min(1, usedTokens / Math.max(1, contextWindow)),
               isRealUsage: true,
             };
+            void hub.usageProjection(sessionId).then((projection) => {
+              if (!projection?.available || projection.asOfSeq === undefined) return;
+              if (projection.asOfSeq < liveUsageAsOfSeq) return;
+              const refined = dshContextUsageFromPressure(projection.contextPressure, contextWindow);
+              if (refined) {
+                liveUsageAsOfSeq = projection.asOfSeq;
+                activeSession.realContextUsage = refined;
+              }
+            }).catch(() => undefined);
           },
           onApprovalRequest: (ask) => {
             const request: PermissionRequest = {
