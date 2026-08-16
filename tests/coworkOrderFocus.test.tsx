@@ -5,8 +5,10 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { CoworkMessage } from '../src/renderer/types/cowork';
 import {
+  buildAutoScrollFollowSignal,
   buildOrderFocusRequestKey,
   findFocusedOrderMessageId,
+  pinScrollToBottom,
   resolveAutoScrollBehavior,
   resolveMessageOrderTxid,
   shouldRunOrderFocusRequest,
@@ -84,6 +86,22 @@ test('auto-scroll behavior jumps on session switch and smooth-scrolls within the
   assert.equal(resolveAutoScrollBehavior('session-1', 'session-2'), 'auto');
   assert.equal(resolveAutoScrollBehavior('session-1', 'session-1'), 'smooth');
   assert.equal(resolveAutoScrollBehavior('session-1', null), 'auto');
+  assert.equal(resolveAutoScrollBehavior('session-1', 'session-1', { streaming: true }), 'auto');
+});
+
+test('streaming follow signal tracks in-flight buffers, not only the last message', () => {
+  const thinking = makeMessage('think', 'abc', { isStreaming: true });
+  const text = makeMessage('text', 'hello', { isStreaming: true });
+  assert.equal(buildAutoScrollFollowSignal([thinking, text], true), 'think:3|text:5');
+  assert.equal(buildAutoScrollFollowSignal([thinking, text], false), 'text:hello');
+  assert.equal(buildAutoScrollFollowSignal([], true), '');
+});
+
+test('pinScrollToBottom writes scrollTop to scrollHeight', () => {
+  const element = { scrollHeight: 800, scrollTop: 10 } as HTMLElement;
+  pinScrollToBottom(element);
+  assert.equal(element.scrollTop, 800);
+  pinScrollToBottom(null);
 });
 
 test('session switch auto-scroll guard prevents the passive effect from smoothing the same switch', () => {
@@ -93,4 +111,6 @@ test('session switch auto-scroll guard prevents the passive effect from smoothin
   assert.match(source, /skipNextAutoScrollEffectRef\.current = true/);
   assert.match(source, /if \(skipNextAutoScrollEffectRef\.current\)/);
   assert.match(source, /skipNextAutoScrollEffectRef\.current = false/);
+  assert.match(source, /useLayoutEffect\(\(\) => \{[\s\S]*pinScrollToBottom\(container\)/);
+  assert.match(source, /overflow-anchor-none/);
 });
