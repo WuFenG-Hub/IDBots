@@ -38,6 +38,8 @@ const dynamicImport = new Function('specifier', 'return import(specifier)') as (
   specifier: string
 ) => Promise<any>
 
+export const DSH_PUMP_YIELD_EVERY = 8
+
 export interface DshKernelOptions {
   /** Directory containing bin.mjs + node_modules (defaults: repo dsh-runtime/). */
   runtimeDir?: string
@@ -55,6 +57,7 @@ export class DshKernel {
   private slotIds = new Map<string, Partial<Record<DshStreamSlot, string>>>()
   private runtimeConfig: DshRuntimeConfigInput | null = null
   private closed = false
+  private pumpEventsSinceYield = 0
 
   constructor(opts: DshKernelOptions) {
     this.opts = opts
@@ -142,6 +145,8 @@ export class DshKernel {
     provider?: string
     model?: string
     maxTokens?: number
+    /** DSH/pi-ai ReasoningEffortId (off|low|medium|high|max). */
+    reasoningEffort?: string
     sections?: Array<{ name: string; order: number; text: string }>
     hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   }): Promise<{ resumed: boolean }> {
@@ -306,6 +311,15 @@ export class DshKernel {
           this.opts.handlers.onSubagentEvent?.({ kind: 'finished', ...params })
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
+        }
+        // Yield so session-switch / other IPC can run while two sessions
+        // stream. The pump is a single sequential loop; without this, handler
+        // work (even after persist is deferred) still head-of-line-blocks
+        // cowork:session:get.
+        this.pumpEventsSinceYield += 1
+        if (this.pumpEventsSinceYield >= DSH_PUMP_YIELD_EVERY) {
+          this.pumpEventsSinceYield = 0
+          await new Promise<void>((resolve) => setImmediate(resolve))
         }
       }
     } catch (error) {

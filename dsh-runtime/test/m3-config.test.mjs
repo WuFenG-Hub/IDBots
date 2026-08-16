@@ -46,7 +46,12 @@ record('generator: three apiFormats map to three pi-ai protocols',
   && piEntry.config.providers['claude-direct'].api === 'anthropic-messages')
 record('generator: thinkingFormat compat + model caps pass through',
   piEntry.config.providers['deepseek-gw'].compat.thinkingFormat === 'deepseek'
-  && piEntry.config.providers.opencode.models[0].maxTokens === 8192)
+  && piEntry.config.providers['deepseek-gw'].compat.supportsReasoningEffort === true
+  && piEntry.config.providers['deepseek-gw'].reasoning === 'high'
+  && piEntry.config.providers['deepseek-gw'].models[0].reasoningEfforts.max === 'max'
+  && piEntry.config.providers['deepseek-gw'].models[0].reasoningEfforts.off === null
+  && piEntry.config.providers.opencode.models[0].maxTokens === 8192
+  && piEntry.config.providers.opencode.models[0].reasoningEfforts === undefined)
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))

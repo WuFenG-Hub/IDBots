@@ -8668,6 +8668,12 @@ if (!gotTheLock) {
         if (!session) {
           return { success: true, session };
         }
+        let sessionWithLiveStream = session;
+        try {
+          sessionWithLiveStream = getCoworkRunner().overlayLiveStreamingMessages(session);
+        } catch {
+          sessionWithLiveStream = session;
+        }
         // Attach context-window usage for the conversation header widgets.
         // Prefer the real per-category usage from the SDK's getContextUsage()
         // (cached on the active local-mode session after each turn); fall back
@@ -8680,7 +8686,7 @@ if (!gotTheLock) {
             contextUsage = realUsage;
           } else {
             contextUsage = computeCoworkContextUsage({
-              messages: session.messages ?? [],
+              messages: sessionWithLiveStream.messages ?? [],
               systemPrompt: session.systemPrompt,
               modelLimits: resolveCurrentModelLimits(getCurrentApiConfig('local')?.model),
               // Deliberately NOT passing realUsageTokens here. The provider's
@@ -8710,7 +8716,7 @@ if (!gotTheLock) {
         } catch {
           usageStats = null;
         }
-        return { success: true, session: { ...session, contextUsage, usageStats } };
+        return { success: true, session: { ...sessionWithLiveStream, contextUsage, usageStats } };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
         return {

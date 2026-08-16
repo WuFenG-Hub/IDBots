@@ -15,6 +15,8 @@
 //     baseUrl: string,
 //     apiKeyEnv: string,               // env var name the app fills when spawning (never the key)
 //     thinkingFormat?: string,         // pi-ai compat.thinkingFormat ('deepseek' for DeepSeek-dialect gateways)
+//                                      // deepseek also declares reasoningEfforts + supportsReasoningEffort
+//                                      // so the host effort selector can reach the wire.
 //     models: [{ id, contextWindow, maxOutputTokens? }],
 //   }],
 //   sections: [{ name, order, text }], // stable prompt layers (promptComposer)
@@ -42,6 +44,15 @@ const API_FORMAT_TO_PROTOCOL = {
 }
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
+
+/** DeepSeek official wire: thinking disabled (`off`) or reasoning_effort high/max. */
+const DEEPSEEK_REASONING_EFFORTS = {
+  off: null,
+  low: 'high',
+  medium: 'high',
+  high: 'high',
+  max: 'max',
+}
 
 /** One user MCP server → one dsh-mcp-client entry config; undefined skips. */
 const mcpEntryConfig = (server) => {
@@ -127,11 +138,23 @@ export function generateRuntimeConfig(input) {
         // Image-input declaration: routes default to text-only; a vision model
         // declares ['text','image'] so image blocks can enter its history.
         ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
+        // DeepSeek chat-completions: without a declared thinkingLevelMap the
+        // model is "non-reasoning" to pi-ai, so effort is ignored and the
+        // provider default (thinking ON) always wins. Declare the UI levels
+        // and map them onto DeepSeek's official off/high/max wire spellings.
+        ...(provider.thinkingFormat === 'deepseek' ? { reasoningEfforts: DEEPSEEK_REASONING_EFFORTS } : {}),
       })),
       // thinkingFormat compat exists ONLY on the openai-completions protocol;
       // attaching it to a responses/anthropic route fails provider resolution.
       ...(provider.thinkingFormat && protocol === 'openai-completions')
-        ? { compat: { thinkingFormat: provider.thinkingFormat } }
+        ? {
+          compat: {
+            thinkingFormat: provider.thinkingFormat,
+            ...(provider.thinkingFormat === 'deepseek' ? { supportsReasoningEffort: true } : {}),
+          },
+          // Official dsh-llm-deepseek omitted-effort default is `high`.
+          ...(provider.thinkingFormat === 'deepseek' ? { reasoning: 'high' } : {}),
+        }
         : {},
     }
   }

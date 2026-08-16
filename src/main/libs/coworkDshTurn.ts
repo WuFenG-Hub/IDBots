@@ -38,6 +38,8 @@ export interface DshTurnProviderRoute {
   thinkingFormat?: string
   /** Input modalities the model declares (['text','image'] for vision models). */
   inputModalities?: string[]
+  /** Per-turn DSH/pi-ai reasoning effort (off|low|medium|high|max). */
+  reasoningEffort?: string
 }
 
 export interface DshTurnCallbacks {
@@ -178,6 +180,7 @@ export class DshTurnHub {
         provider: input.provider.key,
         model: input.provider.model,
         ...Number.isFinite(input.provider.maxOutputTokens) ? { maxTokens: input.provider.maxOutputTokens } : {},
+        ...(input.provider.reasoningEffort ? { reasoningEffort: input.provider.reasoningEffort } : {}),
         sections: input.sections,
         hostTools: input.hostTools,
       })

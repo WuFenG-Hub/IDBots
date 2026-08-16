@@ -9,11 +9,12 @@
 //
 //   session/steer          { sessionId, contentBlocks } → step-boundary steering mid-turn
 //   session/cancel         { sessionId, cause?, keepInbox? } → abort active turn with cause
-//   session/ensure         { sessionId, provider?, model?, maxTokens? } → live agent for the
+//   session/ensure         { sessionId, provider?, model?, maxTokens?,
+//                           reasoningEffort? } → live agent for the
 //                           session: create fresh, or RESUME when a persisted log exists
 //                           (the stock server only lazily creates and would fail on an
 //                           existing log after a runtime restart). Also the per-session
-//                           provider/model override the stock wire lacks.
+//                           provider/model/effort override the stock wire lacks.
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/usage             { sessionId } → token-meter session projections
@@ -58,6 +59,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsPolicySeq = 0
     this.idbotsAsks = new Map() // id → { resolve, reject }
     this.idbotsAskSeq = 0
+    // Per-agent reasoning effort for the agent/request waterfall (UI selector).
+    this.idbotsReasoningEffort = new Map()
+    this.idbotsReasoningBound = new WeakSet()
     // Subagent lineage for the panel: parent dsh id → [{agentId, status, startedAt}]
     this.idbotsSubagentChildren = new Map()
     // Ring buffers of child session events for transcript viewing.
@@ -119,6 +123,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     })
     ctx.on('agent/disposed', ({ agent }) => {
       this.idbotsAgents.delete(String(agent.id))
+      this.idbotsReasoningEffort.delete(String(agent.id))
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
@@ -169,10 +174,13 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   }
 
   async idbotsEnsureSession(hostParams) {
-    const { sessionId, provider, model, maxTokens } = hostParams ?? {}
+    const { sessionId, provider, model, maxTokens, reasoningEffort } = hostParams ?? {}
     const id = String(sessionId ?? '')
     if (id.length === 0) throw new Error('idbots-sdk-server: session/ensure requires sessionId')
-    if (this.idbotsAgents.has(id)) return { ensured: true, resumed: false }
+    if (this.idbotsAgents.has(id)) {
+      this.idbotsBindReasoning(this.idbotsAgents.get(id), reasoningEffort)
+      return { ensured: true, resumed: false }
+    }
 
     const agentOptions = {
       provider: provider ?? this.provider,
@@ -196,11 +204,37 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // agent's scoped context (shadowing globals, unwound on disposal).
     this.idbotsRegisterSections(hostParams.sections, handle.agent?.ctx)
     this.idbotsRegisterHostTools(hostParams.hostTools, handle.agent?.ctx)
+    this.idbotsBindReasoning(handle.agent, reasoningEffort)
     // Register with the stock server's bookkeeping (private at the type level,
     // present at runtime) so its lazy session/prompt create reuses this agent
     // instead of colliding on the registry id.
     this.sessions.set(id, { handle })
     return { ensured: true, resumed }
+  }
+
+  /**
+   * Pin this agent's next LLM request to the host's effort selector. The
+   * agent/request waterfall is the same seam installModelSelection uses:
+   * an explicit value wins, and an absent value strips inherited effort so
+   * the adapter falls back to the route default (DeepSeek: high).
+   */
+  idbotsBindReasoning(agent, reasoningEffort) {
+    if (!agent) return
+    const id = String(agent.id)
+    if (typeof reasoningEffort === 'string' && reasoningEffort.trim().length > 0) {
+      this.idbotsReasoningEffort.set(id, reasoningEffort.trim())
+    } else {
+      this.idbotsReasoningEffort.delete(id)
+    }
+    if (this.idbotsReasoningBound.has(agent) || !agent.ctx?.on) return
+    this.idbotsReasoningBound.add(agent)
+    agent.ctx.on('agent/request', async (_payload, next) => {
+      const resolved = await next()
+      const effort = this.idbotsReasoningEffort.get(String(agent.id))
+      const { reasoningEffort: _inherited, ...withoutInherited } = resolved ?? {}
+      if (effort === undefined) return withoutInherited
+      return { ...withoutInherited, reasoningEffort: effort }
+    })
   }
 
   async idbotsSteer({ sessionId, contentBlocks }) {
