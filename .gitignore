@@ -49,6 +49,7 @@ tests/*
 !tests/coworkDshIntegration.test.mjs
 !tests/coworkDshSessionTypes.test.mjs
 !tests/coworkDshStallWatchdog.test.mjs
+!tests/dshUsageProjection.test.mjs
 !tests/dshPluginManager.test.mjs
 !tests/promptComposer.test.mjs
 !tests/cognitiveGroupChatPrompt.test.mjs

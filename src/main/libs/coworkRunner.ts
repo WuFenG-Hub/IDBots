@@ -11,7 +11,9 @@ import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-age
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
-import type { DshHostToolImagePayload } from './dshKernel/types';
+import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
+import { foldDshUsageProjection } from './dshUsageProjection';
+import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { loadClaudeSdk } from './claudeSdk';
 import {
@@ -1029,7 +1031,7 @@ interface ActiveSession {
   emptyTerminalTurnDetected: boolean;
   executionMode: CoworkExecutionMode;
   /** Latest DSH usage snapshot for context reporting (DSH-kernel turns). */
-  lastDshUsage?: { inputTokens: number; outputTokens: number; provider?: string; model?: string };
+  lastDshUsage?: DshUsageSnapshot;
   localInputChannel?: CoworkSteerChannel;
   /**
    * Steers accepted while the CLI is mid-turn. The native SDK runtime drops
@@ -2263,6 +2265,47 @@ export class CoworkRunner extends EventEmitter {
       });
     }
     return null;
+  }
+
+  /**
+   * Fold the official DSH token-meter projection into the session's usage
+   * stats at turn settlement. The projection is replay-derived over the whole
+   * session log, so cumulative counters are REPLACED with authoritative
+   * values (correct across runtime restarts) while per-turn attribution
+   * (turnStats/cacheMissEvents) appends from the raw-bucket delta. Best
+   * effort: a failed or absent projection keeps the previous stats — the
+   * usage chip then simply shows the last successful fold.
+   */
+  private async settleDshUsageStats(sessionId: string, hub: DshTurnHub): Promise<void> {
+    try {
+      const projection = await hub.usageProjection(sessionId);
+      if (!projection) return;
+      const active = this.activeSessions.get(sessionId);
+      const prev = (this.usageStatsBySessionId.get(sessionId)
+        ?? (this.store.getSessionUsageStats(sessionId) as unknown as DshUsageStatsRow | null)
+        ?? null) as DshUsageStatsRow | null;
+      const folded = foldDshUsageProjection({
+        projection,
+        billingSource: active?.billingSource ?? (prev?.source && prev.source !== 'none' ? prev.source : 'other'),
+        upstreamProvider: active?.upstreamProvider ?? prev?.upstreamProvider,
+        upstreamBaseURL: active?.upstreamBaseURL ?? prev?.upstreamBaseURL,
+        pendingCacheBreakReason: active?.pendingCacheBreakReason ?? null,
+        prev,
+        contextWindowFallback: active?.realContextUsage?.contextWindow,
+      });
+      if (!folded) return;
+      this.usageStatsBySessionId.set(sessionId, folded.stats as NonNullable<ActiveSession['usageStats']>);
+      if (active) {
+        active.usageStats = folded.stats as NonNullable<ActiveSession['usageStats']>;
+        active.pendingCacheBreakReason = folded.pendingCacheBreakReason;
+      }
+      this.store.setSessionUsageStats(sessionId, folded.stats as unknown as Record<string, unknown>);
+    } catch (error) {
+      coworkLog('WARN', 'settleDshUsageStats', 'Failed to fold DSH usage projection', {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   wasSessionStopped(sessionId: string): boolean {
@@ -5774,6 +5817,12 @@ export class CoworkRunner extends EventEmitter {
     const modelLimits = resolveCurrentModelLimits(route.model);
     const dshSessionId = dshSessionIdOf(activeSession.claudeSessionId) ?? `cw-${sessionId}`;
     const hub = this.ensureDshTurnHub();
+    // Same billing/upstream bookkeeping the Claude path records: the usage
+    // chip's cost/balance rows key off billingSource, the upstream row off
+    // these identity fields.
+    activeSession.billingSource = resolveCoworkBillingSource(route.provider, route.baseUrl);
+    activeSession.upstreamProvider = route.provider;
+    activeSession.upstreamBaseURL = route.baseUrl;
     // Re-register: steer/cancel plumbing looks the session up in
     // activeSessions, and turn N+1 arrives after turn N's teardown removed it.
     this.activeSessions.set(sessionId, activeSession);
@@ -5895,10 +5944,23 @@ export class CoworkRunner extends EventEmitter {
           },
           onUsage: (usage) => {
             activeSession.lastDshUsage = usage;
+            // Per-request reasoning estimate: the chip's thinking row merges
+            // this counter (same slot the Claude path's thinking_tokens events
+            // feed). The projection folds reasoning into outputTokens, so the
+            // display-only estimate accumulates here instead.
+            if (Number.isFinite(usage.reasoningTokens) && (usage.reasoningTokens ?? 0) > 0) {
+              const soFar = this.thinkingTokensBySessionId.get(sessionId) ?? 0;
+              this.thinkingTokensBySessionId.set(sessionId, soFar + (usage.reasoningTokens ?? 0));
+            }
             // Feed the renderer's usage ring the same shape the Claude path
-            // produces from getContextUsage().
+            // produces from getContextUsage(). The snapshot's input excludes
+            // cache read/write (disjoint buckets), so the prompt-side pressure
+            // is input + both cache buckets.
             const contextWindow = modelLimits?.contextWindow ?? 64000;
-            const usedTokens = usage.inputTokens + usage.outputTokens + (usage.cacheReadTokens ?? 0);
+            const usedTokens = usage.inputTokens
+              + (usage.cacheReadTokens ?? 0)
+              + (usage.cacheWriteTokens ?? 0)
+              + usage.outputTokens;
             activeSession.realContextUsage = {
               usedTokens,
               contextWindow,
@@ -6060,6 +6122,7 @@ export class CoworkRunner extends EventEmitter {
       if (activeSession.abortController.signal.aborted) {
         this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
         finish('idle');
+        await this.settleDshUsageStats(sessionId, hub);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
         this.clearPendingPermissions(sessionId);
         this.removeActiveSession(sessionId, activeSession);
@@ -6086,6 +6149,7 @@ export class CoworkRunner extends EventEmitter {
       if (outcome.kind === 'aborted') {
         this.addSystemMessage(sessionId, '', { dshTurnStalled: true });
         finish('idle');
+        await this.settleDshUsageStats(sessionId, hub);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
         this.clearPendingPermissions(sessionId);
         this.removeActiveSession(sessionId, activeSession);
@@ -6104,6 +6168,9 @@ export class CoworkRunner extends EventEmitter {
       } else {
         finish('completed');
       }
+      // Usage stats settle BEFORE emit('complete') — the renderer refreshes the
+      // session on streamComplete and must see the folded projection.
+      await this.settleDshUsageStats(sessionId, hub);
       // Memory capture on turn completion — the Claude path runs this in every
       // non-error settlement (local + sandbox); without it DSH turns never fed
       // experience extraction. Kernel-agnostic: reads store messages only.

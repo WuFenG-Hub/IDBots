@@ -26,6 +26,7 @@ import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
   DshKernelHandlers,
+  DshUsageProjectionResult,
   DshUserQuestionAsk,
   DshMapperAction,
   DshRuntimeConfigInput,
@@ -195,6 +196,17 @@ export class DshKernel {
     void dshSessionId
     this.requireClient()
     return this.client.request('idbots/subagents/messages', { sessionId: dshSessionId, agentId, limit })
+  }
+
+  /**
+   * Official token-meter session projections for the usage panel (cumulative
+   * disjoint token buckets + context pressure/composition). Degrades to
+   * { available: false } when the runtime composition lacks the projection
+   * registry or the session has no live agent.
+   */
+  async usageProjection(dshSessionId: string): Promise<DshUsageProjectionResult> {
+    this.requireClient()
+    return this.client.request('idbots/usage', { sessionId: dshSessionId })
   }
 
   /** Answer a pending ask_user_question bridged from the runtime. */
