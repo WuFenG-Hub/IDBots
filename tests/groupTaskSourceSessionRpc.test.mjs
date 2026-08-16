@@ -31,6 +31,25 @@ function resolveCompiledMetaidRpcServerPath() {
   return require.resolve(candidates[0]);
 }
 
+function resolveCompiledMetaidRpcEndpointPath() {
+  const candidates = [
+    '../dist-electron/services/metaidRpcEndpoint.js',
+    '../dist-electron/main/services/metaidRpcEndpoint.js',
+  ];
+  for (const candidate of candidates) {
+    try {
+      return require.resolve(candidate);
+    } catch {
+      // Try next compile output layout.
+    }
+  }
+  return require.resolve(candidates[0]);
+}
+
+const { getMetaidRpcToken } = require(resolveCompiledMetaidRpcEndpointPath());
+const RPC_TOKEN = getMetaidRpcToken();
+const RPC_AUTH_HEADERS = { 'Content-Type': 'application/json', Authorization: `Bearer ${RPC_TOKEN}` };
+
 async function startRpcServerForTest() {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-source-session-rpc-'));
   const originalLoad = Module._load;
@@ -118,7 +137,7 @@ async function startRpcServerForTest() {
 const postCreate = (baseUrl, body) =>
   fetch(`${baseUrl}/api/idbots/group-task/create`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: RPC_AUTH_HEADERS,
     body: JSON.stringify(body),
   });
 

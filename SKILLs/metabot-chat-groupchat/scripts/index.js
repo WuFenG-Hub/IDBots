@@ -48,6 +48,13 @@ const util_1 = require("util");
 const fs = __importStar(require("fs"));
 const crypto_1 = require("crypto");
 const RPC_URL = process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200';
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (RPC_TOKEN)
+        headers.Authorization = `Bearer ${RPC_TOKEN}`;
+    return headers;
+}
 const ASSIGN_PATH = '/api/idbots/assign-group-chat-task';
 const RESOLVE_PATH = '/api/idbots/resolve-metabot-id';
 const CREATE_PIN_PATH = '/api/metaid/create-pin';
@@ -84,7 +91,7 @@ async function resolveMetabot(base, name) {
     const url = `${base}${RESOLVE_PATH}`;
     const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: rpcHeaders(),
         body: JSON.stringify({ name: name.trim() }),
     });
     const result = (await res.json());
@@ -109,7 +116,7 @@ async function runCreatePin(base, metabotId, path, payloadObj, network) {
     };
     const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: rpcHeaders(),
         body: JSON.stringify({ metabot_id: metabotId, network, metaidData }),
     });
     const json = (await res.json());
@@ -150,7 +157,7 @@ async function main() {
         const url = `${base}${ASSIGN_PATH}`;
         const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: rpcHeaders(),
             body: JSON.stringify(params),
         });
         const result = (await res.json());

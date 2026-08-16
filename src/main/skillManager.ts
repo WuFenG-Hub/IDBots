@@ -8,7 +8,7 @@ import { SqliteStore } from './sqliteStore';
 import { getEnhancedEnv } from './libs/coworkUtil';
 import { isPathWithin, resolveElectronExecutablePath } from './libs/runtimePaths';
 import { buildImageSkillEnvOverrides } from './libs/skillImageProviderEnv';
-import { getMetaidRpcBase } from './services/metaidRpcEndpoint';
+import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 
 export type SkillRecord = {
   id: string;
@@ -1357,6 +1357,7 @@ export class SkillManager {
       SKILLS_ROOT: skillsRoot,
       IDBOTS_SKILLS_ROOT: skillsRoot,
       IDBOTS_RPC_URL: getMetaidRpcBase(),
+      IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
     };
     let metabotLlmId: string | null = null;
     if (context?.metabotId != null) {

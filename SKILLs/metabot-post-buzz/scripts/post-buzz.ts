@@ -14,6 +14,12 @@ import fs from 'fs';
 import pathMod from 'path';
 
 const RPC_BASE = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
 const CREATE_PIN_URL = `${RPC_BASE}/api/metaid/create-pin`;
 const UPLOAD_URL = `${RPC_BASE}/api/idbots/files/upload-largefile`;
 
@@ -131,7 +137,7 @@ function isMetafileUri(value: string): boolean {
 async function createPin(metabotId: number, network: string, metaidData: Record<string, unknown>): Promise<CreatePinResponse> {
   const res = await fetch(CREATE_PIN_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify({ metabot_id: metabotId, network, metaidData }),
   });
 
@@ -191,7 +197,7 @@ async function uploadFile(filePath: string, metabotId: number, network: string):
 
   const res = await fetch(UPLOAD_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify({
       metabot_id: metabotId,
       file_path: resolved,

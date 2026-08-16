@@ -130,6 +130,12 @@ function main() {
   }
 
   const rpcUrl = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
+  const rpcToken = process.env.IDBOTS_RPC_TOKEN || '';
+  const rpcHeaders = () => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (rpcToken) headers.Authorization = `Bearer ${rpcToken}`;
+    return headers;
+  };
   const url = `${rpcUrl}/api/metaid/create-pin`;
   const body = {
     metabot_id: metabotId,
@@ -148,7 +154,7 @@ function main() {
     try {
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: rpcHeaders(),
         body: JSON.stringify(body),
       });
       const rawText = await res.text();

@@ -8,6 +8,12 @@ import { mvc } from 'meta-contract';
 
 const DEFAULT_PATH = "m/44'/10001'/0'/0/0";
 const DEFAULT_RPC_URL = 'http://127.0.0.1:31200';
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
 const METAID_USER_API_BASE = 'https://file.metaid.io/metafile-indexer/api';
 
 export interface SendPrivateChatParams {
@@ -173,7 +179,7 @@ async function submitCreatePin(
 
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify(body),
   });
   const json = (await res.json()) as {

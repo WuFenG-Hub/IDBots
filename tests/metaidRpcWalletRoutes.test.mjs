@@ -54,6 +54,25 @@ function resolveCompiledMetaidRpcServerPath() {
   return require.resolve(candidates[0]);
 }
 
+function resolveCompiledMetaidRpcEndpointPath() {
+  const candidates = [
+    '../dist-electron/services/metaidRpcEndpoint.js',
+    '../dist-electron/main/services/metaidRpcEndpoint.js',
+  ];
+  for (const candidate of candidates) {
+    try {
+      return require.resolve(candidate);
+    } catch {
+      // Try next compile output layout.
+    }
+  }
+  return require.resolve(candidates[0]);
+}
+
+const { getMetaidRpcToken } = require(resolveCompiledMetaidRpcEndpointPath());
+const RPC_TOKEN = getMetaidRpcToken();
+const RPC_AUTH_HEADERS = { 'Content-Type': 'application/json', Authorization: `Bearer ${RPC_TOKEN}` };
+
 async function startRpcServerForTest() {
   return startRpcServerForTestWithOverrides({});
 }
@@ -179,7 +198,7 @@ test('rpc bot-browser open route accepts Browser URIs and invokes the host open 
     for (const uri of uris) {
       const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: JSON.stringify({ uri }),
       });
       const json = await response.json();
@@ -215,7 +234,7 @@ test('rpc bot-browser open route rejects unsupported URI schemes', async () => {
   try {
     const response = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({ uri: 'https://example.com' }),
     });
     const json = await response.json();
@@ -245,7 +264,7 @@ test('rpc bot-browser tabs route validates and relays client-only tab commands',
   try {
     const response = await fetch(`${baseUrl}/api/idbots/bot-browser/tabs`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({ action: 'open-tab', uri: 'metaid://idq1alice' }),
     });
     const json = await response.json();
@@ -271,7 +290,7 @@ test('rpc bot-browser tabs route rejects invalid ids before renderer dispatch', 
   try {
     const response = await fetch(`${baseUrl}/api/idbots/bot-browser/tabs`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({ action: 'switch-tab', tabId: 'not-a-number' }),
     });
     const json = await response.json();
@@ -301,15 +320,15 @@ test('rpc routes expose account-summary, address-balance, and fee-rate-summary e
 
     const accountRes = await fetch(`${baseUrl}/api/idbots/metabot/account-summary`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({ metabot_id: 1 }),
     });
     const balanceRes = await fetch(`${baseUrl}/api/idbots/address/balance`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({ metabot_id: 1 }),
     });
-    const feeRes = await fetch(`${baseUrl}/api/idbots/fee-rate-summary?chain=mvc`);
+    const feeRes = await fetch(`${baseUrl}/api/idbots/fee-rate-summary?chain=mvc`, { headers: RPC_AUTH_HEADERS });
 
     const accountJson = await accountRes.json();
     const balanceJson = await balanceRes.json();
@@ -342,7 +361,7 @@ test('rpc transfer route forwards btc, doge, and space transfer requests through
     const responses = await Promise.all([
       fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: JSON.stringify({
           metabot_id: 1,
           chain: 'btc',
@@ -353,7 +372,7 @@ test('rpc transfer route forwards btc, doge, and space transfer requests through
       }),
       fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: JSON.stringify({
           metabot_id: 1,
           chain: 'doge',
@@ -364,7 +383,7 @@ test('rpc transfer route forwards btc, doge, and space transfer requests through
       }),
       fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: JSON.stringify({
           metabot_id: 1,
           chain: 'space',
@@ -502,7 +521,7 @@ test('rpc transfer route rejects unsupported chain or missing fields with 400', 
       cases.map((testCase) =>
         fetch(`${baseUrl}/api/idbots/wallet/transfer`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: RPC_AUTH_HEADERS,
           body: JSON.stringify(testCase.body),
         }),
       ),
@@ -563,7 +582,7 @@ test('rpc btc signing routes expose sign-message and sign-psbt through metabot w
   try {
     const signMessageRes = await fetch(`${baseUrl}/api/idbots/wallet/btc/sign-message`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         message: 'metaid.market',
@@ -571,7 +590,7 @@ test('rpc btc signing routes expose sign-message and sign-psbt through metabot w
     });
     const signPsbtRes = await fetch(`${baseUrl}/api/idbots/wallet/btc/sign-psbt`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         psbt_hex: '70736274ff',
@@ -651,7 +670,7 @@ test('rpc mrc20 transfer route forwards validated requests to the main-process m
   try {
     const response = await fetch(`${baseUrl}/api/idbots/wallet/mrc20/transfer`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         mrc20_id: 'tick-id',
@@ -734,7 +753,7 @@ test('rpc raw-tx routes return success payloads from the wallet raw-tx service c
   try {
     const mvcRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         to_address: '1recipient',
@@ -745,7 +764,7 @@ test('rpc raw-tx routes return success payloads from the wallet raw-tx service c
     });
     const ftRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc-ft/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         token: {
@@ -792,12 +811,12 @@ test('rpc raw-tx routes reject invalid JSON bodies and surface service failures 
   try {
     const invalidJsonRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: '{',
     });
     const workerErrorRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc-ft/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         token: {
@@ -830,7 +849,7 @@ test('rpc raw-tx routes reject malformed input without exposing signer primitive
   try {
     const mvcRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         to_address: '1recipient',
@@ -840,7 +859,7 @@ test('rpc raw-tx routes reject malformed input without exposing signer primitive
     });
     const ftRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc-ft/build-transfer-rawtx`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         token: { symbol: 'MC' },
@@ -923,7 +942,7 @@ test('rpc raw-tx bundle route forwards ordered steps to the wallet raw-tx servic
   try {
     const bundleRes = await fetch(`${baseUrl}/api/idbots/wallet/mvc/build-rawtx-bundle`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         steps: [
@@ -1000,7 +1019,7 @@ test('rpc create-pin route resolves an omitted fee_rate through the store tier, 
   try {
     const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         metaidData: CREATE_PIN_TEST_METAID_DATA,
@@ -1031,7 +1050,7 @@ test('rpc create-pin route forwards an explicit fee_rate unchanged', async () =>
   try {
     const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: RPC_AUTH_HEADERS,
       body: JSON.stringify({
         metabot_id: 1,
         metaidData: CREATE_PIN_TEST_METAID_DATA,
@@ -1060,7 +1079,7 @@ test('rpc create-pin route rejects a non-positive fee_rate with 400 and never ca
     for (const feeRate of [0, -2]) {
       const response = await fetch(`${baseUrl}/api/metaid/create-pin`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: RPC_AUTH_HEADERS,
         body: JSON.stringify({
           metabot_id: 1,
           metaidData: CREATE_PIN_TEST_METAID_DATA,
@@ -1074,6 +1093,69 @@ test('rpc create-pin route rejects a non-positive fee_rate with 400 and never ca
       assert.match(json.error, /fee_rate must be positive/);
     }
     assert.equal(captured.length, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('rpc auth gate: missing token -> 401, bad origin -> 403, allowed origin preflight -> 204 without wildcard ACAO', async () => {
+  const { server, baseUrl } = await startRpcServerForTestWithOverrides({
+    onBotBrowserOpen() {},
+  });
+  try {
+    // 1. No token: every endpoint must reject with 401 before routing.
+    const noToken = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uri: 'metaapp://x' }),
+    });
+    assert.equal(noToken.status, 401);
+    const noTokenJson = await noToken.json();
+    assert.equal(noTokenJson.success, false);
+
+    // 2. Wrong token: 401.
+    const wrongToken = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer wrong-token' },
+      body: JSON.stringify({ uri: 'metaapp://x' }),
+    });
+    assert.equal(wrongToken.status, 401);
+
+    // 3. Non-app origin: 403 even with a valid token (browser-origin defense).
+    const badOrigin = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${RPC_TOKEN}`,
+        Origin: 'https://evil.example',
+      },
+      body: JSON.stringify({ uri: 'metaapp://x' }),
+    });
+    assert.equal(badOrigin.status, 403);
+
+    // 4. Preflight from a non-app origin: 403.
+    const badPreflight = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'https://evil.example', 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(badPreflight.status, 403);
+
+    // 5. Preflight from an allowlisted origin: 204 with an echoed origin, never '*'.
+    const goodPreflight = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'OPTIONS',
+      headers: { Origin: 'http://localhost:5175', 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(goodPreflight.status, 204);
+    assert.equal(goodPreflight.headers.get('access-control-allow-origin'), 'http://localhost:5175');
+    assert.notEqual(goodPreflight.headers.get('access-control-allow-origin'), '*');
+
+    // 6. With the per-launch token and no Origin (native host-spawned client): accepted.
+    const ok = await fetch(`${baseUrl}/api/idbots/bot-browser/open`, {
+      method: 'POST',
+      headers: RPC_AUTH_HEADERS,
+      body: JSON.stringify({ uri: 'metaapp://6d30862cc1c974b2c5ffd26a54a8ba75ff49ce8ddbe1b25d18cad5916aea3069i0' }),
+    });
+    assert.equal(ok.status, 200);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

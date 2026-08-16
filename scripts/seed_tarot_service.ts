@@ -13,6 +13,11 @@
  */
 
 const RPC_URL = process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200';
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+const RPC_HEADERS: Record<string, string> = {
+  'Content-Type': 'application/json',
+  ...(RPC_TOKEN ? { Authorization: `Bearer ${RPC_TOKEN}` } : {}),
+};
 const CREATE_PIN_ENDPOINT = `${RPC_URL.replace(/\/$/, '')}/api/metaid/create-pin`;
 const NETWORK = 'mvc';
 const INDEXER_DELAY_MS = 5_000;
@@ -38,7 +43,7 @@ async function createPin(
 
   const res = await fetch(CREATE_PIN_ENDPOINT, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: RPC_HEADERS,
     body: JSON.stringify(body),
   });
 

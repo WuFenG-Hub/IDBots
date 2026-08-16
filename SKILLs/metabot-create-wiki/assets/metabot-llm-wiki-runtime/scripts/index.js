@@ -2574,6 +2574,13 @@ async function actionBundleZip(input, paths, state) {
   };
 }
 
+const RPC_TOKEN = safeTrim(process.env.IDBOTS_RPC_TOKEN) || '';
+function rpcHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
+
 async function uploadZipViaRpc(input, zipPath) {
   // Uploads the wiki bundle via the local IDBots RPC (the same
   // /api/idbots/files/upload-largefile endpoint metabot-post-buzz and the
@@ -2592,7 +2599,7 @@ async function uploadZipViaRpc(input, zipPath) {
   const url = `${rpcBase.replace(/\/+$/, '')}/api/idbots/files/upload-largefile`;
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify({
       metabot_id: metabotId,
       file_path: zipPath,
@@ -2712,7 +2719,7 @@ async function createMetaidPin(input) {
 
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify(requestBody),
   });
   const rawText = await response.text();

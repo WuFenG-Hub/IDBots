@@ -267,13 +267,19 @@ async function openBotBrowser(input, env = process.env) {
   }
 
   const rpcBase = String(env.IDBOTS_RPC_URL || DEFAULT_RPC_URL).replace(/\/+$/, '');
+  const rpcToken = String(env.IDBOTS_RPC_TOKEN || '').trim();
+  const rpcHeaders = () => {
+    const headers = { 'Content-Type': 'application/json' };
+    if (rpcToken) headers.Authorization = `Bearer ${rpcToken}`;
+    return headers;
+  };
   const path = command.action === 'open' ? OPEN_PATH : TABS_PATH;
   const body = command.action === 'open'
     ? { uri: command.uri, actorId }
     : { action: command.action, uri: command.uri, tabId: command.tabId };
   const response = await fetch(`${rpcBase}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify(body),
   });
   const result = await response.json().catch(() => ({}));

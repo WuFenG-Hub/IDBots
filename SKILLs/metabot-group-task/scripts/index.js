@@ -16,6 +16,12 @@
 const fs = require('fs');
 
 const RPC_URL = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/$/, '');
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
 
 const ACTION_PATHS = {
   create: '/api/idbots/group-task/create',
@@ -55,7 +61,7 @@ function parsePayload() {
 async function postJson(path, body) {
   const res = await fetch(`${RPC_URL}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify(body),
   });
   const json = await res.json().catch(() => null);

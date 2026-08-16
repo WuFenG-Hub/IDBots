@@ -326,7 +326,7 @@ import {
   listCommunityMetaApps,
 } from './services/metaAppChainService';
 import { getP2PLocalBase } from './services/p2pLocalEndpoint';
-import { getMetaidRpcBase } from './services/metaidRpcEndpoint';
+import { getMetaidRpcBase, getMetaidRpcToken } from './services/metaidRpcEndpoint';
 import { isSemanticallyEmptyMetaidInfoPayload } from './services/metabotRestoreService';
 import {
   ServiceOrderLifecycleService,
@@ -4737,6 +4737,7 @@ const getCoworkRunner = () => {
               IDBOTS_TWIN_NAME: metabot.name,
               IDBOTS_METABOT_PATH: wallet.path,
               IDBOTS_RPC_URL: getMetaidRpcBase(),
+              IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
             });
             if (metabot.globalmetaid) {
               overrides.IDBOTS_METABOT_GLOBALMETAID = metabot.globalmetaid;
@@ -4762,6 +4763,7 @@ const getCoworkRunner = () => {
             IDBOTS_TWIN_NAME: twin.name,
             IDBOTS_METABOT_PATH: twin.path,
             IDBOTS_RPC_URL: getMetaidRpcBase(),
+            IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
           });
           const twinMetabot = metabotStore.getMetabotById(twin.id);
           if (twinMetabot?.globalmetaid) {
