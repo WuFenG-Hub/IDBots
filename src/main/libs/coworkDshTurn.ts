@@ -97,6 +97,17 @@ class DshTurnController {
   private settleTurn!: (reason: DshTurnOutcome) => void
   private readonly turnDone: Promise<DshTurnOutcome>
   private steerWaiters: Array<(text: string) => void> = []
+  /**
+   * Set while a steer's inbox message has not been consumed by a follow-up
+   * turn yet. Any turn boundary that arrives in this state — the steer's own
+   * cancel(keepInbox) abort, or a natural end racing the steer — is swallowed
+   * instead of settling the turn: the preserved inbox steer is waking input,
+   * so a follow-up turn is guaranteed and the caller's single runTurn must
+   * stay open until the steered exchange finishes. Only fatal outcomes
+   * (kind 'error') and non-steer aborts (user stop, stall watchdog) settle
+   * through; see handleTurnEnd.
+   */
+  private steerFollowUpExpected = false
 
   constructor(input: DshTurnInput) {
     this.dshSessionId = input.dshSessionId
@@ -108,9 +119,32 @@ class DshTurnController {
     return this.turnDone
   }
 
-  handleTurnEnd(reason: { kind: string; reason?: string }, emptyTerminal?: boolean): void {
-    this.settleTurn(emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason)
+  handleTurnEnd(reason: { kind: string; reason?: unknown }, emptyTerminal?: boolean): void {
+    const outcome = emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason
+    // Fatal outcomes and non-steer aborts (user stop, stall watchdog) always
+    // settle through — a pending steer never outranks them.
+    const settlesThrough = reason.kind === 'error'
+      || (reason.kind === 'aborted' && reason.reason !== 'steer')
+    if (this.steerFollowUpExpected && !settlesThrough) {
+      // Swallow exactly one boundary — the steer's cancel(keepInbox) abort,
+      // or a natural end that raced the steer (an unconsumed inbox steer is
+      // waking input, so a follow-up turn is guaranteed and owns settlement).
+      this.steerFollowUpExpected = false
+      return
+    }
+    this.steerFollowUpExpected = false
+    this.settleTurn(outcome as DshTurnOutcome)
     for (const waiter of this.steerWaiters.splice(0)) waiter('')
+  }
+
+  /** Arm the swallow above: the next steer-abort boundary belongs to us. */
+  expectSteerFollowUp(): void {
+    this.steerFollowUpExpected = true
+  }
+
+  /** Disarm without settling — used when the steer/cancel RPCs failed. */
+  clearSteerFollowUp(): void {
+    this.steerFollowUpExpected = false
   }
 
   notifySteerDelivered(text: string): void {
@@ -198,12 +232,50 @@ export class DshTurnHub {
     return dshId === undefined ? undefined : this.controllersByDsh.get(dshId)
   }
 
-  /** Native step-boundary steer; resolves once the runtime accepted it. */
+  /**
+   * Interrupt-on-steer (parity with the local path's interrupt semantics):
+   * cancel the active turn with keepInbox FIRST, then submit the steer. The
+   * order is load-bearing — the runtime's wake latch only arms for waking
+   * input submitted while the abort is converging (or after it reaches
+   * idle); a steer submitted BEFORE the cancel parks in the inbox with
+   * nobody left to wake it (verified against dsh-agent-loop: the aborted
+   * turn exits the driver without the inbox continuation check, so the steer
+   * sits dormant until some later wake). Submitted after, the preserved
+   * steer wakes a follow-up turn that consumes the correction as its next
+   * turn input.
+   */
   async steer(sessionId: string, text: string): Promise<void> {
     const controller = this.controllerOfCowork(sessionId)
     if (!controller || !this.kernel) throw new Error('DshTurnHub: no active turn for steer')
-    await this.kernel.steer(controller.dshSessionId, text)
+    controller.expectSteerFollowUp()
+    try {
+      await this.kernel.cancel(controller.dshSessionId, 'steer', { keepInbox: true })
+    } catch (error) {
+      // No interrupt happened: plain step-boundary steering, flag disarmed.
+      controller.clearSteerFollowUp()
+      throw error
+    }
+    try {
+      await this.kernel.steer(controller.dshSessionId, text)
+    } catch (error) {
+      // Interrupt landed but the steer never queued: disarm so the aborted
+      // turn's boundary settles normally; the steer itself is lost (the
+      // caller's delivery promise settles empty at turn end).
+      controller.clearSteerFollowUp()
+      throw error
+    }
     controller.notifySteerDelivered(text)
+  }
+
+  /**
+   * Watchdog escape hatch: settle the active turn controller directly when
+   * the runtime cannot — a cancel against an idle agent (no active activity)
+   * is a documented no-op that never emits turnEnd, so a controller whose
+   * boundary was swallowed (steer follow-up that never woke) would otherwise
+   * await forever. Same no-op safety as a normal double settle.
+   */
+  forceSettle(sessionId: string, reason: string): void {
+    this.controllerOfCowork(sessionId)?.handleTurnEnd({ kind: 'aborted', reason })
   }
 
   /** Resolves when the steer text was delivered (or the turn ended first). */

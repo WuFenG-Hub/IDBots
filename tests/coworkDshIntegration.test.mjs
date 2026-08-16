@@ -194,6 +194,17 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     await turn2
     const steerRequest = seen.filter((r) => r.body?.messages?.some((m) => String(m.content).includes('STEERED_IN_RUNNER'))).at(-1)
     assert.ok(steerRequest, 'steer text reached the model on the follow-up request')
+    // Interrupt-on-steer: the steer's cancel(keepInbox) aborted the in-flight
+    // slow_tool (its result is the runtime's "tool call aborted" error, not
+    // the completed {"slept":true} payload) instead of waiting out the
+    // 1500ms step boundary, and the steer text became the follow-up turn's
+    // user message — the whole steered exchange settled as ONE runner turn.
+    const slowResults = store.messages.filter((m) => m.type === 'tool_result' && String(m.content).includes('tool call aborted'))
+    assert.ok(slowResults.length > 0, 'aborted slow_tool result recorded')
+    assert.ok(
+      !store.messages.some((m) => m.type === 'tool_result' && String(m.content).includes('"slept":true')),
+      'slow_tool never ran to completion after the steer interrupt'
+    )
 
     // Approval: third turn triggers dangerous_tool ask → respond allow.
     const turn3 = runner.runDshSessionLocal(activeSession, 'CALL_DANGEROUS', process.cwd(), 'You are Alice.')

@@ -1851,8 +1851,10 @@ export class CoworkRunner extends EventEmitter {
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) return { accepted: false, reason: 'inactive' };
     if (activeSession.executionMode !== 'local') return { accepted: false, reason: 'sandbox' };
-    // DSH-kernel turns steer natively at the next step boundary — no channel
-    // and no interrupt-on-steer; delivery settles when the runtime accepted it.
+    // DSH-kernel turns steer natively with interrupt-on-steer (hub.steer
+    // queues the steer then cancels the active turn with keepInbox — the
+    // correction wakes the follow-up turn immediately); delivery settles
+    // once the runtime accepted the steer.
     if (this.dshActiveTurns.has(sessionId)) {
       const hub = this.dshTurnHub;
       if (!hub) return { accepted: false, reason: 'closing' };
@@ -5945,6 +5947,11 @@ export class CoworkRunner extends EventEmitter {
             { sessionId, stallMs: this.dshTurnStallTimeoutMs }
           );
           void hub.cancel(sessionId, 'turn stall watchdog').catch(() => undefined);
+          // A cancel against an idle agent is a no-op that never emits a
+          // turn boundary — force-settle the controller too, or a turn whose
+          // boundary was swallowed (steer follow-up that never woke) would
+          // await forever despite the watchdog having fired.
+          hub.forceSettle(sessionId, 'turn stall watchdog');
         }, this.dshTurnStallTimeoutMs);
         dshStallTimer.unref?.();
       };
