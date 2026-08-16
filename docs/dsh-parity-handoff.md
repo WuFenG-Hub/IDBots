@@ -1,6 +1,6 @@
 # DSH Kernel Migration — Handoff Document
 
-Last updated: 2026-08-16 · Branch: `main` (unpushed) · Author: ZCode session 2026-08-15~16
+Last updated: 2026-08-16 (session 2) · Branch: `feat/dsh-p0-parity` (unpushed, 5 commits ahead of `main`) · Author: ZCode sessions 2026-08-15~16
 Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 
 ## 1. Where we are
@@ -43,41 +43,62 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ### Backlog, prioritized (the next session's work queue)
 
-1. **P0 — Bridged-tool image blocks lost**: `executeDshHostTool` flattens
-   handler results to `{ok,text}`; screenshot tools return image blocks the
-   model never sees. Fix: extend `idbots/tool/respond` to carry content
-   blocks; server-side render maps them (DSH `image` block type); verify
-   pi-ai sends images to providers.
-2. **P0 — Empty terminal turn auto-continue**: claude path auto-continues
-   DeepSeek turns that end with only reasoning (fix `bf15f63d`); DSH path
-   lacks it. Detect in turn outcome/mapper, auto-continue.
-3. **P0 — User-configured MCP servers**: claude path mounts user MCP config;
-   DSH has `dsh-mcp-client` available but unwired. Mount per user MCP config
-   in the generator (each server = one plugin entry, `mcp__<server>__<tool>`).
-4. **P1 — Attachments**: prompt attachments (images/files), text-only
+**Done in session 2 (branch `feat/dsh-p0-parity`, all tests green):**
+
+1. ✅ **P0 — Bridged-tool image blocks** (`7d867694`): `idbots/tool/respond`
+   carries `images: [{data, mediaType, name?}]`; new
+   `dsh-runtime/plugins/idbots-attachment-store.mjs` implements the abstract
+   `AttachmentStore` seam (content-addressed sha256 files under
+   `<sessionRoot>/attachments`, magic-byte + dimension validation for
+   png/jpeg/webp/gif); the host-tool proxy renders DSH image blocks. Routes
+   declare `input: ['text','image']` from `resolveCurrentModelLimits`
+   (`supportsVision`); the server-side gate degrades to a text note on
+   text-only routes (an image there would poison durable history — pi-ai
+   refuses it on every continuation). Bonus: mounting the store activates
+   DSH's native `read_image` tool for workspace sessions.
+2. ✅ **P0 — Empty terminal turn auto-continue** (`893a365b`): the event
+   mapper flags `turn/end` with `emptyTerminal` (clean stop, no text/tool
+   activity); `runDshSessionLocal` auto-continues once with the shared
+   `EMPTY_TERMINAL_TURN_CONTINUE_PROMPT`, second consecutive empty turn falls
+   back to idle + diagnostic (`reportEmptyTerminalTurn`).
+3. ✅ **P0 — User-configured MCP servers** (`7c589c3d`): generator maps each
+   user server to one `dsh-mcp-client` entry (stdio → command/args/env,
+   sse/http → streamable-http); hub option `mcpServersProvider` accumulates a
+   config-level union like providers; runner feeds it from
+   `mcpServerProvider`. Tools surface as `mcp__<server>__<tool>`.
+4. ✅ **Audit bonus — turn memory updates** (`49e2b8ed`): structural diff
+   found `applyTurnMemoryUpdatesForSession` never ran on DSH completions —
+   DSH sessions fed no experience extraction. Now called before `complete`.
+
+**Remaining backlog (next session):**
+
+5. **P1 — Attachments**: prompt attachments (images/files), text-only
    provider downgrade (`forceTextOnlyAttachments`), attachment labels — all
-   claude-path-only. DSH needs image blocks in user content.
-5. **P1 — AskUserQuestion equivalent**: mount `dsh-tool-ask-user`; wire its
+   claude-path-only. DSH needs image blocks in user content (the attachment
+   store from item 1 is the landing zone; `session/ensure` may need an
+   attachments pass-through or steer-time save).
+6. **P1 — AskUserQuestion equivalent**: mount `dsh-tool-ask-user`; wire its
    ask through the existing approval bridge → renderer dialog.
-6. **P1 — Vision gate + repeated-read dedup**: port `evaluateReadImageGuard`
+7. **P1 — Vision gate + repeated-read dedup**: port `evaluateReadImageGuard`
    + readFiles registry into the policy gate (host-side via policy bridge).
-7. **P1 — Stall watchdog**: claude path has `localTurnStallWatchdog`; add a
+   Note: `read_image` is now live on DSH (item 1), so this gate matters more.
+8. **P1 — Stall watchdog**: claude path has `localTurnStallWatchdog`; add a
    turn-level timeout for DSH (hub.runTurn race with timeout → cancel).
-8. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
+9. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
    only; map `subagent.started/finished` → the renderer's task Redux channel
    (find the task event channel in main.ts).
-9. **P2 — DSH plugin install flow** (Phase 2 opener): npm-install into
-   `userData/dsh-plugins`, absolute-path entries via `extraEntries`,
-   persisted list in app_config, config-change auto-restart already works.
-   Use it to mount official non-overlapping packages: web, fs-search,
-   time-context, jobs, terminal (needs node-pty). Deliberately NOT mounting:
-   dsh-skill/dsh-schedule/dsh-plan-mode/dsh-cmdline (overlap with IDBots
-   systems — IDBots stays authoritative).
-10. **P2 — Behavioral foundation decision**: claude path sits on the full
+10. **P2 — DSH plugin install flow** (Phase 2 opener): npm-install into
+    `userData/dsh-plugins`, absolute-path entries via `extraEntries`,
+    persisted list in app_config, config-change auto-restart already works.
+    Use it to mount official non-overlapping packages: web, fs-search,
+    time-context, jobs, terminal (needs node-pty). Deliberately NOT mounting:
+    dsh-skill/dsh-schedule/dsh-plan-mode/dsh-cmdline (overlap with IDBots
+    systems — IDBots stays authoritative).
+11. **P2 — Behavioral foundation decision**: claude path sits on the full
     claude_code preset; DSH has DSH tool docs + our ~10-line guidance. If
     soak shows quality gaps on complex tasks, distill an IDBots behavioral
     layer (see memory `claude-code-prompt-engineering-techniques`).
-11. **P2 — Windows** (pwsh composition), compaction long-session soak,
+12. **P2 — Windows** (pwsh composition), compaction long-session soak,
     group-task/IM live testing.
 
 ## 4. Hard-won contracts (do not relearn these)
@@ -107,8 +128,9 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 ## 5. Testing infrastructure & gotchas
 
 - App-side: `npm run test:dsh` (rimraf dist → compile:electron → 5 test
-  files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test` (8
-  files, mock-gateway based, no keys needed).
+  files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test`
+  (10 files now — attachment-store + mcp-bridge joined; mock-gateway based,
+  no keys needed).
 - **Run node --test with `--test-concurrency=1`** for the cowork suites;
   parallel files flake on ports.
 - **Session fixtures must clean their userData BEFORE the run** — a hung run
@@ -134,6 +156,12 @@ only for small soak fixes (precedent set this session).
 
 ## 7. Suggested opening move for the next session
 
-Start with backlog items 1–3 (P0): image blocks, empty-terminal continue,
-MCP servers. All three have clear technical approaches in §3 and existing
-test patterns to extend (host-tool-bridge / policy-bridge / m3-config tests).
+P0 items 1–3 are DONE on `feat/dsh-p0-parity` (see §3) — the branch awaits
+merge review. Continue with the P1 tier, in this order: (5) prompt
+attachments — the attachment store from item 1 is the landing zone, and the
+image-capable route plumbing (input declaration + degrade note) already
+exists to copy for user-content images; (6) AskUserQuestion via
+`dsh-tool-ask-user` + approval bridge; (7) read-image guard + dedup through
+the policy bridge (item 1 made `read_image` live, so the N1 guard now has
+something to gate). All three have existing test patterns to extend
+(host-tool-bridge / approval-channel / policy-bridge).
