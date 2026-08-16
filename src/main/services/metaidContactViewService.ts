@@ -85,11 +85,16 @@ export class MetaIDContactViewService {
       direct_count: number;
     }>(`
       SELECT p.globalmetaid,
-             MAX(e.started_at) AS last_seen_at,
+             MAX(COALESCE(ev.last_occurred, e.updated_at, e.started_at)) AS last_seen_at,
              COUNT(DISTINCT e.id) AS interaction_count,
              COUNT(DISTINCT CASE WHEN e.episode_type = 'direct_interaction' THEN e.id END) AS direct_count
       FROM metaid_experience_participants p
       JOIN metaid_experience_episodes e ON e.id = p.episode_id
+      LEFT JOIN (
+        SELECT episode_id, MAX(occurred_at) AS last_occurred
+        FROM metaid_experience_evidence
+        GROUP BY episode_id
+      ) ev ON ev.episode_id = e.id
       WHERE e.owner_globalmetaid = ?
         AND p.globalmetaid IS NOT NULL
         AND p.globalmetaid != ''
@@ -150,7 +155,11 @@ export class MetaIDContactViewService {
     };
   }
 
-  /** Resolve a display name for a GlobalMetaID (local bot > peer name > group sender name). */
+  /**
+   * Display-name only. The contact itself is always keyed by GlobalMetaID;
+   * names (Twin Bot / WuFenGBot / …) may change and must never be used as
+   * identity. Local bot name > latest session peer_name > group sender name.
+   */
   resolveContactName(globalMetaID: unknown): string | null {
     const id = normalizeGlobalMetaID(globalMetaID);
     if (!id) {

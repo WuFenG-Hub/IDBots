@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { ClipboardIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
 import type {
   CoworkMetaIDContactDetail,
@@ -6,6 +7,53 @@ import type {
   CoworkMetaIDImpressionObservation,
   CoworkUserMemoryEntry,
 } from '../../types/cowork';
+
+/** Display-only abbreviation of a GlobalMetaID. Identity remains the full value. */
+export function abbreviateGlobalMetaId(globalMetaId: string): string {
+  const id = globalMetaId.trim();
+  if (id.length <= 16) return id;
+  return `${id.slice(0, 8)}…${id.slice(-6)}`;
+}
+
+export function ContactGlobalMetaIdHint(props: {
+  globalMetaId: string;
+  className?: string;
+}): React.ReactElement {
+  const { globalMetaId, className } = props;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(globalMetaId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  return (
+    <div className={`flex items-center gap-1 min-w-0 ${className ?? ''}`}>
+      <span
+        className="font-mono text-[10px] truncate opacity-55 dark:text-claude-darkTextSecondary text-claude-textSecondary"
+        title={globalMetaId}
+      >
+        {abbreviateGlobalMetaId(globalMetaId)}
+      </span>
+      <button
+        type="button"
+        onClick={(event) => { void handleCopy(event); }}
+        title={copied ? i18nService.t('metaidContactCopied') : i18nService.t('metaidContactCopyId')}
+        aria-label={copied ? i18nService.t('metaidContactCopied') : i18nService.t('metaidContactCopyId')}
+        className="flex-shrink-0 rounded p-0.5 opacity-40 hover:opacity-80 transition-opacity dark:text-claude-darkTextSecondary text-claude-textSecondary"
+      >
+        <ClipboardIcon className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
 
 interface MetaIDContactPanelProps {
   detail: CoworkMetaIDContactDetail;
@@ -188,8 +236,17 @@ const MetaIDContactPanel: React.FC<MetaIDContactPanelProps> = ({
   const [expandedObservationId, setExpandedObservationId] = useState<string | null>(null);
   const { snapshot, observations, episodes } = detail;
 
+  const subjectName = detail.subjectName?.trim() || i18nService.t('coworkMemoryPeerUnknown');
+
   return (
     <div className="space-y-4">
+      <div>
+        <div className="text-sm font-medium dark:text-claude-darkText text-claude-text break-words">
+          {subjectName}
+        </div>
+        <ContactGlobalMetaIdHint globalMetaId={detail.subjectGlobalMetaID} className="mt-0.5" />
+      </div>
+
       {/* Layer 1: overall impression */}
       <div className="rounded-lg border px-3 py-3 dark:border-claude-darkBorder border-claude-border">
         <div className="flex items-center justify-between gap-3">

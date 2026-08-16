@@ -20,7 +20,7 @@ import type {
   CoworkKnowledgeEntry,
   CoworkKnowledgeKind,
 } from '../../types/cowork';
-import MetaIDContactPanel from './MetaIDContactPanel';
+import MetaIDContactPanel, { ContactGlobalMetaIdHint } from './MetaIDContactPanel';
 import BrainIcon from '../icons/BrainIcon';
 
 type MetabotOption = {
@@ -958,6 +958,7 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
                   >
                     <div className="flex-1 min-w-0">
                       <div className="font-medium dark:text-claude-darkText text-claude-text break-words">{name}</div>
+                      <ContactGlobalMetaIdHint globalMetaId={contact.globalMetaID} className="mt-0.5" />
                       <div className="mt-0.5 dark:text-claude-darkTextSecondary text-claude-textSecondary">
                         {`${i18nService.t('metaidContactLastSeen')}: ${formatTimestamp(contact.lastSeenAt)}`}
                       </div>

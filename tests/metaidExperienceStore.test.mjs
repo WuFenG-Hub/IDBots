@@ -179,3 +179,85 @@ test('identity and source constraints reject guesses and malformed records', asy
   }), /Evidence publisher GlobalMetaID is invalid/);
   assert.deepEqual(store.listEpisodes({ ownerGlobalMetaID: OWNER, subjectGlobalMetaID: 'gmid-subject' }), []);
 });
+
+test('listEpisodes time window includes long-lived episodes with later evidence', async () => {
+  const db = await createLegacyMemoryDb();
+  const store = new MetaIDExperienceStore(db, () => {}, () => 1_000);
+  const startedAt = Date.UTC(2026, 3, 28);
+  const laterEvidenceAt = Date.UTC(2026, 7, 16);
+  const { episode } = store.createEpisode({
+    ownerGlobalMetaID: OWNER,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:peer-ongoing',
+    startedAt,
+  });
+  store.addParticipant({
+    episodeId: episode.id,
+    globalMetaID: SUBJECT,
+    role: 'peer',
+    source: 'test',
+  });
+  store.addEvidence({
+    episodeId: episode.id,
+    evidenceType: 'message',
+    sourceKey: 'message-later',
+    publisherGlobalMetaID: SUBJECT,
+    occurredAt: laterEvidenceAt,
+  });
+
+  const august = store.listEpisodes({
+    ownerGlobalMetaID: OWNER,
+    fromTime: Date.UTC(2026, 7, 16),
+    toTime: Date.UTC(2026, 7, 17),
+  });
+  assert.deepEqual(august.map((row) => row.id), [episode.id]);
+
+  const may = store.listEpisodes({
+    ownerGlobalMetaID: OWNER,
+    fromTime: Date.UTC(2026, 4, 1),
+    toTime: Date.UTC(2026, 4, 2),
+  });
+  assert.deepEqual(may, []);
+});
+
+test('listEvidence can bound a long-lived episode to a day window', async () => {
+  const db = await createLegacyMemoryDb();
+  const store = new MetaIDExperienceStore(db, () => {}, () => 1_800_000_000_000);
+  const episode = store.createEpisode({
+    ownerGlobalMetaID: OWNER,
+    episodeType: 'direct_interaction',
+    sourceChannel: 'metaweb_private',
+    sourceKey: 'a2a:long',
+    startedAt: Date.UTC(2026, 3, 28),
+  }).episode;
+  store.addEvidence({
+    episodeId: episode.id,
+    evidenceType: 'message',
+    sourceKey: 'old-1',
+    occurredAt: Date.UTC(2026, 3, 28, 12),
+  });
+  store.addEvidence({
+    episodeId: episode.id,
+    evidenceType: 'message',
+    sourceKey: 'day-1',
+    occurredAt: Date.UTC(2026, 7, 16, 10),
+  });
+  store.addEvidence({
+    episodeId: episode.id,
+    evidenceType: 'message',
+    sourceKey: 'day-2',
+    occurredAt: Date.UTC(2026, 7, 16, 18),
+  });
+
+  const all = store.listEvidence(episode.id);
+  assert.equal(all.length, 3);
+  assert.equal(all[0].sourceKey, 'old-1');
+
+  const day = store.listEvidence(episode.id, {
+    fromTime: Date.UTC(2026, 7, 16),
+    toTime: Date.UTC(2026, 7, 17),
+    limit: 32,
+  });
+  assert.deepEqual(day.map((row) => row.sourceKey), ['day-2', 'day-1']);
+});
