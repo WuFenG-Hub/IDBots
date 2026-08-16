@@ -1434,6 +1434,9 @@ export interface CoworkRunnerOptions {
   twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   /** When set, returns enabled user-configured MCP servers for local execution. */
   mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  /** Re-read every turn: the user-managed DSH plugin directory feeds runtime
+   * composition entries here (installs apply on the next turn). */
+  dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
   /** When set, opens a local MetaApp and returns the resolved local URL. */
   openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   /** When set, resolves a local MetaApp URL without opening it. */
@@ -1538,6 +1541,7 @@ export class CoworkRunner extends EventEmitter {
   private twinTaskCancel?: (sessionId: string, taskId: string) => Promise<unknown> | unknown;
   private twinTaskReassign?: (sessionId: string, input: Record<string, unknown>) => Promise<DelegateLocalWorkerResult>;
   private mcpServerProvider?: () => UserConfiguredMcpServerDefinition[];
+  dshExtraEntriesProvider?: () => Array<{ id: string; name: string; config: Record<string, unknown> }>;
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private requestIMSessionReset?: (sessionId: string) => boolean;
@@ -1618,6 +1622,7 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
+    this.dshExtraEntriesProvider = options.dshExtraEntriesProvider;
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
@@ -5718,6 +5723,7 @@ export class CoworkRunner extends EventEmitter {
       this.dshTurnHub = new DshTurnHub({
         sessionRoot: dshSessionRootFor(app.getPath('userData')),
         extraEntries: this.dshRuntimeExtraEntries,
+        extraEntriesProvider: this.dshExtraEntriesProvider,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
         // Same user MCP store the Claude path mounts (mcpServerProvider returns

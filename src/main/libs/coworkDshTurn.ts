@@ -131,6 +131,10 @@ export interface DshHubOptions {
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
   extraEntries?: Array<Record<string, unknown>>
+  /** Re-read every turn (unlike the static extraEntries): the user-managed
+   * plugin directory feeds entries here, so an install/uninstall applies on
+   * the next turn — config-change restart waits for quiescence as usual. */
+  extraEntriesProvider?: () => Array<Record<string, unknown>>
 }
 
 export class DshTurnHub {
@@ -262,7 +266,7 @@ export class DshTurnHub {
       // every new session's prompt from restarting the shared runtime.
       workspace: this.workspaceSeen ?? input.workspace,
       mcpServers: [...this.mcpServersSeen.values()],
-      extraEntries: this.opts.extraEntries,
+      extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —
         // it never enters the generated config file on disk.

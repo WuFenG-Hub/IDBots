@@ -61,6 +61,7 @@ import {
 } from './sdkCronBridge';
 import { SdkCronHostTriggerLogStore, SdkCronHostTriggerBridge, findScheduledTasksJsonFiles } from './sdkCronHostTrigger';
 import type { SdkCronMirrorBridge } from './libs/coworkRunner';
+import { dshPluginsDirFor, resolveDshPluginEntries } from './libs/dshPluginManager';
 import { GroupTaskStore, setGroupTaskStoreStatusBroadcaster, type GroupTaskStatus } from './groupTaskStore';
 import { OpenTeamMembershipStore } from './openTeamMembershipStore';
 import { OrchestrationStore } from './orchestrationStore';
@@ -4788,6 +4789,12 @@ const getCoworkRunner = () => {
       knowledgeStore: getMetaIDKnowledgeStore(),
       episodeTimelineProvider: getMetaIDExperienceStore(),
       mcpServerProvider: () => getMcpStore().getEnabledServers(),
+      // User-managed DSH plugin directory (userData/dsh-plugins): entries are
+      // re-resolved every turn, so an install applies on the next turn and a
+      // config change restarts the runtime only after in-flight turns settle.
+      dshExtraEntriesProvider: () => resolveDshPluginEntries(
+        dshPluginsDirFor(app.getPath('userData'))
+      ),
       getMetabotById: (id: number) => {
         const m = getMetabotStore().getMetabotById(id);
         return m ? {
