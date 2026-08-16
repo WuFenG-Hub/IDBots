@@ -74,6 +74,23 @@ export interface DshPromptSectionInput {
   text: string
 }
 
+/**
+ * A user-configured MCP server for the runtime composition: one
+ * dsh-mcp-client plugin entry per server (`mcp__<name>__<tool>` naming).
+ * Structurally compatible with the app's UserConfiguredMcpServerDefinition
+ * (transportType stays `string`; the generator validates and skips unknown
+ * transports instead of failing the composition).
+ */
+export interface DshMcpServerDefinition {
+  name: string
+  transportType: string
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+}
+
 export interface DshRuntimeConfigInput {
   sessionRoot: string
   providers: DshProviderRoute[]
@@ -81,6 +98,8 @@ export interface DshRuntimeConfigInput {
   shaping?: { maxChars?: number; tailChars?: number }
   hostTools?: Array<{ name: string; description: string; parameters: Record<string, unknown> }>
   workspace?: { cwd: string }
+  /** User-configured MCP servers mounted as dsh-mcp-client plugin entries. */
+  mcpServers?: DshMcpServerDefinition[]
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>

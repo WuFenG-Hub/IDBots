@@ -15,6 +15,7 @@ import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
+  DshMcpServerDefinition,
   DshPromptSectionInput,
   DshProviderRoute,
   DshRuntimeConfigInput,
@@ -118,6 +119,9 @@ export interface DshHubOptions {
   executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }>
   /** Host permission chain for runtime-native tools (bash/write/edit…). */
   evaluatePolicy?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }>
+  /** User-configured MCP servers, read fresh each turn (additions mount on the
+   * next turn; the config union never removes until restart, same as providers). */
+  mcpServersProvider?: () => DshMcpServerDefinition[]
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -229,9 +233,16 @@ export class DshTurnHub {
   /** Provider routes accumulated across sessions — the runtime serves a UNION
    * so a new provider never rewrites (and restarts over) an existing one. */
   private providersSeen = new Map<string, DshProviderRoute & { apiKeyEnvName?: string }>()
+  /** MCP servers accumulated the same way: user-level (not per-session), and a
+   * removal keeps serving until the runtime restarts — same trade as providers. */
+  private mcpServersSeen = new Map<string, DshMcpServerDefinition>()
 
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
     this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
+    for (const server of this.opts.mcpServersProvider?.() ?? []) {
+      const name = String(server?.name ?? '').trim()
+      if (name) this.mcpServersSeen.set(name, server)
+    }
     const config: DshRuntimeConfigInput = {
       sessionRoot: this.opts.sessionRoot,
       providers: [...this.providersSeen.values()],
@@ -239,6 +250,7 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting the shared runtime.
       workspace: this.workspaceSeen ?? input.workspace,
+      mcpServers: [...this.mcpServersSeen.values()],
       extraEntries: this.opts.extraEntries,
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —

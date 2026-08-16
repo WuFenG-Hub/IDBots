@@ -5683,6 +5683,10 @@ export class CoworkRunner extends EventEmitter {
         extraEntries: this.dshRuntimeExtraEntries,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
+        // Same user MCP store the Claude path mounts (mcpServerProvider returns
+        // the enabled definitions); the runtime mounts each as a dsh-mcp-client
+        // entry exposing mcp__<name>__<tool> tools.
+        mcpServersProvider: () => this.mcpServerProvider?.() ?? [],
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
