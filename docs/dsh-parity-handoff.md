@@ -1,6 +1,6 @@
 # DSH Kernel Migration — Handoff Document
 
-Last updated: 2026-08-16 (session 3) · Branch: `feat/dsh-p1-parity` (unpushed; P0 merged to main as `0ffbd3e4`) · Author: ZCode sessions 2026-08-15~16
+Last updated: 2026-08-16 (session 3, P1 complete) · Branch: `feat/dsh-p1-parity` (unpushed; P0 merged to main as `0ffbd3e4`) · Author: ZCode sessions 2026-08-15~16
 Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 
 ## 1. Where we are
@@ -93,10 +93,17 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    Also: `c4984c85` fixed a latent interleave-test race (two concurrent turns
    on ONE DSH session id clobbered the controller — passes were timing luck).
 
-**Remaining backlog (next session):**
+8. ✅ **P1 — Stall watchdog** (session 3, `feat/dsh-p1-parity`): a
+   TURN-LEVEL deadline for DSH turns (`dshTurnStallTimeoutMs`, default
+   DSH_TURN_STALL_TIMEOUT_MS = 10 min — note the claude path's
+   localTurnStallWatchdog is only steer-channel bookkeeping, not a turn
+   deadline, so this is new policy for both). On fire: hub.cancel; a pending
+   permission/ask dialog extends the deadline instead of firing through it;
+   the non-user `aborted` settlement lands idle + a localized diagnostic
+   (metadata `dshTurnStalled` + i18n key `coworkDshTurnStalled`), never a
+   hollow completed. App-side E2E with a wedged-provider mock fixture.
 
-8. **P1 — Stall watchdog**: claude path has `localTurnStallWatchdog`; add a
-   turn-level timeout for DSH (hub.runTurn race with timeout → cancel).
+**Remaining backlog (next session):**
 9. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
    only; map `subagent.started/finished` → the renderer's task Redux channel
    (find the task event channel in main.ts).
@@ -140,7 +147,7 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 ## 5. Testing infrastructure & gotchas
 
-- App-side: `npm run test:dsh` (rimraf dist → compile:electron → 5 test
+- App-side: `npm run test:dsh` (rimraf dist → compile:electron → 6 test
   files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test`
   (11 files now — attachment-store, mcp-bridge, ask-bridge joined;
   mock-gateway based, no keys needed).
@@ -169,11 +176,12 @@ only for small soak fixes (precedent set this session).
 
 ## 7. Suggested opening move for the next session
 
-P0 (merged to main as `0ffbd3e4`) and the first three P1 items (§3 items
-5–7, on `feat/dsh-p1-parity`) are DONE — the branch awaits merge review.
-Next: (8) the DSH stall watchdog, the last P1 item — claude path reference is
-`localTurnStallWatchdog` in runClaudeCodeLocal; a hub.runTurn race with a
-timeout → cancel should carry it. Then the P2 tier. Watch out when testing:
+The full P1 tier is DONE on `feat/dsh-p1-parity` (§3 items 5–8: prompt
+image attachments, ask_user_question, Read guards, stall watchdog) — the
+branch awaits merge review. Next session: the P2 tier (§3 items 9–12),
+opening with the DSH plugin install flow (npm-install into userData,
+absolute-path extraEntries, persisted list in app_config — the config-change
+auto-restart already works). Watch out when testing:
 orphan mock/runtime processes on 487xx poison later runs (`lsof -ti :4879x |
 xargs kill; pkill -f cordis.runtime`), and the interleave-test race fix
 (c4984c85) documents why two concurrent turns must never share one DSH
