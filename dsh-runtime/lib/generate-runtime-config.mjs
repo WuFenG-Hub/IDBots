@@ -45,7 +45,9 @@ const API_FORMAT_TO_PROTOCOL = {
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
-/** DeepSeek official wire: thinking disabled (`off`) or reasoning_effort high/max. */
+/** DeepSeek official wire: thinking disabled (`off`) or reasoning_effort high/max.
+ *  The host maps UI 快速 (`low`) to `off` before session/ensure; `low`/`medium`
+ *  stay aliased here only as a last-resort if a caller still sends those ids. */
 const DEEPSEEK_REASONING_EFFORTS = {
   off: null,
   low: 'high',

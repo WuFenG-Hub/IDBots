@@ -843,11 +843,36 @@ export const shouldRunOrderFocusRequest = (
 export const resolveAutoScrollBehavior = (
   previousSessionId: string | null,
   currentSessionId: string | null,
-): ScrollBehavior => (
-  previousSessionId && currentSessionId && previousSessionId === currentSessionId
+  options?: { streaming?: boolean },
+): ScrollBehavior => {
+  // Streaming follow must be instant. Overlapping `behavior: 'smooth'`
+  // animations (and the scroll events they emit) fight layout growth from
+  // the next chunk — the whole transcript appears to jitter. Session switch
+  // already jumps; only discrete same-session arrivals stay smooth.
+  if (options?.streaming) return 'auto';
+  return previousSessionId && currentSessionId && previousSessionId === currentSessionId
     ? 'smooth'
-    : 'auto'
-);
+    : 'auto';
+};
+
+export const pinScrollToBottom = (element: HTMLElement | null): void => {
+  if (!element) return;
+  element.scrollTop = element.scrollHeight;
+};
+
+export const buildAutoScrollFollowSignal = (
+  messages: Array<{ id: string; content: string; metadata?: { isStreaming?: boolean } }> | undefined,
+  isStreaming: boolean,
+): string => {
+  if (!messages?.length) return '';
+  if (!isStreaming) {
+    const last = messages[messages.length - 1];
+    return `${last.id}:${last.content}`;
+  }
+  const live = messages.filter((message) => message.metadata?.isStreaming);
+  const source = live.length > 0 ? live : messages.slice(-1);
+  return source.map((message) => `${message.id}:${message.content.length}`).join('|');
+};
 
 const buildDisplayItems = (messages: CoworkMessage[]): DisplayItem[] => {
   const items: DisplayItem[] = [];
@@ -1983,6 +2008,7 @@ const ThinkingBlock: React.FC<{
 }> = ({ message, mapDisplayText }) => {
   const isCurrentlyStreaming = Boolean(message.metadata?.isStreaming);
   const [isExpanded, setIsExpanded] = useState(isCurrentlyStreaming);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
 
   // Auto-expand while streaming, auto-collapse when streaming completes
@@ -1993,6 +2019,11 @@ const ThinkingBlock: React.FC<{
       setIsExpanded(false);
     }
   }, [isCurrentlyStreaming]);
+
+  useLayoutEffect(() => {
+    if (!isCurrentlyStreaming) return;
+    pinScrollToBottom(bodyRef.current);
+  }, [isCurrentlyStreaming, displayContent]);
 
   return (
     <div className="rounded-lg border dark:border-claude-darkBorder/50 border-claude-border/50 overflow-hidden">
@@ -2013,7 +2044,7 @@ const ThinkingBlock: React.FC<{
         )}
       </button>
       {isExpanded && (
-        <div className="px-3 pb-3 max-h-64 overflow-y-auto">
+        <div ref={bodyRef} className="px-3 pb-3 max-h-64 overflow-y-auto overflow-anchor-none">
           <div className="text-xs leading-relaxed dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 whitespace-pre-wrap">
             {displayContent}
           </div>
@@ -2415,6 +2446,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const consumedOrderFocusKeyRef = useRef<string | null>(null);
   const lastAutoScrollSessionIdRef = useRef<string | null>(null);
   const skipNextAutoScrollEffectRef = useRef(false);
+  const pinningScrollRef = useRef(false);
   const focusHighlightTimeoutRef = useRef<number | null>(null);
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const historyLoadInFlightRef = useRef(false);
@@ -3145,6 +3177,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [currentSession?.id, currentSession?.sessionType, currentSession?.messageHistory]);
 
   const handleMessagesScroll = useCallback(() => {
+    if (pinningScrollRef.current) return;
     const container = scrollContainerRef.current;
     if (!container) return;
     const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
@@ -3155,9 +3188,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, [loadEarlierMessages]);
 
-  // Get the last message content for auto-scroll on streaming updates
-  const lastMessage = currentSession?.messages?.[currentSession.messages.length - 1];
-  const lastMessageContent = lastMessage?.content;
+  const autoScrollFollowSignal = buildAutoScrollFollowSignal(currentSession?.messages, isStreaming);
 
   const resolveLocalFilePath = useCallback((href: string, text: string) => {
     const hrefValue = typeof href === 'string' ? href.trim() : '';
@@ -3223,8 +3254,10 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     }
   }, []);
 
-  // Auto scroll to bottom when new messages arrive or content updates (streaming)
-  useEffect(() => {
+  // Stick to the bottom when new messages arrive or streaming content grows.
+  // useLayoutEffect runs before paint so the user never sees a frame where
+  // the transcript has grown and the viewport has not yet followed.
+  useLayoutEffect(() => {
     if (!shouldAutoScroll) {
       return;
     }
@@ -3232,14 +3265,24 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       skipNextAutoScrollEffectRef.current = false;
       return;
     }
+    const sessionId = currentSession?.id ?? null;
+    if (isStreaming) {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+      pinningScrollRef.current = true;
+      pinScrollToBottom(container);
+      pinningScrollRef.current = false;
+      lastAutoScrollSessionIdRef.current = sessionId;
+      return;
+    }
     if (messagesEndRef.current) {
-      const sessionId = currentSession?.id ?? null;
       messagesEndRef.current.scrollIntoView({
         behavior: resolveAutoScrollBehavior(lastAutoScrollSessionIdRef.current, sessionId),
+        block: 'end',
       });
       lastAutoScrollSessionIdRef.current = sessionId;
     }
-  }, [currentSession?.id, currentSession?.messages?.length, lastMessageContent, isStreaming, shouldAutoScroll]);
+  }, [currentSession?.id, autoScrollFollowSignal, isStreaming, shouldAutoScroll]);
 
   useEffect(() => {
     consumedOrderFocusKeyRef.current = null;
@@ -3641,7 +3684,7 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
       <div
         ref={scrollContainerRef}
         onScroll={handleMessagesScroll}
-        className="flex-1 overflow-y-auto min-h-0 pt-3"
+        className="flex-1 overflow-y-auto overflow-anchor-none min-h-0 pt-3"
       >
         {isA2ASession && isLoadingEarlierMessages && (
           <div className="flex items-center justify-center gap-2 px-4 py-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">

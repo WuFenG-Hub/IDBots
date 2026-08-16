@@ -36,13 +36,28 @@ test('mapDshReasoningEffort: auto (null) omits effort so the route default appli
   assert.equal(mapDshReasoningEffort('  '), undefined)
 })
 
-test('mapDshReasoningEffort: UI levels pass through as DSH ids', () => {
+test('mapDshReasoningEffort: generic dialect passes UI levels through as DSH ids', () => {
   const { mapDshReasoningEffort } = loadMapper()
   assert.equal(mapDshReasoningEffort('low'), 'low')
   assert.equal(mapDshReasoningEffort('medium'), 'medium')
   assert.equal(mapDshReasoningEffort('high'), 'high')
   assert.equal(mapDshReasoningEffort('max'), 'max')
   assert.equal(mapDshReasoningEffort('MAX'), 'max')
+})
+
+test('mapDshReasoningEffort: DeepSeek dialect maps 快速/标准 onto off/high', () => {
+  const { mapDshReasoningEffort } = loadMapper()
+  assert.equal(mapDshReasoningEffort('low', undefined, 'deepseek'), 'off')
+  assert.equal(mapDshReasoningEffort('minimal', undefined, 'deepseek'), 'off')
+  assert.equal(mapDshReasoningEffort('medium', undefined, 'deepseek'), 'high')
+  assert.equal(mapDshReasoningEffort('high', undefined, 'deepseek'), 'high')
+  assert.equal(mapDshReasoningEffort('max', undefined, 'deepseek'), 'max')
+  assert.equal(mapDshReasoningEffort('LOW', undefined, 'deepseek'), 'off')
+})
+
+test('mapDshReasoningEffort: DeepSeek 快速 wins over model thinking-enabled default', () => {
+  const { mapDshReasoningEffort } = loadMapper()
+  assert.equal(mapDshReasoningEffort('low', { type: 'enabled' }, 'deepseek'), 'off')
 })
 
 test('mapDshReasoningEffort: thinking disabled forces off', () => {
