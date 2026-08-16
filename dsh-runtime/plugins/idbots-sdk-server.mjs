@@ -16,6 +16,8 @@
 //                           provider/model override the stock wire lacks.
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
 //   idbots/ask/respond       { id, answers } → answer a pending user question
+//   idbots/usage             { sessionId } → token-meter session projections
+//                           (tokenUsage / contextPressure / contextBreakdown)
 //   idbots/ping            → extension presence canary
 //
 // Notifications we emit (beyond the stock session.event / session.status /
@@ -123,6 +125,16 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     // inject (not effect): the service may mount after this plugin; the
     // fiber activates whenever `userQuestions` becomes available.
     ctx.inject(['userQuestions'], () => this.idbotsRegisterAskProvider())
+    // Same reactive pattern for the projection registry: reading
+    // ctx.sessionProjections without declaring inject throws in cordis, and a
+    // hard inject would keep this plugin from ever mounting in compositions
+    // without idbots-session-projections. The fiber delivers the registry
+    // when present; idbots/usage answers available:false otherwise.
+    this.idbotsProjections = null
+    ctx.inject(['sessionProjections'], (projectionCtx) => {
+      this.idbotsProjections = projectionCtx.sessionProjections
+      return () => { this.idbotsProjections = null }
+    })
   }
 
   liveAgent(sessionId) {
@@ -145,10 +157,11 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/ask/respond': return this.idbotsAskRespond(params)
       case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
       case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
+      case 'idbots/usage': return this.idbotsUsage(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond', 'idbots/usage'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -532,6 +545,36 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   idbotsSubagentsList({ sessionId }) {
     const children = this.idbotsSubagentChildren.get(String(sessionId ?? '')) ?? []
     return { agents: children.map((c) => ({ ...c })) }
+  }
+
+  // ---- usage projections ------------------------------------------------------
+  //
+  // idbots/usage reads the official token-meter session projections through
+  // ctx.sessionProjections.snapshot(): the durable cumulative tokenUsage
+  // buckets (uncachedInput/output/cacheRead/cacheWrite — disjoint), the newest
+  // contextPressure sample, and the heuristic contextBreakdown composition.
+  // The snapshot is replay-derived, so it stays correct across runtime
+  // restarts (the resumed log refolds lazily). Graceful absence: a runtime
+  // composed without the projection registry or token-meter answers
+  // { available: false } and the host keeps its last persisted stats.
+
+  idbotsUsage({ sessionId }) {
+    const id = String(sessionId ?? '')
+    if (this.idbotsProjections === null) {
+      return { available: false, reason: 'session-projections not composed' }
+    }
+    const agent = this.idbotsAgents.get(id)
+    if (agent === undefined || agent?.session === undefined) {
+      return { available: false, reason: `no live agent for session ${id || '(none)'}` }
+    }
+    const snapshot = this.idbotsProjections.snapshot(agent.session)
+    return {
+      available: true,
+      asOfSeq: snapshot.asOfSeq,
+      tokenUsage: snapshot.values.tokenUsage ?? null,
+      contextPressure: snapshot.values.contextPressure ?? null,
+      contextBreakdown: snapshot.values.contextBreakdown ?? null,
+    }
   }
 
   idbotsSubagentsMessages({ sessionId, agentId, limit }) {

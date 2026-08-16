@@ -101,7 +101,15 @@ export function startMockServer(port = 48787) {
       // Realistic usage so token-meter accounting can cross compaction
       // thresholds: ~4 chars per token over the actual payload sizes.
       const requestChars = (parsed.messages ?? []).reduce((sum, m) => sum + String(m.content ?? '').length + String(JSON.stringify(m.tool_calls ?? '')).length, 0)
-      const usage = { prompt_tokens: Math.max(1, Math.ceil(requestChars / 4)), completion_tokens: Math.max(1, Math.ceil(reply.length / 4)) }
+      const promptTokens = Math.max(1, Math.ceil(requestChars / 4))
+      const usage = { prompt_tokens: promptTokens, completion_tokens: Math.max(1, Math.ceil(reply.length / 4)) }
+      // CACHE_HIT marker: report half the prompt as served from cache so
+      // usage-projection tests exercise the cacheRead bucket (pi-ai maps
+      // prompt_tokens_details.cached_tokens to cache-read and subtracts it
+      // from uncached input).
+      if (lastUserText.includes('CACHE_HIT')) {
+        usage.prompt_tokens_details = { cached_tokens: Math.floor(promptTokens / 2) }
+      }
       frame({ ...base, choices: [], usage: { ...usage, total_tokens: usage.prompt_tokens + usage.completion_tokens } })
       res.write('data: [DONE]\n\n')
       res.end()

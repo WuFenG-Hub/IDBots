@@ -151,6 +151,10 @@ export function generateRuntimeConfig(input) {
     { id: 'agent-loop', name: '@deepseek-ai/dsh-agent-loop' },
     // Transient provider failures (timeouts, 5xx) retry instead of killing the turn.
     { id: 'llm-retry', name: '@deepseek-ai/dsh-llm-retry' },
+    // Projection registry: token-meter (next entry) registers its tokenUsage /
+    // contextPressure / contextBreakdown units onto it; idbots-sdk-server's
+    // idbots/usage RPC reads them for the host's usage panel.
+    { id: 'session-projections', name: plugin('idbots-session-projections.mjs') },
     { id: 'token-meter', name: '@deepseek-ai/dsh-token-meter' },
     {
       id: 'compaction-basic',
