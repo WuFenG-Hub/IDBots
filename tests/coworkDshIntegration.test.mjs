@@ -83,6 +83,9 @@ class RecordingStore {
       searchDailySummaries: noMemories,
     }
   }
+  getMessageById(sessionId, messageId) {
+    return this.messages.find((m) => m.sessionId === sessionId && m.id === messageId) ?? null
+  }
   updateMessage(sessionId, messageId, updates) {
     const entry = this.messages.find((m) => m.sessionId === sessionId && m.id === messageId)
     if (!entry) return

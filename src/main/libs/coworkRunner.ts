@@ -11,10 +11,12 @@ import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-age
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
+import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
 import { foldDshUsageProjection } from './dshUsageProjection';
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
+import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkSteerChannel,
@@ -1594,6 +1596,22 @@ export class CoworkRunner extends EventEmitter {
   private pendingPermissions: Map<string, PendingPermission> = new Map();
   /** DSH runtime hub (M5): lazily created on the first DSH-routed session. */
   private dshTurnHub: DshTurnHub | null = null;
+  /**
+   * Throttles DSH renderer updates and defers SQLite writes until finalize —
+   * the same performance contract the Claude stream path already uses.
+   */
+  private readonly dshStreamUi = new DshStreamUiGate({
+    throttleMs: STREAM_UPDATE_THROTTLE_MS,
+    emitUpdate: (sessionId, messageId, content) => {
+      this.emit('messageUpdate', sessionId, messageId, content);
+    },
+    persistFinalize: (sessionId, messageId, content) => {
+      this.updateMessageMerged(sessionId, messageId, {
+        content,
+        metadata: { isStreaming: false, isFinal: true },
+      });
+    },
+  });
   /** Cowork session ids with an active DSH turn (native steer path). */
   private dshActiveTurns = new Set<string>();
   /** Test seam: extra runtime composition entries (fixture tools). */
@@ -1675,6 +1693,7 @@ export class CoworkRunner extends EventEmitter {
       new Error('Cowork steer input channel closed before delivery')
     );
     this.activeSessions.delete(sessionId);
+    this.dshStreamUi.clearSession(sessionId);
     // R1 会话结束对账：SDK 侧已删的会话内 cron 从镜像标记 deleted（幂等，失败仅告警）。
     if (this.sdkCronMirror) {
       try {
@@ -1907,6 +1926,15 @@ export class CoworkRunner extends EventEmitter {
       // Best-effort read; the estimator remains the fallback.
     }
     return null;
+  }
+
+  /**
+   * Overlay in-memory DSH streaming buffers onto a store-backed session view.
+   * Session switch reads SQLite, which no longer sees per-chunk content; this
+   * keeps the just-switched session showing the live tokens immediately.
+   */
+  overlayLiveStreamingMessages<T extends { id: string; messages?: CoworkMessage[] }>(session: T): T {
+    return this.dshStreamUi.applyOverlays(session);
   }
 
   /**
@@ -5864,6 +5892,15 @@ export class CoworkRunner extends EventEmitter {
       // Prompt attachments: collected from the ORIGINAL prompt (marker lines
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
+      // Same effort/thinking resolution the Claude path applies per query:
+      // session UI override wins, then the per-model default (DeepSeek auto
+      // is `max`). DSH previously dropped this, so the runtime always used
+      // the provider default (thinking ON, no reasoning_effort).
+      const modelOptions = resolveModelOptions(route.model);
+      const dshReasoningEffort = mapDshReasoningEffort(
+        activeSession.effortOverride ?? modelOptions?.reasoningEffort,
+        activeSession.thinkingOverride ?? modelOptions?.thinking,
+      );
       // Turn-level stall watchdog: cancel a turn that made no progress for
       // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
       // own timeout). A pending permission dialog means a human is the slow
@@ -5923,6 +5960,12 @@ export class CoworkRunner extends EventEmitter {
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
           thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
+          // Only DeepSeek openai-completions models declare reasoningEfforts.
+          // Passing effort on a hand-declared non-reasoning route throws
+          // UNSUPPORTED_REASONING_EFFORT before the request leaves the runtime.
+          ...((route.provider === 'deepseek' && route.apiFormat === 'openai' && dshReasoningEffort)
+            ? { reasoningEffort: dshReasoningEffort }
+            : {}),
           // Vision declaration rides the route (same knowledge source the
           // Claude path's read-image guard uses): pi-ai refuses image blocks
           // on text-only routes, and read_image/host image results gate on it.
@@ -5935,12 +5978,13 @@ export class CoworkRunner extends EventEmitter {
             return stored.id;
           },
           onMessageUpdate: (messageId, content) => {
-            this.updateMessageMerged(sessionId, messageId, { content, metadata: { isStreaming: true } });
-            this.emit('messageUpdate', sessionId, messageId, content);
+            // Match the Claude path: renderer updates are throttled, SQLite
+            // writes wait for finalize. Per-chunk persist starved the shared
+            // DSH notification pump and made session switching stall.
+            this.dshStreamUi.onUpdate(sessionId, messageId, content);
           },
           onMessageFinalize: (messageId, content) => {
-            this.updateMessageMerged(sessionId, messageId, { content, metadata: { isStreaming: false, isFinal: true } });
-            this.emit('messageUpdate', sessionId, messageId, content);
+            this.dshStreamUi.onFinalize(sessionId, messageId, content);
           },
           onUsage: (usage) => {
             activeSession.lastDshUsage = usage;
@@ -10627,6 +10671,12 @@ export class CoworkRunner extends EventEmitter {
   }
 
   private getMessageById(sessionId: string, messageId: string): CoworkMessage | undefined {
+    const store = this.store as CoworkStore & {
+      getMessageById?: (sessionId: string, messageId: string) => CoworkMessage | null;
+    };
+    if (typeof store.getMessageById === 'function') {
+      return store.getMessageById(sessionId, messageId) ?? undefined;
+    }
     const session = this.store.getSession(sessionId);
     return session?.messages?.find((message) => message.id === messageId);
   }
