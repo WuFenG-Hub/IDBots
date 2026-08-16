@@ -1,52 +1,52 @@
 {
-  "version": 1,
+  "version": 2,
   "actions": [
     {
-      "id": "send-chain",
+      "id": "post",
       "icon": "PaperAirplaneIcon",
       "color": "#3B82F6",
-      "skillMapping": "metabot-omni-caster",
+      "skillMapping": "metabot-post-buzz",
       "prompts": [
-        { "id": "send-buzz" },
-        { "id": "send-buzz-with-image" },
-        { "id": "inscribe-file" },
-        { "id": "send-chain-note" }
+        { "id": "post-text" },
+        { "id": "post-with-image" },
+        { "id": "upload-file" },
+        { "id": "weather-to-post", "skillMapping": "weather" }
       ]
     },
     {
-      "id": "read-chain",
-      "icon": "BookOpenIcon",
+      "id": "explore",
+      "icon": "GlobeAltIcon",
       "color": "#8B5CF6",
       "skillMapping": "metabot-omni-reader",
       "prompts": [
-        { "id": "latest-20-buzz" },
-        { "id": "buzz-hot" },
-        { "id": "user-latest" },
-        { "id": "open-buzz-metaapp", "skillMapping": null }
+        { "id": "open-agent-daily", "skillMapping": null },
+        { "id": "open-buzz", "skillMapping": null },
+        { "id": "latest-timeline" },
+        { "id": "find-a-metabot" }
       ]
     },
     {
-      "id": "chat",
-      "icon": "ChatBubbleLeftRightIcon",
+      "id": "collaborate",
+      "icon": "UsersIcon",
       "color": "#10B981",
-      "skillMapping": "metabot-chat",
+      "skillMapping": "metabot-group-task",
       "prompts": [
-        { "id": "open-chat-metaapp", "skillMapping": null },
-        { "id": "join-group", "skillMapping": "metabot-chat-groupchat" },
+        { "id": "start-group-task" },
+        { "id": "join-or-open-chat", "skillMapping": "metabot-chat-groupchat" },
         { "id": "send-dm", "skillMapping": "metabot-chat-privatechat" },
-        { "id": "group-reply-strategy", "skillMapping": "metabot-chat-groupchat" }
+        { "id": "brainstorm-in-group", "skillMapping": "metabot-chat-groupchat" }
       ]
     },
     {
-      "id": "more-skills",
-      "icon": "Squares2X2Icon",
+      "id": "create",
+      "icon": "SparklesIcon",
       "color": "#F59E0B",
-      "skillMapping": "create-plan",
+      "skillMapping": "metabot-metaapp",
       "prompts": [
-        { "id": "weather-to-buzz", "skillMapping": "weather" },
-        { "id": "develop-game-metaapp", "skillMapping": "metabot-create-metaapp" },
-        { "id": "tech-news-to-buzz", "skillMapping": "technology-news-search" },
-        { "id": "video-to-buzz", "skillMapping": "seedance" }
+        { "id": "develop-from-idea" },
+        { "id": "develop-game" },
+        { "id": "publish-metaapp" },
+        { "id": "browse-metaapps" }
       ]
     }
   ]
