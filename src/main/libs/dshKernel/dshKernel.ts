@@ -147,9 +147,22 @@ export class DshKernel {
     return this.client.request('session/ensure', input)
   }
 
-  async prompt(sessionId: string, text: string): Promise<{ messageId: string }> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    images?: DshHostToolImagePayload[]
+  ): Promise<{ messageId: string }> {
     this.requireClient()
-    return this.client.prompt(sessionId, [{ type: 'text', text }])
+    if (!images || images.length === 0) {
+      return this.client.prompt(sessionId, [{ type: 'text', text }])
+    }
+    // Image attachments ride the idbots/prompt extension: the runtime commits
+    // them through its attachment store and queues [text, ...image blocks].
+    return this.client.request('idbots/prompt', {
+      sessionId,
+      text,
+      ...(images.length > 0 ? { images } : {}),
+    })
   }
 
   async steer(sessionId: string, text: string): Promise<{ steered: boolean; messageId: string }> {

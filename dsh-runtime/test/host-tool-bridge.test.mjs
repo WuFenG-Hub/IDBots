@@ -167,6 +167,53 @@ const main = async () => {
       (r) => !JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')
     ))
 
+  // Turn 5: prompt attachments — idbots/prompt with images commits through
+  // the attachment store and lands the image in the user message (and thus in
+  // the next provider request). The pump now forwards every session's events,
+  // so wait on the image-bearing user/message event directly.
+  const attachSessionId = `${sessionId}-attach`
+  await client.request('session/ensure', { sessionId: attachSessionId, provider: 'mockgw', model: 'mock-1' })
+  // The pump forwards every session's events, so a bare turn/end waiter can
+  // resolve on an earlier session's trailing end — wait on attach-turn-specific
+  // content instead (its user/message image block, then its provider request).
+  const attachUserImage = waitForEvent((e) => e.type === 'user/message' && JSON.stringify(e).includes('"type":"image"'), 20000)
+  await client.request('idbots/prompt', {
+    sessionId: attachSessionId,
+    text: 'Analyze this attachment:\n附件路径: /tmp/shot.png',
+    images: [{ data: PNG_1x1_BASE64, mediaType: 'image/png', name: 'shot.png' }],
+  })
+  const attachMessage = await attachUserImage
+  const waitForRequest = async (needle, timeoutMs = 20000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const hit = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes(needle)).at(-1)
+      if (hit) return hit
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return undefined
+  }
+  record('idbots/prompt carries the image into the user message', JSON.stringify(attachMessage).includes('attachmentId'))
+  const attachFollowUp = await waitForRequest('附件路径: /tmp/shot.png')
+  record('prompt image reaches the provider request as image_url', Boolean(
+    attachFollowUp && JSON.stringify(attachFollowUp.body?.messages ?? []).includes('data:image/png;base64,')
+  ))
+
+  // Turn 6: same prompt on the TEXT-ONLY route — no image block may enter the
+  // user message; the omission note rides the text instead.
+  const attachTextSessionId = `${sessionId}-attach-text`
+  await client.request('session/ensure', { sessionId: attachTextSessionId, provider: 'mockgw-text', model: 'mock-1' })
+  await client.request('idbots/prompt', {
+    sessionId: attachTextSessionId,
+    text: 'Analyze this attachment:',
+    images: [{ data: PNG_1x1_BASE64, mediaType: 'image/png' }],
+  })
+  await waitForRequest('omitted — the active model does not accept image input')
+  const attachTextRequests = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('omitted — the active model does not accept image input'))
+  record('text-only prompt keeps images out of the user message (omission note)',
+    attachTextRequests.length > 0 && attachTextRequests.every(
+      (r) => !JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')
+    ))
+
   subscription.close()
   await client.close()
   server.close()

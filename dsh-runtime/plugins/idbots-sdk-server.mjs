@@ -103,6 +103,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'session/steer': return this.idbotsSteer(params)
       case 'session/cancel': return this.idbotsCancel(params)
       case 'session/ensure': return this.idbotsEnsureSession(params)
+      case 'idbots/prompt': return this.idbotsPrompt(params)
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
       case 'idbots/policy/respond': return this.idbotsPolicyRespond(params)
@@ -111,7 +112,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/approval/respond', 'idbots/tool/respond'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -163,6 +164,40 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
     agent.steer(message)
     return { steered: true, messageId: message.id }
+  }
+
+  // Prompt submission with optional image attachments: the host reads the
+  // image files (attachment marker lines carry no bytes over the wire), the
+  // runtime commits them through the attachments store and queues the user
+  // message as [text, ...image blocks] via the stock prompt path. Same route
+  // gate as tool-result images: a user message is durable history, so a
+  // text-only route never receives image blocks — an omission note rides the
+  // text instead.
+  async idbotsPrompt({ sessionId, text, images }) {
+    let content = [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text ?? '') }]
+    const imageList = Array.isArray(images) ? images.filter((image) => typeof image?.data === 'string' && image.data.length > 0) : []
+    if (imageList.length > 0) {
+      const rec = await this.getOrCreateSession(sessionId)
+      const agent = rec?.handle?.agent
+      const attachments = this.ctx.get('attachments')
+      const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
+      if (imageCapable) {
+        for (const image of imageList) {
+          const ref = await attachments.saveImage({
+            data: Uint8Array.from(Buffer.from(image.data, 'base64')),
+            mediaType: image.mediaType,
+            ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
+          })
+          content.push({ type: 'image', attachment: ref })
+        }
+      } else {
+        content = [{
+          type: 'text',
+          text: `${content[0].text}\n[idbots: ${imageList.length} attached image${imageList.length === 1 ? '' : 's'} omitted — the active model does not accept image input; their file paths stay in the text above]`,
+        }]
+      }
+    }
+    return this.prompt({ sessionId, contentBlocks: content })
   }
 
   async idbotsCancel({ sessionId, cause, keepInbox }) {

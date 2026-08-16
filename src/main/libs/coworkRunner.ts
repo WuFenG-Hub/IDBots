@@ -609,6 +609,21 @@ function isImageFilePath(filePath: string): boolean {
   return ext ? IMAGE_FILE_EXTENSIONS.has(ext) : false;
 }
 
+/** Media types the DSH attachment store accepts (magic-verified on save). */
+const DSH_IMAGE_MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+/** Store-side single-image byte cap (idbots-attachment-store LIMITS). */
+const DSH_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+function dshImageMediaTypeForPath(filePath: string): string | undefined {
+  return DSH_IMAGE_MEDIA_TYPES[path.extname(filePath).toLowerCase()];
+}
+
 /**
  * statSync wrapper that returns null instead of throwing (missing file,
  * permission errors). Used by the Read dedupe / vision guard before the SDK
@@ -5769,10 +5784,14 @@ export class CoworkRunner extends EventEmitter {
         .filter((section) => section?.trim())
         .join('\n\n')
       const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
-      const runTurnToOutcome = (turnPrompt: string) => hub.runTurn({
+      // Prompt attachments: collected from the ORIGINAL prompt (marker lines
+      // reference user files, not the volatile context head).
+      const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
+      const runTurnToOutcome = (turnPrompt: string, images?: DshHostToolImagePayload[]) => hub.runTurn({
         sessionId,
         dshSessionId,
         prompt: turnPrompt,
+        promptImages: images,
         hostTools,
         workspace: { cwd },
         sections: [
@@ -5853,7 +5872,7 @@ export class CoworkRunner extends EventEmitter {
         },
       });
 
-      let outcome = await runTurnToOutcome(effectiveDshPrompt);
+      let outcome = await runTurnToOutcome(effectiveDshPrompt, promptImages);
 
       // Empty terminal turn auto-continue (parity with the Claude path's
       // bf15f63d fix): DeepSeek occasionally ends a turn after emitting only a
@@ -6026,6 +6045,47 @@ export class CoworkRunner extends EventEmitter {
       })
       return { decision: 'deny', reason: 'permission policy evaluation failed' }
     }
+  }
+
+  /**
+   * Prompt image attachments for a DSH turn: the Claude path lets the CLI
+   * parse attachment marker lines into image blocks, but the DSH runtime has
+   * no prompt-side file parsing — the host reads the image files itself and
+   * the runtime commits them through its attachment store. Only media types
+   * the store accepts ride along; everything else stays a plain path
+   * reference in the text (the model can still open it with its read tools).
+   */
+  private async collectDshPromptImages(
+    prompt: string,
+    cwd: string,
+    supportsVision: boolean
+  ): Promise<DshHostToolImagePayload[]> {
+    const entries = this.parseAttachmentEntries(prompt)
+    if (entries.length === 0) return []
+    const images: DshHostToolImagePayload[] = []
+    for (const entry of entries) {
+      const resolved = path.resolve(this.resolveAttachmentPath(entry.rawPath, cwd))
+      const mediaType = dshImageMediaTypeForPath(resolved)
+      if (!mediaType) continue
+      try {
+        const stat = await fs.promises.stat(resolved)
+        if (!stat.isFile() || stat.size <= 0 || stat.size > DSH_IMAGE_MAX_BYTES) continue
+        const bytes = await fs.promises.readFile(resolved)
+        images.push({ data: bytes.toString('base64'), mediaType, name: path.basename(resolved) })
+      } catch {
+        // Unreadable attachment: leave the path reference in the text.
+      }
+    }
+    if (images.length === 0) return []
+    if (!supportsVision) {
+      // Parity with the Claude path's force-text-only note: the route cannot
+      // carry image blocks, so the attachments stay as text path references.
+      coworkLog('INFO', 'collectDshPromptImages', 'Model lacks image input; prompt attachments stay as text references', {
+        imageCount: images.length,
+      })
+      return []
+    }
+    return images
   }
 
   /** Execute a host-bridged tool call from the runtime. */

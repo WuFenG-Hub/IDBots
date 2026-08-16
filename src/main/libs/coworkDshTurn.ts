@@ -65,6 +65,8 @@ export interface DshTurnInput {
   sections: DshPromptSectionInput[]
   /** Full user-visible turn text (volatile context already prepended). */
   prompt: string
+  /** Image attachments to commit and send alongside the prompt text. */
+  promptImages?: DshHostToolImagePayload[]
   callbacks: DshTurnCallbacks
 }
 
@@ -164,7 +166,7 @@ export class DshTurnHub {
         sections: input.sections,
         hostTools: input.hostTools,
       })
-      await kernel.prompt(input.dshSessionId, input.prompt)
+      await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
       return await controller.done()
     } finally {
       this.controllersByDsh.delete(input.dshSessionId)
