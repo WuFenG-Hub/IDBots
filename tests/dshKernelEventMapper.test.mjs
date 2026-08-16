@@ -135,3 +135,41 @@ test('turn/end maps with reason; aborted carries the cause', () => {
   assert.equal(ended[0].reason.kind, 'aborted')
   assert.equal(ended[0].reason.reason, 'm1 wire cancel')
 })
+
+test('empty terminal turn flags a clean stop with no text and no tool calls', () => {
+  const mapper = new DshEventMapper()
+  // The DeepSeek truncation signature: only reasoning deltas, then a clean stop.
+  mapper.consume({ type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'thinking…' } } })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(ended[0].kind, 'turnEnd')
+  assert.equal(ended[0].emptyTerminal, true)
+})
+
+test('turn/end with text output is not an empty terminal turn', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({ type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'answer' } } })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(ended[0].emptyTerminal, undefined)
+})
+
+test('turn/end after tool calls is not an empty terminal turn', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({ type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{"command":"ls"}' } })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(ended[0].emptyTerminal, undefined)
+})
+
+test('empty-terminal flags reset between turns', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({ type: 'assistant/chunk', data: { turn: 1, step: 1, chunk: { type: 'text-delta', index: 0, text: 'hi' } } })
+  mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  // Next turn produces nothing at all — still empty (reasoning-only or fully silent).
+  const second = mapper.consume({ type: 'turn/end', data: { turn: 2, reason: { kind: 'stop' } } })
+  assert.equal(second[0].emptyTerminal, true)
+})
+
+test('non-stop reasons never flag empty terminal', () => {
+  const mapper = new DshEventMapper()
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
+  assert.equal(ended[0].emptyTerminal, undefined)
+})

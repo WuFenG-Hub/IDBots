@@ -20,9 +20,16 @@
 //   sections: [{ name, order, text }], // stable prompt layers (promptComposer)
 //   shaping?: { maxChars?, tailChars? },
 //   hostTools?: [{ name, description, parameters }], // proxies bridged to the host
+//   mcpServers?: [{ name, transportType: 'stdio'|'sse'|'http', command?, args?, env?, url?, headers? }],
+//                                        // user MCP servers → dsh-mcp-client entries
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
+//
+// Model entries accept an optional `input` modality array (['text','image']):
+// pi-ai refuses to convert images for a route whose model does not declare
+// image input, and read_image/host-bridged image results gate on it — a tool
+// result is durable history, so an undeclared route degrades to text instead.
 //
 // All providers ride one dsh-llm-pi-ai entry: pi-ai covers all three IDBots
 // apiFormats (openai-completions / openai-responses / anthropic-messages),
@@ -36,10 +43,56 @@ const API_FORMAT_TO_PROTOCOL = {
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
+/** One user MCP server → one dsh-mcp-client entry config; undefined skips. */
+const mcpEntryConfig = (server) => {
+  if (!server || typeof server !== 'object') return undefined
+  // serverName namespaces the model-facing tool names (mcp__<name>__<tool>) and
+  // must match [A-Za-z0-9_-]{1,32}; sanitizing keeps tool names stable.
+  const serverName = sanitizeRouteKey(String(server.name ?? '')).slice(0, 32)
+  if (serverName.length === 0) return undefined
+  if (server.transportType === 'stdio') {
+    const command = String(server.command ?? '').trim()
+    if (!command) return undefined
+    return {
+      transport: 'stdio',
+      serverName,
+      command,
+      ...(Array.isArray(server.args) && server.args.length > 0 ? { args: server.args.map(String) } : {}),
+      ...(server.env && typeof server.env === 'object' ? { env: server.env } : {}),
+    }
+  }
+  if (server.transportType === 'sse' || server.transportType === 'http') {
+    const url = String(server.url ?? '').trim()
+    if (!url) return undefined
+    return {
+      transport: 'streamable-http',
+      serverName,
+      url,
+      ...(server.headers && typeof server.headers === 'object' ? { headers: server.headers } : {}),
+    }
+  }
+  return undefined
+}
+
 // Absolute plugin paths so the generated config is location-independent: the
 // Electron main process writes it into userData, not next to the runtime dir.
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const plugin = (file) => fileURLToPath(new URL(`../plugins/${file}`, import.meta.url))
+
+/** Deduped dsh-mcp-client composition entries for the user's MCP servers. */
+const mcpEntries = (servers) => {
+  const byName = new Map()
+  for (const server of servers ?? []) {
+    const config = mcpEntryConfig(server)
+    if (config && !byName.has(config.serverName)) byName.set(config.serverName, config)
+  }
+  return [...byName.values()].map((config) => ({
+    id: `mcp-${config.serverName.toLowerCase()}`,
+    name: '@deepseek-ai/dsh-mcp-client',
+    config,
+  }))
+}
 
 export function generateRuntimeConfig(input) {
   if (!input?.sessionRoot || typeof input.sessionRoot !== 'string') {
@@ -71,6 +124,9 @@ export function generateRuntimeConfig(input) {
         name: model.id,
         contextWindow: model.contextWindow,
         ...Number.isFinite(model.maxOutputTokens) ? { maxTokens: model.maxOutputTokens } : {},
+        // Image-input declaration: routes default to text-only; a vision model
+        // declares ['text','image'] so image blocks can enter its history.
+        ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
       })),
       // thinkingFormat compat exists ONLY on the openai-completions protocol;
       // attaching it to a responses/anthropic route fails provider resolution.
@@ -108,6 +164,17 @@ export function generateRuntimeConfig(input) {
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
+    // Durable image storage: read_image and host-bridged image tool results
+    // commit bytes here before any image block enters session history.
+    {
+      id: 'attachment-store',
+      name: plugin('idbots-attachment-store.mjs'),
+      config: { root: join(input.sessionRoot, 'attachments') },
+    },
+    // User-configured MCP servers: one dsh-mcp-client entry each, tools land
+    // as mcp__<serverName>__<rawName>. A bad entry (missing command/url,
+    // unmatchable name) is skipped, not fatal — failOnStartupError stays off.
+    ...mcpEntries(input.mcpServers),
     // Model-facing subagent delegation (in-process spawn provider, foreground).
     { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
     { id: 'subagent-spawn-in-process', name: '@deepseek-ai/dsh-subagent-spawn-in-process', config: { providerName: 'spawn' } },

@@ -14,6 +14,8 @@ import { DshKernel } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
   DshApprovalAsk,
+  DshHostToolImagePayload,
+  DshMcpServerDefinition,
   DshPromptSectionInput,
   DshProviderRoute,
   DshRuntimeConfigInput,
@@ -32,6 +34,8 @@ export interface DshTurnProviderRoute {
   contextWindow?: number
   maxOutputTokens?: number
   thinkingFormat?: string
+  /** Input modalities the model declares (['text','image'] for vision models). */
+  inputModalities?: string[]
 }
 
 export interface DshTurnCallbacks {
@@ -64,11 +68,19 @@ export interface DshTurnInput {
   callbacks: DshTurnCallbacks
 }
 
+export interface DshTurnOutcome {
+  kind: string
+  reason?: string
+  /** True when the turn stopped cleanly having produced no text and no tool
+   * calls (the DeepSeek reasoning-only truncation signature). */
+  emptyTerminal?: boolean
+}
+
 class DshTurnController {
   readonly dshSessionId: string
   private readonly callbacks: DshTurnCallbacks
-  private settleTurn!: (reason: { kind: string; reason?: string }) => void
-  private readonly turnDone: Promise<{ kind: string; reason?: string }>
+  private settleTurn!: (reason: DshTurnOutcome) => void
+  private readonly turnDone: Promise<DshTurnOutcome>
   private steerWaiters: Array<(text: string) => void> = []
 
   constructor(input: DshTurnInput) {
@@ -77,12 +89,12 @@ class DshTurnController {
     this.turnDone = new Promise((resolve) => { this.settleTurn = resolve })
   }
 
-  done(): Promise<{ kind: string; reason?: string }> {
+  done(): Promise<DshTurnOutcome> {
     return this.turnDone
   }
 
-  handleTurnEnd(reason: { kind: string; reason?: string }): void {
-    this.settleTurn(reason)
+  handleTurnEnd(reason: { kind: string; reason?: string }, emptyTerminal?: boolean): void {
+    this.settleTurn(emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason)
     for (const waiter of this.steerWaiters.splice(0)) waiter('')
   }
 
@@ -103,10 +115,13 @@ export interface DshHubOptions {
   runtimeDir?: string
   /** Session-root directory under userData (versioned per format). */
   sessionRoot: string
-  /** Execute a host-bridged tool call; resolves {ok,text} or rejects. */
-  executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /** Execute a host-bridged tool call; resolves {ok,text,images?} or rejects. */
+  executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }>
   /** Host permission chain for runtime-native tools (bash/write/edit…). */
   evaluatePolicy?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }>
+  /** User-configured MCP servers, read fresh each turn (additions mount on the
+   * next turn; the config union never removes until restart, same as providers). */
+  mcpServersProvider?: () => DshMcpServerDefinition[]
   log?: DshKernelOptions['log']
   /** Extra composition entries for the runtime (test fixtures; later the
    * idbots tools/policy plugins mount here). */
@@ -130,7 +145,7 @@ export class DshTurnHub {
   }
 
   /** Start (or reuse) the runtime and run one turn to completion. */
-  async runTurn(input: DshTurnInput): Promise<{ kind: string; reason?: string }> {
+  async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
     const kernel = await this.ensureKernel(input)
     const controller = new DshTurnController(input)
     // One active turn per cowork session: a stray previous controller (e.g. a
@@ -218,9 +233,16 @@ export class DshTurnHub {
   /** Provider routes accumulated across sessions — the runtime serves a UNION
    * so a new provider never rewrites (and restarts over) an existing one. */
   private providersSeen = new Map<string, DshProviderRoute & { apiKeyEnvName?: string }>()
+  /** MCP servers accumulated the same way: user-level (not per-session), and a
+   * removal keeps serving until the runtime restarts — same trade as providers. */
+  private mcpServersSeen = new Map<string, DshMcpServerDefinition>()
 
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
     this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
+    for (const server of this.opts.mcpServersProvider?.() ?? []) {
+      const name = String(server?.name ?? '').trim()
+      if (name) this.mcpServersSeen.set(name, server)
+    }
     const config: DshRuntimeConfigInput = {
       sessionRoot: this.opts.sessionRoot,
       providers: [...this.providersSeen.values()],
@@ -228,6 +250,7 @@ export class DshTurnHub {
       // scoped registration) — keeping them out of the config is what stops
       // every new session's prompt from restarting the shared runtime.
       workspace: this.workspaceSeen ?? input.workspace,
+      mcpServers: [...this.mcpServersSeen.values()],
       extraEntries: this.opts.extraEntries,
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —
@@ -277,8 +300,8 @@ export class DshTurnHub {
       onUsage: (sessionId, usage) => {
         controllerOf(sessionId)?.cb.onUsage(usage)
       },
-      onTurnEnd: (sessionId, reason) => {
-        controllerOf(sessionId)?.handleTurnEnd(reason)
+      onTurnEnd: (sessionId, reason, emptyTerminal) => {
+        controllerOf(sessionId)?.handleTurnEnd(reason, emptyTerminal)
       },
       onApprovalRequest: (sessionId, ask) => {
         controllerOf(sessionId)?.cb.onApprovalRequest(ask)
@@ -329,6 +352,9 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
       id: provider.model,
       contextWindow: provider.contextWindow ?? 64000,
       ...Number.isFinite(provider.maxOutputTokens) ? { maxOutputTokens: provider.maxOutputTokens } : {},
+      ...(Array.isArray(provider.inputModalities) && provider.inputModalities.length > 0
+        ? { input: provider.inputModalities }
+        : {}),
     }],
   }
 }

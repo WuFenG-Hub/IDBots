@@ -218,6 +218,30 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // round-trips over the wire — idbots/tool/request notification out,
   // idbots/tool/respond back, idbots/tool/cancelled when the turn aborts
   // mid-call (the tool MUST settle on abort; that contract is enforced here).
+  //
+  // Image results: a respond may carry `images: [{ data: <base64>, mediaType,
+  // name? }]` alongside `text`. Each image is committed through the
+  // attachments service (durable, content-addressed) and rendered as a DSH
+  // image block next to the text. The route is gated first — a tool result is
+  // durable session history, so emitting an image on a route whose model does
+  // not declare image input would poison that session's continuation with a
+  // permanent conversion error. Non-image routes (or a missing attachment
+  // store) degrade to text plus an omission note instead.
+
+  /** True when the calling agent's resolved route declares image input. */
+  async idbotsRouteAcceptsImages(agent) {
+    try {
+      const routed = agent?.session?.requestHeader?.()?.config
+      const provider = routed?.provider ?? agent?.options?.provider
+      const model = routed?.model ?? agent?.options?.model
+      const llm = this.ctx.get('llm')
+      if (provider === undefined || model === undefined || llm === undefined) return false
+      const info = await llm.resolveModelInfo(provider, model)
+      return info?.inputModalities?.includes('image') === true
+    } catch {
+      return false
+    }
+  }
 
   /** Build one host-bridged tool proxy (shared by global and agent-scoped registration). */
   idbotsMakeHostTool(definition) {
@@ -228,12 +252,29 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         parameters: definition.parameters,
         output: {
           schema: { type: 'object', additionalProperties: true },
-          render: (args, value) => [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }],
+          render: (args, value) => {
+            const blocks = [{ type: 'text', text: typeof value?.text === 'string' ? value.text : JSON.stringify(value) }]
+            for (const image of Array.isArray(value?.images) ? value.images : []) {
+              if (typeof image?.attachmentId !== 'string') continue
+              blocks.push({
+                type: 'image',
+                attachment: {
+                  attachmentId: image.attachmentId,
+                  mediaType: image.mediaType,
+                  bytes: image.bytes,
+                  width: image.width,
+                  height: image.height,
+                  ...image.name !== undefined ? { name: image.name } : {},
+                },
+              })
+            }
+            return blocks
+          },
         },
       execute: async (args, exec) => {
         const id = `tool-${Date.now().toString(36)}-${++server.idbotsToolSeq}`
         const pending = new Promise((resolve, reject) => {
-          server.idbotsToolPending.set(id, { resolve, reject })
+          server.idbotsToolPending.set(id, { resolve, reject, agent: exec.agent })
         })
         server.idbotsTransport.notify('idbots/tool/request', {
           id,
@@ -248,7 +289,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
           entry.reject(new Error('host tool call aborted'))
           server.idbotsTransport.notify('idbots/tool/cancelled', { id })
         }, { once: true })
-        return pending // { text } on success; throws on host error/abort
+        return pending // { text, images? } on success; throws on host error/abort
       },
     }
   }
@@ -277,7 +318,7 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
   }
 
-  async idbotsToolRespond({ id, ok, text, error }) {
+  async idbotsToolRespond({ id, ok, text, error, images }) {
     const entry = this.idbotsToolPending.get(String(id))
     if (entry === undefined) {
       throw new Error(`idbots-sdk-server: no pending host tool ${JSON.stringify(id)}`)
@@ -285,10 +326,39 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsToolPending.delete(String(id))
     if (ok === false) {
       entry.reject(new Error(typeof error === 'string' && error ? error : 'host tool failed'))
-    } else {
-      entry.resolve({ text: typeof text === 'string' ? text : JSON.stringify(text ?? null) })
+      return { answered: true, id }
     }
+    entry.resolve(await this.idbotsMaterializeToolValue(entry.agent, text, images))
     return { answered: true, id }
+  }
+
+  /**
+   * Turn a host respond into the tool's canonical value: commit image
+   * payloads through the attachments store when the route can carry them,
+   * degrade to a text note when it cannot. Never emits an image the active
+   * route rejects — the tool result is durable history.
+   */
+  async idbotsMaterializeToolValue(agent, text, images) {
+    const value = { text: typeof text === 'string' ? text : JSON.stringify(text ?? null) }
+    if (!Array.isArray(images) || images.length === 0) return value
+    const attachments = this.ctx.get('attachments')
+    const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
+    if (!imageCapable) {
+      return {
+        ...value,
+        text: `${value.text}\n[idbots: ${images.length} image${images.length === 1 ? '' : 's'} from this tool result omitted — the active model does not accept image input]`,
+      }
+    }
+    const saved = []
+    for (const image of images) {
+      if (typeof image?.data !== 'string' || image.data.length === 0) continue
+      saved.push(await attachments.saveImage({
+        data: Uint8Array.from(Buffer.from(image.data, 'base64')),
+        mediaType: image.mediaType,
+        ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
+      }))
+    }
+    return saved.length > 0 ? { ...value, images: saved } : value
   }
 
   // ---- host policy bridge ----------------------------------------------------

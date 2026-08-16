@@ -11,6 +11,7 @@ import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-age
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
+import type { DshHostToolImagePayload } from './dshKernel/types';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { loadClaudeSdk } from './claudeSdk';
 import {
@@ -5682,6 +5683,10 @@ export class CoworkRunner extends EventEmitter {
         extraEntries: this.dshRuntimeExtraEntries,
         executeTool: (coworkSessionId, name, args) => this.executeDshHostTool(coworkSessionId, name, args),
         evaluatePolicy: (coworkSessionId, name, args) => this.evaluateDshToolPolicy(coworkSessionId, name, args),
+        // Same user MCP store the Claude path mounts (mcpServerProvider returns
+        // the enabled definitions); the runtime mounts each as a dsh-mcp-client
+        // entry exposing mcp__<name>__<tool> tools.
+        mcpServersProvider: () => this.mcpServerProvider?.() ?? [],
         log: (level, message, detail) => coworkLog(level.toUpperCase() as 'INFO' | 'WARN' | 'ERROR', 'dshTurnHub', message, detail as Record<string, unknown> | undefined),
       });
     }
@@ -5764,10 +5769,10 @@ export class CoworkRunner extends EventEmitter {
         .filter((section) => section?.trim())
         .join('\n\n')
       const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
-      const outcome = await hub.runTurn({
+      const runTurnToOutcome = (turnPrompt: string) => hub.runTurn({
         sessionId,
         dshSessionId,
-        prompt: effectiveDshPrompt,
+        prompt: turnPrompt,
         hostTools,
         workspace: { cwd },
         sections: [
@@ -5786,6 +5791,10 @@ export class CoworkRunner extends EventEmitter {
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
           thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
+          // Vision declaration rides the route (same knowledge source the
+          // Claude path's read-image guard uses): pi-ai refuses image blocks
+          // on text-only routes, and read_image/host image results gate on it.
+          ...(modelLimits?.supportsVision ? { inputModalities: ['text', 'image'] } : {}),
         },
         callbacks: {
           onMessage: (message, slot) => {
@@ -5844,6 +5853,25 @@ export class CoworkRunner extends EventEmitter {
         },
       });
 
+      let outcome = await runTurnToOutcome(effectiveDshPrompt);
+
+      // Empty terminal turn auto-continue (parity with the Claude path's
+      // bf15f63d fix): DeepSeek occasionally ends a turn after emitting only a
+      // reasoning block — no text, no tool calls — a transient upstream
+      // behavior, not a real "done". Resume the same DSH session (full history
+      // preserved) with the shared continue cue, exactly like the manual
+      // "继续" workaround. At most once: a second consecutive empty turn falls
+      // through to the idle + diagnostic settlement below instead of looping.
+      if (outcome.emptyTerminal && !activeSession.abortController.signal.aborted) {
+        coworkLog(
+          'INFO',
+          'runDshSessionLocal',
+          'Empty terminal turn (DSH reasoning-only stop) — auto-continuing once',
+          { sessionId }
+        );
+        outcome = await runTurnToOutcome(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
+      }
+
       if (activeSession.abortController.signal.aborted) {
         this.addSystemMessage(sessionId, `Turn aborted: ${outcome.reason ?? 'cancelled'}.`);
         finish('idle');
@@ -5866,7 +5894,22 @@ export class CoworkRunner extends EventEmitter {
         this.dshActiveTurns.delete(sessionId);
         return;
       }
-      finish('completed');
+      // Empty terminal turn fallback: reached only when the auto-continue
+      // above already ran and the resumed turn was again empty. Do NOT falsely
+      // report `completed` — surface the same diagnostic the Claude path uses
+      // and leave the session `idle` so the user can re-send to continue.
+      // Still emit `complete` so automation waiters resolve (the orchestrator
+      // bridge treats an empty reply as a non-answer).
+      if (outcome.emptyTerminal) {
+        this.reportEmptyTerminalTurn(sessionId);
+        finish('idle');
+      } else {
+        finish('completed');
+      }
+      // Memory capture on turn completion — the Claude path runs this in every
+      // non-error settlement (local + sandbox); without it DSH turns never fed
+      // experience extraction. Kernel-agnostic: reads store messages only.
+      this.applyTurnMemoryUpdatesForSession(sessionId);
       this.emit('complete', sessionId, activeSession.claudeSessionId);
       // Same teardown the Claude path performs: without removing the active
       // session, the next submission is classified as a pending steer against
@@ -5990,7 +6033,7 @@ export class CoworkRunner extends EventEmitter {
     coworkSessionId: string,
     name: string,
     args: Record<string, unknown>
-  ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }> {
     const tool = this.dshHostToolRegistry.get(name)
     if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
     const policy = await this.evaluateDshToolPolicy(coworkSessionId, name, args)
@@ -6021,7 +6064,18 @@ export class CoworkRunner extends EventEmitter {
       if (Array.isArray(blocks)) {
         const text = blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
         if ((result as any)?.isError) return { ok: false, error: text || 'tool error' }
-        return { ok: true, text }
+        // Image blocks ride alongside the text (screenshot-style tools): the
+        // runtime commits them through its attachment store and renders them
+        // as image blocks — but only for routes that declare image input, so
+        // the runtime degrades to a text note instead of poisoning history.
+        const images = blocks
+          .filter((b) => b?.type === 'image' && typeof b?.data === 'string' && b.data.length > 0)
+          .map((b) => ({
+            data: b.data,
+            mediaType: typeof b?.mimeType === 'string' ? b.mimeType : 'image/png',
+            ...(typeof b?.name === 'string' && b.name.length > 0 ? { name: b.name } : {}),
+          }))
+        return images.length > 0 ? { ok: true, text, images } : { ok: true, text }
       }
       return { ok: true, text: JSON.stringify(result ?? null) }
     } catch (error) {

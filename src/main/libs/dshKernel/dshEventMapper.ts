@@ -25,6 +25,12 @@ export class DshEventMapper {
   private lastUsage: DshUsageSnapshot | null = null
   private provider: string | undefined
   private model: string | undefined
+  // Per-turn activity signals for the empty-terminal-turn guard: a turn that
+  // ends 'stop' having produced neither text nor tool calls ended before doing
+  // anything — the DeepSeek reasoning-only truncation the Claude path
+  // auto-continues on (bf15f63d). Flags reset at every turn/end.
+  private turnSawText = false
+  private turnSawToolCall = false
 
   consume(envelope: DshSessionEventEnvelope): DshMapperAction[] {
     const actions: DshMapperAction[] = []
@@ -59,6 +65,7 @@ export class DshEventMapper {
             })
           }
           this.textBuf += chunk.text ?? ''
+          if ((chunk.text ?? '').length > 0) this.turnSawText = true
           actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
         } else if (chunk?.type === 'reasoning-delta') {
           if (!this.thinkingOpen) {
@@ -102,6 +109,7 @@ export class DshEventMapper {
       }
 
       case 'tool/call': {
+        this.turnSawToolCall = true
         let toolInput: Record<string, unknown> = {}
         try {
           const parsed = JSON.parse(data.arguments ?? '{}')
@@ -144,7 +152,19 @@ export class DshEventMapper {
 
       case 'turn/end': {
         const reason = data.reason ?? { kind: 'unknown' }
-        actions.push({ kind: 'turnEnd', turn: data.turn, reason })
+        // Empty terminal turn: a clean 'stop' with no text and no tool calls
+        // this turn — the model emitted (at most) reasoning and ended. Flag it
+        // so the turn runner can auto-continue once instead of reporting a
+        // hollow "completed" (parity with the Claude path's bf15f63d fix).
+        const emptyTerminal = reason.kind === 'stop' && !this.turnSawText && !this.turnSawToolCall
+        actions.push({
+          kind: 'turnEnd',
+          turn: data.turn,
+          reason,
+          ...(emptyTerminal ? { emptyTerminal: true } : {}),
+        })
+        this.turnSawText = false
+        this.turnSawToolCall = false
         break
       }
 
