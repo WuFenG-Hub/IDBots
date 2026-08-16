@@ -60,6 +60,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsSubagentChildren = new Map()
     // Ring buffers of child session events for transcript viewing.
     this.idbotsChildEvents = new Map()
+    // child agent id → parent dsh session id (for live row notifications).
+    this.idbotsChildParents = new Map()
 
     ctx.on('agent/created', ({ agent }) => {
       this.idbotsAgents.set(String(agent.id), agent)
@@ -68,10 +70,15 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       const header = agent?.session?.header
       if (header?.origin === 'subagent' && header?.parentSession !== undefined) {
         const parent = String(header.parentSession)
+        const agentId = String(agent.id)
         const children = this.idbotsSubagentChildren.get(parent) ?? []
-        children.push({ agentId: String(agent.id), status: 'running', startedAt: Date.now() })
+        children.push({ agentId, status: 'running', startedAt: Date.now() })
         this.idbotsSubagentChildren.set(parent, children)
-        this.idbotsChildEvents.set(String(agent.id), [])
+        this.idbotsChildEvents.set(agentId, [])
+        this.idbotsChildParents.set(agentId, parent)
+        // Live task rows: the host renders these through the same
+        // task_started/task_notification channel the Claude path emits.
+        this.idbotsTransport.notify('idbots/subagent/started', { sessionId: parent, agentId })
       }
     }, { global: true })
     ctx.on('agent/disposed', ({ agent }) => {
@@ -79,14 +86,34 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
         const entry = children.find((c) => c.agentId === String(agent.id))
         if (entry) entry.status = 'done'
       }
+      const agentId = String(agent.id)
+      const parent = this.idbotsChildParents.get(agentId)
+      if (parent !== undefined) {
+        this.idbotsChildParents.delete(agentId)
+        this.idbotsTransport.notify('idbots/subagent/finished', { sessionId: parent, agentId, status: 'completed' })
+      }
     }, { global: true })
-    // Buffer child session events for the panel transcript view.
+    // Buffer child session events for the panel transcript view; the first
+    // user message (the delegation prompt) also rides a progress
+    // notification so the live row gets a meaningful summary.
     ctx.on('session/event', (session, event) => {
       const sid = typeof session === 'string' ? session : String(session?.id ?? '')
       if (!sid || !this.idbotsChildEvents.has(sid)) return
       const buffer = this.idbotsChildEvents.get(sid)
+      const hadUserMessage = buffer.some((e) => e.type === 'user/message')
       buffer.push(event)
       if (buffer.length > 500) buffer.splice(0, buffer.length - 500)
+      const parent = this.idbotsChildParents.get(sid)
+      if (!hadUserMessage && event.type === 'user/message' && parent !== undefined) {
+        const text = (event.data?.content ?? []).filter((b) => b?.type === 'text').map((b) => b.text ?? '').join(' ').trim()
+        if (text.length > 0) {
+          this.idbotsTransport.notify('idbots/subagent/progress', {
+            sessionId: parent,
+            agentId: sid,
+            summary: text.length > 160 ? `${text.slice(0, 157)}...` : text,
+          })
+        }
+      }
     })
     ctx.on('agent/disposed', ({ agent }) => {
       this.idbotsAgents.delete(String(agent.id))

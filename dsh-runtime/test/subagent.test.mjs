@@ -63,6 +63,13 @@ const main = async () => {
   void (async () => { for (;;) { try { const r = await waitFor((n) => n.method === 'idbots/policy/request', 60000); await client.request('idbots/policy/respond', { id: r.params.id, decision: 'allow' }) } catch { return } } })().catch(() => undefined)
 
   const ended = waitFor((n) => n.method === 'session.event' && n.params.sessionId === sessionId && n.params.event.type === 'turn/end', 40000, 'parent turn end')
+  // Live task rows: the runtime must notify the host on child lifecycle.
+  const lifecycle = []
+  waiters.add((n) => {
+    if (n.method === 'idbots/subagent/started' || n.method === 'idbots/subagent/progress' || n.method === 'idbots/subagent/finished') {
+      lifecycle.push(n)
+    }
+  })
   await client.prompt(sessionId, [{ type: 'text', text: 'DELEGATE the task please' }])
   await ended
 
@@ -85,6 +92,15 @@ const main = async () => {
   fs.rmSync(sessionRoot, { recursive: true, force: true })
   fs.rmSync(configPath, { force: true })
   console.log('PASS  subagent delegation + panel surface (list/messages)')
+
+  const started = lifecycle.find((n) => n.method === 'idbots/subagent/started' && n.params.sessionId === sessionId)
+  assert.ok(started, 'subagent started notification carries the parent session id')
+  const progress = lifecycle.find((n) => n.method === 'idbots/subagent/progress')
+  assert.ok(progress && String(progress.params.summary ?? '').includes('SUBAGENT_DONE') || (progress && progress.params.summary?.length > 0),
+    'subagent progress notification carries the delegation prompt as summary')
+  const finished = lifecycle.find((n) => n.method === 'idbots/subagent/finished' && n.params.agentId === started.params.agentId)
+  assert.ok(finished, 'subagent finished notification for the same agent id')
+  console.log('PASS  subagent lifecycle notifications (started/progress/finished)')
   process.exit(0)
 }
 

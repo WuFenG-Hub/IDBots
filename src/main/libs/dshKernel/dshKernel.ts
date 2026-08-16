@@ -286,6 +286,12 @@ export class DshKernel {
           this.opts.handlers.onAskRequest?.(params as DshUserQuestionAsk)
         } else if (method === 'idbots/ask/cancelled') {
           this.opts.handlers.onAskCancelled?.(params.id)
+        } else if (method === 'idbots/subagent/started') {
+          this.opts.handlers.onSubagentEvent?.({ kind: 'started', ...params })
+        } else if (method === 'idbots/subagent/progress') {
+          this.opts.handlers.onSubagentEvent?.({ kind: 'progress', ...params })
+        } else if (method === 'idbots/subagent/finished') {
+          this.opts.handlers.onSubagentEvent?.({ kind: 'finished', ...params })
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }
