@@ -5897,10 +5897,21 @@ export class CoworkRunner extends EventEmitter {
       // is `max`). DSH previously dropped this, so the runtime always used
       // the provider default (thinking ON, no reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
+      const dshEffortDialect = route.provider === 'deepseek' && route.apiFormat === 'openai'
+        ? 'deepseek'
+        : 'generic';
       const dshReasoningEffort = mapDshReasoningEffort(
         activeSession.effortOverride ?? modelOptions?.reasoningEffort,
         activeSession.thinkingOverride ?? modelOptions?.thinking,
+        dshEffortDialect,
       );
+      coworkLog('INFO', 'runDshSessionLocal', 'DSH reasoning effort for turn', {
+        sessionId,
+        dialect: dshEffortDialect,
+        uiOverride: activeSession.effortOverride ?? null,
+        modelDefault: modelOptions?.reasoningEffort ?? null,
+        mapped: dshReasoningEffort ?? null,
+      });
       // Turn-level stall watchdog: cancel a turn that made no progress for
       // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
       // own timeout). A pending permission dialog means a human is the slow
