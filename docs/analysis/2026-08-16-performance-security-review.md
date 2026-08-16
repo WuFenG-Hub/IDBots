@@ -208,3 +208,44 @@ Each round should: implement in this branch → run the project's real verificat
 - `npm audit --omit=dev` (44 total: 3 critical / 21 high / 18 moderate / 2 low) was run against `package-lock.json`.
 - `dist/` bundle size verified from a previous production build in the main worktree (`index-*.js` ≈ 3,028,542 bytes, single chunk).
 - No runtime profiling was performed in this pass; the report is opinion-level and each fix should be validated with a before/after measurement (startup time, idle CPU, long-session scroll, stream latency).
+
+---
+
+## 7. S2 execution log (2026-08-17) — dependency vulnerability upgrade
+
+Executed on `perf/performance-review` (`6aed20ce` → `chore(deps)`).
+
+**Result**: `npm audit --omit=dev` went from **44 → 15** (3 critical + 21 high → **0 critical**, 6 high, 1 moderate, 8 low).
+
+### Upgraded direct dependencies
+| Package | From | To |
+|---|---|---|
+| electron (dev) | 40.2.1 | 41.10.5 |
+| adm-zip | 0.5.16 | 0.6.0 |
+| js-yaml | 4.1.1 | 4.3.1 |
+| form-data | 4.0.5 | 4.0.6 |
+| uuid | 11.1.0 | 11.1.1 |
+| dompurify | 3.3.1 | 3.4.13 |
+| mermaid | 10.9.5 | 10.9.8 |
+| react-syntax-highlighter | 15.6.6 | 16.1.1 |
+| @larksuiteoapi/node-sdk | 1.59.0 | 1.73.0 |
+| discord.js | 14.25.1 | 14.27.0 |
+| @opcat-labs/scrypt-ts-opcat | 4.1.0 | 4.1.1 |
+
+### `overrides` added (transitive, same-major patches)
+`elliptic@6.6.1`, `bn.js@4.12.5`, `axios@1.19.0`, `ws@8.21.3`, `undici@6.28.0`, `protobufjs@7.6.5`, `lodash@4.18.1`, `lodash-es@4.18.1`, `follow-redirects@1.16.0`, `socket.io-parser@4.2.7`, `@protobufjs/utf8@1.1.2`, `mvc-scrypt.tmp@0.2.7`. These eliminated the 3 critical chains (elliptic/protobufjs/mvc-lib), the axios advisory chain, undici/ws DoS advisories, and the tmp path-traversal advisory.
+
+### Remaining 15 (accepted, documented)
+- **High ×6**
+  - `@opcat-labs/scrypt-ts-opcat` / `valibot` (fixAvailable=false): scrypt-ts-opcat pins `valibot@^0.38.0`; a 0→1 override is a breaking change. ReDoS needs attacker-controlled schema input (local contract code) — low real reachability. Revisit when upstream moves off valibot 0.x.
+  - `extract-zip` (fixAvailable=false, range `*`): no patched release exists (2.0.1 is latest). Used in `skillManager.ts` to unpack skill zips into a controlled temp dir; source is app-managed. Mitigation: keep zip sources trusted/validated.
+  - `minimatch@3.1.3` / `brace-expansion@1.1.12` / `picomatch@2.3.1`: all instances sit in **build-time dev chains** (electron-builder, eslint). They do not ship in the app bundle. Forcing 3.x→9.x/10.x via overrides risks breaking the build toolchain; accepted as dev-only.
+- **Moderate ×1**
+  - `yaml@1.10.2` (via `mvc-scrypt` → vendored `patch-package@6.5.1`): pinned old major, no compatible fix; input is local patch files. Accepted.
+- **Low ×8**
+  - `elliptic`/`bitcore-lib`/`@metalet/utxo-wallet-*`/`@opcat-labs/opcat`/`meta-contract`/`mvc-lib`/`mvc-scrypt`: "risky cryptographic primitive" advisories with no patched release (npm's suggested fix downgrades `@metalet/utxo-wallet-service` to 0.2.4 / `meta-contract` to 0.0.8, which is not applicable). Accepted; monitor upstream.
+
+### Verification
+- `npm run compile:electron` ✅ (Electron 41 types)
+- `npm run build` (renderer + main + preload) ✅
+- Targeted suites: RPC (19) + skill (19) + wallet/metaidCore + runtime contracts — all pass except 4 pre-existing failures that also fail on un-upgraded `main` (`metaidCoreMvcRecovery.test.mjs` ×2, `metabotLimit.test.mjs` + `runtimePaths.test.mjs` ×2, worktree/environment-related, unrelated to S2).
