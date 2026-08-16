@@ -330,9 +330,11 @@ const MemorySettings: React.FC<{ onClose: () => void }> = ({ onClose }) => {
         metabotId,
         scopeKind: 'owner',
         scopeKey: scopes?.owner?.key ?? 'owner:self',
+        usageClass: 'self_identity',
         status: 'created',
+        limit: 1,
       });
-      setSelfIdentity(entries.find((entry) => entry.usageClass === 'self_identity') ?? null);
+      setSelfIdentity(entries[0] ?? null);
     } catch (loadError) {
       console.error('Failed to load self-identity:', loadError);
       setSelfIdentity(null);

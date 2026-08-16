@@ -3971,12 +3971,6 @@ const getCoworkStore = () => {
       console.warn('[Main] Cowork steer restart recovery failed; continuing startup:', error);
     }
     coworkStore = candidate;
-    startupLog('cowork store auto-delete begin');
-    const cleaned = coworkStore.autoDeleteNonPersonalMemories();
-    startupLog(`cowork store auto-delete done (cleaned=${cleaned})`);
-    if (cleaned > 0) {
-      console.info(`[cowork-memory] Auto-deleted ${cleaned} non-personal/procedural memories`);
-    }
   }
   return coworkStore;
 };
@@ -9140,6 +9134,7 @@ if (!gotTheLock) {
     metabotId?: number;
     scopeKind?: 'owner' | 'contact' | 'conversation';
     scopeKey?: string;
+    usageClass?: 'profile_fact' | 'preference' | 'operational_preference' | 'self_identity' | 'work_review' | 'value_boundary';
     query?: string;
     status?: 'created' | 'stale' | 'deleted' | 'all';
     includeDeleted?: boolean;
@@ -9158,6 +9153,7 @@ if (!gotTheLock) {
         metabotId,
         scopeKind: resolvedScope.scopeKind,
         scopeKey: resolvedScope.scopeKey,
+        usageClass: input?.usageClass,
         query: input?.query?.trim() || undefined,
         status: input?.status || 'all',
         includeDeleted: Boolean(input?.includeDeleted),
