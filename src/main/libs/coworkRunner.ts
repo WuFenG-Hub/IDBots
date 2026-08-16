@@ -4321,7 +4321,8 @@ export class CoworkRunner extends EventEmitter {
       'You are the owner\'s one persistent Twin Bot: a private digital twin and chief-of-staff assistant.',
       'Interpret the owner\'s ambiguous intent using known context, then turn material work into a concrete goal, ordered steps, measurable acceptance criteria, and a concise progress plan. Always aim for a high-quality outcome: think through how to decompose the work so each subtask maps to the best-fit local Worker, and in a Group Task drive it end-to-end — planning, assignment, verification — until the owner receives the finished result, never leaving it stalled.',
       'For specialist or multi-step work, prefer suitable local persistent Worker Bots. First call local_workers_list and choose by the returned persona, skills, capability evidence, availability, and permission fit; selection must be evidence-based rather than hard-coded by task category.',
-      'The host provides Twin-only orchestration tools — local_workers_list, local_worker_delegate, twin_task_status, twin_task_reassign, and twin_task_cancel — so you always have the capability to inspect every local Worker and delegate concrete steps to the best-fit Worker instead of doing specialist work yourself.',
+      'The host provides Twin-only orchestration tools — local_workers_list, local_worker_delegate, twin_task_status, twin_task_reassign, twin_task_cancel, and worker_session_stop — so you always have the capability to inspect every local Worker, delegate concrete steps to the best-fit Worker instead of doing specialist work yourself, and terminate a wedged Worker session yourself.',
+      'When a Worker session is genuinely stuck (a step or confirmation that never returns, confirmed via twin_task_status), do not leave it hanging: stop it with worker_session_stop, then cancel or reassign its task so the step is retried elsewhere. A stopped session is a clean terminal state — the Owner should never have to clean up a hung Worker manually.',
       'When the owner\'s wish needs multiple specialists to coordinate (research + build + publish, multi-step content production, etc.), you can also organize an on-chain Group Task via the metabot-group-task skill: you chair it, local Workers join as members, and you drive planning, assignments, verification, and the final report.',
       'Group Tasks support optional human-in-the-loop checkpoints (the chair pauses the task for the owner\'s decision at a milestone). Use them when the owner\'s wish explicitly asks to review/confirm an intermediate result, or when a decision materially changes the outcome of a complex task — but keep autonomous one-shot completion the default: never insert human checkpoints into small or routine tasks the owner expected you to just finish.',
       'Plan local-first: match every decomposed step against the local Worker roster (persona, skills, capability evidence) before looking outside; only when a needed capability has no local match should you recruit one remote bot through the metabot-group-task skill\'s OpenTeam flow (search_remote → invite_remote, one candidate at a time, wait for the join before assigning).',
@@ -5624,6 +5625,43 @@ export class CoworkRunner extends EventEmitter {
         return { success: true, text: JSON.stringify({ ok: true, ...reassigned }) };
       }
 
+      if (toolName === 'worker_session_stop') {
+        if (!this.isTwinSession(sessionId)) {
+          return {
+            success: false,
+            text: JSON.stringify({ ok: false, code: 'TWIN_TOOL_FORBIDDEN', error: 'Only the current Twin Bot may stop worker sessions.' }),
+          };
+        }
+        const targetSessionId = String(toolInput.sessionId ?? '').trim();
+        if (!targetSessionId) {
+          return { success: false, text: JSON.stringify({ ok: false, code: 'SESSION_ID_REQUIRED', error: 'worker_session_stop requires sessionId.' }) };
+        }
+        const target = this.store.getSession(targetSessionId);
+        if (!target) {
+          return { success: false, text: JSON.stringify({ ok: false, code: 'SESSION_NOT_FOUND', error: `No cowork session ${targetSessionId}.` }) };
+        }
+        // Scope: ONLY sessions owned by worker-type MetaBots. The Twin never
+        // stops user sessions, its own session, or another Twin's sessions.
+        const targetMetabotId = target.metabotId;
+        const isWorkerSession = Number.isInteger(targetMetabotId) && Number(targetMetabotId) > 0
+          && this.getMetabotById?.(Number(targetMetabotId))?.metabot_type === 'worker';
+        if (!isWorkerSession) {
+          return {
+            success: false,
+            text: JSON.stringify({ ok: false, code: 'NOT_A_WORKER_SESSION', error: 'worker_session_stop only targets local Worker Bot sessions.' }),
+          };
+        }
+        // stopSession aborts the in-flight turn (DSH native cancel / local
+        // abort), auto-denies any pending approval so nothing hangs, and
+        // settles the session in the deliberate 'stopped' terminal state.
+        this.stopSession(targetSessionId, { finalStatus: 'stopped' });
+        coworkLog('INFO', 'worker_session_stop', 'Twin stopped worker session', {
+          sessionId: targetSessionId,
+          metabotId: Number(targetMetabotId),
+        });
+        return { success: true, text: JSON.stringify({ ok: true, sessionId: targetSessionId, status: 'stopped' }) };
+      }
+
       if (toolName === 'memory_user_edits') {
         const action = toolInput.action;
         if (action !== 'list' && action !== 'add' && action !== 'update' && action !== 'delete') {
@@ -6697,6 +6735,19 @@ export class CoworkRunner extends EventEmitter {
           },
           async (args) => {
             const result = await this.handleHostToolExecution({ toolName: 'twin_task_reassign', toolInput: args }, sessionId);
+            return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
+          }
+        )
+      );
+    }
+    if (this.isTwinSession(sessionId)) {
+      memoryTools.push(
+        tool(
+          'worker_session_stop',
+          'Stop ONE running local Worker Bot session by session id — aborts its in-flight turn and any pending tool confirmation, then settles the session to a terminal stopped state. Twin Bot only. Use to unwind a Worker session that is stuck (wedged tool call, hanging confirmation) after checking twin_task_status, so the Worker is freed and the step can be reassigned. When NOT to use: do not stop sessions merely because work is slow (check twin_task_status first); do not use it to cancel a task record (use twin_task_cancel — it stops the sessions AND settles the task); and never stop a session twice. Requires sessionId; returns { ok, sessionId, status }. Errors: SESSION_NOT_FOUND / NOT_A_WORKER_SESSION.',
+          { sessionId: z.string().min(1) },
+          async (args) => {
+            const result = await this.handleHostToolExecution({ toolName: 'worker_session_stop', toolInput: args }, sessionId);
             return { content: [{ type: 'text', text: result.text }], isError: !result.success } as any;
           }
         )
