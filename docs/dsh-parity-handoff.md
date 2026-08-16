@@ -1,6 +1,6 @@
 # DSH Kernel Migration — Handoff Document
 
-Last updated: 2026-08-16 (session 2) · Branch: `feat/dsh-p0-parity` (unpushed, 5 commits ahead of `main`) · Author: ZCode sessions 2026-08-15~16
+Last updated: 2026-08-16 (session 3) · Branch: `feat/dsh-p1-parity` (unpushed; P0 merged to main as `0ffbd3e4`) · Author: ZCode sessions 2026-08-15~16
 Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 
 ## 1. Where we are
@@ -70,18 +70,31 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
    found `applyTurnMemoryUpdatesForSession` never ran on DSH completions —
    DSH sessions fed no experience extraction. Now called before `complete`.
 
+**Done in session 3 (branch `feat/dsh-p1-parity`, first three P1 items):**
+
+5. ✅ **P1 — Prompt image attachments** (`bad15dab`): new `idbots/prompt` wire
+   extension (text + images → store commit → [text, ...image blocks] user
+   message, route-gated like tool images); host reads image files from the
+   attachment marker lines (store media types + size cap; others stay path
+   references); auto-continue does not re-send them. Text-file attachment
+   contents still ride as path references the model reads with its tools —
+   full text-attachment injection parity is NOT done (claude CLI reads them
+   into context; deferred as low value vs. tool reads).
+6. ✅ **P1 — AskUserQuestion** (`cd9fb648`): `dsh-user-questions` service +
+   `dsh-tool-ask-user` mounted; provider registered by idbots-sdk-server
+   (`idbots/ask/request` / `idbots/ask/respond`); host renders through the
+   SAME AskUserQuestion modal (question-text keys ↔ wire ids mapping, deny →
+   declined custom answer); full-trust low-risk auto-answer parity via
+   `tryAutoAnswerLowRiskQuestion`.
+7. ✅ **P1 — Vision gate + repeated-read dedup** (`3c884e2e`): read/read_image
+   joined the policy-gated set; `evaluateDshToolPolicy` runs the shared pure
+   `evaluateReadImageGuard` (N1 non-vision image block, N2 unchanged re-read
+   dedup via the shared readFiles registry). read_image passes as 'read'.
+   Also: `c4984c85` fixed a latent interleave-test race (two concurrent turns
+   on ONE DSH session id clobbered the controller — passes were timing luck).
+
 **Remaining backlog (next session):**
 
-5. **P1 — Attachments**: prompt attachments (images/files), text-only
-   provider downgrade (`forceTextOnlyAttachments`), attachment labels — all
-   claude-path-only. DSH needs image blocks in user content (the attachment
-   store from item 1 is the landing zone; `session/ensure` may need an
-   attachments pass-through or steer-time save).
-6. **P1 — AskUserQuestion equivalent**: mount `dsh-tool-ask-user`; wire its
-   ask through the existing approval bridge → renderer dialog.
-7. **P1 — Vision gate + repeated-read dedup**: port `evaluateReadImageGuard`
-   + readFiles registry into the policy gate (host-side via policy bridge).
-   Note: `read_image` is now live on DSH (item 1), so this gate matters more.
 8. **P1 — Stall watchdog**: claude path has `localTurnStallWatchdog`; add a
    turn-level timeout for DSH (hub.runTurn race with timeout → cancel).
 9. **P2 — Subagent live task rows**: panel currently shows post-hoc entries
@@ -129,8 +142,8 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 
 - App-side: `npm run test:dsh` (rimraf dist → compile:electron → 5 test
   files → dsh-runtime suite). dsh-runtime: `cd dsh-runtime && npm test`
-  (10 files now — attachment-store + mcp-bridge joined; mock-gateway based,
-  no keys needed).
+  (11 files now — attachment-store, mcp-bridge, ask-bridge joined;
+  mock-gateway based, no keys needed).
 - **Run node --test with `--test-concurrency=1`** for the cowork suites;
   parallel files flake on ports.
 - **Session fixtures must clean their userData BEFORE the run** — a hung run
@@ -156,12 +169,12 @@ only for small soak fixes (precedent set this session).
 
 ## 7. Suggested opening move for the next session
 
-P0 items 1–3 are DONE on `feat/dsh-p0-parity` (see §3) — the branch awaits
-merge review. Continue with the P1 tier, in this order: (5) prompt
-attachments — the attachment store from item 1 is the landing zone, and the
-image-capable route plumbing (input declaration + degrade note) already
-exists to copy for user-content images; (6) AskUserQuestion via
-`dsh-tool-ask-user` + approval bridge; (7) read-image guard + dedup through
-the policy bridge (item 1 made `read_image` live, so the N1 guard now has
-something to gate). All three have existing test patterns to extend
-(host-tool-bridge / approval-channel / policy-bridge).
+P0 (merged to main as `0ffbd3e4`) and the first three P1 items (§3 items
+5–7, on `feat/dsh-p1-parity`) are DONE — the branch awaits merge review.
+Next: (8) the DSH stall watchdog, the last P1 item — claude path reference is
+`localTurnStallWatchdog` in runClaudeCodeLocal; a hub.runTurn race with a
+timeout → cancel should carry it. Then the P2 tier. Watch out when testing:
+orphan mock/runtime processes on 487xx poison later runs (`lsof -ti :4879x |
+xargs kill; pkill -f cordis.runtime`), and the interleave-test race fix
+(c4984c85) documents why two concurrent turns must never share one DSH
+session id.
