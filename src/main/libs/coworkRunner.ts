@@ -11,6 +11,7 @@ import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-age
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
 import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
+import type { DshHostToolImagePayload } from './dshKernel/types';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { loadClaudeSdk } from './claudeSdk';
 import {
@@ -5786,6 +5787,10 @@ export class CoworkRunner extends EventEmitter {
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
           thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
+          // Vision declaration rides the route (same knowledge source the
+          // Claude path's read-image guard uses): pi-ai refuses image blocks
+          // on text-only routes, and read_image/host image results gate on it.
+          ...(modelLimits?.supportsVision ? { inputModalities: ['text', 'image'] } : {}),
         },
         callbacks: {
           onMessage: (message, slot) => {
@@ -5990,7 +5995,7 @@ export class CoworkRunner extends EventEmitter {
     coworkSessionId: string,
     name: string,
     args: Record<string, unknown>
-  ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }> {
     const tool = this.dshHostToolRegistry.get(name)
     if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
     const policy = await this.evaluateDshToolPolicy(coworkSessionId, name, args)
@@ -6021,7 +6026,18 @@ export class CoworkRunner extends EventEmitter {
       if (Array.isArray(blocks)) {
         const text = blocks.filter((b) => b?.type === 'text').map((b) => b.text).join('\n')
         if ((result as any)?.isError) return { ok: false, error: text || 'tool error' }
-        return { ok: true, text }
+        // Image blocks ride alongside the text (screenshot-style tools): the
+        // runtime commits them through its attachment store and renders them
+        // as image blocks — but only for routes that declare image input, so
+        // the runtime degrades to a text note instead of poisoning history.
+        const images = blocks
+          .filter((b) => b?.type === 'image' && typeof b?.data === 'string' && b.data.length > 0)
+          .map((b) => ({
+            data: b.data,
+            mediaType: typeof b?.mimeType === 'string' ? b.mimeType : 'image/png',
+            ...(typeof b?.name === 'string' && b.name.length > 0 ? { name: b.name } : {}),
+          }))
+        return images.length > 0 ? { ok: true, text, images } : { ok: true, text }
       }
       return { ok: true, text: JSON.stringify(result ?? null) }
     } catch (error) {

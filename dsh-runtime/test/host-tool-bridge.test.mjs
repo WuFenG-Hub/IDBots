@@ -1,10 +1,12 @@
 // Host tool bridge wire test: a config-declared tool proxy is callable by the
 // model; execution round-trips to the wire host (idbots/tool/request →
-// idbots/tool/respond), and a host error becomes an error tool result the
-// model sees.
+// idbots/tool/respond), a host error becomes an error tool result the model
+// sees, and image payloads on a respond reach the model as image blocks via
+// the attachment store — or degrade to a text note on a text-only route.
 //
 // Run: node test/host-tool-bridge.test.mjs   (from dsh-runtime/)
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -15,6 +17,10 @@ import { startMockServer } from './fixtures/mock-openai.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const runtimeDir = path.resolve(here, '..')
+
+// 1x1 transparent PNG.
+const PNG_1x1_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='
 
 const results = []
 const record = (name, pass, detail = '') => {
@@ -27,10 +33,18 @@ const main = async () => {
   const sessionRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-hosttool-'))
   const config = generateRuntimeConfig({
     sessionRoot,
-    providers: [{
-      key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48793/v1', apiKeyEnv: 'HOSTTOOL_KEY',
-      models: [{ id: 'mock-1', contextWindow: 32768 }],
-    }],
+    providers: [
+      {
+        key: 'mockgw', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48793/v1', apiKeyEnv: 'HOSTTOOL_KEY',
+        models: [{ id: 'mock-1', contextWindow: 32768, input: ['text', 'image'] }],
+      },
+      {
+        // Same gateway, but the route declares text-only input: image responds
+        // on this route must degrade to a note instead of image blocks.
+        key: 'mockgw-text', apiFormat: 'openai', baseUrl: 'http://127.0.0.1:48793/v1', apiKeyEnv: 'HOSTTOOL_KEY',
+        models: [{ id: 'mock-1', contextWindow: 32768 }],
+      },
+    ],
     sections: [],
     hostTools: [{
       name: 'host_echo_tool',
@@ -57,8 +71,10 @@ const main = async () => {
   const pumping = (async () => {
     for (;;) {
       const notification = await subscription.next()
-      if (notification.method === 'session.event' && notification.params.sessionId === sessionId) {
-        events.push(notification.params.event)
+      if (notification.method === 'session.event') {
+        // `events` collects the primary session only; waiters observe every
+        // session (the text-route turn below rides a second DSH session).
+        if (notification.params.sessionId === sessionId) events.push(notification.params.event)
         for (const wait of waiters) wait(notification.params.event)
       } else if (notification.method?.startsWith('idbots/')) {
         for (const wait of waiters) wait(notification)
@@ -99,6 +115,57 @@ const main = async () => {
   await turn2
   const errorResult = events.find((e) => e.type === 'tool/result' && JSON.stringify(e).includes('host exploded'))
   record('host error becomes an error tool result', Boolean(errorResult))
+
+  // Turn 3: image respond on an image-capable route. The bytes commit to the
+  // attachment store, the tool result carries an image block, and the next
+  // provider request carries the image as an image_url data URL.
+  const turn3 = waitForEvent((e) => e.type === 'turn/end' && e.data?.turn === 3)
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_HOST_TOOL_IMAGE please' }])
+  const request3 = await waitFor((n) => n.method === 'idbots/tool/request' && n.params.id !== request2.params.id)
+  await client.request('idbots/tool/respond', {
+    id: request3.params.id,
+    ok: true,
+    text: 'HOST-SHOT: captured 1x1',
+    images: [{ data: PNG_1x1_BASE64, mediaType: 'image/png', name: 'shot' }],
+  })
+  await turn3
+  const imageResult = events.find((e) => e.type === 'tool/result' && JSON.stringify(e).includes('HOST-SHOT'))
+  const imageBlock = imageResult && JSON.stringify(imageResult).includes('"type":"image"')
+    ? JSON.stringify(imageResult)
+    : null
+  record('image respond renders an image block in the tool result', Boolean(imageBlock))
+  const expectedHash = crypto.createHash('sha256').update(Buffer.from(PNG_1x1_BASE64, 'base64')).digest('hex')
+  const stored = fs.existsSync(path.join(sessionRoot, 'attachments', `${expectedHash}.bin`))
+  record('image bytes are content-addressed in the attachment store', stored)
+  const imageFollowUp = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')).at(-1)
+  record('follow-up provider request carries the image_url data URL', Boolean(imageFollowUp))
+
+  // Turn 4: same image respond on a TEXT-ONLY route — the result must degrade
+  // to the omission note with no image block (an image on this route would
+  // poison the durable history with a permanent conversion error).
+  // Session-event waiters receive the bare event (no sessionId), but turns 1-3
+  // already settled, so the next omitted-bearing tool/result can only be the
+  // text-route session's.
+  const textSessionId = `${sessionId}-text`
+  await client.request('session/ensure', { sessionId: textSessionId, provider: 'mockgw-text', model: 'mock-1' })
+  const degradedSettled = waitForEvent((e) => e.type === 'tool/result' && JSON.stringify(e).includes('omitted'), 20000)
+  await client.prompt(textSessionId, [{ type: 'text', text: 'CALL_HOST_TOOL_IMAGE on text route' }])
+  const request4 = await waitFor((n) => n.method === 'idbots/tool/request' && n.params.sessionId === textSessionId)
+  await client.request('idbots/tool/respond', {
+    id: request4.params.id,
+    ok: true,
+    text: 'HOST-SHOT: captured 1x1',
+    images: [{ data: PNG_1x1_BASE64, mediaType: 'image/png' }],
+  })
+  await degradedSettled
+  const degradedJson = JSON.stringify(await degradedSettled)
+  record('text-only route degrades the image to an omission note',
+    degradedJson.includes('omitted') && degradedJson.includes('HOST-SHOT') && !degradedJson.includes('"type":"image"'))
+  const textRouteRequests = seen.filter((r) => JSON.stringify(r.body?.messages ?? []).includes('on text route'))
+  record('text-only route never sends an image_url upstream',
+    textRouteRequests.length > 0 && textRouteRequests.every(
+      (r) => !JSON.stringify(r.body?.messages ?? []).includes('data:image/png;base64,')
+    ))
 
   subscription.close()
   await client.close()

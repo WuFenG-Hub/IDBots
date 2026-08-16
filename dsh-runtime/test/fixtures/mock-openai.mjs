@@ -60,6 +60,7 @@ export function startMockServer(port = 48787) {
       const toolCallFor = lastUserText.includes('CALL_BIG_TOOL') ? 'big_output_tool'
         : lastUserText.includes('CALL_DANGEROUS') ? 'dangerous_tool'
         : lastUserText.includes('STEER_TEST') ? 'slow_tool'
+        : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE') ? 'subagent'

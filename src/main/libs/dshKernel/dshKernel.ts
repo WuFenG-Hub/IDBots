@@ -24,6 +24,7 @@ import { pathToFileURL } from 'url'
 import { DshEventMapper } from './dshEventMapper'
 import type {
   DshApprovalAsk,
+  DshHostToolImagePayload,
   DshKernelHandlers,
   DshMapperAction,
   DshRuntimeConfigInput,
@@ -188,8 +189,12 @@ export class DshKernel {
     return this.client.request('idbots/policy/respond', { id, decision, reason })
   }
 
-  /** Answer a host tool bridge call. */
-  async respondTool(id: string, result: { ok: true; text: string } | { ok: false; error: string }): Promise<{ answered: boolean }> {
+  /** Answer a host tool bridge call. Images commit through the runtime's
+   * attachment store and render as image blocks when the route allows. */
+  async respondTool(
+    id: string,
+    result: { ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }
+  ): Promise<{ answered: boolean }> {
     this.requireClient()
     return this.client.request('idbots/tool/respond', { id, ...result })
   }
@@ -295,7 +300,7 @@ export class DshKernel {
         break
       }
       case 'turnEnd':
-        handlers.onTurnEnd(sessionId, action.reason)
+        handlers.onTurnEnd(sessionId, action.reason, action.emptyTerminal)
         break
       case 'usage':
         handlers.onUsage(sessionId, action.usage)

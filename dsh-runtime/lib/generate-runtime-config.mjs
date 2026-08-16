@@ -24,6 +24,11 @@
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
 //
+// Model entries accept an optional `input` modality array (['text','image']):
+// pi-ai refuses to convert images for a route whose model does not declare
+// image input, and read_image/host-bridged image results gate on it — a tool
+// result is durable history, so an undeclared route degrades to text instead.
+//
 // All providers ride one dsh-llm-pi-ai entry: pi-ai covers all three IDBots
 // apiFormats (openai-completions / openai-responses / anthropic-messages),
 // which also resolves the Phase 0 open question about the Responses API.
@@ -38,6 +43,7 @@ const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 // Absolute plugin paths so the generated config is location-independent: the
 // Electron main process writes it into userData, not next to the runtime dir.
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 const plugin = (file) => fileURLToPath(new URL(`../plugins/${file}`, import.meta.url))
 
@@ -71,6 +77,9 @@ export function generateRuntimeConfig(input) {
         name: model.id,
         contextWindow: model.contextWindow,
         ...Number.isFinite(model.maxOutputTokens) ? { maxTokens: model.maxOutputTokens } : {},
+        // Image-input declaration: routes default to text-only; a vision model
+        // declares ['text','image'] so image blocks can enter its history.
+        ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
       })),
       // thinkingFormat compat exists ONLY on the openai-completions protocol;
       // attaching it to a responses/anthropic route fails provider resolution.
@@ -108,6 +117,13 @@ export function generateRuntimeConfig(input) {
     },
     { id: 'checkpoint-policy', name: '@deepseek-ai/dsh-session-checkpoint-policy' },
     { id: 'user-approval', name: '@deepseek-ai/dsh-user-approval' },
+    // Durable image storage: read_image and host-bridged image tool results
+    // commit bytes here before any image block enters session history.
+    {
+      id: 'attachment-store',
+      name: plugin('idbots-attachment-store.mjs'),
+      config: { root: join(input.sessionRoot, 'attachments') },
+    },
     // Model-facing subagent delegation (in-process spawn provider, foreground).
     { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
     { id: 'subagent-spawn-in-process', name: '@deepseek-ai/dsh-subagent-spawn-in-process', config: { providerName: 'spawn' } },

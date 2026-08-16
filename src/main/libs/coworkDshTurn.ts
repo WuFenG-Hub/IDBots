@@ -14,6 +14,7 @@ import { DshKernel } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
   DshApprovalAsk,
+  DshHostToolImagePayload,
   DshPromptSectionInput,
   DshProviderRoute,
   DshRuntimeConfigInput,
@@ -32,6 +33,8 @@ export interface DshTurnProviderRoute {
   contextWindow?: number
   maxOutputTokens?: number
   thinkingFormat?: string
+  /** Input modalities the model declares (['text','image'] for vision models). */
+  inputModalities?: string[]
 }
 
 export interface DshTurnCallbacks {
@@ -64,11 +67,19 @@ export interface DshTurnInput {
   callbacks: DshTurnCallbacks
 }
 
+export interface DshTurnOutcome {
+  kind: string
+  reason?: string
+  /** True when the turn stopped cleanly having produced no text and no tool
+   * calls (the DeepSeek reasoning-only truncation signature). */
+  emptyTerminal?: boolean
+}
+
 class DshTurnController {
   readonly dshSessionId: string
   private readonly callbacks: DshTurnCallbacks
-  private settleTurn!: (reason: { kind: string; reason?: string }) => void
-  private readonly turnDone: Promise<{ kind: string; reason?: string }>
+  private settleTurn!: (reason: DshTurnOutcome) => void
+  private readonly turnDone: Promise<DshTurnOutcome>
   private steerWaiters: Array<(text: string) => void> = []
 
   constructor(input: DshTurnInput) {
@@ -77,12 +88,12 @@ class DshTurnController {
     this.turnDone = new Promise((resolve) => { this.settleTurn = resolve })
   }
 
-  done(): Promise<{ kind: string; reason?: string }> {
+  done(): Promise<DshTurnOutcome> {
     return this.turnDone
   }
 
-  handleTurnEnd(reason: { kind: string; reason?: string }): void {
-    this.settleTurn(reason)
+  handleTurnEnd(reason: { kind: string; reason?: string }, emptyTerminal?: boolean): void {
+    this.settleTurn(emptyTerminal === true ? { ...reason, emptyTerminal: true } : reason)
     for (const waiter of this.steerWaiters.splice(0)) waiter('')
   }
 
@@ -103,8 +114,8 @@ export interface DshHubOptions {
   runtimeDir?: string
   /** Session-root directory under userData (versioned per format). */
   sessionRoot: string
-  /** Execute a host-bridged tool call; resolves {ok,text} or rejects. */
-  executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string } | { ok: false; error: string }>
+  /** Execute a host-bridged tool call; resolves {ok,text,images?} or rejects. */
+  executeTool?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }>
   /** Host permission chain for runtime-native tools (bash/write/edit…). */
   evaluatePolicy?: (coworkSessionId: string, name: string, args: Record<string, unknown>) => Promise<{ decision: 'allow' | 'deny' | 'ask'; reason?: string }>
   log?: DshKernelOptions['log']
@@ -130,7 +141,7 @@ export class DshTurnHub {
   }
 
   /** Start (or reuse) the runtime and run one turn to completion. */
-  async runTurn(input: DshTurnInput): Promise<{ kind: string; reason?: string }> {
+  async runTurn(input: DshTurnInput): Promise<DshTurnOutcome> {
     const kernel = await this.ensureKernel(input)
     const controller = new DshTurnController(input)
     // One active turn per cowork session: a stray previous controller (e.g. a
@@ -277,8 +288,8 @@ export class DshTurnHub {
       onUsage: (sessionId, usage) => {
         controllerOf(sessionId)?.cb.onUsage(usage)
       },
-      onTurnEnd: (sessionId, reason) => {
-        controllerOf(sessionId)?.handleTurnEnd(reason)
+      onTurnEnd: (sessionId, reason, emptyTerminal) => {
+        controllerOf(sessionId)?.handleTurnEnd(reason, emptyTerminal)
       },
       onApprovalRequest: (sessionId, ask) => {
         controllerOf(sessionId)?.cb.onApprovalRequest(ask)
@@ -329,6 +340,9 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
       id: provider.model,
       contextWindow: provider.contextWindow ?? 64000,
       ...Number.isFinite(provider.maxOutputTokens) ? { maxOutputTokens: provider.maxOutputTokens } : {},
+      ...(Array.isArray(provider.inputModalities) && provider.inputModalities.length > 0
+        ? { input: provider.inputModalities }
+        : {}),
     }],
   }
 }

@@ -24,7 +24,13 @@ export type DshMapperAction =
     }
   | { kind: 'messageUpdate'; slot: DshStreamSlot; content: string }
   | { kind: 'messageFinalize'; slot: DshStreamSlot; content: string }
-  | { kind: 'turnEnd'; turn: number; reason: { kind: string; reason?: string } }
+  | {
+      kind: 'turnEnd'
+      turn: number
+      reason: { kind: string; reason?: string }
+      /** True when the turn stopped cleanly having produced no text and no tool calls. */
+      emptyTerminal?: boolean
+    }
   | { kind: 'usage'; usage: DshUsageSnapshot }
 
 export interface DshUsageSnapshot {
@@ -52,7 +58,13 @@ export interface DshProviderRoute {
   baseUrl: string
   apiKeyEnv: string
   thinkingFormat?: string
-  models: Array<{ id: string; contextWindow: number; maxOutputTokens?: number }>
+  models: Array<{
+    id: string
+    contextWindow: number
+    maxOutputTokens?: number
+    /** Input modalities the route declares (['text','image'] for vision models); pi-ai gates image blocks on it. */
+    input?: string[]
+  }>
 }
 
 /** Stable prompt layer (promptComposer section list). */
@@ -72,6 +84,15 @@ export interface DshRuntimeConfigInput {
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>
+}
+
+export interface DshHostToolImagePayload {
+  /** Base64-encoded image bytes. */
+  data: string
+  /** Declared media type (image/png | image/jpeg | image/webp | image/gif). */
+  mediaType: string
+  /** Optional display name stripped of path information. */
+  name?: string
 }
 
 export interface DshHostToolRequest {
@@ -94,7 +115,7 @@ export interface DshKernelHandlers {
   onMessage: (sessionId: string, message: CoworkMessageInput, slot?: DshStreamSlot) => string
   onMessageUpdate: (sessionId: string, messageId: string, content: string) => void
   onMessageFinalize: (sessionId: string, messageId: string, content: string) => void
-  onTurnEnd: (sessionId: string, reason: { kind: string; reason?: string }) => void
+  onTurnEnd: (sessionId: string, reason: { kind: string; reason?: string }, emptyTerminal?: boolean) => void
   onUsage: (sessionId: string, usage: DshUsageSnapshot) => void
   onApprovalRequest: (sessionId: string, ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
