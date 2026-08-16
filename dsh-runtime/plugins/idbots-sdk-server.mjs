@@ -15,6 +15,7 @@
 //                           existing log after a runtime restart). Also the per-session
 //                           provider/model override the stock wire lacks.
 //   idbots/approval/respond { id, outcome } → answer a pending approval ask (M2)
+//   idbots/ask/respond       { id, answers } → answer a pending user question
 //   idbots/ping            → extension presence canary
 //
 // Notifications we emit (beyond the stock session.event / session.status /
@@ -22,6 +23,8 @@
 //
 //   idbots/approval/request   { id, sessionId, toolName, callId?, reason? }
 //   idbots/approval/cancelled { id }
+//   idbots/ask/request        { id, sessionId, questions } (ask_user_question)
+//   idbots/ask/cancelled      { id }
 //
 // Approval bridging: the dsh-user-approval service owns the `approval` seam,
 // audit events (approval/asked + approval/decided ride the session feed), and
@@ -51,6 +54,8 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     this.idbotsToolSeq = 0
     this.idbotsPolicyPending = new Map() // id → { resolve }
     this.idbotsPolicySeq = 0
+    this.idbotsAsks = new Map() // id → { resolve, reject }
+    this.idbotsAskSeq = 0
     // Subagent lineage for the panel: parent dsh id → [{agentId, status, startedAt}]
     this.idbotsSubagentChildren = new Map()
     // Ring buffers of child session events for transcript viewing.
@@ -88,6 +93,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }, { global: true })
 
     ctx.on('approval/request', (req, next) => this.idbotsBridgeApproval(req, next), { global: true })
+    // inject (not effect): the service may mount after this plugin; the
+    // fiber activates whenever `userQuestions` becomes available.
+    ctx.inject(['userQuestions'], () => this.idbotsRegisterAskProvider())
   }
 
   liveAgent(sessionId) {
@@ -103,15 +111,17 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
       case 'session/steer': return this.idbotsSteer(params)
       case 'session/cancel': return this.idbotsCancel(params)
       case 'session/ensure': return this.idbotsEnsureSession(params)
+      case 'idbots/prompt': return this.idbotsPrompt(params)
       case 'idbots/approval/respond': return this.idbotsApprovalRespond(params)
       case 'idbots/tool/respond': return this.idbotsToolRespond(params)
       case 'idbots/policy/respond': return this.idbotsPolicyRespond(params)
+      case 'idbots/ask/respond': return this.idbotsAskRespond(params)
       case 'idbots/subagents/list': return this.idbotsSubagentsList(params)
       case 'idbots/subagents/messages': return this.idbotsSubagentsMessages(params)
       case 'idbots/ping': {
         return {
           pong: true,
-          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/approval/respond', 'idbots/tool/respond'],
+          extensions: ['session/steer', 'session/cancel', 'session/ensure', 'idbots/prompt', 'idbots/approval/respond', 'idbots/tool/respond', 'idbots/ask/respond'],
         }
       }
       default: return super.handleRequest(method, params)
@@ -163,6 +173,40 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     }
     agent.steer(message)
     return { steered: true, messageId: message.id }
+  }
+
+  // Prompt submission with optional image attachments: the host reads the
+  // image files (attachment marker lines carry no bytes over the wire), the
+  // runtime commits them through the attachments store and queues the user
+  // message as [text, ...image blocks] via the stock prompt path. Same route
+  // gate as tool-result images: a user message is durable history, so a
+  // text-only route never receives image blocks — an omission note rides the
+  // text instead.
+  async idbotsPrompt({ sessionId, text, images }) {
+    let content = [{ type: 'text', text: typeof text === 'string' ? text : JSON.stringify(text ?? '') }]
+    const imageList = Array.isArray(images) ? images.filter((image) => typeof image?.data === 'string' && image.data.length > 0) : []
+    if (imageList.length > 0) {
+      const rec = await this.getOrCreateSession(sessionId)
+      const agent = rec?.handle?.agent
+      const attachments = this.ctx.get('attachments')
+      const imageCapable = attachments !== undefined && await this.idbotsRouteAcceptsImages(agent)
+      if (imageCapable) {
+        for (const image of imageList) {
+          const ref = await attachments.saveImage({
+            data: Uint8Array.from(Buffer.from(image.data, 'base64')),
+            mediaType: image.mediaType,
+            ...typeof image.name === 'string' && image.name.length > 0 ? { name: image.name } : {},
+          })
+          content.push({ type: 'image', attachment: ref })
+        }
+      } else {
+        content = [{
+          type: 'text',
+          text: `${content[0].text}\n[idbots: ${imageList.length} attached image${imageList.length === 1 ? '' : 's'} omitted — the active model does not accept image input; their file paths stay in the text above]`,
+        }]
+      }
+    }
+    return this.prompt({ sessionId, contentBlocks: content })
   }
 
   async idbotsCancel({ sessionId, cause, keepInbox }) {
@@ -361,6 +405,65 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
     return saved.length > 0 ? { ...value, images: saved } : value
   }
 
+  // ---- user-questions bridge ---------------------------------------------------
+  //
+  // The dsh-user-questions service seam + dsh-tool-ask-user expose the
+  // model-facing ask_user_question tool; the UI-side PROVIDER is deployment
+  // ownership. This bridge forwards each ask to the Electron host
+  // (idbots/ask/request out, idbots/ask/respond back) whose renderer renders
+  // it through the same AskUserQuestion modal the Claude path uses. The turn
+  // signal settles unanswered asks (the tool contract requires settling).
+
+  idbotsRegisterAskProvider() {
+    const service = this.ctx.get('userQuestions')
+    if (service === undefined) return () => undefined
+    return service.registerProvider({
+      ask: async (request) => {
+        const id = `ask-${Date.now().toString(36)}-${++this.idbotsAskSeq}`
+        const questions = Array.isArray(request?.questions) ? request.questions : []
+        const pending = new Promise((resolve, reject) => {
+          this.idbotsAsks.set(id, { resolve, reject })
+        })
+        this.idbotsTransport.notify('idbots/ask/request', {
+          id,
+          sessionId: String(request?.agent?.id ?? ''),
+          questions,
+        })
+        request?.signal?.addEventListener('abort', () => {
+          const entry = this.idbotsAsks.get(id)
+          if (entry === undefined) return
+          this.idbotsAsks.delete(id)
+          entry.reject(new Error('ask_user_question was aborted before the user answered'))
+          this.idbotsTransport.notify('idbots/ask/cancelled', { id })
+        }, { once: true })
+        return pending
+      },
+    })
+  }
+
+  async idbotsAskRespond({ id, answers, error }) {
+    const entry = this.idbotsAsks.get(String(id))
+    if (entry === undefined) {
+      throw new Error(`idbots-sdk-server: no pending user question ${JSON.stringify(id)}`)
+    }
+    this.idbotsAsks.delete(String(id))
+    if (error !== undefined) {
+      entry.reject(new Error(typeof error === 'string' && error ? error : 'ask failed'))
+    } else {
+      entry.resolve({
+        answers: Array.isArray(answers)
+          ? answers.filter((a) => a && typeof a === 'object' && typeof a.id === 'string')
+              .map((a) => ({
+                id: a.id,
+                selected: Array.isArray(a.selected) ? a.selected.map(String) : [],
+                ...typeof a.custom === 'string' && a.custom.length > 0 ? { custom: a.custom } : {},
+              }))
+          : [],
+      })
+    }
+    return { answered: true, id }
+  }
+
   // ---- host policy bridge ----------------------------------------------------
   //
   // Runtime-native tools (bash/write/edit…) route their pre-execute decision
@@ -370,7 +473,9 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
   // M2 approval bridge into the renderer permission dialog.
 
   idbotsRegisterPolicyGate(policyTools) {
-    const gated = new Set(policyTools ?? ['bash', 'write', 'edit'])
+    // read/read_image ride the gate so the host can apply its Read guards
+    // (non-vision image block, unchanged-file re-read dedup).
+    const gated = new Set(policyTools ?? ['bash', 'write', 'edit', 'read', 'read_image'])
     const server = this
     this.ctx.on('tools/pre-execute', async (exec, next) => {
       if (!gated.has(exec?.name)) return next()

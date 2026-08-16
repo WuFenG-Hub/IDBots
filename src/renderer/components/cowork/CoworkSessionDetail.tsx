@@ -2102,6 +2102,10 @@ const AssistantTurnBlock: React.FC<{
       sdkIcon = '⚠️';
       sdkTint = 'text-amber-600 dark:text-amber-400';
       sdkContent = i18nService.t('coworkEmptyTerminalTurn');
+    } else if (meta.dshTurnStalled === true) {
+      sdkIcon = '⏱️';
+      sdkTint = 'text-amber-600 dark:text-amber-400';
+      sdkContent = i18nService.t('coworkDshTurnStalled');
     }
 
     const rawContent = hasText(message.content)

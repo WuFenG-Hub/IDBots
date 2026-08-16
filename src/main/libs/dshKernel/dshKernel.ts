@@ -26,6 +26,7 @@ import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
   DshKernelHandlers,
+  DshUserQuestionAsk,
   DshMapperAction,
   DshRuntimeConfigInput,
   DshSessionEventEnvelope,
@@ -147,9 +148,22 @@ export class DshKernel {
     return this.client.request('session/ensure', input)
   }
 
-  async prompt(sessionId: string, text: string): Promise<{ messageId: string }> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    images?: DshHostToolImagePayload[]
+  ): Promise<{ messageId: string }> {
     this.requireClient()
-    return this.client.prompt(sessionId, [{ type: 'text', text }])
+    if (!images || images.length === 0) {
+      return this.client.prompt(sessionId, [{ type: 'text', text }])
+    }
+    // Image attachments ride the idbots/prompt extension: the runtime commits
+    // them through its attachment store and queues [text, ...image blocks].
+    return this.client.request('idbots/prompt', {
+      sessionId,
+      text,
+      ...(images.length > 0 ? { images } : {}),
+    })
   }
 
   async steer(sessionId: string, text: string): Promise<{ steered: boolean; messageId: string }> {
@@ -181,6 +195,15 @@ export class DshKernel {
     void dshSessionId
     this.requireClient()
     return this.client.request('idbots/subagents/messages', { sessionId: dshSessionId, agentId, limit })
+  }
+
+  /** Answer a pending ask_user_question bridged from the runtime. */
+  async respondAsk(
+    id: string,
+    answers: Array<{ id: string; selected: string[]; custom?: string }>
+  ): Promise<{ answered: boolean }> {
+    this.requireClient()
+    return this.client.request('idbots/ask/respond', { id, answers })
   }
 
   /** Answer a runtime-native tool policy check. */
@@ -259,6 +282,10 @@ export class DshKernel {
           this.opts.handlers.onToolRequest?.(params)
         } else if (method === 'idbots/policy/request') {
           this.opts.handlers.onPolicyRequest?.(params)
+        } else if (method === 'idbots/ask/request') {
+          this.opts.handlers.onAskRequest?.(params as DshUserQuestionAsk)
+        } else if (method === 'idbots/ask/cancelled') {
+          this.opts.handlers.onAskCancelled?.(params.id)
         } else if (method === 'session.status') {
           this.opts.handlers.onStatus?.(params.sessionId, params.status)
         }

@@ -63,12 +63,23 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_HOST_TOOL_IMAGE') ? 'host_echo_tool'
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('CALL_MCP_TOOL') ? 'mcp__echo__echo'
+        : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
+        : lastUserText.includes('CALL_READ') ? 'read'
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE') ? 'subagent'
         : null
+      // HANG_TEST: open the SSE stream, emit one delta, and never finish —
+      // simulates a wedged provider for the stall-watchdog app test. (Headers
+      // were already written above; just never end the stream.)
+      if (lastUserText.includes('HANG_TEST')) {
+        frame({ ...base, choices: [{ index: 0, delta: { role: 'assistant', content: 'hanging' }, finish_reason: null }] })
+        return
+      }
       let reply = ''
       if (toolCallFor !== null && !alreadyHasToolResult) {
-        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' } : toolCallFor === 'bash' ? { command: 'echo BASH_WORKS && date', description: 'echo test' }
+        const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
+          : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
+          : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'bash' ? { command: 'echo BASH_WORKS && date', description: 'echo test' }
           : toolCallFor === 'subagent' ? { prompt: 'say SUBAGENT_DONE', description: 'delegation test' } : { note: 'please dump the big blob' })
         frame({
           ...base,

@@ -16,6 +16,7 @@ import type {
   DshApprovalAsk,
   DshHostToolImagePayload,
   DshMcpServerDefinition,
+  DshUserQuestionAsk,
   DshPromptSectionInput,
   DshProviderRoute,
   DshRuntimeConfigInput,
@@ -48,6 +49,8 @@ export interface DshTurnCallbacks {
   onUsage: (usage: DshUsageSnapshot) => void
   onApprovalRequest: (ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
+  onAskRequest?: (ask: DshUserQuestionAsk) => void
+  onAskCancelled?: (askId: string) => void
   onError?: (error: Error) => void
 }
 
@@ -65,6 +68,8 @@ export interface DshTurnInput {
   sections: DshPromptSectionInput[]
   /** Full user-visible turn text (volatile context already prepended). */
   prompt: string
+  /** Image attachments to commit and send alongside the prompt text. */
+  promptImages?: DshHostToolImagePayload[]
   callbacks: DshTurnCallbacks
 }
 
@@ -164,7 +169,7 @@ export class DshTurnHub {
         sections: input.sections,
         hostTools: input.hostTools,
       })
-      await kernel.prompt(input.dshSessionId, input.prompt)
+      await kernel.prompt(input.dshSessionId, input.prompt, input.promptImages)
       return await controller.done()
     } finally {
       this.controllersByDsh.delete(input.dshSessionId)
@@ -217,6 +222,12 @@ export class DshTurnHub {
   async respondApproval(id: string, outcome: 'allowed-once' | 'rejected'): Promise<void> {
     if (!this.kernel) throw new Error('DshTurnHub: runtime not started')
     await this.kernel.respondApproval(id, outcome)
+  }
+
+  /** Answer a pending ask_user_question for the owning session. */
+  async respondAsk(id: string, answers: Array<{ id: string; selected: string[]; custom?: string }>): Promise<void> {
+    if (!this.kernel) throw new Error('DshTurnHub: runtime not started')
+    await this.kernel.respondAsk(id, answers)
   }
 
   async close(): Promise<void> {
@@ -308,6 +319,12 @@ export class DshTurnHub {
       },
       onApprovalCancelled: (askId) => {
         for (const controller of this.controllersByDsh.values()) controller.cb.onApprovalCancelled(askId)
+      },
+      onAskRequest: (ask) => {
+        controllerOf(ask.sessionId)?.cb.onAskRequest?.(ask)
+      },
+      onAskCancelled: (askId) => {
+        for (const controller of this.controllersByDsh.values()) controller.cb.onAskCancelled?.(askId)
       },
       onError: (error) => {
         this.opts.log?.('error', 'dshTurnHub.pump', { message: error.message })

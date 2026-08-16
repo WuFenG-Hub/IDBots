@@ -200,8 +200,13 @@ test('DSH session-type coverage', { skip: runtimeReady ? false : 'dsh-runtime/no
     // restart, if any, waits for quiescence).
     const sA = makeSession({ sessionType: 'standard', metabotId: 7, model: 'mock-1' })
     sA.activeSession.claudeSessionId = null
+    // Distinct DSH session id: the hub allows ONE active turn per DSH session
+    // (a second runTurn on the same id replaces the first turn's controller,
+    // whose promise then never settles). Pre-seeding a different handle keeps
+    // the two concurrent turns on separate controllers while still exercising
+    // the shared-runtime no-restart/quiescence path across providers.
     const sB = makeSession({ sessionType: 'a2a', metabotId: 42 }) // llm_id → mockgw2
-    sB.activeSession.claudeSessionId = null
+    sB.activeSession.claudeSessionId = 'dsh:cw-session-types-b'
     serverB.seen.length = 0
     const turnA = runner.runDshSessionLocal(sA.activeSession, 'STEER_TEST', process.cwd(), 'Persona A.')
     await waitFor(() => store.messages.some((m) => m.sessionId === 'session-types' && m.type === 'tool_use' && m.metadata?.toolName === 'slow_tool'), 25000, 'turn A slow_tool')

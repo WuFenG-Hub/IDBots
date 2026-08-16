@@ -62,10 +62,12 @@ const main = async () => {
 
   // Permanent collector (waiters have NO replay buffer — register before use).
   const toolResults = []
+  const policyRequests = []
   waiters.add((n) => {
     if (n.method === 'session.event' && n.params.sessionId === sessionId && n.params.event.type === 'tool/result') {
       toolResults.push(JSON.stringify(n.params.event))
     }
+    if (n.method === 'idbots/policy/request') policyRequests.push(n.params.name)
   })
 
   // Host policy: deny everything for turn 1.
@@ -96,6 +98,20 @@ const main = async () => {
   await client.request('idbots/approval/respond', { id: ask.params.id, outcome: 'allowed-once' })
   await ended
   assert.ok(toolResults.some((r) => r.includes('BASH_WORKS')), 'allowed ask executes the command')
+
+  // Turn 3: read gating — the runtime-native read tool now routes through
+  // the host policy bridge too (Read guards: vision gate + re-read dedup).
+  policyMode.decision = 'allow'
+  policyMode.reason = ''
+  fs.writeFileSync(path.join(workspaceDir, 'readable.txt'), 'POLICY_READ_CONTENT\n')
+  let readPolicySeen = false
+  const readWaiters = waiters
+  const ended3 = waitFor(sessionEvent((e) => e.type === 'turn/end'), 30000)
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_READ please' }])
+  await ended3
+  assert.ok(toolResults.some((r) => r.includes('POLICY_READ_CONTENT')), 'allowed read executes and returns file content')
+  assert.ok(policyRequests.includes('read'), 'read arrived as an idbots/policy/request')
+  console.log('PASS  policy bridge: read tool routes through the host gate')
 
   subscription.close()
   await client.close()

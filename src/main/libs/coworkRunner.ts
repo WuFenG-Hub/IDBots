@@ -280,6 +280,16 @@ const MEMORY_ASSISTANT_STYLE_TEXT_RE = /^(?:使用|use)\s+[A-Za-z0-9._-]+\s*(?:�
  */
 export const COWORK_LOCAL_TURN_STALL_TIMEOUT_MS = 180_000;
 
+/**
+ * Turn-level stall deadline for DSH sessions: when a turn makes no progress
+ * for this long (runtime wedged, provider hang beyond every tool's own
+ * timeout), the watchdog cancels it so the session cannot sit in "running"
+ * forever. Generous by design — bash/MCP tool budgets are 60s and the Claude
+ * path has no turn deadline at all; a pending permission dialog (a human is
+ * the slow party) extends the deadline, it never fires through one.
+ */
+export const DSH_TURN_STALL_TIMEOUT_MS = 10 * 60_000;
+
 export function isSdkResultEvent(event: unknown): event is { type: 'result' } & Record<string, unknown> {
   return Boolean(event && typeof event === 'object' && (event as Record<string, unknown>).type === 'result');
 }
@@ -607,6 +617,21 @@ function estimateCoworkStoreToolResultSnipSavings(
 function isImageFilePath(filePath: string): boolean {
   const ext = path.extname(filePath).toLowerCase();
   return ext ? IMAGE_FILE_EXTENSIONS.has(ext) : false;
+}
+
+/** Media types the DSH attachment store accepts (magic-verified on save). */
+const DSH_IMAGE_MEDIA_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+};
+/** Store-side single-image byte cap (idbots-attachment-store LIMITS). */
+const DSH_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
+
+function dshImageMediaTypeForPath(filePath: string): string | undefined {
+  return DSH_IMAGE_MEDIA_TYPES[path.extname(filePath).toLowerCase()];
 }
 
 /**
@@ -1492,6 +1517,13 @@ export interface CoworkRunnerOptions {
    * value <= 0 disables the watchdog.
    */
   localTurnStallTimeoutMs?: number;
+  /**
+   * Turn-level stall deadline for DSH turns; on fire the turn is cancelled
+   * (runtime native cancel) and the session returns to idle with a
+   * diagnostic. Defaults to DSH_TURN_STALL_TIMEOUT_MS; tests override it.
+   * A value <= 0 disables the watchdog.
+   */
+  dshTurnStallTimeoutMs?: number;
 }
 
 export class CoworkRunner extends EventEmitter {
@@ -1521,6 +1553,7 @@ export class CoworkRunner extends EventEmitter {
   private metabotManage?: MetabotManageControl;
   private sdkCronMirror?: SdkCronMirrorBridge;
   private readonly localTurnStallTimeoutMs: number;
+  private readonly dshTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
   private activeSessions: Map<string, ActiveSession> = new Map();
   /**
@@ -1602,6 +1635,10 @@ export class CoworkRunner extends EventEmitter {
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
+    );
+    this.dshTurnStallTimeoutMs = Math.max(
+      0,
+      options?.dshTurnStallTimeoutMs ?? DSH_TURN_STALL_TIMEOUT_MS
     );
     this.loadClaudeSdk = options?.loadClaudeSdk ?? loadClaudeSdk;
   }
@@ -5769,10 +5806,50 @@ export class CoworkRunner extends EventEmitter {
         .filter((section) => section?.trim())
         .join('\n\n')
       const effectiveDshPrompt = volatileHead ? `${volatileHead}\n\n${prompt}` : prompt
-      const runTurnToOutcome = (turnPrompt: string) => hub.runTurn({
+      // Prompt attachments: collected from the ORIGINAL prompt (marker lines
+      // reference user files, not the volatile context head).
+      const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
+      // Turn-level stall watchdog: cancel a turn that made no progress for
+      // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
+      // own timeout). A pending permission dialog means a human is the slow
+      // party — the deadline extends instead of firing through it. The
+      // non-user-aborted settlement below turns the cancel into idle + a
+      // localized diagnostic.
+      let dshStallTimer: NodeJS.Timeout | null = null;
+      const clearDshStallWatchdog = () => {
+        if (dshStallTimer) {
+          clearTimeout(dshStallTimer);
+          dshStallTimer = null;
+        }
+      };
+      const armDshStallWatchdog = () => {
+        clearDshStallWatchdog();
+        if (this.dshTurnStallTimeoutMs <= 0) return;
+        dshStallTimer = setTimeout(() => {
+          dshStallTimer = null;
+          if (activeSession.abortController.signal.aborted) return;
+          if (activeSession.pendingPermission) {
+            armDshStallWatchdog();
+            return;
+          }
+          coworkLog(
+            'WARN',
+            'runDshSessionLocal',
+            'DSH turn stalled with no progress; cancelling via the stall watchdog',
+            { sessionId, stallMs: this.dshTurnStallTimeoutMs }
+          );
+          void hub.cancel(sessionId, 'turn stall watchdog').catch(() => undefined);
+        }, this.dshTurnStallTimeoutMs);
+        dshStallTimer.unref?.();
+      };
+      const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[]) => {
+        armDshStallWatchdog();
+        try {
+          return await hub.runTurn({
         sessionId,
         dshSessionId,
         prompt: turnPrompt,
+        promptImages: images,
         hostTools,
         workspace: { cwd },
         sections: [
@@ -5849,11 +5926,83 @@ export class CoworkRunner extends EventEmitter {
               activeSession.pendingPermission = null;
             }
           },
+          // ask_user_question (DSH user-questions bridge): render through the
+          // SAME AskUserQuestion modal the Claude path uses (toolName is the
+          // modal's trigger); answers map back by question text → wire ids.
+          onAskRequest: (ask) => {
+            const modalQuestions = (ask.questions ?? []).map((q) => ({
+              question: q.question,
+              ...(q.header !== undefined ? { header: q.header } : {}),
+              ...(Array.isArray(q.options) ? { options: q.options } : { options: [] }),
+              ...(q.multiSelect !== undefined ? { multiSelect: q.multiSelect } : {}),
+            }));
+            const wireAnswersFromModal = (modalAnswers: Record<string, unknown> | undefined) =>
+              (ask.questions ?? []).map((q) => {
+                const raw = modalAnswers?.[q.question];
+                if (typeof raw !== 'string' || raw.trim().length === 0) {
+                  return { id: q.id, selected: [], custom: 'The user declined to answer.' };
+                }
+                return {
+                  id: q.id,
+                  selected: raw.split('|||').map((v) => v.trim()).filter(Boolean),
+                };
+              });
+            // Full-trust parity: questions explicitly marked low-risk
+            // (single-select, header 'auto-confirm') answer themselves with
+            // their first option — same helper the Claude path applies.
+            if (activeSession.permissionMode === 'bypassPermissions') {
+              const autoAnswers = tryAutoAnswerLowRiskQuestion({ questions: modalQuestions });
+              if (autoAnswers) {
+                coworkLog('INFO', 'runDshSessionLocal', 'Auto-approved low-risk question under full trust', { sessionId });
+                void hub.respondAsk(ask.id, wireAnswersFromModal(autoAnswers))
+                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
+                return;
+              }
+            }
+            const request: PermissionRequest = {
+              requestId: ask.id,
+              toolName: 'AskUserQuestion',
+              toolInput: { questions: modalQuestions },
+            };
+            this.pendingPermissions.set(ask.id, {
+              sessionId,
+              resolve: (result) => {
+                if (result.behavior !== 'allow') {
+                  void hub.respondAsk(ask.id, (ask.questions ?? []).map((q) => ({
+                    id: q.id,
+                    selected: [],
+                    custom: 'The user declined to answer.',
+                  })))
+                    .catch(() => undefined);
+                  return;
+                }
+                const answers = (result.updatedInput as Record<string, unknown> | undefined)?.answers;
+                void hub.respondAsk(ask.id, wireAnswersFromModal(answers as Record<string, unknown> | undefined))
+                  .catch((error) => coworkLog('WARN', 'runDshSessionLocal', 'ask respond failed', { error: String(error) }));
+              },
+            });
+            activeSession.pendingPermission = request;
+            this.emit('permissionRequest', sessionId, request);
+          },
+          onAskCancelled: (askId) => {
+            const pending = this.pendingPermissions.get(askId);
+            if (pending) {
+              this.pendingPermissions.delete(askId);
+              pending.resolve({ behavior: 'deny', message: 'Question cancelled' });
+            }
+            if (activeSession.pendingPermission?.requestId === askId) {
+              activeSession.pendingPermission = null;
+            }
+          },
           onError: (error) => coworkLog('ERROR', 'runDshSessionLocal', 'runtime stream error', { error: error.message }),
-        },
-      });
+          },
+        });
+      } finally {
+        clearDshStallWatchdog();
+      }
+      };
 
-      let outcome = await runTurnToOutcome(effectiveDshPrompt);
+      let outcome = await runGuardedTurn(effectiveDshPrompt, promptImages);
 
       // Empty terminal turn auto-continue (parity with the Claude path's
       // bf15f63d fix): DeepSeek occasionally ends a turn after emitting only a
@@ -5869,7 +6018,7 @@ export class CoworkRunner extends EventEmitter {
           'Empty terminal turn (DSH reasoning-only stop) — auto-continuing once',
           { sessionId }
         );
-        outcome = await runTurnToOutcome(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
+        outcome = await runGuardedTurn(EMPTY_TERMINAL_TURN_CONTINUE_PROMPT);
       }
 
       if (activeSession.abortController.signal.aborted) {
@@ -5894,6 +6043,19 @@ export class CoworkRunner extends EventEmitter {
         this.dshActiveTurns.delete(sessionId);
         return;
       }
+      // Stall-watchdog cancellation (the only non-user abort source on this
+      // path): the turn made no progress for the whole deadline and was
+      // cancelled. Surface a localized diagnostic and leave the session idle
+      // so the user can re-send; never report a hollow `completed`.
+      if (outcome.kind === 'aborted') {
+        this.addSystemMessage(sessionId, '', { dshTurnStalled: true });
+        finish('idle');
+        this.emit('complete', sessionId, activeSession.claudeSessionId);
+        this.clearPendingPermissions(sessionId);
+        this.removeActiveSession(sessionId, activeSession);
+        return;
+      }
+
       // Empty terminal turn fallback: reached only when the auto-continue
       // above already ran and the resumed turn was again empty. Do NOT falsely
       // report `completed` — surface the same diagnostic the Claude path uses
@@ -6019,6 +6181,47 @@ export class CoworkRunner extends EventEmitter {
           reason: `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
         }
       }
+      // Read guards (GT#12 parity with the Claude path's canUseTool block):
+      // N1 a non-vision model never reads image files; N2 the SAME unchanged
+      // image/large file is not re-read within one session. The pure decision
+      // logic is the shared, unit-tested evaluateReadImageGuard; read_image
+      // passes as 'read' (the guard's tool vocabulary only distinguishes
+      // read tools, and its messages never name the tool).
+      if (normalized === 'read' || normalized === 'read_image') {
+        const guardCwd = activeSession?.workspaceRoot ?? process.cwd();
+        const guardFilePath = this.resolveToolFilePathFromInput(toolInput, guardCwd);
+        if (guardFilePath) {
+          const absoluteGuardPath = path.resolve(guardFilePath);
+          const guardStat = safeFileStat(absoluteGuardPath);
+          const route = this.resolveSessionDshRoute(sessionId);
+          const guardModelLimits = route ? resolveCurrentModelLimits(route.model) : null;
+          const guardDecision = evaluateReadImageGuard({
+            toolName: 'read',
+            absolutePath: absoluteGuardPath,
+            fileStat: guardStat,
+            supportsVision: guardModelLimits?.supportsVision ?? true,
+            priorReads: activeSession?.readFiles ?? null,
+          });
+          if (guardDecision.action === 'deny') {
+            coworkLog(
+              guardDecision.reason === 'no-vision-image' ? 'WARN' : 'INFO',
+              'evaluateDshToolPolicy',
+              guardDecision.reason === 'no-vision-image'
+                ? 'Blocked Read image for non-vision model'
+                : 'Deduplicated repeated Read of unchanged file',
+              { sessionId, toolName, filePath: absoluteGuardPath }
+            );
+            return { decision: 'deny', reason: guardDecision.message };
+          }
+          if (guardDecision.register && activeSession) {
+            activeSession.readFiles ??= new Map();
+            activeSession.readFiles.set(guardDecision.register.path, {
+              mtimeMs: guardDecision.register.mtimeMs,
+              size: guardDecision.register.size,
+            });
+          }
+        }
+      }
       return { decision: 'allow' }
     } catch (error) {
       coworkLog('ERROR', 'evaluateDshToolPolicy', 'policy evaluation failed; failing closed', {
@@ -6026,6 +6229,47 @@ export class CoworkRunner extends EventEmitter {
       })
       return { decision: 'deny', reason: 'permission policy evaluation failed' }
     }
+  }
+
+  /**
+   * Prompt image attachments for a DSH turn: the Claude path lets the CLI
+   * parse attachment marker lines into image blocks, but the DSH runtime has
+   * no prompt-side file parsing — the host reads the image files itself and
+   * the runtime commits them through its attachment store. Only media types
+   * the store accepts ride along; everything else stays a plain path
+   * reference in the text (the model can still open it with its read tools).
+   */
+  private async collectDshPromptImages(
+    prompt: string,
+    cwd: string,
+    supportsVision: boolean
+  ): Promise<DshHostToolImagePayload[]> {
+    const entries = this.parseAttachmentEntries(prompt)
+    if (entries.length === 0) return []
+    const images: DshHostToolImagePayload[] = []
+    for (const entry of entries) {
+      const resolved = path.resolve(this.resolveAttachmentPath(entry.rawPath, cwd))
+      const mediaType = dshImageMediaTypeForPath(resolved)
+      if (!mediaType) continue
+      try {
+        const stat = await fs.promises.stat(resolved)
+        if (!stat.isFile() || stat.size <= 0 || stat.size > DSH_IMAGE_MAX_BYTES) continue
+        const bytes = await fs.promises.readFile(resolved)
+        images.push({ data: bytes.toString('base64'), mediaType, name: path.basename(resolved) })
+      } catch {
+        // Unreadable attachment: leave the path reference in the text.
+      }
+    }
+    if (images.length === 0) return []
+    if (!supportsVision) {
+      // Parity with the Claude path's force-text-only note: the route cannot
+      // carry image blocks, so the attachments stay as text path references.
+      coworkLog('INFO', 'collectDshPromptImages', 'Model lacks image input; prompt attachments stay as text references', {
+        imageCount: images.length,
+      })
+      return []
+    }
+    return images
   }
 
   /** Execute a host-bridged tool call from the runtime. */
