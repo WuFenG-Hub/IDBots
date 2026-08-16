@@ -5902,6 +5902,10 @@ export class CoworkRunner extends EventEmitter {
       } else {
         finish('completed');
       }
+      // Memory capture on turn completion — the Claude path runs this in every
+      // non-error settlement (local + sandbox); without it DSH turns never fed
+      // experience extraction. Kernel-agnostic: reads store messages only.
+      this.applyTurnMemoryUpdatesForSession(sessionId);
       this.emit('complete', sessionId, activeSession.claudeSessionId);
       // Same teardown the Claude path performs: without removing the active
       // session, the next submission is classified as a pending steer against
