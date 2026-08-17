@@ -1574,10 +1574,10 @@ export class CoworkRunner extends EventEmitter {
     emitUpdate: (sessionId, messageId, content, metadata) => {
       this.emit('messageUpdate', sessionId, messageId, content, metadata);
     },
-    persistFinalize: (sessionId, messageId, content) => {
+    persistFinalize: (sessionId, messageId, content, metadata) => {
       this.updateMessageMerged(sessionId, messageId, {
         content,
-        metadata: { isStreaming: false, isFinal: true },
+        metadata: { isStreaming: false, isFinal: true, ...(metadata ?? {}) },
       });
     },
   });
@@ -6025,8 +6025,8 @@ export class CoworkRunner extends EventEmitter {
             // DSH notification pump and made session switching stall.
             this.dshStreamUi.onUpdate(sessionId, messageId, content);
           },
-          onMessageFinalize: (messageId, content) => {
-            this.dshStreamUi.onFinalize(sessionId, messageId, content);
+          onMessageFinalize: (messageId, content, metadata) => {
+            this.dshStreamUi.onFinalize(sessionId, messageId, content, metadata);
           },
           onUsage: (usage) => {
             activeSession.lastDshUsage = usage;

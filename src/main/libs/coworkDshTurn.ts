@@ -48,7 +48,7 @@ export interface DshTurnCallbacks {
     slot?: DshStreamSlot
   ) => string
   onMessageUpdate: (messageId: string, content: string) => void
-  onMessageFinalize: (messageId: string, content: string) => void
+  onMessageFinalize: (messageId: string, content: string, metadata?: { isThinking?: boolean }) => void
   onUsage: (usage: DshUsageSnapshot) => void
   onApprovalRequest: (ask: DshApprovalAsk) => void
   onApprovalCancelled: (askId: string) => void
@@ -404,8 +404,8 @@ export class DshTurnHub {
       onMessageUpdate: (sessionId, messageId, content) => {
         controllerOf(sessionId)?.cb.onMessageUpdate(messageId, content)
       },
-      onMessageFinalize: (sessionId, messageId, content) => {
-        controllerOf(sessionId)?.cb.onMessageFinalize(messageId, content)
+      onMessageFinalize: (sessionId, messageId, content, metadata) => {
+        controllerOf(sessionId)?.cb.onMessageFinalize(messageId, content, metadata)
       },
       onUsage: (sessionId, usage) => {
         controllerOf(sessionId)?.cb.onUsage(usage)

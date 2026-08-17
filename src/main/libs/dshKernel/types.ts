@@ -15,6 +15,14 @@ export type CoworkMessageInput = {
 /** Which streaming slot an action refers to (the store assigns real ids). */
 export type DshStreamSlot = 'text' | 'thinking'
 
+/**
+ * Finalize-time metadata overrides. Used when assembly reclassifies a message
+ * after streaming: DeepSeek Responses commentary-phase text streams as text
+ * (the wire marks the phase only in the assembled replay state) and is
+ * finalized as thinking so it collapses exactly like Claude-kernel thinking.
+ */
+export type DshFinalizeMetadata = { isThinking?: boolean }
+
 /** Actions the adapter applies to the store + event surface. */
 export type DshMapperAction =
   | {
@@ -23,7 +31,12 @@ export type DshMapperAction =
       message: CoworkMessageInput
     }
   | { kind: 'messageUpdate'; slot: DshStreamSlot; content: string }
-  | { kind: 'messageFinalize'; slot: DshStreamSlot; content: string }
+  | {
+      kind: 'messageFinalize'
+      slot: DshStreamSlot
+      content: string
+      metadata?: DshFinalizeMetadata
+    }
   | {
       kind: 'turnEnd'
       turn: number
@@ -175,7 +188,7 @@ export interface DshUserQuestionAsk {
 export interface DshKernelHandlers {
   onMessage: (sessionId: string, message: CoworkMessageInput, slot?: DshStreamSlot) => string
   onMessageUpdate: (sessionId: string, messageId: string, content: string) => void
-  onMessageFinalize: (sessionId: string, messageId: string, content: string) => void
+  onMessageFinalize: (sessionId: string, messageId: string, content: string, metadata?: DshFinalizeMetadata) => void
   onTurnEnd: (sessionId: string, reason: { kind: string; reason?: string }, emptyTerminal?: boolean) => void
   onUsage: (sessionId: string, usage: DshUsageSnapshot) => void
   onApprovalRequest: (sessionId: string, ask: DshApprovalAsk) => void

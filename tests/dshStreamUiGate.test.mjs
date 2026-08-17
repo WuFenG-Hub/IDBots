@@ -131,3 +131,22 @@ test('clearSession drops overlays and cancels a pending trailing flush', () => {
   const viewed = gate.applyOverlays({ id: 's1', messages: [{ id: 'm1', content: '' }] })
   assert.equal(viewed.messages[0].content, '')
 })
+
+test('finalize metadata merges into the emit and persist payloads', () => {
+  const { DshStreamUiGate } = loadGate()
+  const emitted = []
+  const persisted = []
+  const gate = new DshStreamUiGate({
+    throttleMs: 0,
+    emitUpdate: (_s, _m, content, metadata) => emitted.push({ content, metadata }),
+    persistFinalize: (_s, _m, content, metadata) => persisted.push({ content, metadata }),
+  })
+
+  gate.onFinalize('s1', 'm1', 'deliberation', { isThinking: true })
+  assert.deepEqual(persisted[0].metadata, { isThinking: true })
+  assert.deepEqual(emitted[0].metadata, { isStreaming: false, isFinal: true, isThinking: true })
+
+  gate.onFinalize('s1', 'm2', 'plain reply')
+  assert.equal(persisted[1].metadata, undefined)
+  assert.deepEqual(emitted[1].metadata, { isStreaming: false, isFinal: true })
+})

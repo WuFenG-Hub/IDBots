@@ -13,7 +13,11 @@
 //  - usage arrives on assistant/chunk (usage) and assistant/message events
 //  - some DeepSeek/gateway routes leak chain-of-thought into text-delta as
 //    <think> tags instead of reasoning-delta; those are split into the
-//    thinking slot so the renderer can reuse Claude's ThinkingBlock.
+//    thinking slot so the renderer can reuse Claude's ThinkingBlock
+//  - DeepSeek Responses routes tag text items commentary/final_answer in the
+//    assembled replay state; commentary ("thinking out loud" around tool
+//    calls) is reclassified into the thinking slot at finalize so it collapses
+//    exactly like Claude-kernel thinking instead of flooding the transcript.
 
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
 import { splitThinkTaggedContent } from './thinkTags'
@@ -23,6 +27,47 @@ const textOf = (blocks: Array<{ type: string; text?: string }> | undefined): str
 
 const reasoningOf = (blocks: Array<{ type: string; text?: string }> | undefined): string =>
   (blocks ?? []).filter((b) => b.type === 'reasoning').map((b) => b.text ?? '').join('')
+
+type TextPhase = 'commentary' | 'final_answer'
+
+/** Parse one pi-ai textSignature (`{"v":1,"id":…,"phase":…}`) into its phase. */
+const phaseOfSignature = (signature: unknown): TextPhase | undefined => {
+  if (typeof signature !== 'string' || signature.length === 0) return undefined
+  try {
+    const parsed = JSON.parse(signature)
+    if (parsed && typeof parsed === 'object'
+      && (parsed.phase === 'commentary' || parsed.phase === 'final_answer')) {
+      return parsed.phase
+    }
+  } catch { /* malformed signatures stay unclassified */ }
+  return undefined
+}
+
+/**
+ * Ordered phases of the message's text blocks, from the assembled replay
+ * state (`source.replayState.blocks[].textSignature`). DeepSeek's Responses
+ * API tags every text item `commentary` (thinking out loud around tool
+ * calls) or `final_answer` (the user-visible reply); pi-ai preserves the tag
+ * only there — the wire `content` blocks and streaming deltas carry no phase.
+ * Returns null when no block carries a phase (other providers/protocols keep
+ * the legacy all-visible classification).
+ */
+const replayTextPhasesOf = (message: {
+  content?: Array<{ type: string; text?: string }>
+  source?: { replayState?: { blocks?: Array<{ type: string; textSignature?: unknown }> } }
+} | undefined): Array<TextPhase | undefined> | null => {
+  const blocks = message?.source?.replayState?.blocks
+  if (!Array.isArray(blocks)) return null
+  const phases: Array<TextPhase | undefined> = []
+  let sawPhase = false
+  for (const block of blocks) {
+    if (block?.type !== 'text') continue
+    const phase = phaseOfSignature(block.textSignature)
+    if (phase !== undefined) sawPhase = true
+    phases.push(phase)
+  }
+  return sawPhase ? phases : null
+}
 
 export class DshEventMapper {
   private textOpen = false
@@ -40,8 +85,14 @@ export class DshEventMapper {
   // ends 'stop' having produced neither text nor tool calls ended before doing
   // anything — the DeepSeek reasoning-only truncation the Claude path
   // auto-continues on (bf15f63d). Flags reset at every turn/end.
-  private turnSawText = false
   private turnSawToolCall = false
+  /** Sticky per-turn: a step finalized VISIBLE reply text (commentary-phase
+   * text finalized into thinking does not count — a turn whose only output is
+   * commentary must still look empty so the auto-continue guard can fire). */
+  private turnSawFinalText = false
+  /** Text streamed since the last assistant/message finalize — the defensive
+   * "produced something" signal for streams that end without assembling. */
+  private turnSawStreamedText = false
 
   consume(envelope: DshSessionEventEnvelope): DshMapperAction[] {
     const actions: DshMapperAction[] = []
@@ -78,7 +129,7 @@ export class DshEventMapper {
           if (split.text.length > 0) {
             this.openText(actions)
             this.textBuf = split.text
-            this.turnSawText = true
+            this.turnSawStreamedText = true
             actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
           }
         } else if (chunk?.type === 'reasoning-delta') {
@@ -157,14 +208,18 @@ export class DshEventMapper {
         // this turn — the model emitted (at most) reasoning and ended. Flag it
         // so the turn runner can auto-continue once instead of reporting a
         // hollow "completed" (parity with the Claude path's bf15f63d fix).
-        const emptyTerminal = reason.kind === 'stop' && !this.turnSawText && !this.turnSawToolCall
+        const emptyTerminal = reason.kind === 'stop'
+          && !this.turnSawFinalText
+          && !this.turnSawStreamedText
+          && !this.turnSawToolCall
         actions.push({
           kind: 'turnEnd',
           turn: data.turn,
           reason,
           ...(emptyTerminal ? { emptyTerminal: true } : {}),
         })
-        this.turnSawText = false
+        this.turnSawFinalText = false
+        this.turnSawStreamedText = false
         this.turnSawToolCall = false
         break
       }
@@ -202,22 +257,53 @@ export class DshEventMapper {
     })
   }
 
-  private finalizeAssistantMessage(actions: DshMapperAction[], data: { message?: { content?: Array<{ type: string; text?: string }> } }): void {
+  private finalizeAssistantMessage(
+    actions: DshMapperAction[],
+    data: { message?: { content?: Array<{ type: string; text?: string }>; source?: { replayState?: { blocks?: Array<{ type: string; textSignature?: unknown }> } } } }
+  ): void {
     const blocks = data.message?.content
     let reasoning = reasoningOf(blocks)
     let visibleText = textOf(blocks)
+    let commentary = ''
 
-    if (!reasoning) {
+    const phases = replayTextPhasesOf(data.message)
+    if (phases) {
+      // Phase-classified text (DeepSeek Responses): commentary segments are
+      // thinking-aloud around tool calls, only final_answer is the reply.
+      // Content text blocks and replay text blocks are two projections of the
+      // same stream, so walking both in order pairs every block with its tag.
+      const commentaryParts: string[] = []
+      const finalParts: string[] = []
+      let index = 0
+      for (const block of blocks ?? []) {
+        if (block.type !== 'text') continue
+        const text = block.text ?? ''
+        if (text.length > 0) {
+          if (phases[index] === 'commentary') commentaryParts.push(text)
+          else finalParts.push(text)
+        }
+        index += 1
+      }
+      commentary = commentaryParts.join('\n\n')
+      visibleText = splitThinkTaggedContent(finalParts.join('\n\n')).text
+    } else if (!reasoning) {
       const split = splitThinkTaggedContent(visibleText || this.rawTextBuf)
       reasoning = split.thinking || this.thinkingBuf
       visibleText = split.text
-    } else if (visibleText) {
+    } else {
       visibleText = splitThinkTaggedContent(visibleText).text
     }
 
-    if (reasoning.length > 0) {
+    // A commentary-only message whose text already streamed into the text slot
+    // converts that message in place (finalize as thinking) — no separate
+    // thinking message and no empty visible bubble left behind.
+    const convertStreamedTextToThinking = commentary.length > 0
+      && visibleText.length === 0
+      && this.textOpen
+
+    if (reasoning.length > 0 || (commentary.length > 0 && !convertStreamedTextToThinking)) {
       this.openThinking(actions)
-      this.thinkingBuf = reasoning
+      this.thinkingBuf = [reasoning, commentary].filter((part) => part.length > 0).join('\n\n')
     }
     if (this.thinkingOpen) {
       this.thinkingOpen = false
@@ -228,9 +314,13 @@ export class DshEventMapper {
     if (visibleText.length > 0) {
       this.openText(actions)
       this.textBuf = visibleText
-      this.turnSawText = true
+      this.turnSawFinalText = true
     }
-    if (this.textOpen) {
+    if (convertStreamedTextToThinking) {
+      this.textOpen = false
+      actions.push({ kind: 'messageFinalize', slot: 'text', content: commentary, metadata: { isThinking: true } })
+      this.textBuf = ''
+    } else if (this.textOpen) {
       this.textOpen = false
       actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
       this.textBuf = ''
@@ -238,6 +328,7 @@ export class DshEventMapper {
 
     this.rawTextBuf = ''
     this.reasoningFromDeltas = false
+    this.turnSawStreamedText = false
   }
 
   private withRoute(usage: Partial<DshUsageSnapshot> | undefined): DshUsageSnapshot | null {
