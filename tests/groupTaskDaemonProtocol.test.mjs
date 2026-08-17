@@ -373,7 +373,66 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
   }
 });
 
+test('P5 (v1.2): a worker recently active BEFORE the assignment gets a single long-turn note, not a missed-ACK warning', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // Worker spoke 2 minutes ago (mid long skill turn) — BEFORE the chair's
+    // new assignment lands. Task #23: this exact shape produced the false
+    // "@chair ⚠ ... has not sent a [WORKING] ACK" warnings.
+    const spokeAtSec = Math.floor(h.state.nowMs / 1000) - 120;
+    insertGroupMessage(h.db, {
+      pinId: 'recent-work-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 长回合中：正在生成配图批次 3/5', chainTimestamp: spokeAtSec,
+    });
+    await h.loop.runTick(); // consumes the message, records last-speak
+    insertGroupMessage(h.db, {
+      pinId: 'assign-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 下一批配图请改用 PNG 基线',
+    });
+    await h.loop.runTick(); // arms the ACK watch on the fresh assignment
+    h.state.nowMs += 4 * 60 * 1000; // past the 3-minute ACK timeout
+    await h.loop.runTick();
 
+    const warnings = h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK'));
+    assert.equal(warnings.length, 0, 'no missed-ACK warning for an engaged worker');
+    const notes = h.sends.filter((s) => s.content.includes('长回合执行中'));
+    assert.equal(notes.length, 1, 'exactly one neutral long-turn note');
+
+    // Watch consumed: a later tick with no new activity does not repeat either.
+    h.state.nowMs += 60 * 1000;
+    await h.loop.runTick();
+    assert.equal(h.sends.filter((s) => s.content.includes('长回合执行中')).length, 1, 'note fires once');
+    assert.equal(h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK')).length, 0);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P5 (v1.2): a worker silent past the engaged window still gets the real missed-ACK warning', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // Last speech 30 minutes ago — outside the 10-minute engaged window.
+    const spokeAtSec = Math.floor(h.state.nowMs / 1000) - 1800;
+    insertGroupMessage(h.db, {
+      pinId: 'stale-work-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: '[WORKING] 早期进度', chainTimestamp: spokeAtSec,
+    });
+    await h.loop.runTick();
+    insertGroupMessage(h.db, {
+      pinId: 'assign2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请接手 S5 组装',
+    });
+    await h.loop.runTick();
+    h.state.nowMs += 4 * 60 * 1000;
+    await h.loop.runTick();
+    const warnings = h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK'));
+    assert.equal(warnings.length, 1, 'genuinely missed assignment still warns the chair');
+  } finally {
+    h.cleanup();
+  }
+});
 
 test('P5: a standby (observer) member mentioned by the chair arms no ACK watch', async () => {
   const h = await createHarness();
