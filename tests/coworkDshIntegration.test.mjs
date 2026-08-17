@@ -130,7 +130,10 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
   runner.dshRuntimeExtraEntries = [
     { id: 'idbots-test-tools', name: path.join(runtimeDir, 'test', 'fixtures', 'test-tools.mjs') },
   ]
-  const sessionId = 'dsh-integration-1'
+  // Unique per run: the runtime resumes persisted session logs under
+  // .cowork-temp, so a fixed id would replay stale history from earlier
+  // runs (e.g. steers sent by older code) into the mock gateway requests.
+  const sessionId = `dsh-integration-${process.pid}-${Date.now().toString(36)}`
   const activeSession = {
     sessionId,
     claudeSessionId: null,
