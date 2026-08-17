@@ -28,7 +28,12 @@ const streamKey = (sessionId: string, messageId: string): string => `${sessionId
 
 export class DshStreamUiGate {
   private readonly throttleMs: number;
-  private readonly emitUpdate: (sessionId: string, messageId: string, content: string) => void;
+  private readonly emitUpdate: (
+    sessionId: string,
+    messageId: string,
+    content: string,
+    metadata?: Record<string, unknown>,
+  ) => void;
   private readonly persistFinalize: (sessionId: string, messageId: string, content: string) => void;
   private readonly clock: DshStreamUiGateClock;
   private readonly liveContent = new Map<string, string>();
@@ -37,7 +42,12 @@ export class DshStreamUiGate {
 
   constructor(options: {
     throttleMs: number;
-    emitUpdate: (sessionId: string, messageId: string, content: string) => void;
+    emitUpdate: (
+      sessionId: string,
+      messageId: string,
+      content: string,
+      metadata?: Record<string, unknown>,
+    ) => void;
     persistFinalize: (sessionId: string, messageId: string, content: string) => void;
     clock?: DshStreamUiGateClock;
   }) {
@@ -73,7 +83,7 @@ export class DshStreamUiGate {
     this.liveContent.set(key, content);
     this.persistFinalize(sessionId, messageId, content);
     this.lastEmitAt.set(key, this.clock.now());
-    this.emitUpdate(sessionId, messageId, content);
+    this.emitUpdate(sessionId, messageId, content, { isStreaming: false, isFinal: true });
   }
 
   overlays(sessionId: string): DshLiveMessageOverlay[] {

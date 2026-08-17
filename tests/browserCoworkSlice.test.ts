@@ -71,6 +71,27 @@ test('updateBrowserMessageContent patches content and metadata in place', () => 
   assert.equal(state.currentSession?.messages[0].metadata?.isStreaming, true);
 });
 
+test('updateBrowserMessageContent merges metadata so thinking flags survive finalize', () => {
+  let state = reducer(undefined, setBrowserSession(makeSession({
+    messages: [{
+      id: 'm1',
+      type: 'assistant',
+      content: 'hmm',
+      timestamp: 1002,
+      metadata: { isThinking: true, isStreaming: true },
+    }],
+  })));
+  state = reducer(state, updateBrowserMessageContent({
+    sessionId: 'session-1',
+    messageId: 'm1',
+    content: 'hmm done',
+    metadata: { isStreaming: false, isFinal: true },
+  }));
+  assert.equal(state.currentSession?.messages[0].metadata?.isThinking, true);
+  assert.equal(state.currentSession?.messages[0].metadata?.isStreaming, false);
+  assert.equal(state.currentSession?.messages[0].metadata?.isFinal, true);
+});
+
 test('updateBrowserSessionStatus follows the open session only', () => {
   let state = reducer(undefined, setBrowserSession(makeSession()));
   state = reducer(state, updateBrowserSessionStatus({ sessionId: 'other', status: 'completed' }));

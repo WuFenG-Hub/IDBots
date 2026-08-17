@@ -20,6 +20,7 @@ import UsageStatsChip from './UsageStatsChip';
 import ManualCompactButton from './ManualCompactButton';
 import A2AMessageItem from './A2AMessageItem';
 import MessageFeedbackControls from './MessageFeedbackControls';
+import { ThinkingBlock, splitThinkTaggedContent } from './ThinkingBlock';
 import { shouldHideA2AInternalMessage } from './a2aInternalMessageFilter';
 import {
   getTodoListSummaryText,
@@ -1745,6 +1746,7 @@ const AssistantMessageItem: React.FC<{
   const [isHovered, setIsHovered] = useState(false);
   const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
   const gigSquareCard = renderGigSquareCard(message.content);
+  const thinkSplit = splitThinkTaggedContent(displayContent);
 
   if (gigSquareCard) {
     return (
@@ -1754,23 +1756,43 @@ const AssistantMessageItem: React.FC<{
     );
   }
 
+  const replyContent = thinkSplit.thinking ? thinkSplit.text : displayContent;
+
   return (
     <div
       className="relative"
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <div className="dark:text-claude-darkText text-claude-text">
-        <MarkdownContent
-          content={displayContent}
-          className="prose dark:prose-invert max-w-none"
-          resolveLocalFilePath={resolveLocalFilePath}
-        />
-      </div>
+      {thinkSplit.thinking ? (
+        <div className="mb-3">
+          <ThinkingBlock
+            message={{
+              ...message,
+              content: thinkSplit.thinking,
+              metadata: {
+                ...message.metadata,
+                isThinking: true,
+                isStreaming: Boolean(message.metadata?.isStreaming) && !thinkSplit.text,
+              },
+            }}
+            mapDisplayText={mapDisplayText}
+          />
+        </div>
+      ) : null}
+      {replyContent ? (
+        <div className="dark:text-claude-darkText text-claude-text">
+          <MarkdownContent
+            content={replyContent}
+            className="prose dark:prose-invert max-w-none"
+            resolveLocalFilePath={resolveLocalFilePath}
+          />
+        </div>
+      ) : null}
       {showCopyButton && (
         <div className="flex items-center gap-1.5 mt-1">
           <CopyButton
-            content={displayContent}
+            content={replyContent || displayContent}
             visible={isHovered}
           />
           <MessageFeedbackControls
@@ -2001,58 +2023,6 @@ const TypingDots: React.FC = () => (
     <div className="w-2 h-2 rounded-full bg-claude-accent animate-bounce" style={{ animationDelay: '300ms' }} />
   </div>
 );
-
-const ThinkingBlock: React.FC<{
-  message: CoworkMessage;
-  mapDisplayText?: (value: string) => string;
-}> = ({ message, mapDisplayText }) => {
-  const isCurrentlyStreaming = Boolean(message.metadata?.isStreaming);
-  const [isExpanded, setIsExpanded] = useState(isCurrentlyStreaming);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const displayContent = mapDisplayText ? mapDisplayText(message.content) : message.content;
-
-  // Auto-expand while streaming, auto-collapse when streaming completes
-  useEffect(() => {
-    if (isCurrentlyStreaming) {
-      setIsExpanded(true);
-    } else {
-      setIsExpanded(false);
-    }
-  }, [isCurrentlyStreaming]);
-
-  useLayoutEffect(() => {
-    if (!isCurrentlyStreaming) return;
-    pinScrollToBottom(bodyRef.current);
-  }, [isCurrentlyStreaming, displayContent]);
-
-  return (
-    <div className="rounded-lg border dark:border-claude-darkBorder/50 border-claude-border/50 overflow-hidden">
-      <button
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full flex items-center gap-2 px-3 py-2 text-left dark:hover:bg-claude-darkSurfaceHover/50 hover:bg-claude-surfaceHover/50 transition-colors"
-      >
-        <ChevronRightIcon
-          className={`h-3.5 w-3.5 dark:text-claude-darkTextSecondary text-claude-textSecondary flex-shrink-0 transition-transform duration-200 ${
-            isExpanded ? 'rotate-90' : ''
-          }`}
-        />
-        <span className="text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {i18nService.t('reasoning')}
-        </span>
-        {isCurrentlyStreaming && (
-          <span className="w-1.5 h-1.5 rounded-full bg-claude-accent animate-pulse" />
-        )}
-      </button>
-      {isExpanded && (
-        <div ref={bodyRef} className="px-3 pb-3 max-h-64 overflow-y-auto overflow-anchor-none">
-          <div className="text-xs leading-relaxed dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 whitespace-pre-wrap">
-            {displayContent}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
 
 const AssistantTurnBlock: React.FC<{
   turn: ConversationTurn;

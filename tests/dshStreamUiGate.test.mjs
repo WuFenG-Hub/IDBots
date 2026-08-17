@@ -58,7 +58,7 @@ test('rapid DSH chunks emit at most once per throttle window and persist only on
   const persisted = []
   const gate = new DshStreamUiGate({
     throttleMs: 90,
-    emitUpdate: (sessionId, messageId, content) => emitted.push({ sessionId, messageId, content }),
+    emitUpdate: (sessionId, messageId, content, metadata) => emitted.push({ sessionId, messageId, content, metadata }),
     persistFinalize: (sessionId, messageId, content) => persisted.push({ sessionId, messageId, content }),
     clock,
   })
@@ -79,6 +79,7 @@ test('rapid DSH chunks emit at most once per throttle window and persist only on
   assert.equal(persisted.length, 1)
   assert.equal(persisted[0].content, 'Hello world')
   assert.equal(emitted.at(-1).content, 'Hello world')
+  assert.deepEqual(emitted.at(-1).metadata, { isStreaming: false, isFinal: true })
 })
 
 test('live overlays let session switch see unpersisted streaming content', () => {
