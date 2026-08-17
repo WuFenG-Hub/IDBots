@@ -102,6 +102,8 @@ const createHarness = async (overrides = {}) => {
   const routingCalls = [];
   const skillTurnCalls = [];
   const logs = [];
+  const ownerReports = [];
+  const sourceReviewReports = [];
   const state = {
     nowMs: 1_000_000_000_000,
     chatErrorAlways: overrides.chatErrorAlways ?? null,
@@ -150,6 +152,8 @@ const createHarness = async (overrides = {}) => {
     maxRepliesPerTaskPerTick: overrides.maxRepliesPerTaskPerTick ?? 3,
     ...(overrides.disableChairPlanningTurn != null ? { disableChairPlanningTurn: overrides.disableChairPlanningTurn } : {}),
     ...(overrides.autoAckWorkerDispatch != null ? { autoAckWorkerDispatch: overrides.autoAckWorkerDispatch } : {}),
+    ...(overrides.sendOwnerPrivateReport != null ? { sendOwnerPrivateReport: overrides.sendOwnerPrivateReport } : {}),
+    ...(overrides.sendReviewReportToSourceSession != null ? { sendReviewReportToSourceSession: overrides.sendReviewReportToSourceSession } : {}),
     ...(overrides.dependencyWaitMaxMs != null ? { dependencyWaitMaxMs: overrides.dependencyWaitMaxMs } : {}),
     ...(overrides.driverGraceMs != null ? { driverGraceMs: overrides.driverGraceMs } : {}),
     ...(overrides.readPinForVerification != null ? { readPinForVerification: overrides.readPinForVerification } : {}),
@@ -175,7 +179,7 @@ const createHarness = async (overrides = {}) => {
 
   return {
     store, db, metabotStore, groupTaskStore, orchestrationStore, coworkStore,
-    loop, chatCalls, sends, routingCalls, skillTurnCalls, logs, state, createTask,
+    loop, chatCalls, sends, routingCalls, skillTurnCalls, logs, ownerReports, sourceReviewReports, state, createTask,
     /** A SECOND daemon loop over the SAME stores/kv (multi-instance mutex). */
     makeSecondLoop: () => createGroupTaskDaemonLoop(loopDeps),
     cleanup: () => store.close(),
@@ -324,6 +328,52 @@ test('P5: roll-call (请确认在线) mentions arm no ACK watch — no false no-
     h.cleanup();
   }
 });
+
+test('P4 (v1.2): review entry delivers the owner report body to the origin session; rework hatch re-arms it', async () => {
+  const h = await createHarness({
+    sendOwnerPrivateReport: async (params) => ({ pinId: 'owner-report-pin' }),
+    sendReviewReportToSourceSession: ({ taskId, report }) => {
+      h.sourceReviewReports.push({ taskId, report });
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'r1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.equal(h.sourceReviewReports.length, 1, 'review entry -> one source-session report');
+    assert.match(h.sourceReviewReports[0].report, /reply-for-/);
+    assert.equal(h.sourceReviewReports[0].taskId, task.id);
+    // A2A guard set; source-review guard set by the service in production —
+    // here the dep is a stub, so assert the A2A guard holds the pair.
+    assert.equal(h.store.get(`group_task_owner_reported:${task.id}`), '1');
+
+    // Rework hatch: review -> executing clears the guards...
+    insertGroupMessage(h.db, {
+      pinId: 'rework-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] 返工：PNG 基线重建',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    assert.ok(h.store.get(`group_task_owner_reported:${task.id}`) == null, 'A2A guard cleared by rework hatch');
+    assert.ok(h.store.get(`group_task_review_notified:${task.id}`) == null, 'source-review guard cleared by rework hatch');
+
+    // ...so the NEXT review re-reports to both channels.
+    insertGroupMessage(h.db, {
+      pinId: 'r2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 返工完成，再次验收',
+    });
+    await h.loop.runTick();
+    assert.equal(h.sourceReviewReports.length, 2, 'second review re-reports to the source session');
+  } finally {
+    h.cleanup();
+  }
+});
+
+
 
 test('P5: a standby (observer) member mentioned by the chair arms no ACK watch', async () => {
   const h = await createHarness();

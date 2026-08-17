@@ -194,6 +194,13 @@ const DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS = 10 * 60_000;
  */
 export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 /**
+ * P4 (v1.2): one [GROUP_TASK_REVIEW] report injection into the origin CoWork
+ * session per review-entry. Cleared by the rework hatch (like the A2A owner
+ * report) so the next review re-reports. Exported for the service-side
+ * notifySourceSessionReview guard.
+ */
+export const GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX = 'group_task_review_notified:';
+/**
  * HITL checkpoint-report guard: one private A2A checkpoint request per
  * checkpoint (`group_task_checkpoint_reported:<taskId>:<checkpointId>`).
  */
@@ -861,6 +868,12 @@ export interface GroupTaskDaemonDeps {
   /** Per-task minimum interval (ms) between presence probes. */
   remotePresenceThrottleMs?: number;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
+  /**
+   * P4 (v1.2): inject the review-stage owner report (same body the A2A
+   * private chat receives) into the task's origin CoWork session under the
+   * [GROUP_TASK_REVIEW] prefix. Best-effort; kv-guarded per review-entry.
+   */
+  sendReviewReportToSourceSession?: (input: { taskId: number; report: string }) => void;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   getMetaIDGroupCognitionPromptBlock?: (input: {
@@ -2191,6 +2204,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
       }
+      // P4 (v1.2): the origin CoWork session receives the SAME report body the
+      // A2A private chat gets — the owner's repeated ask ("我在 co-work 对话中
+      // 应该也要收到跟线上 A2A 对话相同内容或差不多内容的验收报告").
+      // Best-effort and kv-guarded per review-entry (service side), so an A2A
+      // delivery failure below does not lose the source-session copy and a
+      // rework cycle re-reports on the next review.
+      if (deps.sendReviewReportToSourceSession) {
+        try {
+          deps.sendReviewReportToSourceSession({ taskId: task.id, report });
+        } catch (sourceError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: review report to source session failed (A2A continues): ` +
+            `${sourceError instanceof Error ? sourceError.message : String(sourceError)}`,
+          );
+        }
+      }
       const delivery = await deps.sendOwnerPrivateReport({
         taskId: task.id,
         metabotId: bot.id,
@@ -2651,6 +2680,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // and the re-assert straggler guard must reset so the fresh
               // review entry can re-assert cleanly.
               deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
+              // P4 (v1.2): the origin-session review report follows the same
+              // rework hatch — the next review entry re-reports there too.
+              deps.getStore().delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`);
               deps.getStore().delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {

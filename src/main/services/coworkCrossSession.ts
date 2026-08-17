@@ -202,7 +202,19 @@ export class CoworkCrossSessionService {
     targetSessionId: string;
     message: string;
   }): CoworkCrossSessionInsertResult {
-    const sourceId = normalizeIdbotsSessionId(input.sourceSessionId);
+    // P4 (v1.2): the host pseudo-source `group-task:<id>` (group-task
+    // acceptance/review relay attribution, "哪里发起哪里结束") contains a
+    // colon and has NO cowork_sessions row BY DESIGN — it failed BOTH the
+    // strict id pattern and the source-row check, so the R2 seam rejected
+    // every acceptance insert and the origin session never received the
+    // close/review notices (task #23: notified_session empty, no kv guard).
+    // Recognize the synthetic namespace up front; every other source id keeps
+    // the strict normalization + existence checks.
+    const rawSource = String(input.sourceSessionId ?? '').trim().replace(IDBOTS_SESSION_SCHEME, '');
+    const isHostPseudoSource = /^group-task:\d+$/.test(rawSource);
+    const sourceId = isHostPseudoSource
+      ? { ok: true as const, sessionId: rawSource }
+      : normalizeIdbotsSessionId(input.sourceSessionId);
     if (sourceId.ok === false) {
       return sourceId;
     }
@@ -215,9 +227,11 @@ export class CoworkCrossSessionService {
       return error('SOURCE_TARGET_SAME_SESSION', 'Source and target session ids must be different.');
     }
 
-    const sourceSession = this.store.getSession(sourceId.sessionId);
-    if (!sourceSession) {
-      return error('SESSION_NOT_FOUND', `Source session not found: ${sourceId.sessionId}`);
+    if (!isHostPseudoSource) {
+      const sourceSession = this.store.getSession(sourceId.sessionId);
+      if (!sourceSession) {
+        return error('SESSION_NOT_FOUND', `Source session not found: ${sourceId.sessionId}`);
+      }
     }
 
     const targetSession = this.store.getSession(targetId.sessionId);
