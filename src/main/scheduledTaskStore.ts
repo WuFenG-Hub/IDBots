@@ -5,9 +5,6 @@ import { CronExpressionParser } from 'cron-parser';
 // Types for scheduled tasks (main process side)
 export type TaskLastStatus = 'success' | 'error' | 'running' | null;
 
-/** R2 迁移状态：老任务（scheduled_tasks）→ SDK durable cron 的幂等迁移标记。 */
-export type MigrationStatus = 'pending' | 'migrated' | 'not_supported' | 'skipped_disabled';
-
 export interface TaskState {
   nextRunAtMs: number | null;
   lastRunAtMs: number | null;
@@ -43,10 +40,6 @@ export interface ScheduledTask {
   coworkSessionId: string | null;
   expiresAt: string | null;
   notifyPlatforms: NotifyPlatform[];
-  /** R2：null = 未参与迁移；'migrated' = 已迁移为 SDK durable cron（原任务已禁用）。 */
-  migrationStatus: MigrationStatus | null;
-  /** R2：迁移后对应的 SDK cron id（幂等键，重复迁移跳过依据）。 */
-  migratedTaskId: string | null;
   state: TaskState;
   createdAt: string;
   updatedAt: string;
@@ -93,8 +86,6 @@ interface TaskRow {
   cowork_session_id: string | null;
   expires_at: string | null;
   notify_platforms_json: string;
-  migration_status: string | null;
-  migrated_task_id: string | null;
   next_run_at_ms: number | null;
   last_run_at_ms: number | null;
   last_status: string | null;
@@ -127,6 +118,7 @@ export class ScheduledTaskStore {
     this.saveDb = saveDb;
     this.ensureTaskSessionColumn();
     this.ensureMigrationColumns();
+    this.unmigrateLegacySdkCronTasks();
     this.resetStuckRunningTasks();
   }
 
@@ -190,7 +182,12 @@ export class ScheduledTaskStore {
     }
   }
 
-  /** R2：老表升级，补 migration_status / migrated_task_id 列（幂等，重复启动不报错）。 */
+  /**
+   * Legacy columns from the retired SDK durable-cron migration (migration_status /
+   * migrated_task_id). The SDK-cron feature was removed; the columns are only kept
+   * so the schema is uniform and the one-time un-migration below can find its rows.
+   * Idempotent: repeated startup never errors.
+   */
   private ensureMigrationColumns(): void {
     try {
       if (!this.tableExists('scheduled_tasks')) return;
@@ -213,6 +210,46 @@ export class ScheduledTaskStore {
       }
     } catch (error) {
       console.warn('Failed to ensure scheduled task migration columns:', error);
+    }
+  }
+
+  /**
+   * One-time (idempotent) un-migration for the retired SDK durable-cron feature:
+   * tasks migrated to SDK cron were disabled and marked migrated. With the SDK-cron
+   * machinery gone, restore them as enabled host-scheduled tasks with a freshly
+   * computed next run. No-op once no migrated rows remain.
+   * @returns number of restored tasks.
+   */
+  private unmigrateLegacySdkCronTasks(): number {
+    try {
+      if (!this.tableExists('scheduled_tasks')) return 0;
+      const rows = this.getAll<TaskRow>(
+        `SELECT * FROM scheduled_tasks
+         WHERE migration_status = 'migrated' OR migrated_task_id IS NOT NULL`
+      );
+      if (rows.length === 0) return 0;
+      for (const row of rows) {
+        let nextRunAtMs: number | null = null;
+        try {
+          const schedule = JSON.parse(row.schedule_json) as Schedule;
+          nextRunAtMs = this.calculateNextRunTime(schedule, row.last_run_at_ms);
+        } catch {
+          nextRunAtMs = null;
+        }
+        this.db.run(
+          `UPDATE scheduled_tasks
+           SET migration_status = NULL, migrated_task_id = NULL,
+               enabled = 1, next_run_at_ms = ?, updated_at = ?
+           WHERE id = ?`,
+          [nextRunAtMs, new Date().toISOString(), row.id]
+        );
+      }
+      this.saveDb();
+      console.log(`[ScheduledTaskStore] Restored ${rows.length} migrated task(s) to host scheduling`);
+      return rows.length;
+    } catch (error) {
+      console.warn('Failed to un-migrate legacy SDK cron tasks:', error);
+      return 0;
     }
   }
 
@@ -367,36 +404,6 @@ export class ScheduledTaskStore {
 
     this.saveDb();
     return this.getTask(id)!;
-  }
-
-  // --- R2 Migration Markers ---
-
-  /**
-   * R2：迁移完成后标记原任务 migrated 并禁用（历史 run 记录保留）。
-   * 幂等：重复调用只更新标记，不产生副作用。
-   * @returns 更新后的任务；任务不存在返回 null。
-   */
-  markMigrated(taskId: string, sdkCronId: string): ScheduledTask | null {
-    const existing = this.getTask(taskId);
-    if (!existing) return null;
-    this.db.run(
-      `UPDATE scheduled_tasks
-       SET migration_status = 'migrated', migrated_task_id = ?,
-           enabled = 0, next_run_at_ms = NULL, updated_at = ?
-       WHERE id = ?`,
-      [sdkCronId, new Date().toISOString(), taskId]
-    );
-    this.saveDb();
-    return this.getTask(taskId);
-  }
-
-  /** R2：查询已迁移任务（按 SDK cron id 反查原任务）。 */
-  findByMigratedCronId(sdkCronId: string): ScheduledTask | null {
-    const row = this.getOne<TaskRow>(
-      `SELECT * FROM scheduled_tasks WHERE migrated_task_id = ? ORDER BY updated_at DESC LIMIT 1`,
-      [sdkCronId]
-    );
-    return row ? this.rowToTask(row) : null;
   }
 
   deleteTask(id: string): boolean {
@@ -681,8 +688,6 @@ export class ScheduledTaskStore {
       coworkSessionId: row.cowork_session_id ?? null,
       expiresAt: row.expires_at,
       notifyPlatforms,
-      migrationStatus: (row.migration_status as MigrationStatus | null) ?? null,
-      migratedTaskId: row.migrated_task_id ?? null,
       state: {
         nextRunAtMs: row.next_run_at_ms,
         lastRunAtMs: row.last_run_at_ms,
