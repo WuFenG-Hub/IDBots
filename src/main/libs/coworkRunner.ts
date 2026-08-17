@@ -1642,7 +1642,9 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
-    this.dshExtraEntriesProvider = options.dshExtraEntriesProvider;
+    // Optional-chained like every other option — a bare `new CoworkRunner(store)`
+    // (tests, minimal embedders) used to crash here on the missing `?.`.
+    this.dshExtraEntriesProvider = options?.dshExtraEntriesProvider;
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
