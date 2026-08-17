@@ -3461,6 +3461,30 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         if (member.role !== 'worker' || member.metabotId == null) continue;
         const bot = botsById.get(member.metabotId);
         if (!bot || !isMentioned(message, bot)) continue;
+        // P5 (v1.1) false-positive modeling — being mentioned by the chair is
+        // not always an assignment, and an unACKed "assignment" is not always
+        // a missed one. Three legal states never arm the 3-min no-ACK watch:
+        //   1. roll-call/kickoff notes (@name 请确认在线) — presence check,
+        //      not work; arming here produced the false "Lucy / AI_小新 did
+        //      not ACK" warnings in task #21;
+        //   2. a member already standing by (observer/standby status);
+        //   3. a [DEPENDS_ON]-gated assignment whose upstream is not
+        //      delivered yet — the worker is legitimately waiting.
+        const contentText = (message.content ?? '').trim();
+        if (/请确认在线|确认在线/.test(contentText)) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: roll-call mention of ${member.name ?? member.metabotId} ` +
+            `(message #${message.id}) — no ACK watch armed`,
+          );
+          continue;
+        }
+        if (member.status === 'standby') {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} is standing by ` +
+            `(observer); mention in message #${message.id} arms no ACK watch`,
+          );
+          continue;
+        }
         const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
         const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
         // P1-4: an assignment message this worker already ACKed must never
@@ -3489,10 +3513,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `(message #${message.id}, DEPENDS_ON upstream ${derived}) inherits the upstream ACK; no new ACK watch`,
               );
             } else {
-              sqlite.set(pendingKey, JSON.stringify({ assignedAt: now(), messageId: message.id }));
+              // P5 (v1.1): dependency-waiting is a legal state — the worker
+              // cannot start (and need not ACK) until the upstream deliverable
+              // lands, so arming the 3-min no-ACK watch here would misreport
+              // the #21-style false "did not ACK" warnings.
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: derived assignment to ${member.name ?? member.metabotId} ` +
-                `(message #${message.id}) upstream not ACKed; waiting for [WORKING] ACK`,
+                `(message #${message.id}) upstream not delivered; dependency-wait, no ACK watch`,
               );
             }
             continue;
@@ -3577,6 +3604,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     if (!chair?.metabotId) return;
     for (const member of members) {
       if (member.role !== 'worker' || member.metabotId == null) continue;
+      // P5 (v1.1): a member who moved to standby (observer) after the watch
+      // armed is in a legal silent state — never report them as "not ACKed".
+      if (member.status === 'standby') continue;
       const pendingKey = `${ACK_PENDING_PREFIX}${task.id}:${member.metabotId}`;
       const raw = sqlite.get<string>(pendingKey);
       if (!raw) continue;

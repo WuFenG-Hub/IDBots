@@ -301,7 +301,52 @@ test('P14: no stale 已接单 ACK after the worker already delivered past the as
   }
 });
 
+test('P5: roll-call (请确认在线) mentions arm no ACK watch — no false no-ACK warning', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'rollcall-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot:请确认在线(每人一次即可,无需客套)。',
+    });
+    await h.loop.runTick();
+    assert.ok(h.logs.some((line) => line.includes('roll-call mention') && line.includes('no ACK watch armed')));
+    // Long past the 3-minute ACK timeout: no chair warning may fire (task #21
+    // falsely warned about members who were merely waiting/observing).
+    h.state.nowMs += 10 * 60 * 1000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK')).length,
+      0,
+      'no false no-ACK reminder for a roll-call mention',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
 
+test('P5: a standby (observer) member mentioned by the chair arms no ACK watch', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'standby', 'gmid-w2');
+    insertGroupMessage(h.db, {
+      pinId: 'standby-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请旁观本次验收整理',
+    });
+    await h.loop.runTick();
+    assert.ok(h.logs.some((line) => line.includes('standing by') && line.includes('no ACK watch')));
+    h.state.nowMs += 10 * 60 * 1000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK')).length,
+      0,
+      'no false no-ACK reminder for an observer',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
 
 // ---------------------------------------------------------------------------
 // P0-1: review-phase silence hint
