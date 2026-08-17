@@ -2472,6 +2472,13 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 deliverable.id,
                 report.verified ? 'confirmed' : 'unconfirmed',
               );
+              // P3 (v1.1): a verified deliverable leaves 'pending' — the
+              // ledger must not read "awaiting" once the pin is verifiably
+              // on-chain. The owner's later verdict ('accepted'/'rejected')
+              // is never overwritten (fresh rows are 'pending' here).
+              if (report.verified && deliverable.status === 'pending') {
+                store.updateDeliverableStatus(deliverable.id, 'delivered');
+              }
               const lagging = report.sources.some((entry) => entry.outcome === 'not_found')
                 && report.sources.some((entry) => entry.outcome === 'found');
               if (!report.verified) {
@@ -3693,7 +3700,19 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       } catch {
         // corrupt/missing → re-verify
       }
-      if (report.verified === true) continue;
+      if (report.verified === true) {
+        // P3 (v1.1) backfill: rows verified before the 'delivered' status
+        // existed (task #22's ledger) read 'pending' forever — flip them here
+        // so the enum catches up with the recorded verification report.
+        if (deliverable.status === 'pending') {
+          store.updateDeliverableStatus(deliverable.id, 'delivered');
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} status ` +
+            `pending -> delivered (verified backlog backfill)`,
+          );
+        }
+        continue;
+      }
       const checkedAt = typeof report.checkedAt === 'number' ? report.checkedAt : 0;
       if (nowMs - checkedAt < verificationRetryMs) continue;
       try {
@@ -3706,6 +3725,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           deliverable.id,
           fresh.verified ? 'confirmed' : 'unconfirmed',
         );
+        // P3 (v1.1): chain-confirmation-driven status flip (indexer lag caught
+        // up) — same pending -> delivered rule as the record-time path.
+        if (fresh.verified && deliverable.status === 'pending') {
+          store.updateDeliverableStatus(deliverable.id, 'delivered');
+        }
         const lagging = fresh.sources.some((entry) => entry.outcome === 'not_found')
           && fresh.sources.some((entry) => entry.outcome === 'found');
         emitLog(

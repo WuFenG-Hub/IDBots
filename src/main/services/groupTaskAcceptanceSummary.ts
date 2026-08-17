@@ -142,9 +142,12 @@ export function buildAcceptanceSummaryMessageText(
         confirmation: deliverable.confirmation,
         verification: null,
       } as GroupTaskDeliverable);
+      // P3 (v1.1): surface the ledger status when it moved past 'pending' —
+      // a verified deliverable must not read as still awaiting.
+      const statusNote = deliverable.status === 'pending' ? '' : ` · ${deliverable.status}`;
       const author = (deliverable.authorName ?? '').trim() || 'unknown';
       const body = uri || '（见消息原文）';
-      lines.push(`- [${kind}] ${body} (${verification}) — ${author}`);
+      lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
     }
   }
   lines.push('');

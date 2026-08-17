@@ -100,6 +100,18 @@ test('P13: the member roster wins over a wrong chain nickname (claude bot case)'
   assert.equal(result.deliverables[1].authorName, 'Chain Nickname');
 });
 
+test('P3: non-pending deliverable status is surfaced in the summary message line', () => {
+  const result = buildAcceptanceSummary({
+    task: baseTask,
+    deliverables: [
+      mkDeliverable({ status: 'delivered', uri: 'metaapp://abc', confirmation: 'confirmed' }),
+      mkDeliverable({ status: 'pending', uri: 'metafile://xyz', confirmation: 'unconfirmed' }),
+    ],
+    members: [],
+  });
+  assert.ok(result.messageText.includes('· delivered'));
+  assert.ok(!result.messageText.includes('· pending'));
+});
 
 test('buildAcceptanceSummary shows 无已核验交付物 (not 已完成) when no deliverables', () => {
   const result = buildAcceptanceSummary({ task: baseTask, deliverables: [], members: [] });

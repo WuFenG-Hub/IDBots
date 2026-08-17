@@ -116,7 +116,25 @@ const AcceptanceSummaryCard: React.FC<{ summary: GroupTaskAcceptanceSummary }> =
 /** One deliverable row in the summary card: kind badge + uri (copyable) + verification + author. */
 const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDeliverable }> = ({ deliverable }) => {
   const [copied, setCopied] = useState(false);
-  const verified = deliverable.confirmation === 'confirmed';
+  // P3 (v1.1): badge reflects the ledger state — owner verdict first
+  // (accepted/rejected), then on-chain verification ('delivered' or
+  // confirmation), falling back to 'pending' only while unverified.
+  const badgeAccepted = deliverable.status === 'accepted';
+  const badgeRejected = deliverable.status === 'rejected';
+  const badgeVerified = !badgeAccepted && !badgeRejected
+    && (deliverable.confirmation === 'confirmed' || deliverable.status === 'delivered');
+  const badgeLabel = badgeAccepted
+    ? 'accepted ✓'
+    : badgeRejected
+      ? 'rejected'
+      : badgeVerified
+        ? 'on-chain ✓'
+        : 'pending';
+  const badgeClass = badgeAccepted || badgeVerified
+    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+    : badgeRejected
+      ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400';
   const handleCopy = async () => {
     if (!deliverable.uri) return;
     try {
@@ -136,13 +154,9 @@ const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDelivera
           {deliverable.kind ?? 'text'}
         </span>
         <span
-          className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${
-            verified
-              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
-              : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
-          }`}
+          className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${badgeClass}`}
         >
-          {verified ? 'on-chain ✓' : 'pending'}
+          {badgeLabel}
         </span>
         {deliverable.uri && (
           <button

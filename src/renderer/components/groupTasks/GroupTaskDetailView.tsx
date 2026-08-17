@@ -1041,12 +1041,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                     ? 'groupTasksDeliverableStatusAccepted'
                     : deliverable.status === 'rejected'
                       ? 'groupTasksDeliverableStatusRejected'
-                      : 'groupTasksDeliverableStatusPending';
+                      : deliverable.status === 'delivered'
+                        ? 'groupTasksDeliverableStatusDelivered'
+                        : 'groupTasksDeliverableStatusPending';
                   const statusHintKey = deliverable.status === 'accepted'
                     ? 'groupTasksDeliverableStatusAcceptedHint'
                     : deliverable.status === 'rejected'
                       ? 'groupTasksDeliverableStatusRejectedHint'
-                      : 'groupTasksDeliverableStatusPendingHint';
+                      : deliverable.status === 'delivered'
+                        ? 'groupTasksDeliverableStatusDeliveredHint'
+                        : 'groupTasksDeliverableStatusPendingHint';
                   return (
                   <div
                     key={deliverable.id}

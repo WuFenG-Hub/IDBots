@@ -855,7 +855,7 @@ export class SqliteStore {
         author_globalmetaid TEXT,
         kind TEXT,
         uri TEXT,
-        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','rejected')),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','accepted','rejected')),
         confirmation TEXT NOT NULL DEFAULT 'unconfirmed'
           CHECK(confirmation IN ('unconfirmed','confirmed')),
         created_at TEXT DEFAULT (datetime('now'))
@@ -866,6 +866,8 @@ export class SqliteStore {
     this.migrateGroupTaskMembersStatusColumns();
     this.migrateGroupTaskDeliverablesVerification();
     this.migrateGroupTaskDeliverablesConfirmation();
+    // P3 (v1.1): widen the legacy status CHECK to include 'delivered'.
+    this.migrateGroupTaskDeliverablesDeliveredStatus();
     // P0-8: public integrity declarations (honest corrections/reports).
     this.db.run(`
       CREATE TABLE IF NOT EXISTS group_task_integrity_events (
@@ -2214,6 +2216,63 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskDeliverablesConfirmation:', error);
+    }
+  }
+
+  /**
+   * Migration (P3, v1.1): widen the deliverable status CHECK to include
+   * 'delivered' — a deliverable whose pin verified on-chain must not keep
+   * reading 'pending' (task #22: uri populated + verified, enum stuck at
+   * 'pending'). SQLite cannot ALTER a CHECK constraint, so the table is
+   * rebuilt once inside a transaction: every row is copied verbatim
+   * (data-preserving), then the legacy table is dropped. Fresh installs
+   * already create the widened table via the base DDL, and the migration
+   * no-ops when the stored schema already carries 'delivered'.
+   */
+  private migrateGroupTaskDeliverablesDeliveredStatus(): void {
+    try {
+      const schemaResult = this.db.exec(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'group_task_deliverables' LIMIT 1",
+      );
+      const schemaSql = String(schemaResult[0]?.values?.[0]?.[0] ?? '');
+      if (!schemaSql) return; // table absent (created later by the base DDL)
+      if (schemaSql.includes("'delivered'")) return; // already widened
+      this.db.run('BEGIN TRANSACTION;');
+      try {
+        this.db.run(
+          'ALTER TABLE group_task_deliverables RENAME TO group_task_deliverables_legacy_status_migration;',
+        );
+        this.db.run(`
+          CREATE TABLE group_task_deliverables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            msg_pin_id TEXT,
+            author_globalmetaid TEXT,
+            kind TEXT,
+            uri TEXT,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','accepted','rejected')),
+            confirmation TEXT NOT NULL DEFAULT 'unconfirmed'
+              CHECK(confirmation IN ('unconfirmed','confirmed')),
+            verification TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+          );
+        `);
+        this.db.run(`
+          INSERT INTO group_task_deliverables
+            (id, task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, verification, created_at)
+          SELECT
+            id, task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, verification, created_at
+          FROM group_task_deliverables_legacy_status_migration
+        `);
+        this.db.run('DROP TABLE group_task_deliverables_legacy_status_migration;');
+        this.db.run('COMMIT;');
+        this.save();
+      } catch (innerError) {
+        this.db.run('ROLLBACK;');
+        throw innerError;
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskDeliverablesDeliveredStatus:', error);
     }
   }
 
