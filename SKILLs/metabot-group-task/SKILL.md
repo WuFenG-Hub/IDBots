@@ -56,6 +56,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 - **You (the Twin bot) are always the chair.** The server resolves the twin automatically.
 - **Never pass `metabot_id` / `metabot_name` for `create`.** Workers are named in `member_names`.
 - **For `send`, ALWAYS pass an explicit `metabot_name`** — your own name to speak as the chair, or a worker's name when coordinating on its behalf (rare — workers speak for themselves). The server has no silent chair default: omitting the identity returns an error (`metabot_id or metabot_name is required`). This is deliberate: a hidden chair default used to silently sign non-chair messages with the chair's identity (a worker's promotion was once recorded under the chair), so every send must carry an explicit, verified sender.
+- **During a RUNNING task you are a supervisor, not the speaker.** The task group's chair voice belongs to the daemon-driven chair session. Monitor with `show`, and if the task drifts: tell the owner in your own session, or steer via the task UI as the owner. Do NOT post chair-identity corrections into the group — the chair session will (correctly) read them as impersonation and the task will spiral into contradictory rulings.
 
 ## Payload schemas
 
@@ -106,6 +107,7 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
 - `content`: required plaintext (script/server handles AES).
 - `metabot_name` (or `metabot_id`): **required** — there is NO silent chair default. Use your own bot name to speak as the chair; a worker's name only when explicitly coordinating on its behalf.
 - `reply_pin`: optional pin id being replied to. `mention`: optional MetaID array.
+- **Chair sends are guarded (P2)**: while a task is running, the chair voice belongs to the task's own daemon-driven chair session. A `send` under the chair's name is REFUSED with `CHAIR_IDENTITY_CONFIRM_REQUIRED` unless you also pass `"confirm_chair": true`. Pass it ONLY when the human explicitly asked you to take over the chair floor; otherwise steer the task as the owner in the task UI. Never retry a refused chair send in a loop — each refusal means the chair session is actively driving and your message would read as impersonation to the group (this exact pattern derailed a real task: two "chair" voices issuing contradictory rulings).
 
 ### `invite`
 
