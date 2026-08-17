@@ -19,9 +19,11 @@ import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './cow
 import { mapDshReasoningEffort } from './dshReasoningEffort';
 import { loadClaudeSdk } from './claudeSdk';
 import {
+  CoworkDshSteerWindowClosedError,
   CoworkSteerChannel,
   buildCoworkSdkUserMessage,
   buildCoworkSteerSdkMessage,
+  buildCoworkSteerText,
 } from './coworkSteerChannel';
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
@@ -1049,6 +1051,13 @@ interface ActiveSession {
   localSettledInputs: number;
   localPendingSteerIds: string[];
   localDeliveredSteerIds: Set<string>;
+  /**
+   * Steer submissions admitted against the active DSH turn. Drained at turn
+   * settlement to emit steerSettled/steerFailed — the DSH steer delivery
+   * promise resolves on runtime acceptance, so without this drain the message
+   * would sit on "Sent to MetaBot" and never reach "Turn settled".
+   */
+  dshPendingSteerIds: string[];
   localTurnState: 'none' | 'starting' | 'open' | 'closing';
   maybeCloseLocalTurn?: () => void;
   turnSettled: Promise<void>;
@@ -1654,6 +1663,29 @@ export class CoworkRunner extends EventEmitter {
     return this.stoppedSessions.has(sessionId) || Boolean(activeSession?.abortController.signal.aborted);
   }
 
+  /**
+   * Drains DSH steer submissions at turn settlement and emits the terminal
+   * steer lifecycle event. The delivery promise resolves on runtime
+   * acceptance, so this drain is what moves a steer message from "Sent to
+   * MetaBot" to "Turn settled" (or "Send failed" when the turn errored).
+   */
+  private settleDshSteerSubmissions(
+    activeSession: ActiveSession,
+    outcome: 'settled' | 'failed',
+    reason?: string
+  ): void {
+    const pending = Array.isArray(activeSession.dshPendingSteerIds)
+      ? activeSession.dshPendingSteerIds.splice(0)
+      : [];
+    for (const submissionId of pending) {
+      if (outcome === 'failed') {
+        this.emit('steerFailed', activeSession.sessionId, submissionId, reason ?? 'DSH turn failed');
+      } else {
+        this.emit('steerSettled', activeSession.sessionId, submissionId);
+      }
+    }
+  }
+
   private removeActiveSession(sessionId: string, activeSession: ActiveSession): void {
     if (this.activeSessions.get(sessionId) !== activeSession) return;
     activeSession.localTurnState = 'closing';
@@ -1814,15 +1846,40 @@ export class CoworkRunner extends EventEmitter {
     if (!activeSession) return { accepted: false, reason: 'inactive' };
     if (activeSession.executionMode !== 'local') return { accepted: false, reason: 'sandbox' };
     // DSH-kernel turns steer natively with interrupt-on-steer (hub.steer
-    // queues the steer then cancels the active turn with keepInbox — the
-    // correction wakes the follow-up turn immediately); delivery settles
+    // cancels the active turn with keepInbox FIRST, then submits the steer —
+    // the correction wakes the follow-up turn immediately); delivery settles
     // once the runtime accepted the steer.
     if (this.dshActiveTurns.has(sessionId)) {
       const hub = this.dshTurnHub;
       if (!hub) return { accepted: false, reason: 'closing' };
-      const delivered = hub.waitForSteerDelivery(sessionId).then(() => undefined);
+      // Delivery settles with the steer text on runtime acceptance, or with
+      // '' at turn end when the RPC never landed — the empty settlement
+      // rejects with CoworkDshSteerWindowClosedError so the submission
+      // controller can degrade the text to the next turn's input (official
+      // best-effort semantics) instead of erroring.
+      const delivered = hub.waitForSteerDelivery(sessionId).then((deliveredText) => {
+        if (deliveredText === '') {
+          throw new CoworkDshSteerWindowClosedError();
+        }
+        return undefined;
+      });
       void delivered.then(undefined, () => undefined);
-      void hub.steer(sessionId, text).catch(() => undefined);
+      if (Array.isArray(activeSession.dshPendingSteerIds)) {
+        activeSession.dshPendingSteerIds.push(submissionId);
+      } else {
+        activeSession.dshPendingSteerIds = [submissionId];
+      }
+      void hub.steer(sessionId, buildCoworkSteerText(text)).catch((error) => {
+        // Best-effort steer (official DSH semantics): a failed steer RPC
+        // leaves delivery to settle at turn end (window closed); the
+        // submission controller degrades the text to the next turn's input
+        // instead of surfacing an error.
+        coworkLog('WARN', 'trySubmitSteer', 'DSH steer RPC failed; submission degrades to a queued turn input', {
+          sessionId,
+          submissionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
       return { accepted: true, delivered };
     }
     if (!activeSession.localInputChannel?.isOpen || activeSession.localTurnState !== 'open') {
@@ -1852,12 +1909,18 @@ export class CoworkRunner extends EventEmitter {
     return { accepted: true, delivered };
   }
 
-  getSteerCapability(sessionId: string): 'open-local' | 'closing-local' | 'sandbox' | 'inactive' {
+  getSteerCapability(sessionId: string): 'open-local' | 'open-dsh' | 'closing-local' | 'sandbox' | 'inactive' {
     const activeSession = this.activeSessions.get(sessionId);
     if (!activeSession) return 'inactive';
     if (activeSession.executionMode !== 'local') {
       return activeSession.localTurnState === 'none' ? 'inactive' : 'sandbox';
     }
+    // DSH-kernel turns steer natively through the hub (interrupt-on-steer);
+    // the localTurnState machine below only describes the Claude SDK path, so
+    // an active DSH turn used to fall into 'closing-local' — parking the
+    // interjection as a queued steer that waited out the whole turn instead
+    // of interrupting it.
+    if (this.dshActiveTurns.has(sessionId)) return 'open-dsh';
     return activeSession.localTurnState === 'open' && activeSession.localInputChannel?.isOpen
       ? 'open-local'
       : 'closing-local';
@@ -5038,6 +5101,7 @@ export class CoworkRunner extends EventEmitter {
       localPendingSteerIds: [],
       localDeliveredSteerIds: new Set(),
       localBufferedSteers: [],
+      dshPendingSteerIds: [],
       localTurnState: 'starting',
       pendingManualCompact: false,
       turnSettled,
@@ -6228,6 +6292,7 @@ export class CoworkRunner extends EventEmitter {
         await this.settleDshUsageStats(sessionId, hub);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
         this.clearPendingPermissions(sessionId);
+        this.settleDshSteerSubmissions(activeSession, 'settled');
         this.removeActiveSession(sessionId, activeSession);
         return;
       }
@@ -6241,6 +6306,7 @@ export class CoworkRunner extends EventEmitter {
         coworkLog('ERROR', 'runDshSessionLocal', 'DSH turn failed', { outcome });
         this.handleError(sessionId, `DSH turn failed: ${failureDetail}`);
         this.clearPendingPermissions(sessionId);
+        this.settleDshSteerSubmissions(activeSession, 'failed', `DSH turn failed: ${failureDetail}`);
         this.removeActiveSession(sessionId, activeSession);
         this.dshActiveTurns.delete(sessionId);
         return;
@@ -6255,6 +6321,7 @@ export class CoworkRunner extends EventEmitter {
         await this.settleDshUsageStats(sessionId, hub);
         this.emit('complete', sessionId, activeSession.claudeSessionId);
         this.clearPendingPermissions(sessionId);
+        this.settleDshSteerSubmissions(activeSession, 'settled');
         this.removeActiveSession(sessionId, activeSession);
         return;
       }
@@ -6283,11 +6350,13 @@ export class CoworkRunner extends EventEmitter {
       // session, the next submission is classified as a pending steer against
       // a turn that already ended ("引导 等待送达" that never delivers).
       this.clearPendingPermissions(sessionId);
+      this.settleDshSteerSubmissions(activeSession, 'settled');
       this.removeActiveSession(sessionId, activeSession);
     } catch (error) {
       coworkLog('ERROR', 'runDshSessionLocal', 'turn crashed', { sessionId, error: String(error) });
       this.handleError(sessionId, error instanceof Error ? error.message : String(error));
       this.clearPendingPermissions(sessionId);
+      this.settleDshSteerSubmissions(activeSession, 'failed', error instanceof Error ? error.message : String(error));
       this.removeActiveSession(sessionId, activeSession);
       this.dshActiveTurns.delete(sessionId);
     }
