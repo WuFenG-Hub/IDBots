@@ -54,10 +54,11 @@ const ARCHIVED_CHATS_PAGE_SIZE = 20;
 
 const providerKeys = [
   'metaid-free',
+  'deepseek',
+  'opencode',
   'openai',
   'gemini',
   'anthropic',
-  'deepseek',
   'moonshot',
   'zhipu',
   'minimax',
@@ -65,7 +66,6 @@ const providerKeys = [
   'xiaomi',
   'openrouter',
   'ollama',
-  'opencode',
 ] as const;
 
 type ProviderType = (typeof providerKeys)[number];
@@ -249,6 +249,16 @@ const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropi
 const providerRequiresApiKey = (provider: ProviderType) => provider !== 'ollama';
 /** The built-in free-quota provider is relay-managed: its credentials and API shape are hidden from the UI. */
 const isBuiltInFreeProvider = (provider: string): boolean => provider === LLM_FREE_PROVIDER_KEY;
+/**
+ * Providers whose Base URL / API format are managed by the app (relay endpoint
+ * or the vendor's official fixed endpoint). Their API Key stays user-editable
+ * unless relay-provisioned (IDBots-Free).
+ */
+const isManagedProvider = (provider: string): boolean => (
+  isBuiltInFreeProvider(provider) || provider === 'deepseek'
+);
+/** DeepSeek official key-console URL, opened in the external browser from the key hint. */
+const DEEPSEEK_PLATFORM_URL = 'https://platform.deepseek.com/';
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.trim().replace(/\/+$/, '').toLowerCase();
 const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses' => {
   if (value === 'responses') {
@@ -272,8 +282,10 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
 const getEffectiveApiFormat = (provider: string, value: unknown): 'anthropic' | 'openai' | 'responses' => (
   getFixedApiFormatForProvider(provider) ?? normalizeApiFormat(value)
 );
+// DeepSeek hides the selector (official harness pins the key-only chat-completions
+// setup); the stored format still drives requests so legacy endpoints keep working.
 const shouldShowApiFormatSelector = (provider: string): boolean => (
-  getFixedApiFormatForProvider(provider) === null
+  getFixedApiFormatForProvider(provider) === null && !isManagedProvider(provider)
 );
 const getProviderDefaultBaseUrl = (
   provider: ProviderType,
@@ -2600,6 +2612,11 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                       }`}>
                         {getProviderDisplayLabel(providerKey, config)}
                       </span>
+                      {providerKey === 'deepseek' && (
+                        <span className="ml-1.5 shrink-0 text-[10px] px-1.5 py-0.5 rounded-md bg-claude-accent/10 text-claude-accent font-medium">
+                          {i18nService.t('providerRecommendedBadge')}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center ml-2">
                       {isCustomProviderKey(providerKey) && (
@@ -2681,10 +2698,29 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                     className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
                     placeholder={i18nService.t('apiKeyPlaceholder')}
                   />
+                  {activeProvider === 'deepseek' && (
+                    <p className="mt-1 text-[11px] leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {i18nService.t('deepseekApiKeyHint')}{' '}
+                      <a
+                        href={DEEPSEEK_PLATFORM_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          void window.electron.shell.openExternal(DEEPSEEK_PLATFORM_URL).catch(() => {
+                            window.open(DEEPSEEK_PLATFORM_URL, '_blank', 'noopener');
+                          });
+                        }}
+                        className="text-claude-accent hover:underline"
+                      >
+                        {DEEPSEEK_PLATFORM_URL}
+                      </a>
+                    </p>
+                  )}
                 </div>
               )}
 
-              {!isBuiltInFreeProvider(activeProvider) && (
+              {!isManagedProvider(activeProvider) && (
                 <div>
                   <label htmlFor={`${activeProvider}-baseUrl`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('baseUrl')}

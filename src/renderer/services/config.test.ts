@@ -135,6 +135,42 @@ test('applyProviderApiFormatMigrations does not touch deepseek or other provider
   assert.equal(result.providers!.openai.apiFormat, 'openai');
 });
 
+test('applyProviderApiFormatMigrations v2 moves factory-default deepseek anthropic to openai', () => {
+  // Official-harness alignment: configs still parked on the official anthropic
+  // endpoint default are migrated to chat completions on the plain base URL.
+  const config = makeConfig({
+    deepseek: {
+      enabled: true,
+      apiKey: 'sk-ds',
+      baseUrl: 'https://api.deepseek.com/anthropic',
+      apiFormat: 'anthropic',
+      models: [],
+    },
+  });
+
+  const result = applyProviderApiFormatMigrations(config);
+  assert.equal(result.providers!.deepseek.apiFormat, 'openai');
+  assert.equal(result.providers!.deepseek.baseUrl, 'https://api.deepseek.com');
+  assert.equal(result.providerApiFormatMigrationVersion, PROVIDER_API_FORMAT_MIGRATION_VERSION);
+});
+
+test('applyProviderApiFormatMigrations v2 leaves custom deepseek endpoints untouched', () => {
+  // A user behind a self-hosted proxy keeps their format and base URL.
+  const config = makeConfig({
+    deepseek: {
+      enabled: true,
+      apiKey: 'sk-ds',
+      baseUrl: 'https://my-proxy.example/anthropic',
+      apiFormat: 'anthropic',
+      models: [],
+    },
+  });
+
+  const result = applyProviderApiFormatMigrations(config);
+  assert.equal(result.providers!.deepseek.apiFormat, 'anthropic');
+  assert.equal(result.providers!.deepseek.baseUrl, 'https://my-proxy.example/anthropic');
+});
+
 test('mergeProvidersConfig rewrites free-provider model names to display names', () => {
   // Users provisioned before the rename have the raw relay id stored as the
   // model name; normalization must map it to the product display name while

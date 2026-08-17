@@ -45,6 +45,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API设置
     apiKey: 'API Key',
     apiKeyPlaceholder: '输入你的 API Key',
+    providerRecommendedBadge: '推荐',
+    deepseekApiKeyHint: '第一次使用?请到 DeepSeek 官网申请 API Key:',
     baseUrl: 'API Base URL',
     baseUrlPlaceholder: '输入 API 基础 URL',
     currentModel: '当前模型',
@@ -2104,6 +2106,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API Settings
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API Key',
+    providerRecommendedBadge: 'Recommended',
+    deepseekApiKeyHint: 'First time here? Get your DeepSeek API key from the official website:',
     baseUrl: 'API Base URL',
     baseUrlPlaceholder: 'Enter API Base URL',
     currentModel: 'Current Model',
