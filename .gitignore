@@ -61,6 +61,7 @@ tests/*
 !tests/orchestratorCoworkBridgeSkillIds.test.mjs
 !tests/groupChatAllowChatSkillsRuntime.test.mjs
 !tests/groupTaskStore.test.mjs
+!tests/groupTasksI18nKeys.test.mjs
 !tests/groupTaskService.test.mjs
 !tests/groupChatBackfill.test.mjs
 !tests/groupChatMsgIndexMigration.test.mjs

@@ -19,7 +19,13 @@ function normalizeMemberGlobalMetaId(value: unknown): string {
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
 export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
-export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
+/**
+ * Deliverable ledger status. 'pending' = recorded, awaiting verification;
+ * 'delivered' = pin verified on-chain (P3, v1.1 — previously stuck at
+ * 'pending' even after verification); 'accepted'/'rejected' = the owner's
+ * final verdict at acceptance time (never overwritten by verification).
+ */
+export type GroupTaskDeliverableStatus = 'pending' | 'delivered' | 'accepted' | 'rejected';
 
 /**
  * Who moved a group task between statuses. 'chair' = the chair bot acted
@@ -691,7 +697,11 @@ function rowToGroupTaskDeliverable(row: GroupTaskDeliverableRow): GroupTaskDeliv
     authorGlobalmetaid: row.author_globalmetaid ?? null,
     kind: row.kind ?? null,
     uri: row.uri ?? null,
-    status: status === 'accepted' || status === 'rejected' ? status : 'pending',
+    // P3 (v1.1): 'delivered' = pin verified on-chain; anything unknown keeps
+    // reading as 'pending' so a corrupt row can never masquerade as accepted.
+    status: status === 'accepted' || status === 'rejected' || status === 'delivered'
+      ? status
+      : 'pending',
     createdAt: row.created_at ?? null,
     verification: row.verification ?? null,
     confirmation: row.confirmation === 'confirmed' ? 'confirmed' : 'unconfirmed',

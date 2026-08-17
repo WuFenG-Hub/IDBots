@@ -239,6 +239,115 @@ test('auto-ACK: disabled via deps flag — no ACK posted', async () => {
   }
 });
 
+test('P14: chair protocol messages (carrying [DELIVERABLE]/[STATUS:] tags) never auto-ACK', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+  });
+  try {
+    h.createTask([2]);
+    // A chair note that both mentions the worker and carries a protocol tag is
+    // coordination, not an assignment (task #22: template ACKs quoting status
+    // notes as "assignments").
+    insertGroupMessage(h.db, {
+      pinId: 'chair-status-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot [DELIVERABLE] 已收到上游成果，稍后派工',
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.startsWith('[WORKING]')).length,
+      0,
+      'no template ACK for a protocol-tagged chair note',
+    );
+    assert.ok(h.logs.some((line) => line.includes('auto-ACK suppressed')));
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P14: no stale 已接单 ACK after the worker already delivered past the assignment', async () => {
+  const h = await createHarness({
+    coderChatSkills: ['web-search'],
+    routing: () => ({ prompt: '<available_skills>x</available_skills>', activeSkillIds: ['x'] }),
+  });
+  try {
+    const task = h.createTask([2]);
+    // Worker delivers first (deliverable row created now); the chair
+    // coordination note that arrives afterwards must not produce an ACK
+    // claiming the worker just accepted work (eleven's empty-assignment
+    // ACK case in task #22).
+    const deliveredPin = 'e'.repeat(64) + 'i0';
+    insertGroupMessage(h.db, {
+      pinId: 'done-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: `[DELIVERABLE] metafile: metafile://${deliveredPin}`,
+      chainTimestamp: 100,
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.listDeliverables(task.id).length, 1, 'deliverable recorded');
+
+    insertGroupMessage(h.db, {
+      pinId: 'late-chair-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 整合进 MetaApp', chainTimestamp: 101,
+    });
+    h.state.nowMs += 25_000; // escape the worker cooldown
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.startsWith('[WORKING]')).length,
+      0,
+      'no ACK claiming un-started work after delivery',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P5: roll-call (请确认在线) mentions arm no ACK watch — no false no-ACK warning', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'rollcall-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot:请确认在线(每人一次即可,无需客套)。',
+    });
+    await h.loop.runTick();
+    assert.ok(h.logs.some((line) => line.includes('roll-call mention') && line.includes('no ACK watch armed')));
+    // Long past the 3-minute ACK timeout: no chair warning may fire (task #21
+    // falsely warned about members who were merely waiting/observing).
+    h.state.nowMs += 10 * 60 * 1000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK')).length,
+      0,
+      'no false no-ACK reminder for a roll-call mention',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P5: a standby (observer) member mentioned by the chair arms no ACK watch', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'standby', 'gmid-w2');
+    insertGroupMessage(h.db, {
+      pinId: 'standby-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请旁观本次验收整理',
+    });
+    await h.loop.runTick();
+    assert.ok(h.logs.some((line) => line.includes('standing by') && line.includes('no ACK watch')));
+    h.state.nowMs += 10 * 60 * 1000;
+    await h.loop.runTick();
+    assert.equal(
+      h.sends.filter((s) => s.content.includes('has not sent a [WORKING] ACK')).length,
+      0,
+      'no false no-ACK reminder for an observer',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // P0-1: review-phase silence hint
 // ---------------------------------------------------------------------------
@@ -489,10 +598,11 @@ test('Issue #8: [DELIVERABLE] with an on-chain-found pin records confirmation=co
 
     const deliverables = h.groupTaskStore.listDeliverables(task.id);
     assert.equal(deliverables.length, 1, 'one deliverable row recorded');
-    // The pin is verifiably on-chain, so the ledger says confirmed — while the
-    // acceptance status stays pending until the owner accepts (Issue #8 root).
+    // The pin is verifiably on-chain, so the ledger says confirmed — and P3
+    // (v1.1): a verified deliverable leaves 'pending' (status 'delivered'),
+    // while the owner's acceptance verdict is still unwritten.
     assert.equal(deliverables[0].confirmation, 'confirmed');
-    assert.equal(deliverables[0].status, 'pending');
+    assert.equal(deliverables[0].status, 'delivered');
   } finally {
     h.cleanup();
   }
@@ -522,7 +632,31 @@ test('Issue #8: monitor re-verification drives unconfirmed -> confirmed once the
     await h.loop.runTick();
     const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
     assert.equal(deliverable.confirmation, 'confirmed', 'monitor pass flips the ledger');
-    assert.equal(deliverable.status, 'pending', 'acceptance status unchanged');
+    assert.equal(deliverable.status, 'delivered', 'P3: verified via monitor leaves pending too');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('P3: verified-but-pending legacy rows are backfilled to delivered by the monitor', async () => {
+  const foundPin = 'd'.repeat(64) + 'i0';
+  const h = await createHarness({
+    readPinForVerification: async (pinId) => (pinId === foundPin ? 'found' : 'not_found'),
+  });
+  try {
+    const task = h.createTask([2]);
+    // Task #22 shape: a row recorded before the 'delivered' status existed —
+    // verification report says verified, confirmation confirmed, but the enum
+    // is stuck at 'pending'. Insert directly to simulate the legacy ledger.
+    h.db.run(
+      `INSERT INTO group_task_deliverables
+         (task_id, msg_pin_id, author_globalmetaid, kind, uri, status, confirmation, verification)
+       VALUES (?, 'legacy-i0', 'gmid-w2', 'metaapp', ?, 'pending', 'confirmed', ?)`,
+      [task.id, `metaapp://${foundPin}`, JSON.stringify({ verified: true, checkedAt: Date.now() })],
+    );
+    await h.loop.runTick();
+    const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
+    assert.equal(deliverable.status, 'delivered', 'backfill flips the legacy verified row');
   } finally {
     h.cleanup();
   }

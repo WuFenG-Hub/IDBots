@@ -52,18 +52,36 @@ export function deliverableVerificationLabel(deliverable: GroupTaskDeliverable):
 /**
  * Snapshot a deliverable for the immutable summary record. Strips the heavy
  * verification JSON (the label is enough for display) and resolves a display
- * author name (sender name preferred over the raw globalmetaid).
+ * author name.
+ *
+ * P13 (v1.1): the roster wins over the chain nickname. A worker session may
+ * post with a runtime identity nickname (task #22 rendered Builder阿码's
+ * delivery as "claude bot") while the deliverable row's authorGlobalmetaid is
+ * always the worker's registered identity — so the display name is resolved
+ * from the member roster by globalmetaid first, and only falls back to the
+ * chain sender name / raw id when the author is not on the roster.
  */
 export function buildAcceptanceSummaryDeliverables(
   deliverables: GroupTaskDeliverable[],
+  members: GroupTaskMember[] = [],
 ): GroupTaskAcceptanceSummaryDeliverable[] {
-  return deliverables.map((deliverable) => ({
-    kind: deliverable.kind ?? null,
-    uri: deliverable.uri ?? null,
-    status: deliverable.status,
-    confirmation: deliverable.confirmation,
-    authorName: deliverable.sourceSenderName?.trim() || deliverable.authorGlobalmetaid || null,
-  }));
+  const nameByGmid = new Map<string, string>();
+  for (const member of members) {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    const name = (member.name ?? member.displayName ?? '').trim();
+    if (gmid && name) nameByGmid.set(gmid, name);
+  }
+  return deliverables.map((deliverable) => {
+    const gmid = (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase();
+    const rosterName = gmid ? nameByGmid.get(gmid) : undefined;
+    return {
+      kind: deliverable.kind ?? null,
+      uri: deliverable.uri ?? null,
+      status: deliverable.status,
+      confirmation: deliverable.confirmation,
+      authorName: rosterName || deliverable.sourceSenderName?.trim() || deliverable.authorGlobalmetaid || null,
+    };
+  });
 }
 
 /**
@@ -124,9 +142,12 @@ export function buildAcceptanceSummaryMessageText(
         confirmation: deliverable.confirmation,
         verification: null,
       } as GroupTaskDeliverable);
+      // P3 (v1.1): surface the ledger status when it moved past 'pending' —
+      // a verified deliverable must not read as still awaiting.
+      const statusNote = deliverable.status === 'pending' ? '' : ` · ${deliverable.status}`;
       const author = (deliverable.authorName ?? '').trim() || 'unknown';
       const body = uri || '（见消息原文）';
-      lines.push(`- [${kind}] ${body} (${verification}) — ${author}`);
+      lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
     }
   }
   lines.push('');
@@ -156,7 +177,7 @@ export function buildAcceptanceSummary(input: {
   guidance: string;
   messageText: string;
 } {
-  const deliverables = buildAcceptanceSummaryDeliverables(input.deliverables);
+  const deliverables = buildAcceptanceSummaryDeliverables(input.deliverables, input.members);
   const members = buildAcceptanceSummaryMembers(input.members);
   const guidance = buildAcceptanceGuidance(input.task);
   const summaryShape = {

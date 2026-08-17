@@ -6,7 +6,8 @@
 export type GroupTaskStatus = 'planning' | 'executing' | 'review' | 'done' | 'cancelled';
 export type GroupTaskMemberRole = 'chair' | 'worker';
 export type GroupTaskMemberStatus = 'assigned' | 'working' | 'standby' | 'done' | 'unreachable';
-export type GroupTaskDeliverableStatus = 'pending' | 'accepted' | 'rejected';
+/** Mirror of the main-process deliverable status ('delivered' = verified on-chain, P3 v1.1). */
+export type GroupTaskDeliverableStatus = 'pending' | 'delivered' | 'accepted' | 'rejected';
 
 export interface GroupTask {
   id: number;

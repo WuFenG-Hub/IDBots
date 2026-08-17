@@ -986,10 +986,12 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     );
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
     assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
-    // R1: the re-assert re-posts the SAME acceptance summary (re-rendered from
-    // the stored record), not the old fixed string.
-    assert.match(h.sends[h.sends.length - 1].content, /目标：Build and publish the intro MetaApp/);
-    assert.match(h.sends[h.sends.length - 1].content, /成果清单：/);
+    // P12 (v1.1): the re-assert is the COMPACT closing line only — the full
+    // acceptance summary must never be re-posted per straggler (task #22 got
+    // two identical >2000-char summaries this way).
+    assert.doesNotMatch(h.sends[h.sends.length - 1].content, /成果清单：/);
+    const summaryPosts = h.sends.filter((s) => s.metabotId === 1 && /成果清单：/.test(s.content)).length;
+    assert.equal(summaryPosts, 1, 'exactly one full acceptance summary in the transcript');
 
     // Idempotent: a second tick with no NEW straggler does not re-assert again.
     const countAfter = h.sends.length;
@@ -1016,11 +1018,16 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     await h.loop.runTick();
 
     assert.equal(h.skillTurnCalls.length, 1, 'skill turn used');
-    // P0-2 round-5: the host auto-ACK runs one fast chat call BEFORE the skill
-    // turn (the fake returns 'reply-for-llm-2' without [WORKING], so the
-    // template fallback is posted); the plain completion itself is not called.
-    assert.equal(h.chatCalls.length, 1, 'exactly one chat call (the worker ACK)');
-    assert.match(h.chatCalls[0].userMessage, /\[SYSTEM ACK directive/);
+    // P14 (v1.1): the sender is a fellow WORKER (Designer Bot), not the chair —
+    // a worker mention is not an assignment, so no auto-ACK chat call runs and
+    // no "[WORKING] 已接单" template may quote it as work (task #22 logged ~20
+    // such mismatches). The plain completion itself is not called either.
+    assert.equal(h.chatCalls.length, 0, 'no ACK chat call for a worker-originated mention');
+    assert.equal(
+      h.sends.filter((s) => s.content.startsWith('[WORKING]')).length,
+      0,
+      'no template ACK posted',
+    );
     assert.deepEqual(h.routingCalls[0].allowChatSkills, ['web-search']);
     assert.equal(h.routingCalls[0].allowAllEnabled, false, 'human sender: no owner privilege');
 
@@ -1032,16 +1039,12 @@ test('skill path: routing hit runs the skill turn in the existing session, plain
     assert.match(h.skillTurnCalls[0].systemPrompt, /available_skills/);
     assert.match(h.skillTurnCalls[0].userMessage, />>> Designer Bot: @Coder Bot/);
 
-    // P0-2: the [WORKING] ACK went on-chain FIRST, then the turn reply;
-    // the daemon did not double-append an assistant message for the ACK.
-    assert.equal(h.sends.length, 2, 'ACK + turn reply posted');
-    assert.match(h.sends[0].content, /^\[WORKING\]/, 'first send is the ACK status line');
-    assert.deepEqual(
-      [h.sends[0].metabotId, h.sends[1].metabotId],
-      [2, 2],
-      'both messages posted as the worker bot',
-    );
-    assert.equal(h.sends[1].content, 'skill-turn-reply');
+    // P14 (v1.1): no [WORKING] ACK precedes the turn — the trigger came from
+    // a fellow worker, not the chair, so no assignment context exists. Only
+    // the skill-turn reply goes on-chain, posted as the worker bot.
+    assert.equal(h.sends.length, 1, 'turn reply only (no auto-ACK for worker-originated trigger)');
+    assert.equal(h.sends[0].metabotId, 2, 'reply posted as the worker bot');
+    assert.equal(h.sends[0].content, 'skill-turn-reply');
     const messages = h.coworkStore.getSessionMessages(mapping.coworkSessionId);
     assert.deepEqual(messages.map((m) => m.type), ['user']);
   } finally {
