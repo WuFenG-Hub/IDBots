@@ -728,19 +728,6 @@ contextBridge.exposeInMainWorld('electron', {
     listAllRuns: (limit?: number, offset?: number) =>
       ipcRenderer.invoke('scheduledTask:listAllRuns', limit, offset),
 
-    // SDK cron 镜像（方案 C R1/R2）
-    sdkCronMirror: {
-      list: () => ipcRenderer.invoke('sdkCronMirror:list'),
-      requestDelete: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:requestDelete', cronId),
-      create: (input: { spec: any; replacesId?: string | null }) =>
-        ipcRenderer.invoke('sdkCronMirror:create', input),
-      toggle: (cronId: string, enabled: boolean) =>
-        ipcRenderer.invoke('sdkCronMirror:toggle', cronId, enabled),
-      runNow: (cronId: string) => ipcRenderer.invoke('sdkCronMirror:runNow', cronId),
-    },
-    migratePlan: () => ipcRenderer.invoke('scheduledTask:migratePlan'),
-    migrateExecute: () => ipcRenderer.invoke('scheduledTask:migrateExecute'),
-
     // Stream event listeners
     onStatusUpdate: (callback: (data: any) => void) => {
       const handler = (_event: any, data: any) => callback(data);
