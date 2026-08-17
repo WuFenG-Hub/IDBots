@@ -644,6 +644,52 @@ export function gateChairDrivingSend(input: GateChairDrivingSendInput):
   return { ok: true };
 }
 
+/** Input of gateExternalChairSend. */
+export interface GateExternalChairSendInput {
+  taskId: number;
+  /** Resolved sender metabot id of the outgoing RPC message. */
+  senderMetabotId: number;
+  /** Chair metabot id of the task. */
+  chairMetabotId: number;
+  /** The caller explicitly passed confirm_chair: true. */
+  confirmChair: boolean;
+}
+
+/**
+ * P2 (v1.1): impersonation guard for EXTERNAL (RPC) chair-identity sends.
+ *
+ * Task #21 evidence: the Twin's source CoWork session watched the running
+ * task via `show`, disagreed with the daemon-driven chair session's ruling,
+ * and posted an "authoritative clarification" INTO the group through this RPC
+ * as the chair (pin 33484c72; the skill script even retried around the F2
+ * driver mutex until the daemon's claim went stale mid-long-turn). The chair
+ * task session then saw a message in its own name it never wrote and posted a
+ * counter-ruling — two AI_Sunny voices fighting, the human's baseline lost.
+ *
+ * The chain signature cannot distinguish host-daemon posts from external
+ * RPC posts (same bot wallet), so the guard lives at the RPC boundary: a
+ * chair-identity send on a runnable task (all of them — terminal tasks
+ * reject earlier) requires an EXPLICIT confirm_chair:true escape hatch.
+ * Worker sends and daemon-internal posts (postGroupTaskMessage called
+ * in-process by the daemon) are unaffected. Pure + exported for unit tests.
+ */
+export function gateExternalChairSend(input: GateExternalChairSendInput):
+  { ok: true } | { ok: false; code: 'CHAIR_IDENTITY_CONFIRM_REQUIRED'; error: string } {
+  if (input.senderMetabotId !== input.chairMetabotId || input.confirmChair) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    code: 'CHAIR_IDENTITY_CONFIRM_REQUIRED',
+    error:
+      `Refusing to post as the chair of task ${input.taskId}: ` +
+      'an external chair-identity message contradicts the daemon-driven chair session and reads ' +
+      'as impersonation to the whole group (task #21 incident). ' +
+      'Steer the task as the OWNER in the task UI, or pass "confirm_chair": true when the human ' +
+      'EXPLICITLY asked you to take the chair floor manually.',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Daemon loop
 // ---------------------------------------------------------------------------

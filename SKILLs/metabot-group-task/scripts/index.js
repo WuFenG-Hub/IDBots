@@ -141,6 +141,11 @@ async function main() {
       const replyPin = String(params.reply_pin ?? '').trim();
       if (replyPin) body.reply_pin = replyPin;
       if (Array.isArray(params.mention) && params.mention.length) body.mention = params.mention;
+      // P2 (v1.1): explicit escape hatch for a manual chair-identity send —
+      // the server refuses chair sends without it (impersonation guard).
+      if (params.confirm_chair === true) body.confirm_chair = true;
+      const driverId = String(params.driver_id ?? '').trim();
+      if (driverId) body.driver_id = driverId;
       break;
     }
     case 'invite': {

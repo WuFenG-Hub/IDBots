@@ -43,7 +43,7 @@ import {
   reworkGroupTask,
   exportGroupTask,
 } from './groupTaskService';
-import { gateChairDrivingSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
+import { gateChairDrivingSend, gateExternalChairSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
 import { resolveTwinSourceSessionFallback } from './groupTaskSourceSession';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
@@ -1394,6 +1394,8 @@ export function startMetaidRpcServer(
         reply_pin?: string;
         mention?: unknown[];
         driver_id?: string;
+        /** P2 (v1.1): explicit escape hatch for a manual chair-identity send. */
+        confirm_chair?: boolean;
       };
       try {
         parsed = JSON.parse(body) as typeof parsed;
@@ -1450,6 +1452,27 @@ export function startMetaidRpcServer(
         // Worker / owner sends are never driving and always pass.
         try {
           const chairMetabotId = getGroupTaskChairMetabotId(taskId);
+          // P2 (v1.1): impersonation guard FIRST — an external chair-identity
+          // send without the explicit confirm_chair escape hatch is refused
+          // outright (403), BEFORE the F2 mutex. In #21 the Twin source
+          // session retried around the mutex (the daemon's claim goes stale
+          // mid-long-turn) and posted a contradictory "chair ruling"; the F2
+          // retry window alone cannot prevent that.
+          const impersonationGate = gateExternalChairSend({
+            taskId,
+            senderMetabotId: metabotId,
+            chairMetabotId,
+            confirmChair: parsed.confirm_chair === true,
+          });
+          if ('error' in impersonationGate) {
+            res.writeHead(403);
+            res.end(JSON.stringify({
+              success: false,
+              code: impersonationGate.code,
+              error: impersonationGate.error,
+            }));
+            return;
+          }
           const gateResult = gateChairDrivingSend({
             kv: getStore(),
             taskId,

@@ -69,6 +69,7 @@ tests/*
 !tests/groupChatTransport.test.mjs
 !tests/groupTaskDaemon.test.mjs
 !tests/groupTaskDaemonProtocol.test.mjs
+!tests/groupTaskChairImpersonation.test.mjs
 !tests/groupTaskDeliverableParser.test.mjs
 !tests/groupTaskReopenAndStatus.test.mjs
 !tests/groupTaskSession.test.mjs
