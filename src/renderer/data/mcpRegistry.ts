@@ -173,17 +173,13 @@ export const mcpRegistry: McpRegistryEntry[] = [
     defaultArgs: ['-y', 'firecrawl-mcp@latest'],
     requiredEnvKeys: ['FIRECRAWL_API_KEY'],
   },
-  {
-    id: 'fetch',
-    name: 'Fetch',
-    descriptionKey: 'mcpDesc_fetch',
-    category: 'data-api',
-    categoryKey: 'mcpCategoryDataApi',
-    githubUrl: 'https://github.com/modelcontextprotocol/servers/tree/main/src/fetch',
-    transportType: 'stdio',
-    command: 'npx',
-    defaultArgs: ['-y', '@modelcontextprotocol/server-fetch'],
-  },
+  // NOTE (2026-08-17): the built-in Fetch entry was removed — its package
+  // @modelcontextprotocol/server-fetch was unpublished from npm (the upstream
+  // modelcontextprotocol/servers repo archived the fetch server), so every
+  // `npx -y` spawn 404s in a retry loop that drags DSH runtime boots out to
+  // minutes. Existing installs get the row auto-disabled by the sqlite
+  // migration (see McpStore.disableDeadFetchMcpServers). Add a custom server
+  // with a maintained community fetch package if you need the capability.
 ];
 
 /**

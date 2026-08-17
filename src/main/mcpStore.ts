@@ -1,6 +1,39 @@
 import crypto from 'crypto';
 import type { SqliteDatabase as Database } from './sqliteTypes';
 
+/** The built-in Fetch server's package, unpublished from npm (upstream repo
+ * archived the fetch server) — every `npx -y` spawn 404s in a retry loop. */
+export const DEAD_MCP_FETCH_PACKAGE = '@modelcontextprotocol/server-fetch';
+
+/**
+ * Migration (2026-08-17): auto-disable any ENABLED MCP server row whose config
+ * still references the dead Fetch package. The DSH runtime spawns every
+ * enabled MCP server at boot; the dead package's npx 404 retry loop dragged
+ * boots out to 2-3 minutes and widened the config-restart window until an
+ * in-flight Twin turn was killed ("DSH runtime stream closed"). Idempotent:
+ * only enabled rows match, so a disabled row never re-matches. The
+ * description suffix makes the auto-action visible in the MCP settings UI.
+ * Returns the number of rows disabled (for logging by the caller).
+ */
+export function disableDeadFetchMcpServers(db: Database, nowMs: number = Date.now()): number {
+  const result = db.exec(
+    `SELECT id FROM mcp_servers
+     WHERE enabled = 1 AND config_json LIKE ?`,
+    [`%${DEAD_MCP_FETCH_PACKAGE}%`],
+  );
+  const ids = (result[0]?.values ?? []).map((row) => String(row[0]));
+  if (ids.length === 0) return 0;
+  db.run(
+    `UPDATE mcp_servers
+     SET enabled = 0,
+         updated_at = ?,
+         description = description || ' [auto-disabled: upstream package @modelcontextprotocol/server-fetch was removed from npm]'
+     WHERE enabled = 1 AND config_json LIKE ?`,
+    [nowMs, `%${DEAD_MCP_FETCH_PACKAGE}%`],
+  );
+  return ids.length;
+}
+
 export interface McpServerRecord {
   id: string;
   name: string;
