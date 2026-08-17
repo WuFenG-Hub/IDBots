@@ -194,6 +194,13 @@ const DEFAULT_CHAIR_PLAN_ROSTER_CAP_MS = 10 * 60_000;
  */
 export const GROUP_TASK_OWNER_REPORTED_KV_PREFIX = 'group_task_owner_reported:';
 /**
+ * P4 (v1.2): one [GROUP_TASK_REVIEW] report injection into the origin CoWork
+ * session per review-entry. Cleared by the rework hatch (like the A2A owner
+ * report) so the next review re-reports. Exported for the service-side
+ * notifySourceSessionReview guard.
+ */
+export const GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX = 'group_task_review_notified:';
+/**
  * HITL checkpoint-report guard: one private A2A checkpoint request per
  * checkpoint (`group_task_checkpoint_reported:<taskId>:<checkpointId>`).
  */
@@ -284,6 +291,8 @@ const DEFAULT_MEMBER_TIMEOUT_AFTER_MINUTES = 20;
 const DEFAULT_MEMBER_ESCALATE_AFTER_MINUTES = 10;
 /** P0-3: minutes before a missing [WORKING] ACK triggers the chair reminder. */
 const DEFAULT_ACK_TIMEOUT_MS = 3 * 60_000;
+/** P5 (v1.2): activity window within which a worker counts as ENGAGED. */
+const DEFAULT_ACK_ENGAGED_RECENT_MS = 10 * 60_000;
 /** P0-4: minutes between retries of an unverified deliverable (indexer lag). */
 const DEFAULT_VERIFICATION_RETRY_MS = 10 * 60_000;
 
@@ -861,6 +870,12 @@ export interface GroupTaskDaemonDeps {
   /** Per-task minimum interval (ms) between presence probes. */
   remotePresenceThrottleMs?: number;
   sendOwnerPrivateReport?: GroupTaskDaemonSendOwnerReportFn;
+  /**
+   * P4 (v1.2): inject the review-stage owner report (same body the A2A
+   * private chat receives) into the task's origin CoWork session under the
+   * [GROUP_TASK_REVIEW] prefix. Best-effort; kv-guarded per review-entry.
+   */
+  sendReviewReportToSourceSession?: (input: { taskId: number; report: string }) => void;
   listUserMemories?: GroupTaskDaemonListUserMemoriesFn;
   listDailySummaries?: GroupTaskDaemonListDailySummariesFn;
   getMetaIDGroupCognitionPromptBlock?: (input: {
@@ -927,6 +942,8 @@ export interface GroupTaskDaemonDeps {
   memberEscalateAfterMinutes?: number;
   /** P0-3: ms before a missing [WORKING] ACK triggers the chair reminder (default 3 min). */
   ackTimeoutMs?: number;
+  /** P5 (v1.2): engaged-activity window override (default 10 min). */
+  ackEngagedRecentMs?: number;
   /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
   verificationRetryMs?: number;
 }
@@ -1176,6 +1193,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   const ackTimeoutMs = Math.max(
     30_000,
     Math.trunc(deps.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS),
+  );
+  /**
+   * P5 (v1.2): a worker with speech or a recorded deliverable within this
+   * window is ENGAGED, even if the activity predates the assignment — a
+   * mid-skill-turn worker only sees the new assignment when the turn ends, so
+   * the 3-min no-ACK clock on a fresh assignment must not fire underneath it
+   * (task #23: eleven was mid-delivery and Lucy mid-copy when the false
+   * "@chair ⚠ … has not sent a [WORKING] ACK" warnings fired).
+   */
+  const ackEngagedRecentMs = Math.max(
+    ackTimeoutMs,
+    Math.trunc(deps.ackEngagedRecentMs ?? DEFAULT_ACK_ENGAGED_RECENT_MS),
   );
   const verificationRetryMs = Math.max(
     60_000,
@@ -2191,6 +2220,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
       }
+      // P4 (v1.2): the origin CoWork session receives the SAME report body the
+      // A2A private chat gets — the owner's repeated ask ("我在 co-work 对话中
+      // 应该也要收到跟线上 A2A 对话相同内容或差不多内容的验收报告").
+      // Best-effort and kv-guarded per review-entry (service side), so an A2A
+      // delivery failure below does not lose the source-session copy and a
+      // rework cycle re-reports on the next review.
+      if (deps.sendReviewReportToSourceSession) {
+        try {
+          deps.sendReviewReportToSourceSession({ taskId: task.id, report });
+        } catch (sourceError) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: review report to source session failed (A2A continues): ` +
+            `${sourceError instanceof Error ? sourceError.message : String(sourceError)}`,
+          );
+        }
+      }
       const delivery = await deps.sendOwnerPrivateReport({
         taskId: task.id,
         metabotId: bot.id,
@@ -2651,6 +2696,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               // and the re-assert straggler guard must reset so the fresh
               // review entry can re-assert cleanly.
               deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
+              // P4 (v1.2): the origin-session review report follows the same
+              // rework hatch — the next review entry re-reports there too.
+              deps.getStore().delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`);
               deps.getStore().delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`);
             }
             if (updated.status === 'review') {
@@ -3691,7 +3739,50 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           continue;
         }
       }
+      // P5 (v1.2): ENGAGED worker — recent speech (even before the assignment:
+      // mid long skill turn) or a deliverable recorded within the window. The
+      // missed-ACK warning is suppressed; instead ONE neutral long-turn note
+      // tells the chair the assignment will be picked up at turn end, and the
+      // watch is consumed so no per-interval warning chases a working worker.
       const remindedKey = `${ACK_REMINDED_PREFIX}${task.id}:${member.metabotId}`;
+      const engagedNoteKey = `group_task_ack_engaged:${task.id}:${member.metabotId}`;
+      const lastActivityMs = (() => {
+        if (memberGmid && task.groupId) {
+          const speakSec = store.getMembersLastSpeakAt(task.groupId, [memberGmid]).get(memberGmid.toLowerCase());
+          if (speakSec != null && Number.isFinite(speakSec)) return speakSec * 1000;
+        }
+        return 0;
+      })();
+      const hasRecentDeliverable = store.listDeliverables(task.id).some((deliverable) => {
+        if (!memberGmid) return false;
+        if ((deliverable.authorGlobalmetaid ?? '').trim().toLowerCase() !== memberGmid.toLowerCase()) return false;
+        const created = deliverable.createdAt;
+        if (!created) return false;
+        const createdSec = Math.floor(Date.parse(`${created.trim().replace(' ', 'T')}Z`) / 1000);
+        return Number.isFinite(createdSec) && createdSec * 1000 >= now() - ackEngagedRecentMs;
+      });
+      if (lastActivityMs >= now() - ackEngagedRecentMs || hasRecentDeliverable) {
+        try {
+          await postGroupMessage(
+            task.id,
+            chair.metabotId,
+            `@chair ℹ️ ${member.name ?? `bot-${member.metabotId}`} 正在长回合执行中（近期有进展/交付），新派单将在本回合结束后处理，无需干预。`,
+          );
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: ${member.name ?? member.metabotId} engaged on a long turn ` +
+            `(assignment #${entry.messageId}); standby note posted, watch consumed`,
+          );
+        } catch (error) {
+          emitLog(
+            `[GroupTaskDaemon] Task ${task.id}: engaged-note post failed for ${member.name ?? member.metabotId}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+        sqlite.delete(pendingKey);
+        if (sqlite.get<string>(remindedKey) != null) sqlite.delete(remindedKey);
+        sqlite.delete(engagedNoteKey);
+        continue;
+      }
       if (sqlite.get<string>(remindedKey) === '1') continue;
       const text =
         `@chair ⚠ ${member.name ?? `bot-${member.metabotId}`} was assigned work ` +

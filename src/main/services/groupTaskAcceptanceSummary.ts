@@ -116,6 +116,22 @@ export function buildAcceptanceGuidance(task: Pick<GroupTask, 'title'>): string 
   ].join('\n');
 }
 
+/**
+ * P12 (v1.2): preview cap for the goal/criteria lines in the group message.
+ * Task #23's summary reproduced the full goal (313 chars) + criteria (162) +
+ * every deliverable + guidance in one giant host-posted message. The checklist
+ * (deliverable lines) is the core content; goal/criteria render as truncated
+ * previews — the panel and the summary record keep the full texts.
+ */
+export const ACCEPTANCE_SUMMARY_PREVIEW_MAX_CHARS = 160;
+
+/** Deterministic preview: full text when short, ellipsized first line-block otherwise. */
+export function acceptancePreview(text: string, maxChars: number = ACCEPTANCE_SUMMARY_PREVIEW_MAX_CHARS): string {
+  const trimmed = (text ?? '').trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars).trimEnd()}…`;
+}
+
 /** Render the immutable summary record back into the deterministic group message. */
 export function buildAcceptanceSummaryMessageText(
   summary: Pick<
@@ -127,8 +143,8 @@ export function buildAcceptanceSummaryMessageText(
   const lines: string[] = [];
   lines.push(`📦 任务「${taskTitle}」已进入验收阶段，以下为成果汇总。`);
   lines.push('');
-  lines.push(`目标：${summary.goal.trim()}`);
-  lines.push(`验收标准：${(summary.acceptanceCriteria ?? '').trim() || '（未填写）'}`);
+  lines.push(`目标：${acceptancePreview(summary.goal)}`);
+  lines.push(`验收标准：${(summary.acceptanceCriteria ?? '').trim() ? acceptancePreview(summary.acceptanceCriteria ?? '') : '（未填写）'}`);
   lines.push('');
   if (summary.deliverables.length === 0) {
     lines.push('成果清单：无已核验交付物。');

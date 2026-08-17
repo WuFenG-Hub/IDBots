@@ -170,6 +170,7 @@ import {
   setGroupTaskServiceCoworkStoreGetter,
   setGroupTaskServiceTransport,
   setGroupTaskAcceptanceNotifier,
+  notifySourceSessionReview,
   postGroupTaskMessage,
   createGroupTask,
   listGroupTaskSummaries,
@@ -3612,6 +3613,12 @@ const startSqliteDaemons = (): void => {
       };
     })(),
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
+    // P4 (v1.2): the review-stage owner report also reaches the origin CoWork
+    // session (same body the A2A private chat gets) under [GROUP_TASK_REVIEW].
+    sendReviewReportToSourceSession: ({ taskId, report }) => {
+      const task = getGroupTaskStore().getTaskById(taskId);
+      if (task) notifySourceSessionReview(task, report);
+    },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
     // (idchat online-status API, shared lazy singleton).
     fetchRemotePresence: async (globalMetaIds) => {

@@ -54,6 +54,7 @@ import {
   extractCheckpointDecisionSummary,
   GROUP_TASK_DRIVER_KV_PREFIX,
   GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
+  GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX,
 } from './groupTaskDaemon';
 import { getMetaIdDetail, type MetaIdDetail } from './metaIdSearchService';
 import {
@@ -1590,6 +1591,56 @@ function notifySourceSession(
   } catch (error) {
     console.warn(
       `[GroupTask] Acceptance notification failed for task ${task.id}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** Cap for the review report body injected into the origin session (P4 v1.2):
+ * concise summary + pointer per the owner's guidance — never a >2000-char dump. */
+const REVIEW_REPORT_MAX_CHARS = 1500;
+
+/**
+ * P4 (v1.2): deliver the review-stage owner report (the same body the A2A
+ * private chat receives) into the origin CoWork session under the
+ * [GROUP_TASK_REVIEW] prefix, through the same R2 insertCrossSessionMessageAndQueue
+ * seam as the close-time acceptance notice. kv-guarded per review-entry
+ * (`group_task_review_notified:<taskId>`); the daemon's rework hatch clears the
+ * guard so the next review re-reports. Body is capped with a pointer to the
+ * full acceptance summary (Tasks panel / group transcript). Best-effort only.
+ */
+export function notifySourceSessionReview(task: GroupTask, reportBody: string): void {
+  const targetSessionId = (task.sourceSessionId ?? '').trim();
+  if (!targetSessionId) return; // no originating session (panel-created task)
+  if (!acceptanceNotifier) return; // R2 seam not wired (tests / pre-init)
+  const kv = getKvStore();
+  const guardKey = `${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`;
+  if (kv.get<string>(guardKey) === '1') return;
+
+  const body = reportBody.trim();
+  if (!body) return;
+  const capped = body.length > REVIEW_REPORT_MAX_CHARS
+    ? `${body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd()}…\n（报告过长已截断——完整验收摘要见 Tasks 面板与群内 chair 摘要消息）`
+    : body;
+  const message = [
+    `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收，chair 报告如下：`,
+    capped,
+  ].join('\n');
+
+  try {
+    const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });
+    if (!result.ok) {
+      console.warn(
+        `[GroupTask] Review report to session ${targetSessionId} not delivered for task ${task.id}` +
+        (result.warning ? ` (${result.warning})` : ''),
+      );
+      return;
+    }
+    kv.set(guardKey, '1');
+    console.log(`[GroupTask] Review report delivered to session ${targetSessionId} for task ${task.id}`);
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Review report failed for task ${task.id}: ` +
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
