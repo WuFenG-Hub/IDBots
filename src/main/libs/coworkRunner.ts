@@ -5920,9 +5920,11 @@ export class CoworkRunner extends EventEmitter {
       // is `max`). DSH previously dropped this, so the runtime always used
       // the provider default (thinking ON, no reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
-      const dshEffortDialect = route.provider === 'deepseek' && route.apiFormat === 'openai'
-        ? 'deepseek'
-        : 'generic';
+      const dshEffortDialect = route.provider === 'deepseek' && route.apiFormat === 'responses'
+        ? 'deepseek-responses'
+        : route.provider === 'deepseek' && route.apiFormat === 'openai'
+          ? 'deepseek'
+          : 'generic';
       const dshReasoningEffort = mapDshReasoningEffort(
         activeSession.effortOverride ?? modelOptions?.reasoningEffort,
         activeSession.thinkingOverride ?? modelOptions?.thinking,
@@ -6002,10 +6004,17 @@ export class CoworkRunner extends EventEmitter {
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
           thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
-          // Only DeepSeek openai-completions models declare reasoningEfforts.
-          // Passing effort on a hand-declared non-reasoning route throws
-          // UNSUPPORTED_REASONING_EFFORT before the request leaves the runtime.
-          ...((route.provider === 'deepseek' && route.apiFormat === 'openai' && dshReasoningEffort)
+          // DeepSeek declares reasoning on both its wires: completions via
+          // thinkingFormat, Responses via catalog models (v4 accepts off..high).
+          // Without an explicit effort pi-ai's Responses adapter FORCES
+          // reasoning.effort='none' — thinking silently disabled for every
+          // turn — so the mapped UI effort must ride the route on both.
+          // Hand-declared custom models (outside pi-ai's catalog) would throw
+          // UNSUPPORTED_REASONING_EFFORT — same accepted posture as the
+          // completions path.
+          ...((route.provider === 'deepseek'
+            && (route.apiFormat === 'openai' || route.apiFormat === 'responses')
+            && dshReasoningEffort)
             ? { reasoningEffort: dshReasoningEffort }
             : {}),
           // Vision declaration rides the route (same knowledge source the

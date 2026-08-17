@@ -55,6 +55,22 @@ test('mapDshReasoningEffort: DeepSeek dialect maps 快速/标准 onto off/high',
   assert.equal(mapDshReasoningEffort('LOW', undefined, 'deepseek'), 'off')
 })
 
+// The Responses wire (DeepSeek's current default route): pi-ai forces
+// reasoning.effort='none' when no effort rides the request, so the UI ladder
+// must map onto real wire values — none/low/medium/high per product decision.
+test('mapDshReasoningEffort: DeepSeek Responses dialect shifts the ladder onto the wire', () => {
+  const { mapDshReasoningEffort } = loadMapper()
+  assert.equal(mapDshReasoningEffort('low', undefined, 'deepseek-responses'), 'off', '快速 → none')
+  assert.equal(mapDshReasoningEffort('minimal', undefined, 'deepseek-responses'), 'off')
+  assert.equal(mapDshReasoningEffort('medium', undefined, 'deepseek-responses'), 'low', '标准 → low')
+  assert.equal(mapDshReasoningEffort('high', undefined, 'deepseek-responses'), 'medium', '深度 → medium')
+  assert.equal(mapDshReasoningEffort('max', undefined, 'deepseek-responses'), 'high', '极限 → high (wire max stays unused)')
+  assert.equal(mapDshReasoningEffort('xhigh', undefined, 'deepseek-responses'), 'high')
+  assert.equal(mapDshReasoningEffort('MAX', undefined, 'deepseek-responses'), 'high')
+  // 'off' is a legal DSH id on this dialect too (model default may store it).
+  assert.equal(mapDshReasoningEffort('off', undefined, 'deepseek-responses'), 'off')
+})
+
 test('mapDshReasoningEffort: DeepSeek 快速 wins over model thinking-enabled default', () => {
   const { mapDshReasoningEffort } = loadMapper()
   assert.equal(mapDshReasoningEffort('low', { type: 'enabled' }, 'deepseek'), 'off')
