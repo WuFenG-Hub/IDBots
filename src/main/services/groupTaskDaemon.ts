@@ -43,7 +43,7 @@ import {
 } from './groupTaskSession';
 import type { GroupTaskOrchestrationBridge } from './groupTaskOrchestrationBridge';
 import { recordMetaIDGroupTaskExperience } from './metaidExperienceRecorder';
-import { buildAcceptanceSummary, buildAcceptanceSummaryMessageText } from './groupTaskAcceptanceSummary';
+import { buildAcceptanceSummary } from './groupTaskAcceptanceSummary';
 import {
   buildExperiencePromptBlocksXml,
   RECENT_SUMMARIES_PROMPT_DAYS,
@@ -4290,14 +4290,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           if (String(sqlite.get(reassertKey) ?? '') !== String(lastRow.id)) {
             sqlite.set(reassertKey, String(lastRow.id));
             try {
-              // R1: re-assert the SAME acceptance summary posted at review entry
-              // (re-rendered deterministically from the stored record) so a late
-              // straggler never replaces "把菜端上桌" with a bare [WORKING]. Falls
-              // back to the plain closing line only when no summary exists yet.
-              const latest = deps.getGroupTaskStore().getLatestAcceptanceSummary(task.id);
-              const reassertText = latest
-                ? buildAcceptanceSummaryMessageText(latest, task.title)
-                : buildReviewClosingLine(task);
+              // P12 (v1.1): re-assert with the COMPACT closing line only. The full
+              // acceptance summary stays a single chair message per review entry —
+              // re-posting the >2000-char checklist after every straggler buried
+              // the transcript under duplicates (task #22: two identical
+              // summaries, pins 427af681/632a46ad). The summary card in the
+              // detail view and the original transcript message keep carrying
+              // the full checklist, so nothing is lost here.
+              const reassertText = buildReviewClosingLine(task);
               const sent = await postGroupMessage(task.id, chair.metabotId, reassertText);
               emitLog(
                 `[GroupTaskDaemon] Task ${task.id}: re-asserted chair closing after straggler msg ${lastRow.id} (pin ${sent.pinId})`,

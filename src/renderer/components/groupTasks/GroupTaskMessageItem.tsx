@@ -117,8 +117,27 @@ function longDeliverableSummary(content: string): string {
   return `${longLines.length} [DELIVERABLE] line(s), ${totalChars} chars`;
 }
 
+/**
+ * P12 (v1.1): the host-posted acceptance summary is a >2000-char checklist
+ * (goal + criteria + all deliverables + guidance). Detect it by its
+ * deterministic opening so the transcript can fold it by default — one click
+ * expands the full checklist. The opening line is generated verbatim by
+ * buildAcceptanceSummaryMessageText, so this match is stable.
+ */
+function isAcceptanceSummaryMessage(content: string): boolean {
+  const text = content.trimStart();
+  return text.startsWith('📦 任务「') && text.includes('已进入验收阶段');
+}
+
 interface GroupTaskMessageItemProps {
   message: GroupChatTranscriptMessage;
+  /**
+   * P13 (v1.1): sender display name resolved from the task's member roster by
+   * senderGlobalMetaId. Wins over the chain nickname, which can carry a
+   * runtime identity name ("claude bot") instead of the worker's registered
+   * name. Optional — callers without a roster fall back to message.senderName.
+   */
+  senderDisplayName?: string;
   isChairSender: boolean;
   isOwnerSender: boolean;
   /** Sender is a remote member who joined via OpenTeam (matched by globalmetaid). */
@@ -238,7 +257,18 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
               : 'dark:bg-claude-darkSurfaceHover/60 bg-claude-surfaceHover/60 dark:text-claude-darkText text-claude-text'
           }`}
         >
-          {longDeliverable && !deliverableExpanded ? (
+          {acceptanceSummaryFold && !deliverableExpanded ? (
+            <button
+              type="button"
+              onClick={() => setDeliverableExpanded(true)}
+              className="block w-full text-left text-sm dark:text-claude-darkText text-claude-text"
+              title="Click to expand the full acceptance checklist"
+            >
+              <span className="inline-flex items-center gap-1.5 rounded bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                {i18nService.t('groupTasksAcceptanceFolded')} ({rawContent.length} chars)
+              </span>
+            </button>
+          ) : longDeliverable && !deliverableExpanded ? (
             <button
               type="button"
               onClick={() => setDeliverableExpanded(true)}
@@ -252,13 +282,15 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
           ) : (
             <MarkdownContent content={rawContent} className="text-sm" />
           )}
-          {longDeliverable && deliverableExpanded && (
+          {(longDeliverable || acceptanceSummaryFold) && deliverableExpanded && (
             <button
               type="button"
               onClick={() => setDeliverableExpanded(false)}
               className="mt-1 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary/70 hover:underline"
             >
-              Collapse long delivery
+              {acceptanceSummaryFold
+                ? i18nService.t('groupTasksAcceptanceCollapse')
+                : 'Collapse long delivery'}
             </button>
           )}
         </div>

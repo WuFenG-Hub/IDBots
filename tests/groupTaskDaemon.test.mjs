@@ -986,10 +986,12 @@ test('#14 closing re-assert: a worker straggler landing after review entry is fo
     );
     assert.equal(h.sends[h.sends.length - 1].metabotId, 1, 'the chair, not the worker, is last');
     assert.match(h.sends[h.sends.length - 1].content, /进入验收阶段/);
-    // R1: the re-assert re-posts the SAME acceptance summary (re-rendered from
-    // the stored record), not the old fixed string.
-    assert.match(h.sends[h.sends.length - 1].content, /目标：Build and publish the intro MetaApp/);
-    assert.match(h.sends[h.sends.length - 1].content, /成果清单：/);
+    // P12 (v1.1): the re-assert is the COMPACT closing line only — the full
+    // acceptance summary must never be re-posted per straggler (task #22 got
+    // two identical >2000-char summaries this way).
+    assert.doesNotMatch(h.sends[h.sends.length - 1].content, /成果清单：/);
+    const summaryPosts = h.sends.filter((s) => s.metabotId === 1 && /成果清单：/.test(s.content)).length;
+    assert.equal(summaryPosts, 1, 'exactly one full acceptance summary in the transcript');
 
     // Idempotent: a second tick with no NEW straggler does not re-assert again.
     const countAfter = h.sends.length;
