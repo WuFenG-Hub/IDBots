@@ -90,12 +90,18 @@ async function main() {
       const title = String(params.title ?? '').trim();
       const goal = String(params.goal ?? '').trim();
       if (!title || !goal) fail('title and goal are required for create');
+      // P1/P4: forward the originating CoWork session (explicit payload wins;
+      // env fallback covers hosts that inject IDBOTS_COWORK_SESSION_ID into
+      // skill subprocesses). The task close-out relays the acceptance notice
+      // back to this session — without it the relay degrades.
+      const sourceSessionId = String(params.source_session_id ?? process.env.IDBOTS_COWORK_SESSION_ID ?? '').trim();
       body = {
         title,
         goal,
         acceptance_criteria: params.acceptance_criteria,
         member_metabot_ids: Array.isArray(params.member_metabot_ids) ? params.member_metabot_ids : undefined,
         member_names: Array.isArray(params.member_names) ? params.member_names : undefined,
+        ...(sourceSessionId ? { source_session_id: sourceSessionId } : {}),
         // The twin bot runs this skill, so it is the default creator/chair.
         created_by: params.created_by === 'user' ? 'user' : 'twinbot',
       };

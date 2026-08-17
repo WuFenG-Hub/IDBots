@@ -44,6 +44,7 @@ import {
   exportGroupTask,
 } from './groupTaskService';
 import { gateChairDrivingSend, DEFAULT_DRIVER_GRACE_MS } from './groupTaskDaemon';
+import { resolveTwinSourceSessionFallback } from './groupTaskSourceSession';
 import { inviteRemoteBot, searchRemoteCandidates } from './openTeamService';
 import { buildMetabotDirectory } from './metabotDirectoryService';
 import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
@@ -1214,6 +1215,42 @@ export function startMetaidRpcServer(
             return;
           }
           sourceSessionId = candidate;
+        }
+      }
+      // P1/P4 (v1.1): twin-created tasks historically arrived without
+      // source_session_id (task #21: the linkage was NULL, so the R2
+      // acceptance relay silently skipped and the close-out never reached the
+      // originating session). Best-effort UNAMBIGUOUS fallback: exactly one
+      // standard session of the Twin updated within the last 15 minutes is
+      // the originating session (the create call itself runs inside that
+      // session's turn, so it is by definition the freshest). Zero or
+      // multiple candidates → leave unset (relay degrades exactly as before)
+      // — never guess wrong-session attribution.
+      if (!sourceSessionId && parsed.created_by === 'twinbot') {
+        try {
+          const twin = getMetabotStore().getTwinWallet();
+          if (twin) {
+            const fallback = resolveTwinSourceSessionFallback(
+              (sql, params) => getStore().getDatabase().exec(sql, params),
+              twin.id,
+              Date.now(),
+            );
+            if (fallback && 'sessionId' in fallback) {
+              sourceSessionId = fallback.sessionId;
+              console.log(
+                `[GroupTask RPC] source session resolved by twin fallback: ${sourceSessionId}`,
+              );
+            } else if (fallback && 'ambiguous' in fallback) {
+              console.warn(
+                `[GroupTask RPC] ambiguous source session (${fallback.ambiguous} recent Twin sessions); source_session_id left unset`,
+              );
+            }
+          }
+        } catch (error) {
+          console.warn(
+            `[GroupTask RPC] source session fallback failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
       const memberMetabotIds: number[] = [];

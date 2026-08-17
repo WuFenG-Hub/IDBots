@@ -67,13 +67,15 @@ Create one when the user expresses a **wish-style complex goal** that clearly ne
   "title": "Publish IDBots intro MetaApp",
   "goal": "Produce an IDBots introduction MetaApp and publish it on-chain",
   "acceptance_criteria": "MetaApp preview URL works; on-chain pin id returned",
-  "member_names": ["coder-bot", "designer-bot"]
+  "member_names": ["coder-bot", "designer-bot"],
+  "source_session_id": "<Current CoWork session id from your Local Time Context>"
 }
 ```
 
 - `title`, `goal`: required. `acceptance_criteria`, `member_names`: optional (chair-only task is legal).
 - Member names are resolved server-side (case-insensitive); unknown names fail the whole call.
 - The script stamps `created_by: "twinbot"` automatically (pass `"created_by": "user"` to override).
+- `source_session_id` (recommended): the CoWork session this create runs in — copy it verbatim from the `Current CoWork session id` line of your Local Time Context. The task close-out relays the `[GROUP_TASK_ACCEPTANCE]` notice back to exactly this session ("哪里发起哪里结束"); without it the relay degrades to the owner-private channel only. When omitted, the server falls back to the single most recently active Twin standard session (only when that is unambiguous).
 - Response contains `task.id`, `task.groupId` (the on-chain group, = create pin id), and `members`. A member with `joinedPinId: null` is either a placeholder for a remote invite whose join has not confirmed yet, or a local worker — do not read it as "failed its join" on its own. Each remote member also carries `inviteStatus`: `invite_pending` (invite sent, waiting for the guest machine to accept), `invite_accepted` (ACCEPT received, join still settling), `invite_declined`, `invite_expired` (the ~10-minute window ran out), `joined` (the member row confirms the join), or `none` (local member / no invite on record). "Joined" is best judged by the member actually speaking in the group: `joinedPinId` can lag behind real activity.
 
 ### `list`
