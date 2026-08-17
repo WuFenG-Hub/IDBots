@@ -9,6 +9,8 @@ const {
   buildAcceptanceSummaryMessageText,
   buildAcceptanceGuidance,
   deliverableVerificationLabel,
+  extractChairConclusion,
+  CHAIR_CONCLUSION_MAX_CHARS,
 } = require('../dist-electron/main/services/groupTaskAcceptanceSummary.js');
 
 const baseTask = { title: '西游记第一回', goal: 'Three.js 三维动画', acceptanceCriteria: '可播放' };
@@ -179,4 +181,61 @@ test('buildAcceptanceGuidance always ends with an action, never an open question
   assert.ok(guidance.includes('Accept & Close'));
   // No open-ended "what would you like" phrasing.
   assert.ok(!/what would you like|接下来想做/i.test(guidance));
+});
+
+// ---------------------------------------------------------------------------
+// Improvement #1 (single-card acceptance): the chair's 【结论】 verdict
+// ---------------------------------------------------------------------------
+
+test('extractChairConclusion: 【结论】 first line is captured, cleaned, capped', () => {
+  assert.equal(
+    extractChairConclusion('【结论】验收通过并结项\n\n正文……'),
+    '验收通过并结项',
+  );
+  // Markdown bold and trailing punctuation are stripped.
+  assert.equal(
+    extractChairConclusion('【结论】 **建议返工：配图未交付**。',
+    ),
+    '建议返工：配图未交付');
+  // Legacy narrative forms (task #24 style) still parse.
+  assert.equal(
+    extractChairConclusion('**结论**：验收通过，理由见验收卡'),
+    '验收通过，理由见验收卡',
+  );
+  assert.equal(
+    extractChairConclusion('目标回顾：……\n结论：建议验收通过'),
+    '建议验收通过',
+  );
+  // Over-long verdicts are capped.
+  const long = 'x'.repeat(200);
+  const capped = extractChairConclusion(`【结论】${long}`);
+  assert.equal(capped.length, CHAIR_CONCLUSION_MAX_CHARS + 1);
+  assert.ok(capped.endsWith('…'));
+});
+
+test('extractChairConclusion: mentions deep in the narration or absent tags yield null', () => {
+  // A 结论 mentioned beyond the opening lines is prose, not the verdict.
+  const deep = ['开场白', '一', '二', '三', '四', '五', '六', '七', '结论：太深了'].join('\n');
+  assert.equal(extractChairConclusion(deep), null);
+  assert.equal(extractChairConclusion(''), null);
+  assert.equal(extractChairConclusion(null), null);
+  assert.equal(extractChairConclusion('没有任何标签的报告正文'), null);
+});
+
+test('Improvement #1: the group message leads with the stored conclusion when present', () => {
+  const base = {
+    goal: 'G',
+    acceptanceCriteria: 'C',
+    deliverables: [],
+    members: [],
+    guidance: buildAcceptanceGuidance({ title: 'T' }),
+  };
+  const withConclusion = buildAcceptanceSummaryMessageText(
+    { ...base, conclusion: '验收通过并结项' },
+    'T',
+  );
+  const lines = withConclusion.split('\n');
+  assert.equal(lines[1], '结论：验收通过并结项', 'conclusion is the first content line after the header');
+  const withoutConclusion = buildAcceptanceSummaryMessageText({ ...base }, 'T');
+  assert.ok(!withoutConclusion.includes('结论：'), 'no fabricated conclusion line');
 });

@@ -66,13 +66,98 @@ test('group_task_acceptance_summaries table + index are created on open', async 
   const { store, db } = await openStores(tempDir);
   try {
     const cols = getColumns(db, 'group_task_acceptance_summaries');
-    for (const col of ['id', 'task_id', 'version', 'goal', 'deliverables_json', 'members_json', 'guidance', 'generated_by']) {
+    for (const col of ['id', 'task_id', 'version', 'goal', 'deliverables_json', 'members_json', 'guidance', 'conclusion', 'generated_by']) {
       assert.ok(cols.includes(col), `${col} column should exist`);
     }
     assert.ok(
       getIndexNames(db, 'group_task_acceptance_summaries').includes('idx_group_task_acceptance_summaries_task'),
       'task index should exist',
     );
+  } finally {
+    store.close();
+  }
+});
+
+test('Improvement #1: conclusion column is migrated onto pre-existing databases', async () => {
+  // Simulate an upgraded DB whose table predates the conclusion column: open a
+  // store, drop the column's data by rebuilding the old-shape table, then
+  // re-open — the idempotent ALTER TABLE in the schema init must add it back.
+  const tempDir = makeTempDir();
+  const first = await openStores(tempDir);
+  const db = first.db;
+  // Rebuild the table in its pre-Improv#1 shape (no conclusion column).
+  db.run('DROP TABLE group_task_acceptance_summaries;');
+  db.run(`
+    CREATE TABLE group_task_acceptance_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL,
+      version INTEGER NOT NULL,
+      goal TEXT NOT NULL,
+      acceptance_criteria TEXT,
+      deliverables_json TEXT NOT NULL,
+      members_json TEXT NOT NULL,
+      guidance TEXT NOT NULL,
+      outcome TEXT,
+      rating INTEGER,
+      rating_comment TEXT,
+      generated_by TEXT NOT NULL DEFAULT 'host',
+      generated_at TEXT DEFAULT (datetime('now')),
+      published_group_pin_id TEXT,
+      notified_session TEXT
+    );
+  `);
+  // close() does NOT flush — persist the old-shape table explicitly so the
+  // re-open below really exercises the migration path.
+  first.store.getSaveFunction()();
+  first.store.close();
+  const { store } = await openStores(tempDir);
+  try {
+    assert.ok(
+      getColumns(store.getDatabase(), 'group_task_acceptance_summaries').includes('conclusion'),
+      're-opening an old-shape DB adds the conclusion column',
+    );
+    // Idempotent: a third open does not fail on the duplicate ALTER.
+    store.close();
+    const third = await openStores(tempDir);
+    assert.ok(
+      getColumns(third.db, 'group_task_acceptance_summaries').includes('conclusion'),
+      're-opening again is idempotent',
+    );
+    third.store.close();
+  } finally {
+    try {
+      store.close();
+    } catch {
+      // already closed in the idempotency leg
+    }
+  }
+});
+
+test('Improvement #1: updateAcceptanceSummaryConclusion stamps the latest version only', async () => {
+  const tempDir = makeTempDir();
+  const { store, db, groupTaskStore } = await openStores(tempDir);
+  try {
+    insertWallet(db, 1);
+    insertMetabot(db, { id: 1, walletId: 1, name: 'Twin', type: 'twin' });
+    const task = seedTask(groupTaskStore);
+    const v1 = groupTaskStore.saveAcceptanceSummary({
+      taskId: task.id, goal: task.goal, deliverables: [], members: [], guidance: 'g1',
+    });
+    assert.equal(v1.conclusion, null, 'fresh summaries carry no conclusion yet');
+    groupTaskStore.saveAcceptanceSummary({
+      taskId: task.id, goal: task.goal, deliverables: [], members: [], guidance: 'g2',
+    });
+
+    groupTaskStore.updateAcceptanceSummaryConclusion(task.id, '验收通过并结项');
+    const latest = groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.equal(latest.version, 2);
+    assert.equal(latest.conclusion, '验收通过并结项');
+    // v1 (the previous review entry) keeps its own absent verdict.
+    assert.equal(groupTaskStore.listAcceptanceSummaries(task.id)[0].conclusion, null);
+
+    // Blank conclusions normalize to null (no empty-string verdicts).
+    groupTaskStore.updateAcceptanceSummaryConclusion(task.id, '   ');
+    assert.equal(groupTaskStore.getLatestAcceptanceSummary(task.id).conclusion, null);
   } finally {
     store.close();
   }

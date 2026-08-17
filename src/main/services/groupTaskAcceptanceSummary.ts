@@ -110,8 +110,8 @@ export function buildAcceptanceSummaryMembers(
 export function buildAcceptanceGuidance(task: Pick<GroupTask, 'title'>): string {
   return [
     `你可以：`,
-    `① 在 Tasks 面板点「Accept & Close」并评分（1-5 星 + 可选评语）——任务关闭；`,
-    `② 点「Back to work / Rework」——返回执行，chair 会补派工作；`,
+    `① 在 Tasks 面板的验收卡点「Accept & Close」并评分（1-5 星 + 可选评语）——任务关闭；`,
+    `② 在验收卡点「Back to work / Rework」——返回执行，chair 会补派工作；`,
     `③ 在群内直接回复意见——chair 会按你的意见处理。`,
   ].join('\n');
 }
@@ -132,16 +132,66 @@ export function acceptancePreview(text: string, maxChars: number = ACCEPTANCE_SU
   return `${trimmed.slice(0, maxChars).trimEnd()}…`;
 }
 
+/**
+ * Improvement #1 (single-card acceptance): cap for the chair's one-line
+ * conclusion. The conclusion is the card's headline and the lead of the group
+ * summary — a verdict, not a paragraph.
+ */
+export const CHAIR_CONCLUSION_MAX_CHARS = 120;
+
+/** How deep into the report the conclusion tag may appear (narrative below this is prose, not a verdict). */
+const CHAIR_CONCLUSION_HEAD_LINES = 6;
+
+const CONCLUSION_TAGGED_RE = /【结论】[ \t]*([^\n\r]+)/;
+const CONCLUSION_BOLD_RE = /\*\*结论\*\*[ \t]*[：:]?[ \t]*([^\n\r]+)/;
+const CONCLUSION_PLAIN_RE = /^[ \t]*结论[：:][ \t]*([^\n\r]+)/m;
+
+/**
+ * Improvement #1: extract the chair's one-line conclusion from the owner-report
+ * narrative. The owner-report directive requires the report to OPEN with a
+ * `【结论】<verdict>` line; legacy **结论**：/结论： forms are still honored so
+ * pre-format reports (task #24 style) parse too. Only the opening lines are
+ * searched — a 结论 mentioned deep in the narration is prose, not the verdict.
+ * Returns the cleaned, capped string or null when no verdict line exists (the
+ * card then falls back to its deterministic deliverable-count headline).
+ */
+export function extractChairConclusion(report: string): string | null {
+  const text = (report ?? '').trim();
+  if (!text) return null;
+  const head = text.split(/\r?\n/, CHAIR_CONCLUSION_HEAD_LINES).join('\n');
+  const match = CONCLUSION_TAGGED_RE.exec(head)
+    ?? CONCLUSION_BOLD_RE.exec(head)
+    ?? CONCLUSION_PLAIN_RE.exec(head);
+  if (!match) return null;
+  const cleaned = (match[1] ?? '')
+    .replace(/\*\*/g, '')
+    .replace(/^#{1,6}[ \t]*/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[。.；;，,]+$/, '');
+  if (!cleaned) return null;
+  return cleaned.length > CHAIR_CONCLUSION_MAX_CHARS
+    ? `${cleaned.slice(0, CHAIR_CONCLUSION_MAX_CHARS).trimEnd()}…`
+    : cleaned;
+}
+
 /** Render the immutable summary record back into the deterministic group message. */
 export function buildAcceptanceSummaryMessageText(
   summary: Pick<
     GroupTaskAcceptanceSummary,
     'goal' | 'acceptanceCriteria' | 'deliverables' | 'members' | 'guidance'
-  >,
+  > & Partial<Pick<GroupTaskAcceptanceSummary, 'conclusion'>>,
   taskTitle: string,
 ): string {
   const lines: string[] = [];
   lines.push(`📦 任务「${taskTitle}」已进入验收阶段，以下为成果汇总。`);
+  // Improvement #1: the chair's one-line conclusion leads the message when it
+  // was captured before posting — the SAME stored string headlines the Tasks
+  // acceptance card and the source-session notice (one authoritative copy).
+  const conclusion = (summary.conclusion ?? '').trim();
+  if (conclusion) {
+    lines.push(`结论：${conclusion}`);
+  }
   lines.push('');
   lines.push(`目标：${acceptancePreview(summary.goal)}`);
   lines.push(`验收标准：${(summary.acceptanceCriteria ?? '').trim() ? acceptancePreview(summary.acceptanceCriteria ?? '') : '（未填写）'}`);
@@ -179,7 +229,10 @@ export function buildAcceptanceSummaryMessageText(
  * Build a fresh acceptance summary (un-persisted) plus the deterministic group
  * message from the live task + recorded deliverables + members. The daemon
  * persists the result via {@link GroupTaskStore.saveAcceptanceSummary} at the
- * review-entry moment (T1) and posts `messageText` as the group's last message.
+ * review-entry moment (T1); after the owner report captures the chair's
+ * conclusion onto the saved record, the posted group message is re-rendered
+ * from that record via {@link buildAcceptanceSummaryMessageText} so the
+ * conclusion leads it (`messageText` here is the conclusion-less pre-render).
  */
 export function buildAcceptanceSummary(input: {
   task: Pick<GroupTask, 'title' | 'goal' | 'acceptanceCriteria'>;

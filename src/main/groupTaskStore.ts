@@ -270,6 +270,14 @@ export interface GroupTaskAcceptanceSummary {
   members: GroupTaskAcceptanceSummaryMember[];
   /** Deterministic acceptance guidance (3 actions). */
   guidance: string;
+  /**
+   * Improvement #1 (single-card acceptance): the chair's one-line conclusion
+   * extracted from the owner-report narrative at review entry. The SAME string
+   * headlines the Tasks acceptance card, the group summary message, and the
+   * source-session notice — null until captured (card falls back to a
+   * deterministic deliverable-count headline).
+   */
+  conclusion: string | null;
   /** T2 terminal outcome, null until the task closes. */
   outcome: GroupTaskStatus | null;
   rating: number | null;
@@ -463,6 +471,7 @@ interface GroupTaskAcceptanceSummaryRow {
   deliverables_json: string;
   members_json: string;
   guidance: string;
+  conclusion: string | null;
   outcome: string | null;
   rating: number | null;
   rating_comment: string | null;
@@ -599,6 +608,7 @@ function rowToGroupTaskAcceptanceSummary(
     deliverables,
     members,
     guidance: row.guidance,
+    conclusion: row.conclusion ?? null,
     outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
     rating: row.rating ?? null,
     ratingComment: row.rating_comment ?? null,
@@ -1191,6 +1201,23 @@ export class GroupTaskStore {
        WHERE id = (SELECT id FROM group_task_acceptance_summaries
                    WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
       [sessionId, taskId],
+    );
+    this.saveDb();
+  }
+
+  /**
+   * Improvement #1 (single-card acceptance): stamp the chair's one-line
+   * conclusion onto the LATEST summary version (= this review entry), making
+   * the stored record the single authoritative copy. No-op when no summary
+   * row exists; an empty conclusion is normalized to null.
+   */
+  updateAcceptanceSummaryConclusion(taskId: number, conclusion: string | null): void {
+    const trimmed = (conclusion ?? '').trim();
+    this.db.run(
+      `UPDATE group_task_acceptance_summaries SET conclusion = ?
+       WHERE id = (SELECT id FROM group_task_acceptance_summaries
+                   WHERE task_id = ? ORDER BY version DESC LIMIT 1)`,
+      [trimmed || null, taskId],
     );
     this.saveDb();
   }

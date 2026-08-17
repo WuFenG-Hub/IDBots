@@ -3570,9 +3570,11 @@ const startSqliteDaemons = (): void => {
     sendOwnerPrivateReport: sendGroupTaskOwnerPrivateReport,
     // P4 (v1.2): the review-stage owner report also reaches the origin CoWork
     // session (same body the A2A private chat gets) under [GROUP_TASK_REVIEW].
-    sendReviewReportToSourceSession: ({ taskId, report }) => {
+    // Improvement #1: with an extracted 【结论】 verdict the notice collapses to
+    // verdict + pointer to the Tasks acceptance card.
+    sendReviewReportToSourceSession: ({ taskId, report, conclusion }) => {
       const task = getGroupTaskStore().getTaskById(taskId);
-      if (task) notifySourceSessionReview(task, report);
+      if (task) notifySourceSessionReview(task, { report, conclusion });
     },
     // OpenTeam M2: presence probe for remote-teammate unreachable detection
     // (idchat online-status API, shared lazy singleton).

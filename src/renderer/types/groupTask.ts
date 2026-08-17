@@ -157,6 +157,13 @@ export interface GroupTaskAcceptanceSummary {
   deliverables: GroupTaskAcceptanceSummaryDeliverable[];
   members: GroupTaskAcceptanceSummaryMember[];
   guidance: string;
+  /**
+   * Improvement #1 (single-card acceptance): the chair's one-line conclusion —
+   * the single authoritative string headed on the card, the group summary
+   * message, and the source-session notice. Null until captured at review
+   * entry (the card then shows a deterministic deliverable-count fallback).
+   */
+  conclusion: string | null;
   outcome: GroupTaskStatus | null;
   rating: number | null;
   ratingComment: string | null;

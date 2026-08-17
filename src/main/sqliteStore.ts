@@ -964,6 +964,7 @@ export class SqliteStore {
         deliverables_json TEXT NOT NULL,
         members_json TEXT NOT NULL,
         guidance TEXT NOT NULL,
+        conclusion TEXT,
         outcome TEXT,
         rating INTEGER,
         rating_comment TEXT,
@@ -977,6 +978,18 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_group_task_acceptance_summaries_task
         ON group_task_acceptance_summaries(task_id, version);
     `);
+    // Improvement #1 (single-card acceptance): the chair's one-line conclusion
+    // captured from the owner report. Additive, idempotent ALTER TABLE so
+    // upgraded DBs get the column before the code reads it.
+    try {
+      const cols = this.db.exec('PRAGMA table_info(group_task_acceptance_summaries);');
+      const columns = (cols[0]?.values || []).map((row) => String(row[1]));
+      if (!columns.includes('conclusion')) {
+        this.db.run('ALTER TABLE group_task_acceptance_summaries ADD COLUMN conclusion TEXT;');
+      }
+    } catch (error) {
+      console.warn('[SqliteStore] Failed to verify group_task_acceptance_summaries columns:', error);
+    }
 
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
