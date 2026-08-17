@@ -35,6 +35,7 @@ import P2PConfigPanel from './p2p/P2PConfigPanel';
 import UserSettings from './user/UserSettings';
 import TrafficSettings from './traffic/TrafficSettings';
 import { defaultConfig, type AppConfig, getVisibleProviders } from '../config';
+import { LLM_FREE_PROVIDER_KEY, getFreeProviderModelDisplayName } from '../services/llmFreeQuotaGate.js';
 
 type TabType = 'user' | 'general' | 'model' | 'skills' | 'projects' | 'coworkSandbox' | 'coworkMemory' | 'archivedChats' | 'shortcuts' | 'im' | 'email' | 'paramsConfig' | 'traffic' | 'p2p';
 
@@ -128,9 +129,9 @@ interface ProvidersImportPayload {
 
 const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode }> = {
   'metaid-free': {
-    label: 'MetaID Free',
+    label: 'IDBots-Free',
     icon: (
-      <svg height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>MetaID Free</title><path fill="currentColor" d="M12 1.5l2.1 6.4 6.4 2.1-6.4 2.1L12 18.5l-2.1-6.4-6.4-2.1 6.4-2.1L12 1.5zM19.2 14.8l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9.9-2.7z"></path></svg>
+      <svg height="24" viewBox="0 0 24 24" width="24" xmlns="http://www.w3.org/2000/svg" style={{flex: '0 0 auto', lineHeight: 1}}><title>IDBots-Free</title><path fill="currentColor" d="M12 1.5l2.1 6.4 6.4 2.1-6.4 2.1L12 18.5l-2.1-6.4-6.4-2.1 6.4-2.1L12 1.5zM19.2 14.8l.9 2.7 2.7.9-2.7.9-.9 2.7-.9-2.7-2.7-.9 2.7-.9.9-2.7z"></path></svg>
     ),
   },
   openai: {
@@ -246,6 +247,8 @@ const providerSwitchableDefaultBaseUrls: Partial<Record<ProviderType, { anthropi
 };
 
 const providerRequiresApiKey = (provider: ProviderType) => provider !== 'ollama';
+/** The built-in free-quota provider is relay-managed: its credentials and API shape are hidden from the UI. */
+const isBuiltInFreeProvider = (provider: string): boolean => provider === LLM_FREE_PROVIDER_KEY;
 const normalizeBaseUrl = (baseUrl: string): string => baseUrl.trim().replace(/\/+$/, '').toLowerCase();
 const normalizeApiFormat = (value: unknown): 'anthropic' | 'openai' | 'responses' => {
   if (value === 'responses') {
@@ -259,6 +262,10 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   }
   if (provider === 'anthropic') {
     return 'anthropic';
+  }
+  // Free-quota relay always speaks the OpenAI format; the selector stays hidden.
+  if (isBuiltInFreeProvider(provider)) {
+    return 'openai';
   }
   return null;
 };
@@ -2526,7 +2533,6 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
           <div className="flex h-full">
             {/* Provider List - Left Side */}
             <div className="w-2/5 border-r dark:border-claude-darkBorder border-claude-border pr-3 space-y-1.5 overflow-y-auto">
-              <FreeQuotaCard providers={providers} onProvisioned={handleFreeQuotaProvisioned} />
               <div className="mb-1.5 px-1">
                 <div className="flex items-center justify-between mb-1.5">
                   <h3 className="text-sm font-medium dark:text-claude-darkText text-claude-text">
@@ -2653,7 +2659,16 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               </div>
 
-              {providerRequiresApiKey(activeProvider) && (
+              {activeProvider === LLM_FREE_PROVIDER_KEY && (
+                <div>
+                  <FreeQuotaCard providers={providers} onProvisioned={handleFreeQuotaProvisioned} />
+                  <p className="text-[11px] leading-relaxed dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {i18nService.t('freeQuotaNotice')}
+                  </p>
+                </div>
+              )}
+
+              {providerRequiresApiKey(activeProvider) && !isBuiltInFreeProvider(activeProvider) && (
                 <div>
                   <label htmlFor={`${activeProvider}-apiKey`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
                     {i18nService.t('apiKey')}
@@ -2669,19 +2684,21 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                 </div>
               )}
 
-              <div>
-                <label htmlFor={`${activeProvider}-baseUrl`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
-                  {i18nService.t('baseUrl')}
-                </label>
-                <input
-                  type="text"
-                  id={`${activeProvider}-baseUrl`}
-                  value={providers[activeProvider].baseUrl}
-                  onChange={(e) => handleProviderConfigChange(activeProvider, 'baseUrl', e.target.value)}
-                  className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
-                  placeholder={i18nService.t('baseUrlPlaceholder')}
-                />
-              </div>
+              {!isBuiltInFreeProvider(activeProvider) && (
+                <div>
+                  <label htmlFor={`${activeProvider}-baseUrl`} className="block text-xs font-medium dark:text-claude-darkText text-claude-text mb-1">
+                    {i18nService.t('baseUrl')}
+                  </label>
+                  <input
+                    type="text"
+                    id={`${activeProvider}-baseUrl`}
+                    value={providers[activeProvider].baseUrl}
+                    onChange={(e) => handleProviderConfigChange(activeProvider, 'baseUrl', e.target.value)}
+                    className="block w-full rounded-xl bg-claude-surfaceInset dark:bg-claude-darkSurfaceInset dark:border-claude-darkBorder border-claude-border border focus:border-claude-accent focus:ring-1 focus:ring-claude-accent/30 dark:text-claude-darkText text-claude-text px-3 py-2 text-xs"
+                    placeholder={i18nService.t('baseUrlPlaceholder')}
+                  />
+                </div>
+              )}
 
               {/* API 格式选择器 */}
               {shouldShowApiFormatSelector(activeProvider) && (
@@ -2787,7 +2804,9 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                           <span className="dark:text-claude-darkText text-claude-text font-medium text-[11px]">{model.name}</span>
                         </div>
                         <div className="flex items-center space-x-1">
-                          <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary">{model.id}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-claude-surfaceHover dark:bg-claude-darkSurfaceHover rounded-md dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                            {isBuiltInFreeProvider(activeProvider) ? getFreeProviderModelDisplayName(model.id) : model.id}
+                          </span>
                           {model.supportsImage && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-claude-accent/10 text-claude-accent">
                               {i18nService.t('imageInput')}

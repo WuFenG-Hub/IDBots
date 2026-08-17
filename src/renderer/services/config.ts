@@ -1,5 +1,6 @@
 import { AppConfig, CONFIG_KEYS, defaultConfig, normalizeDeepSeekAppConfig } from '../config';
 import { localStore } from './store';
+import { getFreeProviderModelDisplayName, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
 
 const getFixedProviderApiFormat = (providerKey: string): 'anthropic' | 'openai' | null => {
   if (providerKey === 'openai' || providerKey === 'gemini') {
@@ -81,6 +82,16 @@ const buildProviderSignature = (
   })),
 );
 
+// The built-in free-quota provider is managed end to end (relay-provisioned
+// credentials, hidden in the UI), so its model display names are always the
+// canonical product names, never the relay's internal wire ids.
+const normalizeFreeProviderModelNames = (
+  models: NonNullable<NonNullable<AppConfig['providers']>[string]['models']> | undefined,
+) => models?.map((model) => ({
+  ...model,
+  name: getFreeProviderModelDisplayName(model.id),
+}));
+
 const normalizeSingleProviderConfig = (
   providerKey: string,
   providerConfig: NonNullable<AppConfig['providers']>[string],
@@ -88,7 +99,9 @@ const normalizeSingleProviderConfig = (
   ...providerConfig,
   baseUrl: normalizeProviderBaseUrl(providerKey, providerConfig.baseUrl),
   apiFormat: normalizeProviderApiFormat(providerKey, providerConfig.apiFormat),
-  models: cloneProviderModels(providerConfig.models),
+  models: providerKey === LLM_FREE_PROVIDER_KEY
+    ? normalizeFreeProviderModelNames(providerConfig.models)
+    : cloneProviderModels(providerConfig.models),
 });
 
 const getDefaultProvidersConfig = (): NonNullable<AppConfig['providers']> => (

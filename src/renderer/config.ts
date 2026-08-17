@@ -448,7 +448,7 @@ export const defaultConfig: AppConfig = {
       baseUrl: '',
       apiFormat: 'openai',
       models: [],
-      name: 'MetaID Free',
+      name: 'IDBots-Free',
     },
     openai: {
       enabled: false,

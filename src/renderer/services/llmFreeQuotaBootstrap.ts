@@ -21,6 +21,7 @@ import { welcomeBotAvatarUrl } from '../assets/welcomeBotAvatar';
 import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
+  getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
   planFreeQuotaProvisioning,
 } from './llmFreeQuotaGate.js';
@@ -71,7 +72,7 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
   const config = configService.getConfig();
   const models = (result.models ?? []).map((model) => ({
     id: model.id,
-    name: model.id,
+    name: getFreeProviderModelDisplayName(model.id),
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxOutputTokens,
   }));
@@ -83,7 +84,7 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
         baseUrl: result.baseUrl,
         apiFormat: 'openai',
         models,
-        name: 'MetaID Free',
+        name: 'IDBots-Free',
       },
     } as AppConfig['providers'],
     model: {
