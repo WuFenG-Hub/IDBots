@@ -1172,7 +1172,6 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpDesc_playwright: '高级浏览器自动化，支持 Chromium/Firefox/WebKit',
     mcpDesc_canva: 'Canva 设计平台：创建和管理设计、模板操作',
     mcpDesc_firecrawl: '网页抓取与数据提取：支持批处理、结构化提取和内容分析',
-    mcpDesc_fetch: '网页内容抓取和 HTML 转 Markdown，适合 LLM 消费',
 
     // MetaBot
     metabots: '我的Bot',
@@ -3238,7 +3237,6 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpDesc_playwright: 'Advanced browser automation supporting Chromium/Firefox/WebKit',
     mcpDesc_canva: 'Canva design platform: create and manage designs, template operations',
     mcpDesc_firecrawl: 'Web scraping and data extraction: batch processing, structured extraction and content analysis',
-    mcpDesc_fetch: 'Web content fetching and HTML-to-markdown conversion for LLM consumption',
 
     // MetaBot
     metabots: 'My Bots',

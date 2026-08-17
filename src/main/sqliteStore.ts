@@ -11,6 +11,7 @@ import { findNearestExistingFile } from './libs/runtimePaths';
 import { writeFileAtomicSync } from './libs/atomicFile';
 import { createNativeSqliteDatabase } from './nativeSqliteDatabase';
 import type { SqliteDatabase } from './sqliteTypes';
+import { disableDeadFetchMcpServers } from './mcpStore';
 import { ensureMetaIDExperienceSchema } from './metaidExperienceStore';
 import { ensureMetaIDImpressionSchema } from './metaidImpressionStore';
 import { ensureMetaIDMemoryGrantSchema } from './metaidMemoryGrantStore';
@@ -366,6 +367,18 @@ export class SqliteStore {
         updated_at INTEGER NOT NULL
       );
     `);
+    // Migration (2026-08-17): the built-in Fetch MCP server's package was
+    // unpublished from npm — auto-disable enabled rows still referencing it
+    // (its npx 404 retry loop dragged DSH runtime boots out to minutes).
+    try {
+      const disabled = disableDeadFetchMcpServers(this.db);
+      if (disabled > 0) {
+        console.warn(`[SqliteStore] auto-disabled ${disabled} MCP server row(s) using the dead @modelcontextprotocol/server-fetch package`);
+        this.save();
+      }
+    } catch (error) {
+      console.warn('mcp dead-package migration failed:', error);
+    }
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS projects (
