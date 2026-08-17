@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
 import { CoworkTurnSubmissionController } from '../dist-electron/main/services/coworkTurnSubmission.js';
+import { CoworkDshSteerWindowClosedError } from '../dist-electron/main/libs/coworkSteerChannel.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
 
@@ -628,4 +629,108 @@ test('rejects blank input and missing sessions without persisting', async () => 
   const missingResult = await missing.controller.submit(input());
   assert.equal(missingResult.success, false);
   assert.equal(missingResult.code, 'session_not_found');
+});
+
+// ---- DSH-kernel steer admissions (open-dsh) ---------------------------------
+//
+// DSH turns steer natively through the hub: trySubmitSteer resolves the
+// delivery promise on runtime acceptance, but ALSO at turn end when the steer
+// RPC never landed (official best-effort semantics). The controller tells the
+// two apart from the message's steerStatus.
+
+test('open-dsh live steer admits through trySubmitSteer and marks delivery', async () => {
+  const harness = createHarness({ capability: 'open-dsh' });
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'steer');
+  assert.deepEqual(harness.runner.steerCalls, [{
+    sessionId: 'session-1', submissionId: UUID, text: 'next direction',
+  }]);
+  assert.equal(harness.runner.continueCalls.length, 0);
+  assert.equal(harness.runner.waitCalls, 0);
+  const metadata = harness.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.steerStatus, 'delivered');
+  assert.equal(metadata.interactionKind, 'steer');
+});
+
+test('open-dsh steer settled by the runner event resolves as settled', async () => {
+  let releaseDelivery;
+  const harness = createHarness({
+    capability: 'open-dsh',
+    configureRunner: (runner) => {
+      runner.delivery = new Promise((resolve) => { releaseDelivery = resolve; });
+    },
+  });
+
+  const pending = harness.controller.submit(input());
+  await Promise.resolve();
+  // The steered exchange finished before the submission resumed: the runner
+  // emitted steerSettled (drained at DSH turn settlement) while delivery was
+  // still resolving.
+  harness.runner.emit('steerSettled', 'session-1', UUID);
+  releaseDelivery();
+  const result = await pending;
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'steer');
+  assert.equal(result.message.metadata.steerStatus, 'settled');
+  assert.equal(harness.runner.continueCalls.length, 0);
+});
+
+test('open-dsh steer whose window closed degrades to the next turn instead of erroring', async () => {
+  // Window closed: the steer RPC failed, so delivery settles at turn end
+  // with the window-closed rejection. Official DSH behavior: the submission
+  // becomes the next waking turn's input — never an error.
+  const harness = createHarness({
+    capability: 'open-dsh',
+    configureRunner: (runner) => {
+      runner.delivery = Promise.reject(new CoworkDshSteerWindowClosedError());
+    },
+  });
+
+  const result = await harness.controller.submit(input());
+
+  assert.equal(result.success, true);
+  assert.equal(result.mode, 'continue');
+  assert.equal(harness.runner.steerCalls.length, 1);
+  // The degrade waits for the DSH turn's full settlement before continuing,
+  // exactly like the closing-local path.
+  assert.equal(harness.runner.waitCalls, 1);
+  assert.deepEqual(harness.runner.continueCalls, [{
+    sessionId: 'session-1',
+    text: 'next direction',
+    options: {
+      skipUserMessage: true,
+      systemPrompt: undefined,
+      skillIds: undefined,
+    },
+  }]);
+  const metadata = harness.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.steerStatus, undefined);
+  assert.equal(metadata.submissionMode, 'continue');
+  assert.equal(metadata.submissionResult, 'completed');
+});
+
+test('open-dsh degraded steer stops with the session instead of continuing', async () => {
+  let settle;
+  const harness = createHarness({
+    capability: 'open-dsh',
+    configureRunner: (runner) => {
+      runner.delivery = Promise.reject(new CoworkDshSteerWindowClosedError());
+      runner.turnSettlement = new Promise((resolve) => { settle = resolve; });
+    },
+  });
+
+  const pending = harness.controller.submit(input());
+  await Promise.resolve();
+  harness.runner.sessionStopped = true;
+  settle();
+  const result = await pending;
+
+  assert.equal(result.success, false);
+  assert.equal(result.code, 'cancelled');
+  assert.equal(harness.runner.continueCalls.length, 0);
+  const metadata = harness.store.getMessageById('session-1', UUID).metadata;
+  assert.equal(metadata.steerStatus, 'cancelled');
 });

@@ -247,14 +247,21 @@ export class DshTurnHub {
   async steer(sessionId: string, text: string): Promise<void> {
     const controller = this.controllerOfCowork(sessionId)
     if (!controller || !this.kernel) throw new Error('DshTurnHub: no active turn for steer')
-    controller.expectSteerFollowUp()
+    // Arm the boundary latch only when the cancel actually interrupted a
+    // running activity. A no-op cancel against an idle agent (steer racing
+    // turn start, or a second steer after a first abort already converged)
+    // never emits the steer-abort boundary — arming there would swallow the
+    // turn's natural end instead. Older runtime builds always report
+    // cancelled:true, so only an explicit false skips the latch.
+    let interrupted = true
     try {
-      await this.kernel.cancel(controller.dshSessionId, 'steer', { keepInbox: true })
+      const cancelResult = await this.kernel.cancel(controller.dshSessionId, 'steer', { keepInbox: true })
+      interrupted = cancelResult.cancelled !== false
     } catch (error) {
-      // No interrupt happened: plain step-boundary steering, flag disarmed.
-      controller.clearSteerFollowUp()
+      // No interrupt happened: plain step-boundary steering, nothing armed.
       throw error
     }
+    if (interrupted) controller.expectSteerFollowUp()
     try {
       await this.kernel.steer(controller.dshSessionId, text)
     } catch (error) {

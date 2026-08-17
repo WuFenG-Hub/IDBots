@@ -3,6 +3,7 @@ import type {
   CoworkMessageMetadata,
   CoworkSession,
 } from '../coworkStore';
+import { CoworkDshSteerWindowClosedError } from '../libs/coworkSteerChannel';
 import { resolveContinueSystemPrompt } from '../libs/coworkPromptStrategy';
 
 export type CoworkSubmitInput = {
@@ -35,7 +36,7 @@ export type CoworkSubmitInputResult =
 
 type CoworkSubmitInputFailure = Extract<CoworkSubmitInputResult, { success: false }>;
 
-type SteerCapability = 'open-local' | 'closing-local' | 'sandbox' | 'inactive';
+type SteerCapability = 'open-local' | 'open-dsh' | 'closing-local' | 'sandbox' | 'inactive';
 
 interface SubmissionStore {
   getSession(sessionId: string): CoworkSession | null;
@@ -315,7 +316,9 @@ export class CoworkTurnSubmissionController {
       );
     }
 
-    const interactionKind = capability === 'open-local' || capability === 'closing-local'
+    // Steers admitted live into a running turn (both kernels).
+    const steerAdmission = capability === 'open-local' || capability === 'open-dsh';
+    const interactionKind = steerAdmission || capability === 'closing-local'
       ? 'steer'
       : undefined;
     const message = existing ?? this.store.addMessageWithId(sessionId, submissionId, {
@@ -346,57 +349,89 @@ export class CoworkTurnSubmissionController {
 
     // An idempotency retry keeps the originally persisted visible text.
     const text = message.content;
-    if (capability === 'open-local') {
+    if (steerAdmission) {
       const admission = this.runner.trySubmitSteer(sessionId, submissionId, text);
       if (admission.accepted) {
+        let degradedToContinue = false;
         try {
           await admission.delivered;
         } catch (error) {
-          const reason = error instanceof Error ? error.message : 'Steer delivery failed';
-          const current = this.store.getMessageById(sessionId, submissionId) ?? message;
-          if (current.metadata?.steerStatus === 'cancelled') {
-            return errorResult(
-              'cancelled',
-              String(current.metadata.steerFailureReason || reason)
-            );
+          if (error instanceof CoworkDshSteerWindowClosedError) {
+            // DSH best-effort steer (official semantics): the window closed
+            // before the RPC landed. Degrade to the Continue flow below so
+            // the text becomes the next turn's input instead of erroring —
+            // but a terminal steer state that already landed wins.
+            const current = this.store.getMessageById(sessionId, submissionId) ?? message;
+            if (current.metadata?.steerStatus === 'cancelled') {
+              return errorResult(
+                'cancelled',
+                String(current.metadata.steerFailureReason || 'Cowork session stopped')
+              );
+            }
+            if (current.metadata?.steerStatus === 'failed') {
+              return errorResult(
+                'delivery_failed',
+                String(current.metadata.steerFailureReason || 'Steer delivery failed')
+              );
+            }
+            if (current.metadata?.steerStatus === 'settled') {
+              return { success: true, mode: 'steer', message: current };
+            }
+            degradedToContinue = true;
+          } else {
+            const reason = error instanceof Error ? error.message : 'Steer delivery failed';
+            const current = this.store.getMessageById(sessionId, submissionId) ?? message;
+            if (current.metadata?.steerStatus === 'cancelled') {
+              return errorResult(
+                'cancelled',
+                String(current.metadata.steerFailureReason || reason)
+              );
+            }
+            this.markSteerFailed(sessionId, submissionId, reason);
+            return errorResult('delivery_failed', reason);
           }
-          this.markSteerFailed(sessionId, submissionId, reason);
-          return errorResult('delivery_failed', reason);
         }
 
-        const delivered = this.store.getMessageById(sessionId, submissionId) ?? message;
-        if (delivered.metadata?.steerStatus === 'cancelled') {
-          return errorResult(
-            'cancelled',
-            String(delivered.metadata.steerFailureReason || 'Cowork session stopped')
-          );
+        if (degradedToContinue) {
+          // The turn whose window closed must fully settle before the
+          // fallback Continue can start its own turn.
+          await this.runner.waitForActiveTurnSettlement(sessionId);
+        } else {
+          const delivered = this.store.getMessageById(sessionId, submissionId) ?? message;
+          if (delivered.metadata?.steerStatus === 'cancelled') {
+            return errorResult(
+              'cancelled',
+              String(delivered.metadata.steerFailureReason || 'Cowork session stopped')
+            );
+          }
+          if (delivered.metadata?.steerStatus === 'failed') {
+            return errorResult(
+              'delivery_failed',
+              String(delivered.metadata.steerFailureReason || 'Steer delivery failed')
+            );
+          }
+          if (delivered.metadata?.steerStatus === 'settled') {
+            return { success: true, mode: 'steer', message: delivered };
+          }
+          const deliveredMetadata: CoworkMessageMetadata = {
+            ...delivered.metadata,
+            interactionKind: 'steer',
+            submissionId,
+            submissionMode: 'steer',
+            submissionResult: 'completed',
+            steerStatus: 'delivered',
+            steerDeliveredAt: Date.now(),
+          };
+          this.persistAndEmit(sessionId, delivered, deliveredMetadata);
+          return {
+            success: true,
+            mode: 'steer',
+            message: this.store.getMessageById(sessionId, submissionId) ?? delivered,
+          };
         }
-        if (delivered.metadata?.steerStatus === 'failed') {
-          return errorResult(
-            'delivery_failed',
-            String(delivered.metadata.steerFailureReason || 'Steer delivery failed')
-          );
-        }
-        if (delivered.metadata?.steerStatus === 'settled') {
-          return { success: true, mode: 'steer', message: delivered };
-        }
-        const deliveredMetadata: CoworkMessageMetadata = {
-          ...delivered.metadata,
-          interactionKind: 'steer',
-          submissionId,
-          submissionMode: 'steer',
-          submissionResult: 'completed',
-          steerStatus: 'delivered',
-          steerDeliveredAt: Date.now(),
-        };
-        this.persistAndEmit(sessionId, delivered, deliveredMetadata);
-        return {
-          success: true,
-          mode: 'steer',
-          message: this.store.getMessageById(sessionId, submissionId) ?? delivered,
-        };
+      } else {
+        await this.runner.waitForActiveTurnSettlement(sessionId);
       }
-      await this.runner.waitForActiveTurnSettlement(sessionId);
     } else if (capability === 'closing-local') {
       await this.runner.waitForActiveTurnSettlement(sessionId);
     }

@@ -10,6 +10,20 @@ export type CoworkSteerEnqueueResult = {
   delivered: Promise<void>;
 };
 
+/**
+ * DSH best-effort steer signal: the delivery promise rejects with this when
+ * the runtime steer window closed before the RPC landed (turn ended, agent
+ * gone). Official DSH semantics degrade the submission to the next waking
+ * turn's input instead of erroring — the submission controller catches this
+ * type and falls back to the Continue flow.
+ */
+export class CoworkDshSteerWindowClosedError extends Error {
+  constructor(message = 'DSH steer window closed before delivery') {
+    super(message);
+    this.name = 'CoworkDshSteerWindowClosedError';
+  }
+}
+
 export function buildCoworkSdkUserMessage(text: string): SDKUserMessage {
   return {
     type: 'user',
@@ -19,17 +33,21 @@ export function buildCoworkSdkUserMessage(text: string): SDKUserMessage {
   };
 }
 
-export function buildCoworkSteerSdkMessage(text: string): SDKUserMessage {
-  const escaped = text.trim();
-  return buildCoworkSdkUserMessage([
+/** Interrupt-on-steer framing shared by both kernels (SDK envelope + raw text). */
+export function buildCoworkSteerText(text: string): string {
+  return [
     '<operator_steer>',
     'This is a new instruction from the human user that supersedes the task currently in progress.',
     'Stop the current task immediately and switch to this new instruction.',
     'Preserve completed work that remains valid. Do not claim an in-flight side effect was rolled back.',
     '',
-    escaped,
+    text.trim(),
     '</operator_steer>',
-  ].join('\n'));
+  ].join('\n');
+}
+
+export function buildCoworkSteerSdkMessage(text: string): SDKUserMessage {
+  return buildCoworkSdkUserMessage(buildCoworkSteerText(text));
 }
 
 export class CoworkSteerChannel implements AsyncIterable<SDKUserMessage> {

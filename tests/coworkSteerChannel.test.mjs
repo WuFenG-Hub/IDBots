@@ -51,5 +51,5 @@ test('runtime envelope does not alter the visible user text', () => {
   const runtimeText = message.message.content[0].text;
   assert.match(runtimeText, /<operator_steer>/);
   assert.match(runtimeText, /只修改查询逻辑/);
-  assert.match(runtimeText, /earliest safe boundary/i);
+  assert.match(runtimeText, /stop the current task immediately/i);
 });

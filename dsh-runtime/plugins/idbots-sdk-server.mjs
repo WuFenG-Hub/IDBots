@@ -285,8 +285,12 @@ class IdbotsSdkServer extends HarnessSdkJsonRpcServer {
 
   async idbotsCancel({ sessionId, cause, keepInbox }) {
     const agent = this.liveAgent(sessionId)
+    // Report whether an abort actually fired: a cancel against an idle agent
+    // is a documented no-op that never emits a turn boundary, and the host's
+    // steer latch arms only on a real interrupt.
+    const cancelled = agent.status === 'running'
     agent.cancel(cause ?? 'idbots client cancel', { keepInbox: keepInbox === true })
-    return { cancelled: true }
+    return { cancelled }
   }
 
   // ---- approval bridge -----------------------------------------------------

@@ -143,11 +143,12 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
   }
   runner.activeSessions.set(sessionId, activeSession)
 
-  const events = { messages: [], updates: [], completes: [], permissions: [] }
+  const events = { messages: [], updates: [], completes: [], permissions: [], steerSettled: [] }
   runner.on('message', (sid, message) => { if (sid === sessionId) events.messages.push(message) })
   runner.on('messageUpdate', (sid, messageId, content) => { if (sid === sessionId) events.updates.push({ messageId, content }) })
   runner.on('complete', (sid) => { if (sid === sessionId) events.completes.push(sid) })
   runner.on('permissionRequest', (sid, request) => { if (sid === sessionId) events.permissions.push(request) })
+  runner.on('steerSettled', (sid, submissionId) => { if (sid === sessionId) events.steerSettled.push(submissionId) })
   runner.on('error', () => undefined) // EventEmitter: unhandled 'error' throws
   const handleErrorOrig = runner.handleError.bind(runner)
   let failure = null
@@ -182,6 +183,11 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     claudeSettings.setStoreGetter(() => fakeStore)
     const turn2 = runner.runDshSessionLocal(activeSession, 'STEER_TEST', process.cwd(), 'You are Alice.')
     await waitFor(() => events.messages.some((m) => m.type === 'tool_use' && m.metadata?.toolName === 'slow_tool'), 25000, 'slow_tool via runner')
+    // The capability gate is the real UI entry: an active DSH turn must admit
+    // steers natively (regression: it used to fall into 'closing-local', which
+    // parked the interjection as a queued steer that waited out the whole
+    // turn before continuing).
+    assert.equal(runner.getSteerCapability(sessionId), 'open-dsh', 'active DSH turn admits native steer')
     const steerResult = runner.trySubmitSteer(sessionId, 'sub-1', 'STEERED_IN_RUNNER')
     assert.ok(steerResult?.accepted !== false, `steer accepted: ${JSON.stringify(steerResult && { reason: steerResult.reason })}`)
     // Steer bubbles come from the submission path; consumption is proven by
@@ -194,6 +200,10 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
     await turn2
     const steerRequest = seen.filter((r) => r.body?.messages?.some((m) => String(m.content).includes('STEERED_IN_RUNNER'))).at(-1)
     assert.ok(steerRequest, 'steer text reached the model on the follow-up request')
+    // Both kernels frame the interrupt identically: the correction rides an
+    // operator_steer envelope so the model treats it as superseding work.
+    const steerMessage = steerRequest.body.messages.find((m) => String(m.content).includes('STEERED_IN_RUNNER'))
+    assert.match(String(steerMessage.content), /<operator_steer>/, 'steer rides the operator_steer envelope')
     // Interrupt-on-steer: the steer's cancel(keepInbox) aborted the in-flight
     // slow_tool (its result is the runtime's "tool call aborted" error, not
     // the completed {"slept":true} payload) instead of waiting out the
@@ -205,6 +215,10 @@ test('CoworkRunner DSH integration', { skip: runtimeReady ? false : 'dsh-runtime
       !store.messages.some((m) => m.type === 'tool_result' && String(m.content).includes('"slept":true')),
       'slow_tool never ran to completion after the steer interrupt'
     )
+    // The steered exchange settled as one runner turn, and the steer
+    // submission reached its terminal lifecycle state (drained at turn
+    // settlement — without it the message would sit on "Sent to MetaBot").
+    assert.ok(events.steerSettled.includes('sub-1'), 'steer submission settled with the steered exchange')
 
     // Approval: third turn triggers dangerous_tool ask → respond allow.
     const turn3 = runner.runDshSessionLocal(activeSession, 'CALL_DANGEROUS', process.cwd(), 'You are Alice.')
