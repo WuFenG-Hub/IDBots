@@ -127,6 +127,25 @@ test('P4: review report reaches the origin session once, prefixed and capped, kv
 // §3 P12: concise group summary message
 // ---------------------------------------------------------------------------
 
+test('P12: long goal/criteria render as truncated previews in the group message', () => {
+  const longGoal = 'G'.repeat(313);
+  const longCriteria = 'C'.repeat(162);
+  const result = buildAcceptanceSummary({
+    task: { title: 'T', goal: longGoal, acceptanceCriteria: longCriteria },
+    deliverables: [],
+    members: [],
+  });
+  assert.match(result.messageText, /目标：G{160}…/);
+  assert.match(result.messageText, /验收标准：C{160}…/);
+  assert.ok(!result.messageText.includes(longGoal), 'full 313-char goal not dumped');
+  // Short texts render in full.
+  const short = buildAcceptanceSummaryMessageText(
+    { goal: 'short goal', acceptanceCriteria: 'short criteria', deliverables: [], members: [], guidance: 'g' },
+    'T',
+  );
+  assert.match(short, /目标：short goal/);
+  assert.match(short, /验收标准：short criteria/);
+});
 
 // ---------------------------------------------------------------------------
 // Static: daemon wiring — review entry calls the source-session dep once per
