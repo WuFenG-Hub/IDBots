@@ -555,6 +555,23 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       .filter((member) => member.metabotId == null && member.globalmetaid)
       .map((member) => member.globalmetaid as string),
   );
+  // P13 (v1.1): the roster wins over the chain nickname. A worker session can
+  // post under a runtime identity nickname (task #22 rendered Builder阿码's
+  // delivery as "claude bot"), while senderGlobalMetaId always points at the
+  // registered member — resolve transcript author names through this map.
+  const memberNameByGmid = new Map<string, string>();
+  for (const member of detail.members) {
+    const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
+    const name = (member.name ?? member.displayName ?? '').trim();
+    if (gmid && name) memberNameByGmid.set(gmid, name);
+  }
+  const resolveTranscriptSenderName = (message: {
+    senderGlobalMetaId?: string | null;
+    senderName?: string | null;
+  }): string => {
+    const gmid = message.senderGlobalMetaId?.trim().toLowerCase();
+    return (gmid ? memberNameByGmid.get(gmid) : undefined) || message.senderName?.trim() || 'Unknown';
+  };
   const deliverableAuthorName = (authorGlobalMetaId: string | null): string => {
     if (!authorGlobalMetaId) return '—';
     const member = detail.members.find((candidate) => candidate.globalmetaid === authorGlobalMetaId);
@@ -777,15 +794,16 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                 const replyTarget = replyPin
                   ? (replyTargetMessage
                     ? {
-                        senderName: replyTargetMessage.senderName?.trim() || 'Unknown',
-                        preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
-                      }
+                      senderName: resolveTranscriptSenderName(replyTargetMessage),
+                      preview: (replyTargetMessage.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+                    }
                     : null)
                   : undefined;
                 return (
                 <GroupTaskMessageItem
                   key={message.id}
                   message={message}
+                  senderDisplayName={resolveTranscriptSenderName(message)}
                   isChairSender={Boolean(
                     chairMember?.globalmetaid
                     && message.senderGlobalMetaId === chairMember.globalmetaid,

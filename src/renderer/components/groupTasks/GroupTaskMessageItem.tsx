@@ -158,6 +158,7 @@ interface GroupTaskMessageItemProps {
 
 const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   message,
+  senderDisplayName,
   isChairSender,
   isOwnerSender,
   isRemoteSender,
@@ -170,12 +171,13 @@ const GroupTaskMessageItem: React.FC<GroupTaskMessageItemProps> = ({
   // source. A message whose sender is neither a task member nor the owner is
   // flagged SUSPECT — never attributed by senderName.
   const isSuspectSender = message.senderSuspect === true;
-  const senderName = message.senderName?.trim() || 'Unknown';
+  const senderName = senderDisplayName?.trim() || message.senderName?.trim() || 'Unknown';
   const timestamp = formatGroupTaskTime(message.chainTimestamp);
   const avatarSrc = useSenderAvatar(message);
   const txId = resolveTxId(message);
   const rawContent = message.content ?? '';
   const longDeliverable = hasLongDeliverableLine(rawContent);
+  const acceptanceSummaryFold = isAcceptanceSummaryMessage(rawContent);
   const [deliverableExpanded, setDeliverableExpanded] = useState(false);
 
 

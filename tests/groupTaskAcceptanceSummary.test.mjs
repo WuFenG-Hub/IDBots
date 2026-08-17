@@ -53,7 +53,7 @@ test('buildAcceptanceSummary produces deterministic message with deliverable row
       mkDeliverable({ kind: 'metaapp', uri: 'metaapp://abc', confirmation: 'confirmed', sourceSenderName: 'Lucy' }),
       mkDeliverable({ kind: 'metafile', uri: null, confirmation: 'unconfirmed', verification: null, sourceSenderName: 'Builder阿码' }),
     ],
-    members: [mkMember({ name: 'Lucy' }), mkMember({ name: 'Builder阿码' })],
+    members: [mkMember({ name: 'Lucy' }), mkMember({ name: 'Builder阿码', globalmetaid: 'gmid-builder' })],
   });
 
   assert.equal(result.goal, 'Three.js 三维动画');
@@ -75,6 +75,31 @@ test('buildAcceptanceSummary produces deterministic message with deliverable row
   assert.ok(result.messageText.includes('②'));
   assert.ok(result.messageText.includes('③'));
 });
+
+test('P13: the member roster wins over a wrong chain nickname (claude bot case)', () => {
+  // Task #22: Builder阿码's delivery was posted under a runtime identity
+  // nickname "claude bot" while the deliverable row's authorGlobalmetaid was
+  // correct. The roster lookup must override the chain sender name.
+  const result = buildAcceptanceSummary({
+    task: baseTask,
+    deliverables: [
+      mkDeliverable({
+        authorGlobalmetaid: 'gmid-builder',
+        sourceSenderName: 'claude bot',
+      }),
+      // Author not on the roster: keep the chain nickname as the fallback.
+      mkDeliverable({
+        id: 2,
+        authorGlobalmetaid: 'gmid-outsider',
+        sourceSenderName: 'Chain Nickname',
+      }),
+    ],
+    members: [mkMember({ name: 'Builder阿码', globalmetaid: 'gmid-builder' })],
+  });
+  assert.equal(result.deliverables[0].authorName, 'Builder阿码');
+  assert.equal(result.deliverables[1].authorName, 'Chain Nickname');
+});
+
 
 test('buildAcceptanceSummary shows 无已核验交付物 (not 已完成) when no deliverables', () => {
   const result = buildAcceptanceSummary({ task: baseTask, deliverables: [], members: [] });
