@@ -291,7 +291,10 @@ const coworkSlice = createSlice({
             state.currentSession.messages[messageIndex].content = content;
           }
           if (metadata !== undefined) {
-            state.currentSession.messages[messageIndex].metadata = metadata;
+            state.currentSession.messages[messageIndex].metadata = {
+              ...(state.currentSession.messages[messageIndex].metadata ?? {}),
+              ...metadata,
+            };
           }
         }
       }

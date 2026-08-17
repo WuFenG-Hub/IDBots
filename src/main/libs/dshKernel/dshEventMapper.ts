@@ -11,17 +11,28 @@
 //    must NOT become user bubbles — they are model-facing context only
 //  - tool/result carries only the callId; the tool name lives on tool/call
 //  - usage arrives on assistant/chunk (usage) and assistant/message events
+//  - some DeepSeek/gateway routes leak chain-of-thought into text-delta as
+//    <think> tags instead of reasoning-delta; those are split into the
+//    thinking slot so the renderer can reuse Claude's ThinkingBlock.
 
 import type { DshMapperAction, DshSessionEventEnvelope, DshUsageSnapshot } from './types'
+import { splitThinkTaggedContent } from './thinkTags'
 
 const textOf = (blocks: Array<{ type: string; text?: string }> | undefined): string =>
   (blocks ?? []).filter((b) => b.type === 'text').map((b) => b.text ?? '').join('')
+
+const reasoningOf = (blocks: Array<{ type: string; text?: string }> | undefined): string =>
+  (blocks ?? []).filter((b) => b.type === 'reasoning').map((b) => b.text ?? '').join('')
 
 export class DshEventMapper {
   private textOpen = false
   private textBuf = ''
   private thinkingOpen = false
   private thinkingBuf = ''
+  /** Accumulated raw text-delta (may still contain <think> tags). */
+  private rawTextBuf = ''
+  /** True once a native reasoning-delta opened the thinking slot this step. */
+  private reasoningFromDeltas = false
   private lastUsage: DshUsageSnapshot | null = null
   private provider: string | undefined
   private model: string | undefined
@@ -54,52 +65,42 @@ export class DshEventMapper {
 
       case 'assistant/chunk': {
         const chunk = data.chunk
-        if (chunk?.type === 'text-delta') {
-          if (!this.textOpen) {
-            this.textOpen = true
-            this.textBuf = ''
-            actions.push({
-              kind: 'message',
-              slot: 'text',
-              message: { type: 'assistant', content: '', metadata: { isStreaming: true } },
-            })
+        if (chunk?.type === 'block-start' && chunk.blockType === 'reasoning') {
+          this.openThinking(actions)
+        } else if (chunk?.type === 'text-delta') {
+          this.rawTextBuf += chunk.text ?? ''
+          const split = splitThinkTaggedContent(this.rawTextBuf)
+          if (!this.reasoningFromDeltas && split.thinking.length > 0) {
+            this.openThinking(actions)
+            this.thinkingBuf = split.thinking
+            actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
           }
-          this.textBuf += chunk.text ?? ''
-          if ((chunk.text ?? '').length > 0) this.turnSawText = true
-          actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
+          if (split.text.length > 0) {
+            this.openText(actions)
+            this.textBuf = split.text
+            this.turnSawText = true
+            actions.push({ kind: 'messageUpdate', slot: 'text', content: this.textBuf })
+          }
         } else if (chunk?.type === 'reasoning-delta') {
-          if (!this.thinkingOpen) {
-            this.thinkingOpen = true
-            this.thinkingBuf = ''
-            actions.push({
-              kind: 'message',
-              slot: 'thinking',
-              message: { type: 'assistant', content: '', metadata: { isThinking: true, isStreaming: true } },
-            })
-          }
+          this.reasoningFromDeltas = true
+          this.openThinking(actions)
           this.thinkingBuf += chunk.text ?? ''
           actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
+        } else if (chunk?.type === 'block-end' && chunk.block?.type === 'reasoning') {
+          const assembled = typeof chunk.block.text === 'string' ? chunk.block.text : ''
+          if (assembled.length > 0) {
+            this.openThinking(actions)
+            this.thinkingBuf = assembled
+            actions.push({ kind: 'messageUpdate', slot: 'thinking', content: this.thinkingBuf })
+          }
         } else if (chunk?.type === 'usage') {
           this.lastUsage = this.withRoute(chunk.usage)
         }
-        // block-start/block-end/finish carry no additional mapped output: the
-        // assembled message arrives as assistant/message.
         break
       }
 
       case 'assistant/message': {
-        // Finalize any open streaming slots first (same-message-id finalize,
-        // matching the Claude path's finalizeStreamingContent).
-        if (this.thinkingOpen) {
-          this.thinkingOpen = false
-          actions.push({ kind: 'messageFinalize', slot: 'thinking', content: this.thinkingBuf })
-          this.thinkingBuf = ''
-        }
-        if (this.textOpen) {
-          this.textOpen = false
-          actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
-          this.textBuf = ''
-        }
+        this.finalizeAssistantMessage(actions, data)
         const usage = this.withRoute(data.usage ?? undefined)
         if (usage) {
           this.lastUsage = usage
@@ -177,6 +178,66 @@ export class DshEventMapper {
   /** Latest usage snapshot (the getContextUsage equivalent source). */
   usage(): DshUsageSnapshot | null {
     return this.lastUsage
+  }
+
+  private openThinking(actions: DshMapperAction[]): void {
+    if (this.thinkingOpen) return
+    this.thinkingOpen = true
+    this.thinkingBuf = ''
+    actions.push({
+      kind: 'message',
+      slot: 'thinking',
+      message: { type: 'assistant', content: '', metadata: { isThinking: true, isStreaming: true } },
+    })
+  }
+
+  private openText(actions: DshMapperAction[]): void {
+    if (this.textOpen) return
+    this.textOpen = true
+    this.textBuf = ''
+    actions.push({
+      kind: 'message',
+      slot: 'text',
+      message: { type: 'assistant', content: '', metadata: { isStreaming: true } },
+    })
+  }
+
+  private finalizeAssistantMessage(actions: DshMapperAction[], data: { message?: { content?: Array<{ type: string; text?: string }> } }): void {
+    const blocks = data.message?.content
+    let reasoning = reasoningOf(blocks)
+    let visibleText = textOf(blocks)
+
+    if (!reasoning) {
+      const split = splitThinkTaggedContent(visibleText || this.rawTextBuf)
+      reasoning = split.thinking || this.thinkingBuf
+      visibleText = split.text
+    } else if (visibleText) {
+      visibleText = splitThinkTaggedContent(visibleText).text
+    }
+
+    if (reasoning.length > 0) {
+      this.openThinking(actions)
+      this.thinkingBuf = reasoning
+    }
+    if (this.thinkingOpen) {
+      this.thinkingOpen = false
+      actions.push({ kind: 'messageFinalize', slot: 'thinking', content: this.thinkingBuf })
+      this.thinkingBuf = ''
+    }
+
+    if (visibleText.length > 0) {
+      this.openText(actions)
+      this.textBuf = visibleText
+      this.turnSawText = true
+    }
+    if (this.textOpen) {
+      this.textOpen = false
+      actions.push({ kind: 'messageFinalize', slot: 'text', content: this.textBuf })
+      this.textBuf = ''
+    }
+
+    this.rawTextBuf = ''
+    this.reasoningFromDeltas = false
   }
 
   private withRoute(usage: Partial<DshUsageSnapshot> | undefined): DshUsageSnapshot | null {

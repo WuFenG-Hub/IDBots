@@ -1602,8 +1602,8 @@ export class CoworkRunner extends EventEmitter {
    */
   private readonly dshStreamUi = new DshStreamUiGate({
     throttleMs: STREAM_UPDATE_THROTTLE_MS,
-    emitUpdate: (sessionId, messageId, content) => {
-      this.emit('messageUpdate', sessionId, messageId, content);
+    emitUpdate: (sessionId, messageId, content, metadata) => {
+      this.emit('messageUpdate', sessionId, messageId, content, metadata);
     },
     persistFinalize: (sessionId, messageId, content) => {
       this.updateMessageMerged(sessionId, messageId, {

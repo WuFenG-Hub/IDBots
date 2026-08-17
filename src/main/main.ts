@@ -5176,7 +5176,7 @@ const getCoworkRunner = () => {
       });
     });
 
-    coworkRunner.on('messageUpdate', (sessionId: string, messageId: string, content: string) => {
+    coworkRunner.on('messageUpdate', (sessionId: string, messageId: string, content: string, metadata?: Record<string, unknown>) => {
       if (!shouldForwardCoworkStreamEvent(getCoworkStore(), sessionId)) {
         return;
       }
@@ -5185,7 +5185,12 @@ const getCoworkRunner = () => {
       windows.forEach(win => {
         if (!win.isDestroyed()) {
           try {
-            win.webContents.send('cowork:stream:messageUpdate', { sessionId, messageId, content: safeContent });
+            win.webContents.send('cowork:stream:messageUpdate', {
+              sessionId,
+              messageId,
+              content: safeContent,
+              ...(metadata ? { metadata } : {}),
+            });
           } catch (error) {
             console.error('Failed to forward cowork message update:', error);
           }

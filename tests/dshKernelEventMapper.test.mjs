@@ -8,6 +8,7 @@ import Module from 'node:module'
 
 const require = Module.createRequire(import.meta.url)
 const { DshEventMapper } = require('../dist-electron/main/libs/dshKernel/dshEventMapper.js')
+const { splitThinkTaggedContent } = require('../dist-electron/main/libs/dshKernel/thinkTags.js')
 
 const kinds = (actions) => actions.map((a) => a.kind)
 
@@ -172,4 +173,80 @@ test('non-stop reasons never flag empty terminal', () => {
   const mapper = new DshEventMapper()
   const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'max-tokens' } } })
   assert.equal(ended[0].emptyTerminal, undefined)
+})
+
+test('assistant/message reasoning blocks become a thinking slot', () => {
+  const mapper = new DshEventMapper()
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 1,
+      step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'need to inspect git first' },
+          { type: 'text', text: 'I will run git status.' },
+        ],
+      },
+    },
+  })
+  assert.equal(done[0].slot, 'thinking')
+  assert.equal(done[0].message.metadata.isThinking, true)
+  assert.equal(done[1].slot, 'thinking')
+  assert.equal(done[1].content, 'need to inspect git first')
+  assert.equal(done[2].slot, 'text')
+  assert.equal(done[3].content, 'I will run git status.')
+})
+
+test('text-delta think tags stream into the thinking slot and leave visible text', () => {
+  const mapper = new DshEventMapper()
+  const first = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '<think>plan it</think>hello' } },
+  })
+  assert.equal(first[0].slot, 'thinking')
+  assert.equal(first[0].message.metadata.isThinking, true)
+  assert.equal(first[1].content, 'plan it')
+  assert.equal(first[2].slot, 'text')
+  assert.equal(first[3].content, 'hello')
+
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(ended[0].emptyTerminal, undefined)
+})
+
+test('think-tag-only text-delta is an empty terminal turn (reasoning, no reply)', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'text-delta', index: 0, text: '<think>still figuring it out</think>' } },
+  })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 1, reason: { kind: 'stop' } } })
+  assert.equal(ended[0].emptyTerminal, true)
+})
+
+test('block-start reasoning opens the thinking slot before deltas arrive', () => {
+  const mapper = new DshEventMapper()
+  const opened = mapper.consume({
+    type: 'assistant/chunk',
+    data: { chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+  })
+  assert.equal(opened[0].slot, 'thinking')
+  assert.equal(opened[0].message.metadata.isThinking, true)
+})
+
+test('splitThinkTaggedContent extracts think and thinking tags', () => {
+  assert.deepEqual(splitThinkTaggedContent('plain reply'), { thinking: '', text: 'plain reply' })
+  assert.deepEqual(
+    splitThinkTaggedContent('<think>plan</think>answer'),
+    { thinking: 'plan', text: 'answer' },
+  )
+  assert.deepEqual(
+    splitThinkTaggedContent('<thinking>plan</thinking>\nanswer'),
+    { thinking: 'plan', text: '\nanswer' },
+  )
+  assert.deepEqual(
+    splitThinkTaggedContent('<think>unclosed'),
+    { thinking: 'unclosed', text: '' },
+  )
 })
