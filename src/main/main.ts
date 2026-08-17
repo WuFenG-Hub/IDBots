@@ -3215,6 +3215,12 @@ const startSqliteDaemons = (): void => {
   // when the target is missing/A2A so the service degrades to owner-private-only.
   setGroupTaskAcceptanceNotifier(({ taskId, targetSessionId, message }) => {
     try {
+      // P1 (v1.1): a source session resting on a stale kernel-error status
+      // must not swallow the close-out — reset it to idle (never touching
+      // user-stopped sessions) so the continuation below queues and the
+      // session concludes 'completed' (task #21 symptom: error/stopped
+      // source session, acceptance notice never processed).
+      getCoworkRunner().reviveErroredSessionForContinuation(targetSessionId);
       const result = getCoworkRunner().insertCrossSessionMessageAndQueue({
         sourceSessionId: `group-task:${taskId}`,
         targetSessionId,
@@ -4697,6 +4703,14 @@ const getCoworkRunner = () => {
       getSkillSessionEnvOverrides: async (sessionId: string): Promise<Record<string, string>> => {
         const session = getCoworkStore().getSession(sessionId);
         const overrides: Record<string, string> = {};
+        // P1/P4 (v1.1): the session's own id rides the subprocess env so skill
+        // scripts (metabot-group-task create) can stamp source_session_id and
+        // the task close-out acceptance relay lands back in THIS session. The
+        // DSH bash plugin does not receive per-session env (shared runtime);
+        // there the "Current CoWork session id" prompt line carries it.
+        if (sessionId?.trim()) {
+          overrides.IDBOTS_COWORK_SESSION_ID = sessionId.trim();
+        }
         // NOTE: SKILLS_ROOT / IDBOTS_SKILLS_ROOT are intentionally NOT derived
         // from session.cwd here. The legacy exact-title match against
         // '[Orchestrator] skill-turn' died on 2026-03-14 (58ab6d57) when

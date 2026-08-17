@@ -1642,7 +1642,9 @@ export class CoworkRunner extends EventEmitter {
     this.twinTaskCancel = options?.twinTaskCancel;
     this.twinTaskReassign = options?.twinTaskReassign;
     this.mcpServerProvider = options?.mcpServerProvider;
-    this.dshExtraEntriesProvider = options.dshExtraEntriesProvider;
+    // Optional-chained like every other option — a bare `new CoworkRunner(store)`
+    // (tests, minimal embedders) used to crash here on the missing `?.`.
+    this.dshExtraEntriesProvider = options?.dshExtraEntriesProvider;
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
@@ -4148,7 +4150,7 @@ export class CoworkRunner extends EventEmitter {
     return `${sign}${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
   }
 
-  private buildLocalTimeContextPrompt(mode: SystemPromptBlockMode = 'full'): string {
+  private buildLocalTimeContextPrompt(mode: SystemPromptBlockMode = 'full', sessionId?: string): string {
     const now = new Date();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'unknown';
     const localDateTime = this.formatLocalDateTime(now);
@@ -4159,6 +4161,14 @@ export class CoworkRunner extends EventEmitter {
       `- Current local datetime: ${localDateTime} (timezone: ${timezone}, UTC${utcOffset})`,
       `- Current unix timestamp (ms): ${now.getTime()}`,
     ];
+    // P1 (v1.1): the session's own id rides the same volatile block on BOTH
+    // kernels — the metabot-group-task skill's create action needs it as
+    // source_session_id so the task close-out can relay the acceptance notice
+    // back here (task #21: the linkage was NULL and the notice never landed).
+    const trimmedSessionId = sessionId?.trim();
+    if (trimmedSessionId) {
+      lines.push(`- Current CoWork session id: ${trimmedSessionId}`);
+    }
     if (mode === 'full') {
       lines.splice(3, 0, `- Current local ISO datetime (no timezone suffix): ${this.formatLocalIsoWithoutTimezone(now)}`);
       lines.push(
@@ -4897,6 +4907,28 @@ export class CoworkRunner extends EventEmitter {
       runQueued: true,
       queueDepth: queue.length,
     };
+  }
+
+  /**
+   * P1 (v1.1): reset an ERRORED (not user-stopped) session to 'idle' so a
+   * system continuation — the group-task acceptance notice relay — can queue
+   * and run, letting the session conclude 'completed' instead of resting on a
+   * stale kernel-error status (task #21: the source session showed
+   * error/stopped and never processed the close-out). Deliberately narrow:
+   * 'stopped' sessions (explicit user / worker_session_stop terminal state)
+   * are never revived — the inserted message stays visible but the session's
+   * rest is respected; mid-turn sessions are untouched.
+   */
+  reviveErroredSessionForContinuation(sessionId: string): boolean {
+    if (this.activeSessions.has(sessionId)) return false;
+    if (this.stoppedSessions.has(sessionId)) return false;
+    const session = this.store.getSession(sessionId);
+    if (!session || session.status !== 'error') return false;
+    this.store.updateSession(sessionId, { status: 'idle' });
+    coworkLog('INFO', 'reviveErroredSessionForContinuation', 'Reset errored session to idle for system continuation', {
+      sessionId,
+    });
+    return true;
   }
 
   /**
@@ -5917,7 +5949,7 @@ export class CoworkRunner extends EventEmitter {
       // path builds it inside runClaudeCodeLocal; replicate here so DSH
       // sessions get the same proactive injection.
       const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId)
-      const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode)
+      const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId)
       const volatileBlocks = await this.buildVolatileContextPrompt(
         sessionId,
         prompt,
@@ -7404,7 +7436,7 @@ export class CoworkRunner extends EventEmitter {
     // message (the tail, which is new each turn) — the system prompt stays
     // byte-stable and the prefix keeps hitting.
     const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
-    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode);
+    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId);
     const volatileBlocks = await this.buildVolatileContextPrompt(
       sessionId,
       prompt,
