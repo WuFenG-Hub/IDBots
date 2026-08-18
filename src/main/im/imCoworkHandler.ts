@@ -794,6 +794,9 @@ export class IMCoworkHandler extends EventEmitter {
     if (message.attachments && message.attachments.length > 0) {
       const mediaInfo = message.attachments.map((att: IMMediaAttachment) => {
         const parts = [`类型: ${att.type}`, `路径: ${att.localPath}`];
+        if (att.type === 'image') {
+          parts.push('提示: 可调用 describe_image 工具获取该图片的内容描述与文字转写');
+        }
         if (att.fileName) parts.push(`文件名: ${att.fileName}`);
         if (att.mimeType) parts.push(`MIME: ${att.mimeType}`);
         if (att.width && att.height) parts.push(`尺寸: ${att.width}x${att.height}`);

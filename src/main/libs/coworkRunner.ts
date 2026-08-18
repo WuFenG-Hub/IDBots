@@ -122,6 +122,10 @@ import {
   type MetaFileUploadControl,
 } from './metaFileUploadAgentTools';
 import {
+  buildVisionRelayAgentTools,
+  type VisionRelayControl,
+} from './visionRelayAgentTools';
+import {
   buildMetabotManageAgentTools,
   type MetabotManageControl,
 } from './metabotManageAgentTools';
@@ -723,7 +727,7 @@ export function evaluateReadImageGuard(input: EvaluateReadImageGuardInput): Read
     return {
       action: 'deny',
       reason: 'no-vision-image',
-      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用文字描述图片内容，或切换到支持多模态输入的模型（如 Claude/GPT）。`,
+      message: `当前模型不支持读图，图片内容已省略：${input.absolutePath}${sizeLabel}。请改用 describe_image 工具读取该图片的内容描述。`,
     };
   }
 
@@ -1488,6 +1492,14 @@ export interface CoworkRunnerOptions {
    */
   metaFileUpload?: MetaFileUploadControl;
   /**
+   * When set, every cowork session gets the describe_image tool backed by
+   * recognizeImageViaRelay() (services/visionRelayService.ts). The relay's
+   * VLM reads a local image and returns a text description + OCR, so sessions
+   * whose model lacks vision (e.g. the DeepSeek V4 family) can still answer
+   * questions about images without base64 ever entering the session history.
+   */
+  visionRelay?: VisionRelayControl;
+  /**
    * When set, Twin cowork sessions get the metabot_manage tools (metabot_list,
    * metabot_create, metabot_update, metabot_delete) backed by the shared core
    * functions in services/metabotManageService.ts — the same code the manual
@@ -1537,6 +1549,7 @@ export class CoworkRunner extends EventEmitter {
   private projects?: ProjectsControl;
   private socialRecall?: SocialRecallControl;
   private metaFileUpload?: MetaFileUploadControl;
+  private visionRelay?: VisionRelayControl;
   private metabotManage?: MetabotManageControl;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
@@ -1635,6 +1648,7 @@ export class CoworkRunner extends EventEmitter {
     this.projects = options?.projects;
     this.socialRecall = options?.socialRecall;
     this.metaFileUpload = options?.metaFileUpload;
+    this.visionRelay = options?.visionRelay;
     this.metabotManage = options?.metabotManage;
     this.localTurnStallTimeoutMs = Math.max(
       0,
@@ -7109,6 +7123,19 @@ export class CoworkRunner extends EventEmitter {
           upload: this.metaFileUpload.upload.bind(this.metaFileUpload),
           sessionId,
           resolveMetabotId: (sid) => this.getMemoryBackend().resolveMetabotIdForMemory(sid),
+        })
+      );
+    }
+    // Image understanding for every cowork surface: the relay VLM turns a
+    // local image file into a text description + OCR, which matters most for
+    // non-vision models (the Read-image guard denies their raw file reads),
+    // but also gives vision models a cheap path that keeps base64 out of the
+    // session history.
+    if (this.visionRelay) {
+      memoryTools.push(
+        ...buildVisionRelayAgentTools({
+          tool,
+          visionRelay: this.visionRelay,
         })
       );
     }
