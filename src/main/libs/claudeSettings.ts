@@ -373,7 +373,8 @@ function resolveFallbackModelId(
  */
 export function resolveApiConfigForModel(
   modelId?: string | null,
-  target: OpenAICompatProxyTarget = 'local'
+  target: OpenAICompatProxyTarget = 'local',
+  sessionKey?: string | null
 ): ApiConfigResolution {
   const sqliteStore = getStore();
   if (!sqliteStore) {
@@ -387,7 +388,7 @@ export function resolveApiConfigForModel(
   if (!matched) {
     return { config: null, error };
   }
-  const resolution = buildApiConfigFromMatched(matched, target);
+  const resolution = buildApiConfigFromMatched(matched, target, sessionKey);
   if (resolution.config) {
     const fallbackModel = resolveFallbackModelId(appConfig, matched.providerName);
     if (fallbackModel) {
@@ -399,7 +400,8 @@ export function resolveApiConfigForModel(
 
 function buildApiConfigFromMatched(
   matched: MatchedProvider,
-  target: OpenAICompatProxyTarget
+  target: OpenAICompatProxyTarget,
+  sessionKey?: string | null
 ): ApiConfigResolution {
   const resolvedBaseURL = matched.providerConfig.baseUrl.trim();
   const resolvedApiKey = matched.providerConfig.apiKey?.trim() || '';
@@ -432,6 +434,9 @@ function buildApiConfigFromMatched(
     model: matched.modelId,
     provider: matched.providerName,
     apiFormat: matched.apiFormat,
+    // Pin this upstream to the cowork session so the proxy's per-session
+    // registry isolates it from concurrent sessions on other providers.
+    sessionKey: sessionKey ?? undefined,
   });
 
   const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL(target);

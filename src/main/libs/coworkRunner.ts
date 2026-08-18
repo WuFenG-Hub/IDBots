@@ -55,6 +55,8 @@ import { readBootstrapDoc } from './welcomeBootstrap';
 import { buildCoworkSdkAutoCompactEnv } from './coworkSdkAutoCompact';
 import { buildCoworkProviderErrorSignal, isDeepSeekMissingReasoningContentError as isDeepSeekProviderMissingReasoningContentError } from './coworkProviderErrors';
 import {
+  clearCoworkSessionUpstream,
+  getCoworkOpenAICompatProxyBaseURL,
   getCoworkOpenAICompatProxyStatus,
   getCoworkSnipHeadTokens,
   resetCoworkSnipHeadTokens,
@@ -1710,6 +1712,9 @@ export class CoworkRunner extends EventEmitter {
     );
     this.activeSessions.delete(sessionId);
     this.dshStreamUi.clearSession(sessionId);
+    // Drop this session's pinned proxy upstream so the per-session registry
+    // does not grow unbounded across the session's lifetime.
+    clearCoworkSessionUpstream(sessionId);
     if (
       !activeSession.turnSettlementResolved
       && typeof activeSession.resolveTurnSettled === 'function'
@@ -7208,7 +7213,7 @@ export class CoworkRunner extends EventEmitter {
     const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null;
     const automationModelOverride = sessionModel || this.getSessionAutomationModelOverride(sessionId);
     let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(automationModelOverride, 'local')
+      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId)
       : { config: getCurrentApiConfig('local') };
     let apiConfig = apiConfigResolution.config;
     if (!apiConfig && automationModelOverride) {
@@ -7295,7 +7300,18 @@ export class CoworkRunner extends EventEmitter {
     // the segment here suffices. Use the CoWork session id — it survives SDK
     // session resets and hard compactions, unlike claudeSessionId. Local mode
     // only: sandbox envs come from buildSandboxEnv and stay untouched.
-    if (envVars.ANTHROPIC_BASE_URL) {
+    //
+    // IMPORTANT: this session path only exists on the local cowork proxy. For
+    // anthropic-direct providers the resolved ANTHROPIC_BASE_URL is the remote
+    // provider endpoint, and appending /s/<sessionId> makes the upstream return
+    // 404 — which the Claude Agent SDK then surfaces as "There's an issue with
+    // the selected model". So only splice the segment in when the base URL is
+    // actually the proxy (openai/responses providers). See resolveMatchedProvider:
+    // anthropic apiFormat keeps the remote baseURL, every other format routes via
+    // the proxy (baseURL = http://127.0.0.1:<port>).
+    const proxyBaseURL = getCoworkOpenAICompatProxyBaseURL('local');
+    const isProxyRouted = !!(proxyBaseURL && envVars.ANTHROPIC_BASE_URL?.startsWith(proxyBaseURL));
+    if (isProxyRouted && envVars.ANTHROPIC_BASE_URL) {
       envVars.ANTHROPIC_BASE_URL = `${envVars.ANTHROPIC_BASE_URL.replace(/\/+$/, '')}/s/${encodeURIComponent(sessionId)}`;
     }
     let stderrTail = '';
