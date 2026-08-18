@@ -373,6 +373,73 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
   }
 });
 
+// ---------------------------------------------------------------------------
+// Improvement #5 (task #25): the owner-report directive must not force an AI
+// accept/rework verdict from an incomplete ledger. A recommendation is only
+// requested when EVERY deliverable is on-chain confirmed; otherwise the
+// directive demands facts only + an explicit deferral to the chair's in-group
+// first-hand verification and the owner's Tasks-UI decision.
+// ---------------------------------------------------------------------------
+
+test('Improvement #5: pending-only deliverables yield a facts-only directive that defers the verdict', async () => {
+  const h = await createHarness({
+    sendOwnerPrivateReport: async () => ({ pinId: 'owner-report-pin' }),
+  });
+  try {
+    const task = h.createTask([2]);
+    // Local-path delivery (task #25 shape): recorded on the ledger, never
+    // uploaded as an on-chain metafile — renders "(no uri) (pending, unconfirmed)".
+    h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'd-local-1', authorGlobalmetaid: 'gmid-w2', kind: 'text', uri: null,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'i5-rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+    });
+    await h.loop.runTick();
+    const directive = h.chatCalls.find((call) => call.userMessage.includes('owner-report directive'))?.userMessage;
+    assert.ok(directive, 'owner-report directive captured');
+    assert.match(directive, /\(no uri\) \(pending, unconfirmed\)/, 'ledger renders the pending shape');
+    assert.match(directive, /Report FACTS ONLY/, 'facts-only mode');
+    assert.match(directive, /Explicitly defer the decision/, 'verdict deferred to chair + owner');
+    assert.match(directive, /Never treat "pending", "unconfirmed", or "\(no uri\)" as grounds for requesting rework/);
+    assert.ok(!directive.includes('Recommend an action'), 'no accept/rework recommendation on an incomplete ledger');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Improvement #5: all deliverables on-chain confirmed keep the accept/rework recommendation', async () => {
+  const h = await createHarness({
+    sendOwnerPrivateReport: async () => ({ pinId: 'owner-report-pin' }),
+  });
+  try {
+    const task = h.createTask([2]);
+    const delivered = h.groupTaskStore.addDeliverable({
+      taskId: task.id, msgPinId: 'd-chain-1', authorGlobalmetaid: 'gmid-w2', kind: 'metafile',
+      uri: `metafile://${'f'.repeat(64)}i0`,
+    });
+    h.groupTaskStore.updateDeliverableConfirmation(delivered.id, 'confirmed');
+    // A verified report makes the periodic re-verification pass skip the row,
+    // keeping the seeded 'confirmed' state deterministic in this tick.
+    h.groupTaskStore.updateDeliverableVerification(
+      delivered.id, JSON.stringify({ verified: true, checkedAt: h.state.nowMs, sources: [] }),
+    );
+    insertGroupMessage(h.db, {
+      pinId: 'i5-rv2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 全部上链，请验收',
+    });
+    await h.loop.runTick();
+    const directive = h.chatCalls.find((call) => call.userMessage.includes('owner-report directive'))?.userMessage;
+    assert.ok(directive, 'owner-report directive captured');
+    assert.match(directive, /\(delivered, confirmed\)/, 'ledger renders the confirmed shape');
+    assert.match(directive, /Recommend an action/, 'a fully confirmed ledger may carry a recommendation');
+    assert.ok(!directive.includes('Report FACTS ONLY'), 'facts-only mode not used for a fully confirmed ledger');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('P5 (v1.2): a worker recently active BEFORE the assignment gets a single long-turn note, not a missed-ACK warning', async () => {
   const h = await createHarness();
   try {
