@@ -74,6 +74,10 @@
       {
         "from": "resources/man-p2p/config.toml",
         "to": "man-p2p-config.toml"
+      },
+      {
+        "from": "resources/ffmpeg/ffmpeg-darwin-${arch}",
+        "to": "ffmpeg/ffmpeg-darwin-${arch}"
       }
     ],
     "extendInfo": {
@@ -109,6 +113,10 @@
       {
         "from": "resources/man-p2p/config.toml",
         "to": "man-p2p-config.toml"
+      },
+      {
+        "from": "resources/ffmpeg/ffmpeg-win32-x64.exe",
+        "to": "ffmpeg/ffmpeg-win32-x64.exe"
       }
     ]
   },

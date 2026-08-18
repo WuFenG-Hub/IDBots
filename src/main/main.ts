@@ -96,7 +96,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
-import { initVisionRelayService, recognizeImageViaRelay } from './services/visionRelayService';
+import { initVisionRelayService, recognizeImageViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
@@ -5028,6 +5028,7 @@ const getCoworkRunner = () => {
       // unchanged; errors surface through the tool result.
       visionRelay: {
         recognize: (input) => recognizeImageViaRelay(input),
+        recognizeVideo: (input) => recognizeVideoViaRelay(input),
       },
       // metabot_manage tools (metabot_list/create/update/delete). Every method
       // delegates to the shared metabotManageService core — the same code the
