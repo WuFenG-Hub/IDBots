@@ -2116,7 +2116,6 @@ const AssistantTurnBlock: React.FC<{
         typeof meta.steerText === 'string' ? meta.steerText : ''
       );
     }
-    }
 
     const rawContent = hasText(message.content)
       ? message.content
