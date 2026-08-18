@@ -6026,14 +6026,36 @@ export class CoworkRunner extends EventEmitter {
       });
       // Turn-level stall watchdog: cancel a turn that made no progress for
       // dshTurnStallTimeoutMs (runtime wedge, provider hang past every tool's
-      // own timeout). A pending permission dialog means a human is the slow
-      // party — the deadline extends instead of firing through it. The
-      // non-user-aborted settlement below turns the cancel into idle + a
-      // localized diagnostic.
+      // own timeout). Progress is re-armed on every LLM-side event (message,
+      // stream update, usage), and a pending permission dialog means a human
+      // is the slow party — those extend the deadline instead of firing
+      // through it. A tool call executing in the runtime (bash rendering a
+      // video, npm install) emits no LLM-side events by design, so in-flight
+      // tool calls extend the deadline the same way. The non-user-aborted
+      // settlement below turns the cancel into idle + a localized diagnostic.
       let dshStallTimer: NodeJS.Timeout | null = null;
       // Watermark of the newest usage-projection snapshot applied to the live
       // ring value (onUsage refines it over the wire; guards out-of-order).
       let liveUsageAsOfSeq = -1;
+      // In-flight DSH tool calls: tool/call message seen, matching
+      // tool/result not yet. Keyed by toolUseId (null-id calls fall back to a
+      // counter). Cleared at every guarded-turn start so a cancelled or
+      // steered previous attempt whose results never settle cannot pin the
+      // watchdog open forever.
+      const dshInFlightToolUses = new Set<string>();
+      let dshAnonInFlightToolUses = 0;
+      const dshInFlightToolCallCount = () => dshInFlightToolUses.size + dshAnonInFlightToolUses;
+      const trackDshToolActivity = (message: unknown) => {
+        const type = (message as { type?: string } | null)?.type;
+        const toolUseId = (message as { metadata?: { toolUseId?: string | null } } | null)?.metadata?.toolUseId ?? null;
+        if (type === 'tool_use') {
+          if (toolUseId) dshInFlightToolUses.add(toolUseId);
+          else dshAnonInFlightToolUses++;
+        } else if (type === 'tool_result') {
+          if (toolUseId) dshInFlightToolUses.delete(toolUseId);
+          else dshAnonInFlightToolUses = Math.max(0, dshAnonInFlightToolUses - 1);
+        }
+      };
       const clearDshStallWatchdog = () => {
         if (dshStallTimer) {
           clearTimeout(dshStallTimer);
@@ -6046,7 +6068,7 @@ export class CoworkRunner extends EventEmitter {
         dshStallTimer = setTimeout(() => {
           dshStallTimer = null;
           if (activeSession.abortController.signal.aborted) return;
-          if (activeSession.pendingPermission) {
+          if (activeSession.pendingPermission || dshInFlightToolCallCount() > 0) {
             armDshStallWatchdog();
             return;
           }
@@ -6066,6 +6088,10 @@ export class CoworkRunner extends EventEmitter {
         dshStallTimer.unref?.();
       };
       const runGuardedTurn = async (turnPrompt: string, images?: DshHostToolImagePayload[]) => {
+        // Fresh guarded attempt → clean tool ledger (a cancelled/steered
+        // previous attempt may leave calls whose results never settle).
+        dshInFlightToolUses.clear();
+        dshAnonInFlightToolUses = 0;
         armDshStallWatchdog();
         try {
           return await hub.runTurn({
@@ -6111,6 +6137,11 @@ export class CoworkRunner extends EventEmitter {
         },
         callbacks: {
           onMessage: (message, slot) => {
+            // Every message is progress; tool_use/tool_result also maintain
+            // the in-flight ledger that extends the watchdog while a tool
+            // executes (long bash renders emit nothing until they finish).
+            trackDshToolActivity(message);
+            armDshStallWatchdog();
             const stored = this.store.addMessage(sessionId, message as Omit<CoworkMessage, 'id' | 'timestamp'>);
             this.emit('message', sessionId, stored);
             return stored.id;
@@ -6119,12 +6150,15 @@ export class CoworkRunner extends EventEmitter {
             // Match the Claude path: renderer updates are throttled, SQLite
             // writes wait for finalize. Per-chunk persist starved the shared
             // DSH notification pump and made session switching stall.
+            armDshStallWatchdog();
             this.dshStreamUi.onUpdate(sessionId, messageId, content);
           },
           onMessageFinalize: (messageId, content, metadata) => {
+            armDshStallWatchdog();
             this.dshStreamUi.onFinalize(sessionId, messageId, content, metadata);
           },
           onUsage: (usage) => {
+            armDshStallWatchdog();
             activeSession.lastDshUsage = usage;
             // Per-request reasoning estimate: the chip's thinking row merges
             // this counter (same slot the Claude path's thinking_tokens events

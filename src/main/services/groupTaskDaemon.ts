@@ -3156,8 +3156,21 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
             emitLog(
               `[GroupTaskDaemon] Task ${task.id}: ${error.message} — stale in-flight verdict ignored; task stays executing`,
             );
-          } else {
+          } else if (error instanceof Error && error.message.startsWith('Illegal group task status transition')) {
             // Illegal transition (e.g. backwards or from terminal): silently ignored.
+          } else {
+            // GT#26: not a protocol verdict — the durable write itself failed
+            // (e.g. a busy DB during the DSH stall storm). Swallowing it here
+            // used to mark the message processed and silently lose the chair's
+            // status directive, pinning the task in 'planning' while workers
+            // already executed. Propagate instead: the message rides the
+            // bounded MSG_RETRY path, and the drop-time tag-only reprocess is
+            // the final chance for the transition to land.
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: [STATUS:${statusMatch[1].toUpperCase()}] tag application failed — ` +
+              `retrying: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            throw error;
           }
         }
       }
@@ -4873,6 +4886,29 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
         if (failures >= MSG_RETRY_MAX_FAILURES) {
           sqlite.delete(retryKey);
+          // GT#26 (stall incident): control tags must not die with the dropped
+          // message. The chair's plan ended with [STATUS:EXECUTING] but every
+          // attempt failed during the DSH stall storm (e.g. updateTaskStatus
+          // hitting a busy DB), so the bounded retries gave up, the cursor
+          // advanced, and the task stayed pinned in 'planning' while workers
+          // already executed. Best-effort, idempotent tag-only reprocess of the
+          // PERSISTED row: no attribution resolver (fall back to the stored
+          // sender_global_metaid — an unattributable sender correctly keeps its
+          // tags ignored), no reply generation, no cursor semantics of its own.
+          // Only the durable local side effects (status transition, deliverable
+          // rows, protocol markers) get one final chance to land.
+          try {
+            const rawMessage = toDaemonMessage(row);
+            const tagMessage = await enrichMessageAttribution(rawMessage, memberGmids, ownerGlobalMetaId)
+              .catch(() => rawMessage);
+            await processMessageTags(task, tagMessage, members, botsById, promptMembers);
+            handleMemberProtocolMarkers(task, tagMessage, members, botsById);
+          } catch (tagError) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: dropped message ${row.id} tag reprocess failed: ` +
+              `${tagError instanceof Error ? tagError.message : String(tagError)}`,
+            );
+          }
           store.updateLastProcessedMsgId(task.id, row.id);
           emitLog(
             `[GroupTaskDaemon] Task ${task.id}: message ${row.id} dropped after ` +
