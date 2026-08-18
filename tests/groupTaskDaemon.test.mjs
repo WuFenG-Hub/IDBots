@@ -946,8 +946,54 @@ test('#14 closing ceremony: review entry posts a system closing line as chair (n
   }
 });
 
-test('#14 closing re-assert: a worker straggler landing after review entry is followed by the chair closing line again', async () => {
-  const h = await createHarness();
+test('Improvement #1: review entry captures the chair 【结论】 into the record and the group message', async () => {
+  const h = await createHarness({ chatReply: '【结论】验收通过并结项\n\n叙述正文……' });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    // The verdict is persisted on the summary record — the single authoritative
+    // copy the card headline renders from.
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary, 'summary persisted on review entry');
+    assert.equal(summary.conclusion, '验收通过并结项');
+    // The group 📦 message leads with the SAME string (no divergent copy).
+    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(closing, 'ceremony message posted');
+    assert.match(closing.content, /^结论：验收通过并结项$/m);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Improvement #1: a failed owner report degrades to a conclusion-less ceremony (never blocks review)', async () => {
+  const h = await createHarness({ ownerReportFails: true });
+  try {
+    const task = h.createTask([2]); // executing
+    insertGroupMessage(h.db, {
+      pinId: 'review-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] goal met', chainTimestamp: 101,
+    });
+    await h.loop.runTick();
+
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    const summary = h.groupTaskStore.getLatestAcceptanceSummary(task.id);
+    assert.ok(summary);
+    assert.equal(summary.conclusion, null, 'no fabricated conclusion without the report');
+    const closing = h.sends.find((s) => s.metabotId === 1 && /进入验收阶段/.test(s.content));
+    assert.ok(closing, 'ceremony still posted despite the report failure');
+    assert.ok(!closing.content.includes('结论：'), 'no conclusion line when none was captured');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('#14 closing re-assert: a worker straggler landing after review entry is followed by the chair closing line again', async () => {  const h = await createHarness();
   try {
     const task = h.createTask([2]); // executing (planning->review is illegal)
     // Worker [WORKING] then chair [STATUS:REVIEW] -> review + closing ceremony.

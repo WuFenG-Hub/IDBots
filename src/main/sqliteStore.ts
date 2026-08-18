@@ -964,6 +964,7 @@ export class SqliteStore {
         deliverables_json TEXT NOT NULL,
         members_json TEXT NOT NULL,
         guidance TEXT NOT NULL,
+        conclusion TEXT,
         outcome TEXT,
         rating INTEGER,
         rating_comment TEXT,
@@ -2258,9 +2259,10 @@ export class SqliteStore {
   }
 
   /**
-   * Migration (Improvement #4, v1.3): plan-changes JSON snapshot column on the
-   * acceptance summaries. Idempotent PRAGMA-guarded; existing rows keep NULL
-   * (no plan change disclosed) and new review entries write the snapshot.
+   * Migration (Improvement #4, v1.3 + Improvement #1, single-card acceptance):
+   * additive acceptance-summary columns — the plan-changes JSON snapshot and
+   * the chair's stored conclusion. Idempotent PRAGMA-guarded; existing rows
+   * keep NULL (no plan change disclosed / verdict not captured).
    */
   private migrateGroupTaskAcceptanceSummariesPlanChanges(): void {
     try {
@@ -2269,6 +2271,12 @@ export class SqliteStore {
       if (!columns.includes('plan_changes_json')) {
         this.db.run(
           'ALTER TABLE group_task_acceptance_summaries ADD COLUMN plan_changes_json TEXT;',
+        );
+        this.save();
+      }
+      if (!columns.includes('conclusion')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN conclusion TEXT;',
         );
         this.save();
       }

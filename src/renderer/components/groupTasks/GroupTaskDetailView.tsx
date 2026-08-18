@@ -627,7 +627,13 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (
             <>
-              {canReopenGroupTask(detail.status) && (
+              {/* Improvement #1 (single-card acceptance): the Accept & Close /
+                  Rework decisions live INSIDE the acceptance card — the single
+                  place to read the verdict and act. The header keeps them only
+                  as a defensive fallback when review was reached without a
+                  summary record (save failed at entry), so the owner is never
+                  left without a decision path. */}
+              {canReopenGroupTask(detail.status) && !detail.acceptanceSummary && (
                 <button
                   type="button"
                   onClick={() => void handleReopen()}
@@ -637,7 +643,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   {reopening ? i18nService.t('groupTasksReopening') : i18nService.t('groupTasksBackToWork')}
                 </button>
               )}
-              {canAcceptGroupTask(detail.status) && (
+              {canAcceptGroupTask(detail.status) && !detail.acceptanceSummary && (
                 <button
                   type="button"
                   onClick={() => setConfirmAction('done')}
@@ -705,7 +711,18 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
             )}
             {detail.acceptanceSummary && (
               <div className="mt-2">
-                <AcceptanceSummaryCard summary={detail.acceptanceSummary} />
+                <AcceptanceSummaryCard
+                  summary={detail.acceptanceSummary}
+                  actions={
+                    detail.status === 'review'
+                      ? {
+                          onAccept: () => setConfirmAction('done'),
+                          onRework: () => void handleReopen(),
+                          reworking: reopening,
+                        }
+                      : undefined
+                  }
+                />
               </div>
             )}
             {detail.acceptanceCriteria && (

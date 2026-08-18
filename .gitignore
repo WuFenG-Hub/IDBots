@@ -74,6 +74,7 @@ tests/*
 !tests/mcpFetchDeadPackage.test.mjs
 !tests/groupTaskV12ReviewReport.test.mjs
 !tests/groupTaskPlanChange.test.mjs
+!tests/groupTaskAcceptanceCard.test.mjs
 !tests/groupTaskDeliverableParser.test.mjs
 !tests/groupTaskReopenAndStatus.test.mjs
 !tests/groupTaskSession.test.mjs

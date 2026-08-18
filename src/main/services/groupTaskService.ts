@@ -1622,10 +1622,18 @@ const REVIEW_REPORT_MAX_CHARS = 1500;
  * [GROUP_TASK_REVIEW] prefix, through the same R2 insertCrossSessionMessageAndQueue
  * seam as the close-time acceptance notice. kv-guarded per review-entry
  * (`group_task_review_notified:<taskId>`); the daemon's rework hatch clears the
- * guard so the next review re-reports. Body is capped with a pointer to the
- * full acceptance summary (Tasks panel / group transcript). Best-effort only.
+ * guard so the next review re-reports. Best-effort only.
+ *
+ * Improvement #1 (single-card acceptance): when the daemon extracted the
+ * chair's 【结论】 verdict, the notice collapses to verdict + pointer to the
+ * Tasks acceptance card (the single place to read the checklist and act) —
+ * no parallel full report. Without a conclusion the legacy capped-narrative
+ * form is kept as the fallback.
  */
-export function notifySourceSessionReview(task: GroupTask, reportBody: string): void {
+export function notifySourceSessionReview(
+  task: GroupTask,
+  input: { report: string; conclusion?: string | null },
+): void {
   const targetSessionId = (task.sourceSessionId ?? '').trim();
   if (!targetSessionId) return; // no originating session (panel-created task)
   if (!acceptanceNotifier) return; // R2 seam not wired (tests / pre-init)
@@ -1633,17 +1641,34 @@ export function notifySourceSessionReview(task: GroupTask, reportBody: string): 
   const guardKey = `${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`;
   if (kv.get<string>(guardKey) === '1') return;
 
-  const body = reportBody.trim();
+  const body = input.report.trim();
   if (!body) return;
-  const capped = body.length > REVIEW_REPORT_MAX_CHARS
-    ? `${body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd()}…\n（报告过长已截断——完整验收摘要见 Tasks 面板与群内 chair 摘要消息）`
-    : body;
-  const message = [
-    // Improvement #5 (task #25): the body is an AI-drafted narration of the
-    // host acceptance summary — it must never be labeled as the chair's ruling.
-    `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收（系统生成验收汇总，chair 一手核验结论见群内）：`,
-    capped,
-  ].join('\n');
+  const conclusion = (input.conclusion ?? '').trim();
+  let message: string;
+  if (conclusion) {
+    let versionTag = '';
+    try {
+      const summary = getGroupTaskStore().getLatestAcceptanceSummary(task.id);
+      if (summary) versionTag = `（验收摘要 v${summary.version}）`;
+    } catch {
+      // Version tag is decorative — never blocks the notice.
+    }
+    message = [
+      `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收${versionTag}。`,
+      `结论：${conclusion}`,
+      `完整验收清单与 Accept & Close / Rework 操作见 Tasks 面板的验收卡。`,
+    ].join('\n');
+  } else {
+    const capped = body.length > REVIEW_REPORT_MAX_CHARS
+      ? `${body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd()}…\n（报告过长已截断——完整验收摘要见 Tasks 面板与群内 chair 摘要消息）`
+      : body;
+    message = [
+      // Improvement #5 (task #25): the body is an AI-drafted narration of the
+      // host acceptance summary — it must never be labeled as the chair's ruling.
+      `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收（系统生成验收汇总，chair 一手核验结论见群内）：`,
+      capped,
+    ].join('\n');
+  }
 
   try {
     const result = acceptanceNotifier({ taskId: task.id, targetSessionId, message });

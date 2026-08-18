@@ -511,11 +511,20 @@ test('Improvement #2: a rework landing while the owner report is composed aborts
     });
     await h.loop.runTick();
 
-    // The review ceremony's summary documents the REAL review entry (posted
-    // before the rework landed) — but the report composed during the rework
-    // race must never reach the source session or the A2A chat while the
-    // Tasks UI shows executing.
-    assert.equal(h.sends.filter((s) => s.content.includes('已进入验收阶段')).length, 1, 'the real review entry still has its summary');
+    // Improvement #1 reorder: the owner report composes BEFORE the group
+    // summary is posted. The rework landed mid-report, so posting a
+    // "已进入验收" summary now would be the same task #24 contradiction in
+    // message form (group says review, Tasks UI says executing) — the ceremony
+    // aborts instead, and the next review entry re-runs it cleanly (the rework
+    // hatch already cleared the delivery guards).
+    assert.equal(
+      h.sends.filter((s) => s.content.includes('已进入验收阶段')).length, 0,
+      'no review summary posted over the fresh rework',
+    );
+    assert.ok(
+      h.logs.some((line) => line.includes('review ceremony aborted')),
+      'the abort is observable in the logs',
+    );
     assert.equal(h.sourceReviewReports.length, 0, 'no stale [GROUP_TASK_REVIEW] into the source session');
     assert.equal(ownerReports.length, 0, 'no stale A2A owner report');
     assert.ok(h.store.get(`group_task_owner_reported:${task.id}`) == null, 'delivery guard not set — the next review re-reports');

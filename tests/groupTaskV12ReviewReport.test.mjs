@@ -98,7 +98,8 @@ test('P4: review report reaches the origin session once, prefixed and capped, kv
     });
 
     const longBody = 'X'.repeat(1800);
-    notifySourceSessionReview(task, longBody);
+    // Improvement #1: WITHOUT a conclusion the legacy capped-narrative form holds.
+    notifySourceSessionReview(task, { report: longBody, conclusion: null });
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0].targetSessionId, 'origin-session');
     // Improvement #5 (task #25): the body is an AI-drafted narration of the
@@ -113,7 +114,7 @@ test('P4: review report reaches the origin session once, prefixed and capped, kv
     assert.match(delivered[0].message, /报告过长已截断/);
 
     // kv guard: a second call within the same review entry does not re-deliver.
-    notifySourceSessionReview(task, 'again');
+    notifySourceSessionReview(task, { report: 'again', conclusion: null });
     assert.equal(delivered.length, 1);
 
     // Guard key exists; a task without sourceSessionId never notifies.
@@ -121,8 +122,52 @@ test('P4: review report reaches the origin session once, prefixed and capped, kv
       groupId: 'g2', title: 'P', goal: 'G', acceptanceCriteria: null,
       chairMetabotId: 1, createdBy: 'user', createPinId: 'pc2',
     });
-    notifySourceSessionReview(panelTask, 'nope');
+    notifySourceSessionReview(panelTask, { report: 'nope', conclusion: null });
     assert.equal(delivered.length, 1, 'panel-created task (no source) silently skips');
+  } finally {
+    setGroupTaskAcceptanceNotifier(null);
+    store.close();
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('Improvement #1: with a captured conclusion the source-session notice is verdict + card pointer', async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-v12c-'));
+  const store = await SqliteStore.create(tempDir);
+  try {
+    const db = store.getDatabase();
+    const metabotStore = new MetabotStore(db, store.getSaveFunction());
+    const groupTaskStore = new GroupTaskStore(db, store.getSaveFunction());
+    setGroupTaskServiceKvStoreGetter(() => store);
+    setGroupTaskServiceGroupTaskStoreGetter(() => groupTaskStore);
+    setGroupTaskServiceMetabotStoreGetter(() => metabotStore);
+
+    const task = groupTaskStore.createTask({
+      groupId: 'g1', title: 'T', goal: 'G', acceptanceCriteria: null,
+      chairMetabotId: 1, createdBy: 'user', createPinId: 'pc', sourceSessionId: 'origin-session',
+    });
+    // A summary row exists (the review-entry ceremony saves it before the
+    // notice), so the pointer carries the version the owner will see.
+    groupTaskStore.saveAcceptanceSummary({
+      taskId: task.id, goal: 'G', acceptanceCriteria: null,
+      deliverables: [], members: [], guidance: 'g',
+    });
+
+    const delivered = [];
+    setGroupTaskAcceptanceNotifier(({ targetSessionId, message }) => {
+      delivered.push({ targetSessionId, message });
+      return { ok: true };
+    });
+
+    const narrative = 'N'.repeat(1200);
+    notifySourceSessionReview(task, { report: narrative, conclusion: '验收通过并结项' });
+    assert.equal(delivered.length, 1);
+    const message = delivered[0].message;
+    assert.match(message, /^\[GROUP_TASK_REVIEW\] 任务「T」已进入验收（验收摘要 v1）。/);
+    assert.match(message, /^结论：验收通过并结项$/m);
+    assert.match(message, /完整验收清单与 Accept & Close \/ Rework 操作见 Tasks 面板的验收卡/);
+    assert.ok(!message.includes('N'.repeat(100)), 'the parallel narrative dump is gone');
+    assert.ok(message.length < 300, 'pointer form stays short');
   } finally {
     setGroupTaskAcceptanceNotifier(null);
     store.close();
@@ -165,10 +210,28 @@ test('daemon wiring: maybeSendOwnerReport also notifies the source session; rewo
     'utf8',
   );
   assert.ok(
-    source.includes('deps.sendReviewReportToSourceSession({ taskId: task.id, report })'),
-    'maybeSendOwnerReport delivers the same report body to the source session',
+    source.includes('deps.sendReviewReportToSourceSession({ taskId: task.id, report, conclusion })'),
+    'maybeSendOwnerReport delivers the report body + extracted conclusion to the source session',
   );
-  assert.match(source, /sendReviewReportToSourceSession\?: \(input: \{ taskId: number; report: string \}\) => void/);
+  assert.match(
+    source,
+    /sendReviewReportToSourceSession\?: \(input: \{\s*taskId: number;\s*report: string;\s*conclusion: string \| null;\s*\}\) => void/,
+  );
+  // Improvement #1: the conclusion is extracted and stamped onto the summary
+  // record BEFORE the group summary message is rendered from that record.
+  assert.ok(
+    source.includes('extractChairConclusion(report)'),
+    'the 【结论】 verdict is extracted from the owner report',
+  );
+  assert.ok(
+    source.includes('store.updateAcceptanceSummaryConclusion(task.id, conclusion)'),
+    'the conclusion is persisted onto the latest summary version',
+  );
+  assert.ok(
+    source.indexOf('await maybeSendOwnerReport(task, members, botsById, promptMembers)')
+      < source.indexOf('buildAcceptanceSummaryMessageText(summarized, task.title)'),
+    'owner report (conclusion capture) runs before the group summary is rendered',
+  );
   assert.ok(
     source.includes('clearGroupTaskReviewDeliveryGuards(deps.getStore(), task.id)'),
     'rework hatch clears every review-delivery guard via the shared helper (Improvement #2 v1.3)',
@@ -179,7 +242,7 @@ test('daemon wiring: maybeSendOwnerReport also notifies the source session; rewo
   );
   assert.ok(
     fs.readFileSync(path.join(projectRoot, 'src', 'main', 'main.ts'), 'utf8')
-      .includes('sendReviewReportToSourceSession: ({ taskId, report }) =>'),
+      .includes('sendReviewReportToSourceSession: ({ taskId, report, conclusion }) =>'),
     'main wires the dep',
   );
 });
