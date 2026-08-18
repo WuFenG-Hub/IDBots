@@ -10,6 +10,7 @@
 // uses (store.addMessage + runner events).
 
 import { join } from 'path'
+import { getMetaidRpcToken } from '../services/metaidRpcEndpoint'
 import { DshKernel } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
@@ -427,6 +428,11 @@ export class DshTurnHub {
         // The web-search credential rides a DEDICATED name so it survives
         // provider switches (the route key above is swapped on every ensure).
         ...(this.webSearchSeen ? { [DSH_WEBSEARCH_API_KEY_ENV]: this.webSearchSeen.apiKey } : {}),
+        // The per-launch local RPC bearer token (S1 hardening) must ride the
+        // runtime env too, or every bundled SKILL RPC client (group-task /
+        // post-buzz / metaapp / omni-caster / upload) fails with 401 from DSH
+        // sessions. Mirrors skillManager.ts runSkillById injection.
+        IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
       },
     }
     if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace
