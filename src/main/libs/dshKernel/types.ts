@@ -129,6 +129,18 @@ export interface DshRuntimeConfigInput {
   workspace?: { cwd: string }
   /** User-configured MCP servers mounted as dsh-mcp-client plugin entries. */
   mcpServers?: DshMcpServerDefinition[]
+  /**
+   * DeepSeek server-side web search (dsh-web trio): mounts the model-facing
+   * `web_search` tool backed by an auxiliary Anthropic-compatible Messages
+   * call with the native web_search_20250305 server tool. Present once the
+   * host has seen a DeepSeek provider; the API key rides `env` under
+   * `apiKeyEnv`, never this config.
+   */
+  webSearch?: {
+    apiKeyEnv: string
+    baseURL: string
+    model: string
+  }
   extraEntries?: Array<Record<string, unknown>>
   /** Extra env for the runtime process (credential vars, never keys in config). */
   env?: Record<string, string>

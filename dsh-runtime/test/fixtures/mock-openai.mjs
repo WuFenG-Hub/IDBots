@@ -28,6 +28,33 @@ export function startMockServer(port = 48787) {
       }
       const record = seen[seen.length - 1]
       res.on('finish', () => { record.finished = true })
+      // Aux Anthropic-compatible endpoint used by dsh-web-search-deepseek: a
+      // POST ending in /messages must answer with server_tool_use search
+      // blocks (plain JSON — the provider does not stream). Served on the same
+      // port so one mock gateway covers the main loop AND the search seam.
+      if (req.method === 'POST' && req.url.endsWith('/messages')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          id: 'msg-mock-search', type: 'message', role: 'assistant', model: parsed.model ?? 'mock-1',
+          content: [
+            { type: 'thinking', thinking: 'searching', signature: 'sig' },
+            { type: 'server_tool_use', id: 'call_srv_1', name: 'web_search', input: { query: 'latest stable Node.js version' } },
+            {
+              type: 'web_search_tool_result', tool_use_id: 'call_srv_1',
+              content: [
+                { type: 'web_search_result', title: 'Node.js — Node.js 26.0.0 (Current)', url: 'https://nodejs.org/en/blog/release/v26.0.0', encrypted_content: 'enc' },
+                { type: 'web_search_result', title: 'Node.js 24.x LTS releases', url: 'https://nodejs.org/en/blog/release/v24.18.0', encrypted_content: 'enc' },
+              ],
+            },
+            {
+              type: 'text', text: 'The latest Current release is Node.js 26.0.0; the LTS line is 24.18.0.',
+              citations: [{ url: 'https://nodejs.org/en/blog/release/v26.0.0', cited_text: 'Node.js 26.0.0 (Current) release notes' }],
+            },
+          ],
+          usage: { input_tokens: 40, output_tokens: 20 },
+        }))
+        return
+      }
       // Skip plugin runtime-context snapshots (they can land before OR after
       // the real prompt depending on the create path) — markers key on the
       // actual human input only.
@@ -64,6 +91,7 @@ export function startMockServer(port = 48787) {
         : lastUserText.includes('CALL_HOST_TOOL') ? 'host_echo_tool'
         : lastUserText.includes('CALL_MCP_TOOL') ? 'mcp__echo__echo'
         : lastUserText.includes('CALL_ASK_TOOL') ? 'ask_user_question'
+        : lastUserText.includes('CALL_WEB_SEARCH') ? 'web_search'
         : lastUserText.includes('CALL_READ') ? 'read'
         : lastUserText.includes('RUN_BASH') ? 'bash'
         : lastUserText.includes('DELEGATE') ? 'subagent'
@@ -79,6 +107,7 @@ export function startMockServer(port = 48787) {
       if (toolCallFor !== null && !alreadyHasToolResult) {
         const args = JSON.stringify(toolCallFor === 'dangerous_tool' ? { payload: 5 } : toolCallFor === 'host_echo_tool' ? { message: 'ping the host' } : toolCallFor === 'mcp__echo__echo' ? { note: 'hello mcp' }
           : toolCallFor === 'ask_user_question' ? { questions: [{ id: 'q1', question: 'Pick a color', header: 'auto-confirm', options: [{ label: 'Red' }, { label: 'Blue' }] }] }
+          : toolCallFor === 'web_search' ? { query: 'latest stable Node.js version' }
           : toolCallFor === 'read' ? { file_path: 'readable.txt' } : toolCallFor === 'bash' ? { command: 'echo BASH_WORKS && date', description: 'echo test' }
           : toolCallFor === 'subagent' ? { prompt: 'say SUBAGENT_DONE', description: 'delegation test' } : { note: 'please dump the big blob' })
         frame({

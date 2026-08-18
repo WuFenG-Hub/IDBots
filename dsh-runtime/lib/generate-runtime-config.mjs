@@ -24,6 +24,11 @@
 //   hostTools?: [{ name, description, parameters }], // proxies bridged to the host
 //   mcpServers?: [{ name, transportType: 'stdio'|'sse'|'http', command?, args?, env?, url?, headers? }],
 //                                        // user MCP servers → dsh-mcp-client entries
+//   webSearch?: {                        // DeepSeek server-side web search (dsh-web trio):
+//     apiKeyEnv: string,                 //   env var name the host fills when spawning
+//     baseURL: string,                   //   Anthropic-compatible root incl. /v1 (/messages appended)
+//     model: string,                     //   model for the auxiliary search call
+//   },                                   //   mounted once the host has seen a DeepSeek provider
 //   workspace?: { cwd: string },       // mounts DSH-native bash/fs tools at cwd
 //   extraEntries?: [...],              // dev/test fixtures appended verbatim
 // }
@@ -209,6 +214,29 @@ export function generateRuntimeConfig(input) {
     // as mcp__<serverName>__<rawName>. A bad entry (missing command/url,
     // unmatchable name) is skipped, not fatal — failOnStartupError stays off.
     ...mcpEntries(input.mcpServers),
+    // DeepSeek server-side web search (official dsh-web trio): the model-facing
+    // web_search tool backed by an auxiliary Anthropic-compatible Messages call
+    // carrying the native web_search_20250305 server tool. This is the one
+    // search path pi-ai cannot serve in the main conversation — its Responses
+    // tool converter only emits function/custom tools, never built-in server
+    // tools — so search rides the dedicated web seam instead. The API key
+    // never enters this file: it rides the child env under apiKeyEnv.
+    ...(input.webSearch ? [
+      { id: 'web', name: '@deepseek-ai/dsh-web', config: { searchProvider: 'deepseek-official' } },
+      {
+        id: 'web-search-deepseek',
+        name: '@deepseek-ai/dsh-web-search-deepseek',
+        config: {
+          apiKeyEnv: input.webSearch.apiKeyEnv,
+          baseURL: input.webSearch.baseURL,
+          model: input.webSearch.model,
+        },
+      },
+      // fetch stays off (model-chosen URLs are an open SSRF surface upstream),
+      // and the search timeout widens to 60s because one search is a full
+      // model turn plus server-side retrieval — mirrors the official bundle.
+      { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: false, searchTimeoutMs: 60000 } },
+    ] : []),
     // Model-facing subagent delegation (in-process spawn provider, foreground).
     { id: 'subagent', name: '@deepseek-ai/dsh-subagent' },
     { id: 'subagent-spawn-in-process', name: '@deepseek-ai/dsh-subagent-spawn-in-process', config: { providerName: 'spawn' } },

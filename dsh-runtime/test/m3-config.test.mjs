@@ -55,6 +55,20 @@ record('generator: thinkingFormat compat + model caps pass through',
 record('generator: sections config emitted', unit.some((e) => e.config?.sections?.[0]?.name === 'persona:metabot'))
 record('generator: plugin paths are absolute (config location-independent)',
   unit.every((e) => !String(e.name).startsWith('./')))
+record('generator: no webSearch input → no web entries mounted',
+  !unit.some((e) => ['@deepseek-ai/dsh-web', '@deepseek-ai/dsh-web-search-deepseek', '@deepseek-ai/dsh-tool-web'].includes(e.name)))
+const withWeb = generateRuntimeConfig({
+  sessionRoot: '/tmp/x',
+  providers: [{ key: 'deepseek', apiFormat: 'responses', baseUrl: 'https://api.deepseek.com', apiKeyEnv: 'K', models: [{ id: 'deepseek-v4-pro', contextWindow: 128000 }] }],
+  webSearch: { apiKeyEnv: 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY', baseURL: 'https://api.deepseek.com/anthropic/v1', model: 'deepseek-v4-flash' },
+})
+record('generator: webSearch mounts the dsh-web trio (provider pinned, key via env name)',
+  withWeb.some((e) => e.id === 'web' && e.name === '@deepseek-ai/dsh-web' && e.config?.searchProvider === 'deepseek-official')
+  && withWeb.some((e) => e.id === 'web-search-deepseek' && e.name === '@deepseek-ai/dsh-web-search-deepseek'
+    && e.config?.apiKeyEnv === 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
+    && e.config?.baseURL === 'https://api.deepseek.com/anthropic/v1'
+    && e.config?.model === 'deepseek-v4-flash')
+  && withWeb.some((e) => e.id === 'tool-web' && e.name === '@deepseek-ai/dsh-tool-web' && e.config?.fetch === false && e.config?.searchTimeoutMs === 60000))
 try {
   generateRuntimeConfig({ sessionRoot: '/tmp/x', providers: [{ key: 'bad', apiFormat: 'grpc', baseUrl: 'x', apiKeyEnv: 'K', models: [{ id: 'm', contextWindow: 1 }] }] })
   record('generator: unsupported apiFormat rejected', false)
@@ -80,6 +94,7 @@ const main = async () => {
       { name: 'idbots:memory-strategy', order: 20, text: 'Memory policy: recall before acting.' },
     ],
     shaping: { maxChars: 8000, tailChars: 1000 },
+    webSearch: { apiKeyEnv: 'MOCK_WEB_KEY', baseURL: 'http://127.0.0.1:48788/anthropic/v1', model: 'mock-1' },
     extraEntries: [{ id: 'idbots-big-tool', name: path.join(runtimeDir, 'test/fixtures/big-tool.mjs') }],
   })
   const configPath = path.join(os.tmpdir(), `idbots-m3-${Date.now()}.json`)
@@ -88,7 +103,7 @@ const main = async () => {
   const client = new HarnessClient({
     command: process.execPath,
     args: [path.join(runtimeDir, 'bin.mjs'), configPath],
-    env: { ...process.env, MOCK_API_KEY: 'sk-mock-123', SPIKE_QUIET: '1' },
+    env: { ...process.env, MOCK_API_KEY: 'sk-mock-123', MOCK_WEB_KEY: 'sk-web-mock-456', SPIKE_QUIET: '1' },
   })
   client.start()
   await client.initialize({ cwd: runtimeDir, provider: 'mockgw', model: 'mock-1' })
@@ -165,6 +180,47 @@ const main = async () => {
     toolContent.includes('tool result trimmed') && toolContent.length <= 9500,
     `${toolContent.length} chars`)
   record('E2E: full blob never left the runtime', !toolContent.includes('BIG-BLOB-END') || toolContent.length < 9000)
+
+  // Web-search round trip: the model-facing web_search tool (dsh-web trio)
+  // must reach the gateway's tool list, and executing it must POST the aux
+  // Anthropic-compatible search call (native web_search_20250305 server tool,
+  // key via the dedicated env var) and return formatted sources to the model.
+  const firstTools = firstRequest?.body?.tools ?? []
+  record('E2E: web_search rides the tool list to the gateway (web_fetch absent)',
+    firstTools.some((t) => t?.function?.name === 'web_search' || t?.name === 'web_search')
+    && !JSON.stringify(firstTools).includes('web_fetch'))
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timeout waiting for idle after big-tool turn')), 20000)
+    const wait = (notification) => {
+      if (notification.method === 'session.status' && notification.params.sessionId === sessionId && notification.params.status === 'idle') {
+        clearTimeout(timer)
+        waiters2.delete(wait)
+        resolve()
+      }
+    }
+    waiters2.add(wait)
+  })
+  const turn3 = waitForEvent((e) => e.type === 'turn/end')
+  await client.prompt(sessionId, [{ type: 'text', text: 'CALL_WEB_SEARCH please' }])
+  await turn3
+  const auxSearch = seen.find((r) => r.method === 'POST' && String(r.url).endsWith('/messages'))
+  record('E2E: aux search call hit the Anthropic-compat endpoint with the server tool + env key',
+    Boolean(auxSearch)
+    && auxSearch.body?.tools?.[0]?.type === 'web_search_20250305'
+    && auxSearch.body?.tools?.[0]?.max_uses === 5
+    && auxSearch.body?.model === 'mock-1'
+    && auxSearch.auth === 'Bearer sk-web-mock-456',
+    auxSearch ? `${auxSearch.url}` : 'no /messages request seen')
+  const webCall = events.find((e) => e.type === 'tool/call' && e.data?.name === 'web_search')
+  const webResult = webCall ? events.find((e) => e.type === 'tool/result' && e.data?.message?.content?.[0]?.toolCallId === webCall.data.callId) : undefined
+  const webResultText = JSON.stringify(webResult ?? {})
+  record('E2E: web_search tool executed with formatted sources',
+    webResultText.includes('Sources:') && webResultText.includes('nodejs.org/en/blog/release/v26.0.0'))
+  const followUpWeb = seen.filter((r) => r.body?.messages?.some((m) => m.role === 'tool')).at(-1)
+  const webToolMsg = followUpWeb?.body?.messages?.filter((m) => m.role === 'tool').at(-1)
+  const webToolContent = typeof webToolMsg?.content === 'string' ? webToolMsg.content : JSON.stringify(webToolMsg?.content ?? '')
+  record('E2E: follow-up request carries the web_search result to the model',
+    webToolContent.includes('Sources:') && webToolContent.includes('nodejs.org'))
 
   subscription.close()
   await client.close()
