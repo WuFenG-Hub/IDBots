@@ -8,7 +8,9 @@ Companion memory: `dsh-phase1-m1-progress` (project memory, auto-recalled)
 IDBots runs a **dual-kernel architecture**: cowork sessions run either on the
 Claude Agent SDK (original path, untouched) or on **DSH (DeepSeek Harness)**
 via `dsh-runtime/` — a self-composed Cordis plugin runtime consumed strictly
-as pinned npm packages (`@deepseek-ai/*@0.1.0-rc.6`, zero forks). Phase 1
+as pinned npm packages (`@deepseek-ai/*@0.1.0-rc.7`, zero forks; upgraded
+from rc.6 on 2026-08-19 — rc.7 replays v1 assistant state as provider-neutral
+history instead of failing). Phase 1
 (26 commits on `feat/dsh-phase1`, merged as `946361a7`) plus a soak-fix
 series on main is complete and live-verified: kernel swap, full tool surface,
 skills (bash-executed), permission chain, compaction, retry, session-scoped
@@ -164,7 +166,7 @@ stage; structural diffs find subtle gaps that soak testing misses. Finding #1
 - **Mapper never echoes user/message** (submission path records user bubbles).
 - **DSH session teardown**: `removeActiveSession` after completion (else next
   input classifies as a dangling steer); re-register at turn start.
-- **npm**: pin `next` tag / exact `0.1.0-rc.6` — `latest` dist-tags are stale
+- **npm**: pin `next` tag / exact `0.1.0-rc.7` — `latest` dist-tags are stale
   and ERESOLVE-conflict.
 
 ## 5. Testing infrastructure & gotchas
