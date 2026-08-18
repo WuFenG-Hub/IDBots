@@ -155,3 +155,30 @@ test('P0-4: deliverableVerificationState maps stored reports', async () => {
   );
   assert.equal(typeof deliverableVerificationBadgeClass('verified'), 'string');
 });
+
+test('selectAcceptanceChecklist: digital URIs first; process-text placeholders omitted', async () => {
+  const { selectAcceptanceChecklist, isDigitalDeliverable } = await import('../src/renderer/components/groupTasks/groupTaskUtils.js');
+  assert.equal(isDigitalDeliverable({ uri: 'metaapp://abc' }), true);
+  assert.equal(isDigitalDeliverable({ kind: 'text', uri: null }), false);
+
+  const mixed = [
+    { kind: 'text', uri: null, preview: null, authorName: 'loop' },
+    { kind: 'metaapp', uri: 'metaapp://abc', confirmation: 'confirmed', authorName: 'eleven' },
+    { kind: 'text', uri: null, preview: '核验报告', authorName: 'Builder阿码' },
+    { kind: 'url', uri: 'https://openagentinternet.org/browser/x', confirmation: 'confirmed', authorName: 'eleven' },
+  ];
+  const selected = selectAcceptanceChecklist(mixed);
+  assert.deepEqual(selected.items.map((item) => item.kind), ['metaapp', 'url']);
+  assert.equal(selected.omittedProcessCount, 2);
+
+  const textOnly = [
+    { kind: 'text', uri: null, preview: '【结论】验收通过', authorName: 'chair' },
+    { kind: 'text', uri: null, preview: null, authorName: 'loop' },
+  ];
+  const textSelected = selectAcceptanceChecklist(textOnly);
+  assert.equal(textSelected.items.length, 1);
+  assert.equal(textSelected.items[0].preview, '【结论】验收通过');
+  assert.equal(textSelected.omittedProcessCount, 1);
+
+  assert.deepEqual(selectAcceptanceChecklist(null), { items: [], omittedProcessCount: 0 });
+});

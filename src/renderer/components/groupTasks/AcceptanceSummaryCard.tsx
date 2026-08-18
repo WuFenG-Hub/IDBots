@@ -4,7 +4,7 @@ import type {
   GroupTaskAcceptanceSummary,
   GroupTaskAcceptanceSummaryDeliverable,
 } from '../../types/groupTask';
-import { deliverableKindBadge, isBotBrowserUri, openGroupTaskUri } from './groupTaskUtils';
+import { deliverableKindBadge, isBotBrowserUri, openGroupTaskUri, selectAcceptanceChecklist } from './groupTaskUtils';
 import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
 
 /**
@@ -14,7 +14,8 @@ import { ClipboardDocumentIcon, CheckIcon } from '@heroicons/react/24/outline';
  * group 📦 summary and the origin-session [GROUP_TASK_REVIEW] notice — when no
  * 【结论】 verdict was captured, a deterministic deliverable-count line from the
  * same record stands in). The Accept & Close / Rework buttons live INSIDE the
- * card (expanded); goal/criteria render as capped previews with inline expand.
+ * card and stay visible while collapsed (never hidden behind Expand);
+ * goal/criteria render as capped previews with inline expand.
  *
  * P12 (v1.1): the card lives in the detail view's FIXED header block, which is
  * not part of the scrollable transcript. With 10+ deliverables the old
@@ -46,12 +47,13 @@ const AcceptanceSummaryCard: React.FC<{
   // Improvement #1 fallback headline: deterministic facts computed from the
   // same record (no second prose voice) when the chair's verdict is absent.
   const conclusion = (summary.conclusion ?? '').trim();
-  const confirmedCount = summary.deliverables.filter(
+  const checklist = selectAcceptanceChecklist(summary.deliverables);
+  const confirmedCount = checklist.items.filter(
     (deliverable) => deliverable.confirmation === 'confirmed' || deliverable.status === 'delivered',
   ).length;
   const headline = conclusion
     || i18nService.t('groupTasksAcceptanceConclusionFallback')
-      .replace('{total}', String(summary.deliverables.length))
+      .replace('{total}', String(checklist.items.length))
       .replace('{confirmed}', String(confirmedCount));
   return (
     <div className="rounded-xl border border-emerald-300/60 dark:border-emerald-500/30 bg-emerald-50/60 dark:bg-emerald-900/10 p-3">
@@ -69,7 +71,7 @@ const AcceptanceSummaryCard: React.FC<{
           </span>
         )}
         <span className="shrink-0 text-[11px] dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
-          {i18nService.t('groupTasksAcceptanceDeliverables')} · {summary.deliverables.length}
+          {i18nService.t('groupTasksAcceptanceDeliverables')} · {checklist.items.length}
         </span>
         <button
           type="button"
@@ -93,30 +95,30 @@ const AcceptanceSummaryCard: React.FC<{
         {headline}
       </p>
 
+      {actions && (
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={actions.onAccept}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
+          >
+            {i18nService.t('groupTasksAcceptClose')}
+          </button>
+          <button
+            type="button"
+            onClick={actions.onRework}
+            disabled={actions.reworking}
+            className="px-3 py-1.5 text-sm font-medium rounded-lg text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
+          >
+            {actions.reworking
+              ? i18nService.t('groupTasksReopening')
+              : i18nService.t('groupTasksBackToWork')}
+          </button>
+        </div>
+      )}
+
       {expanded && (
         <div className="mt-2 max-h-64 overflow-y-auto space-y-2">
-          {actions && (
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={actions.onAccept}
-                className="px-3 py-1.5 text-sm font-medium rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors"
-              >
-                {i18nService.t('groupTasksAcceptClose')}
-              </button>
-              <button
-                type="button"
-                onClick={actions.onRework}
-                disabled={actions.reworking}
-                className="px-3 py-1.5 text-sm font-medium rounded-lg text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-500/40 hover:bg-amber-50 dark:hover:bg-amber-900/20 transition-colors disabled:opacity-50"
-              >
-                {actions.reworking
-                  ? i18nService.t('groupTasksReopening')
-                  : i18nService.t('groupTasksBackToWork')}
-              </button>
-            </div>
-          )}
-
           <div className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary space-y-1">
             <PreviewableField
               label={i18nService.t('groupTasksAcceptanceGoal')}
@@ -133,16 +135,23 @@ const AcceptanceSummaryCard: React.FC<{
             <div className="text-[11px] font-medium uppercase tracking-wide dark:text-claude-darkTextSecondary/80 text-claude-textSecondary/80 mb-1">
               {i18nService.t('groupTasksAcceptanceDeliverables')}
             </div>
-            {summary.deliverables.length === 0 ? (
+            {checklist.items.length === 0 ? (
               <p className="text-xs italic dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
                 {i18nService.t('groupTasksAcceptanceNoDeliverables')}
               </p>
             ) : (
               <ul className="space-y-1.5">
-                {summary.deliverables.map((deliverable, index) => (
+                {checklist.items.map((deliverable, index) => (
                   <DeliverableRow key={index} deliverable={deliverable} />
                 ))}
               </ul>
+            )}
+            {checklist.omittedProcessCount > 0 && (
+              <p className="mt-1.5 text-[11px] italic dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
+                {i18nService
+                  .t('groupTasksAcceptanceSeeGroupReport')
+                  .replace('{count}', String(checklist.omittedProcessCount))}
+              </p>
             )}
           </div>
 
@@ -235,6 +244,9 @@ const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDelivera
   const badgeRejected = deliverable.status === 'rejected';
   const badgeVerified = !badgeAccepted && !badgeRejected
     && (deliverable.confirmation === 'confirmed' || deliverable.status === 'delivered');
+  // Text-only rows (no URI) are not on-chain artifacts — do not badge them
+  // as pending/unverified; that label is reserved for digital outcomes.
+  const hidePendingBadge = !deliverable.uri && !badgeAccepted && !badgeRejected && !badgeVerified;
   const badgeLabel = badgeAccepted
     ? 'accepted ✓'
     : badgeRejected
@@ -273,11 +285,13 @@ const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDelivera
             </span>
           );
         })()}
+        {!hidePendingBadge && (
         <span
           className={`shrink-0 rounded px-1 py-px text-[10px] font-medium leading-tight ${badgeClass}`}
         >
           {badgeLabel}
         </span>
+        )}
         {deliverable.uri && (
           <button
             type="button"
@@ -308,6 +322,10 @@ const DeliverableRow: React.FC<{ deliverable: GroupTaskAcceptanceSummaryDelivera
             </code>
           );
         })()
+      ) : (deliverable.preview ?? '').trim() ? (
+        <p className="mt-1 text-xs whitespace-pre-wrap break-words dark:text-claude-darkTextSecondary text-claude-textSecondary">
+          {deliverable.preview}
+        </p>
       ) : (
         <span className="block mt-1 text-[11px] italic dark:text-claude-darkTextSecondary/70 text-claude-textSecondary/70">
           {i18nService.t('groupTasksDeliverableNoSource')}

@@ -74,14 +74,55 @@ export function buildAcceptanceSummaryDeliverables(
   return deliverables.map((deliverable) => {
     const gmid = (deliverable.authorGlobalmetaid ?? '').trim().toLowerCase();
     const rosterName = gmid ? nameByGmid.get(gmid) : undefined;
+    const uri = (deliverable.uri ?? '').trim() || null;
     return {
       kind: deliverable.kind ?? null,
-      uri: deliverable.uri ?? null,
+      uri,
       status: deliverable.status,
       confirmation: deliverable.confirmation,
       authorName: rosterName || deliverable.sourceSenderName?.trim() || deliverable.authorGlobalmetaid || null,
+      preview: uri ? null : textDeliverablePreview(deliverable.sourceContent),
     };
   });
+}
+
+/** Digital outcomes: a clickable/copyable URI. Process-text rows stay off the main checklist. */
+export function isDigitalDeliverable(
+  deliverable: Pick<GroupTaskAcceptanceSummaryDeliverable, 'uri'>,
+): boolean {
+  return String(deliverable?.uri ?? '').trim().length > 0;
+}
+
+/**
+ * Acceptance checklist: URI-bearing digital outcomes first. Process-text
+ * placeholders (kind=text, no uri, "（见消息原文）") are omitted. When a task's
+ * only outcomes are text, rows that carry a body preview stay so the owner
+ * can read the actual report instead of a placeholder.
+ */
+export function selectAcceptanceChecklist(
+  deliverables: GroupTaskAcceptanceSummaryDeliverable[] | null | undefined,
+): { items: GroupTaskAcceptanceSummaryDeliverable[]; omittedProcessCount: number } {
+  const list = Array.isArray(deliverables) ? deliverables : [];
+  const digital = list.filter(isDigitalDeliverable);
+  if (digital.length > 0) {
+    return { items: digital, omittedProcessCount: list.length - digital.length };
+  }
+  const withBody = list.filter((deliverable) => {
+    const uri = String(deliverable.uri ?? '').trim();
+    const preview = String(deliverable.preview ?? '').trim();
+    return uri.length > 0 || preview.length > 0;
+  });
+  return { items: withBody, omittedProcessCount: list.length - withBody.length };
+}
+
+/** Strip the protocol tag and collapse whitespace so a text row can show the report body. */
+export function textDeliverablePreview(sourceContent: string | null | undefined): string | null {
+  const stripped = String(sourceContent ?? '')
+    .replace(/\[DELIVERABLE\]/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!stripped) return null;
+  return acceptancePreview(stripped);
 }
 
 /**
@@ -206,24 +247,38 @@ export function buildAcceptanceSummaryMessageText(
   lines.push(`目标：${acceptancePreview(summary.goal)}`);
   lines.push(`验收标准：${(summary.acceptanceCriteria ?? '').trim() ? acceptancePreview(summary.acceptanceCriteria ?? '') : '（未填写）'}`);
   lines.push('');
-  if (summary.deliverables.length === 0) {
+  const checklist = selectAcceptanceChecklist(summary.deliverables);
+  if (checklist.items.length === 0) {
     lines.push('成果清单：无已核验交付物。');
+    if (checklist.omittedProcessCount > 0) {
+      lines.push(`（另有 ${checklist.omittedProcessCount} 项过程记录，见群内报告）`);
+    }
   } else {
     lines.push('成果清单：');
-    for (const deliverable of summary.deliverables) {
+    for (const deliverable of checklist.items) {
       const kind = (deliverable.kind ?? 'text').trim();
       const uri = (deliverable.uri ?? '').trim();
-      const verification = deliverableVerificationLabel({
-        // Reconstruct just enough for the label helper (confirmation + verification JSON).
-        confirmation: deliverable.confirmation,
-        verification: null,
-      } as GroupTaskDeliverable);
-      // P3 (v1.1): surface the ledger status when it moved past 'pending' —
-      // a verified deliverable must not read as still awaiting.
-      const statusNote = deliverable.status === 'pending' ? '' : ` · ${deliverable.status}`;
+      const preview = (deliverable.preview ?? '').trim();
+      const body = uri || preview;
+      if (!body) continue;
       const author = (deliverable.authorName ?? '').trim() || 'unknown';
-      const body = uri || '（见消息原文）';
-      lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
+      if (uri) {
+        const verification = deliverableVerificationLabel({
+          // Reconstruct just enough for the label helper (confirmation + verification JSON).
+          confirmation: deliverable.confirmation,
+          verification: null,
+        } as GroupTaskDeliverable);
+        // P3 (v1.1): surface the ledger status when it moved past 'pending' —
+        // a verified deliverable must not read as still awaiting.
+        const statusNote = deliverable.status === 'pending' ? '' : ` · ${deliverable.status}`;
+        lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
+      } else {
+        // Text-only outcome: print the body, never "（见消息原文）(unverified)".
+        lines.push(`- [${kind}] ${body} — ${author}`);
+      }
+    }
+    if (checklist.omittedProcessCount > 0) {
+      lines.push(`（另有 ${checklist.omittedProcessCount} 项过程记录，见群内报告）`);
     }
   }
   const planChanges = (summary.planChanges ?? []).map((line) => line.trim()).filter(Boolean);

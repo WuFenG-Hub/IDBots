@@ -409,7 +409,6 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
       && guard < 12
     ) {
       guard += 1;
-      // eslint-disable-next-line no-await-in-loop
       await loadOlder();
     }
     const present = messagesRef.current.some((message) => message.pinId === pinId);
@@ -627,13 +626,11 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
         <div className="non-draggable flex items-center gap-2">
           {!isTerminal && (
             <>
-              {/* Improvement #1 (single-card acceptance): the Accept & Close /
-                  Rework decisions live INSIDE the acceptance card — the single
-                  place to read the verdict and act. The header keeps them only
-                  as a defensive fallback when review was reached without a
-                  summary record (save failed at entry), so the owner is never
-                  left without a decision path. */}
-              {canReopenGroupTask(detail.status) && !detail.acceptanceSummary && (
+              {/* Accept & Close / Rework stay in the header so the owner can
+                  always decide from the top-right while a task is in review —
+                  the single-card also keeps in-card copies (never behind the
+                  collapsed expand toggle). */}
+              {canReopenGroupTask(detail.status) && (
                 <button
                   type="button"
                   onClick={() => void handleReopen()}
@@ -643,7 +640,7 @@ const GroupTaskDetailView: React.FC<GroupTaskDetailViewProps> = ({
                   {reopening ? i18nService.t('groupTasksReopening') : i18nService.t('groupTasksBackToWork')}
                 </button>
               )}
-              {canAcceptGroupTask(detail.status) && !detail.acceptanceSummary && (
+              {canAcceptGroupTask(detail.status) && (
                 <button
                   type="button"
                   onClick={() => setConfirmAction('done')}

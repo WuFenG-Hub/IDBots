@@ -133,6 +133,8 @@ export interface GroupTaskAcceptanceSummaryDeliverable {
   status: GroupTaskDeliverableStatus;
   confirmation: 'unconfirmed' | 'confirmed';
   authorName: string | null;
+  /** Body preview for text deliverables (no uri). Null for URI-bearing rows. */
+  preview?: string | null;
 }
 
 /** One member row inside an acceptance summary (immutable snapshot). */

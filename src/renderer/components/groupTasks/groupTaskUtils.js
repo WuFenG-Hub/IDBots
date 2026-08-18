@@ -15,6 +15,30 @@ export function canAcceptGroupTask(status) {
   return status === 'review';
 }
 
+/**
+ * Digital outcomes for the acceptance checklist: a clickable/copyable URI
+ * (metaapp / metafile / url / pinid). Process-text rows (kind=text, no uri)
+ * stay out of the main list so verification notes do not drown the real
+ * deliverable. A text-only task still surfaces rows that carry a body preview.
+ */
+export function isDigitalDeliverable(deliverable) {
+  return String(deliverable?.uri ?? '').trim().length > 0;
+}
+
+export function selectAcceptanceChecklist(deliverables) {
+  const list = Array.isArray(deliverables) ? deliverables : [];
+  const digital = list.filter(isDigitalDeliverable);
+  if (digital.length > 0) {
+    return { items: digital, omittedProcessCount: list.length - digital.length };
+  }
+  const withBody = list.filter((deliverable) => {
+    const uri = String(deliverable?.uri ?? '').trim();
+    const preview = String(deliverable?.preview ?? deliverable?.sourceContent ?? '').trim();
+    return uri.length > 0 || preview.length > 0;
+  });
+  return { items: withBody, omittedProcessCount: list.length - withBody.length };
+}
+
 const BOT_BROWSER_URI_PROTOCOL_RE = /^(metaid|metaapp|map|metafile|pin|preview-metaapp):/i;
 
 /** R3: whether a URI opens inside the Bot Browser (vs the external browser). */

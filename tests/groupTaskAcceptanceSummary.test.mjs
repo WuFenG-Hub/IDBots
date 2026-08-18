@@ -10,6 +10,8 @@ const {
   buildAcceptanceGuidance,
   deliverableVerificationLabel,
   extractChairConclusion,
+  selectAcceptanceChecklist,
+  textDeliverablePreview,
   CHAIR_CONCLUSION_MAX_CHARS,
 } = require('../dist-electron/main/services/groupTaskAcceptanceSummary.js');
 
@@ -238,4 +240,75 @@ test('Improvement #1: the group message leads with the stored conclusion when pr
   assert.equal(lines[1], '结论：验收通过并结项', 'conclusion is the first content line after the header');
   const withoutConclusion = buildAcceptanceSummaryMessageText({ ...base }, 'T');
   assert.ok(!withoutConclusion.includes('结论：'), 'no fabricated conclusion line');
+});
+
+test('acceptance checklist omits process-text placeholders when digital outcomes exist', () => {
+  const result = buildAcceptanceSummary({
+    task: baseTask,
+    deliverables: [
+      mkDeliverable({
+        kind: 'metaapp',
+        uri: 'metaapp://ad3ba22f',
+        confirmation: 'confirmed',
+        status: 'delivered',
+        sourceSenderName: 'eleven',
+      }),
+      mkDeliverable({
+        id: 2,
+        kind: 'text',
+        uri: null,
+        confirmation: 'unconfirmed',
+        sourceContent: '[DELIVERABLE] 核验报告全文',
+        sourceSenderName: 'Builder阿码',
+      }),
+      mkDeliverable({
+        id: 3,
+        kind: 'text',
+        uri: null,
+        confirmation: 'unconfirmed',
+        sourceContent: '[DELIVERABLE]',
+        sourceSenderName: 'loop',
+      }),
+      mkDeliverable({
+        id: 4,
+        kind: 'url',
+        uri: 'https://openagentinternet.org/browser/x',
+        confirmation: 'confirmed',
+        status: 'delivered',
+        sourceSenderName: 'eleven',
+      }),
+    ],
+    members: [mkMember({ name: 'eleven' })],
+  });
+  // Snapshot still keeps every row for audit.
+  assert.equal(result.deliverables.length, 4);
+  const checklist = selectAcceptanceChecklist(result.deliverables);
+  assert.deepEqual(checklist.items.map((item) => item.kind), ['metaapp', 'url']);
+  assert.equal(checklist.omittedProcessCount, 2);
+  assert.ok(result.messageText.includes('[metaapp] metaapp://ad3ba22f'));
+  assert.ok(result.messageText.includes('on-chain ✓'));
+  assert.ok(!result.messageText.includes('（见消息原文）'));
+  assert.ok(!result.messageText.includes('(unverified)'));
+  assert.ok(result.messageText.includes('另有 2 项过程记录，见群内报告'));
+});
+
+test('text-only task prints the report body, never 见消息原文/unverified', () => {
+  const result = buildAcceptanceSummary({
+    task: baseTask,
+    deliverables: [
+      mkDeliverable({
+        kind: 'text',
+        uri: null,
+        confirmation: 'unconfirmed',
+        sourceContent: '[DELIVERABLE]\n验收观察：动画可播放',
+        sourceSenderName: 'chair',
+      }),
+    ],
+    members: [],
+  });
+  assert.equal(result.deliverables[0].preview, '验收观察：动画可播放');
+  assert.equal(textDeliverablePreview('[DELIVERABLE]\n验收观察：动画可播放'), '验收观察：动画可播放');
+  assert.ok(result.messageText.includes('[text] 验收观察：动画可播放 — chair'));
+  assert.ok(!result.messageText.includes('（见消息原文）'));
+  assert.ok(!result.messageText.includes('(unverified)'));
 });

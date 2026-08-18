@@ -200,7 +200,7 @@ test('status broadcast: real transitions emit once, no-op/illegal stay silent, e
 
     assert.deepEqual(
       events.map((event) => [event.taskId, event.status]),
-      [[task.id, 'executing'], [task.id, 'review']],
+      [[task.id, 'planning'], [task.id, 'executing'], [task.id, 'review']],
     );
     assert.ok(events.every((event) => event.type === 'groupTask:statusChanged' && typeof event.at === 'number'));
 

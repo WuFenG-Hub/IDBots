@@ -161,6 +161,11 @@ const Sidebar: React.FC<SidebarProps> = ({
   }, [onShowCowork]);
 
   useEffect(() => {
+    if (taskRecordTab !== 'group') return;
+    void groupTaskService.loadTasks();
+  }, [taskRecordTab]);
+
+  useEffect(() => {
     if (!isCollapsed) return;
     setIsSearchOpen(false);
   }, [isCollapsed]);
