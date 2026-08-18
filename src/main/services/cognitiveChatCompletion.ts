@@ -78,15 +78,16 @@ function resolveThinkingForModel(
 
 /**
  * Whether the cognitive layer should call the DeepSeek Responses API for this
- * model. The Responses API currently serves flash models only; pro and other
- * variants fall back to chat/completions. See
+ * model. The Responses API serves the V4 family (flash and pro — pro GA
+ * 2026-08-13); older variants fall back to chat/completions. See
  * https://api-docs.deepseek.com/zh-cn/guides/responses_api
  */
 function shouldUseDeepSeekResponses(provider: string | undefined, model: string): boolean {
   if (provider?.toLowerCase() !== 'deepseek') {
     return false;
   }
-  return model.toLowerCase().includes('flash');
+  const normalized = model.toLowerCase();
+  return normalized.includes('flash') || normalized.includes('pro');
 }
 
 /** Build the DeepSeek Responses endpoint URL (host root, no /v1 prefix). */

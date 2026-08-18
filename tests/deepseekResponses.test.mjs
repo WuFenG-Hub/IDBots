@@ -66,11 +66,13 @@ test('resolveUpstreamAPIType routes DeepSeek flash to responses', async () => {
   assert.equal(resolveUpstreamAPIType('DEEPSEEK', 'deepseek-v4-flash'), 'responses');
 });
 
-test('resolveUpstreamAPIType routes DeepSeek pro to chat_completions (not yet supported)', async () => {
+test('resolveUpstreamAPIType routes DeepSeek pro to responses (GA since 2026-08-13)', async () => {
   const { __openAICompatProxyTestUtils } = await importCompiled('coworkOpenAICompatProxy');
   const { resolveUpstreamAPIType } = __openAICompatProxyTestUtils;
 
-  assert.equal(resolveUpstreamAPIType('deepseek', 'deepseek-v4-pro'), 'chat_completions');
+  assert.equal(resolveUpstreamAPIType('deepseek', 'deepseek-v4-pro'), 'responses');
+  assert.equal(resolveUpstreamAPIType('deepseek', 'DeepSeek-V4-PRO'), 'responses');
+  // Older/unknown variants still fall back to chat/completions.
   assert.equal(resolveUpstreamAPIType('deepseek', 'deepseek-reasoner'), 'chat_completions');
 });
 
@@ -519,12 +521,13 @@ test('injectResponsesWebSearchBlocks is a no-op without web_search_call items', 
 // Cognitive layer: shouldUseDeepSeekResponses + URL building
 // ---------------------------------------------------------------------------
 
-test('shouldUseDeepSeekResponses gates on provider + flash model', async () => {
+test('shouldUseDeepSeekResponses gates on provider + V4 family model', async () => {
   const { __cognitiveChatCompletionTestUtils } = await importCompiledService('cognitiveChatCompletion');
   const { shouldUseDeepSeekResponses, buildDeepSeekResponsesURL, normalizeDeepSeekResponsesEffort } = __cognitiveChatCompletionTestUtils;
 
   assert.equal(shouldUseDeepSeekResponses('deepseek', 'deepseek-v4-flash'), true);
-  assert.equal(shouldUseDeepSeekResponses('deepseek', 'deepseek-v4-pro'), false);
+  assert.equal(shouldUseDeepSeekResponses('deepseek', 'deepseek-v4-pro'), true);
+  assert.equal(shouldUseDeepSeekResponses('deepseek', 'deepseek-reasoner'), false);
   assert.equal(shouldUseDeepSeekResponses('openai', 'gpt-5.6'), false);
   assert.equal(shouldUseDeepSeekResponses(undefined, 'deepseek-v4-flash'), false);
 });
