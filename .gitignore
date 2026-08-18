@@ -56,6 +56,7 @@ tests/*
 !tests/dshUsageProjection.test.mjs
 !tests/dshPluginManager.test.mjs
 !tests/dshKernelDefault.test.mjs
+!tests/metaidRpcTokenFile.test.mjs
 !tests/promptComposer.test.mjs
 !tests/cognitiveGroupChatPrompt.test.mjs
 !tests/p2pIndexerServiceRecovery.test.mjs

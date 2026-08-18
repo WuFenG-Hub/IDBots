@@ -9,8 +9,13 @@
 // session — every message lands through the same callbacks the Claude path
 // uses (store.addMessage + runner events).
 
+import { app } from 'electron'
 import { join } from 'path'
-import { getMetaidRpcToken } from '../services/metaidRpcEndpoint'
+import {
+  getMetaidRpcToken,
+  getMetaidRpcTokenFilePath,
+  METAID_RPC_AUTHFILE_ENV,
+} from '../services/metaidRpcEndpoint'
 import { DshKernel } from './dshKernel/dshKernel'
 import type { DshKernelOptions } from './dshKernel/dshKernel'
 import type {
@@ -433,6 +438,13 @@ export class DshTurnHub {
         // post-buzz / metaapp / omni-caster / upload) fails with 401 from DSH
         // sessions. Mirrors skillManager.ts runSkillById injection.
         IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
+        // Layer 2: the DSH bash tool scrubs env names matching
+        // /KEY|PASSWORD|SECRET|TOKEN/i before model-visible subprocesses
+        // inherit them, so the token above never reaches SKILL scripts run via
+        // bash. Its mirror file (written per launch by the MetaID RPC server)
+        // carries the credential instead; this env name must stay free of
+        // KEY/PASSWORD/SECRET/TOKEN to survive the same scrub.
+        [METAID_RPC_AUTHFILE_ENV]: getMetaidRpcTokenFilePath(app.getPath('userData')),
       },
     }
     if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace

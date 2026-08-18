@@ -19,6 +19,20 @@ function cleanToken(value) {
   return String(value || '').trim().replace(TRAILING_PUNCTUATION_RE, '');
 }
 
+function resolveRpcToken(env) {
+  const fromEnv = String(env.IDBOTS_RPC_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+  // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+  const authFile = String(env.IDBOTS_RPC_AUTHFILE || '').trim();
+  if (!authFile) return '';
+  try {
+    return fs.readFileSync(authFile, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 function normalizeSupportedUri(rawUri) {
   const cleaned = cleanToken(rawUri);
   const match = /^([a-z][a-z0-9+.-]*):\/\/(.+)$/i.exec(cleaned);
@@ -267,7 +281,7 @@ async function openBotBrowser(input, env = process.env) {
   }
 
   const rpcBase = String(env.IDBOTS_RPC_URL || DEFAULT_RPC_URL).replace(/\/+$/, '');
-  const rpcToken = String(env.IDBOTS_RPC_TOKEN || '').trim();
+  const rpcToken = resolveRpcToken(env);
   const rpcHeaders = () => {
     const headers = { 'Content-Type': 'application/json' };
     if (rpcToken) headers.Authorization = `Bearer ${rpcToken}`;

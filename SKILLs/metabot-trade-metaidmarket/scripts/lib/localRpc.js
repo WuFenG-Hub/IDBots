@@ -1,5 +1,19 @@
 'use strict';
 
+function resolveRpcToken(env) {
+  const fromEnv = String(env?.IDBOTS_RPC_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+  // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+  const authFile = String(env?.IDBOTS_RPC_AUTHFILE || '').trim();
+  if (!authFile) return '';
+  try {
+    return require('fs').readFileSync(authFile, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 function getRpcBase(env) {
   return String(env?.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
 }

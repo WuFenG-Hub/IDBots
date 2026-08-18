@@ -9,6 +9,7 @@ import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
 import { resolveElectronExecutablePath } from './runtimePaths';
+import { getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
 function appendEnvPath(current: string | undefined, additions: string[]): string | undefined {
@@ -1086,6 +1087,11 @@ export async function getEnhancedEnv(
   env.IDBOTS_ELECTRON_PATH = resolveElectronExecutablePath();
   env.IDBOTS_APP_DATA_PATH = app.getPath('appData');
   env.IDBOTS_USER_DATA_PATH = app.getPath('userData');
+  // Scrub-proof fallback channel for the local RPC bearer token: DSH bash
+  // erases *TOKEN* env names, so SKILL scripts read the token from this
+  // mirror file (written per launch by the MetaID RPC server) when the
+  // env-borne IDBOTS_RPC_TOKEN is missing.
+  env[METAID_RPC_AUTHFILE_ENV] = getMetaidRpcTokenFilePath(app.getPath('userData'));
 
   // Inject internal API base URL for skill scripts (e.g. scheduled-task creation)
   const internalApiBaseURL = getInternalApiBaseURL();

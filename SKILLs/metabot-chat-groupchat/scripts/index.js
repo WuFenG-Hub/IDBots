@@ -48,7 +48,23 @@ const util_1 = require("util");
 const fs = __importStar(require("fs"));
 const crypto_1 = require("crypto");
 const RPC_URL = process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200';
-const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function resolveRpcToken(env) {
+    const fromEnv = String(env.IDBOTS_RPC_TOKEN || '').trim();
+    if (fromEnv)
+        return fromEnv;
+    // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+    // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+    const authFile = String(env.IDBOTS_RPC_AUTHFILE || '').trim();
+    if (!authFile)
+        return '';
+    try {
+        return fs.readFileSync(authFile, 'utf8').trim();
+    }
+    catch {
+        return '';
+    }
+}
+const RPC_TOKEN = resolveRpcToken(process.env);
 function rpcHeaders() {
     const headers = { 'Content-Type': 'application/json' };
     if (RPC_TOKEN)

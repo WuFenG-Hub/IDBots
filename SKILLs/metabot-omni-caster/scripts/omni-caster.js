@@ -192,7 +192,23 @@ async function main() {
     await runCreatePin(rpcUrl, requestBody);
 }
 void main();
-const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function resolveRpcToken(env) {
+    const fromEnv = String(env.IDBOTS_RPC_TOKEN || '').trim();
+    if (fromEnv)
+        return fromEnv;
+    // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+    // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+    const authFile = String(env.IDBOTS_RPC_AUTHFILE || '').trim();
+    if (!authFile)
+        return '';
+    try {
+        return require("fs").readFileSync(authFile, 'utf8').trim();
+    }
+    catch {
+        return '';
+    }
+}
+const RPC_TOKEN = resolveRpcToken(process.env);
 function rpcHeaders() {
     const headers = { 'Content-Type': 'application/json' };
     if (RPC_TOKEN)

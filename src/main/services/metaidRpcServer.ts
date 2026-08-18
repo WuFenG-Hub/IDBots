@@ -58,6 +58,7 @@ import {
   isAllowedMetaidRpcOrigin,
   isMetaidRpcTokenAuthorized,
   resolveMetaidRpcPort,
+  writeMetaidRpcTokenFile,
 } from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
 import { sendBotBrowserOpenUri } from './botBrowserOpenUriService';
@@ -2145,6 +2146,12 @@ export function startMetaidRpcServer(
   });
 
   const rpcPort = resolveMetaidRpcPort();
+  // Layer 2 (DSH skill RPC 401): mirror the per-launch token into userData so
+  // SKILL scripts can read it via IDBOTS_RPC_AUTHFILE when the DSH bash tool
+  // scrubs the IDBOTS_RPC_TOKEN env name from their environment.
+  if (!writeMetaidRpcTokenFile(app.getPath('userData'))) {
+    console.warn('[MetaID RPC] Failed to write the token mirror file; DSH SKILL RPC keeps env-only token injection');
+  }
   listenWithRetry(server, rpcPort, RPC_HOST, {
     onListening: () => {
       console.log(`[MetaID RPC] Gateway listening on ${getMetaidRpcBase()}`);

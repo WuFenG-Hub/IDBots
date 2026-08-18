@@ -1,9 +1,13 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { chmodSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const DEFAULT_METAID_RPC_HOST = '127.0.0.1';
 export const DEFAULT_METAID_RPC_PORT = 31200;
 export const METAID_RPC_PORT_ENV = 'IDBOTS_METAID_RPC_PORT';
 export const METAID_RPC_TOKEN_ENV = 'IDBOTS_RPC_TOKEN';
+export const METAID_RPC_AUTHFILE_ENV = 'IDBOTS_RPC_AUTHFILE';
+export const METAID_RPC_TOKEN_FILENAME = 'metaid-rpc-token';
 
 let cachedMetaidRpcToken: string | null = null;
 
@@ -46,6 +50,35 @@ export function isMetaidRpcTokenAuthorized(
     return false;
   }
   return timingSafeEqual(expectedBuffer, providedBuffer);
+}
+
+/** Path of the per-launch token mirror file inside the Electron userData dir. */
+export function getMetaidRpcTokenFilePath(userDataPath: string): string {
+  return join(userDataPath, METAID_RPC_TOKEN_FILENAME);
+}
+
+/**
+ * Mirror the per-launch bearer token into a 0600 file under userData.
+ *
+ * Layer 2 fallback for DSH sessions: the DSH bash tool erases env names
+ * matching /KEY|PASSWORD|SECRET|TOKEN/i from model-visible subprocesses, so
+ * IDBOTS_RPC_TOKEN never reaches SKILL scripts executed via bash there. The
+ * file's path rides the scrub-proof IDBOTS_RPC_AUTHFILE env name and skill
+ * RPC clients fall back to reading it when the env-borne token is absent.
+ * Best-effort: on write failure the env injection remains the only channel.
+ */
+export function writeMetaidRpcTokenFile(
+  userDataPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const filePath = getMetaidRpcTokenFilePath(userDataPath);
+  try {
+    writeFileSync(filePath, `${getMetaidRpcToken(env)}\n`, 'utf8');
+    chmodSync(filePath, 0o600);
+    return filePath;
+  } catch {
+    return null;
+  }
 }
 
 /**

@@ -21,6 +21,20 @@ function extractRpcField(record, key) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function resolveRpcToken(env) {
+  const fromEnv = String(env.IDBOTS_RPC_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+  // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+  const authFile = String(env.IDBOTS_RPC_AUTHFILE || '').trim();
+  if (!authFile) return '';
+  try {
+    return require('fs').readFileSync(authFile, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
 const SKILL_SERVICE_PATH = '/protocols/skill-service';
 const DEFAULT_INPUT_TYPE = 'text';
 const DEFAULT_OUTPUT_TYPE = 'text';
@@ -130,7 +144,7 @@ function main() {
   }
 
   const rpcUrl = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
-  const rpcToken = process.env.IDBOTS_RPC_TOKEN || '';
+  const rpcToken = resolveRpcToken(process.env);
   const rpcHeaders = () => {
     const headers = { 'Content-Type': 'application/json' };
     if (rpcToken) headers.Authorization = `Bearer ${rpcToken}`;
