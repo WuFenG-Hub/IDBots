@@ -94,6 +94,7 @@ test('builds the four metabot_manage tools', () => {
   assert.ok(byName.metabot_create, 'metabot_create tool must exist');
   assert.ok(byName.metabot_update, 'metabot_update tool must exist');
   assert.ok(byName.metabot_delete, 'metabot_delete tool must exist');
+  assert.ok(byName.metabot_getinfo, 'metabot_getinfo tool must exist');
 });
 
 // ---------------------------------------------------------------------------
@@ -192,6 +193,7 @@ test('welcome viewer: builds only list + create (update/delete stay Twin-only)',
   assert.ok(byName.metabot_create, 'metabot_create tool must exist');
   assert.equal(byName.metabot_update, undefined, 'metabot_update must NOT be exposed to the Welcome Bot');
   assert.equal(byName.metabot_delete, undefined, 'metabot_delete must NOT be exposed to the Welcome Bot');
+  assert.equal(byName.metabot_getinfo, undefined, 'metabot_getinfo must NOT be exposed to the Welcome Bot');
 });
 
 test('welcome viewer: create with no Twin on the machine creates the first Twin', async () => {
@@ -381,4 +383,109 @@ test('metabot_delete: invalid id is rejected', async () => {
   const res = await byName.metabot_delete.handler({ metabot_id: 0 });
   assert.equal(res.isError, true);
   assert.match(textOf(res), /positive integer `metabot_id`/);
+});
+
+test('metabot_update chat_skill_op: add appends one skill without replacing the list', async () => {
+  const { byName, calls } = makeHarness({
+    listResult: [{
+      id: 5,
+      name: 'Worker',
+      type: 'worker',
+      enabled: true,
+      llm_id: 'deepseek',
+      fallback_llm_id: null,
+      role: '',
+      bio: null,
+      goal: null,
+      allow_chat_skills: ['metabot-help'],
+      a2a_max_incoming_turns: null,
+      a2a_bye_cooldown_ms: null,
+      a2a_auto_reply_enabled: null,
+      globalMetaID: 'gmid-5',
+    }],
+  });
+  const res = await byName.metabot_update.handler({
+    metabot_id: 5,
+    chat_skill_op: { action: 'add', skill: 'hyperframes' },
+  });
+  assert.equal(res.isError, undefined);
+  assert.deepEqual(calls.update[0].input.allow_chat_skills, ['metabot-help', 'hyperframes']);
+});
+
+test('metabot_update chat_skill_op: remove drops one skill and keeps the rest', async () => {
+  const { byName, calls } = makeHarness({
+    listResult: [{
+      id: 5,
+      name: 'Worker',
+      type: 'worker',
+      enabled: true,
+      llm_id: 'deepseek',
+      fallback_llm_id: null,
+      role: '',
+      bio: null,
+      goal: null,
+      allow_chat_skills: ['alpha', 'beta', 'gamma'],
+      a2a_max_incoming_turns: null,
+      a2a_bye_cooldown_ms: null,
+      a2a_auto_reply_enabled: null,
+      globalMetaID: 'gmid-5',
+    }],
+  });
+  await byName.metabot_update.handler({
+    metabot_id: 5,
+    chat_skill_op: { action: 'remove', skill: 'beta' },
+  });
+  assert.deepEqual(calls.update[0].input.allow_chat_skills, ['alpha', 'gamma']);
+});
+
+test('metabot_update rejects mixing chat_skill_op with allow_chat_skills', async () => {
+  const { byName } = makeHarness();
+  const res = await byName.metabot_update.handler({
+    metabot_id: 5,
+    allow_chat_skills: ['x'],
+    chat_skill_op: { action: 'add', skill: 'y' },
+  });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /cannot take both/);
+});
+
+test('metabot_getinfo list_bot_chat_skills returns the whitelist', async () => {
+  const { byName } = makeHarness({
+    listResult: [{
+      id: 5,
+      name: 'Worker',
+      type: 'worker',
+      enabled: true,
+      llm_id: 'deepseek',
+      fallback_llm_id: null,
+      role: '',
+      bio: null,
+      goal: null,
+      allow_chat_skills: ['alpha', 'beta'],
+      a2a_max_incoming_turns: null,
+      a2a_bye_cooldown_ms: null,
+      a2a_auto_reply_enabled: null,
+      globalMetaID: 'gmid-5',
+    }],
+  });
+  const res = await byName.metabot_getinfo.handler({ action: 'list_bot_chat_skills', metabot_id: 5 });
+  assert.equal(res.isError, undefined);
+  assert.match(textOf(res), /alpha/);
+  assert.match(textOf(res), /beta/);
+});
+
+test('standard viewer: exposes update + getinfo only', () => {
+  const { byName } = makeHarness({}, { viewer: 'standard' });
+  assert.ok(byName.metabot_update);
+  assert.ok(byName.metabot_getinfo);
+  assert.equal(byName.metabot_list, undefined);
+  assert.equal(byName.metabot_create, undefined);
+  assert.equal(byName.metabot_delete, undefined);
+});
+
+test('standard viewer: rejects non-chat-skill update fields', async () => {
+  const { byName } = makeHarness({}, { viewer: 'standard' });
+  const res = await byName.metabot_update.handler({ metabot_id: 5, name: 'Nope' });
+  assert.equal(res.isError, true);
+  assert.match(textOf(res), /chat skills/);
 });

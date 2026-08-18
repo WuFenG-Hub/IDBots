@@ -1,11 +1,12 @@
 import { z } from 'zod';
-import type {
-  CreateMetaBotOnChainResult,
-  DeleteMetaBotResult,
-  ManagedMetabotSummary,
-  LlmProviderOption,
-  UpdateMetaBotInput,
-  UpdateMetaBotResult,
+import {
+  applyChatSkillOp,
+  type CreateMetaBotOnChainResult,
+  type DeleteMetaBotResult,
+  type ManagedMetabotSummary,
+  type LlmProviderOption,
+  type UpdateMetaBotInput,
+  type UpdateMetaBotResult,
 } from '../services/metabotManageService';
 
 /**
@@ -170,27 +171,42 @@ function formatDeleteResult(id: number, result: DeleteMetaBotResult): string {
   return `MetaBot (id=${id}) deleted. If the deleted bot was the Twin, Twin status was transferred to the earliest remaining bot.`;
 }
 
+export type ChatSkillOp = { action: 'add' | 'remove'; skill: string };
+
+function formatGetInfoResult(bot: ManagedMetabotSummary | undefined, id: number): string {
+  if (!bot) {
+    return `MetaBot ${id} not found.`;
+  }
+  const skills = bot.allow_chat_skills;
+  if (skills.length === 0) {
+    return `MetaBot ${bot.name} (id=${bot.id}) chatSkills whitelist is empty.`;
+  }
+  return [
+    `MetaBot ${bot.name} (id=${bot.id}) chatSkills whitelist (${skills.length}):`,
+    ...skills.map((skill) => `- ${skill}`),
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // Tool builder
 // ---------------------------------------------------------------------------
 
 /** Which operator persona the tool suite is registered for. */
-export type MetabotManageViewer = 'twin' | 'welcome';
+export type MetabotManageViewer = 'twin' | 'welcome' | 'standard';
 
 /**
- * Inline MCP tools that let the host's operator bots manage the local MetaBot
- * roster: list, create, update, and delete.
+ * Inline MCP tools that let bots manage the local MetaBot roster.
  *
- * - viewer 'twin' (default): the full four-tool suite, registered ONLY for
- *   Twin sessions in coworkRunner (isTwinSession gate) — Worker bots never
- *   see these tools.
+ * - viewer 'twin' (default): the full list/create/update/delete suite plus
+ *   metabot_getinfo, registered for Twin sessions.
  * - viewer 'welcome': a reduced list+create suite for the built-in Welcome
- *   Bot during initial setup (the machine has no Twin Bot yet). metabot_create
- *   enforces the "exactly one Twin" invariant centrally: while no Twin exists
- *   the created bot becomes the user's first Twin Bot; afterwards Workers.
+ *   Bot during initial setup.
+ * - viewer 'standard': chat-skill whitelist update + metabot_getinfo, so a
+ *   Worker in an ordinary Chat can install a skill onto itself without the
+ *   Twin-only create/delete tools.
  *
- * Every tool delegates to services/metabotManageService.ts, the same code the
- * manual UI uses, so bot-assisted management is identical to hand-editing.
+ * Every mutating tool delegates to services/metabotManageService.ts, the same
+ * code the manual UI uses.
  */
 export function buildMetabotManageAgentTools(deps: {
   tool: SdkToolFactory;
@@ -199,9 +215,12 @@ export function buildMetabotManageAgentTools(deps: {
 }): unknown[] {
   const { tool, control } = deps;
   const isWelcomeViewer = deps.viewer === 'welcome';
+  const isStandardViewer = deps.viewer === 'standard';
   const audience = isWelcomeViewer
     ? 'Welcome Bot during initial setup (this machine has no Twin Bot yet).'
-    : 'Twin Bot only.';
+    : isStandardViewer
+      ? 'Available in ordinary Chat sessions. Use chat_skill_op to add or remove a single chat skill; use metabot_getinfo to read the whitelist back.'
+      : 'Twin Bot only.';
 
   const metabotList = tool(
     'metabot_list',
@@ -318,15 +337,22 @@ export function buildMetabotManageAgentTools(deps: {
 
   const metabotUpdate = tool(
     'metabot_update',
-    [
-      'Update ONE existing local MetaBot\'s editable fields: basic info (name, avatar, bio, enabled, Twin/Worker type), persona (role, soul, goal), LLM (llm_id, fallback_llm_id), chat skills, homepage, and A2A auto-reply knobs. Twin Bot only.',
-      'Use when the user asks to rename, re-describe, re-persona, enable/disable, switch the LLM brain of, change the homepage of, or otherwise edit an existing bot. Resolve the target with metabot_list first (the user usually names it by display name).',
-      'When NOT to use: do not update without a confirmed metabot_id; do not edit fields the user did not ask to change (pass only the fields to change); and signed owner-binding is NOT supported by this tool — for security the user must set a bot\'s owner (boss_global_metaid) themselves in My Bots > Edit, so never attempt to change owner via this tool.',
-      'Rules: metabot_id is required. Pass only the fields that should change; omitted fields keep their current value. Transferring Twin status (metabot_type="twin") demotes the current Twin automatically. Changed info pins are re-published on-chain (best-effort); the result reports txids and any partial status. A2A knobs and enabled/type are local-only (no on-chain publish). Homepage takes a structured object (see schema); pass null or source "default" to reset to the default template.',
-      'Returns the updated bot name/id and the on-chain sync outcome.',
-    ].join(' '),
+    isStandardViewer
+      ? [
+          'Update ONE existing local MetaBot\'s chat-skill whitelist. Available in ordinary Chat sessions.',
+          'Use chat_skill_op to add or remove a SINGLE skill without replacing the rest of the list (action "add" | "remove", skill = the skill name from list_installed_skills). metabot_id is required.',
+          'When NOT to use: do not pass allow_chat_skills (full replacement) unless you intend to replace the entire list; prefer chat_skill_op. Do not use this to rename, re-persona, or delete a bot.',
+          'Does not prompt for confirmation. Returns the updated bot name/id and the on-chain sync outcome.',
+        ].join(' ')
+      : [
+          'Update ONE existing local MetaBot\'s editable fields: basic info (name, avatar, bio, enabled, Twin/Worker type), persona (role, soul, goal), LLM (llm_id, fallback_llm_id), chat skills, homepage, and A2A auto-reply knobs. Twin Bot only.',
+          'Use when the user asks to rename, re-describe, re-persona, enable/disable, switch the LLM brain of, change the homepage of, or otherwise edit an existing bot. Resolve the target with metabot_list first (the user usually names it by display name). To add or remove a single chat skill without replacing the list, pass chat_skill_op instead of allow_chat_skills.',
+          'When NOT to use: do not update without a confirmed metabot_id; do not edit fields the user did not ask to change (pass only the fields to change); and signed owner-binding is NOT supported by this tool — for security the user must set a bot\'s owner (boss_global_metaid) themselves in My Bots > Edit, so never attempt to change owner via this tool.',
+          'Rules: metabot_id is required. Pass only the fields that should change; omitted fields keep their current value. Transferring Twin status (metabot_type="twin") demotes the current Twin automatically. Changed info pins are re-published on-chain (best-effort); the result reports txids and any partial status. A2A knobs and enabled/type are local-only (no on-chain publish). Homepage takes a structured object (see schema); pass null or source "default" to reset to the default template. chat_skill_op does not prompt for confirmation.',
+          'Returns the updated bot name/id and the on-chain sync outcome.',
+        ].join(' '),
     {
-      metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list).'),
+      metabot_id: z.number().int().positive().describe('id of the bot to update (from metabot_list, or the current bot\'s id).'),
       name: z.string().optional().describe('New display name.'),
       avatar: z.string().optional().describe('New avatar (data URL or http(s) URL), or empty string to clear.'),
       bio: z.string().optional().describe('New public bio.'),
@@ -343,7 +369,14 @@ export function buildMetabotManageAgentTools(deps: {
       allow_chat_skills: z
         .array(z.string())
         .optional()
-        .describe('Full replacement list of skill ids allowed in this bot\'s private chats.'),
+        .describe('Full replacement list of skill ids allowed in this bot\'s private chats. Prefer chat_skill_op for a single add/remove.'),
+      chat_skill_op: z
+        .object({
+          action: z.enum(['add', 'remove']).describe('Add or remove one skill without replacing the rest of the whitelist.'),
+          skill: z.string().min(1).describe('Skill name or skill id (from list_installed_skills / SKILL.md name).'),
+        })
+        .optional()
+        .describe('Incremental chat-skill whitelist change. Does not prompt for confirmation.'),
       homepage: z
         .object({
           source: z
@@ -381,7 +414,27 @@ export function buildMetabotManageAgentTools(deps: {
       if (!Number.isInteger(id) || id <= 0) {
         return textResult('metabot_update requires a positive integer `metabot_id`.', true);
       }
-      // Forward only the fields the caller actually provided.
+      const chatSkillOp = args.chat_skill_op as ChatSkillOp | undefined;
+      if (isStandardViewer) {
+        const extraKeys = Object.keys(args).filter((key) => (
+          key !== 'metabot_id'
+          && key !== 'chat_skill_op'
+          && key !== 'allow_chat_skills'
+          && args[key] !== undefined
+        ));
+        if (extraKeys.length > 0) {
+          return textResult(
+            `Ordinary Chat sessions may only change chat skills via metabot_update (got extra fields: ${extraKeys.join(', ')}). Use chat_skill_op.`,
+            true,
+          );
+        }
+      }
+      if (chatSkillOp && args.allow_chat_skills !== undefined) {
+        return textResult(
+          'metabot_update cannot take both chat_skill_op and allow_chat_skills. Use chat_skill_op for a single add/remove.',
+          true,
+        );
+      }
       const input: UpdateMetaBotInput = {};
       const passthrough: Array<keyof UpdateMetaBotInput> = [
         'name',
@@ -406,6 +459,19 @@ export function buildMetabotManageAgentTools(deps: {
           provided += 1;
         }
       }
+      if (chatSkillOp) {
+        const action = chatSkillOp.action === 'remove' ? 'remove' : 'add';
+        const skill = asString(chatSkillOp.skill);
+        if (!skill) {
+          return textResult('metabot_update chat_skill_op requires a non-empty `skill`.', true);
+        }
+        const bot = control.list().find((item) => item.id === id);
+        if (!bot) {
+          return textResult(`MetaBot ${id} not found.`, true);
+        }
+        input.allow_chat_skills = applyChatSkillOp(bot.allow_chat_skills, { action, skill });
+        provided += 1;
+      }
       // Homepage needs structured→JSON composition before it is forwarded.
       if (args.homepage !== undefined) {
         try {
@@ -420,7 +486,7 @@ export function buildMetabotManageAgentTools(deps: {
       }
       if (provided === 0) {
         return textResult(
-          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, ...).',
+          'metabot_update received no fields to change. Pass at least one editable field (name, bio, role, llm_id, enabled, homepage, chat_skill_op, ...).',
           true,
         );
       }
@@ -451,11 +517,42 @@ export function buildMetabotManageAgentTools(deps: {
     },
   );
 
+  const metabotGetinfo = tool(
+    'metabot_getinfo',
+    [
+      'Read ONE local MetaBot\'s information. This period covers list_bot_chat_skills: return the bot\'s chatSkills whitelist so you can verify a chat_skill_op add/remove.',
+      'Use after metabot_update(chat_skill_op) to confirm the skill is (or is no longer) on the whitelist. metabot_id is required.',
+      'When NOT to use: do not use this to list every bot (Twin uses metabot_list for that); this is a focused read of one bot\'s chat skills.',
+      'Returns the whitelist as one skill per line, or an empty-whitelist note.',
+    ].join(' '),
+    {
+      action: z
+        .enum(['list_bot_chat_skills'])
+        .optional()
+        .describe('Read operation. Defaults to list_bot_chat_skills.'),
+      metabot_id: z.number().int().positive().describe('id of the bot to read.'),
+    },
+    async (args: { action?: 'list_bot_chat_skills'; metabot_id: number }) => {
+      const id = Number(args.metabot_id);
+      if (!Number.isInteger(id) || id <= 0) {
+        return textResult('metabot_getinfo requires a positive integer `metabot_id`.', true);
+      }
+      const bot = control.list().find((item) => item.id === id);
+      if (!bot) {
+        return textResult(`MetaBot ${id} not found.`, true);
+      }
+      return textResult(formatGetInfoResult(bot, id));
+    },
+  );
+
   if (isWelcomeViewer) {
     // The Welcome Bot only needs discovery + creation during initial setup;
     // update/delete stay Twin-only so the free-quota guide cannot mutate or
     // remove existing bots.
     return [metabotList, metabotCreate];
   }
-  return [metabotList, metabotCreate, metabotUpdate, metabotDelete];
+  if (isStandardViewer) {
+    return [metabotUpdate, metabotGetinfo];
+  }
+  return [metabotList, metabotCreate, metabotUpdate, metabotDelete, metabotGetinfo];
 }

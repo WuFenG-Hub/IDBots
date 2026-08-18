@@ -234,6 +234,20 @@ function normalizedList(values: string[] | null | undefined): string[] {
   return Array.from(new Set((values ?? []).map((value) => String(value).trim()).filter(Boolean)));
 }
 
+/** Incremental add/remove against a chat-skill whitelist. Other items are preserved. */
+export function applyChatSkillOp(
+  current: string[] | null | undefined,
+  op: { action: 'add' | 'remove'; skill: string },
+): string[] {
+  const skill = String(op.skill ?? '').trim();
+  const list = normalizedList(current);
+  if (!skill) return list;
+  if (op.action === 'add') {
+    return list.includes(skill) ? list : [...list, skill];
+  }
+  return list.filter((item) => item !== skill);
+}
+
 // ---------------------------------------------------------------------------
 // Create
 // ---------------------------------------------------------------------------

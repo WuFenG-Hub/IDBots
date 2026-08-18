@@ -293,6 +293,11 @@ import {
   listMetaAppForks as listMetaAppForksRemote,
 } from './services/metaAppSearchService';
 import {
+  extractMetaApp as extractMetaAppPackage,
+  installSkill as installSkillPackage,
+  listInstalledSkills as listInstalledSkillPackages,
+} from './services/skillInstallService';
+import {
   searchMetaIds as searchMetaIdsRemote,
   getMetaIdDetail as getMetaIdDetailRemote,
 } from './services/metaIdSearchService';
@@ -5056,6 +5061,22 @@ const getCoworkRunner = () => {
           const appConfig = getStore().get<{ providers?: Record<string, { enabled?: boolean; apiKey?: string } | undefined> }>('app_config');
           return listConfiguredLlmProviders(appConfig?.providers);
         },
+      },
+      skillTools: {
+        extractMetaApp: async ({ pinId, workspaceDir }) => extractMetaAppPackage(pinId, {
+          fetchPin: (id) => getPinData(id, false),
+          getSkillsRoot: () => getSkillManager().getSkillsRoot(),
+          workspaceDir,
+        }),
+        installSkill: async (input) => installSkillPackage(input, {
+          fetchPin: (id) => getPinData(id, false),
+          getSkillsRoot: () => getSkillManager().getSkillsRoot(),
+          reloadSkills: () => getSkillManager().reloadAfterInstall(),
+          workspaceDir: os.tmpdir(),
+        }),
+        listInstalledSkills: () => listInstalledSkillPackages({
+          getSkillsRoot: () => getSkillManager().getSkillsRoot(),
+        }),
       },
       getBrowserContextPrompt: async (sessionId: string): Promise<string | null> => {
         const coworkStoreInstance = getCoworkStore();

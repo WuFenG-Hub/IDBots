@@ -19,6 +19,7 @@ const {
   listConfiguredLlmProviders,
   requireMetabotLlmIdForCreate,
   assertCanCreateMetabot,
+  applyChatSkillOp,
 } = require('../dist-electron/main/services/metabotManageService.js');
 
 const makeTempDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'idbots-metabot-manage-'));
@@ -413,4 +414,16 @@ test('listConfiguredLlmProviders: filters by enabled + apiKey (non-ollama)', () 
 
 test('listConfiguredLlmProviders: undefined providers yields empty list', () => {
   assert.deepEqual(listConfiguredLlmProviders(undefined), []);
+});
+
+test('applyChatSkillOp: add appends without duplicating or touching other items', () => {
+  assert.deepEqual(applyChatSkillOp(['alpha', 'beta'], { action: 'add', skill: 'gamma' }), ['alpha', 'beta', 'gamma']);
+  assert.deepEqual(applyChatSkillOp(['alpha', 'beta'], { action: 'add', skill: 'alpha' }), ['alpha', 'beta']);
+  assert.deepEqual(applyChatSkillOp([' alpha ', ''], { action: 'add', skill: ' beta ' }), ['alpha', 'beta']);
+});
+
+test('applyChatSkillOp: remove drops only the named skill', () => {
+  assert.deepEqual(applyChatSkillOp(['alpha', 'beta', 'gamma'], { action: 'remove', skill: 'beta' }), ['alpha', 'gamma']);
+  assert.deepEqual(applyChatSkillOp(['alpha'], { action: 'remove', skill: 'missing' }), ['alpha']);
+  assert.deepEqual(applyChatSkillOp([], { action: 'remove', skill: 'x' }), []);
 });

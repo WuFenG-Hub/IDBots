@@ -116,6 +116,8 @@ export function formatBotBrowserTabs(result: BotBrowserTabCommandResult): string
     .join('\n');
 }
 
+export type SearchMetaAppsNextStep = 'browser' | 'install';
+
 /** Ready-to-quote markdown bullets for MetaApp search candidates: titles and authors are already links. */
 export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string {
   return items.map((item) => {
@@ -135,6 +137,119 @@ export function formatMetaAppCandidates(items: MetaAppSearchCandidate[]): string
     ].filter(Boolean).join(' | ');
     return `- [${linkTitle}](metaapp://${item.pinId})${intro}\n  ${meta}`;
   }).join('\n');
+}
+
+/**
+ * search_metaapps is reused by both Bot Browser sessions (open the match)
+ * and ordinary Chat sessions (read APP.md / install the skill it describes).
+ */
+export function buildSearchMetaAppsAgentTools(deps: {
+  tool: SdkToolFactory;
+  searchMetaApps: NonNullable<BotBrowserControl['searchMetaApps']>;
+  listMetaAppForks?: BotBrowserControl['listMetaAppForks'];
+  nextStep?: SearchMetaAppsNextStep;
+}): unknown[] {
+  const { tool, searchMetaApps, listMetaAppForks } = deps;
+  const nextStep = deps.nextStep ?? 'browser';
+  const nextStepHint = nextStep === 'install'
+    ? 'Pick the single best match for the user\'s intent and call skill_tool with action="extract_metaapp" and its pinId to read APP.md / install instructions. When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of inventing an app.'
+    : 'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of opening a random app.';
+  const whenNotToUse = nextStep === 'install'
+    ? 'When NOT to use: if you already have an app pinId, skip the search and call skill_tool extract_metaapp directly; and this is for apps only — for social posts use search_social_posts, for identities use search_metaids.'
+    : 'When NOT to use: if you already have an app pinId, skip the search and open it directly with bot_browser_open_uri (metaapp://<pinId>); and this is for apps only — for social posts use search_social_posts, for identities use search_metaids.';
+  const useLine = nextStep === 'install'
+    ? 'Returns up to `limit` candidates (best first); pick the best match and call skill_tool action="extract_metaapp" with its pinId. For remix children of a known app, use mode="forks" with its pinId.'
+    : 'Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.';
+
+  return [
+    tool(
+      'search_metaapps',
+      [
+        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app.',
+        whenNotToUse,
+        useLine,
+      ].join(' '),
+      {
+        query: z.string().optional(),
+        tag: z.string().optional(),
+        publisher: z.string().optional(),
+        sinceDays: z.number().optional(),
+        mode: z.enum(['search', 'forks']).optional(),
+        pinId: z.string().optional(),
+        limit: z.number().optional(),
+      },
+      async (args: {
+        query?: string;
+        tag?: string;
+        publisher?: string;
+        sinceDays?: number;
+        mode?: 'search' | 'forks';
+        pinId?: string;
+        limit?: number;
+      }) => {
+        const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 8)));
+        const mode = args.mode ?? 'search';
+
+        if (mode === 'forks') {
+          if (!listMetaAppForks) {
+            return textResult('Fork listing is not supported by this host.', true);
+          }
+          const pinId = parseMetaAppPinIdFromUri(args.pinId ?? '');
+          if (!pinId) {
+            return textResult('search_metaapps mode="forks" requires a valid pinId (or metaapp://<pinId>).', true);
+          }
+          try {
+            const { items } = await listMetaAppForks({ pinId, limit });
+            if (!items.length) {
+              return textResult(`No remixes (forks) found for metaapp://${pinId}. If the user expected some, the lineage may simply not exist yet — say so honestly.`);
+            }
+            return textResult([
+              `${items.length} direct remix(es) of metaapp://${pinId}:`,
+              formatMetaAppCandidates(items),
+            ].join('\n\n'));
+          } catch (error) {
+            return textResult(`Failed to list forks: ${error instanceof Error ? error.message : String(error)}`, true);
+          }
+        }
+
+        const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
+          ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
+          : undefined;
+        try {
+          let { items } = await searchMetaApps({
+            keyword: args.query,
+            tag: args.tag,
+            publisher: args.publisher,
+            since,
+            limit,
+          });
+          // Empty-result degradation: drop the weakest (last) query token once and retry.
+          if (!items.length && args.query?.trim()) {
+            const tokens = args.query.trim().split(/\s+/);
+            if (tokens.length > 1) {
+              ({ items } = await searchMetaApps({
+                keyword: tokens.slice(0, -1).join(' '),
+                tag: args.tag,
+                publisher: args.publisher,
+                since,
+                limit,
+              }));
+            }
+          }
+          if (!items.length) {
+            return textResult(`No on-chain MetaApps matched${args.query ? ` "${args.query}"` : ''}${args.publisher ? ` from ${args.publisher}` : ''}${args.sinceDays ? ` in the last ${args.sinceDays} days` : ''}. Tell the user honestly; do NOT invent apps.`);
+          }
+          return textResult([
+            `${items.length} on-chain MetaApp candidate(s), best first:`,
+            formatMetaAppCandidates(items),
+            nextStepHint,
+          ].join('\n\n'));
+        } catch (error) {
+          return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
+        }
+      },
+    ),
+  ];
 }
 
 /**
@@ -313,92 +428,13 @@ export function buildBotBrowserAgentTools(deps: {
   const extraTools: unknown[] = [];
 
   if (controlBotBrowser.searchMetaApps) {
-    const searchMetaApps = controlBotBrowser.searchMetaApps;
-    const listMetaAppForks = controlBotBrowser.listMetaAppForks;
     extraTools.push(
-      tool(
-        'search_metaapps',
-        'Search on-chain MetaApps (HTML mini-apps published via /protocols/metaapp on the Agent Internet). Use when the user wants to FIND or DISCOVER an app by intent, topic, capability, time range, or publisher — rather than open a known app. When NOT to use: if you already have an app pinId, skip the search and open it directly with bot_browser_open_uri (metaapp://<pinId>); and this is for apps only — for social posts use search_social_posts, for identities use search_metaids. Returns up to `limit` candidates (best first); pick the best match and open it with bot_browser_open_uri using metaapp://<pinId>. For remix children of a known app, use mode="forks" with its pinId.',
-        {
-          query: z.string().optional(),
-          tag: z.string().optional(),
-          publisher: z.string().optional(),
-          sinceDays: z.number().optional(),
-          mode: z.enum(['search', 'forks']).optional(),
-          pinId: z.string().optional(),
-          limit: z.number().optional(),
-        },
-        async (args: {
-          query?: string;
-          tag?: string;
-          publisher?: string;
-          sinceDays?: number;
-          mode?: 'search' | 'forks';
-          pinId?: string;
-          limit?: number;
-        }) => {
-          const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 8)));
-          const mode = args.mode ?? 'search';
-
-          if (mode === 'forks') {
-            if (!listMetaAppForks) {
-              return textResult('Fork listing is not supported by this host.', true);
-            }
-            const pinId = parseMetaAppPinIdFromUri(args.pinId ?? '');
-            if (!pinId) {
-              return textResult('search_metaapps mode="forks" requires a valid pinId (or metaapp://<pinId>).', true);
-            }
-            try {
-              const { items } = await listMetaAppForks({ pinId, limit });
-              if (!items.length) {
-                return textResult(`No remixes (forks) found for metaapp://${pinId}. If the user expected some, the lineage may simply not exist yet — say so honestly.`);
-              }
-              return textResult([
-                `${items.length} direct remix(es) of metaapp://${pinId}:`,
-                formatMetaAppCandidates(items),
-              ].join('\n\n'));
-            } catch (error) {
-              return textResult(`Failed to list forks: ${error instanceof Error ? error.message : String(error)}`, true);
-            }
-          }
-
-          const since = typeof args.sinceDays === 'number' && args.sinceDays > 0
-            ? Math.floor(Date.now() / 1000) - Math.floor(args.sinceDays) * 86400
-            : undefined;
-          try {
-            let { items } = await searchMetaApps({
-              keyword: args.query,
-              tag: args.tag,
-              publisher: args.publisher,
-              since,
-              limit,
-            });
-            // Empty-result degradation: drop the weakest (last) query token once and retry.
-            if (!items.length && args.query?.trim()) {
-              const tokens = args.query.trim().split(/\s+/);
-              if (tokens.length > 1) {
-                ({ items } = await searchMetaApps({
-                  keyword: tokens.slice(0, -1).join(' '),
-                  tag: args.tag,
-                  publisher: args.publisher,
-                  since,
-                  limit,
-                }));
-              }
-            }
-            if (!items.length) {
-              return textResult(`No on-chain MetaApps matched${args.query ? ` "${args.query}"` : ''}${args.publisher ? ` from ${args.publisher}` : ''}${args.sinceDays ? ` in the last ${args.sinceDays} days` : ''}. Tell the user honestly; do NOT invent apps.`);
-            }
-            return textResult([
-              `${items.length} on-chain MetaApp candidate(s), best first:`,
-              formatMetaAppCandidates(items),
-              'Pick the single best match for the user\'s intent and open it with bot_browser_open_uri (prefer newTab=true). When listing apps in your reply, REUSE the bullet lines above verbatim: app titles and author names MUST remain markdown links — never mention an app or an author as plain text. Offer 2–3 alternatives if the best one might not be what they meant; if nothing fits, say so instead of opening a random app.',
-            ].join('\n\n'));
-          } catch (error) {
-            return textResult(`MetaApp search failed: ${error instanceof Error ? error.message : String(error)}`, true);
-          }
-        }
-      )
+      ...buildSearchMetaAppsAgentTools({
+        tool,
+        searchMetaApps: controlBotBrowser.searchMetaApps,
+        listMetaAppForks: controlBotBrowser.listMetaAppForks,
+        nextStep: 'browser',
+      }),
     );
   }
 
