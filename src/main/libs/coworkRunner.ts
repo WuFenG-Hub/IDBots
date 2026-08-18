@@ -28,6 +28,10 @@ import {
 import { getEnhancedEnv, getEnhancedEnvWithTmpdir, getSkillsRoot } from './coworkUtil';
 import { coworkLog, getCoworkLogPath } from './coworkLogger';
 import { DEEPSEEK_RESPONSES_REASONING_PLACEHOLDER, EMPTY_TERMINAL_TURN_CONTINUE_PROMPT, isEmptyTerminalSdkResult } from './coworkAssistantReply';
+import {
+  filterSdkInternalDiagnostics,
+  isSdkInternalDiagnostic,
+} from './coworkSdkResultDiagnostics';
 import { isQuestionLikeMemoryText, type CoworkMemoryGuardLevel } from './coworkMemoryExtractor';
 import {
   buildExperiencePromptBlocksXml as composeExperiencePromptBlocks,
@@ -9865,16 +9869,51 @@ export class CoworkRunner extends EventEmitter {
     if (eventType === 'result') {
       const subtype = String(payload.subtype ?? 'success');
       if (subtype !== 'success') {
-        const errors = Array.isArray(payload.errors)
+        const rawErrors = Array.isArray(payload.errors)
           ? payload.errors
             .filter((error) => typeof error === 'string')
             .map((error) => (error as string).trim())
             .filter((error) => error && error.toLowerCase() !== 'unknown')
           : [];
-        const payloadError = this.normalizeSdkError(payload.error);
+        // The CLI tags internal turn-interruption diagnostics with a
+        // `[ede_diagnostic]` prefix. A runtime steer aborts the in-flight turn
+        // and the CLI reports that aborted turn as `result_type=user ...
+        // stop_reason=tool_use`; the query keeps running and the steer becomes
+        // the next turn, so this is a benign boundary, not a failure. Mirror
+        // the CLI's own filtering policy and surface only real errors.
+        const realErrors = filterSdkInternalDiagnostics(rawErrors);
+        const rawPayloadError = this.normalizeSdkError(payload.error);
+        const payloadError = rawPayloadError && isSdkInternalDiagnostic(rawPayloadError)
+          ? null
+          : rawPayloadError;
+        if (
+          realErrors.length === 0
+          && payloadError === null
+          && (rawErrors.length > 0 || rawPayloadError !== null)
+        ) {
+          const steerText = this.findPendingSteerText(sessionId, activeSession);
+          coworkLog(
+            'INFO',
+            'handleClaudeEvent',
+            'SDK result event carried only internal diagnostics; treating as a benign steer/turn-interrupt boundary',
+            {
+              sessionId,
+              diagnostic: (rawErrors.length > 0 ? rawErrors : [rawPayloadError]).join('\n'),
+              steerAttributed: Boolean(steerText),
+            }
+          );
+          if (steerText) {
+            this.addSystemMessage(sessionId, '', {
+              steerInterruptAcknowledged: true,
+              steerText,
+            });
+          }
+          return;
+        }
+
         const errorMessage =
-          errors.length > 0
-            ? errors.join('\n')
+          realErrors.length > 0
+            ? realErrors.join('\n')
             : payloadError
               ? payloadError
               : 'Claude run failed';
@@ -10845,6 +10884,30 @@ export class CoworkRunner extends EventEmitter {
     }
     const session = this.store.getSession(sessionId);
     return session?.messages?.find((message) => message.id === messageId);
+  }
+
+  /**
+   * Resolves the text of the first delivered-but-unsettled steer, i.e. the
+   * correction the model will act on next after a steer interrupt. Used to
+   * acknowledge a steer in the timeline when the CLI reports the interrupted
+   * turn via a `[ede_diagnostic] result_type=user` result instead of a normal
+   * boundary. Returns null when no steer can be attributed.
+   */
+  private findPendingSteerText(sessionId: string, activeSession: ActiveSession): string | null {
+    const pending = Array.isArray(activeSession.localPendingSteerIds)
+      ? activeSession.localPendingSteerIds
+      : [];
+    const delivered = activeSession.localDeliveredSteerIds;
+    if (!delivered) return null;
+    for (const submissionId of pending) {
+      if (!delivered.has(submissionId)) continue;
+      const message = this.getMessageById(sessionId, submissionId);
+      const text = message?.content?.trim();
+      if (message?.type === 'user' && text) {
+        return message.content;
+      }
+    }
+    return null;
   }
 
   private updateMessageMerged(
