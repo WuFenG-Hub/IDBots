@@ -42,6 +42,38 @@ export interface DshTurnProviderRoute {
   reasoningEffort?: string
 }
 
+/** Env var carrying the DeepSeek key for the runtime's web-search provider. */
+const DSH_WEBSEARCH_API_KEY_ENV = 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
+/** Model serving the auxiliary search call (cheap + fast; search quality is
+ *  provider-side, the model only formats the query — official DSH default). */
+const DSH_WEBSEARCH_MODEL = 'deepseek-v4-flash'
+
+/** Hostname of a URL string, '' when it does not parse (regex, not URL — an
+ *  invalid base can never throw here; port/userinfo are not provider shapes). */
+function hostnameOf(value: string): string {
+  const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#:]+)/i.exec(value.trim())
+  return match?.[1]?.toLowerCase() ?? ''
+}
+
+/** True when the route is the official DeepSeek provider (key or api host). */
+export function isOfficialDeepSeekRoute(provider: Pick<DshTurnProviderRoute, 'key' | 'baseUrl'>): boolean {
+  return provider.key?.toLowerCase() === 'deepseek' || hostnameOf(provider.baseUrl) === 'api.deepseek.com'
+}
+
+/**
+ * Normalize any DeepSeek provider base URL onto the Anthropic-compatible root
+ * the web-search provider expects (`/messages` is appended by the package):
+ * `https://api.deepseek.com` / `.../anthropic` / `.../responses`-style bases
+ * all resolve to `<root>/anthropic/v1`.
+ */
+export function deepSeekWebSearchBaseURL(baseUrl: string): string {
+  let base = baseUrl.trim().replace(/\/+$/, '')
+  base = base.replace(/\/responses$/, '')
+  if (/\/anthropic\/v\d+$/.test(base)) return base
+  if (/\/anthropic$/.test(base)) return `${base}/v1`
+  return `${base}/anthropic/v1`
+}
+
 export interface DshTurnCallbacks {
   onMessage: (
     message: { type: string; content: string; metadata?: Record<string, unknown> },
@@ -353,12 +385,24 @@ export class DshTurnHub {
   /** MCP servers accumulated the same way: user-level (not per-session), and a
    * removal keeps serving until the runtime restarts — same trade as providers. */
   private mcpServersSeen = new Map<string, DshMcpServerDefinition>()
+  /** DeepSeek server-side web search: mounted once an official DeepSeek
+   * provider is seen and then sticky — like MCP servers, a later non-DeepSeek
+   * session never unmounts it (that would restart the runtime over nothing).
+   * Composition-level tools serve every session in the shared runtime, which
+   * matches the official DSH bundle (search backend is not per-model). */
+  private webSearchSeen: { apiKey: string; baseURL: string } | null = null
 
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
     this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
     for (const server of this.opts.mcpServersProvider?.() ?? []) {
       const name = String(server?.name ?? '').trim()
       if (name) this.mcpServersSeen.set(name, server)
+    }
+    if (isOfficialDeepSeekRoute(input.provider) && input.provider.apiKey) {
+      this.webSearchSeen = {
+        apiKey: input.provider.apiKey,
+        baseURL: deepSeekWebSearchBaseURL(input.provider.baseUrl),
+      }
     }
     const config: DshRuntimeConfigInput = {
       sessionRoot: this.opts.sessionRoot,
@@ -368,11 +412,21 @@ export class DshTurnHub {
       // every new session's prompt from restarting the shared runtime.
       workspace: this.workspaceSeen ?? input.workspace,
       mcpServers: [...this.mcpServersSeen.values()],
+      ...(this.webSearchSeen ? {
+        webSearch: {
+          apiKeyEnv: DSH_WEBSEARCH_API_KEY_ENV,
+          baseURL: this.webSearchSeen.baseURL,
+          model: DSH_WEBSEARCH_MODEL,
+        },
+      } : {}),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: {
         // The credential rides the child env under the route's apiKeyEnv name —
         // it never enters the generated config file on disk.
         [input.provider.apiKeyEnvName ?? 'IDBOTS_DSH_API_KEY']: input.provider.apiKey,
+        // The web-search credential rides a DEDICATED name so it survives
+        // provider switches (the route key above is swapped on every ensure).
+        ...(this.webSearchSeen ? { [DSH_WEBSEARCH_API_KEY_ENV]: this.webSearchSeen.apiKey } : {}),
       },
     }
     if (!this.workspaceSeen && input.workspace) this.workspaceSeen = input.workspace

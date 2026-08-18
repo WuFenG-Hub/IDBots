@@ -1,12 +1,17 @@
 ---
 name: web-search
-description: Real-time web search using Playwright-controlled browser. Use this skill when you need current information, latest documentation, recent news, or any data beyond your knowledge cutoff (January 2025).
+description: Real-time web search using Playwright-controlled browser. Use this skill when you need current information, latest documentation, recent news, or any data beyond your knowledge cutoff (January 2025). If a native web_search tool is available in the session, use that tool instead and only fall back to this skill when it is unavailable.
 official: true
 ---
 
 # Web Search Skill
 
 ## When to Use This Skill
+
+**Prefer the native `web_search` tool when your tool list has one.** If a
+`web_search` tool is available in this session, use it directly — it is
+server-side, faster, and returns structured results. Only fall back to this
+browser-based skill when no such tool exists or it errors.
 
 Use the web-search skill when you need:
 

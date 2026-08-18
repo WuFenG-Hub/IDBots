@@ -981,12 +981,13 @@ function resolveUpstreamAPIType(provider?: string, model?: string, apiFormat?: s
   if (normalizedProvider === 'openai') {
     return 'responses';
   }
-  // DeepSeek Responses API currently only serves flash models; pro and other
-  // variants fall back to chat/completions. Pro support is expected in a later
-  // DeepSeek release.
+  // DeepSeek's Responses API serves the V4 family (flash GA since the
+  // endpoint launched, pro GA 2026-08-13 — both verified to execute the
+  // built-in web_search tool server-side). Older/other variants fall back
+  // to chat/completions.
   if (normalizedProvider === 'deepseek') {
     const normalizedModel = (model ?? '').toLowerCase();
-    if (normalizedModel.includes('flash')) {
+    if (normalizedModel.includes('flash') || normalizedModel.includes('pro')) {
       return 'responses';
     }
   }
