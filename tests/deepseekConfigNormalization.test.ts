@@ -22,7 +22,7 @@ test('defaultConfig uses DeepSeek V4 Flash and Pro as the built-in DeepSeek defa
       { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
     ],
   );
-  assert.equal(defaultConfig.model.defaultModel, 'deepseek-v4-pro');
+  assert.equal(defaultConfig.model.defaultModel, 'deepseek-v4-flash');
   assert.deepEqual(
     defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.options,
     {
@@ -36,7 +36,7 @@ test('defaultConfig uses DeepSeek V4 Flash and Pro as the built-in DeepSeek defa
   );
   assert.equal(
     defaultConfig.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    16_000,
+    32_768,
   );
   assert.deepEqual(
     defaultConfig.providers?.deepseek.models?.map(({ id, name }) => ({ id, name })),
@@ -58,7 +58,7 @@ test('defaultConfig uses DeepSeek V4 Flash and Pro as the built-in DeepSeek defa
   );
   assert.equal(
     defaultConfig.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    16_000,
+    32_768,
   );
 });
 
@@ -97,7 +97,7 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.equal(
     normalized.model.availableModels.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    16_000,
+    32_768,
   );
   assert.deepEqual(
     normalized.providers?.deepseek.models?.map(({ id }) => id),
@@ -116,7 +116,7 @@ test('normalizeDeepSeekAppConfig migrates legacy DeepSeek defaults in stored con
   );
   assert.equal(
     normalized.providers?.deepseek.models?.find(({ id }) => id === 'deepseek-v4-pro')?.maxOutputTokens,
-    16_000,
+    32_768,
   );
 });
 
@@ -248,3 +248,4 @@ test('mergeProvidersConfig applies explicit provider credential updates', () => 
   assert.equal(merged?.deepseek.baseUrl, 'https://api.deepseek.com/anthropic');
   assert.equal(merged?.deepseek.apiFormat, 'anthropic');
 });
+

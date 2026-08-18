@@ -34,7 +34,7 @@ export class DshStreamUiGate {
     content: string,
     metadata?: Record<string, unknown>,
   ) => void;
-  private readonly persistFinalize: (sessionId: string, messageId: string, content: string) => void;
+  private readonly persistFinalize: (sessionId: string, messageId: string, content: string, metadata?: Record<string, unknown>) => void;
   private readonly clock: DshStreamUiGateClock;
   private readonly liveContent = new Map<string, string>();
   private readonly lastEmitAt = new Map<string, number>();
@@ -48,7 +48,7 @@ export class DshStreamUiGate {
       content: string,
       metadata?: Record<string, unknown>,
     ) => void;
-    persistFinalize: (sessionId: string, messageId: string, content: string) => void;
+    persistFinalize: (sessionId: string, messageId: string, content: string, metadata?: Record<string, unknown>) => void;
     clock?: DshStreamUiGateClock;
   }) {
     this.throttleMs = Math.max(0, options.throttleMs);
@@ -77,13 +77,13 @@ export class DshStreamUiGate {
     this.cancelFlush.set(key, cancel);
   }
 
-  onFinalize(sessionId: string, messageId: string, content: string): void {
+  onFinalize(sessionId: string, messageId: string, content: string, metadata?: Record<string, unknown>): void {
     const key = streamKey(sessionId, messageId);
     this.clearTimer(key);
     this.liveContent.set(key, content);
-    this.persistFinalize(sessionId, messageId, content);
+    this.persistFinalize(sessionId, messageId, content, metadata);
     this.lastEmitAt.set(key, this.clock.now());
-    this.emitUpdate(sessionId, messageId, content, { isStreaming: false, isFinal: true });
+    this.emitUpdate(sessionId, messageId, content, { isStreaming: false, isFinal: true, ...metadata });
   }
 
   overlays(sessionId: string): DshLiveMessageOverlay[] {

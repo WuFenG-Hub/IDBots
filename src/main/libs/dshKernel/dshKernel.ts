@@ -363,7 +363,7 @@ export class DshKernel {
       }
       case 'messageFinalize': {
         const id = this.slotId(sessionId, action.slot)
-        if (id) handlers.onMessageFinalize(sessionId, id, action.content)
+        if (id) handlers.onMessageFinalize(sessionId, id, action.content, action.metadata)
         break
       }
       case 'turnEnd':

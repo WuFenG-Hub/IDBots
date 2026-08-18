@@ -235,6 +235,170 @@ test('block-start reasoning opens the thinking slot before deltas arrive', () =>
   assert.equal(opened[0].message.metadata.isThinking, true)
 })
 
+// ---- DeepSeek Responses phase classification ------------------------------
+// Text items arrive tagged commentary (thinking out loud around tool calls)
+// or final_answer (the visible reply); the tag rides the assembled replay
+// state only — content blocks and streaming deltas carry no phase.
+
+const sig = (phase) => JSON.stringify({ v: 1, id: 'msg_1', phase })
+
+test('streamed commentary text converts the text message into thinking at finalize', () => {
+  const mapper = new DshEventMapper()
+  // Commentary streams as plain text (phase unknown on the wire mid-stream).
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 3, step: 1, chunk: { type: 'text-delta', index: 0, text: '让我先查一下配置。' } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 3, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '让我先查一下配置。' },
+          { type: 'tool-call', id: 'c1', name: 'bash', arguments: '{"command":"ls"}' },
+        ],
+        source: {
+          kind: 'model', provider: 'deepseek', model: 'deepseek-v4-flash',
+          replayState: { kind: 'pi-ai', version: 1, api: 'openai-responses', blocks: [
+            { type: 'text', textSignature: sig('commentary') },
+            { type: 'tool-call' },
+          ] },
+        },
+      },
+    },
+  })
+  const finalize = done.find((a) => a.kind === 'messageFinalize')
+  assert.equal(finalize.slot, 'text')
+  assert.equal(finalize.content, '让我先查一下配置。')
+  assert.equal(finalize.metadata.isThinking, true, 'streamed text message reclassifies to thinking')
+  // A commentary-only step followed by its tool call must not look empty.
+  mapper.consume({ type: 'tool/call', data: { callId: 'c1', name: 'bash', arguments: '{}' } })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 3, reason: { kind: 'aborted', reason: 'cancel' } } })
+  assert.equal(ended[0].kind, 'turnEnd')
+})
+
+test('final_answer text stays visible (no thinking metadata)', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 4, step: 1, chunk: { type: 'text-delta', index: 0, text: 'Here is the result.' } },
+  })
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 4, step: 1,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Here is the result.' }],
+        source: { kind: 'model', replayState: { blocks: [{ type: 'text', textSignature: sig('final_answer') }] } },
+      },
+    },
+  })
+  const finalize = done.find((a) => a.kind === 'messageFinalize')
+  assert.equal(finalize.slot, 'text')
+  assert.equal(finalize.content, 'Here is the result.')
+  assert.equal(finalize.metadata, undefined)
+})
+
+test('a turn whose only output is commentary is an empty terminal turn', () => {
+  const mapper = new DshEventMapper()
+  mapper.consume({
+    type: 'assistant/chunk',
+    data: { turn: 5, step: 1, chunk: { type: 'text-delta', index: 0, text: '考虑一下该怎么回答……' } },
+  })
+  mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 5, step: 1,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: '考虑一下该怎么回答……' }],
+        source: { kind: 'model', replayState: { blocks: [{ type: 'text', textSignature: sig('commentary') }] } },
+      },
+    },
+  })
+  const ended = mapper.consume({ type: 'turn/end', data: { turn: 5, reason: { kind: 'stop' } } })
+  // Commentary reclassified as thinking → nothing visible → the auto-continue
+  // guard must fire instead of reporting a hollow completed turn.
+  assert.equal(ended[0].emptyTerminal, true)
+})
+
+test('unassembled commentary (block-end only) opens a thinking message', () => {
+  const mapper = new DshEventMapper()
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 6, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'Thinking out loud without any streamed deltas.' },
+          { type: 'tool-call', id: 'c2', name: 'read', arguments: '{}' },
+        ],
+        source: { kind: 'model', replayState: { blocks: [
+          { type: 'text', textSignature: sig('commentary') },
+          { type: 'tool-call' },
+        ] } },
+      },
+    },
+  })
+  // No text slot was streamed, so commentary materializes as its own thinking
+  // message (open + finalize), exactly like assembled reasoning blocks.
+  const opened = done.find((a) => a.kind === 'message')
+  assert.equal(opened.slot, 'thinking')
+  assert.equal(opened.message.metadata.isThinking, true)
+  const finalize = done.find((a) => a.kind === 'messageFinalize')
+  assert.equal(finalize.slot, 'thinking')
+  assert.equal(finalize.content, 'Thinking out loud without any streamed deltas.')
+})
+
+test('mixed commentary and final text split across slots in order', () => {
+  const mapper = new DshEventMapper()
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 7, step: 1,
+      message: {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'First, deliberation.' },
+          { type: 'text', text: 'The final answer.' },
+        ],
+        source: { kind: 'model', replayState: { blocks: [
+          { type: 'text', textSignature: sig('commentary') },
+          { type: 'text', textSignature: sig('final_answer') },
+        ] } },
+      },
+    },
+  })
+  const thinking = done.filter((a) => a.slot === 'thinking').find((a) => a.kind === 'messageFinalize')
+  assert.equal(thinking.content, 'First, deliberation.')
+  const textFinal = done.filter((a) => a.slot === 'text').find((a) => a.kind === 'messageFinalize')
+  assert.equal(textFinal.content, 'The final answer.')
+  assert.equal(textFinal.metadata, undefined)
+})
+
+test('unsigned replay signatures keep the legacy all-visible classification', () => {
+  const mapper = new DshEventMapper()
+  const done = mapper.consume({
+    type: 'assistant/message',
+    data: {
+      turn: 8, step: 1,
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'plain visible reply' }],
+        source: { kind: 'model', replayState: { blocks: [{ type: 'text' }] } },
+      },
+    },
+  })
+  const finalize = done.find((a) => a.kind === 'messageFinalize')
+  assert.equal(finalize.slot, 'text')
+  assert.equal(finalize.content, 'plain visible reply')
+  assert.equal(finalize.metadata, undefined)
+})
+
 test('splitThinkTaggedContent extracts think and thinking tags', () => {
   assert.deepEqual(splitThinkTaggedContent('plain reply'), { thinking: '', text: 'plain reply' })
   assert.deepEqual(
