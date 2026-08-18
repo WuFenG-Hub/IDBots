@@ -156,6 +156,7 @@ sandbox/runtime/out/
 sandbox/runtime-darwin-*/
 
 # Bundled PortableGit for Windows builds (downloaded via scripts/setup-mingit.js)
+resources/ffmpeg/
 resources/mingit/
 resources/MinGit-*.zip
 resources/PortableGit-*.7z.exe
@@ -215,6 +216,7 @@ man_base_data_pebble/
 !tests/metaFileUploadAgentTools.test.mjs
 !tests/visionRelayService.test.mjs
 !tests/visionRelayAgentTools.test.mjs
+!tests/visionVideoRelay.test.mjs
 !tests/metaAppManagerBundledSync.test.mjs
 !tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts

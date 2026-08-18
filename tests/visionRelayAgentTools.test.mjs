@@ -48,18 +48,27 @@ function buildTool(recognize) {
       captured.push(entry);
       return entry;
     },
-    visionRelay: { recognize },
+    visionRelay: {
+      recognize,
+      recognizeVideo: async () => {
+        throw new Error('video not under test here');
+      },
+    },
   });
   return { captured, tools };
 }
 
-test('factory registers exactly one describe_image tool with a zod schema', () => {
+test('factory registers describe_image and describe_video tools with zod schemas', () => {
   const { captured } = buildTool(async () => ({}));
-  assert.equal(captured.length, 1);
-  assert.equal(captured[0].name, 'describe_image');
-  assert.ok(captured[0].description.length > 100, 'description must follow the tool template');
-  assert.ok(captured[0].schema.image_path, 'image_path parameter required');
-  assert.ok(captured[0].schema.question, 'question parameter present');
+  assert.equal(captured.length, 2);
+  const image = captured.find((t) => t.name === 'describe_image');
+  const video = captured.find((t) => t.name === 'describe_video');
+  assert.ok(image, 'describe_image registered');
+  assert.ok(video, 'describe_video registered');
+  assert.ok(image.description.length > 100, 'description must follow the tool template');
+  assert.ok(image.schema.image_path, 'image_path parameter required');
+  assert.ok(video.schema.video_path, 'video_path parameter required');
+  assert.ok(image.schema.question && video.schema.question, 'question parameter present');
 });
 
 test('happy path returns the description plus the remaining-quota line', async () => {

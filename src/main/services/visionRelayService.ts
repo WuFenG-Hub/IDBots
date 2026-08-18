@@ -21,11 +21,28 @@
  * so plain node:test coverage works, mirroring llmRelayService.
  */
 
+import fs from 'fs';
+import path from 'path';
 import type { SqliteStore } from '../sqliteStore';
 
-const VISION_RECOGNIZE_TIMEOUT_MS = 60_000;
+const VISION_RECOGNIZE_TIMEOUT_MS = 120_000;
 /** Cap for the post-codec JPEG payload handed to the relay (base64 excluded). */
 const VISION_MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+/**
+ * Target ceiling for a transcoded video's RAW bytes. The upstream accepts
+ * base64 up to 10MB and base64 inflates by ~4/3, so 6.8MB raw encodes to
+ * ~9.1MB — inside the cap with envelope margin.
+ */
+export const VISION_VIDEO_MAX_RAW_BYTES = 6.8 * 1024 * 1024;
+/** Videos longer than this are truncated (the tool result says so). */
+export const VISION_VIDEO_MAX_SECONDS = 180;
+const VISION_VIDEO_TRANSCODE_TIMEOUT_MS = 120_000;
+
+/** Bundled ffmpeg asset names per platform (scripts/setup-ffmpeg.js). */
+const FFMPEG_PLATFORM_ASSETS: Record<string, Record<string, string>> = {
+  darwin: { arm64: 'ffmpeg-darwin-arm64', x64: 'ffmpeg-darwin-x64' },
+  win32: { x64: 'ffmpeg-win32-x64.exe' },
+};
 
 /** kv keys for the cached vision relay credentials. */
 export const VISION_RELAY_API_KEY_KV = 'visionRelay.apiKey';
@@ -65,6 +82,16 @@ export interface VisionRelayRecognizeInput {
   prompt?: string;
 }
 
+export interface VisionTranscodeResult {
+  /** Base64 of the transcoded mp4 (video/mp4, H.264, no audio). */
+  base64: string;
+  bytes: number;
+  /** Source duration in seconds when probeable. */
+  durationSec: number | null;
+  /** True when the source exceeded VISION_VIDEO_MAX_SECONDS and was cut. */
+  truncated: boolean;
+}
+
 export interface VisionRelayServiceDeps {
   getStore: () => SqliteStore | null;
   fetchImpl?: typeof fetch;
@@ -75,6 +102,17 @@ export interface VisionRelayServiceDeps {
    * Default implementation uses Electron nativeImage; tests inject a stub.
    */
   loadImageBase64Impl?: (imagePath: string) => Promise<{ base64: string; bytes: number } | null>;
+  /**
+   * Transcodes one local video file to a small mp4 for recognition.
+   * Default implementation shells out to the bundled ffmpeg; tests inject.
+   */
+  transcodeVideoImpl?: (videoPath: string) => Promise<VisionTranscodeResult>;
+  /** Resolves the ffmpeg executable path; tests inject. */
+  resolveFfmpegPathImpl?: () => string | null;
+  /** Spawns a process; tests inject. */
+  spawnImpl?: typeof import('child_process').spawn;
+  /** mkdtemp-like temp dir provider; tests inject. */
+  tempDirImpl?: () => string;
 }
 
 let depsRef: VisionRelayServiceDeps | null = null;
@@ -318,6 +356,47 @@ export async function recognizeImageViaRelay(input: VisionRelayRecognizeInput): 
   const prompt = (input.prompt || '').trim();
   if (prompt) body.prompt = prompt;
 
+  return postRecognizeWithKeyRetry(body);
+}
+
+/**
+ * Describe one local video through the vision relay. The video is transcoded
+ * to a small H.264/mp4 clip first (downscaled, audio dropped, capped at
+ * VISION_VIDEO_MAX_SECONDS) so any input format fits the upstream base64 cap.
+ * A rejected relay key triggers exactly one re-bootstrap + retry.
+ */
+export async function recognizeVideoViaRelay(input: {
+  videoPath?: string;
+  videoBase64?: string;
+  prompt?: string;
+}): Promise<VisionRelayRecognizeResult & { truncated: boolean; durationSec: number | null }> {
+  const body: Record<string, unknown> = {};
+  let truncated = false;
+  let durationSec: number | null = null;
+  if (input.videoPath) {
+    const transcoded = await transcodeVideoForVision(input.videoPath);
+    body.videoBase64 = transcoded.base64;
+    body.mimeType = 'video/mp4';
+    truncated = transcoded.truncated;
+    durationSec = transcoded.durationSec;
+    if (transcoded.bytes > VISION_VIDEO_MAX_RAW_BYTES) {
+      throw new VisionRelayError(
+        'video still too large after compression; keep videos under ~3 minutes',
+      );
+    }
+  } else if (input.videoBase64) {
+    body.videoBase64 = input.videoBase64;
+    body.mimeType = 'video/mp4';
+  } else {
+    throw new VisionRelayError('videoPath or videoBase64 is required');
+  }
+  const prompt = (input.prompt || '').trim();
+  if (prompt) body.prompt = prompt;
+  const result = await postRecognizeWithKeyRetry(body);
+  return { ...result, truncated, durationSec };
+}
+
+async function postRecognizeWithKeyRetry(body: Record<string, unknown>): Promise<VisionRelayRecognizeResult> {
   let credentials = await resolveVisionRelayCredentials();
   try {
     return await postRecognize(credentials, body);
@@ -329,4 +408,188 @@ export async function recognizeImageViaRelay(input: VisionRelayRecognizeInput): 
     credentials = await resolveVisionRelayCredentials();
     return postRecognize(credentials, body);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Video transcoding (bundled ffmpeg; aggressive one-shot-recognition settings)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the ffmpeg argument list for one transcode pass. Exported for tests.
+ * Recognition clips are throwaway: tiny resolution, low fps, no audio, high
+ * CRF — the upstream samples 2 frames/second off the timeline regardless, so
+ * visual fidelity only needs to survive 480px.
+ */
+export function buildVideoTranscodeArgs(input: {
+  inputPath: string;
+  outputPath: string;
+  maxSeconds: number;
+  pass: 'standard' | 'hard';
+}): string[] {
+  const scale = input.pass === 'standard' ? "scale='min(480,iw)':-2" : "scale='min(360,iw)':-2";
+  const crf = input.pass === 'standard' ? '32' : '38';
+  return [
+    '-y',
+    '-hide_banner',
+    '-loglevel', 'error',
+    '-i', input.inputPath,
+    '-t', String(Math.max(1, Math.floor(input.maxSeconds))),
+    '-vf', scale,
+    '-r', '4',
+    '-an',
+    '-c:v', 'libx264',
+    '-preset', 'veryfast',
+    '-crf', crf,
+    '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart',
+    input.outputPath,
+  ];
+}
+
+/** Parse the source duration (seconds) out of an `ffmpeg -i` stderr probe. */
+export function parseFfmpegDuration(stderr: string): number | null {
+  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
+  if (!match) return null;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+let cachedFfmpegPath: string | null | undefined;
+
+/**
+ * Resolve the ffmpeg executable: env override, bundled binary (packaged
+ * resourcesPath, then dev project resources), then a system ffmpeg on PATH.
+ * Returns null when nothing is found.
+ */
+export function resolveFfmpegPath(): string | null {
+  if (cachedFfmpegPath !== undefined) return cachedFfmpegPath;
+  cachedFfmpegPath = null;
+  const envPath = (process.env.IDBOTS_FFMPEG_PATH || '').trim();
+  if (envPath) {
+    cachedFfmpegPath = envPath;
+    return cachedFfmpegPath;
+  }
+  const asset = FFMPEG_PLATFORM_ASSETS[process.platform]?.[process.arch];
+  if (!asset) {
+    cachedFfmpegPath = 'ffmpeg';
+    return cachedFfmpegPath;
+  }
+  // Packaged app: <resourcesPath>/ffmpeg/<asset> (extraResources)
+  const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath;
+  // Dev: project resources/ffmpeg/<asset> (dist-electron/main/services -> root)
+  const candidates = [
+    ...(resourcesPath ? [path.join(resourcesPath, 'ffmpeg', asset)] : []),
+    path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', asset),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) {
+        cachedFfmpegPath = candidate;
+        return cachedFfmpegPath;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  // Last resort: system ffmpeg on PATH (dev machines with homebrew etc.)
+  cachedFfmpegPath = 'ffmpeg';
+  return cachedFfmpegPath;
+}
+
+async function runFfmpeg(args: string[], timeoutMs: number): Promise<{ code: number; stderr: string }> {
+  const deps = getDeps();
+  const ffmpegPath = deps.resolveFfmpegPathImpl ? deps.resolveFfmpegPathImpl() : resolveFfmpegPath();
+  if (!ffmpegPath) {
+    throw new VisionRelayError('ffmpeg is not available for video compression');
+  }
+  const spawnFn = deps.spawnImpl ?? ((await import('child_process')) as typeof import('child_process')).spawn;
+  return new Promise((resolve, reject) => {
+    const child = spawnFn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new VisionRelayError('ffmpeg video compression timed out'));
+    }, timeoutMs);
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (stderr.length > 64 * 1024) stderr = stderr.slice(-32 * 1024);
+    });
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(new VisionRelayError(`ffmpeg failed to start: ${getErrorMessage(error)}`));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, stderr });
+    });
+  });
+}
+
+/**
+ * Transcode one local video to a recognition-grade mp4: probe duration,
+ * two escalating compression passes until the output fits the payload budget.
+ */
+export async function transcodeVideoForVision(videoPath: string): Promise<VisionTranscodeResult> {
+  const deps = getDeps();
+  if (deps.transcodeVideoImpl) return deps.transcodeVideoImpl(videoPath);
+
+  // Probe duration (ffmpeg -i exits non-zero but prints the header)
+  let durationSec: number | null = null;
+  try {
+    const probe = await runFfmpeg(['-hide_banner', '-i', videoPath], 15_000);
+    durationSec = parseFfmpegDuration(probe.stderr);
+  } catch {
+    durationSec = null;
+  }
+  const truncated = durationSec != null && durationSec > VISION_VIDEO_MAX_SECONDS;
+
+  const osMod = await import('os');
+  const tempDir = deps.tempDirImpl
+    ? deps.tempDirImpl()
+    : fs.mkdtempSync(path.join(osMod.tmpdir(), 'idbots-vision-'));
+  const readResult = async (outputPath: string): Promise<VisionTranscodeResult | null> => {
+    try {
+      const buffer = await fs.promises.readFile(outputPath);
+      if (buffer.length === 0) return null;
+      return {
+        base64: buffer.toString('base64'),
+        bytes: buffer.length,
+        durationSec,
+        truncated,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const passes: Array<'standard' | 'hard'> = ['standard', 'hard'];
+  let lastResult: VisionTranscodeResult | null = null;
+  for (const pass of passes) {
+    const outputPath = path.join(tempDir, `vision-${pass}.mp4`);
+    const args = buildVideoTranscodeArgs({
+      inputPath: videoPath,
+      outputPath,
+      maxSeconds: VISION_VIDEO_MAX_SECONDS,
+      pass,
+    });
+    const run = await runFfmpeg(args, VISION_VIDEO_TRANSCODE_TIMEOUT_MS);
+    if (run.code !== 0) {
+      throw new VisionRelayError(`ffmpeg video compression failed: ${run.stderr.slice(-300)}`);
+    }
+    lastResult = await readResult(outputPath);
+    if (lastResult && lastResult.bytes <= VISION_VIDEO_MAX_RAW_BYTES) {
+      try {
+        fs.promises.rm(tempDir, { recursive: true, force: true });
+      } catch {
+        // temp cleanup is best-effort
+      }
+      return lastResult;
+    }
+  }
+  try {
+    fs.promises.rm(tempDir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+  if (lastResult) return lastResult; // caller rejects oversized payloads
+  throw new VisionRelayError('ffmpeg produced no output; the file may not be a valid video');
 }

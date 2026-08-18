@@ -25,6 +25,25 @@ export type VisionRelayControl = {
       estimated: boolean;
     };
   }>;
+  /** Video path: transcodes locally (bundled ffmpeg) then relays as video/mp4. */
+  recognizeVideo(input: {
+    videoPath?: string;
+    videoBase64?: string;
+    prompt?: string;
+  }): Promise<{
+    content: string;
+    model: string;
+    remainingToday: number;
+    truncated: boolean;
+    durationSec: number | null;
+    usage: {
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      imageTokens: number;
+      estimated: boolean;
+    };
+  }>;
 };
 
 /** Minimal shape of the claude-agent-sdk tool() helper we depend on. */
@@ -141,5 +160,60 @@ export function buildVisionRelayAgentTools(deps: {
     }
   );
 
-  return [describeImage];
+  const describeVideo = tool(
+    'describe_video',
+    [
+      'Watch ONE local video file and return what happens in it as plain text: content summary, timeline of notable moments, and any text visible in frames. The runtime compresses the clip locally (ffmpeg) and sends it to the IDBots vision relay — never pass video contents, only the absolute local path.',
+      'Use when the user shares a video (chat attachments arrive as "[附件信息] 类型: video, 路径: <path>" lines) and asks what is in it, what happens, or anything requiring the video content. Works even when your own model cannot watch videos.',
+      'When NOT to use: do not use it for video files the user only asked to upload or move (use the file tools); one call per clip — do not call it twice on the same unchanged path in one turn; and never pass file contents into the tool — only the absolute local path.',
+      'Pass `question` only when the user asks something specific; omit it for the default full description.',
+      'Limits: clips longer than ~3 minutes are truncated to the first 3 minutes (the result says so); very large videos may fail compression. Videos cost 5× the daily image quota — one call per clip.',
+      'Returns the video description text, a truncation note when applicable, and the remaining quota units today.',
+    ].join(' '),
+    {
+      video_path: z
+        .string()
+        .min(1)
+        .describe('Absolute local path to the video file (copy it from the attachment info or the user message). Relative paths are rejected.'),
+      question: z
+        .string()
+        .optional()
+        .describe('Optional question about the video; omit for the default full description.'),
+    },
+    async (args: { video_path: string; question?: string }) => {
+      const videoPath = asString(args.video_path);
+      if (!videoPath) {
+        return textResult('describe_video requires `video_path` (an absolute local path).', true);
+      }
+      if (!path.isAbsolute(videoPath)) {
+        return textResult(
+          `describe_video requires an ABSOLUTE file path. Received a relative path: "${videoPath}". Resolve it to an absolute path first.`,
+          true,
+        );
+      }
+
+      try {
+        const result = await visionRelay.recognizeVideo({
+          videoPath,
+          prompt: asString(args.question) || undefined,
+        });
+        const lines = [result.content];
+        if (result.truncated) {
+          lines.push('(note: the source video exceeded 3 minutes; only the first 3 minutes were analyzed)');
+        }
+        if (typeof result.remainingToday === 'number' && result.remainingToday >= 0) {
+          lines.push(`(image-read quota units left today: ${result.remainingToday})`);
+        }
+        return textResult(lines.join('\n'));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const stable = message.startsWith('vision relay error: ')
+          ? message.slice('vision relay error: '.length)
+          : message;
+        return textResult(formatVisionRelayError(stable), true);
+      }
+    }
+  );
+
+  return [describeImage, describeVideo];
 }

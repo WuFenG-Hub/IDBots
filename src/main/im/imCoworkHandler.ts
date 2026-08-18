@@ -797,6 +797,9 @@ export class IMCoworkHandler extends EventEmitter {
         if (att.type === 'image') {
           parts.push('提示: 可调用 describe_image 工具获取该图片的内容描述与文字转写');
         }
+        if (att.type === 'video') {
+          parts.push('提示: 可调用 describe_video 工具获取该视频的内容描述(超过3分钟只分析前3分钟)');
+        }
         if (att.fileName) parts.push(`文件名: ${att.fileName}`);
         if (att.mimeType) parts.push(`MIME: ${att.mimeType}`);
         if (att.width && att.height) parts.push(`尺寸: ${att.width}x${att.height}`);
