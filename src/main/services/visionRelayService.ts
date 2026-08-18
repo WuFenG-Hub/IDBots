@@ -23,7 +23,12 @@
 
 import fs from 'fs';
 import path from 'path';
+import { parseFfmpegDuration, runFfmpegProcess } from './mediaToolsService';
 import type { SqliteStore } from '../sqliteStore';
+
+// Re-exported for existing import sites (tests); the canonical home of the
+// generic ffmpeg layer is mediaToolsService.
+export { parseFfmpegDuration, resolveFfmpegPath } from './mediaToolsService';
 
 const VISION_RECOGNIZE_TIMEOUT_MS = 120_000;
 /** Cap for the post-codec JPEG payload handed to the relay (base64 excluded). */
@@ -37,12 +42,6 @@ export const VISION_VIDEO_MAX_RAW_BYTES = 6.8 * 1024 * 1024;
 /** Videos longer than this are truncated (the tool result says so). */
 export const VISION_VIDEO_MAX_SECONDS = 180;
 const VISION_VIDEO_TRANSCODE_TIMEOUT_MS = 120_000;
-
-/** Bundled ffmpeg asset names per platform (scripts/setup-ffmpeg.js). */
-const FFMPEG_PLATFORM_ASSETS: Record<string, Record<string, string>> = {
-  darwin: { arm64: 'ffmpeg-darwin-arm64', x64: 'ffmpeg-darwin-x64' },
-  win32: { x64: 'ffmpeg-win32-x64.exe' },
-};
 
 /** kv keys for the cached vision relay credentials. */
 export const VISION_RELAY_API_KEY_KV = 'visionRelay.apiKey';
@@ -107,10 +106,6 @@ export interface VisionRelayServiceDeps {
    * Default implementation shells out to the bundled ffmpeg; tests inject.
    */
   transcodeVideoImpl?: (videoPath: string) => Promise<VisionTranscodeResult>;
-  /** Resolves the ffmpeg executable path; tests inject. */
-  resolveFfmpegPathImpl?: () => string | null;
-  /** Spawns a process; tests inject. */
-  spawnImpl?: typeof import('child_process').spawn;
   /** mkdtemp-like temp dir provider; tests inject. */
   tempDirImpl?: () => string;
 }
@@ -447,82 +442,8 @@ export function buildVideoTranscodeArgs(input: {
 }
 
 /** Parse the source duration (seconds) out of an `ffmpeg -i` stderr probe. */
-export function parseFfmpegDuration(stderr: string): number | null {
-  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
-  if (!match) return null;
-  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
-}
-
-let cachedFfmpegPath: string | null | undefined;
-
-/**
- * Resolve the ffmpeg executable: env override, bundled binary (packaged
- * resourcesPath, then dev project resources), then a system ffmpeg on PATH.
- * Returns null when nothing is found.
- */
-export function resolveFfmpegPath(): string | null {
-  if (cachedFfmpegPath !== undefined) return cachedFfmpegPath;
-  cachedFfmpegPath = null;
-  const envPath = (process.env.IDBOTS_FFMPEG_PATH || '').trim();
-  if (envPath) {
-    cachedFfmpegPath = envPath;
-    return cachedFfmpegPath;
-  }
-  const asset = FFMPEG_PLATFORM_ASSETS[process.platform]?.[process.arch];
-  if (!asset) {
-    cachedFfmpegPath = 'ffmpeg';
-    return cachedFfmpegPath;
-  }
-  // Packaged app: <resourcesPath>/ffmpeg/<asset> (extraResources)
-  const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath;
-  // Dev: project resources/ffmpeg/<asset> (dist-electron/main/services -> root)
-  const candidates = [
-    ...(resourcesPath ? [path.join(resourcesPath, 'ffmpeg', asset)] : []),
-    path.join(__dirname, '..', '..', '..', 'resources', 'ffmpeg', asset),
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (fs.statSync(candidate).isFile()) {
-        cachedFfmpegPath = candidate;
-        return cachedFfmpegPath;
-      }
-    } catch {
-      // try next candidate
-    }
-  }
-  // Last resort: system ffmpeg on PATH (dev machines with homebrew etc.)
-  cachedFfmpegPath = 'ffmpeg';
-  return cachedFfmpegPath;
-}
-
-async function runFfmpeg(args: string[], timeoutMs: number): Promise<{ code: number; stderr: string }> {
-  const deps = getDeps();
-  const ffmpegPath = deps.resolveFfmpegPathImpl ? deps.resolveFfmpegPathImpl() : resolveFfmpegPath();
-  if (!ffmpegPath) {
-    throw new VisionRelayError('ffmpeg is not available for video compression');
-  }
-  const spawnFn = deps.spawnImpl ?? ((await import('child_process')) as typeof import('child_process')).spawn;
-  return new Promise((resolve, reject) => {
-    const child = spawnFn(ffmpegPath, args, { stdio: ['ignore', 'ignore', 'pipe'] });
-    let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new VisionRelayError('ffmpeg video compression timed out'));
-    }, timeoutMs);
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-      if (stderr.length > 64 * 1024) stderr = stderr.slice(-32 * 1024);
-    });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      reject(new VisionRelayError(`ffmpeg failed to start: ${getErrorMessage(error)}`));
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: code ?? -1, stderr });
-    });
-  });
-}
+// parseFfmpegDuration + resolveFfmpegPath live in mediaToolsService and are
+// re-exported at the top of this file.
 
 /**
  * Transcode one local video to a recognition-grade mp4: probe duration,
@@ -535,7 +456,7 @@ export async function transcodeVideoForVision(videoPath: string): Promise<Vision
   // Probe duration (ffmpeg -i exits non-zero but prints the header)
   let durationSec: number | null = null;
   try {
-    const probe = await runFfmpeg(['-hide_banner', '-i', videoPath], 15_000);
+    const probe = await runFfmpegProcess(['-hide_banner', '-i', videoPath], 15_000);
     durationSec = parseFfmpegDuration(probe.stderr);
   } catch {
     durationSec = null;
@@ -571,7 +492,7 @@ export async function transcodeVideoForVision(videoPath: string): Promise<Vision
       maxSeconds: VISION_VIDEO_MAX_SECONDS,
       pass,
     });
-    const run = await runFfmpeg(args, VISION_VIDEO_TRANSCODE_TIMEOUT_MS);
+    const run = await runFfmpegProcess(args, VISION_VIDEO_TRANSCODE_TIMEOUT_MS);
     if (run.code !== 0) {
       throw new VisionRelayError(`ffmpeg video compression failed: ${run.stderr.slice(-300)}`);
     }

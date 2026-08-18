@@ -97,6 +97,7 @@ import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
 import { initVisionRelayService, recognizeImageViaRelay, recognizeVideoViaRelay } from './services/visionRelayService';
+import { probeMediaFile, convertMediaFile, grabVideoFrame } from './services/mediaToolsService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
@@ -5040,6 +5041,13 @@ const getCoworkRunner = () => {
       visionRelay: {
         recognize: (input) => recognizeImageViaRelay(input),
         recognizeVideo: (input) => recognizeVideoViaRelay(input),
+      },
+      // Local media tools (media_info/convert_media/grab_video_frame) over
+      // the bundled ffmpeg; all local-only, no credentials involved.
+      mediaTools: {
+        probe: (filePath) => probeMediaFile(filePath),
+        convert: (input) => convertMediaFile(input),
+        grabFrame: (input) => grabVideoFrame(input),
       },
       // metabot_manage tools (metabot_list/create/update/delete). Every method
       // delegates to the shared metabotManageService core — the same code the

@@ -228,8 +228,8 @@ test('integration: transcodeVideoForVision compresses a real clip with local ffm
     assert.ok(result.durationSec == null || Math.abs(result.durationSec - 4) < 1.5);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('ffmpeg is not available')) {
-      t.skip('no local ffmpeg available');
+    if (/ffmpeg (is not available|failed to start)/.test(message)) {
+      t.skip(`no local ffmpeg: ${message}`);
       return;
     }
     throw error;

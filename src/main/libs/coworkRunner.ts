@@ -131,6 +131,7 @@ import {
   buildVisionRelayAgentTools,
   type VisionRelayControl,
 } from './visionRelayAgentTools';
+import { buildMediaToolsAgentTools, type MediaToolsControl } from './mediaToolsAgentTools';
 import {
   buildMetabotManageAgentTools,
   type MetabotManageControl,
@@ -1506,6 +1507,13 @@ export interface CoworkRunnerOptions {
    */
   visionRelay?: VisionRelayControl;
   /**
+   * When set, every cowork session gets the local media tools (media_info,
+   * convert_media, grab_video_frame) backed by the bundled ffmpeg
+   * (services/mediaToolsService.ts). All operations are local-only: no
+   * network, no relay key, no recognition quota.
+   */
+  mediaTools?: MediaToolsControl;
+  /**
    * When set, Twin cowork sessions get the metabot_manage tools (metabot_list,
    * metabot_create, metabot_update, metabot_delete) backed by the shared core
    * functions in services/metabotManageService.ts — the same code the manual
@@ -1556,6 +1564,7 @@ export class CoworkRunner extends EventEmitter {
   private socialRecall?: SocialRecallControl;
   private metaFileUpload?: MetaFileUploadControl;
   private visionRelay?: VisionRelayControl;
+  private mediaTools?: MediaToolsControl;
   private metabotManage?: MetabotManageControl;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
@@ -1655,6 +1664,7 @@ export class CoworkRunner extends EventEmitter {
     this.socialRecall = options?.socialRecall;
     this.metaFileUpload = options?.metaFileUpload;
     this.visionRelay = options?.visionRelay;
+    this.mediaTools = options?.mediaTools;
     this.metabotManage = options?.metabotManage;
     this.localTurnStallTimeoutMs = Math.max(
       0,
@@ -7154,6 +7164,17 @@ export class CoworkRunner extends EventEmitter {
         ...buildVisionRelayAgentTools({
           tool,
           visionRelay: this.visionRelay,
+        })
+      );
+    }
+    // Local ffmpeg media tools for every cowork surface: probe, convert, and
+    // frame extraction are free/local, complementing the quota-metered
+    // describe_image/describe_video relay tools above.
+    if (this.mediaTools) {
+      memoryTools.push(
+        ...buildMediaToolsAgentTools({
+          tool,
+          media: this.mediaTools,
         })
       );
     }
