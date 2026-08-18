@@ -202,7 +202,7 @@ function resolveRpcToken(env) {
     if (!authFile)
         return '';
     try {
-        return require("fs").readFileSync(authFile, 'utf8').trim();
+        return fs_1.default.readFileSync(authFile, 'utf8').trim();
     }
     catch {
         return '';

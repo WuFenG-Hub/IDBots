@@ -14,7 +14,20 @@ import fs from 'fs';
 import pathMod from 'path';
 
 const RPC_BASE = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
-const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function resolveRpcToken(env: NodeJS.ProcessEnv): string {
+  const fromEnv = String(env.IDBOTS_RPC_TOKEN || '').trim();
+  if (fromEnv) return fromEnv;
+  // DSH sessions scrub *TOKEN* env names from bash; fall back to the
+  // host-written token mirror file (path rides the scrub-proof AUTHFILE name).
+  const authFile = String(env.IDBOTS_RPC_AUTHFILE || '').trim();
+  if (!authFile) return '';
+  try {
+    return fs.readFileSync(authFile, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+const RPC_TOKEN = resolveRpcToken(process.env);
 function rpcHeaders(): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;

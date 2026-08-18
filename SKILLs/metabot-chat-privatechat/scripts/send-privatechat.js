@@ -40,6 +40,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.sendPrivateChat = sendPrivateChat;
 const util_1 = require("util");
 const nodeCrypto = __importStar(require("crypto"));
+const fs = __importStar(require("fs"));
 const crypto_js_1 = __importDefault(require("crypto-js"));
 const utxo_wallet_service_1 = require("@metalet/utxo-wallet-service");
 const meta_contract_1 = require("meta-contract");
@@ -55,7 +56,7 @@ function resolveRpcToken(env) {
     if (!authFile)
         return '';
     try {
-        return require("fs").readFileSync(authFile, 'utf8').trim();
+        return fs.readFileSync(authFile, 'utf8').trim();
     }
     catch {
         return '';
