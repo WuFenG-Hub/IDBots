@@ -6116,7 +6116,12 @@ export class CoworkRunner extends EventEmitter {
           model: route.model,
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
-          thinkingFormat: route.provider === 'deepseek' && route.apiFormat === 'openai' ? 'deepseek' : undefined,
+          // 'deepseek' on BOTH wires: on completions it drives the compat
+          // thinkingFormat switch, on Responses it makes the config generator
+          // declare the low/medium/high/max effort ladder (pi-ai's builtin
+          // catalog pins low/medium to null — without the declaration those UI
+          // levels throw UNSUPPORTED_REASONING_EFFORT in the runtime).
+          thinkingFormat: route.provider === 'deepseek' ? 'deepseek' : undefined,
           // DeepSeek declares reasoning on both its wires: completions via
           // thinkingFormat, Responses via catalog models (v4 accepts off..high).
           // Without an explicit effort pi-ai's Responses adapter FORCES

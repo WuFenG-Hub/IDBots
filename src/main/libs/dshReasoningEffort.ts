@@ -9,14 +9,18 @@
 // felt identical. 快速's copy is "least thinking, fastest response", which
 // on this API is thinking disabled (`off`).
 //
-// The Responses wire (the current default route) takes none | low | high |
-// max on the reasoning toggle, and pi-ai FORCES `none` when no effort rides
-// the request — without an explicit mapping the UI selector silently ran
+// The Responses wire (the current default route) takes none | low | medium |
+// high | max on the reasoning toggle, and pi-ai FORCES `none` when no effort
+// rides the request — without an explicit mapping the UI selector silently ran
 // every turn with thinking disabled. Product mapping (2026-08): 快速→none,
-// 标准→low, 深度→medium, 极限→high. `medium` rides DeepSeek's documented
-// effort mapping (it folds onto high server-side); pi-ai's catalog models
-// accept off..high, so none of these values can trip the runtime's
-// UNSUPPORTED_REASONING_EFFORT guard.
+// 标准→low, 深度→medium, 极限→high (wire max declared but deliberately unused).
+//
+// These low/medium levels are only requestable because the runtime config
+// declares DEEPSEEK_RESPONSES_REASONING_EFFORTS on the generated model entries:
+// pi-ai's builtin catalog pins low/medium to null for deepseek models, and
+// without the declaration the runtime rejects them with
+// UNSUPPORTED_REASONING_EFFORT before the request leaves the process (the
+// 2026-08-18 标准-crash on a fresh V4 Pro session).
 
 const DSH_REASONING_EFFORTS = new Set([
   'off',
@@ -57,9 +61,8 @@ export function mapDshReasoningEffort(
     //   快速 / low / minimal → off    (pi-ai omits effort → wire none)
     //   标准 / medium        → low
     //   深度 / high          → medium
-    //   极限 / max / xhigh   → high   (wire max stays unused: pi-ai's catalog
-    //                                 does not declare it and the runtime
-    //                                 would reject the request)
+    //   极限 / max / xhigh   → high   (wire max is declared and legal, but the
+    //                                 product ladder tops out at high)
     if (normalized === 'low' || normalized === 'minimal') return 'off';
     if (normalized === 'medium') return 'low';
     if (normalized === 'high') return 'medium';

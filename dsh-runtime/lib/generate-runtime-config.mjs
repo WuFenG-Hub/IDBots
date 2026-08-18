@@ -50,13 +50,29 @@ const API_FORMAT_TO_PROTOCOL = {
 
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
-/** DeepSeek official wire: thinking disabled (`off`) or reasoning_effort high/max.
- *  The host maps UI 快速 (`low`) to `off` before session/ensure; `low`/`medium`
- *  stay aliased here only as a last-resort if a caller still sends those ids. */
+/** DeepSeek official chat-completions wire: thinking disabled (`off`) or
+ *  reasoning_effort high/max. The host maps UI 快速 (`low`) to `off` before
+ *  session/ensure; `low`/`medium` stay aliased here only as a last-resort if a
+ *  caller still sends those ids. */
 const DEEPSEEK_REASONING_EFFORTS = {
   off: null,
   low: 'high',
   medium: 'high',
+  high: 'high',
+  max: 'max',
+}
+
+/** DeepSeek Responses wire: reasoning.effort none/low/medium/high/max, all
+ *  accepted verbatim (medium verified live 2026-08-18). Declaring this map is
+ *  what unlocks low/medium as requestable pi-ai levels — the installed pi-ai
+ *  builtin catalog pins low/medium to null for deepseek models, so without it
+ *  the runtime rejects those efforts with UNSUPPORTED_REASONING_EFFORT before
+ *  the request leaves the process. `off: null` keeps "send nothing" as the
+ *  thinking-off spelling (pi-ai then sends reasoning.effort='none'). */
+const DEEPSEEK_RESPONSES_REASONING_EFFORTS = {
+  off: null,
+  low: 'low',
+  medium: 'medium',
   high: 'high',
   max: 'max',
 }
@@ -145,11 +161,17 @@ export function generateRuntimeConfig(input) {
         // Image-input declaration: routes default to text-only; a vision model
         // declares ['text','image'] so image blocks can enter its history.
         ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
-        // DeepSeek chat-completions: without a declared thinkingLevelMap the
-        // model is "non-reasoning" to pi-ai, so effort is ignored and the
-        // provider default (thinking ON) always wins. Declare the UI levels
-        // and map them onto DeepSeek's official off/high/max wire spellings.
-        ...(provider.thinkingFormat === 'deepseek' ? { reasoningEfforts: DEEPSEEK_REASONING_EFFORTS } : {}),
+        // DeepSeek effort declaration: without a declared thinkingLevelMap the
+        // model inherits pi-ai's builtin catalog — which pins low/medium to
+        // null for deepseek, so those UI levels throw
+        // UNSUPPORTED_REASONING_EFFORT before the request leaves the runtime.
+        // Declare the ladder per wire: completions maps low/medium onto the
+        // official high alias, Responses passes low/medium/high/max verbatim.
+        ...(provider.thinkingFormat === 'deepseek' ? {
+          reasoningEfforts: protocol === 'openai-responses'
+            ? DEEPSEEK_RESPONSES_REASONING_EFFORTS
+            : DEEPSEEK_REASONING_EFFORTS,
+        } : {}),
       })),
       // thinkingFormat compat exists ONLY on the openai-completions protocol;
       // attaching it to a responses/anthropic route fails provider resolution.
