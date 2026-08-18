@@ -45,6 +45,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API设置
     apiKey: 'API Key',
     apiKeyPlaceholder: '输入你的 API Key',
+    providerRecommendedBadge: '推荐',
+    deepseekApiKeyHint: '第一次使用?请到 DeepSeek 官网申请 API Key:',
     baseUrl: 'API Base URL',
     baseUrlPlaceholder: '输入 API 基础 URL',
     currentModel: '当前模型',
@@ -1986,7 +1988,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     trafficFreeGrantClaim: '免费领取 {amount} 流量',
     trafficFreeGrantClaiming: '领取中…',
     trafficFreeGrantClaimSuccess: '已领取 {amount} 免费流量。',
-    // 免费 LLM 额度（MetaID Free 内置供应商）
+    // 免费 LLM 额度（IDBots-Free 内置供应商）
     freeQuotaTitle: '免费模型额度',
     freeQuotaRefresh: '刷新',
     freeQuotaUsedOf: '已用 {used} / 共 {total} tokens',
@@ -1997,6 +1999,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     freeQuotaEnable: '启用免费额度',
     freeQuotaEnabling: '正在启用…',
     freeQuotaEnableHint: '无需 API Key，即可领取一定的免费模型用量并开始对话。',
+    freeQuotaNotice: 'IDBots-Free 是 IDBots 为新用户提供的零门槛体验额度，无需任何配置即可开始对话。额度总量有限，建议尽早配置自己的模型服务商，以确保机器人持续稳定可用。',
     freeQuotaEnableFailed: '启用失败：{error}',
     freeQuotaExhaustedBanner: '免费额度已用完。配置自己的模型 API Key 后即可继续对话。',
     freeQuotaGoSettings: '去配置',
@@ -2106,6 +2109,8 @@ const translations: Record<LanguageType, Record<string, string>> = {
     // API Settings
     apiKey: 'API Key',
     apiKeyPlaceholder: 'Enter your API Key',
+    providerRecommendedBadge: 'Recommended',
+    deepseekApiKeyHint: 'First time here? Get your DeepSeek API key from the official website:',
     baseUrl: 'API Base URL',
     baseUrlPlaceholder: 'Enter API Base URL',
     currentModel: 'Current Model',
@@ -4048,7 +4053,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     trafficFreeGrantClaim: 'Claim {amount} free traffic',
     trafficFreeGrantClaiming: 'Claiming…',
     trafficFreeGrantClaimSuccess: '{amount} free traffic claimed.',
-    // Free LLM quota (built-in MetaID Free provider)
+    // Free LLM quota (built-in IDBots-Free provider)
     freeQuotaTitle: 'Free LLM Quota',
     freeQuotaRefresh: 'Refresh',
     freeQuotaUsedOf: 'Used {used} of {total} tokens',
@@ -4059,6 +4064,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     freeQuotaEnable: 'Enable free quota',
     freeQuotaEnabling: 'Enabling…',
     freeQuotaEnableHint: 'No API key needed — claim a free token quota and start chatting.',
+    freeQuotaNotice: 'IDBots-Free is a zero-setup starter quota IDBots offers to new users — you can start chatting without any configuration. The quota is limited, so set up your own LLM provider soon to keep your bots running.',
     freeQuotaEnableFailed: 'Failed to enable: {error}',
     freeQuotaExhaustedBanner: 'Free quota exhausted. Add your own model API key to keep chatting.',
     freeQuotaGoSettings: 'Configure',

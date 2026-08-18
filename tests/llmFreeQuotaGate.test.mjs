@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   LLM_FREE_PROVIDER_KEY,
   LLM_RELAY_WELCOME_BOT_ID_KEY,
+  getFreeProviderModelDisplayName,
   isFreeProviderConfigured,
   planFreeQuotaProvisioning,
 } from '../src/renderer/services/llmFreeQuotaGate.js';
@@ -12,6 +13,12 @@ import { getDefaultOnboardingProvider } from '../src/renderer/components/onboard
 test('constants stay stable (backend + kv contracts)', () => {
   assert.equal(LLM_FREE_PROVIDER_KEY, 'metaid-free');
   assert.equal(LLM_RELAY_WELCOME_BOT_ID_KEY, 'llmRelay.welcomeBotId');
+});
+
+test('getFreeProviderModelDisplayName maps relay wire ids to product names', () => {
+  assert.equal(getFreeProviderModelDisplayName('deepseek-chat'), 'deepseek-v4-flash');
+  assert.equal(getFreeProviderModelDisplayName('another-relay-model'), 'another-relay-model');
+  assert.equal(getFreeProviderModelDisplayName(undefined), undefined);
 });
 
 test('isFreeProviderConfigured requires credentials and models', () => {

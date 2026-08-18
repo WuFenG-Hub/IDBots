@@ -448,7 +448,27 @@ export const defaultConfig: AppConfig = {
       baseUrl: '',
       apiFormat: 'openai',
       models: [],
-      name: 'MetaID Free',
+      name: 'IDBots-Free',
+    },
+    deepseek: {
+      enabled: false,
+      apiKey: '',
+      baseUrl: 'https://api.deepseek.com',
+      apiFormat: 'openai',
+      models: getDefaultDeepSeekModels()
+    },
+    opencode: {
+      enabled: false,
+      apiKey: '',
+      // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
+      // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
+      // Default to the Responses endpoint: DeepSeek Flash carries reasoning there and
+      // the gateway serves pro/flash alike on /v1/responses.
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiFormat: 'responses',
+      models: [
+        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
+      ]
     },
     openai: {
       enabled: false,
@@ -484,13 +504,6 @@ export const defaultConfig: AppConfig = {
         { id: 'claude-opus-4-6', name: 'Claude Opus 4.6', supportsImage: true, contextWindow: 1_048_576 },
         { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6', supportsImage: true, contextWindow: 1_048_576 }
       ]
-    },
-    deepseek: {
-      enabled: false,
-      apiKey: '',
-      baseUrl: 'https://api.deepseek.com',
-      apiFormat: 'openai',
-      models: getDefaultDeepSeekModels()
     },
     moonshot: {
       enabled: false,
@@ -565,19 +578,6 @@ export const defaultConfig: AppConfig = {
         { id: 'qwen3-coder-next', name: 'Qwen3-Coder-Next', supportsImage: false, contextWindow: 1_000_000 },
         { id: 'glm-4.7-flash', name: 'GLM 4.7 Flash', supportsImage: false, contextWindow: 204_800 }
       ]
-    },
-    opencode: {
-      enabled: false,
-      apiKey: '',
-      // OpenCode Go 网关（https://opencode.ai/docs/zh-cn/go），统一走 /v1 前缀，
-      // Messages / Chat Completions / Responses 三个端点都挂在同一 Base URL 下。
-      // Default to the Responses endpoint: DeepSeek Flash carries reasoning there and
-      // the gateway serves pro/flash alike on /v1/responses.
-      baseUrl: 'https://opencode.ai/zen/go/v1',
-      apiFormat: 'responses',
-      models: [
-        { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', supportsImage: false, contextWindow: 1_000_000 }
-      ]
     }
   },
   theme: 'system',
@@ -614,7 +614,7 @@ export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 
 /** All supported LLM provider keys for the Model settings page. No language filtering. */
 export const ALL_PROVIDER_KEYS = [
-  'metaid-free', 'openai', 'gemini', 'anthropic', 'deepseek', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama', 'opencode',
+  'metaid-free', 'deepseek', 'opencode', 'openai', 'gemini', 'anthropic', 'moonshot', 'zhipu', 'minimax', 'qwen', 'xiaomi', 'openrouter', 'ollama',
 ] as const;
 
 /**

@@ -11,6 +11,21 @@ export const LLM_FREE_PROVIDER_KEY = 'metaid-free';
 export const LLM_RELAY_WELCOME_BOT_ID_KEY = 'llmRelay.welcomeBotId';
 
 /**
+ * User-facing display names for free-relay model ids. Relay ids are internal
+ * wire names sent to the API; the UI should show these product names instead.
+ */
+const FREE_PROVIDER_MODEL_DISPLAY_NAMES = {
+  'deepseek-chat': 'deepseek-v4-flash',
+};
+
+export function getFreeProviderModelDisplayName(modelId) {
+  if (typeof modelId !== 'string') {
+    return modelId;
+  }
+  return FREE_PROVIDER_MODEL_DISPLAY_NAMES[modelId] ?? modelId;
+}
+
+/**
  * A provider entry counts as provisioned only when bootstrap has filled in
  * connection credentials AND at least one model.
  */

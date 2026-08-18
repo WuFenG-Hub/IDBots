@@ -1,5 +1,6 @@
 import { AppConfig, CONFIG_KEYS, defaultConfig, normalizeDeepSeekAppConfig } from '../config';
 import { localStore } from './store';
+import { getFreeProviderModelDisplayName, LLM_FREE_PROVIDER_KEY } from './llmFreeQuotaGate.js';
 
 const getFixedProviderApiFormat = (providerKey: string): 'anthropic' | 'openai' | null => {
   if (providerKey === 'openai' || providerKey === 'gemini') {
@@ -81,6 +82,16 @@ const buildProviderSignature = (
   })),
 );
 
+// The built-in free-quota provider is managed end to end (relay-provisioned
+// credentials, hidden in the UI), so its model display names are always the
+// canonical product names, never the relay's internal wire ids.
+const normalizeFreeProviderModelNames = (
+  models: NonNullable<NonNullable<AppConfig['providers']>[string]['models']> | undefined,
+) => models?.map((model) => ({
+  ...model,
+  name: getFreeProviderModelDisplayName(model.id),
+}));
+
 const normalizeSingleProviderConfig = (
   providerKey: string,
   providerConfig: NonNullable<AppConfig['providers']>[string],
@@ -88,7 +99,9 @@ const normalizeSingleProviderConfig = (
   ...providerConfig,
   baseUrl: normalizeProviderBaseUrl(providerKey, providerConfig.baseUrl),
   apiFormat: normalizeProviderApiFormat(providerKey, providerConfig.apiFormat),
-  models: cloneProviderModels(providerConfig.models),
+  models: providerKey === LLM_FREE_PROVIDER_KEY
+    ? normalizeFreeProviderModelNames(providerConfig.models)
+    : cloneProviderModels(providerConfig.models),
 });
 
 const getDefaultProvidersConfig = (): NonNullable<AppConfig['providers']> => (
@@ -329,7 +342,7 @@ export const applyProviderModelMigrations = (config: AppConfig): AppConfig => {
 // （apiKey 为空）的 provider，已自定义配置（填了 key 或改过格式）的用户保持不动。
 // ---------------------------------------------------------------------------
 
-export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 1;
+export const PROVIDER_API_FORMAT_MIGRATION_VERSION = 2;
 
 type ProviderApiFormatValue = 'anthropic' | 'openai' | 'responses';
 
@@ -359,6 +372,35 @@ const migrateOpencodeApiFormatToResponses = (
   };
 };
 
+/**
+ * v2：DeepSeek 默认 API 形态对齐官方 harness —— 仅 API Key 的开通流程固定走
+ * chat completions（apiFormat 'openai'）+ https://api.deepseek.com。设置页已隐藏
+ * Base URL / API 格式字段，这里把仍停留在官方 anthropic 端点默认的老配置一次性
+ * 迁到 openai 默认；自定义 Base URL（代理等）或已显式选择其他格式的保持不动。
+ */
+const DEEPSEEK_OFFICIAL_ANTHROPIC_BASE_URL = 'https://api.deepseek.com/anthropic';
+const DEEPSEEK_OFFICIAL_OPENAI_BASE_URL = 'https://api.deepseek.com';
+
+const migrateDeepseekApiFormatToOpenai = (
+  providers: NonNullable<AppConfig['providers']>,
+): NonNullable<AppConfig['providers']> => {
+  const deepseek = providers.deepseek;
+  if (!deepseek) {
+    return providers;
+  }
+  if ((deepseek.apiFormat as ProviderApiFormatValue | undefined) !== 'anthropic') {
+    return providers;
+  }
+  const baseUrl = String(deepseek.baseUrl ?? '').trim().replace(/\/+$/, '').toLowerCase();
+  if (baseUrl !== DEEPSEEK_OFFICIAL_ANTHROPIC_BASE_URL) {
+    return providers;
+  }
+  return {
+    ...providers,
+    deepseek: { ...deepseek, apiFormat: 'openai', baseUrl: DEEPSEEK_OFFICIAL_OPENAI_BASE_URL },
+  };
+};
+
 export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig => {
   const currentVersion = config.providerApiFormatMigrationVersion ?? 0;
   if (currentVersion >= PROVIDER_API_FORMAT_MIGRATION_VERSION) {
@@ -371,6 +413,11 @@ export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig =
     if (version === 1) {
       nextProviders = nextProviders
         ? migrateOpencodeApiFormatToResponses(nextProviders as NonNullable<AppConfig['providers']>)
+        : nextProviders;
+    }
+    if (version === 2) {
+      nextProviders = nextProviders
+        ? migrateDeepseekApiFormatToOpenai(nextProviders as NonNullable<AppConfig['providers']>)
         : nextProviders;
     }
   }
