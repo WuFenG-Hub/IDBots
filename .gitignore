@@ -45,6 +45,7 @@ tests/*
 !tests/runtimeDependencyContract.test.mjs
 !tests/dshKernelEventMapper.test.mjs
 !tests/dshKernelRuntime.test.mjs
+!tests/dshRuntimeConfigEfforts.test.mjs
 !tests/coworkKernelRouting.test.mjs
 !tests/coworkDshIntegration.test.mjs
 !tests/coworkSessionGtCloseStatus.test.mjs
