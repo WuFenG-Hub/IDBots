@@ -214,9 +214,12 @@ export interface DshHubOptions {
    * idbots tools/policy plugins mount here). */
   extraEntries?: Array<Record<string, unknown>>
   /** Re-read every turn (unlike the static extraEntries): the user-managed
-   * plugin directory feeds entries here, so an install/uninstall applies on
-   * the next turn — config-change restart waits for quiescence as usual. */
+   *  plugin directory feeds entries here, so an install/uninstall applies on
+   *  the next turn — config-change restart waits for quiescence as usual. */
   extraEntriesProvider?: () => Array<Record<string, unknown>>
+  /** Quiescence budget before a NON-deferrable config change restarts the
+   *  shared runtime while turns are in flight (default 90s; tests shrink it). */
+  configRestartQuiescenceMs?: number
 }
 
 export class DshTurnHub {
@@ -456,11 +459,33 @@ export class DshTurnHub {
       })
     }
     // A config change restarts the runtime; never do that while OTHER
-    // sessions have turns in flight — wait for quiescence first (bounded).
+    // sessions have turns in flight. GT#26 follow-up: a config flap while a
+    // long turn ran (render / sleep-40 probe) restarted the shared runtime
+    // exactly at the 90s quiescence deadline and killed the turn ("runtime
+    // stream closed", exit 0). When the CALLING turn's provider route is
+    // served identically by the running runtime, the change is not needed
+    // for THIS turn — skip the restart and let the next quiescent ensureKernel
+    // apply the fresh config instead (lastConfigJson stays at the running
+    // runtime's config, so the diff stays visible to the next call). Only a
+    // config the old runtime genuinely cannot serve (caller's provider route
+    // new or changed) keeps the bounded wait + restart path.
     if (this.kernel?.running && this.lastConfigJson !== undefined) {
       const nextJson = JSON.stringify(config)
       if (nextJson !== this.lastConfigJson && this.controllersByDsh.size > 0) {
-        const deadline = Date.now() + 90000
+        const changedKeys = dshConfigChangedKeys(this.lastConfigJson, nextJson)
+        const callerRouteJson = JSON.stringify(providerRouteOf(input.provider))
+        const servedByRunningRuntime =
+          lastProviderRouteJsonOf(this.lastConfigJson, input.provider.key) === callerRouteJson
+        if (servedByRunningRuntime) {
+          this.opts.log?.('warn',
+            'config changed but the running runtime serves this turn; restart deferred until quiescence',
+            { changed: changedKeys, inFlight: this.controllersByDsh.size })
+          return this.kernel
+        }
+        this.opts.log?.('warn',
+          'config change needs a runtime restart; waiting (bounded) for in-flight turns',
+          { changed: changedKeys, inFlight: this.controllersByDsh.size })
+        const deadline = Date.now() + (this.opts.configRestartQuiescenceMs ?? 90000)
         while (this.controllersByDsh.size > 0 && Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, 100))
         }
@@ -554,6 +579,32 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
         ? { input: provider.inputModalities }
         : {}),
     }],
+  }
+}
+
+/** Top-level config keys whose serialized value differs between two configs
+ *  (restarting the shared runtime is destructive — say WHAT changed). */
+export function dshConfigChangedKeys(lastJson: string, nextJson: string): string[] {
+  try {
+    const last = JSON.parse(lastJson) as Record<string, unknown>
+    const next = JSON.parse(nextJson) as Record<string, unknown>
+    const keys = new Set([...Object.keys(last), ...Object.keys(next)])
+    return [...keys].filter((key) => JSON.stringify(last[key]) !== JSON.stringify(next[key]))
+  } catch {
+    return ['<unparseable>']
+  }
+}
+
+/** Serialized provider route stored in a config JSON by key, or null when the
+ *  key is absent — the runtime can only serve a turn whose route is present
+ *  verbatim. */
+export function lastProviderRouteJsonOf(configJson: string, providerKey: string): string | null {
+  try {
+    const parsed = JSON.parse(configJson) as { providers?: Array<{ key: string }> }
+    const route = (parsed.providers ?? []).find((candidate) => candidate.key === providerKey)
+    return route === undefined ? null : JSON.stringify(route)
+  } catch {
+    return null
   }
 }
 
