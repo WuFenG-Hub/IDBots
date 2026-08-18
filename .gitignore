@@ -213,6 +213,8 @@ man_base_data_pebble/
 !tests/metaIdSearchService.test.mjs
 !tests/metaIdSearchAgentTools.test.mjs
 !tests/metaFileUploadAgentTools.test.mjs
+!tests/visionRelayService.test.mjs
+!tests/visionRelayAgentTools.test.mjs
 !tests/metaAppManagerBundledSync.test.mjs
 !tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts

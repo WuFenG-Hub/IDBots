@@ -96,6 +96,7 @@ import {
 import { registerMetabotWalletIpcHandlers } from './services/metabotWalletIpc';
 import { initTrafficAccountService, registerTrafficAccountIpcHandlers } from './services/trafficAccountService';
 import { initLlmRelayService, registerLlmRelayIpcHandlers } from './services/llmRelayService';
+import { initVisionRelayService, recognizeImageViaRelay } from './services/visionRelayService';
 import { startMetaidRpcServer } from './services/metaidRpcServer';
 import { syncMetaBotEditChangesToChain, syncMetaBotToChain } from './services/metaidCore';
 import {
@@ -5021,6 +5022,12 @@ const getCoworkRunner = () => {
           const { uploadMetaFile } = await import('./services/metaFileUploadService');
           return uploadMetaFile(getMetabotStore(), params);
         },
+      },
+      // describe_image tool backend: one local image -> relay VLM -> text
+      // description + OCR. Lazy credential resolution keeps the startup path
+      // unchanged; errors surface through the tool result.
+      visionRelay: {
+        recognize: (input) => recognizeImageViaRelay(input),
       },
       // metabot_manage tools (metabot_list/create/update/delete). Every method
       // delegates to the shared metabotManageService core — the same code the
@@ -11635,6 +11642,11 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     getUserIdentityStore,
   });
   registerLlmRelayIpcHandlers({ ipcMain });
+
+  // Vision relay (describe_image backend): reuses the free-quota relay
+  // credentials (metaid-free provider key, identity-signed bootstrap on
+  // demand) and never touches the renderer.
+  initVisionRelayService({ getStore });
 
   ipcMain.handle('metabot:setEnabled', async (_event, id: number, enabled: boolean) => {
     try {
