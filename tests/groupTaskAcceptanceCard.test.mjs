@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url';
  *   2. the Accept & Close / Rework buttons live INSIDE the card;
  *   3. goal/criteria render as capped previews (scroll-successful, P12-safe);
  *   4. deliverable URIs stay openable (openGroupTaskUri), not copy-only;
- *   5. the detail view hands the decision actions to the card and keeps the
- *      header buttons only as the no-summary fallback.
+ *   5. the detail view hands the decision actions to the card AND keeps the
+ *      header Accept/Rework visible whenever the task is in review.
  */
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -31,7 +31,8 @@ test('card: conclusion headline with deterministic fallback, buttons inside, pre
     'falls back to the deterministic deliverable-count headline',
   );
 
-  // 2 — the decision buttons live in the card, driven by the actions prop.
+  // 2 — the decision buttons live in the card, driven by the actions prop,
+  //     and stay visible while the card is collapsed (never behind Expand).
   assert.ok(
     source.includes('export interface AcceptanceSummaryCardActions'),
     'card declares its actions contract',
@@ -46,6 +47,9 @@ test('card: conclusion headline with deterministic fallback, buttons inside, pre
     source.includes("i18nService.t('groupTasksBackToWork')"),
     'Rework rendered inside the card',
   );
+  const actionsIdx = source.indexOf('{actions && (');
+  const expandedIdx = source.indexOf('{expanded && (');
+  assert.ok(actionsIdx >= 0 && expandedIdx > actionsIdx, 'in-card actions render before the collapsed body');
 
   // 3 — goal/criteria previews keep the card scannable (full text behind expand).
   assert.ok(source.includes('PreviewableField'), 'preview fields used');
@@ -62,7 +66,7 @@ test('card: conclusion headline with deterministic fallback, buttons inside, pre
   );
 });
 
-test('detail view: card carries the decision; header buttons are the no-summary fallback only', () => {
+test('detail view: card carries the decision; header Accept/Rework stay visible in review', () => {
   const source = read('GroupTaskDetailView.tsx');
 
   // The card receives the actions while the task is in review.
@@ -73,20 +77,27 @@ test('detail view: card carries the decision; header buttons are the no-summary 
     'decision actions are handed to the acceptance card',
   );
 
-  // Header keeps Accept/Rework ONLY when review was reached without a summary
-  // record (defensive fallback so the owner always has a decision path).
+  // Header Accept/Rework must remain visible whenever the task is in review
+  // (not gated on a missing summary). The collapsed card also keeps in-card
+  // copies, but the top-right is the owner's one-click accept path and must
+  // never vanish.
   const headerAccept = source.match(
     /canAcceptGroupTask\(detail\.status\)[\s\S]{0,120}?onClick=\{\(\) => setConfirmAction\('done'\)\}/,
   );
-  assert.ok(headerAccept, 'header accept button still exists (fallback)');
+  assert.ok(headerAccept, 'header accept button still exists');
   assert.match(
+    source,
+    /canAcceptGroupTask\(detail\.status\) && \(/,
+    'header accept button is gated on review status',
+  );
+  assert.doesNotMatch(
     source,
     /canAcceptGroupTask\(detail\.status\) && !detail\.acceptanceSummary/,
-    'header accept button is gated on the missing-summary fallback',
+    'header accept button must not hide when a summary record exists',
   );
-  assert.match(
+  assert.doesNotMatch(
     source,
     /canReopenGroupTask\(detail\.status\) && !detail\.acceptanceSummary/,
-    'header rework button is gated on the missing-summary fallback',
+    'header rework button must not hide when a summary record exists',
   );
 });

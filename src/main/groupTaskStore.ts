@@ -243,6 +243,11 @@ export interface GroupTaskAcceptanceSummaryDeliverable {
   status: GroupTaskDeliverableStatus;
   confirmation: 'unconfirmed' | 'confirmed';
   authorName: string | null;
+  /**
+   * Body preview for text deliverables (no uri). Null for URI-bearing rows.
+   * Lets a text-only task show the actual report instead of "（见消息原文）".
+   */
+  preview?: string | null;
 }
 
 /** One member row inside an acceptance summary (immutable snapshot). */
@@ -839,6 +844,10 @@ export class GroupTaskStore {
     this.saveDb();
     const task = this.getTaskById(id);
     if (!task) throw new Error(`createTask failed: task ${id} not found after insert`);
+    // Birth is a list-visible event: the sidebar only upserts on
+    // groupTask:statusChanged (or a full list reload). Without this emit a
+    // Twin-created task stays invisible until the owner clicks Group Tasks.
+    this.emitStatusChanged(id, task.status);
     return task;
   }
 

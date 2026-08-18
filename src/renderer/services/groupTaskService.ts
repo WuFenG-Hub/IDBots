@@ -49,12 +49,20 @@ class GroupTaskService {
     if (!api) return;
 
     const cleanup = api.onStatusChanged((event: GroupTaskStatusEvent) => {
-      store.dispatch(
-        updateTaskStatus({
-          taskId: event.taskId,
-          status: event.status as GroupTaskStatus,
-        })
-      );
+      const existing = store.getState().groupTasks.tasks.find((task) => task.id === event.taskId);
+      if (existing) {
+        store.dispatch(
+          updateTaskStatus({
+            taskId: event.taskId,
+            status: event.status as GroupTaskStatus,
+          })
+        );
+        return;
+      }
+      // Unknown taskId = a newly created task (Twin/daemon path). Status-only
+      // updates are a no-op for missing rows, so reload the list instead of
+      // leaving the sidebar blank until the owner clicks Group Tasks.
+      void this.loadTasks();
     });
     this.cleanupFns.push(cleanup);
 
