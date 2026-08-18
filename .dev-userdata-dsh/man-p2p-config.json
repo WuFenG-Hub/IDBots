@@ -1,0 +1,21 @@
+{
+  "p2p_sync_mode": "self",
+  "p2p_bootstrap_nodes": [
+    "/ip4/8.217.14.206/tcp/4001/p2p/12D3KooWSvVfJ7s37hsCfRHuhccWxocxyjU6uKGKF4czBGZk8f5H",
+    "/dns4/manapi.metaid.io/tcp/4001/p2p/12D3KooWSvVfJ7s37hsCfRHuhccWxocxyjU6uKGKF4czBGZk8f5H",
+    "/ip4/47.239.239.128/tcp/4001/p2p/12D3KooWK7eZa2YGnFruM4GkRmKNDv7qvxCPMowVAiCVPuFhxRcS"
+  ],
+  "p2p_enable_relay": true,
+  "p2p_storage_limit_gb": 10,
+  "p2p_enable_chain_source": false,
+  "p2p_own_addresses": [
+    "1mhXDyqPbov51dDniiePwa3qKYFoK8T4d",
+    "D5uo4UvUh1iCc1opXJiCwhjeiTGZ6DKYw4",
+    "1NxHniWCwGwyJTpdzF8rVXLykjZgFxf8YX",
+    "DT6PKySrEgrFqU1Eiq8R3HWadsHygCx6g9"
+  ],
+  "p2p_presence_global_metaids": [
+    "idq1pp6zptzjar0ngzy6drjt4h30k5zgem7llfr4hl",
+    "idq17r8c3ruh58l89x3e9r6a23su2chs8x7vxpa6ae"
+  ]
+}

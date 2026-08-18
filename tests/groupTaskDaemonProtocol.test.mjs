@@ -158,6 +158,7 @@ const createHarness = async (overrides = {}) => {
     ...(overrides.driverGraceMs != null ? { driverGraceMs: overrides.driverGraceMs } : {}),
     ...(overrides.readPinForVerification != null ? { readPinForVerification: overrides.readPinForVerification } : {}),
     ...(overrides.readPinSecondaryForVerification != null ? { readPinSecondaryForVerification: overrides.readPinSecondaryForVerification } : {}),
+    ...(overrides.uploadDeliverableFile != null ? { uploadDeliverableFile: overrides.uploadDeliverableFile } : {}),
   };
 
   const loop = createGroupTaskDaemonLoop(loopDeps);
@@ -972,6 +973,200 @@ test('P3: verified-but-pending legacy rows are backfilled to delivered by the mo
     await h.loop.runTick();
     const deliverable = h.groupTaskStore.listDeliverables(task.id)[0];
     assert.equal(deliverable.status, 'delivered', 'backfill flips the legacy verified row');
+  } finally {
+    h.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Ledger fix (#14→#16): local-file deliverables are uploaded on-chain as
+// metafiles; reject/rework backfills deliverable status; transcript reads
+// stay id-ordered (show/dump consistency).
+// ---------------------------------------------------------------------------
+
+test('ledger fix: [DELIVERABLE] naming a LOCAL file is uploaded as metafile (uri + confirmed)', async () => {
+  const tempDir = makeTempDir();
+  const localFile = path.join(tempDir, 'visual-spec.md');
+  fs.writeFileSync(localFile, '# Visual spec\n');
+  const uploadedPin = 'd'.repeat(64) + 'i0';
+  const uploads = [];
+  const h = await createHarness({
+    uploadDeliverableFile: async (input) => {
+      uploads.push(input);
+      return { pinId: uploadedPin };
+    },
+    readPinForVerification: async (pinId) => (pinId === uploadedPin ? 'found' : 'not_found'),
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'local-file-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] 视觉规范文档：\`${localFile}\`（含参数速查表）`,
+    });
+    await h.loop.runTick();
+
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'one deliverable row recorded');
+    assert.equal(deliverables[0].kind, 'metafile', 'text row upgraded to metafile');
+    assert.equal(deliverables[0].uri, `metafile://${uploadedPin}.md`, 'uri carries the uploaded pinid + extension');
+    assert.equal(deliverables[0].confirmation, 'confirmed', 'on-chain confirmation follows the uploaded pin');
+    assert.equal(uploads.length, 1, 'exactly one upload');
+    assert.equal(uploads[0].filePath, localFile);
+    assert.equal(uploads[0].metabotId, 2, 'upload paid by the author bot wallet');
+    const parsed = JSON.parse(deliverables[0].verification ?? '{}');
+    assert.equal(parsed.verified, true, 'on-chain verification report persisted');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('ledger fix: upload failure degrades to the plain text record (row kept, no fake uri)', async () => {
+  const tempDir = makeTempDir();
+  const localFile = path.join(tempDir, 'report.md');
+  fs.writeFileSync(localFile, 'x');
+  const h = await createHarness({
+    uploadDeliverableFile: async () => { throw new Error('wallet insufficient'); },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'upload-fail-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] 报告：\`${localFile}\``,
+    });
+    await h.loop.runTick();
+
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'row still recorded');
+    assert.equal(deliverables[0].kind, 'text', 'no fake metafile kind');
+    assert.equal(deliverables[0].uri, null, 'no fake uri');
+    assert.equal(deliverables[0].confirmation, 'unconfirmed');
+    assert.ok(
+      h.logs.some((line) => line.includes('local deliverable upload failed')),
+      'failure is logged',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('ledger fix: missing/non-file paths never trigger an upload', async () => {
+  const h = await createHarness({
+    uploadDeliverableFile: async () => {
+      throw new Error('upload must not be called for a missing file');
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    insertGroupMessage(h.db, {
+      pinId: 'no-file-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: '[DELIVERABLE] 结论：路径 `/tmp/idbots-no-such-dir-xyz/ghost.md` 不存在，仅作引用',
+    });
+    await h.loop.runTick();
+
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'row recorded as plain text');
+    assert.equal(deliverables[0].kind, 'text');
+    assert.equal(deliverables[0].uri, null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('ledger fix: a correction to a REJECTED deliverable re-opens it to pending (new version, same row)', async () => {
+  const pinA = 'e'.repeat(64) + 'i0';
+  const h = await createHarness({
+    readPinForVerification: async () => 'found',
+  });
+  try {
+    const task = h.createTask([2]);
+    // A deliverable row that was REJECTED by the chair's rework.
+    const row = h.groupTaskStore.addDeliverable({
+      taskId: task.id,
+      msgPinId: 'rejected-msg-i0',
+      authorGlobalmetaid: 'gmid-w2',
+      kind: 'metaapp',
+      uri: `metaapp://${pinA}`,
+    });
+    h.groupTaskStore.updateDeliverableStatus(row.id, 'rejected');
+    assert.equal(h.groupTaskStore.listDeliverables(task.id)[0].status, 'rejected');
+
+    // The worker re-delivers the SAME object with a correction tag.
+    insertGroupMessage(h.db, {
+      pinId: 'correction-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot',
+      content: `[DELIVERABLE] 更正：修正版已重新发布，以 metaapp://${pinA} 为准`,
+    });
+    await h.loop.runTick();
+
+    const deliverables = h.groupTaskStore.listDeliverables(task.id);
+    assert.equal(deliverables.length, 1, 'corrected in place, no duplicate row');
+    assert.equal(deliverables[0].status, 'pending', 'rejected verdict re-opened to pending');
+    assert.equal(deliverables[0].uri, `metaapp://${pinA}`);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('ledger fix: reject backfill marks pending deliverables rejected (store-level)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    h.groupTaskStore.addDeliverable({ taskId: task.id, msgPinId: 'm1-i0', authorGlobalmetaid: 'gmid-w2', kind: 'text' });
+    const pin = 'f'.repeat(64) + 'i0';
+    h.groupTaskStore.addDeliverable({ taskId: task.id, msgPinId: 'm2-i0', authorGlobalmetaid: 'gmid-w3', kind: 'metaapp', uri: `metaapp://${pin}` });
+    const changed = h.groupTaskStore.updateDeliverablesStatusByTask(task.id, 'pending', 'rejected');
+    assert.equal(changed, 2, 'both pending rows rejected');
+    const rows = h.groupTaskStore.listDeliverables(task.id);
+    assert.ok(rows.every((row) => row.status === 'rejected'), 'all pending rows rejected');
+    assert.equal(h.groupTaskStore.updateDeliverablesStatusByTask(task.id, 'pending', 'rejected'), 0, 'idempotent');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('show/dump consistency: transcript reads stay id-ordered even when chain timestamps are out of order', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask([2]);
+    // Deliberately insert with chain timestamps OUT of id order (backfill lag
+    // scenario): id order must still drive the transcript, never timestamps.
+    insertGroupMessage(h.db, {
+      pinId: 'm-a-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'first message', chainTimestamp: 300,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'm-b-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'second message', chainTimestamp: 100,
+    });
+    insertGroupMessage(h.db, {
+      pinId: 'm-c-i0', senderMetaId: 'metaid-2', senderGlobalMetaId: 'gmid-w2',
+      senderName: 'Coder Bot', content: 'third message', chainTimestamp: 200,
+    });
+    const transcript = h.groupTaskStore.listGroupChatMessages(GROUP_ID, { limit: 50 });
+    assert.deepEqual(transcript.map((m) => m.id), [1, 2, 3], 'UI/show transcript is id-ordered');
+    assert.deepEqual(transcript.map((m) => m.content), ['first message', 'second message', 'third message']);
+
+    // The daemon's worker-context dump rides the SAME id-ordered query path
+    // (queryRecentMessages: ORDER BY id DESC LIMIT then reverse), so a reply
+    // turn produces a dump whose message order matches the UI transcript.
+    insertGroupMessage(h.db, {
+      pinId: 'm-d-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '@Coder Bot 请按上述顺序复核', chainTimestamp: 400,
+    });
+    await h.loop.runTick();
+    assert.ok(h.chatCalls.length > 0, 'a reply turn ran for the trigger');
+    const dumpUser = h.chatCalls[0].userMessage;
+    const firstPos = dumpUser.indexOf('first message');
+    const secondPos = dumpUser.indexOf('second message');
+    const thirdPos = dumpUser.indexOf('third message');
+    const triggerPos = dumpUser.indexOf('请按上述顺序复核');
+    assert.ok(firstPos !== -1 && secondPos !== -1 && thirdPos !== -1 && triggerPos !== -1,
+      'dump carries every message');
+    assert.ok(firstPos < secondPos && secondPos < thirdPos && thirdPos < triggerPos,
+      'dump order equals the id-ordered UI transcript');
   } finally {
     h.cleanup();
   }

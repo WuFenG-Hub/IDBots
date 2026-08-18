@@ -11,6 +11,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { MetabotStore } from '../metabotStore';
 import type { CoworkStore, CoworkSession } from '../coworkStore';
@@ -54,11 +56,17 @@ import {
 } from '../libs/experiencePromptBlocks';
 import {
   parseDeliverableLines,
+  parseDeliverableSegments,
+  extractLocalFilePaths,
   parseWorkingAck,
   hasStandbyMarker,
   isIntegrityDeclaration,
   type ParsedDeliverable,
 } from './groupTaskDeliverableParser';
+import { buildMetafileUri } from './serviceDeliveryArtifacts.js';
+import metaFileUploadShared from './metaFileUploadShared.js';
+
+const { inferContentTypeFromFilePath } = metaFileUploadShared;
 
 /** Alias kept for readability; the canonical value lives in groupTaskSession. */
 const CONVERSATION_CHANNEL = GROUP_TASK_CONVERSATION_CHANNEL;
@@ -1021,6 +1029,18 @@ export interface GroupTaskDaemonDeps {
   ackEngagedRecentMs?: number;
   /** P0-4: ms between retries of an unverified deliverable (default 10 min). */
   verificationRetryMs?: number;
+  /**
+   * Ledger fix (#14→#16): upload a LOCAL file deliverable on-chain as a
+   * metafile paid by the author bot's wallet, so a worker's local file path
+   * becomes verifiable chain evidence. Same seam the OpenTeam guest daemon
+   * uses (metaFileUploadService.uploadMetaFile). Unwired = text deliverables
+   * are recorded as-is (no on-chain upgrade).
+   */
+  uploadDeliverableFile?: (input: {
+    metabotId: number;
+    filePath: string;
+    contentType?: string;
+  }) => Promise<Record<string, unknown>>;
 }
 
 export interface GroupTaskDaemonLoop {
@@ -2591,16 +2611,25 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const candidatePinids = new Set(
       candidate.uri.match(/[0-9a-f]{64}i0/gi)?.map((token) => token.toLowerCase()) ?? [],
     );
+    // Ledger fix (#14→#16): a REJECTED row is also supersedeable — the same
+    // object re-delivered after the chair's reject is a new version of the
+    // same ledger row, re-opened to pending, not a duplicate row.
     const candidatesByAuthor = deps.getGroupTaskStore().listDeliverables(taskId)
       .filter((deliverable) =>
-        deliverable.status === 'pending'
+        (deliverable.status === 'pending' || deliverable.status === 'rejected')
         && Boolean(deliverable.authorGlobalmetaid)
         && deliverable.authorGlobalmetaid!.trim().toLowerCase() === author,
       )
       .slice()
       .reverse(); // newest rows first
     for (const deliverable of candidatesByAuthor) {
-      if (deliverable.uri === candidate.uri && deliverable.kind === candidate.kind) continue;
+      if (deliverable.uri === candidate.uri && deliverable.kind === candidate.kind) {
+        // A REJECTED row re-delivered with the SAME uri is a re-submission of
+        // the same object — it re-opens to pending instead of duplicating
+        // (the caller flips the status). Identical pending rows stay deduped.
+        if (deliverable.status === 'rejected') return deliverable;
+        continue;
+      }
       const oldPinids = new Set(
         (deliverable.uri ?? '').match(/[0-9a-f]{64}i0/gi)?.map((token) => token.toLowerCase()) ?? [],
       );
@@ -2664,6 +2693,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const msgPinId = message.pinId;
       const tagLines = deliverableTagLines(content);
       const candidates = parseDeliverableLines(content);
+      // Index-aligned raw segment text per candidate (ledger fix: text
+      // candidates may carry a local file path worth uploading on-chain).
+      const candidateSegments = parseDeliverableSegments(content);
       const recordedDeliverables: ParsedDeliverable[] = [];
       const rejected = candidates.filter((candidate) => !candidate.valid);
       if (rejected.length > 0) {
@@ -2673,7 +2705,8 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         );
       }
       const isCorrection = /更正|修正|以…?为准|以此为准|请以此为准/.test(content);
-      for (const candidate of candidates) {
+      for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex += 1) {
+        const candidate = candidates[candidateIndex];
         if (!candidate.valid) continue; // placeholder/truncated/example → never recorded
         if (!msgPinId) continue;
         // Round-4 correction-first aggregation: a later message declaring
@@ -2684,6 +2717,11 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
           const superseded = findSupersededDeliverable(task.id, message.senderGlobalMetaId, candidate);
           if (superseded) {
             store.updateDeliverableUri(superseded.id, candidate.uri, candidate.kind);
+            // Ledger fix (#14→#16): a corrected object is a NEW version — a
+            // previously rejected verdict no longer applies, re-open it.
+            if (superseded.status === 'rejected') {
+              store.updateDeliverableStatus(superseded.id, 'pending');
+            }
             // P0-4: corrected deliverable is re-verified on the next monitor pass.
             store.updateDeliverableVerification(superseded.id, '{}');
             verificationNotes.push(
@@ -2760,6 +2798,56 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                 `[GroupTaskDaemon] Task ${task.id}: deliverable #${deliverable.id} verification failed: ` +
                 `${error instanceof Error ? error.message : String(error)}`,
               );
+            }
+          }
+        }
+        // Ledger fix (#14→#16): a text deliverable whose segment names a LOCAL
+        // file is upgraded to on-chain evidence — the host uploads the file as
+        // a metafile (paid by the author bot) and rewrites the row in place.
+        // Upload failure degrades to the plain text record + a visible note;
+        // it never drops the deliverable row.
+        if (candidate.kind === 'text' && deps.uploadDeliverableFile) {
+          const segment = candidateSegments[candidateIndex] ?? '';
+          const filePath = extractLocalFilePaths(segment)[0];
+          // Only files that actually exist are upload candidates — a path
+          // mentioned in prose must never trigger an on-chain upload.
+          if (filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+            const authorBotId = members.find((member) =>
+              Boolean(member.globalmetaid)
+              && member.globalmetaid!.toLowerCase() === String(message.senderGlobalMetaId ?? '').toLowerCase(),
+            )?.metabotId ?? null;
+            try {
+              const contentType = inferContentTypeFromFilePath(filePath);
+              const upload = await deps.uploadDeliverableFile({
+                metabotId: authorBotId ?? 0,
+                filePath,
+                contentType,
+              });
+              const pinId = typeof upload?.pinId === 'string' ? upload.pinId.trim() : '';
+              if (pinId) {
+                const uri = buildMetafileUri(pinId, {
+                  fileName: path.basename(filePath),
+                  contentType,
+                });
+                store.updateDeliverableUri(deliverable.id, uri, 'metafile');
+                // Reuse the pinid verification path so the upgraded row gets
+                // the same on-chain confirmation semantics as a native one.
+                const report = await verifyPinSources(pinId);
+                store.updateDeliverableVerification(deliverable.id, JSON.stringify(report));
+                store.updateDeliverableConfirmation(
+                  deliverable.id,
+                  report.verified ? 'confirmed' : 'unconfirmed',
+                );
+                verificationNotes.push(`✓ 本地交付物已上链为 ${uri}`);
+              } else {
+                verificationNotes.push(`⚠ 本地交付物上传未返回 pinId：${filePath}`);
+              }
+            } catch (error) {
+              emitLog(
+                `[GroupTaskDaemon] Task ${task.id}: local deliverable upload failed for ${filePath}: ` +
+                `${error instanceof Error ? error.message : String(error)}`,
+              );
+              verificationNotes.push(`⚠ 本地交付物上传失败（${filePath}）`);
             }
           }
         }
