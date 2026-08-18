@@ -6007,11 +6007,11 @@ export class CoworkRunner extends EventEmitter {
       // is `max`). DSH previously dropped this, so the runtime always used
       // the provider default (thinking ON, no reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
-      const dshEffortDialect = route.provider === 'deepseek' && route.apiFormat === 'responses'
-        ? 'deepseek-responses'
-        : route.provider === 'deepseek' && route.apiFormat === 'openai'
-          ? 'deepseek'
-          : 'generic';
+      // Official DeepSeek (non-anthropic format) rides the first-party
+      // dsh-llm-deepseek adapter under its own route key; everything else —
+      // including anthropic-format deepseek relays — stays on the pi-ai route.
+      const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
+      const dshEffortDialect = officialDeepSeekNative ? 'deepseek-native' : 'generic';
       const dshReasoningEffort = mapDshReasoningEffort(
         activeSession.effortOverride ?? modelOptions?.reasoningEffort,
         activeSession.thinkingOverride ?? modelOptions?.thinking,
@@ -6109,30 +6109,21 @@ export class CoworkRunner extends EventEmitter {
           { name: 'idbots:tool-use', order: 150, text: CoworkRunner.DSH_TOOL_USE_GUIDANCE },
         ],
         provider: {
-          key: route.provider,
+          // Official DeepSeek rides the first-party dsh-llm-deepseek adapter,
+          // which owns the 'deepseek-official' route key in the runtime; all
+          // other providers keep their app-config key on the pi-ai route.
+          key: officialDeepSeekNative ? 'deepseek-official' : route.provider,
           apiFormat,
           baseUrl: route.baseUrl,
           apiKey: route.apiKey,
           model: route.model,
           contextWindow: modelLimits?.contextWindow,
           maxOutputTokens: modelLimits?.maxOutputTokens,
-          // 'deepseek' on BOTH wires: on completions it drives the compat
-          // thinkingFormat switch, on Responses it makes the config generator
-          // declare the low/medium/high/max effort ladder (pi-ai's builtin
-          // catalog pins low/medium to null — without the declaration those UI
-          // levels throw UNSUPPORTED_REASONING_EFFORT in the runtime).
-          thinkingFormat: route.provider === 'deepseek' ? 'deepseek' : undefined,
-          // DeepSeek declares reasoning on both its wires: completions via
-          // thinkingFormat, Responses via catalog models (v4 accepts off..high).
-          // Without an explicit effort pi-ai's Responses adapter FORCES
-          // reasoning.effort='none' — thinking silently disabled for every
-          // turn — so the mapped UI effort must ride the route on both.
-          // Hand-declared custom models (outside pi-ai's catalog) would throw
-          // UNSUPPORTED_REASONING_EFFORT — same accepted posture as the
-          // completions path.
-          ...((route.provider === 'deepseek'
-            && (route.apiFormat === 'openai' || route.apiFormat === 'responses')
-            && dshReasoningEffort)
+          // Effort rides the native route (adapter-validated off/low/high/max
+          // ladder). pi-ai routes get no effort: their models' thinking stays
+          // at the provider default, matching the pre-selector behavior for
+          // non-deepseek providers.
+          ...(officialDeepSeekNative && dshReasoningEffort
             ? { reasoningEffort: dshReasoningEffort }
             : {}),
           // Vision declaration rides the route (same knowledge source the

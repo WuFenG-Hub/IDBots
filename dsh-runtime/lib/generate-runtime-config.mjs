@@ -38,9 +38,11 @@
 // image input, and read_image/host-bridged image results gate on it — a tool
 // result is durable history, so an undeclared route degrades to text instead.
 //
-// All providers ride one dsh-llm-pi-ai entry: pi-ai covers all three IDBots
+// Providers ride one dsh-llm-pi-ai entry: pi-ai covers all three IDBots
 // apiFormats (openai-completions / openai-responses / anthropic-messages),
 // which also resolves the Phase 0 open question about the Responses API.
+// The official DeepSeek route is the exception: it rides its first-party
+// dsh-llm-deepseek adapter (chat-completions) via `native: true` on the route.
 
 const API_FORMAT_TO_PROTOCOL = {
   openai: 'openai-completions',
@@ -51,31 +53,43 @@ const API_FORMAT_TO_PROTOCOL = {
 const sanitizeRouteKey = (key) => String(key).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 /** DeepSeek official chat-completions wire: thinking disabled (`off`) or
- *  reasoning_effort high/max. The host maps UI 快速 (`low`) to `off` before
- *  session/ensure; `low`/`medium` stay aliased here only as a last-resort if a
- *  caller still sends those ids. */
-const DEEPSEEK_REASONING_EFFORTS = {
-  off: null,
-  low: 'high',
-  medium: 'high',
-  high: 'high',
-  max: 'max',
+ *  reasoning_effort low/high/max. Kept for the effort ladder documentation;
+ *  the native adapter validates it itself. */
+const NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS = 32_768
+
+/** Normalize any DeepSeek provider base URL onto the host root the native
+ *  adapter expects (it appends `/chat/completions` itself): `…/responses`,
+ *  `…/anthropic`, `…/anthropic/v1`, and `…/v1` style bases all collapse to
+ *  the bare origin — DeepSeek serves chat completions at the root. */
+const deepSeekChatBaseURL = (baseUrl) => {
+  let base = String(baseUrl ?? '').trim().replace(/\/+$/, '')
+  base = base.replace(/\/responses$/, '')
+  base = base.replace(/\/anthropic\/v\d+$/, '')
+  base = base.replace(/\/anthropic$/, '')
+  base = base.replace(/\/v\d+$/, '')
+  return base
 }
 
-/** DeepSeek Responses wire: reasoning.effort none/low/medium/high/max, all
- *  accepted verbatim (medium verified live 2026-08-18). Declaring this map is
- *  what unlocks low/medium as requestable pi-ai levels — the installed pi-ai
- *  builtin catalog pins low/medium to null for deepseek models, so without it
- *  the runtime rejects those efforts with UNSUPPORTED_REASONING_EFFORT before
- *  the request leaves the process. `off: null` keeps "send nothing" as the
- *  thinking-off spelling (pi-ai then sends reasoning.effort='none'). */
-const DEEPSEEK_RESPONSES_REASONING_EFFORTS = {
-  off: null,
-  low: 'low',
-  medium: 'medium',
-  high: 'high',
-  max: 'max',
-}
+/** One native-route → one dsh-llm-deepseek plugin entry. Deployment defaults:
+ *  thinking on at `high` when a turn carries no explicit effort (per-turn
+ *  effort rides session/ensure; the off/low/high/max ladder is adapter-owned). */
+const nativeDeepSeekEntry = (provider) => ({
+  id: `llm-deepseek-${sanitizeRouteKey(provider.key)}`,
+  name: '@deepseek-ai/dsh-llm-deepseek',
+  config: {
+    apiKeyEnv: provider.apiKeyEnv,
+    baseURL: deepSeekChatBaseURL(provider.baseUrl),
+    thinking: 'enabled',
+    reasoningEffort: 'high',
+    defaultContextWindow: provider.models[0].contextWindow,
+    models: provider.models.map((model) => ({
+      id: model.id,
+      name: model.id,
+      contextWindow: model.contextWindow,
+      maxTokens: Number.isFinite(model.maxOutputTokens) ? model.maxOutputTokens : NATIVE_DEEPSEEK_DEFAULT_MAX_TOKENS,
+    })),
+  },
+})
 
 /** One user MCP server → one dsh-mcp-client entry config; undefined skips. */
 const mcpEntryConfig = (server) => {
@@ -129,7 +143,7 @@ const mcpEntries = (servers) => {
 }
 
 export function generateRuntimeConfig(input) {
-  if (!input?.sessionRoot || typeof input.sessionRoot !== 'string') {
+  if (!input?.sessionRoot || typeof input?.sessionRoot !== 'string') {
     throw new Error('generate-runtime-config: sessionRoot is required')
   }
 
@@ -139,13 +153,22 @@ export function generateRuntimeConfig(input) {
   }
 
   const routes = {}
+  const nativeDeepSeekRoutes = []
   for (const provider of providers) {
+    if (!Array.isArray(provider.models) || provider.models.length === 0) {
+      throw new Error(`generate-runtime-config: provider "${provider.key}" has no models`)
+    }
+    // Official DeepSeek rides its OWN first-party adapter (dsh-llm-deepseek,
+    // chat-completions wire, native off/low/high/max efforts, reasoning in
+    // the dedicated reasoning_content channel) instead of pi-ai — it never
+    // enters the llm-pi-ai providers dict.
+    if (provider.native) {
+      nativeDeepSeekRoutes.push(provider)
+      continue
+    }
     const protocol = API_FORMAT_TO_PROTOCOL[provider.apiFormat]
     if (protocol === undefined) {
       throw new Error(`generate-runtime-config: provider "${provider.key}" has unsupported apiFormat ${JSON.stringify(provider.apiFormat)}`)
-    }
-    if (!Array.isArray(provider.models) || provider.models.length === 0) {
-      throw new Error(`generate-runtime-config: provider "${provider.key}" has no models`)
     }
     routes[sanitizeRouteKey(provider.key)] = {
       displayName: provider.key,
@@ -161,30 +184,7 @@ export function generateRuntimeConfig(input) {
         // Image-input declaration: routes default to text-only; a vision model
         // declares ['text','image'] so image blocks can enter its history.
         ...Array.isArray(model.input) && model.input.length > 0 ? { input: model.input } : {},
-        // DeepSeek effort declaration: without a declared thinkingLevelMap the
-        // model inherits pi-ai's builtin catalog — which pins low/medium to
-        // null for deepseek, so those UI levels throw
-        // UNSUPPORTED_REASONING_EFFORT before the request leaves the runtime.
-        // Declare the ladder per wire: completions maps low/medium onto the
-        // official high alias, Responses passes low/medium/high/max verbatim.
-        ...(provider.thinkingFormat === 'deepseek' ? {
-          reasoningEfforts: protocol === 'openai-responses'
-            ? DEEPSEEK_RESPONSES_REASONING_EFFORTS
-            : DEEPSEEK_REASONING_EFFORTS,
-        } : {}),
       })),
-      // thinkingFormat compat exists ONLY on the openai-completions protocol;
-      // attaching it to a responses/anthropic route fails provider resolution.
-      ...(provider.thinkingFormat && protocol === 'openai-completions')
-        ? {
-          compat: {
-            thinkingFormat: provider.thinkingFormat,
-            ...(provider.thinkingFormat === 'deepseek' ? { supportsReasoningEffort: true } : {}),
-          },
-          // Official dsh-llm-deepseek omitted-effort default is `high`.
-          ...(provider.thinkingFormat === 'deepseek' ? { reasoning: 'high' } : {}),
-        }
-        : {},
     }
   }
 
@@ -278,6 +278,7 @@ export function generateRuntimeConfig(input) {
       name: '@deepseek-ai/dsh-llm-pi-ai',
       config: { providers: routes },
     },
+    ...nativeDeepSeekRoutes.map(nativeDeepSeekEntry),
     {
       id: 'idbots-sdk-server',
       name: plugin('idbots-sdk-server.mjs'),

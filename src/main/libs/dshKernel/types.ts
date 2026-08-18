@@ -99,7 +99,15 @@ export interface DshProviderRoute {
   apiFormat: 'openai' | 'responses' | 'anthropic'
   baseUrl: string
   apiKeyEnv: string
-  thinkingFormat?: string
+  /**
+   * Official DeepSeek rides its first-party dsh-llm-deepseek adapter
+   * (chat-completions wire, native off/low/high/max efforts, reasoning in the
+   * dedicated reasoning_content channel) instead of the pi-ai route; the
+   * generator emits a dedicated plugin entry and never adds this provider to
+   * llm-pi-ai. apiFormat becomes irrelevant for the wire (the adapter always
+   * speaks chat completions; the base URL is normalized onto the host root).
+   */
+  native?: boolean
   models: Array<{
     id: string
     contextWindow: number

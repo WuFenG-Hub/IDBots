@@ -41,10 +41,10 @@ export interface DshTurnProviderRoute {
   model: string
   contextWindow?: number
   maxOutputTokens?: number
-  thinkingFormat?: string
   /** Input modalities the model declares (['text','image'] for vision models). */
   inputModalities?: string[]
-  /** Per-turn DSH/pi-ai reasoning effort (off|low|medium|high|max). */
+  /** Per-turn DSH reasoning effort (off|low|medium|high|max on the pi-ai
+   * vocabulary; the native deepseek ladder is off|low|high|max). */
   reasoningEffort?: string
 }
 
@@ -63,7 +63,8 @@ function hostnameOf(value: string): string {
 
 /** True when the route is the official DeepSeek provider (key or api host). */
 export function isOfficialDeepSeekRoute(provider: Pick<DshTurnProviderRoute, 'key' | 'baseUrl'>): boolean {
-  return provider.key?.toLowerCase() === 'deepseek' || hostnameOf(provider.baseUrl) === 'api.deepseek.com'
+  const key = provider.key?.toLowerCase()
+  return key === 'deepseek' || key === 'deepseek-official' || hostnameOf(provider.baseUrl) === 'api.deepseek.com'
 }
 
 /**
@@ -570,7 +571,9 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
     apiFormat: provider.apiFormat,
     baseUrl: provider.baseUrl,
     apiKeyEnv: provider.apiKeyEnvName ?? 'IDBOTS_DSH_API_KEY',
-    thinkingFormat: provider.thinkingFormat,
+    // 'deepseek-official' is the dsh-llm-deepseek adapter's route key — the
+    // generator mounts it on its first-party adapter instead of pi-ai.
+    native: provider.key === 'deepseek-official',
     models: [{
       id: provider.model,
       contextWindow: provider.contextWindow ?? 64000,
