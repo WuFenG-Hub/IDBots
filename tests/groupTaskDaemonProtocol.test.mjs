@@ -37,7 +37,7 @@ const { GroupTaskStore } = require('../dist-electron/main/groupTaskStore.js');
 const { OrchestrationStore } = require('../dist-electron/main/orchestrationStore.js');
 const { CoworkStore } = require('../dist-electron/main/coworkStore.js');
 const { GroupTaskOrchestrationBridge } = require('../dist-electron/main/services/groupTaskOrchestrationBridge.js');
-const { createGroupTaskDaemonLoop, gateChairDrivingSend } = require('../dist-electron/main/services/groupTaskDaemon.js');
+const { createGroupTaskDaemonLoop, gateChairDrivingSend, clearGroupTaskReviewDeliveryGuards } = require('../dist-electron/main/services/groupTaskDaemon.js');
 
 Module._load = originalLoad;
 
@@ -124,11 +124,11 @@ const createHarness = async (overrides = {}) => {
     getMetabotStore: () => metabotStore,
     getCoworkStore: () => coworkStore,
     orchestrationBridge,
-    performChat: async (systemPrompt, userMessage, llmId) => {
+    performChat: overrides.performChat ?? (async (systemPrompt, userMessage, llmId) => {
       chatCalls.push({ systemPrompt, userMessage, llmId });
       if (state.chatErrorAlways) throw new Error(state.chatErrorAlways);
       return state.chatReply ?? `reply-for-${llmId}`;
-    },
+    }),
     postGroupTaskMessage: async (taskId, metabotId, content) => {
       sends.push({ taskId, metabotId, content });
       return { pinId: `send-pin-${sends.length}` };
@@ -361,7 +361,11 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
     assert.ok(h.store.get(`group_task_owner_reported:${task.id}`) == null, 'A2A guard cleared by rework hatch');
     assert.ok(h.store.get(`group_task_review_notified:${task.id}`) == null, 'source-review guard cleared by rework hatch');
 
-    // ...so the NEXT review re-reports to both channels.
+    // ...so the NEXT review re-reports to both channels. The clock must first
+    // move past the Improvement #2 review re-entry debounce (the rework hatch
+    // stamped group_task_rework_at; a REVIEW tag within 30s of it would be
+    // treated as a stale in-flight verdict and skipped).
+    h.state.nowMs += 31_000;
     insertGroupMessage(h.db, {
       pinId: 'r2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
       senderName: 'Twin Bot', content: '[STATUS:REVIEW] 返工完成，再次验收',
@@ -371,6 +375,132 @@ test('P4 (v1.2): review entry delivers the owner report body to the origin sessi
   } finally {
     h.cleanup();
   }
+});
+
+test('Improvement #2: a chair [STATUS:REVIEW] verdict landing within the rework debounce window is skipped (task #24 race)', async () => {
+  const h = await createHarness({
+    sendOwnerPrivateReport: async () => ({ pinId: 'owner-report-pin' }),
+    sendReviewReportToSourceSession: ({ taskId, report }) => {
+      h.sourceReviewReports.push({ taskId, report });
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    const summaryCount = () => h.sends.filter((s) => s.content.includes('已进入验收阶段')).length;
+
+    insertGroupMessage(h.db, {
+      pinId: 'rv1-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.equal(h.sourceReviewReports.length, 1);
+    assert.equal(summaryCount(), 1);
+
+    // The boss sends the just-reviewed task back to work 27s in.
+    h.state.nowMs += 27_000;
+    insertGroupMessage(h.db, {
+      pinId: 'rework2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:EXECUTING] 返工：重启 Builder 的子任务',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+    assert.ok(h.store.get(`group_task_rework_at:${task.id}`) != null, 'rework hatch stamps the rework instant');
+
+    // 3s later the chair's ALREADY-IN-FLIGHT verification turn lands its
+    // verdict — the exact task #24 pattern. It must NOT flip the task back to
+    // review nor amplify itself into a second acceptance summary.
+    h.state.nowMs += 3_000;
+    insertGroupMessage(h.db, {
+      pinId: 'stale-rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: 'S4 核验通过 [STATUS:REVIEW]',
+    });
+    await h.loop.runTick();
+    assert.equal(
+      h.groupTaskStore.getTaskById(task.id).status,
+      'executing',
+      'stale in-flight verdict debounced; task stays executing',
+    );
+    assert.equal(h.sourceReviewReports.length, 1, 'no re-report for the debounced verdict');
+    assert.equal(summaryCount(), 1, 'exactly one acceptance summary in the group');
+    assert.ok(h.logs.some((line) => line.includes('stale in-flight verdict ignored')));
+
+    // Past the debounce window, the chair's post-rework verdict enters review
+    // cleanly and every channel re-reports.
+    h.state.nowMs += 31_000;
+    insertGroupMessage(h.db, {
+      pinId: 'rv2-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 返工完成，再次验收',
+    });
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'review');
+    assert.equal(h.sourceReviewReports.length, 2, 'post-rework review re-reports');
+    assert.equal(summaryCount(), 2);
+    assert.ok(h.store.get(`group_task_rework_at:${task.id}`) == null, 'stamp cleared on the accepted review entry');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Improvement #2: a rework landing while the owner report is composed aborts the delivery — no stale [GROUP_TASK_REVIEW]', async () => {
+  const ownerReports = [];
+  let reworkMidReport = null;
+  const h = await createHarness({
+    sendOwnerPrivateReport: async (params) => {
+      ownerReports.push(params);
+      return { pinId: 'owner-report-pin' };
+    },
+    sendReviewReportToSourceSession: ({ taskId, report }) => {
+      h.sourceReviewReports.push({ taskId, report });
+    },
+    performChat: async (systemPrompt, userMessage) => {
+      // The report turn is slow; mid-call the boss's rework hatch fires (the
+      // service path: status flip + guard reset + rework stamp, no group msg).
+      if (reworkMidReport != null && userMessage.includes('owner-report directive')) {
+        reworkMidReport();
+        reworkMidReport = null;
+      }
+      return '验收报告正文';
+    },
+  });
+  try {
+    const task = h.createTask([2]);
+    reworkMidReport = () => {
+      h.groupTaskStore.updateTaskStatus(task.id, 'executing', { actor: { kind: 'chair' } });
+      h.store.set(`group_task_rework_at:${task.id}`, h.state.nowMs);
+    };
+    insertGroupMessage(h.db, {
+      pinId: 'rv-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot', content: '[STATUS:REVIEW] 目标达成',
+    });
+    await h.loop.runTick();
+
+    // The review ceremony's summary documents the REAL review entry (posted
+    // before the rework landed) — but the report composed during the rework
+    // race must never reach the source session or the A2A chat while the
+    // Tasks UI shows executing.
+    assert.equal(h.sends.filter((s) => s.content.includes('已进入验收阶段')).length, 1, 'the real review entry still has its summary');
+    assert.equal(h.sourceReviewReports.length, 0, 'no stale [GROUP_TASK_REVIEW] into the source session');
+    assert.equal(ownerReports.length, 0, 'no stale A2A owner report');
+    assert.ok(h.store.get(`group_task_owner_reported:${task.id}`) == null, 'delivery guard not set — the next review re-reports');
+    assert.ok(h.logs.some((line) => line.includes('owner report aborted')));
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('Improvement #2: clearGroupTaskReviewDeliveryGuards resets every review-delivery guard for the one task', () => {
+  const kv = new Map();
+  kv.set('group_task_owner_reported:7', '1');
+  kv.set('group_task_review_notified:7', '1');
+  kv.set('group_task_review_reassert:7', '99');
+  kv.set('group_task_owner_reported:8', '1');
+  clearGroupTaskReviewDeliveryGuards(kv, 7);
+  assert.ok(!kv.has('group_task_owner_reported:7'));
+  assert.ok(!kv.has('group_task_review_notified:7'));
+  assert.ok(!kv.has('group_task_review_reassert:7'));
+  assert.ok(kv.has('group_task_owner_reported:8'), 'other tasks untouched');
 });
 
 test('P5 (v1.2): a worker recently active BEFORE the assignment gets a single long-turn note, not a missed-ACK warning', async () => {

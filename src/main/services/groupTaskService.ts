@@ -51,10 +51,11 @@ import {
   GROUP_TASK_CONVERSATION_CHANNEL,
 } from './groupTaskSession';
 import {
+  clearGroupTaskReviewDeliveryGuards,
   extractCheckpointDecisionSummary,
   GROUP_TASK_DRIVER_KV_PREFIX,
-  GROUP_TASK_OWNER_REPORTED_KV_PREFIX,
   GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX,
+  GROUP_TASK_REWORK_AT_KV_PREFIX,
 } from './groupTaskDaemon';
 import { getMetaIdDetail, type MetaIdDetail } from './metaIdSearchService';
 import {
@@ -1436,6 +1437,21 @@ export async function reworkGroupTask(
     actor,
     reason: opts.reason?.trim() || null,
   });
+  // Improvement #2 (v1.3): rework-hatch parity with the on-chain
+  // [STATUS:EXECUTING] path — reset EVERY review-delivery guard (owner A2A
+  // report, origin-session review report, closing re-assert) so the next
+  // review re-reports on all channels, and stamp the rework instant so a
+  // stale in-flight [STATUS:REVIEW] verdict is debounced (task #24).
+  try {
+    const kv = getKvStore();
+    clearGroupTaskReviewDeliveryGuards(kv, taskId);
+    kv.set(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${taskId}`, Date.now());
+  } catch (error) {
+    console.warn(
+      `[GroupTask] Failed to reset review-delivery guards after rework of task ${taskId}: ` +
+      `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   if (orchestrationBridgeGetter) {
     try {
       orchestrationBridgeGetter().syncStatus(taskId);
@@ -1732,12 +1748,17 @@ export async function reopenGroupTask(
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  // Rework-hatch parity: the next review must report to the owner again.
+  // Rework-hatch parity (Improvement #2 v1.3): reset EVERY review-delivery
+  // guard (not just the owner-report one) and stamp the rework instant, so
+  // the next review re-reports on all channels and a stale in-flight
+  // [STATUS:REVIEW] verdict is debounced.
   try {
-    getKvStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${taskId}`);
+    const kv = getKvStore();
+    clearGroupTaskReviewDeliveryGuards(kv, taskId);
+    kv.set(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${taskId}`, Date.now());
   } catch (error) {
     console.warn(
-      `[GroupTask] Failed to clear owner-report guard after reopen of task ${taskId}: ` +
+      `[GroupTask] Failed to reset review-delivery guards after reopen of task ${taskId}: ` +
       `${error instanceof Error ? error.message : String(error)}`,
     );
   }

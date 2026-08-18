@@ -234,6 +234,44 @@ const GROUP_TASK_TIMEOUT_OWNER_PREFIX = 'group_task_timeout_owner:';
  * (and a second tick with no new straggler stays quiet).
  */
 const GROUP_TASK_REVIEW_REASSERT_KV_PREFIX = 'group_task_review_reassert:';
+/**
+ * Improvement #2 (v1.3): every review -> executing rework hatch (on-chain
+ * [STATUS:EXECUTING] tag, RPC rework, UI Back-to-work) stamps
+ * `group_task_rework_at:<taskId>` = <epochMs>. A chair [STATUS:REVIEW] tag
+ * arriving within REVIEW_REENTRY_DEBOUNCE_MS of that stamp is treated as the
+ * verdict of a turn already in flight when the rework landed (task #24: the
+ * chair's "S4 核验通过" landed 3s after the boss's rework) and is NOT applied —
+ * the task keeps the rework's executing state so the group sees exactly one
+ * authoritative state directive. The chair's NEXT review verdict (after the
+ * rework work actually happens) enters review cleanly. Exported so the service
+ * rework paths stamp the same marker.
+ */
+export const GROUP_TASK_REWORK_AT_KV_PREFIX = 'group_task_rework_at:';
+/** Improvement #2 (v1.3): see GROUP_TASK_REWORK_AT_KV_PREFIX. In-flight chair turns finish well within this bound. */
+export const REVIEW_REENTRY_DEBOUNCE_MS = 30_000;
+/**
+ * Improvement #2 (v1.3): clear EVERY review-delivery guard a rework hatch must
+ * reset (A2A owner report, origin-session review report, closing re-assert) so
+ * the next review entry re-reports on all channels. Shared by the daemon's
+ * on-chain rework path and the service-side reworkGroupTask / reopenGroupTask
+ * paths — previously the service paths cleared a subset (or nothing), leaving
+ * the source-session report stuck at the FIRST review while the Tasks UI had
+ * already moved on (task #24's review-report / executing contradiction).
+ */
+export function clearGroupTaskReviewDeliveryGuards(kv: GroupTaskDriverKv, taskId: number): void {
+  kv.delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${taskId}`);
+  kv.delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${taskId}`);
+  kv.delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${taskId}`);
+}
+
+/**
+ * Improvement #2 (v1.3): thrown by the STATUS-tag handler when a chair
+ * [STATUS:REVIEW] tag is the stale verdict of a turn already in flight when a
+ * rework hatch landed (task #24) — see GROUP_TASK_REWORK_AT_KV_PREFIX. Caught
+ * by the handler's existing catch so the tag is skipped without aborting the
+ * rest of the message processing.
+ */
+class StaleReviewReentryError extends Error {}
 /** Round-4: a message failing this many consecutive ticks is dropped (cursor advances). */
 const MSG_RETRY_MAX_FAILURES = 5;
 /**
@@ -2164,6 +2202,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
   };
 
   /**
+   * Improvement #2 (v1.3): age in ms of the most recent rework-hatch stamp
+   * (`group_task_rework_at:<taskId>`), or Infinity when no fresh stamp exists.
+   * See GROUP_TASK_REWORK_AT_KV_PREFIX for why the STATUS-tag handler debounces
+   * review re-entries against it.
+   */
+  const freshReworkAgeMs = (taskId: number): number => {
+    const reworkAt = Number(deps.getStore().get<string>(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${taskId}`)) || 0;
+    if (reworkAt <= 0) return Number.POSITIVE_INFINITY;
+    return Math.max(0, now() - reworkAt);
+  };
+
+  /**
    * Owner report on review: one private A2A report from the chair to the owner
    * per task per review-entry (kv guard group_task_owner_reported:<taskId>;
    * cleared when the task re-enters executing via the rework hatch). The report
@@ -2188,6 +2238,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
     const sqlite = deps.getStore();
     const guardKey = `${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`;
     if (sqlite.get<string>(guardKey) === '1') return;
+    // Improvement #2 (v1.3): status re-validation — a rework hatch (RPC/UI
+    // path) can land between the review transition and this point without any
+    // group message; never compose a report for a task that already left
+    // review (task #24's review-report / executing contradiction).
+    if (deps.getGroupTaskStore().getTaskById(task.id)?.status !== 'review') {
+      emitLog(`[GroupTaskDaemon] Task ${task.id}: owner report skipped — task is no longer in review`);
+      return;
+    }
 
     const chairMember = members.find((member) => member.role === 'chair');
     const bot = chairMember?.metabotId != null ? botsById.get(chairMember.metabotId) : undefined;
@@ -2219,6 +2277,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
+      }
+      // Improvement #2 (v1.3): the report turn above is slow (LLM); a rework
+      // may have moved the task back to executing while it ran (the task #24
+      // 27-second race). Delivering now would show the origin session a
+      // [GROUP_TASK_REVIEW] report while the Tasks UI says executing — abort.
+      // The rework hatch already cleared the delivery guards, so the next
+      // review entry re-reports cleanly on every channel.
+      if (deps.getGroupTaskStore().getTaskById(task.id)?.status !== 'review') {
+        emitLog(
+          `[GroupTaskDaemon] Task ${task.id}: owner report aborted — the task left review while the report was being composed`,
+        );
+        return;
       }
       // P4 (v1.2): the origin CoWork session receives the SAME report body the
       // A2A private chat gets — the owner's repeated ask ("我在 co-work 对话中
@@ -2649,6 +2719,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
         const nextStatus = statusMatch[1].toLowerCase() as 'executing' | 'review';
         try {
           const beforeStatus = store.getTaskById(task.id)?.status;
+          // Improvement #2 (v1.3): review re-entry debounce — a [STATUS:REVIEW]
+          // verdict landing within the window after a rework hatch is the
+          // output of a chair turn that was ALREADY in flight when the rework
+          // landed (task #24: "S4 核验通过" 3s after the boss's rework).
+          // Applying it would flip the task straight back to review and expose
+          // the driver race as two contradictory directives; skip the tag and
+          // let the chair's next (post-rework) verdict enter review cleanly.
+          if (
+            nextStatus === 'review'
+            && beforeStatus === 'executing'
+            && freshReworkAgeMs(task.id) < REVIEW_REENTRY_DEBOUNCE_MS
+          ) {
+            throw new StaleReviewReentryError(
+              `[STATUS:REVIEW] landed ${Math.round(freshReworkAgeMs(task.id) / 1000)}s after the rework hatch`,
+            );
+          }
           // P1-5: the on-chain status tag is a chair action — record the actor
           // on the transition event (who moved the task where and when).
           // P0-5: status tags also write the transition audit log (reason =
@@ -2692,16 +2778,22 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
               at: now(),
             });
             if (updated.status === 'executing' && beforeStatus === 'review') {
-              // Rework hatch: the next review must report to the owner again,
-              // and the re-assert straggler guard must reset so the fresh
-              // review entry can re-assert cleanly.
-              deps.getStore().delete(`${GROUP_TASK_OWNER_REPORTED_KV_PREFIX}${task.id}`);
-              // P4 (v1.2): the origin-session review report follows the same
-              // rework hatch — the next review entry re-reports there too.
-              deps.getStore().delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`);
-              deps.getStore().delete(`${GROUP_TASK_REVIEW_REASSERT_KV_PREFIX}${task.id}`);
+              // Rework hatch: every review-delivery guard resets (shared with
+              // the RPC/UI rework paths via clearGroupTaskReviewDeliveryGuards)
+              // so the next review re-reports on all channels, and the
+              // re-assert straggler guard resets so the fresh review entry can
+              // re-assert cleanly.
+              clearGroupTaskReviewDeliveryGuards(deps.getStore(), task.id);
+              // Improvement #2 (v1.3): stamp the rework instant so a chair
+              // [STATUS:REVIEW] verdict arriving within the debounce window is
+              // recognized as a stale in-flight turn (task #24).
+              deps.getStore().set(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${task.id}`, now());
             }
             if (updated.status === 'review') {
+              // Improvement #2 (v1.3): the rework stamp's job is done — this
+              // review re-entry passed the debounce, so later review tags are
+              // never compared against a stale stamp.
+              deps.getStore().delete(`${GROUP_TASK_REWORK_AT_KV_PREFIX}${task.id}`);
               // HITL: review entry is itself the final human gate — an open
               // checkpoint still pending at this point is superseded by it.
               try {
@@ -2735,60 +2827,77 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
                   `${error instanceof Error ? error.message : String(error)}`,
                 );
               }
-              // R1 closing ceremony: the group must never rest on a worker's
-              // [WORKING] when it enters acceptance. Instead of the old fixed
-              // string, the host now deterministically aggregates a structured
-              // acceptance summary (goal/acceptance criteria/deliverable list/
-              // verification/guidance) and posts it as the LAST group message —
-              // "把菜端上桌". The same record is the single source of truth for
-              // the owner private report (below) and the R2 source-session
-              // notification. Publish failure only logs (the existing ceremony
-              // contract): review never blocks on a chain write.
-              try {
-                const deliverables = store.listDeliverables(task.id);
-                const summaryInput = buildAcceptanceSummary({ task, deliverables, members });
-                const saved = store.saveAcceptanceSummary({
-                  taskId: task.id,
-                  goal: summaryInput.goal,
-                  acceptanceCriteria: summaryInput.acceptanceCriteria,
-                  deliverables: summaryInput.deliverables,
-                  members: summaryInput.members,
-                  guidance: summaryInput.guidance,
-                });
-                const sent = await postGroupMessage(task.id, chairMember.metabotId!, summaryInput.messageText);
-                try {
-                  store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
-                } catch (pinError) {
-                  emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary published-pin record failed: ` +
-                    `${pinError instanceof Error ? pinError.message : String(pinError)}`,
-                  );
-                }
+              // Improvement #2 (v1.3): re-validate freshness before the
+              // ceremony's visible emissions — a rework hatch (RPC/UI path,
+              // which posts no group message) can land between the transition
+              // above and this point; the ceremony must then not post a review
+              // summary over the fresh rework directive (task #24).
+              if (deps.getGroupTaskStore().getTaskById(task.id)?.status !== 'review') {
                 emitLog(
-                  `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId}, ${deliverables.length} deliverable(s))`,
+                  `[GroupTaskDaemon] Task ${task.id}: review ceremony aborted — the task left review before the summary was posted`,
                 );
-              } catch (error) {
-                emitLog(
-                  `[GroupTaskDaemon] Task ${task.id}: acceptance summary post failed, falling back to plain closing line: ` +
-                  `${error instanceof Error ? error.message : String(error)}`,
-                );
+              } else {
+                // R1 closing ceremony: the group must never rest on a worker's
+                // [WORKING] when it enters acceptance. Instead of the old fixed
+                // string, the host now deterministically aggregates a structured
+                // acceptance summary (goal/acceptance criteria/deliverable list/
+                // verification/guidance) and posts it as the LAST group message —
+                // "把菜端上桌". The same record is the single source of truth for
+                // the owner private report (below) and the R2 source-session
+                // notification. Publish failure only logs (the existing ceremony
+                // contract): review never blocks on a chain write.
                 try {
-                  const sent = await postGroupMessage(task.id, chairMember.metabotId!, buildReviewClosingLine(task));
+                  const deliverables = store.listDeliverables(task.id);
+                  const summaryInput = buildAcceptanceSummary({ task, deliverables, members });
+                  const saved = store.saveAcceptanceSummary({
+                    taskId: task.id,
+                    goal: summaryInput.goal,
+                    acceptanceCriteria: summaryInput.acceptanceCriteria,
+                    deliverables: summaryInput.deliverables,
+                    members: summaryInput.members,
+                    guidance: summaryInput.guidance,
+                  });
+                  const sent = await postGroupMessage(task.id, chairMember.metabotId!, summaryInput.messageText);
+                  try {
+                    store.updateAcceptanceSummaryPublishedPin(task.id, sent.pinId);
+                  } catch (pinError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: acceptance summary published-pin record failed: ` +
+                      `${pinError instanceof Error ? pinError.message : String(pinError)}`,
+                    );
+                  }
                   emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: plain closing line posted as fallback (pin ${sent.pinId})`,
+                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary v${saved.version} posted on review entry (pin ${sent.pinId}, ${deliverables.length} deliverable(s))`,
                   );
-                } catch (fallbackError) {
+                } catch (error) {
                   emitLog(
-                    `[GroupTaskDaemon] Task ${task.id}: review closing fallback post failed: ` +
-                    `${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+                    `[GroupTaskDaemon] Task ${task.id}: acceptance summary post failed, falling back to plain closing line: ` +
+                    `${error instanceof Error ? error.message : String(error)}`,
                   );
+                  try {
+                    const sent = await postGroupMessage(task.id, chairMember.metabotId!, buildReviewClosingLine(task));
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: plain closing line posted as fallback (pin ${sent.pinId})`,
+                    );
+                  } catch (fallbackError) {
+                    emitLog(
+                      `[GroupTaskDaemon] Task ${task.id}: review closing fallback post failed: ` +
+                      `${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+                    );
+                  }
                 }
+                await maybeSendOwnerReport(task, members, botsById, promptMembers);
               }
-              await maybeSendOwnerReport(task, members, botsById, promptMembers);
             }
           }
-        } catch {
-          // Illegal transition (e.g. backwards or from terminal): silently ignored.
+        } catch (error) {
+          if (error instanceof StaleReviewReentryError) {
+            emitLog(
+              `[GroupTaskDaemon] Task ${task.id}: ${error.message} — stale in-flight verdict ignored; task stays executing`,
+            );
+          } else {
+            // Illegal transition (e.g. backwards or from terminal): silently ignored.
+          }
         }
       }
     }

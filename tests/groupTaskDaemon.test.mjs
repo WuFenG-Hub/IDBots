@@ -1875,7 +1875,12 @@ test('owner report: rework hatch clears the guard and the next review reports ag
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 1);
 
+    // Improvement #2 (v1.3): the re-review must land past the review re-entry
+    // debounce window — a [STATUS:REVIEW] within 30s of the rework hatch is a
+    // stale in-flight verdict and is deliberately skipped.
     chairMsg('rw2-i0', '[STATUS:EXECUTING] rework needed');
+    await h.loop.runTick();
+    h.state.nowMs += 31_000;
     chairMsg('rw3-i0', '[STATUS:REVIEW] done for real');
     await h.loop.runTick();
     assert.equal(h.ownerReportCalls.length, 2, 're-review after rework reports again');

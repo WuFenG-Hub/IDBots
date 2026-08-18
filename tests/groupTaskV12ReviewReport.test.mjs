@@ -163,8 +163,12 @@ test('daemon wiring: maybeSendOwnerReport also notifies the source session; rewo
   );
   assert.match(source, /sendReviewReportToSourceSession\?: \(input: \{ taskId: number; report: string \}\) => void/);
   assert.ok(
-    source.includes('getStore().delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${task.id}`)'),
-    'rework hatch clears the review guard',
+    source.includes('clearGroupTaskReviewDeliveryGuards(deps.getStore(), task.id)'),
+    'rework hatch clears every review-delivery guard via the shared helper (Improvement #2 v1.3)',
+  );
+  assert.ok(
+    source.includes('kv.delete(`${GROUP_TASK_REVIEW_NOTIFIED_KV_PREFIX}${taskId}`)'),
+    'the shared helper clears the source-session review guard',
   );
   assert.ok(
     fs.readFileSync(path.join(projectRoot, 'src', 'main', 'main.ts'), 'utf8')
