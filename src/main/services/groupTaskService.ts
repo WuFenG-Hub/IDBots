@@ -1639,7 +1639,9 @@ export function notifySourceSessionReview(task: GroupTask, reportBody: string): 
     ? `${body.slice(0, REVIEW_REPORT_MAX_CHARS).trimEnd()}…\n（报告过长已截断——完整验收摘要见 Tasks 面板与群内 chair 摘要消息）`
     : body;
   const message = [
-    `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收，chair 报告如下：`,
+    // Improvement #5 (task #25): the body is an AI-drafted narration of the
+    // host acceptance summary — it must never be labeled as the chair's ruling.
+    `[GROUP_TASK_REVIEW] 任务「${task.title}」已进入验收（系统生成验收汇总，chair 一手核验结论见群内）：`,
     capped,
   ].join('\n');
 

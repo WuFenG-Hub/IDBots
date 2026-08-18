@@ -101,7 +101,14 @@ test('P4: review report reaches the origin session once, prefixed and capped, kv
     notifySourceSessionReview(task, longBody);
     assert.equal(delivered.length, 1);
     assert.equal(delivered[0].targetSessionId, 'origin-session');
-    assert.match(delivered[0].message, /^\[GROUP_TASK_REVIEW\] 任务「T」已进入验收，chair 报告如下：/);
+    // Improvement #5 (task #25): the body is an AI-drafted narration of the
+    // host acceptance summary — the prefix must label it as a system-generated
+    // summary, never as the chair's ruling.
+    assert.match(
+      delivered[0].message,
+      /^\[GROUP_TASK_REVIEW\] 任务「T」已进入验收（系统生成验收汇总，chair 一手核验结论见群内）：/,
+    );
+    assert.ok(!delivered[0].message.includes('chair 报告如下'), 'never labeled as the chair\'s report');
     assert.ok(delivered[0].message.length < 1800, 'body capped (concise, not a dump)');
     assert.match(delivered[0].message, /报告过长已截断/);
 
