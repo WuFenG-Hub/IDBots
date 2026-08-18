@@ -2543,6 +2543,64 @@ test('round-4 cursor semantics: permanently failing message is dropped after the
   }
 });
 
+test('GT#26 regression: control tags on a dropped message still land via the tag-only reprocess', async () => {
+  const h = await createHarness({ disableChairPlanningTurn: true });
+  try {
+    const task = h.createTask([2], { activate: false }); // stays 'planning'
+    // Stall-storm shape: the durable status write keeps failing (e.g. a busy
+    // DB while the DSH watchdog crisis unfolds) for EVERY retry attempt, then
+    // recovers in time for the drop-time tag-only reprocess.
+    const originalUpdate = h.groupTaskStore.updateTaskStatus.bind(h.groupTaskStore);
+    let executingUpdateCalls = 0;
+    h.groupTaskStore.updateTaskStatus = (id, next, opts) => {
+      if (id === task.id && next === 'executing') {
+        executingUpdateCalls += 1;
+        if (executingUpdateCalls <= 5) throw new Error('simulated SQLITE_BUSY during the stall storm');
+      }
+      return originalUpdate(id, next, opts);
+    };
+
+    insertGroupMessage(h.db, {
+      pinId: 'gt26-plan-i0', senderMetaId: 'metaid-1', senderGlobalMetaId: 'gmid-twin',
+      senderName: 'Twin Bot',
+      content: '[GROUP TASK #26 计划] Remotion vs HyperFrames 双视频对比……分工如下。\n\n[STATUS:EXECUTING]',
+    });
+    const msgId = h.db.exec('SELECT id FROM group_chat_messages WHERE pin_id = ?', ['gt26-plan-i0'])[0].values[0][0];
+    // Baseline: the task-creation announcement (a lower id) may process
+    // normally on tick 1 — the cursor must then HOLD there across the retries.
+    const baselineCursor = msgId - 1;
+
+    for (let tick = 1; tick <= 4; tick += 1) {
+      await h.loop.runTick();
+      assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'planning',
+        `tick ${tick}: every attempt failed before the transition could land`);
+      assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, baselineCursor,
+        `tick ${tick}: cursor held while the retry budget was being spent`);
+    }
+
+    // The 5th failure spends the budget: the message is dropped, and the
+    // tag-only reprocess lands the [STATUS:EXECUTING] transition the retries
+    // never could — the exact loss that pinned task #26 in 'planning'.
+    await h.loop.runTick();
+    assert.equal(h.groupTaskStore.getTaskById(task.id).status, 'executing',
+      'chair [STATUS:EXECUTING] on the dropped message still transitioned the task');
+    assert.equal(h.groupTaskStore.getTaskById(task.id).lastProcessedMsgId, msgId,
+      'cursor advanced past the dropped message');
+    const transitions = h.db.exec(
+      'SELECT from_status, to_status FROM group_task_status_events WHERE task_id = ?',
+      [task.id],
+    );
+    assert.deepEqual(
+      (transitions[0]?.values ?? []).map((row) => [row[0], row[1]]),
+      [['planning', 'executing']],
+      'the transition is durably recorded',
+    );
+    assert.equal(h.chatCalls.length, 0, 'no reply generation ever ran for the dropped message');
+  } finally {
+    h.cleanup();
+  }
+});
+
 test('round-4: lastDrivenAt heartbeat is written every tick', async () => {
   const h = await createHarness();
   try {
