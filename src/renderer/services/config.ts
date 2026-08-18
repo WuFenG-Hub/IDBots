@@ -382,70 +382,6 @@ export const applyProviderApiFormatMigrations = (config: AppConfig): AppConfig =
   };
 };
 
-// ---------------------------------------------------------------------------
-// 版本化 DeepSeek 默认推理档位迁移
-//
-// 背景：V4 出厂默认曾是 max（深度思考）。现在 thinking 真正上 wire 后
-// （修复：Responses 路由此前被 pi-ai 显式 reasoning.effort='none' 关闭），
-// 停留在旧出厂默认的用户会从"秒回（思考被关）"变成"每轮深度思考"，体感
-// 断崖式变慢。产品决策：默认档位改为 快速（low → wire none），只有仍停留
-// 在旧出厂默认（max + thinking enabled）的配置被改写；用户此后在 UI 里
-// 选择的任何档位都不再被碰。
-// ---------------------------------------------------------------------------
-
-export const DEEPSEEK_EFFORT_DEFAULT_MIGRATION_VERSION = 1;
-
-const DEEPSEEK_V4_MODEL_IDS = new Set(['deepseek-v4-flash', 'deepseek-v4-pro']);
-
-const isLegacyDeepSeekEffortDefault = (id: string, options: unknown): boolean => {
-  if (!DEEPSEEK_V4_MODEL_IDS.has(id)) return false;
-  if (!options || typeof options !== 'object') return false;
-  const record = options as { reasoningEffort?: unknown; thinking?: { type?: unknown } };
-  return record.reasoningEffort === 'max'
-    && (!record.thinking || record.thinking.type === 'enabled');
-};
-
-const migrateLegacyDeepSeekEffortModels = <T extends { id: string; options?: unknown }>(models?: T[] | null): T[] | undefined => {
-  if (!models) return undefined;
-  let changed = false;
-  const next = models.map((model) => {
-    if (!isLegacyDeepSeekEffortDefault(model.id, model.options)) return model;
-    changed = true;
-    return { ...model, options: { ...(model.options as object), reasoningEffort: 'low' as const } };
-  });
-  return changed ? next : models;
-};
-
-export const applyDeepSeekEffortDefaultMigrations = (config: AppConfig): AppConfig => {
-  const currentVersion = config.deepSeekEffortDefaultMigrationVersion ?? 0;
-  if (currentVersion >= DEEPSEEK_EFFORT_DEFAULT_MIGRATION_VERSION) {
-    return config;
-  }
-
-  const deepseek = config.providers?.deepseek;
-  const nextProviderModels = deepseek
-    ? migrateLegacyDeepSeekEffortModels(deepseek.models as Array<{ id: string; options?: unknown }> | undefined)
-    : undefined;
-  const nextAvailableModels = migrateLegacyDeepSeekEffortModels(config.model.availableModels);
-
-  return {
-    ...config,
-    model: nextAvailableModels
-      ? { ...config.model, availableModels: nextAvailableModels as AppConfig['model']['availableModels'] }
-      : config.model,
-    providers: (deepseek && nextProviderModels)
-      ? {
-          ...config.providers,
-          deepseek: {
-            ...deepseek,
-            models: nextProviderModels as NonNullable<AppConfig['providers']>['deepseek']['models'],
-          },
-        } as AppConfig['providers']
-      : config.providers,
-    deepSeekEffortDefaultMigrationVersion: DEEPSEEK_EFFORT_DEFAULT_MIGRATION_VERSION,
-  };
-};
-
 class ConfigService {
   private config: AppConfig = defaultConfig;
 
@@ -478,9 +414,7 @@ class ConfigService {
         };
 
         const normalizedConfig = normalizeDeepSeekAppConfig(
-          applyDeepSeekEffortDefaultMigrations(
-            applyProviderModelMigrations(applyProviderApiFormatMigrations(mergedConfig)),
-          ),
+          applyProviderModelMigrations(applyProviderApiFormatMigrations(mergedConfig)),
         );
         this.config = normalizedConfig;
 
