@@ -9,6 +9,12 @@ const path = require('path');
 const zlib = require('zlib');
 
 const RPC_BASE = (process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200').replace(/\/+$/, '');
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
 const UPLOAD_URL = `${RPC_BASE}/api/idbots/files/upload-largefile`;
 const CREATE_PIN_URL = `${RPC_BASE}/api/metaid/create-pin`;
 const METAAPP_PROTOCOL_PATH = '/protocols/metaapp';
@@ -185,7 +191,7 @@ function normalizePinId(response) {
 async function postJson(url, body) {
   const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify(body),
   });
   const rawText = await response.text();

@@ -51,7 +51,14 @@ import type { GroupTaskStatus, GroupTaskMemberStatus } from '../groupTaskStore';
 import { getAddressBalance } from './addressBalanceService';
 import { getRate as getGlobalFeeRate, getAllTiers as getGlobalFeeTiers, resolveCreatePinFeeRate } from './feeRateStore';
 import { listenWithRetry } from './httpListenWithRetry';
-import { DEFAULT_METAID_RPC_HOST, getMetaidRpcBase, resolveMetaidRpcPort } from './metaidRpcEndpoint';
+import {
+  DEFAULT_METAID_RPC_HOST,
+  getMetaidRpcBase,
+  getMetaidRpcToken,
+  isAllowedMetaidRpcOrigin,
+  isMetaidRpcTokenAuthorized,
+  resolveMetaidRpcPort,
+} from './metaidRpcEndpoint';
 import { getMetabotAccountSummary } from './metabotAccountService';
 import { sendBotBrowserOpenUri } from './botBrowserOpenUriService';
 import { uploadMetaFile } from './metaFileUploadService';
@@ -217,6 +224,20 @@ function createMetabotBtcWallet(store: MetabotStore, metabotId: number): BtcWall
   });
 }
 
+// Simple in-memory throttle for failed auth attempts. Binding is loopback-only,
+// so this only guards against a local process hammering the server; the bearer
+// token is the primary control.
+const RPC_AUTH_FAILURE_WINDOW_MS = 60_000;
+const RPC_AUTH_FAILURE_MAX = 30;
+let rpcAuthFailures: Array<{ at: number; origin: string }> = [];
+
+function recordRpcAuthFailure(origin: string | undefined): boolean {
+  const now = Date.now();
+  rpcAuthFailures = rpcAuthFailures.filter((entry) => now - entry.at < RPC_AUTH_FAILURE_WINDOW_MS);
+  rpcAuthFailures.push({ at: now, origin: origin ?? '' });
+  return rpcAuthFailures.length > RPC_AUTH_FAILURE_MAX;
+}
+
 export function startMetaidRpcServer(
   getMetabotStore: () => MetabotStore,
   getStore: () => SqliteStore,
@@ -228,17 +249,61 @@ export function startMetaidRpcServer(
 
   const server = http.createServer(async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
-    const cors = {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    };
-    Object.entries(cors).forEach(([k, v]) => res.setHeader(k, v));
+
+    // S1 hardening: the local RPC server must not be callable by arbitrary
+    // web pages (localhost CSRF/SSRF). Two controls, no protocol change:
+    //   1. Origin allowlist — browser-originated requests must come from an
+    //      app-owned origin (dev server / file://). Native host-spawned
+    //      clients send no Origin and are admitted by the token below.
+    //   2. Per-launch bearer token — every endpoint requires
+    //      `Authorization: Bearer <IDBOTS_RPC_TOKEN>`, which browsers cannot
+    //      set cross-origin. The host passes the token to subprocesses via the
+    //      IDBOTS_RPC_TOKEN env var next to IDBOTS_RPC_URL.
+    const requestOrigin = typeof req.headers.origin === 'string'
+      ? req.headers.origin
+      : undefined;
+    const originAllowed = isAllowedMetaidRpcOrigin(requestOrigin);
+
+    if (requestOrigin && !originAllowed) {
+      res.writeHead(403);
+      res.end(JSON.stringify({ success: false, error: 'Origin not allowed' }));
+      return;
+    }
 
     if (req.method === 'OPTIONS') {
+      // Preflight only succeeds for allowlisted origins; browsers that cannot
+      // preflight cannot attach the Authorization header to the real request.
+      if (!originAllowed) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ success: false, error: 'Origin not allowed' }));
+        return;
+      }
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin as string);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '600');
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    if (!isMetaidRpcTokenAuthorized(req.headers.authorization, getMetaidRpcToken())) {
+      if (recordRpcAuthFailure(requestOrigin)) {
+        res.writeHead(429);
+        res.end(JSON.stringify({ success: false, error: 'Too many unauthorized attempts' }));
+      } else {
+        res.writeHead(401);
+        res.end(JSON.stringify({ success: false, error: 'Unauthorized' }));
+      }
+      return;
+    }
+
+    // Echo the allowlisted origin only (never `*`) so a browser client gets
+    // readable responses; native clients (no Origin) are unaffected.
+    if (requestOrigin && originAllowed) {
+      res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+      res.setHeader('Vary', 'Origin');
     }
 
     const url = req.url ?? '';

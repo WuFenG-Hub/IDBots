@@ -16,7 +16,7 @@ import {
   type OpenAITool,
   type ToolCallResult,
 } from './cognitiveChatCompletion';
-import { getMetaidRpcBase } from './metaidRpcEndpoint';
+import { getMetaidRpcBase, getMetaidRpcToken } from './metaidRpcEndpoint';
 import { getEnhancedEnv } from '../libs/coworkUtil';
 import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
 import { isPathWithin } from '../libs/runtimePaths';
@@ -476,6 +476,7 @@ function runBashOnce(
       SKILLS_ROOT: cwd,
       IDBOTS_SKILLS_ROOT: cwd,
       IDBOTS_RPC_URL: getMetaidRpcBase(),
+      IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
     };
     if (metabotId != null) {
       env.IDBOTS_METABOT_ID = String(metabotId);

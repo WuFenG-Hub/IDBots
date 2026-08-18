@@ -15,10 +15,17 @@ async function readJson(response) {
   return json;
 }
 
+function rpcHeaders(env) {
+  const headers = { 'Content-Type': 'application/json' };
+  const token = String(env?.IDBOTS_RPC_TOKEN || '').trim();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
 async function postJson({ env, fetchImpl, path, body }) {
   const response = await fetchImpl(`${getRpcBase(env)}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(env),
     body: JSON.stringify(body || {}),
   });
   return readJson(response);

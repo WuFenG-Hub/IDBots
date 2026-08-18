@@ -15,6 +15,12 @@ import * as fs from 'fs';
 import { createCipheriv } from 'crypto';
 
 const RPC_URL = process.env.IDBOTS_RPC_URL || 'http://127.0.0.1:31200';
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (RPC_TOKEN) headers.Authorization = `Bearer ${RPC_TOKEN}`;
+  return headers;
+}
 const ASSIGN_PATH = '/api/idbots/assign-group-chat-task';
 const RESOLVE_PATH = '/api/idbots/resolve-metabot-id';
 const CREATE_PIN_PATH = '/api/metaid/create-pin';
@@ -100,7 +106,7 @@ async function resolveMetabot(base: string, name: string): Promise<{ metabot_id:
   const url = `${base}${RESOLVE_PATH}`;
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify({ name: name.trim() }),
   });
   const result = (await res.json()) as {
@@ -137,7 +143,7 @@ async function runCreatePin(
   };
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: rpcHeaders(),
     body: JSON.stringify({ metabot_id: metabotId, network, metaidData }),
   });
   const json = (await res.json()) as {
@@ -188,7 +194,7 @@ async function main(): Promise<void> {
     const url = `${base}${ASSIGN_PATH}`;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: rpcHeaders(),
       body: JSON.stringify(params),
     });
 

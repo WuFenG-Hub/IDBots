@@ -192,12 +192,19 @@ async function main() {
     await runCreatePin(rpcUrl, requestBody);
 }
 void main();
+const RPC_TOKEN = process.env.IDBOTS_RPC_TOKEN || '';
+function rpcHeaders() {
+    const headers = { 'Content-Type': 'application/json' };
+    if (RPC_TOKEN)
+        headers.Authorization = `Bearer ${RPC_TOKEN}`;
+    return headers;
+}
 async function runCreatePin(rpcUrl, body) {
     const url = `${rpcUrl.replace(/\/$/, '')}/api/metaid/create-pin`;
     try {
         const res = await fetch(url, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: rpcHeaders(),
             body: JSON.stringify(body),
         });
         const json = (await res.json());
