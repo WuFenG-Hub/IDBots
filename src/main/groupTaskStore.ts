@@ -268,6 +268,13 @@ export interface GroupTaskAcceptanceSummary {
   acceptanceCriteria: string | null;
   deliverables: GroupTaskAcceptanceSummaryDeliverable[];
   members: GroupTaskAcceptanceSummaryMember[];
+  /**
+   * Improvement #4 (v1.3): plan-change disclosures snapshotted at review entry
+   * — one line each (original plan -> blocker -> fallback) from the chair's own
+   * in-group [PLAN_CHANGE] resolutions. Empty array = no plan change (the
+   * owner-facing block is then omitted entirely, never padded).
+   */
+  planChanges: string[];
   /** Deterministic acceptance guidance (3 actions). */
   guidance: string;
   /** T2 terminal outcome, null until the task closes. */
@@ -463,6 +470,7 @@ interface GroupTaskAcceptanceSummaryRow {
   deliverables_json: string;
   members_json: string;
   guidance: string;
+  plan_changes_json?: string | null;
   outcome: string | null;
   rating: number | null;
   rating_comment: string | null;
@@ -470,6 +478,37 @@ interface GroupTaskAcceptanceSummaryRow {
   generated_at: string | null;
   published_group_pin_id: string | null;
   notified_session: string | null;
+}
+
+/** Improvement #4 (v1.3): one recorded chair plan-change resolution. */
+export interface GroupTaskPlanChange {
+  id: number;
+  taskId: number;
+  msgPinId: string | null;
+  authorGlobalmetaid: string | null;
+  /** One line: original plan -> blocker -> fallback, as the chair posted it. */
+  summary: string;
+  createdAt: string | null;
+}
+
+interface GroupTaskPlanChangeRow {
+  id: number;
+  task_id: number;
+  msg_pin_id: string | null;
+  author_globalmetaid: string | null;
+  summary: string;
+  created_at: string | null;
+}
+
+function rowToGroupTaskPlanChange(row: GroupTaskPlanChangeRow): GroupTaskPlanChange {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    msgPinId: row.msg_pin_id ?? null,
+    authorGlobalmetaid: row.author_globalmetaid ?? null,
+    summary: row.summary,
+    createdAt: row.created_at ?? null,
+  };
 }
 
 interface GroupChatTranscriptRow {
@@ -590,6 +629,15 @@ function rowToGroupTaskAcceptanceSummary(
   } catch {
     // Malformed snapshot JSON degrades to empty; the row is never fatal.
   }
+  let planChanges: string[] = [];
+  try {
+    const parsed = row.plan_changes_json ? JSON.parse(row.plan_changes_json) as unknown : null;
+    if (Array.isArray(parsed)) {
+      planChanges = parsed.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
+    }
+  } catch {
+    // Malformed snapshot JSON degrades to "no plan change disclosed".
+  }
   return {
     id: row.id,
     taskId: row.task_id,
@@ -598,6 +646,7 @@ function rowToGroupTaskAcceptanceSummary(
     acceptanceCriteria: row.acceptance_criteria ?? null,
     deliverables,
     members,
+    planChanges,
     guidance: row.guidance,
     outcome: isGroupTaskStatusValue(row.outcome) ? row.outcome : null,
     rating: row.rating ?? null,
@@ -1123,13 +1172,16 @@ export class GroupTaskStore {
     deliverables: GroupTaskAcceptanceSummaryDeliverable[];
     members: GroupTaskAcceptanceSummaryMember[];
     guidance: string;
+    /** Improvement #4 (v1.3): plan-change snapshot; omitted/empty stores NULL. */
+    planChanges?: string[];
   }): GroupTaskAcceptanceSummary {
     const latest = this.getLatestAcceptanceSummary(input.taskId);
     const version = (latest?.version ?? 0) + 1;
+    const planChanges = (input.planChanges ?? []).filter((line) => line.trim().length > 0);
     this.db.run(
       `INSERT INTO group_task_acceptance_summaries
-        (task_id, version, goal, acceptance_criteria, deliverables_json, members_json, guidance, generated_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'host')`,
+        (task_id, version, goal, acceptance_criteria, deliverables_json, members_json, plan_changes_json, guidance, generated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'host')`,
       [
         input.taskId,
         version,
@@ -1137,6 +1189,7 @@ export class GroupTaskStore {
         input.acceptanceCriteria?.trim() || null,
         JSON.stringify(input.deliverables),
         JSON.stringify(input.members),
+        planChanges.length > 0 ? JSON.stringify(planChanges) : null,
         input.guidance,
       ],
     );
@@ -1657,6 +1710,56 @@ export class GroupTaskStore {
       [taskId],
     );
     return rows.map(rowToGroupTaskIntegrityEvent);
+  }
+
+  /**
+   * Improvement #4 (v1.3): record one chair plan-change resolution (from a
+   * [PLAN_CHANGE: ...] tag). Deduped by the caller via hasPlanChange.
+   */
+  addPlanChange(input: {
+    taskId: number;
+    msgPinId?: string | null;
+    authorGlobalmetaid?: string | null;
+    summary: string;
+  }): GroupTaskPlanChange {
+    this.db.run(
+      `INSERT INTO group_task_plan_changes (task_id, msg_pin_id, author_globalmetaid, summary)
+       VALUES (?, ?, ?, ?)`,
+      [
+        input.taskId,
+        input.msgPinId ?? null,
+        input.authorGlobalmetaid ?? null,
+        input.summary,
+      ],
+    );
+    const id = this.lastInsertId();
+    this.saveDb();
+    const row = this.getOne<GroupTaskPlanChangeRow>(
+      'SELECT * FROM group_task_plan_changes WHERE id = ?',
+      [id],
+    );
+    if (!row) throw new Error(`addPlanChange failed: row ${id} not found after insert`);
+    return rowToGroupTaskPlanChange(row);
+  }
+
+  /** Improvement #4 (v1.3): all plan changes for one task, oldest first. */
+  listPlanChanges(taskId: number): GroupTaskPlanChange[] {
+    const rows = this.getAll<GroupTaskPlanChangeRow>(
+      'SELECT * FROM group_task_plan_changes WHERE task_id = ? ORDER BY id ASC',
+      [taskId],
+    );
+    return rows.map(rowToGroupTaskPlanChange);
+  }
+
+  /** Improvement #4 (v1.3): dedupe check — this exact line already recorded for the message pin. */
+  hasPlanChange(taskId: number, msgPinId: string | null | undefined, summary: string): boolean {
+    if (!msgPinId) return false;
+    const row = this.getOne<{ found: number }>(
+      `SELECT 1 AS found FROM group_task_plan_changes
+       WHERE task_id = ? AND msg_pin_id = ? AND summary = ? LIMIT 1`,
+      [taskId, msgPinId, summary],
+    );
+    return Boolean(row);
   }
 
   /** P0-8: dedupe check — an event already recorded for this message pin. */

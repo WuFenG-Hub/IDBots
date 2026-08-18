@@ -977,6 +977,31 @@ export class SqliteStore {
       CREATE INDEX IF NOT EXISTS idx_group_task_acceptance_summaries_task
         ON group_task_acceptance_summaries(task_id, version);
     `);
+    // Improvement #4 (v1.3): older user databases lack the plan-changes snapshot
+    // column — add it idempotently (NULL = no plan change disclosed).
+    this.migrateGroupTaskAcceptanceSummariesPlanChanges();
+
+    // Improvement #4 (v1.3): plan-change resolutions the chair posts in-group
+    // with a [PLAN_CHANGE: ...] tag (original plan -> blocker -> fallback).
+    // First-hand on-chain facts (deduped by message pin) snapshotted into the
+    // acceptance summary at review entry, so the owner-facing surfaces render
+    // "why the artifact looks the way it does" without transcript digging.
+    // CREATE TABLE IF NOT EXISTS is the idempotent first-run migration;
+    // existing rows are never touched.
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS group_task_plan_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        msg_pin_id TEXT,
+        author_globalmetaid TEXT,
+        summary TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      );
+    `);
+    this.db.run(`
+      CREATE INDEX IF NOT EXISTS idx_group_task_plan_changes_task
+        ON group_task_plan_changes(task_id, id);
+    `);
 
     // OpenTeam: invitee-side group memberships + inviter-side invite tracking (M1).
     this.db.run(`
@@ -2229,6 +2254,26 @@ export class SqliteStore {
       }
     } catch (error) {
       console.warn('migrateGroupTaskDeliverablesConfirmation:', error);
+    }
+  }
+
+  /**
+   * Migration (Improvement #4, v1.3): plan-changes JSON snapshot column on the
+   * acceptance summaries. Idempotent PRAGMA-guarded; existing rows keep NULL
+   * (no plan change disclosed) and new review entries write the snapshot.
+   */
+  private migrateGroupTaskAcceptanceSummariesPlanChanges(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(group_task_acceptance_summaries)');
+      const columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      if (!columns.includes('plan_changes_json')) {
+        this.db.run(
+          'ALTER TABLE group_task_acceptance_summaries ADD COLUMN plan_changes_json TEXT;',
+        );
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateGroupTaskAcceptanceSummariesPlanChanges:', error);
     }
   }
 

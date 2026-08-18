@@ -156,6 +156,12 @@ export interface GroupTaskAcceptanceSummary {
   acceptanceCriteria: string | null;
   deliverables: GroupTaskAcceptanceSummaryDeliverable[];
   members: GroupTaskAcceptanceSummaryMember[];
+  /**
+   * Improvement #4 (v1.3): plan-change disclosures snapshotted at review entry
+   * — one line each (original plan -> blocker -> fallback) from the chair's own
+   * in-group [PLAN_CHANGE] resolutions. Empty/undefined = no change (block omitted).
+   */
+  planChanges?: string[];
   guidance: string;
   outcome: GroupTaskStatus | null;
   rating: number | null;

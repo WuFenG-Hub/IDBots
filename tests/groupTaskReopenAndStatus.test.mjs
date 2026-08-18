@@ -41,6 +41,7 @@ const {
   getGroupTask,
   closeGroupTask,
   reopenGroupTask,
+  reworkGroupTask,
   getGroupTaskMemberStatus,
   joinGroupTaskMemberWithSession,
   computeGroupTaskMemberWorkStatus,
@@ -157,22 +158,51 @@ const createHarness = async (overrides = {}) => {
 // P0-1: reopen (review -> executing)
 // ---------------------------------------------------------------------------
 
-test('reopenGroupTask pulls review back to executing, records the owner actor and clears the owner-report guard', async () => {
+test('reopenGroupTask pulls review back to executing, records the owner actor and clears every review-delivery guard', async () => {
   const h = await createHarness();
   try {
     const task = h.createTask('review');
-    // owner-report guard set (as if a review report was already sent)
+    // Review-delivery guards set (as if a review report cycle already ran).
     h.store.set('group_task_owner_reported:' + task.id, '1');
+    h.store.set('group_task_review_notified:' + task.id, '1');
+    h.store.set('group_task_review_reassert:' + task.id, '42');
 
     const detail = await reopenGroupTask(task.id, { actor: { kind: 'owner' } });
     assert.equal(detail.status, 'executing', 'task back to executing');
     assert.equal(detail.statusEvents[0].fromStatus, 'review');
     assert.equal(detail.statusEvents[0].toStatus, 'executing');
     assert.equal(detail.statusEvents[0].actorKind, 'owner', 'owner actor recorded');
+    // Improvement #2 (v1.3): the UI rework path must reset ALL review-delivery
+    // guards (not just the owner-report one) so the next review re-reports on
+    // every channel, and stamp the rework instant for the review re-entry
+    // debounce (task #24's stuck source-session report).
     assert.equal(h.store.get('group_task_owner_reported:' + task.id), undefined, 'owner-report guard cleared');
+    assert.equal(h.store.get('group_task_review_notified:' + task.id), undefined, 'source-review guard cleared');
+    assert.equal(h.store.get('group_task_review_reassert:' + task.id), undefined, 're-assert guard cleared');
+    assert.ok(Number(h.store.get('group_task_rework_at:' + task.id)) > 0, 'rework instant stamped');
     // canonical task synced to running via the bridge
     const canonical = h.orchestrationStore.getTask(detail.orchestrationTaskId);
     assert.equal(canonical.status, 'running', 'canonical task projected to running');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('reworkGroupTask (chair RPC path) clears every review-delivery guard and stamps the rework instant', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask('review');
+    h.store.set('group_task_owner_reported:' + task.id, '1');
+    h.store.set('group_task_review_notified:' + task.id, '1');
+    h.store.set('group_task_review_reassert:' + task.id, '42');
+
+    const updated = await reworkGroupTask(task.id, { reason: 'S1 生图受阻，重排子任务' });
+    assert.equal(updated.status, 'executing', 'task back to executing');
+    assert.equal(h.store.get('group_task_owner_reported:' + task.id), undefined, 'owner-report guard cleared');
+    assert.equal(h.store.get('group_task_review_notified:' + task.id), undefined, 'source-review guard cleared');
+    assert.equal(h.store.get('group_task_review_reassert:' + task.id), undefined, 're-assert guard cleared');
+    assert.ok(Number(h.store.get('group_task_rework_at:' + task.id)) > 0, 'rework instant stamped');
+    await assert.rejects(() => reworkGroupTask(task.id), /rework is only available from review/);
   } finally {
     h.cleanup();
   }

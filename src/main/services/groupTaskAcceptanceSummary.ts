@@ -132,12 +132,26 @@ export function acceptancePreview(text: string, maxChars: number = ACCEPTANCE_SU
   return `${trimmed.slice(0, maxChars).trimEnd()}…`;
 }
 
-/** Render the immutable summary record back into the deterministic group message. */
+/**
+ * Improvement #4 (v1.3): the "方案变更 / Plan changes" block budget — a few
+ * one-line disclosures (original plan -> blocker -> fallback), never a prose
+ * re-dump, so the P12 concise-report budget holds. Extra lines collapse into
+ * a single overflow pointer to the group transcript.
+ */
+export const PLAN_CHANGE_MAX_RENDER_LINES = 3;
+/** Per-line cap for a rendered plan-change disclosure. */
+export const PLAN_CHANGE_LINE_MAX_CHARS = 160;
+
+/**
+ * Render the immutable summary record back into the deterministic group message.
+ * The plan-changes block (Improvement #4 v1.3) is omitted entirely when the
+ * snapshot carries no change — no placeholder, no noise.
+ */
 export function buildAcceptanceSummaryMessageText(
   summary: Pick<
     GroupTaskAcceptanceSummary,
     'goal' | 'acceptanceCriteria' | 'deliverables' | 'members' | 'guidance'
-  >,
+  > & { planChanges?: string[] },
   taskTitle: string,
 ): string {
   const lines: string[] = [];
@@ -166,6 +180,17 @@ export function buildAcceptanceSummaryMessageText(
       lines.push(`- [${kind}] ${body} (${verification}${statusNote}) — ${author}`);
     }
   }
+  const planChanges = (summary.planChanges ?? []).map((line) => line.trim()).filter(Boolean);
+  if (planChanges.length > 0) {
+    lines.push('');
+    lines.push('方案变更：');
+    for (const change of planChanges.slice(0, PLAN_CHANGE_MAX_RENDER_LINES)) {
+      lines.push(`- ${acceptancePreview(change, PLAN_CHANGE_LINE_MAX_CHARS)}`);
+    }
+    if (planChanges.length > PLAN_CHANGE_MAX_RENDER_LINES) {
+      lines.push(`（另有 ${planChanges.length - PLAN_CHANGE_MAX_RENDER_LINES} 项变更，见群内记录）`);
+    }
+  }
   lines.push('');
   if (summary.members.length > 0) {
     lines.push(`成员：${summary.members.map((member) => member.name ?? 'unknown').join('、')}`);
@@ -180,27 +205,33 @@ export function buildAcceptanceSummaryMessageText(
  * message from the live task + recorded deliverables + members. The daemon
  * persists the result via {@link GroupTaskStore.saveAcceptanceSummary} at the
  * review-entry moment (T1) and posts `messageText` as the group's last message.
+ * planChanges (Improvement #4 v1.3) snapshots the chair's recorded [PLAN_CHANGE]
+ * resolutions so every owner-facing surface renders the same disclosure.
  */
 export function buildAcceptanceSummary(input: {
   task: Pick<GroupTask, 'title' | 'goal' | 'acceptanceCriteria'>;
   deliverables: GroupTaskDeliverable[];
   members: GroupTaskMember[];
+  planChanges?: string[];
 }): {
   goal: string;
   acceptanceCriteria: string | null;
   deliverables: GroupTaskAcceptanceSummaryDeliverable[];
   members: GroupTaskAcceptanceSummaryMember[];
+  planChanges: string[];
   guidance: string;
   messageText: string;
 } {
   const deliverables = buildAcceptanceSummaryDeliverables(input.deliverables, input.members);
   const members = buildAcceptanceSummaryMembers(input.members);
   const guidance = buildAcceptanceGuidance(input.task);
+  const planChanges = (input.planChanges ?? []).map((line) => line.trim()).filter(Boolean);
   const summaryShape = {
     goal: input.task.goal,
     acceptanceCriteria: input.task.acceptanceCriteria ?? null,
     deliverables,
     members,
+    planChanges,
     guidance,
   };
   const messageText = buildAcceptanceSummaryMessageText(summaryShape, input.task.title);
