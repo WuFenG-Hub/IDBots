@@ -26,6 +26,7 @@ import {
 import type { SqliteDatabase as Database } from '../sqliteTypes';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import type { CoworkStore } from '../coworkStore';
+import { tApp } from '../libs/appLanguage';
 
 const CONNECTIVITY_TIMEOUT_MS = 10_000;
 const INBOUND_ACTIVITY_WARN_AFTER_MS = 2 * 60 * 1000;
@@ -215,7 +216,7 @@ export class IMGatewayManager extends EventEmitter {
         console.error(`[IMGatewayManager] Error processing message: ${error.message}`);
         // Send error message to user
         try {
-          await replyFn(`处理消息时出错: ${error.message}`);
+          await replyFn(tApp(`处理消息时出错: ${error.message}`, `Error while processing the message: ${error.message}`));
         } catch (replyError) {
           console.error(`[IMGatewayManager] Failed to send error reply: ${replyError}`);
         }
@@ -324,8 +325,8 @@ export class IMGatewayManager extends EventEmitter {
       addCheck({
         code: 'missing_credentials',
         level: 'fail',
-        message: `缺少必要配置项: ${missingCredentials.join(', ')}`,
-        suggestion: '请补全配置后重新测试连通性。',
+        message: tApp(`缺少必要配置项: ${missingCredentials.join(', ')}`, `Missing required fields: ${missingCredentials.join(', ')}`),
+        suggestion: tApp('请补全配置后重新测试连通性。', 'Fill in the required fields and test connectivity again.'),
       });
 
       return {
@@ -340,7 +341,7 @@ export class IMGatewayManager extends EventEmitter {
       const authMessage = await this.withTimeout(
         this.runAuthProbe(platform, config),
         CONNECTIVITY_TIMEOUT_MS,
-        '鉴权探测超时'
+        tApp('鉴权探测超时', 'Authentication probe timed out')
       );
       addCheck({
         code: 'auth_check',
@@ -351,8 +352,8 @@ export class IMGatewayManager extends EventEmitter {
       addCheck({
         code: 'auth_check',
         level: 'fail',
-        message: `鉴权失败: ${error.message}`,
-        suggestion: '请检查 ID/Secret/Token 是否正确，且机器人权限已开通。',
+        message: tApp(`鉴权失败: ${error.message}`, `Authentication failed: ${error.message}`),
+        suggestion: tApp('请检查 ID/Secret/Token 是否正确，且机器人权限已开通。', 'Check that the ID/Secret/Token is correct and the bot has the required permissions.'),
       });
       return {
         platform,
@@ -372,18 +373,20 @@ export class IMGatewayManager extends EventEmitter {
         code: 'gateway_running',
         level: discordStarting ? 'info' : 'warn',
         message: discordStarting
-          ? 'IM 渠道正在启动，请稍后重试。'
-          : 'IM 渠道已启用但当前未连接。',
+          ? tApp('IM 渠道正在启动，请稍后重试。', 'The IM channel is starting. Please retry shortly.')
+          : tApp('IM 渠道已启用但当前未连接。', 'The IM channel is enabled but not connected.'),
         suggestion: discordStarting
-          ? '等待启动完成后重新测试。'
-          : '请检查网络、机器人配置和平台侧事件开关。',
+          ? tApp('等待启动完成后重新测试。', 'Wait until startup finishes, then test again.')
+          : tApp('请检查网络、机器人配置和平台侧事件开关。', 'Check the network, bot credentials, and platform event subscriptions.'),
       });
     } else {
       addCheck({
         code: 'gateway_running',
         level: connected ? 'pass' : 'info',
-        message: connected ? 'IM 渠道已启用且运行正常。' : 'IM 渠道当前未启用。',
-        suggestion: connected ? undefined : '请点击对应 IM 渠道胶囊按钮启用该渠道。',
+        message: connected
+          ? tApp('IM 渠道已启用且运行正常。', 'The IM channel is enabled and running.')
+          : tApp('IM 渠道当前未启用。', 'The IM channel is currently disabled.'),
+        suggestion: connected ? undefined : tApp('请点击对应 IM 渠道胶囊按钮启用该渠道。', 'Click the IM channel toggle to enable it.'),
       });
     }
 
@@ -396,21 +399,21 @@ export class IMGatewayManager extends EventEmitter {
         addCheck({
           code: 'inbound_activity',
           level: 'warn',
-          message: '已连接超过 2 分钟，但尚未收到任何入站消息。',
-          suggestion: '请确认机器人已在目标会话中，或按平台规则 @机器人 触发消息。',
+          message: tApp('已连接超过 2 分钟，但尚未收到任何入站消息。', 'Connected for more than 2 minutes, but no inbound messages yet.'),
+          suggestion: tApp('请确认机器人已在目标会话中，或按平台规则 @机器人 触发消息。', 'Make sure the bot is in the target chat, or @mention it according to the platform rules.'),
         });
       } else {
         addCheck({
           code: 'inbound_activity',
           level: 'pass',
-          message: '已检测到入站消息。',
+          message: tApp('已检测到入站消息。', 'Inbound messages have been detected.'),
         });
       }
     } else if (connected) {
       addCheck({
         code: 'inbound_activity',
         level: 'info',
-        message: '网关刚启动，入站活动检查将在 2 分钟后更准确。',
+        message: tApp('网关刚启动，入站活动检查将在 2 分钟后更准确。', 'The gateway just started. Inbound activity checks are more accurate after 2 minutes.'),
       });
     }
 
@@ -419,21 +422,21 @@ export class IMGatewayManager extends EventEmitter {
         addCheck({
           code: 'outbound_activity',
           level: 'warn',
-          message: '已收到消息，但尚未观察到成功回发。',
-          suggestion: '请检查消息发送权限、机器人可见范围和会话回包权限。',
+          message: tApp('已收到消息，但尚未观察到成功回发。', 'Inbound messages were received, but no successful reply has been observed yet.'),
+          suggestion: tApp('请检查消息发送权限、机器人可见范围和会话回包权限。', 'Check send permissions, bot visibility, and reply rights for the conversation.'),
         });
       } else {
         addCheck({
           code: 'outbound_activity',
           level: 'pass',
-          message: '已检测到成功回发消息。',
+          message: tApp('已检测到成功回发消息。', 'Successful outbound replies have been detected.'),
         });
       }
     } else if (connected) {
       addCheck({
         code: 'outbound_activity',
         level: 'info',
-        message: '尚未收到可用于评估回发能力的入站消息。',
+        message: tApp('尚未收到可用于评估回发能力的入站消息。', 'No inbound message is available yet to evaluate reply capability.'),
       });
     }
 
@@ -442,10 +445,10 @@ export class IMGatewayManager extends EventEmitter {
       addCheck({
         code: 'platform_last_error',
         level: connected ? 'warn' : 'fail',
-        message: `最近错误: ${lastError}`,
+        message: tApp(`最近错误: ${lastError}`, `Latest error: ${lastError}`),
         suggestion: connected
-          ? '当前已连接，但建议修复该错误避免后续中断。'
-          : '该错误可能阻断对话，请优先修复后重试。',
+          ? tApp('当前已连接，但建议修复该错误避免后续中断。', 'The channel is connected, but fix this error to avoid later interruptions.')
+          : tApp('该错误可能阻断对话，请优先修复后重试。', 'This error may block conversations. Fix it first, then retry.'),
       });
     }
 
@@ -453,35 +456,35 @@ export class IMGatewayManager extends EventEmitter {
       addCheck({
         code: 'feishu_group_requires_mention',
         level: 'info',
-        message: '飞书群聊中仅响应 @机器人的消息。',
-        suggestion: '请在群聊中使用 @机器人 + 内容触发对话。',
+        message: tApp('飞书群聊中仅响应 @机器人的消息。', 'In Feishu group chats the bot only replies to @mentions.'),
+        suggestion: tApp('请在群聊中使用 @机器人 + 内容触发对话。', 'In group chats, @mention the bot plus your message.'),
       });
       addCheck({
         code: 'feishu_event_subscription_required',
         level: 'info',
-        message: '飞书需要开启消息事件订阅（im.message.receive_v1）才能收消息。',
-        suggestion: '请在飞书开发者后台确认事件订阅、权限和发布状态。',
+        message: tApp('飞书需要开启消息事件订阅（im.message.receive_v1）才能收消息。', 'Feishu needs the im.message.receive_v1 event subscription to receive messages.'),
+        suggestion: tApp('请在飞书开发者后台确认事件订阅、权限和发布状态。', 'Confirm event subscriptions, permissions, and the published version in the Feishu developer console.'),
       });
     } else if (platform === 'discord') {
       addCheck({
         code: 'discord_group_requires_mention',
         level: 'info',
-        message: 'Discord 群聊中仅响应 @机器人的消息。',
-        suggestion: '请在频道中使用 @机器人 + 内容触发对话。',
+        message: tApp('Discord 群聊中仅响应 @机器人的消息。', 'In Discord servers the bot only replies to @mentions.'),
+        suggestion: tApp('请在频道中使用 @机器人 + 内容触发对话。', 'In channels, @mention the bot plus your message.'),
       });
     } else if (platform === 'telegram') {
       addCheck({
         code: 'telegram_privacy_mode_hint',
         level: 'info',
-        message: 'Telegram 可能受 Bot Privacy Mode 影响。',
-        suggestion: '若群聊中不响应，请在 @BotFather 检查 Privacy Mode 配置。',
+        message: tApp('Telegram 可能受 Bot Privacy Mode 影响。', 'Telegram may be affected by Bot Privacy Mode.'),
+        suggestion: tApp('若群聊中不响应，请在 @BotFather 检查 Privacy Mode 配置。', 'If the bot ignores group messages, check Privacy Mode in @BotFather.'),
       });
     } else if (platform === 'dingtalk') {
       addCheck({
         code: 'dingtalk_bot_membership_hint',
         level: 'info',
-        message: '钉钉机器人需被加入目标会话并具备发言权限。',
-        suggestion: '请确认机器人在目标会话中，且企业权限配置允许收发消息。',
+        message: tApp('钉钉机器人需被加入目标会话并具备发言权限。', 'The DingTalk bot must be added to the target chat and allowed to send messages.'),
+        suggestion: tApp('请确认机器人在目标会话中，且企业权限配置允许收发消息。', 'Confirm the bot is in the target chat and org permissions allow sending and receiving.'),
       });
     }
 

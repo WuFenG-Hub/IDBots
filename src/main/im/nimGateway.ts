@@ -23,6 +23,7 @@ import {
   cleanupOldNimMediaFiles,
 } from './nimMedia';
 import { parseMediaMarkers, stripMediaMarkers } from './dingtalkMediaParser';
+import { tApp } from '../libs/appLanguage';
 
 // Message deduplication cache
 const processedMessages = new Map<string, number>();
@@ -794,7 +795,7 @@ export class NimGateway extends EventEmitter {
           await this.onMessageCallback(message, replyFn);
         } catch (error: any) {
           console.error(`[NIM Gateway] Error in message callback: ${error.message}`);
-          await replyFn(`抱歉，处理消息时出现错误：${error.message}`);
+          await replyFn(tApp(`抱歉，处理消息时出现错误：${error.message}`, `Sorry, an error occurred while processing the message: ${error.message}`));
         }
       }
     } catch (err: any) {

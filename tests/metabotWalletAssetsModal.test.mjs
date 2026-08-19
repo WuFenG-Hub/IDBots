@@ -19,11 +19,11 @@ test('wallet asset presentation helpers expose native, mrc20, and mvc sections w
   });
 
   assert.deepEqual(
-    viewModel.sections.map((section) => ({ title: section.title, state: section.state })),
+    viewModel.sections.map((section) => ({ titleKey: section.titleKey, state: section.state })),
     [
-      { title: '原生币', state: 'empty' },
-      { title: 'MRC20 Token', state: 'empty' },
-      { title: 'MVC Token', state: 'empty' },
+      { titleKey: 'metabotWalletNativeAssets', state: 'empty' },
+      { titleKey: 'metabotWalletMrc20Assets', state: 'empty' },
+      { titleKey: 'metabotWalletMvcFtAssets', state: 'empty' },
     ],
   );
 });

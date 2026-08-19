@@ -39,6 +39,12 @@ test('buildUseMetaAppPrompt builds a cowork prompt around the selected MetaApp',
   assert.match(prompt, /如果需要，请直接打开它/);
 });
 
+test('buildUseMetaAppPrompt uses English copy when language is en', () => {
+  const prompt = buildUseMetaAppPrompt({ name: 'Buzz' }, 'en');
+  assert.match(prompt, /local MetaApp Buzz/);
+  assert.doesNotMatch(prompt, /[\u4e00-\u9fff]/);
+});
+
 test('getMetaAppAuthorModel uses author fields and IDBots fallback', () => {
   assert.deepEqual(
     getMetaAppAuthorModel({

@@ -439,7 +439,7 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
   // 状态
   const [activeTab, setActiveTab] = useState<TabType>(initialTab ?? 'general');
   const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
-  const [language, setLanguage] = useState<LanguageType>('zh');
+  const [language, setLanguage] = useState<LanguageType>(i18nService.getLanguage());
   const [autoLaunch, setAutoLaunchState] = useState(false);
   const [isUpdatingAutoLaunch, setIsUpdatingAutoLaunch] = useState(false);
   const [isSaving, setIsSaving] = useState(false);

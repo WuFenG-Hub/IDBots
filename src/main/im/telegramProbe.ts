@@ -5,6 +5,7 @@
  */
 
 import axios, { type AxiosRequestConfig } from 'axios';
+import { tApp } from '../libs/appLanguage';
 
 const TELEGRAM_API_BASE = 'https://api.telegram.org';
 const DEFAULT_RETRIES = 3;
@@ -75,7 +76,7 @@ export async function probeTelegramAuth(
         throw new Error(description);
       }
       const username = data.result?.username ? `@${data.result.username}` : 'unknown';
-      return `Telegram 鉴权通过（Bot: ${username}）。`;
+      return tApp(`Telegram 鉴权通过（Bot: ${username}）。`, `Telegram authentication succeeded (Bot: ${username}).`);
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
       const isAxios = lastError && typeof (lastError as any).response !== 'undefined';
@@ -95,18 +96,18 @@ export async function probeTelegramAuth(
 
       // Last attempt failed: throw with clear message
       if ((lastError as any).code === 'ECONNABORTED' || (lastError as any).message?.includes('timeout')) {
-        throw new Error('连接 Telegram API 超时，请检查网络或配置代理后重试。');
+        throw new Error(tApp('连接 Telegram API 超时，请检查网络或配置代理后重试。', 'Timed out connecting to the Telegram API. Check the network or proxy and retry.'));
       }
       if (
         (lastError as any).code === 'ENOTFOUND' ||
         (lastError as any).code === 'ECONNREFUSED' ||
         (lastError as any).code === 'ENETUNREACH'
       ) {
-        throw new Error('无法连接 api.telegram.org，请检查网络或配置代理后重试。');
+        throw new Error(tApp('无法连接 api.telegram.org，请检查网络或配置代理后重试。', 'Cannot reach api.telegram.org. Check the network or proxy and retry.'));
       }
       throw new Error(apiDescription || lastError.message);
     }
   }
 
-  throw lastError || new Error('Telegram 鉴权失败');
+  throw lastError || new Error(tApp('Telegram 鉴权失败', 'Telegram authentication failed'));
 }

@@ -34,8 +34,8 @@ type SettingsPlatform = IMPlatform | 'chainListener';
 
 // Platform metadata
 const platformMeta: Record<IMPlatform, { label: string; logo: string }> = {
-  dingtalk: { label: '钉钉', logo: 'dingding.png' },
-  feishu: { label: '飞书', logo: 'feishu.png' },
+  dingtalk: { label: 'DingTalk', logo: 'dingding.png' },
+  feishu: { label: 'Feishu', logo: 'feishu.png' },
   telegram: { label: 'Telegram', logo: 'telegram.svg' },
   discord: { label: 'Discord', logo: 'discord.svg' },
 };
@@ -445,7 +445,7 @@ const IMSettings: React.FC = () => {
                 <div className="mr-2 flex h-7 w-7 items-center justify-center">
                   <img
                     src={meta.logo}
-                    alt={meta.label}
+                    alt={i18nService.t(platform)}
                     className="w-6 h-6 object-contain"
                   />
                 </div>
@@ -533,7 +533,7 @@ const IMSettings: React.FC = () => {
               ) : (
                 <img
                   src={platformMeta[activePlatform].logo}
-                  alt={platformMeta[activePlatform].label}
+                  alt={i18nService.t(activePlatform)}
                   className="w-4 h-4 object-contain"
                 />
               )}
@@ -553,7 +553,7 @@ const IMSettings: React.FC = () => {
               {getPlatformConnected(activePlatform)
                 ? i18nService.t('connected')
                 : getPlatformStarting(activePlatform)
-                  ? (i18nService.t('starting') || '启动中')
+                  ? i18nService.t('starting')
                   : i18nService.t('disconnected')}
             </div>
           ) : chainListenerActive ? (
@@ -687,7 +687,7 @@ const IMSettings: React.FC = () => {
                 placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                {i18nService.t('telegramTokenHint') || '从 @BotFather 获取 Bot Token'}
+                {i18nService.t('telegramTokenHint')}
               </p>
             </div>
 
@@ -748,7 +748,7 @@ const IMSettings: React.FC = () => {
                 placeholder="MTIzNDU2Nzg5MDEyMzQ1Njc4OQ..."
               />
               <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
-                从 Discord Developer Portal 获取 Bot Token
+                {i18nService.t('discordTokenHint')}
               </p>
             </div>
 

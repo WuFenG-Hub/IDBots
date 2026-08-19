@@ -137,7 +137,7 @@ const MetaBotWalletAssetsModal: React.FC<MetaBotWalletAssetsModalProps> = ({
             <section key={section.key} className="space-y-3">
               <div className="flex items-center justify-between">
                 <h4 className="text-sm font-semibold uppercase tracking-wide dark:text-claude-darkText text-claude-text">
-                  {section.title}
+                  {i18nService.t(section.titleKey)}
                 </h4>
                 <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
                   {section.items.length}

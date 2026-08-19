@@ -1144,6 +1144,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpTransportHttp: 'HTTP 流式传输',
     addKeyValue: '添加',
     saveMcpServer: '保存',
+    mcpInstall: '安装',
     mcpInstalled: '已安装',
     mcpMarketplace: '市场',
     mcpCustom: '自定义',
@@ -1238,6 +1239,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     delegationWaitingForResult: '正在等待远程服务返回结果…',
     delegationInputDisabledPlaceholder: '等待远程服务结果中，输入已禁用',
     a2aSessionLabel: 'Agent 对话',
+    a2aDownloadFile: '下载文件',
+    a2aInternalStatus: '内部状态',
+    a2aMediaLoadingVideo: '正在加载视频预览...',
+    a2aMediaLoadingAudio: '正在加载音频预览...',
+    a2aMediaLoadFailedVideo: '视频预览加载失败，可先下载文件观看。',
+    a2aMediaLoadFailedAudio: '音频预览加载失败，可先下载文件收听。',
+    a2aMediaLoadedBytes: '已加载 {size}',
     metabotSearchPlaceholder: '搜索 MetaBot',
     metabotNoItems: '暂无 MetaBot',
     metabotLimitReached: 'MetaBot 数量不能超过 {limit} 个',
@@ -1430,6 +1438,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotWalletAssetsRefresh: '刷新',
     metabotWalletAssetsLoadFailed: 'Token 余额加载失败',
     metabotWalletAssetsEmpty: '暂无资产',
+    metabotWalletNativeAssets: '原生币',
+    metabotWalletMrc20Assets: 'MRC20 Token',
+    metabotWalletMvcFtAssets: 'MVC Token',
     metabotBackupMnemonicHint: '请离线抄写并妥善保存这 12 个助记词，任何人获取后都可控制该 MetaBot 资产。',
     metabotMnemonicLoadFailed: '助记词加载失败',
     metabotMnemonicEmpty: '未读取到助记词',
@@ -1559,6 +1570,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     imConnectivityCheckSuggestion_telegram_privacy_mode_hint: '在 @BotFather 调整 Privacy Mode 设置。',
     imConnectivityCheckSuggestion_dingtalk_bot_membership_hint: '确认机器人已加入目标会话并允许收发消息。',
     telegramTokenHint: '从 @BotFather 获取 Bot Token',
+    discordTokenHint: '从 Discord Developer Portal 获取 Bot Token',
     telegramProxyUrlLabel: '代理地址（选填）',
     telegramProxyUrlHint: '网络受限时填写 HTTP(S) 代理，如 http://127.0.0.1:7890，用于连通性测试与连接 Telegram API。留空则直连。',
 
@@ -3231,6 +3243,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     mcpTransportHttp: 'Streamable HTTP',
     addKeyValue: 'Add',
     saveMcpServer: 'Save',
+    mcpInstall: 'Install',
     mcpInstalled: 'Installed',
     mcpMarketplace: 'Marketplace',
     mcpCustom: 'Custom',
@@ -3325,6 +3338,13 @@ const translations: Record<LanguageType, Record<string, string>> = {
     delegationWaitingForResult: 'Waiting for remote service result...',
     delegationInputDisabledPlaceholder: 'Waiting for remote service result, input disabled',
     a2aSessionLabel: 'Agent Chat',
+    a2aDownloadFile: 'Download file',
+    a2aInternalStatus: 'Internal status',
+    a2aMediaLoadingVideo: 'Loading video preview...',
+    a2aMediaLoadingAudio: 'Loading audio preview...',
+    a2aMediaLoadFailedVideo: 'Video preview failed. Download the file to watch it.',
+    a2aMediaLoadFailedAudio: 'Audio preview failed. Download the file to listen.',
+    a2aMediaLoadedBytes: 'Loaded {size}',
     metabotSearchPlaceholder: 'Search MetaBot',
     metabotNoItems: 'No MetaBots yet',
     metabotLimitReached: 'MetaBot count cannot exceed {limit}',
@@ -3517,6 +3537,9 @@ const translations: Record<LanguageType, Record<string, string>> = {
     metabotWalletAssetsRefresh: 'Refresh',
     metabotWalletAssetsLoadFailed: 'Failed to load token balances',
     metabotWalletAssetsEmpty: 'No assets',
+    metabotWalletNativeAssets: 'Native Coins',
+    metabotWalletMrc20Assets: 'MRC20 Token',
+    metabotWalletMvcFtAssets: 'MVC Token',
     metabotBackupMnemonicHint: 'Write down and store these 12 words offline. Anyone with them can control this MetaBot wallet.',
     metabotMnemonicLoadFailed: 'Failed to load mnemonic',
     metabotMnemonicEmpty: 'Mnemonic is empty',
@@ -3646,6 +3669,7 @@ const translations: Record<LanguageType, Record<string, string>> = {
     imConnectivityCheckSuggestion_telegram_privacy_mode_hint: 'Review Privacy Mode in @BotFather settings.',
     imConnectivityCheckSuggestion_dingtalk_bot_membership_hint: 'Ensure the bot is in the target conversation with send/receive rights.',
     telegramTokenHint: 'Get Bot Token from @BotFather',
+    discordTokenHint: 'Get Bot Token from the Discord Developer Portal',
     telegramProxyUrlLabel: 'Proxy URL (optional)',
     telegramProxyUrlHint: 'In restricted networks, set an HTTP(S) proxy (e.g. http://127.0.0.1:7890) for connectivity test and Telegram API. Leave empty for direct connection.',
 
@@ -4182,13 +4206,39 @@ const translations: Record<LanguageType, Record<string, string>> = {
   }
 };
 
+/**
+ * Map an OS/Chromium locale to the app language.
+ * Only Simplified Chinese locales use zh; Traditional Chinese and every other
+ * locale fall back to English.
+ *
+ * Keep this logic in sync with src/main/libs/appLanguage.ts.
+ */
+export function inferLanguageFromLocale(systemLocale: string): LanguageType {
+  const normalized = String(systemLocale || '').trim().replace(/_/g, '-').toLowerCase();
+  if (!normalized) {
+    return 'en';
+  }
+
+  const tags = normalized.split('-').filter(Boolean);
+  if (tags[0] !== 'zh') {
+    return 'en';
+  }
+
+  if (tags.includes('hant') || tags[1] === 'tw' || tags[1] === 'hk' || tags[1] === 'mo') {
+    return 'en';
+  }
+
+  return 'zh';
+}
+
 class I18nService {
-  private currentLanguage: LanguageType = 'zh';
+  private currentLanguage: LanguageType = 'en';
   private listeners = new Set<() => void>();
   
   constructor() {
-    // 默认使用中文
-    this.currentLanguage = 'zh';
+    // Default to English until initialize() reads the saved or OS locale.
+    // First paint (loading screen) must not flash Chinese for non-zh users.
+    this.currentLanguage = 'en';
   }
   
   // 初始化语言设置
@@ -4216,7 +4266,7 @@ class I18nService {
           // 新用户或使用默认中文的旧用户:检测系统语言
           try {
             const systemLocale = await window.electron.appInfo.getSystemLocale();
-            const defaultLanguage = this.inferLanguageFromLocale(systemLocale);
+            const defaultLanguage = inferLanguageFromLocale(systemLocale);
 
             console.log(`[i18n] First run detected. System locale: ${systemLocale}, default language: ${defaultLanguage}`);
 
@@ -4254,18 +4304,10 @@ class I18nService {
       }
     } catch (error) {
       console.error('Failed to initialize language:', error);
-      // 默认使用英文
       this.currentLanguage = 'en';
     }
-  }
 
-  // 根据系统语言推断应用语言
-  private inferLanguageFromLocale(systemLocale: string): LanguageType {
-    // 只有 zh-CN (简体中文) 才使用中文,其他所有情况都使用英文
-    if (systemLocale === 'zh-CN') {
-      return 'zh';
-    }
-    return 'en'; // 默认英文 (包括 zh-TW, zh-HK, en-*, 以及其他所有语言)
+    this.listeners.forEach((listener) => listener());
   }
   
   // 设置语言
@@ -4304,9 +4346,11 @@ class I18nService {
     const translation = translations[this.currentLanguage][key];
     if (!translation) {
       console.warn(`Translation missing for key: ${key} in language: ${this.currentLanguage}`);
-      // 尝试从另一种语言获取
-      const fallbackTranslation = translations[this.currentLanguage === 'zh' ? 'en' : 'zh'][key];
-      return fallbackTranslation || key;
+      if (this.currentLanguage === 'en') {
+        // Never fall back to Chinese in the English UI.
+        return key;
+      }
+      return translations.en[key] || key;
     }
     return translation;
   }

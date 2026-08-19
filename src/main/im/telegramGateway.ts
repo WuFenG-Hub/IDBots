@@ -18,6 +18,7 @@ import {
   IMMediaAttachment,
   DEFAULT_TELEGRAM_STATUS,
 } from './types';
+import { tApp } from '../libs/appLanguage';
 import { extractMediaFromMessage, cleanupOldMediaFiles } from './telegramMedia';
 import { parseMediaMarkers } from './dingtalkMediaParser';
 import { parseTelegramProxy } from './telegramProbe';
@@ -814,7 +815,7 @@ export class TelegramGateway extends EventEmitter {
         await this.onMessageCallback(imMessage, replyFn);
       } catch (error: any) {
         console.error(`[Telegram Gateway] Error in message callback: ${error.message}`);
-        await replyFn(`❌ 处理消息时出错: ${error.message}`);
+        await replyFn(tApp(`❌ 处理消息时出错: ${error.message}`, `❌ Error while processing the message: ${error.message}`));
       }
     }
   }

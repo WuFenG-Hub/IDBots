@@ -536,11 +536,16 @@ const MetafileMediaPreview: React.FC<{ item: ParsedMetafile }> = ({ item }) => {
     }
   };
 
-  const loadingLabel = item.kind === 'video' ? '正在加载视频预览...' : '正在加载音频预览...';
+  const loadingLabel = item.kind === 'video'
+    ? i18nService.t('a2aMediaLoadingVideo')
+    : i18nService.t('a2aMediaLoadingAudio');
   const errorLabel = item.kind === 'video'
-    ? '视频预览加载失败，可先下载文件观看。'
-    : '音频预览加载失败，可先下载文件收听。';
+    ? i18nService.t('a2aMediaLoadFailedVideo')
+    : i18nService.t('a2aMediaLoadFailedAudio');
   const progressLabel = formatBytes(loadedBytes);
+  const loadedLabel = progressLabel
+    ? i18nService.t('a2aMediaLoadedBytes').replace('{size}', progressLabel)
+    : '';
 
   if (item.kind === 'audio') {
     return (
@@ -555,7 +560,7 @@ const MetafileMediaPreview: React.FC<{ item: ParsedMetafile }> = ({ item }) => {
         </audio>
         {status === 'loading' && (
           <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-            {loadingLabel}{progressLabel ? ` 已加载 ${progressLabel}` : ''}
+            {loadingLabel}{loadedLabel ? ` ${loadedLabel}` : ''}
           </div>
         )}
         {status === 'error' && (
@@ -580,7 +585,7 @@ const MetafileMediaPreview: React.FC<{ item: ParsedMetafile }> = ({ item }) => {
       </video>
       {status === 'loading' && (
         <div className="mt-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          {loadingLabel}{progressLabel ? ` 已加载 ${progressLabel}` : ''}
+          {loadingLabel}{loadedLabel ? ` ${loadedLabel}` : ''}
         </div>
       )}
       {status === 'error' && (
@@ -640,7 +645,7 @@ const MetafilePreviewCard: React.FC<{ item: ParsedMetafile }> = ({ item }) => {
           onClick={() => { void triggerMetafileDownload(item); }}
           className="inline-flex items-center rounded-md border dark:border-claude-darkBorder border-claude-border px-3 py-1.5 text-xs dark:text-claude-darkText text-claude-text hover:opacity-80 transition-opacity"
         >
-          下载文件
+          {i18nService.t('a2aDownloadFile')}
         </button>
       </div>
     </div>
@@ -735,7 +740,7 @@ const A2AMessageItem: React.FC<A2AMessageItemProps> = ({
     return (
       <div className="px-4 py-1 flex justify-center">
         <div className="max-w-[76%] px-3 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-words dark:text-claude-darkTextSecondary text-claude-textSecondary">
-          <div className="mb-0.5 font-medium">内部状态</div>
+          <div className="mb-0.5 font-medium">{i18nService.t('a2aInternalStatus')}</div>
           <div>{internalContent}</div>
           {renderResendAction()}
           <div className="mt-0.5 text-[10px] opacity-70">{formatTime(message.timestamp)}</div>
