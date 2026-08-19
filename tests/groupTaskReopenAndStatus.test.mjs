@@ -349,6 +349,53 @@ test('getGroupTaskMemberStatus reads running/failed canonical attempt state', as
   }
 });
 
+test('getGroupTask full view derives workStatus from [WORKING] tags (not summary-only)', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask();
+    const recentSec = Math.floor(Date.now() / 1000) - 60;
+    insertGroupMessage(h.db, {
+      pinId: 'work-full-i0', senderMetaId: 'metaid-coder', senderGlobalMetaId: 'gmid-coder',
+      senderName: 'Coder Bot', content: '[WORKING] 已接单，正在做X，预计5分钟', chainTimestamp: recentSec,
+    });
+    const detail = await getGroupTask(task.id);
+    const coder = detail.members.find((m) => m.metabotId === 2);
+    assert.equal(coder.workStatus, 'working', 'IPC full view still sees a fresh [WORKING] tag');
+    assert.equal(coder.lastWorkingAt, recentSec * 1000, 'lastWorkingAt exposed in epoch ms on the detail payload');
+  } finally {
+    h.cleanup();
+  }
+});
+
+test('working member with a later failed attempt does not read error on the detail rail', async () => {
+  const h = await createHarness();
+  try {
+    const task = h.createTask();
+    h.groupTaskStore.setMemberStatus(task.id, 2, 'working', 'gmid-coder');
+    const ackSec = Math.floor(Date.now() / 1000) - 90;
+    insertGroupMessage(h.db, {
+      pinId: 'lucy-ack-i0', senderMetaId: 'metaid-coder', senderGlobalMetaId: 'gmid-coder',
+      senderName: 'Coder Bot', content: '[WORKING] 收到，随时待命', chainTimestamp: ackSec,
+    });
+    const context = h.bridge.beginWorkerAttempt({
+      groupTaskId: task.id, workerMetabotId: 2,
+      objective: 'write copy', sourceMessageKey: 'msg-lucy',
+    });
+    h.bridge.markWorkerAttemptRunning(context.attempt.id, 'session-lucy');
+    h.bridge.failWorkerAttempt(context.attempt.id, 'OpenAI API error (401): Invalid API key');
+    const detail = await getGroupTask(task.id);
+    const coder = detail.members.find((m) => m.metabotId === 2);
+    assert.equal(coder.status, 'working', 'state-machine status stays working');
+    assert.equal(
+      coder.workStatus,
+      'working',
+      'failed attempt after a [WORKING] ACK must not paint the rail as error',
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // P2-8: driver readout
 // ---------------------------------------------------------------------------

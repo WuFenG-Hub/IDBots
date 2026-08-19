@@ -1000,6 +1000,42 @@ test('P1-4: computeGroupTaskMemberWorkStatus error-degrade priority', () => {
   // Regression: no failure, speech => idle; nothing at all => unknown.
   assert.equal(status({ lastSpeakAt: NOW - 30 * MIN }), 'idle');
   assert.equal(status({}), 'unknown');
+
+  // Production call site passes lastSpeakAt in epoch seconds (chain_timestamp)
+  // and attemptAtMs in milliseconds. Seconds must still count as a newer
+  // success record — otherwise the error residual never degrades in the UI.
+  assert.equal(
+    status({
+      attemptStatus: 'failed',
+      attemptAtMs: NOW - 10 * MIN,
+      lastSpeakAt: Math.floor((NOW - 8 * MIN) / 1000),
+    }),
+    'idle',
+    'epoch-second lastSpeakAt still degrades a failed attempt',
+  );
+
+  // A state-machine `working` member with a failed attempt is mid-retry, not
+  // crashed — the panel must not stack "出错" on top of "working".
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, memberStatus: 'working' }),
+    'working',
+    'working member with a failed attempt reads working, not error',
+  );
+  assert.equal(
+    status({
+      attemptStatus: 'failed',
+      attemptAtMs: NOW - 10 * MIN,
+      memberStatus: 'working',
+      lastWorkingAt: NOW - 30 * MIN,
+    }),
+    'timeout',
+    'working member + failed attempt + stale [WORKING] reads timeout, not error',
+  );
+  assert.equal(
+    status({ attemptStatus: 'failed', attemptAtMs: NOW - 10 * MIN, memberStatus: 'assigned' }),
+    'error',
+    'assigned member (not yet working) still reads error on a failed attempt',
+  );
 });
 
 // --- Local-only UI state: display name, pin, archive/unarchive ---
