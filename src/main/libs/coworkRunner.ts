@@ -290,6 +290,38 @@ const READ_ONLY_TOOL_NAMES = new Set([
 ]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
 const ENABLE_SDK_WEB_TOOLS_ENV = 'IDBOTS_ENABLE_SDK_WEB_TOOLS';
+/**
+ * Built-in CLI tools exposed to cowork sessions (SDK `tools` whitelist). The
+ * claude_code preset registers every CLI built-in (~27 schemas ≈ 21k tokens,
+ * re-sent on EVERY request), including CLI-autonomy features a cowork session
+ * never uses — Workflow alone is ~19k chars, and Cron*, Monitor,
+ * ScheduleWakeup, SendMessage, PushNotification, ReportFindings, DesignSync,
+ * EnterWorktree, NotebookEdit have no host counterpart (scheduled tasks are
+ * host-scheduled, see scheduledTaskStore). Keep only what the cowork UI and
+ * permission flow actually surface: core file/shell tools, subagent + task
+ * tracking (the todo panel runs on TaskCreate/TaskUpdate via
+ * todoFeatureEnabled), and Grep/Glob (native CLI builds only provide them
+ * when explicitly listed, per SDK docs).
+ * Skill stays out: the Skill tool is policy-denied (denyUnsupportedSkillTool)
+ * and `skills: []` hides the user's ~/.claude plugin listing from context.
+ * WebSearch/WebFetch are appended only when IDBOTS_ENABLE_SDK_WEB_TOOLS opts
+ * in — they are policy-denied otherwise (shouldBlockBuiltinWebTool).
+ */
+const COWORK_BUILTIN_TOOLS: readonly string[] = [
+  'Agent',
+  'Bash',
+  'Edit',
+  'Glob',
+  'Grep',
+  'Read',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'Write',
+];
 const SAFETY_APPROVAL_ALLOW_OPTION = '允许本次操作';
 const SAFETY_APPROVAL_DENY_OPTION = '拒绝本次操作';
 const DELETE_COMMAND_RE = /\b(rm|rmdir|unlink|del|erase|remove-item)\b/i;
@@ -1460,6 +1492,12 @@ export interface CoworkRunnerOptions {
    */
   requestIMSessionReset?: (sessionId: string) => boolean;
   /**
+   * When set, reports whether the given session is IM-originated. Gates
+   * registration of the `start_new_im_session` tool so non-IM sessions never
+   * see a tool that can only no-op for them.
+   */
+  isIMSession?: (sessionId: string) => boolean;
+  /**
    * When set, returns the Bot Browser context XML block (active tab, open tabs)
    * to inject into the system prompt. Implementations should return null for
    * non-browser sessions and degrade gracefully (never throw) when the browser
@@ -1576,6 +1614,7 @@ export class CoworkRunner extends EventEmitter {
   private openMetaApp?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private resolveMetaAppUrl?: (input: { appId: string; targetPath?: string }) => Promise<{ success: boolean; url?: string; error?: string; name?: string }>;
   private requestIMSessionReset?: (sessionId: string) => boolean;
+  private isIMSessionCallback?: (sessionId: string) => boolean;
   private getBrowserContextPrompt?: (sessionId: string) => Promise<string | null>;
   private controlBotBrowser?: BotBrowserControl;
   private experienceStore?: CoworkExperienceStore;
@@ -1677,6 +1716,7 @@ export class CoworkRunner extends EventEmitter {
     this.openMetaApp = options?.openMetaApp;
     this.resolveMetaAppUrl = options?.resolveMetaAppUrl;
     this.requestIMSessionReset = options?.requestIMSessionReset;
+    this.isIMSessionCallback = options?.isIMSession;
     this.getBrowserContextPrompt = options?.getBrowserContextPrompt;
     this.controlBotBrowser = options?.controlBotBrowser;
     this.experienceStore = options?.experienceStore;
@@ -4287,14 +4327,14 @@ export class CoworkRunner extends EventEmitter {
           '- Confirmation channel: plain text only (no modal).',
           '- Before any delete operation, ask for explicit text confirmation first.',
           '- Wait for explicit confirmation text before proceeding.',
-          '- Do not use AskUserQuestion in this session.',
+          '- Do not use the ask-user question tool in this session.',
         ]
       : [
-          '- Confirmation channel: AskUserQuestion modal.',
-          '- For every delete operation, you must call AskUserQuestion before executing any tool action.',
-          '- A direct user instruction is not enough for safety confirmation; AskUserQuestion approval is still required.',
+          '- Confirmation channel: the ask-user question tool (shown as a modal).',
+          '- For every delete operation, you must ask via the ask-user question tool before executing any tool action.',
+          '- A direct user instruction is not enough for safety confirmation; approval through the question tool is still required.',
           '- Never use normal assistant text as the confirmation channel in modal mode.',
-          '- Continue only when AskUserQuestion returns explicit allow.',
+          '- Continue only when the question tool returns explicit allow.',
           '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
         ];
 
@@ -4321,7 +4361,7 @@ export class CoworkRunner extends EventEmitter {
     return DEFAULT_SYSTEM_PROMPT_PROFILE;
   }
 
-  private buildMemoryStrategyPrompt(memoryEnabled: boolean, includeMemoryStrategy: boolean): string | null {
+  private buildMemoryStrategyPrompt(memoryEnabled: boolean, includeMemoryStrategy: boolean, implicitUpdateEnabled = false): string | null {
     if (!includeMemoryStrategy) {
       return null;
     }
@@ -4330,7 +4370,7 @@ export class CoworkRunner extends EventEmitter {
       '## Memory Strategy',
       '- Historical retrieval is tool-first: when the user references previous chats, earlier outputs, prior decisions, or says "还记得/之前/上次/刚才", call `conversation_search` or `recent_chats` before answering.',
       '- When the conversation includes an `IDBots://{sessionId}` link, extract the session id and use `idbots_session_read_all` or `idbots_session_read_latest` to inspect that local Cowork/A2A session before relying on it.',
-      '- Use `idbots_session_insert_user_message` only to send an instruction into another Cowork session. The source session id is derived automatically; A2A sessions are read-only targets.',
+      '- Use `idbots_session_insert_user_message` only to send an instruction into another Cowork session; the source session id is derived automatically.',
       '- Do not guess historical facts from partial context. If retrieval returns no evidence, explicitly say not found.',
       '- Do not call history tools for every request; only use them when historical context is required.',
       '- If retrieved history conflicts with the latest explicit user instruction, follow the latest explicit user instruction.',
@@ -4339,7 +4379,13 @@ export class CoworkRunner extends EventEmitter {
       memoryRecallPrompt.push(
         '- Memories may be injected as scoped blocks such as <ownerMemories>, <contactMemories>, <conversationMemories>, or <ownerOperationalPreferences>.',
         '- Treat each injected memory block as stable context only for that scope; do not assume omitted scopes are available.',
-        '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
+        // Write semantics follow the memoryImplicitUpdateEnabled switch:
+        // off = explicit user requests only; on = proactive durable-fact
+        // capture is allowed. The memory_user_edits tool description mirrors
+        // this rule — keep the two wordings consistent.
+        implicitUpdateEnabled
+          ? '- Use `memory_user_edits` when the user asks to remember, update, list, or delete memory facts, or when you discover a durable fact worth persisting.'
+          : '- Use `memory_user_edits` only when the user explicitly asks to remember, update, list, or delete memory facts.',
         '- Use `experience_recall` to look up your own past days: a bare call returns the last 30 days of your daily summaries, `query` searches your full history, and `date_from`/`date_to` (YYYY-MM-DD) pin a range.',
         '- When a task resembles something you have done before, first search it with `experience_recall` (keyword), then read the referenced IDBots:// session with `idbots_session_read_all`: reuse the approaches that worked last time and avoid the pitfalls you already hit.',
         '- When <recent_daily_summaries> is present, those summaries are your own nightly dreams (做梦): questions like "did you dream / what did you dream about / do you remember that day" should be answered from them first.',
@@ -4585,7 +4631,8 @@ export class CoworkRunner extends EventEmitter {
     confirmationMode: 'modal' | 'text',
     memoryEnabled: boolean,
     personaBlock?: string,
-    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE
+    profile: SystemPromptProfile = DEFAULT_SYSTEM_PROMPT_PROFILE,
+    implicitMemoryUpdateEnabled = false
   ): string {
     return composePromptSections([
       { name: 'persona:metabot', order: PROMPT_SECTION_ORDER.PERSONA, text: personaBlock },
@@ -4601,7 +4648,7 @@ export class CoworkRunner extends EventEmitter {
       {
         name: 'idbots:memory-strategy',
         order: PROMPT_SECTION_ORDER.MEMORY_STRATEGY,
-        text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy),
+        text: this.buildMemoryStrategyPrompt(memoryEnabled, profile.includeMemoryStrategy, implicitMemoryUpdateEnabled),
       },
       { name: 'idbots:base', order: PROMPT_SECTION_ORDER.BASE, text: baseSystemPrompt?.trim() },
     ]);
@@ -5230,7 +5277,8 @@ export class CoworkRunner extends EventEmitter {
       activeSession.confirmationMode,
       sessionMemoryEnabled,
       personaWithExperience,
-      systemPromptProfile
+      systemPromptProfile,
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -5348,7 +5396,8 @@ export class CoworkRunner extends EventEmitter {
       activeSession.confirmationMode,
       sessionMemoryEnabled,
       personaWithExperience,
-      systemPromptProfile
+      systemPromptProfile,
+      this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
     );
     this.trackSystemPromptHash(activeSession, sessionId, effectiveSystemPrompt);
 
@@ -6513,7 +6562,7 @@ export class CoworkRunner extends EventEmitter {
     '',
     '- Create a file with `write`; inspect it first with `read`; modify it with `edit`.',
     '- Track multi-step work with `todo_write` as you go.',
-    '- Use the search tools for information you do not have; never invent results.',
+    '- Use whatever search capability is available (a search tool when present, otherwise shell tools like curl/grep) for information you do not have; never invent results.',
     '- A file or change only exists after the corresponding tool returned success. Never claim work you did not perform.',
     '- After acting, report the outcome briefly. Pure questions may be answered directly.',
   ].join('\n');
@@ -6951,10 +7000,16 @@ export class CoworkRunner extends EventEmitter {
       );
     }
     if (sessionMemoryEnabled) {
+      // The write-invitation clause follows memoryImplicitUpdateEnabled (off =
+      // explicit user requests only; on = proactive durable-fact capture). The
+      // Memory Strategy prompt rule mirrors this — keep the two consistent.
+      const memoryWritesInvitation = this.getSessionMemoryPolicy(sessionId).memoryImplicitUpdateEnabled
+        ? 'Use when the user states a durable fact ("I always want X", "记住我做的是 Y") or you discover one worth persisting.'
+        : 'Use only when the user explicitly asks to remember, update, list, or delete memory facts.';
       memoryTools.push(
         tool(
           'memory_user_edits',
-          'Manage the current user\'s long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. Use when the user states a durable fact ("I always want X", "记住我做的是 Y") or you discover one worth persisting. When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.',
+          `Manage the current user's long-term memories — durable facts about them (role, preferences, ongoing projects) that persist across sessions. Writes are high-signal: record only non-obvious, durable facts, never ephemeral chat state. action=list (optionally filter by query/status/limit) returns stored memories; action=add stores a new memory (requires text); action=update changes an existing memory by id (requires text); action=delete removes a memory by id. ${memoryWritesInvitation} When NOT to use: do not record ephemeral/task state ("the user just asked about Z"); list first to avoid duplicates; do not write every turn — memories must outlive this conversation. When unsure whether a fact is durable, ASK rather than guess. Returns the affected memory object(s) or a confirmation; writes are persistent state.`,
           {
             action: z.enum(['list', 'add', 'update', 'delete']),
             id: z.string().optional(),
@@ -7121,7 +7176,11 @@ export class CoworkRunner extends EventEmitter {
         )
       );
     }
-    if (this.requestIMSessionReset) {
+    // Only IM-originated sessions get the session-rotation tool; elsewhere it
+    // can only no-op ("Has no effect when called from a non-IM session"), so
+    // registering it there is pure schema cost. When the host provides no
+    // isIMSession probe (tests), keep the legacy always-register behavior.
+    if (this.requestIMSessionReset && (!this.isIMSessionCallback || this.isIMSessionCallback(sessionId))) {
     memoryTools.push(
       tool(
         'start_new_im_session',
@@ -7764,6 +7823,17 @@ export class CoworkRunner extends EventEmitter {
       // main message stream; full transcripts are read post-hoc via
       // getSubagentMessages.
       agentProgressSummaries: true,
+      // Restrict the built-in tool set to what cowork sessions actually use
+      // (see COWORK_BUILTIN_TOOLS): the preset default registers ~27 schemas
+      // (~21k tokens) on every request, most of it CLI-autonomy features.
+      tools: isSdkBuiltinWebToolsEnabled()
+        ? [...COWORK_BUILTIN_TOOLS, 'WebFetch', 'WebSearch']
+        : [...COWORK_BUILTIN_TOOLS],
+      // Hide the user's ~/.claude plugin skills from the model's listing: the
+      // Skill tool is policy-denied in cowork sessions, so the injected
+      // "skills available for the Skill tool" block (~6k chars with plugins
+      // installed) is dead weight. IDBots skills route via <available_skills>.
+      skills: [],
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -8029,6 +8099,14 @@ export class CoworkRunner extends EventEmitter {
     const usedResumeForThisRun = Boolean(activeSession.claudeSessionId);
     if (usedResumeForThisRun) {
       options.resume = activeSession.claudeSessionId;
+    } else {
+      // Hand the CLI the host-generated session title so it skips its own
+      // AI title-generation request for new sessions (one less LLM round-trip
+      // per cowork session; the renderer already generates the UI title).
+      const sessionTitle = this.store.getSession(sessionId)?.title?.trim();
+      if (sessionTitle) {
+        options.title = sessionTitle;
+      }
     }
     activeSession.contextOverflowRetryAllowed = !isRetry && usedResumeForThisRun;
     let contextOverflowExceptionRetryAllowed = !isRetry && usedResumeForThisRun;
@@ -8679,6 +8757,34 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Prepend the volatile per-turn head (local time, memory projections,
+   * browser tabs, remote services) to a sandbox-bound prompt. The guest runs
+   * the SDK inside the VM and cannot see host-side state, so without this the
+   * sandbox path silently skipped the context both local and DSH turns get.
+   * The guest's own memoryEnabled flag only gates its tool registration, so
+   * there is no double injection. Per-turn dedup applies as on the local path.
+   */
+  private async buildSandboxPromptWithVolatileHead(
+    activeSession: ActiveSession,
+    prompt: string
+  ): Promise<string> {
+    const { sessionId } = activeSession;
+    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId);
+    const volatileBlocks = await this.buildVolatileContextPrompt(
+      sessionId,
+      prompt,
+      this.isSessionMemoryEnabled(sessionId, activeSession),
+      systemPromptProfile,
+      activeSession.disableRemoteServicesPrompt
+    );
+    const volatileHead = [localTimePrompt, volatileBlocks]
+      .filter((section) => section?.trim())
+      .join('\n\n');
+    return volatileHead ? `${volatileHead}\n\n${prompt}` : prompt;
+  }
+
   private async runClaudeCodeInSandbox(
     activeSession: ActiveSession,
     prompt: string,
@@ -8747,7 +8853,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     const input: Record<string, unknown> = {
-      prompt,
+      prompt: await this.buildSandboxPromptWithVolatileHead(activeSession, prompt),
       cwd: cwdMapping.guestPath,
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,
@@ -9298,7 +9404,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     const input: Record<string, unknown> = {
-      prompt,
+      prompt: await this.buildSandboxPromptWithVolatileHead(activeSession, prompt),
       cwd: cwdMapping.guestPath,
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,

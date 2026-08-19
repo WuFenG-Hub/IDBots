@@ -425,6 +425,11 @@ export class IMCoworkHandler extends EventEmitter {
     return true;
   }
 
+  /** Whether the cowork session is IM-managed (drives tool gating in CoworkRunner). */
+  isIMSession(coworkSessionId: string): boolean {
+    return this.imSessionIds.has(coworkSessionId);
+  }
+
   /**
    * Delete the IM ↔ cowork conversation mapping for a session.
    *
