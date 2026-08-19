@@ -7,7 +7,7 @@ import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { MetabotStore } from '../metabotStore';
 import type { OrderSource } from './orderPayment';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
-import { normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { generateSessionTitle } from '../libs/coworkUtil';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
@@ -1236,10 +1236,17 @@ export class PrivateChatOrderCowork extends EventEmitter {
       `The service result you delivered: "${serviceReply.slice(0, 200)}"`,
     ].filter(Boolean).join('\n');
 
-    const llmId = metabot && typeof metabot.llm_id === 'string' ? metabot.llm_id.trim() || undefined : undefined;
-    const fallbackLlmId = metabot ? normalizeMetabotLlmId(metabot.fallback_llm_id) : null;
+    const brain = metabot ? metabotBrainOptions(metabot) : null;
+    const llmId = brain?.llmId ?? undefined;
+    const fallbackLlmId = brain?.fallbackLlmId ?? null;
 
-    const text = await performChatCompletionForOrchestrator(systemPrompt, 'Write the rating invitation now.', llmId, { fallbackLlmId });
+    const text = await performChatCompletionForOrchestrator(systemPrompt, 'Write the rating invitation now.', llmId, {
+      llmProvider: brain?.llmProvider ?? undefined,
+      fallbackLlmId,
+      fallbackLlmProvider: brain?.fallbackLlmProvider ?? undefined,
+      effort: brain?.effort ?? undefined,
+      fallbackEffort: brain?.fallbackEffort ?? undefined,
+    });
     return `[NeedsRating] ${text.trim()}`;
   }
 

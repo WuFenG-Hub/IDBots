@@ -16,6 +16,7 @@ import {
   type OpenAITool,
   type ToolCallResult,
 } from './cognitiveChatCompletion';
+import { toLlmEffortLevel } from '../libs/llmEffort';
 import { getMetaidRpcBase, getMetaidRpcToken } from './metaidRpcEndpoint';
 import { getEnhancedEnv } from '../libs/coworkUtil';
 import { buildMetabotPersonaPrompt } from '../libs/metabotPersonaPrompt';
@@ -71,8 +72,14 @@ export interface MetabotInfo {
   role: string;
   soul: string;
   llm_id: string | null;
-  /** Optional fallback LLM provider key; retried once when the primary LLM fails. */
+  /** Provider key the brain model was picked from. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max). */
+  llm_effort?: string | null;
+  /** Optional fallback brain; retried once when the primary LLM fails. */
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   globalmetaid: string | null;
   metaid?: string;
   /** Human owner GlobalMetaID (metabots.boss_global_metaid); privileged for Boss skill path when sender matches. */
@@ -94,7 +101,14 @@ export type PerformChatCompletionFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }
+  options?: {
+    llmProvider?: string | null;
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    effort?: 'off' | 'low' | 'high' | 'max' | null;
+    fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+    thinking?: 'enabled' | 'disabled';
+  }
 ) => Promise<string>;
 /** (metabotId, groupId, nickName, content) => void; signs and broadcasts via create-pin */
 export type BroadcastGroupChatFn = (
@@ -709,7 +723,11 @@ async function runReplyPipeline(
         try {
           result = await chatWithTools(chatMessages, {
             llmId: metabot.llm_id ?? undefined,
+            llmProvider: metabot.llm_provider ?? undefined,
             fallbackLlmId: metabot.fallback_llm_id ?? undefined,
+            fallbackLlmProvider: metabot.fallback_llm_provider ?? undefined,
+            effort: toLlmEffortLevel(metabot.llm_effort) ?? undefined,
+            fallbackEffort: toLlmEffortLevel(metabot.fallback_llm_effort) ?? undefined,
             tools,
             // Default to thinking-on for DeepSeek reasoning turns; non-DeepSeek
             // models ignore this (resolveThinkingForModel drops it).
@@ -770,7 +788,11 @@ async function runReplyPipeline(
   } else {
     try {
       replyText = await performChatCompletion(directSystemPrompt, userMessage, metabot.llm_id ?? undefined, {
+        llmProvider: metabot.llm_provider ?? undefined,
         fallbackLlmId: metabot.fallback_llm_id ?? undefined,
+        fallbackLlmProvider: metabot.fallback_llm_provider ?? undefined,
+        effort: toLlmEffortLevel(metabot.llm_effort) ?? undefined,
+        fallbackEffort: toLlmEffortLevel(metabot.fallback_llm_effort) ?? undefined,
         thinking: 'enabled',
       });
     } catch (err) {

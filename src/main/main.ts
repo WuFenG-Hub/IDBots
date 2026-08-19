@@ -207,7 +207,7 @@ import {
   performChatCompletionForOrchestrator,
   type ChatMessage,
 } from './services/cognitiveChatCompletion';
-import { normalizeMetabotLlmId } from './services/llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
@@ -7861,12 +7861,17 @@ if (!gotTheLock) {
             llmId: metabot.llm_id ?? undefined,
             performChat: async (systemPrompt, userMessage, llmId, options) => {
               // throwOnEmptyContent makes an empty completion throw inside the
-              // fallback-wrapped attempt, so the configured fallback LLM gets
+              // fallback-wrapped attempt, so the configured fallback brain gets
               // a chance (runWithLlmFallback only retries on throw); when the
               // fallback is also empty the error reaches the outer retry loop.
+              const brain = metabotBrainOptions(metabot);
               return performChatCompletionForOrchestrator(systemPrompt, userMessage, llmId, {
                 ...options,
-                fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+                llmProvider: brain.llmProvider ?? undefined,
+                fallbackLlmId: brain.fallbackLlmId,
+                fallbackLlmProvider: brain.fallbackLlmProvider ?? undefined,
+                effort: brain.effort ?? undefined,
+                fallbackEffort: brain.fallbackEffort ?? undefined,
                 throwOnEmptyContent: true,
               });
             },

@@ -7,6 +7,7 @@
  */
 
 import { resolveApiConfigForModel } from '../libs/claudeSettings';
+import { effortForAnthropicWire, effortForOpenAiWire, type LlmEffortLevel } from '../libs/llmEffort';
 import { runWithLlmFallback } from './llmFallback';
 
 /** OpenAI-style tool definition for function calling. */
@@ -145,8 +146,19 @@ function extractAnthropicThinkingText(block: { type?: string; text?: string; thi
 /** Options for one chat completion request (with optional fallback LLM retry). */
 export interface ChatCompletionOptions {
   llmId?: string | null;
-  /** Optional fallback provider key: retried once when the primary resolution or call fails. */
+  /** Provider key the primary brain model was picked from (id-collision disambiguation). */
+  llmProvider?: string | null;
+  /** Optional fallback brain: retried once when the primary resolution or call fails. */
   fallbackLlmId?: string | null;
+  fallbackLlmProvider?: string | null;
+  /**
+   * Reasoning effort for the primary brain (off/low/high/max). Overrides the
+   * binary thinking toggle: off disables thinking, any other step enables it
+   * with the wire-appropriate strength.
+   */
+  effort?: LlmEffortLevel | null;
+  /** Reasoning effort riding the fallback brain. */
+  fallbackEffort?: LlmEffortLevel | null;
   tools?: OpenAITool[];
   signal?: AbortSignal;
   maxTokens?: number;
@@ -183,7 +195,12 @@ async function chatCompletionSingleAttempt(
   messages: ChatMessage[],
   options: ChatCompletionOptions
 ): Promise<ChatCompletionResult> {
-  const { config, error } = resolveApiConfigForModel(options.llmId ?? undefined);
+  const { config, error } = resolveApiConfigForModel(
+    options.llmId ?? undefined,
+    'local',
+    undefined,
+    options.llmProvider ?? undefined,
+  );
   if (error || !config) {
     throw new Error(error ?? 'LLM config not available');
   }
@@ -195,7 +212,14 @@ async function chatCompletionSingleAttempt(
 
   const model = config.model || 'gpt-4o';
   const apiType = config.apiType ?? 'openai';
-  const thinking = resolveThinkingForModel(model, options.thinking);
+  // An explicit effort overrides the binary thinking toggle: off disables
+  // thinking entirely, any other step enables it (the wire mappers below
+  // translate the ladder into budget/effort parameters).
+  const thinkingToggle: 'enabled' | 'disabled' | undefined = options.effort
+    ? (options.effort === 'off' ? 'disabled' : 'enabled')
+    : options.thinking;
+  const thinking = resolveThinkingForModel(model, thinkingToggle);
+  const effort = options.effort ?? null;
   const hasTools = Array.isArray(options.tools) && options.tools.length > 0;
   // DeepSeek flash models support the Responses API (with built-in web_search).
   // Route them there when we have the real upstream base URL; fall back to the
@@ -220,7 +244,8 @@ async function chatCompletionSingleAttempt(
         options.signal,
         options.maxTokens,
         options.temperature,
-        thinking
+        thinking,
+        effort
       );
     } else if (apiType === 'anthropic') {
       result = await callAnthropicStyleWithTools(
@@ -232,7 +257,8 @@ async function chatCompletionSingleAttempt(
         options.signal,
         options.maxTokens,
         options.temperature,
-        thinking
+        thinking,
+        effort
       );
     } else {
       result = await callOpenAIStyleWithTools(
@@ -244,7 +270,8 @@ async function chatCompletionSingleAttempt(
         options.signal,
         options.maxTokens,
         options.temperature,
-        thinking
+        thinking,
+        effort
       );
     }
     if (options.throwOnEmptyContent && !result.content?.trim() && !result.tool_calls?.length) {
@@ -273,6 +300,10 @@ export async function performChatCompletionForOrchestrator(
     signal?: AbortSignal;
     maxTokens?: number;
     fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    effort?: LlmEffortLevel | null;
+    fallbackEffort?: LlmEffortLevel | null;
+    llmProvider?: string | null;
     throwOnEmptyContent?: boolean;
     thinking?: 'enabled' | 'disabled';
   } = {}
@@ -283,7 +314,11 @@ export async function performChatCompletionForOrchestrator(
   ];
   const result = await chatCompletionWithTools(messages, {
     llmId,
+    llmProvider: options.llmProvider,
     fallbackLlmId: options.fallbackLlmId,
+    fallbackLlmProvider: options.fallbackLlmProvider,
+    effort: options.effort,
+    fallbackEffort: options.fallbackEffort,
     signal: options.signal,
     maxTokens: options.maxTokens,
     throwOnEmptyContent: options.throwOnEmptyContent,
@@ -327,7 +362,8 @@ async function callAnthropicStyleWithTools(
   signal?: AbortSignal,
   maxTokens?: number,
   temperature?: number,
-  thinking?: 'enabled' | 'disabled'
+  thinking?: 'enabled' | 'disabled',
+  effort?: LlmEffortLevel | null
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/messages`;
   const systemParts: string[] = [];
@@ -379,7 +415,12 @@ async function callAnthropicStyleWithTools(
     }));
   }
   if (temperature !== undefined) body.temperature = temperature;
-  if (thinking !== undefined) {
+  if (effort) {
+    // Model-level brain effort: the ladder maps onto thinking + budget_tokens
+    // (off disables; low/high/max enable with tiered budgets).
+    const mapped = effortForAnthropicWire(effort);
+    if (mapped.thinking) body.thinking = mapped.thinking;
+  } else if (thinking !== undefined) {
     // DeepSeek Anthropic 格式支持 thinking toggle（默认 enabled，effort=high）。
     // 轻量 llm.complete 调用（如下棋走子）显式 disabled 可避免长思考与超时。
     body.thinking = { type: thinking };
@@ -475,7 +516,8 @@ async function callOpenAIStyleWithTools(
   signal?: AbortSignal,
   maxTokens?: number,
   temperature?: number,
-  thinking?: 'enabled' | 'disabled'
+  thinking?: 'enabled' | 'disabled',
+  effort?: LlmEffortLevel | null
 ): Promise<ChatCompletionResult> {
   const url = `${baseURL.replace(/\/+$/, '')}/v1/chat/completions`;
   const body: Record<string, unknown> = {
@@ -487,7 +529,13 @@ async function callOpenAIStyleWithTools(
     body.tools = tools;
   }
   if (temperature !== undefined) body.temperature = temperature;
-  if (thinking !== undefined) {
+  if (effort) {
+    // Model-level brain effort: reasoning_effort on the OpenAI wire (max caps
+    // at high) plus the DeepSeek thinking toggle for relays honoring it.
+    const reasoningEffort = effortForOpenAiWire(effort);
+    if (reasoningEffort) body.reasoning_effort = reasoningEffort;
+    body.thinking = { type: effort === 'off' ? 'disabled' : 'enabled' };
+  } else if (thinking !== undefined) {
     // DeepSeek OpenAI 兼容格式同样支持 thinking toggle。
     body.thinking = { type: thinking };
   }
@@ -577,7 +625,8 @@ async function callDeepSeekResponsesStyle(
   signal?: AbortSignal,
   maxTokens?: number,
   temperature?: number,
-  thinking?: 'enabled' | 'disabled'
+  thinking?: 'enabled' | 'disabled',
+  effort?: LlmEffortLevel | null
 ): Promise<ChatCompletionResult> {
   const url = buildDeepSeekResponsesURL(baseURL);
   const instructions: string[] = [];
@@ -641,7 +690,11 @@ async function callDeepSeekResponsesStyle(
   }
   // Reasoning effort: 'disabled' must be explicit ({ effort: 'none' }) — an
   // omitted field means thinking stays ON. See resolveDeepSeekResponsesReasoning.
-  body.reasoning = resolveDeepSeekResponsesReasoning(thinking);
+  // Model-level brain effort rides the Responses reasoning ladder directly
+  // (off → none); without an explicit effort the thinking toggle maps as before.
+  body.reasoning = effort
+    ? { effort: effort === 'off' ? 'none' : effort }
+    : resolveDeepSeekResponsesReasoning(thinking);
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (apiKey.trim()) {

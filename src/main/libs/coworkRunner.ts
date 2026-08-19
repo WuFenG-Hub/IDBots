@@ -9,7 +9,7 @@ import { StringDecoder } from 'string_decoder';
 import { v4 as uuidv4 } from 'uuid';
 import type { AgentDefinition, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { CoworkStore, CoworkMessage, CoworkExecutionMode, CoworkSessionStatus, CoworkPermissionMode } from '../coworkStore';
-import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
+import { getClaudeCodePath, getCurrentApiConfig, resolveApiConfigForModel, resolveCurrentModelLimits, resolveModelOptions, getPersistedAutoApproveTools, getPersistedCoworkEffortLevel, isDshKernelEnabled, resolveDshProviderRoute } from './claudeSettings';
 import { DshTurnHub, dshSessionRootFor } from './coworkDshTurn';
 import { DshStreamUiGate } from './dshStreamUiGate';
 import type { DshHostToolImagePayload, DshUsageSnapshot } from './dshKernel/types';
@@ -17,6 +17,7 @@ import { foldDshUsageProjection, dshPromptSideTokens, dshContextUsageFromPressur
 import type { DshUsageStatsRow } from './dshUsageProjection';
 import { dshSessionIdOf, makeDshSessionHandle, resolveKernelChoice } from './coworkKernelRouting';
 import { mapDshReasoningEffort } from './dshReasoningEffort';
+import { effortForClaudeSdk, toLlmEffortLevel, type LlmEffortLevel } from './llmEffort';
 import { loadClaudeSdk } from './claudeSdk';
 import {
   CoworkDshSteerWindowClosedError,
@@ -1332,6 +1333,11 @@ type CoworkMetabotIdentity = {
   background?: string | null;
   goal?: string | null;
   llm_id?: string | null;
+  llm_provider?: string | null;
+  llm_effort?: string | null;
+  fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   mvc_address?: string | null;
   globalmetaid?: string | null;
   enabled?: boolean | null;
@@ -4486,27 +4492,41 @@ export class CoworkRunner extends EventEmitter {
   }
 
   /**
-   * The MetaBot's llm_id is the provider key the bot was configured with
-   * ('deepseek', 'opencode', ...). Return it as the session's automation
-   * model override so the bot's CoWork traffic actually routes to that
-   * provider — resolveApiConfigForModel resolves the key to a concrete model
-   * (llm_id 'deepseek' maps to the default flash model; other keys are
-   * matched as provider keys and use the provider's model list).
-   *
-   * NOTE: this used to only honor llm_id === 'deepseek' and silently ignore
-   * every other value, so metabots configured for opencode (or any other
-   * provider) still fell back to the global default model — their traffic
-   * never reached the configured provider. Now any non-empty llm_id routes
-   * the session (unknown keys fall back to the global default in the caller).
+   * The MetaBot brain bound to a session's bot: a concrete MODEL id (new
+   * semantic) or a legacy provider key that resolveApiConfigForModel still
+   * resolves to a concrete model. Carries the provider hint (id-collision
+   * disambiguation), the per-brain reasoning effort, and the fallback brain —
+   * used for both the A2A/group-task automation sessions (the brain IS their
+   * model+effort) and cowork UI sessions that never picked a session override.
    */
-  private getSessionAutomationModelOverride(sessionId: string): string | null {
+  private getSessionAutomationBrain(sessionId: string): {
+    modelId: string;
+    providerKey: string | null;
+    effort: LlmEffortLevel | null;
+    fallbackModelId: string | null;
+    fallbackProviderKey: string | null;
+    fallbackEffort: LlmEffortLevel | null;
+  } | null {
     if (!this.getMetabotById) return null;
     const session = this.store.getSession(sessionId);
     const metabotId = session?.metabotId;
     if (metabotId == null || typeof metabotId !== 'number') return null;
     const metabot = this.getMetabotById(metabotId);
-    const llmId = metabot?.llm_id?.trim();
-    return llmId || null;
+    const modelId = metabot?.llm_id?.trim();
+    if (!modelId) return null;
+    return {
+      modelId,
+      providerKey: metabot?.llm_provider?.trim() || null,
+      effort: toLlmEffortLevel(metabot?.llm_effort),
+      fallbackModelId: metabot?.fallback_llm_id?.trim() || null,
+      fallbackProviderKey: metabot?.fallback_llm_provider?.trim() || null,
+      fallbackEffort: toLlmEffortLevel(metabot?.fallback_llm_effort),
+    };
+  }
+
+  /** Effort of the session bot's primary brain (null when no bot / no effort). */
+  private getSessionBrainEffort(sessionId: string): LlmEffortLevel | null {
+    return this.getSessionAutomationBrain(sessionId)?.effort ?? null;
   }
 
   /**
@@ -5889,14 +5909,32 @@ export class CoworkRunner extends EventEmitter {
    */
   private resolveSessionDshRoute(sessionId: string): ReturnType<typeof resolveDshProviderRoute> {
     const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null
-    const automationModelOverride = sessionModel || this.getSessionAutomationModelOverride(sessionId)
-    let route = resolveDshProviderRoute(automationModelOverride)
+    const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
+    const automationModelOverride = sessionModel || brain?.modelId || null
+    let route = resolveDshProviderRoute(
+      automationModelOverride,
+      sessionModel ? null : (brain?.providerKey ?? null),
+    )
     if (!route && automationModelOverride) {
-      coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
-        sessionId,
-        override: automationModelOverride,
-      })
-      route = resolveDshProviderRoute()
+      // Primary brain unavailable: the bot's fallback brain (model+effort)
+      // takes over before the global default route.
+      const fallbackRoute = brain?.fallbackModelId
+        ? resolveDshProviderRoute(brain.fallbackModelId, brain.fallbackProviderKey)
+        : null
+      if (fallbackRoute) {
+        coworkLog('INFO', 'resolveSessionDshRoute', 'Primary brain did not resolve; using the fallback brain', {
+          sessionId,
+          primary: automationModelOverride,
+          fallback: brain?.fallbackModelId,
+        })
+        route = fallbackRoute
+      } else {
+        coworkLog('WARN', 'resolveSessionDshRoute', 'Model override did not resolve to an enabled provider; falling back to the default route', {
+          sessionId,
+          override: automationModelOverride,
+        })
+        route = resolveDshProviderRoute()
+      }
     }
     return route
   }
@@ -6005,9 +6043,10 @@ export class CoworkRunner extends EventEmitter {
       // reference user files, not the volatile context head).
       const promptImages = await this.collectDshPromptImages(prompt, cwd, modelLimits?.supportsVision === true);
       // Same effort/thinking resolution the Claude path applies per query:
-      // session UI override wins, then the per-model default (DeepSeek auto
-      // is `max`). DSH previously dropped this, so the runtime always used
-      // the provider default (thinking ON, no reasoning_effort).
+      // session UI override wins, then the bot brain effort, then the global
+      // default, then the per-model default. DSH previously dropped this, so
+      // the runtime always used the provider default (thinking ON, no
+      // reasoning_effort).
       const modelOptions = resolveModelOptions(route.model);
       // Official DeepSeek (non-anthropic format) rides the first-party
       // dsh-llm-deepseek adapter under its own route key; everything else —
@@ -6015,7 +6054,12 @@ export class CoworkRunner extends EventEmitter {
       const officialDeepSeekNative = route.provider === 'deepseek' && route.apiFormat !== 'anthropic';
       const dshEffortDialect = officialDeepSeekNative ? 'deepseek-native' : 'generic';
       const dshReasoningEffort = mapDshReasoningEffort(
-        activeSession.effortOverride ?? modelOptions?.reasoningEffort,
+        toLlmEffortLevel(
+          activeSession.effortOverride
+            ?? this.getSessionBrainEffort(sessionId)
+            ?? getPersistedCoworkEffortLevel()
+            ?? modelOptions?.reasoningEffort,
+        ),
         activeSession.thinkingOverride ?? modelOptions?.thinking,
         dshEffortDialect,
       );
@@ -6023,6 +6067,7 @@ export class CoworkRunner extends EventEmitter {
         sessionId,
         dialect: dshEffortDialect,
         uiOverride: activeSession.effortOverride ?? null,
+        brainEffort: this.getSessionBrainEffort(sessionId),
         modelDefault: modelOptions?.reasoningEffort ?? null,
         mapped: dshReasoningEffort ?? null,
       });
@@ -7244,26 +7289,46 @@ export class CoworkRunner extends EventEmitter {
     activeSession.emptyTerminalTurnDetected = false;
 
     // Per-session model override (chosen in the session's own model selector)
-    // takes precedence; then the metabot's llm_id; otherwise the global
-    // default config. The session override only affects this conversation.
+    // takes precedence; then the metabot's brain (model id, or legacy provider
+    // key); otherwise the global default config. The session override only
+    // affects this conversation. `brainEffort` rides along so the effort tier
+    // below can apply the bot brain's reasoning effort.
     const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null;
-    const automationModelOverride = sessionModel || this.getSessionAutomationModelOverride(sessionId);
+    const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId);
+    const automationModelOverride = sessionModel || brain?.modelId || null;
+    let brainEffort: LlmEffortLevel | null = brain?.effort ?? null;
     let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId)
+      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId, brain?.providerKey ?? null)
       : { config: getCurrentApiConfig('local') };
     let apiConfig = apiConfigResolution.config;
     if (!apiConfig && automationModelOverride) {
-      // The metabot's llm_id did not resolve (provider disabled/removed, or
-      // the key is not a known provider). Fall back to the global default
-      // config instead of failing the session — the legacy behavior ignored
-      // unknown llm_ids silently, so keep sessions runnable.
-      coworkLog('WARN', 'runClaudeCodeLocal', 'Metabot llm_id did not resolve to an enabled provider; falling back to the default model config', {
-        sessionId,
-        llmId: automationModelOverride,
-        reason: apiConfigResolution.error ?? null,
-      });
-      apiConfigResolution = { config: getCurrentApiConfig('local') };
-      apiConfig = apiConfigResolution.config;
+      // The primary brain did not resolve (provider disabled/removed, or the
+      // model was deleted). The bot's fallback brain (model+effort) takes over
+      // before the global default — A2A/group-task sessions follow the metabot
+      // edit page's brain pair wherever possible.
+      const fallbackResolution = brain?.fallbackModelId
+        ? resolveApiConfigForModel(brain.fallbackModelId, 'local', sessionId, brain.fallbackProviderKey)
+        : null;
+      if (fallbackResolution?.config) {
+        coworkLog('INFO', 'runClaudeCodeLocal', 'Primary brain did not resolve; using the fallback brain', {
+          sessionId,
+          primary: automationModelOverride,
+          fallback: brain?.fallbackModelId,
+          reason: apiConfigResolution.error ?? null,
+        });
+        apiConfigResolution = fallbackResolution;
+        apiConfig = fallbackResolution.config;
+        brainEffort = brain?.fallbackEffort ?? null;
+      } else {
+        coworkLog('WARN', 'runClaudeCodeLocal', 'Metabot brain did not resolve to an enabled provider; falling back to the default model config', {
+          sessionId,
+          llmId: automationModelOverride,
+          reason: apiConfigResolution.error ?? null,
+        });
+        apiConfigResolution = { config: getCurrentApiConfig('local') };
+        apiConfig = apiConfigResolution.config;
+        brainEffort = null;
+      }
     }
     if (!apiConfig) {
       this.handleError(sessionId, apiConfigResolution.error ?? 'API configuration not found. Please configure model settings.');
@@ -7587,11 +7652,17 @@ export class CoworkRunner extends EventEmitter {
     // Resolve per-model effort/thinking options from app_config. These reach
     // the SDK directly (previously they only went through the OpenAI-compat
     // proxy for the renderer's direct API calls, never the cowork session).
-    // Session-level effort override (from the runtime UI toggle) takes
-    // precedence over the per-model default.
+    // Effort tiering: session-level override (composer picker) > bot brain
+    // effort (already swapped to the fallback brain's effort when the fallback
+    // took over) > persisted global default > per-model default.
     const modelOptions = resolveModelOptions(apiConfig.model);
-    const effectiveEffort = activeSession.effortOverride ?? modelOptions?.reasoningEffort;
-    const effectiveThinking = activeSession.thinkingOverride ?? modelOptions?.thinking;
+    const effectiveEffort: LlmEffortLevel | null = toLlmEffortLevel(
+      activeSession.effortOverride ?? brainEffort ?? getPersistedCoworkEffortLevel() ?? modelOptions?.reasoningEffort,
+    );
+    // The four-step ladder maps onto the SDK's effort/thinking options
+    // (off disables thinking; max pairs effort max with thinking enabled).
+    const sdkEffort = effortForClaudeSdk(effectiveEffort);
+    const effectiveThinking = activeSession.thinkingOverride ?? sdkEffort.thinking ?? modelOptions?.thinking;
 
     const options: Record<string, unknown> = {
       cwd,
@@ -7608,7 +7679,7 @@ export class CoworkRunner extends EventEmitter {
       ...(apiConfig.fallbackModel
         ? { fallbackModel: apiConfig.fallbackModel }
         : {}),
-      ...(effectiveEffort ? { effort: effectiveEffort } : {}),
+      ...(sdkEffort.effort ? { effort: sdkEffort.effort } : {}),
       ...(effectiveThinking
         ? { thinking: effectiveThinking }
         : {}),

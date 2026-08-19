@@ -29,9 +29,9 @@ function methodBody(source, signature) {
   return nextMethod >= 0 ? rest.slice(0, nextMethod) : rest;
 }
 
-test('metabot llm_id override honors any provider key, not just deepseek', () => {
+test('metabot brain override honors any llm_id, not just deepseek', () => {
   const source = read('src/main/libs/coworkRunner.ts');
-  const body = methodBody(source, 'private getSessionAutomationModelOverride(');
+  const body = methodBody(source, 'private getSessionAutomationBrain(');
   // The old narrow guard that ignored every llm_id except 'deepseek' must be
   // gone — that is why opencode-configured metabots still billed DeepSeek.
   assert.ok(
@@ -39,9 +39,14 @@ test('metabot llm_id override honors any provider key, not just deepseek', () =>
     'llm_id must not be narrowed to deepseek only'
   );
   assert.ok(
-    body.includes('return llmId || null'),
-    'any non-empty llm_id must be returned as the override'
+    body.includes('if (!modelId) return null'),
+    'any non-empty brain model id must be returned as the override'
   );
+  // Model-level brain: provider hint + effort ride along, plus the fallback
+  // brain pair.
+  assert.ok(body.includes('providerKey:'), 'brain carries the provider hint');
+  assert.ok(body.includes('effort: toLlmEffortLevel('), 'brain carries the normalized effort');
+  assert.ok(body.includes('fallbackModelId:'), 'brain carries the fallback brain');
 });
 
 test('runClaudeCodeLocal falls back to the global default when llm_id does not resolve', () => {

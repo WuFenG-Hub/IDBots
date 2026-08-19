@@ -45,7 +45,7 @@ import type {
   OpenTeamMembershipStore,
 } from '../openTeamMembershipStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
-import { normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { buildOpenTeamGuestPrompt } from './openTeamGuestPrompt';
 import { ensureOpenTeamGuestSession } from './groupTaskSession';
@@ -144,7 +144,14 @@ export type OpenTeamGuestPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' },
+  options?: {
+    llmProvider?: string | null;
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    effort?: 'off' | 'low' | 'high' | 'max' | null;
+    fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+    thinking?: 'enabled' | 'disabled';
+  },
 ) => Promise<string>;
 
 export type OpenTeamGuestSendGroupMessageFn = (
@@ -585,10 +592,18 @@ export function createOpenTeamGuestDaemonLoop(deps: OpenTeamGuestDaemonDeps): Op
       }
     }
     if (!reply) {
-      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
+      const brain = metabotBrainOptions(bot);
+      const llmId = brain.llmId ?? undefined;
+      const fallbackLlmId = brain.fallbackLlmId;
       reply = (
-        await deps.performChat(systemPrompt, userMessage, llmId, { fallbackLlmId, thinking: 'enabled' })
+        await deps.performChat(systemPrompt, userMessage, llmId, {
+          llmProvider: brain.llmProvider,
+          fallbackLlmId,
+          fallbackLlmProvider: brain.fallbackLlmProvider,
+          effort: brain.effort,
+          fallbackEffort: brain.fallbackEffort,
+          thinking: 'enabled',
+        })
       ).trim();
     }
     if (!reply) return;

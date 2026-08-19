@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+const llmFallbackModule = await import('../dist-electron/main/services/llmFallback.js');
 const {
   normalizeMetabotLlmId,
   resolveFallbackLlmId,
   runWithLlmFallback,
-} = await import('../dist-electron/main/services/llmFallback.js');
+} = llmFallbackModule;
+const loadModule = () => llmFallbackModule;
 
 const { buildMetabotInfoPayloads } = await import('../dist-electron/main/services/metabotInfoPayload.js');
 
@@ -140,4 +142,67 @@ test('runWithLlmFallback returns the primary result without touching the fallbac
   );
   assert.equal(result, 'primary ok');
   assert.deepEqual(calls, ['primary']);
+});
+
+test('metabotBrainOptions extracts the model+effort brain pair', () => {
+  const { metabotBrainOptions } = loadModule();
+  const brain = metabotBrainOptions({
+    llm_id: 'deepseek-v4-pro',
+    llm_provider: 'deepseek',
+    llm_effort: 'high',
+    fallback_llm_id: 'qwen3.5-plus',
+    fallback_llm_provider: 'qwen',
+    fallback_llm_effort: 'medium', // legacy five-step value
+  });
+  assert.deepEqual(brain, {
+    llmId: 'deepseek-v4-pro',
+    llmProvider: 'deepseek',
+    effort: 'high',
+    fallbackLlmId: 'qwen3.5-plus',
+    fallbackLlmProvider: 'qwen',
+    fallbackEffort: 'low',
+  });
+
+  // Legacy provider-key brains and empty fields normalize cleanly.
+  assert.deepEqual(metabotBrainOptions({ llm_id: ' deepseek ' }), {
+    llmId: 'deepseek',
+    llmProvider: null,
+    effort: null,
+    fallbackLlmId: null,
+    fallbackLlmProvider: null,
+    fallbackEffort: null,
+  });
+  assert.deepEqual(metabotBrainOptions(null).llmId, null);
+});
+
+test('runWithLlmFallback swaps model, provider hint, and effort to the fallback brain', async () => {
+  const { runWithLlmFallback } = loadModule();
+  const calls = [];
+  await runWithLlmFallback(
+    {
+      llmId: 'broken-primary',
+      llmProvider: 'gone-provider',
+      fallbackLlmId: 'fallback-model',
+      fallbackLlmProvider: 'fallback-provider',
+      effort: 'max',
+      fallbackEffort: 'low',
+    },
+    async (options) => {
+      calls.push({
+        llmId: options.llmId,
+        llmProvider: options.llmProvider ?? null,
+        fallbackLlmId: options.fallbackLlmId ?? null,
+        effort: options.effort ?? null,
+      });
+      if (options.llmId === 'broken-primary') {
+        throw new Error('LLM config not available');
+      }
+      return { content: 'ok' };
+    },
+    noopLog,
+  );
+  assert.deepEqual(calls, [
+    { llmId: 'broken-primary', llmProvider: 'gone-provider', fallbackLlmId: 'fallback-model', effort: 'max' },
+    { llmId: 'fallback-model', llmProvider: 'fallback-provider', fallbackLlmId: null, effort: 'low' },
+  ]);
 });
