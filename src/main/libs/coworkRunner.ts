@@ -1636,8 +1636,8 @@ export class CoworkRunner extends EventEmitter {
   private dshActiveTurns = new Set<string>();
   /** Test seam: extra runtime composition entries (fixture tools). */
   dshRuntimeExtraEntries?: Array<Record<string, unknown>>;
-  /** name → { parameters, execute } for the current DSH turn's host tools. */
-  private dshHostToolRegistry: Map<string, { name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }> = new Map();
+  /** cowork session id → (tool name → { parameters, execute }) for that session's current DSH turn. */
+  private dshHostToolRegistry: Map<string, Map<string, { name: string; description: string; parameters: Record<string, unknown>; execute: (args: any) => Promise<unknown> }>> = new Map();
   private sandboxPermissions: Map<string, SandboxPendingPermission> = new Map();
   private stoppedSessions: Set<string> = new Set();
   private turnMemoryQueue: QueuedTurnMemoryUpdate[] = [];
@@ -1740,6 +1740,9 @@ export class CoworkRunner extends EventEmitter {
     );
     this.activeSessions.delete(sessionId);
     this.dshStreamUi.clearSession(sessionId);
+    // Best-effort pruning: a closed session no longer dispatches host tools,
+    // so its registry entry can go (missing entry → safe `unknown host tool`).
+    this.dshHostToolRegistry.delete(sessionId);
     // Drop this session's pinned proxy upstream so the per-session registry
     // does not grow unbounded across the session's lifetime.
     clearCoworkSessionUpstream(sessionId);
@@ -6040,7 +6043,10 @@ export class CoworkRunner extends EventEmitter {
 
     try {
       const hostTools = this.buildDshHostTools(sessionId)
-      this.dshHostToolRegistry = new Map(hostTools.map((tool) => [tool.name, tool]))
+      // Per-session registry: a concurrent turn of ANOTHER session must not
+      // clobber this session's tool set (Twin-only tools would intermittently
+      // go missing while a worker turn ran, and vice versa).
+      this.dshHostToolRegistry.set(sessionId, new Map(hostTools.map((tool) => [tool.name, tool])))
       // Volatile context (memory projections, time, browser tabs, remote
       // services) rides the user-message tail on BOTH kernels — the claude
       // path builds it inside runClaudeCodeLocal; replicate here so DSH
@@ -6690,7 +6696,8 @@ export class CoworkRunner extends EventEmitter {
     name: string,
     args: Record<string, unknown>
   ): Promise<{ ok: true; text: string; images?: DshHostToolImagePayload[] } | { ok: false; error: string }> {
-    const tool = this.dshHostToolRegistry.get(name)
+    const registry = this.dshHostToolRegistry.get(coworkSessionId)
+    const tool = registry?.get(name)
     if (!tool) return { ok: false, error: `unknown host tool: ${name}` }
     const policy = await this.evaluateDshToolPolicy(coworkSessionId, name, args)
     if (policy.decision === 'deny') return { ok: false, error: policy.reason ?? 'denied by permission policy' }
