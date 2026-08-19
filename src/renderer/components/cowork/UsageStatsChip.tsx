@@ -188,17 +188,28 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
               ? provider.charAt(0).toUpperCase() + provider.slice(1)
               : upstreamHost;
             return (
-              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between text-[11px]">
-                <span className="dark:text-claude-darkTextSecondary text-claude-textSecondary">
+              <div className="mt-2 pt-2 border-t dark:border-claude-darkBorder/60 border-claude-border/60 flex items-center justify-between gap-2 text-[11px]">
+                <span className="shrink-0 whitespace-nowrap dark:text-claude-darkTextSecondary text-claude-textSecondary">
                   {i18nService.t('coworkUsageUpstream')}
                 </span>
-                <span className="font-mono truncate pl-2 dark:text-claude-darkText text-claude-text" title={upstreamHost || label}>
+                <span className="font-mono truncate min-w-0 text-right dark:text-claude-darkText text-claude-text" title={upstreamHost || label}>
                   {upstreamHost ? `${label} · ${upstreamHost}` : label}
                 </span>
               </div>
             );
           })()}
           <div className="mt-2 space-y-1 text-[11px] dark:text-claude-darkTextSecondary text-claude-textSecondary">
+            {/* Current context size (provider-reported total input of the most
+                recent turn) — the same quantity the context ring shows. The
+                rows below are SESSION-CUMULATIVE billing totals: every request
+                re-sends the full context, so the cumulative input grows far
+                beyond the live context size as the conversation goes on. */}
+            {typeof usageStats.lastTurnInputTokens === 'number' && usageStats.lastTurnInputTokens > 0 && (
+              <div className="flex justify-between">
+                <span className="font-medium dark:text-claude-darkText text-claude-text">{i18nService.t('coworkUsageCurrentContext')}</span>
+                <span className="font-mono font-medium dark:text-claude-darkText text-claude-text">{formatTokens(usageStats.lastTurnInputTokens)}</span>
+              </div>
+            )}
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageInput')}</span><span className="font-mono">{formatTokens(usageStats.inputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageOutput')}</span><span className="font-mono">{formatTokens(usageStats.outputTokens)}</span></div>
             <div className="flex justify-between"><span>{i18nService.t('coworkUsageCacheHit')}</span><span className="font-mono">{formatTokens(usageStats.cacheReadTokens)}</span></div>
@@ -209,6 +220,7 @@ const UsageStatsChip: React.FC<UsageStatsChipProps> = ({ usageStats, modelId }) 
                 <span className="font-mono">{formatTokens(usageStats.thinkingTokensEstimate)}</span>
               </div>
             )}
+            <div className="opacity-60 leading-snug">{i18nService.t('coworkUsageCumulativeHint')}</div>
           </div>
           {(() => {
             // Cache-hit rates, three meanings:
