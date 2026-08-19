@@ -782,16 +782,30 @@ export function deriveGroupTaskMemberInviteStatus(input: {
 }
 
 /**
+ * Chain timestamps are epoch seconds; attempt timestamps are epoch ms.
+ * Values below 1e12 are treated as seconds so mixed call sites stay comparable.
+ */
+function toEpochMs(value: number | null | undefined): number | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  return value < 1e12 ? value * 1000 : value;
+}
+
+/**
  * P1-4: pure workStatus derivation. Priority:
  *  1. a RUNNING canonical attempt => working;
  *  2. a fresh `[WORKING]` tag (working window) => working;
  *  3. a recent FAILED attempt (error window) with a NEWER success record
- *     (lastSpeakAt / lastWorkingAt strictly AFTER attemptAtMs) => degraded off
- *     'error': working when lastWorkingAt is inside the working window,
- *     otherwise idle — the member has visibly recovered since the failure;
- *  4. a recent FAILED attempt without newer records => error;
- *  5. any speech => idle;
- *  6. otherwise => unknown.
+ *     (lastSpeakAt / lastWorkingAt strictly AFTER attemptAtMs) => idle
+ *     (a fresh `[WORKING]` already returned at 2);
+ *  4. a recent FAILED attempt without newer records, only when the member is
+ *     NOT currently `working` => error. A `working` member's failed attempt is
+ *     a retryable blip (auth hiccup, skill crash, next turn still coming) and
+ *     must not paint the panel "出错" next to the state-machine "working" badge;
+ *  5. a working/assigned member whose `[WORKING]` signal is past the timeout
+ *     window => timeout;
+ *  6. member still in state-machine `working` => working;
+ *  7. any speech => idle;
+ *  8. otherwise => unknown.
  */
 export function computeGroupTaskMemberWorkStatus(input: {
   metabotId: number | null;
@@ -806,19 +820,21 @@ export function computeGroupTaskMemberWorkStatus(input: {
   memberStatus?: GroupTaskMemberStatus;
 }): GroupTaskMemberWorkStatus {
   const nowMs = input.nowMs ?? Date.now();
+  const lastSpeakAtMs = toEpochMs(input.lastSpeakAt);
+  const lastWorkingAtMs = toEpochMs(input.lastWorkingAt);
+  const attemptAtMs = toEpochMs(input.attemptAtMs);
+  const workingWindowMs = GROUP_TASK_WORKING_WINDOW_MINUTES * 60_000;
+  const errorWindowMs = GROUP_TASK_ERROR_WINDOW_MINUTES * 60_000;
+  const timeoutWindowMs = GROUP_TASK_TIMEOUT_WINDOW_MINUTES * 60_000;
+  const hasFreshWorkingTag =
+    lastWorkingAtMs != null && nowMs - lastWorkingAtMs <= workingWindowMs;
+
   if (input.attemptStatus === 'running') return 'working';
-  if (
-    input.lastWorkingAt != null
-    && Number.isFinite(input.lastWorkingAt)
-    && nowMs - input.lastWorkingAt <= GROUP_TASK_WORKING_WINDOW_MINUTES * 60_000
-  ) {
-    return 'working';
-  }
+  if (hasFreshWorkingTag) return 'working';
   if (
     input.attemptStatus === 'failed'
-    && input.attemptAtMs != null
-    && Number.isFinite(input.attemptAtMs)
-    && nowMs - input.attemptAtMs <= GROUP_TASK_ERROR_WINDOW_MINUTES * 60_000
+    && attemptAtMs != null
+    && nowMs - attemptAtMs <= errorWindowMs
   ) {
     // Error-degrade: a failed attempt is only a stale residual marker when no
     // NEWER success record exists. Any speech/working record strictly AFTER
@@ -826,34 +842,26 @@ export function computeGroupTaskMemberWorkStatus(input: {
     // the panel off 'error'. A record at exactly attemptAtMs is NOT treated as
     // post-failure recovery evidence — it coincides with the failure itself.
     const hasNewerSuccessRecord =
-      (input.lastSpeakAt != null && Number.isFinite(input.lastSpeakAt) && input.lastSpeakAt > input.attemptAtMs)
-      || (input.lastWorkingAt != null && Number.isFinite(input.lastWorkingAt) && input.lastWorkingAt > input.attemptAtMs);
-    if (hasNewerSuccessRecord) {
-      // lastWorkingAt inside the working window => working, otherwise idle.
-      if (
-        input.lastWorkingAt != null
-        && Number.isFinite(input.lastWorkingAt)
-        && nowMs - input.lastWorkingAt <= GROUP_TASK_WORKING_WINDOW_MINUTES * 60_000
-      ) {
-        return 'working';
-      }
-      return 'idle';
-    }
-    return 'error';
+      (lastSpeakAtMs != null && lastSpeakAtMs > attemptAtMs)
+      || (lastWorkingAtMs != null && lastWorkingAtMs > attemptAtMs);
+    if (hasNewerSuccessRecord) return 'idle';
+    // A member the state machine still calls `working` is mid-retry, not
+    // crashed. Fall through so R6 timeout / the working self-report can win
+    // instead of stacking "出错" on top of "working".
+    if (input.memberStatus !== 'working') return 'error';
   }
   // R6: a working/assigned member whose [WORKING] signal is stale (older than
-  // the timeout window) and who is not mid-attempt or in the error window reads
-  // 'timeout' — the authoritative "went silent" state. This is what replaces the
-  // old "出错" misread: a silently-working member is no longer shown as idle.
+  // the timeout window) reads 'timeout' — the authoritative "went silent"
+  // state. This is what replaces the old "出错" misread.
   if (
     (input.memberStatus === 'working' || input.memberStatus === 'assigned')
-    && input.lastWorkingAt != null
-    && Number.isFinite(input.lastWorkingAt)
-    && nowMs - input.lastWorkingAt > GROUP_TASK_TIMEOUT_WINDOW_MINUTES * 60_000
+    && lastWorkingAtMs != null
+    && nowMs - lastWorkingAtMs > timeoutWindowMs
   ) {
     return 'timeout';
   }
-  if (input.lastSpeakAt != null) return 'idle';
+  if (input.memberStatus === 'working') return 'working';
+  if (lastSpeakAtMs != null) return 'idle';
   return 'unknown';
 }
 
@@ -890,12 +898,14 @@ export async function getGroupTask(
   // endpoint explicitly requests view='summary' by default.
   const view = opts?.view ?? 'full';
   const members = store.listMembers(id);
-  // P0-2: lastSpeakAt is computed for BOTH views — the detail/UI member list
-  // shows the member state badge plus when each member last spoke.
+  // lastSpeakAt / lastWorkingAt feed the member-rail workStatus for BOTH
+  // views. The IPC detail (default 'full') is what the owner actually sees;
+  // skipping the [WORKING] lookup there left the panel stuck on a failed
+  // attempt's 'error' even while the member was still working.
   const speakMap = task.groupId
     ? store.getMembersLastSpeakAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
-  const workingMap = view === 'summary' && task.groupId
+  const workingMap = task.groupId
     ? store.getMembersWorkingAt(task.groupId!, members.map((m) => m.globalmetaid))
     : new Map<string, number>();
   const bridge = orchestrationBridgeGetter?.();
