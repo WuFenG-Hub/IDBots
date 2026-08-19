@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
 
-import { createBotBrowserMetaAppCacheService } from '../src/main/services/botBrowserMetaAppCacheService.ts';
+import { createBotBrowserMetaAppCacheService, metaAppPreviewHtmlPreparationAvailable } from '../src/main/services/botBrowserMetaAppCacheService.ts';
 import { fetchContentWithFallback } from '../src/main/services/localIndexerProxy.ts';
 import {
   assertMetaAppZipDownloadIntegrity,
@@ -126,7 +126,8 @@ test('Bot Browser MetaApp cache resolver downloads, caches, and serves a MetaAPP
   }
 });
 
-test('Bot Browser MetaApp cache serves prepared preview HTML with Agent Internet URI support', async () => {
+test('Bot Browser MetaApp cache serves prepared preview HTML with Agent Internet URI support', async (t) => {
+  if (!metaAppPreviewHtmlPreparationAvailable()) t.skip('requires agent-browser-core >= 0.5.3');
   const cacheRoot = await mkdtemp(path.join(os.tmpdir(), 'idbots-bot-browser-cache-'));
   const metaAppPinId = 'd5'.repeat(32) + 'i0';
   const codePinId = 'a1'.repeat(32) + 'i0';
