@@ -17,6 +17,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PhotoIcon, PlusIcon, XMarkIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../../services/i18n';
+import { configService } from '../../services/config';
+import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
+import ModelEffortPicker from '../ModelEffortPicker';
 import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
 import type { SyncStepKey } from './MetaBotCreateSuccessModal';
@@ -58,9 +61,17 @@ export interface MetaBotEditValues {
   bio: string;
   boss_global_metaid: string;
   boss_id: string;
+  /** Primary brain: model id (legacy provider-key values still resolve at call time). */
   llm_id: string;
+  /** Provider key the primary brain model was picked from; '' = unset. */
+  llm_provider: string;
+  /** Primary brain reasoning effort (off/low/high/max); '' = model default. */
+  llm_effort: string;
   /** First-class edit field (Basic tab); empty string means "no fallback". */
   fallback_llm_id: string;
+  fallback_llm_provider: string;
+  /** Fallback brain reasoning effort; '' = model default. */
+  fallback_llm_effort: string;
   allow_chat_skills: string[];
   /** Max incoming turns per active A2A private-chat session before forcing "bye". */
   a2a_max_incoming_turns: number;
@@ -87,7 +98,7 @@ export type MetaBotEditTabKey = 'basic' | 'persona' | 'chatSettings' | 'advanced
 
 /** Editable fields owned by each tab; drives dirty tracking and save scoping. */
 export const EDIT_TAB_FIELDS: Record<MetaBotEditTabKey, readonly (keyof MetaBotEditValues)[]> = {
-  basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id'],
+  basic: ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'llm_provider', 'llm_effort', 'fallback_llm_id', 'fallback_llm_provider', 'fallback_llm_effort'],
   persona: ['role', 'soul', 'goal'],
   chatSettings: ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms', 'a2a_auto_reply_enabled'],
   advanced: ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin'],
@@ -123,7 +134,11 @@ const defaultValues: MetaBotEditValues = {
   boss_global_metaid: '',
   boss_id: '',
   llm_id: '',
+  llm_provider: '',
+  llm_effort: '',
   fallback_llm_id: '',
+  fallback_llm_provider: '',
+  fallback_llm_effort: '',
   allow_chat_skills: [],
   a2a_max_incoming_turns: DEFAULT_A2A_MAX_INCOMING_TURNS,
   a2a_bye_cooldown_ms: DEFAULT_A2A_BYE_COOLDOWN_MS,
@@ -449,6 +464,9 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   };
 
   const hasNoAvailableLlm = llmOptions.length === 0;
+  const globalDefaultModel = configService.getConfig().model?.defaultModel ?? null;
+  const brainEffortOf = (value: string): LlmEffortLevel | null =>
+    isLlmEffortLevel(value) ? value : null;
   // Twin switch: the bot that currently holds the Twin role is locked on —
   // the only Twin cannot be turned off here, transfer it from another Bot.
   const isTwin = values.metabot_type === 'twin';
@@ -713,19 +731,20 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                 )}
               </div>
             ) : (
-              <select
+              <ModelEffortPicker
                 id="metabot-llm"
-                value={values.llm_id}
-                onChange={(e) => handleChange('llm_id', e.target.value)}
-                className={inputClass}
-              >
-                <option value="">{i18nService.t('metabotLlmIdPlaceholder')}</option>
-                {llmOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                value={{
+                  modelId: values.llm_id || null,
+                  providerKey: values.llm_provider || null,
+                  effort: brainEffortOf(values.llm_effort),
+                }}
+                onChange={(selection) => {
+                  handleChange('llm_id', selection.modelId ?? '');
+                  handleChange('llm_provider', selection.providerKey ?? '');
+                  handleChange('llm_effort', selection.effort ?? '');
+                }}
+                globalDefaultModel={globalDefaultModel}
+              />
             )}
           </div>
         </div>
@@ -736,19 +755,51 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
               {i18nService.t('metabotFallbackLlmLabel')}
             </label>
             <div className="min-w-0">
-              <select
-                id="metabot-fallback-llm"
-                value={values.fallback_llm_id}
-                onChange={(e) => handleChange('fallback_llm_id', e.target.value)}
-                className={inputClass}
-              >
-                <option value="">{i18nService.t('metabotFallbackLlmNone')}</option>
-                {llmOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              {values.fallback_llm_id.trim() ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <ModelEffortPicker
+                    id="metabot-fallback-llm"
+                    value={{
+                      modelId: values.fallback_llm_id || null,
+                      providerKey: values.fallback_llm_provider || null,
+                      effort: brainEffortOf(values.fallback_llm_effort),
+                    }}
+                    onChange={(selection) => {
+                      handleChange('fallback_llm_id', selection.modelId ?? '');
+                      handleChange('fallback_llm_provider', selection.providerKey ?? '');
+                      handleChange('fallback_llm_effort', selection.effort ?? '');
+                    }}
+                    globalDefaultModel={globalDefaultModel}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      handleChange('fallback_llm_id', '');
+                      handleChange('fallback_llm_provider', '');
+                      handleChange('fallback_llm_effort', '');
+                    }}
+                    className="px-2 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                  >
+                    {i18nService.t('metabotFallbackLlmNone')}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  id="metabot-fallback-llm"
+                  onClick={() => {
+                    // Seed the fallback with the primary brain so the picker has
+                    // a concrete starting selection; the user adjusts from there.
+                    handleChange('fallback_llm_id', values.llm_id);
+                    handleChange('fallback_llm_provider', values.llm_provider);
+                    handleChange('fallback_llm_effort', values.llm_effort);
+                  }}
+                  disabled={!values.llm_id.trim()}
+                  className="px-3 py-1.5 rounded-xl border dark:border-claude-darkBorder border-claude-border text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {i18nService.t('metabotFallbackLlmSetup')}
+                </button>
+              )}
               <p className={hintClass}>
                 {i18nService.t('metabotFallbackLlmHint')}
               </p>

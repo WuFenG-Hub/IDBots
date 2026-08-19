@@ -9,8 +9,14 @@ export interface MetabotInfoPayloadInput {
   /** Deprecated local compatibility field; v3 Bot Info uses `bio`. */
   background?: string | null;
   llm_id?: string | null;
-  /** Optional fallback LLM provider key published as fallbackProvider in /info/llm. */
+  /** Provider key the primary brain model was picked from. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max). */
+  llm_effort?: string | null;
+  /** Optional fallback brain published in /info/llm. */
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   allow_chat_skills?: unknown;
 }
 
@@ -79,7 +85,11 @@ export function buildMetabotInfoPayloads(input: MetabotInfoPayloadInput): Metabo
   const soul = cleanString(input.soul);
   const goal = cleanString(input.goal);
   const llmId = cleanString(input.llm_id);
+  const llmProvider = cleanString(input.llm_provider);
+  const llmEffort = cleanString(input.llm_effort);
   const fallbackLlmId = cleanString(input.fallback_llm_id);
+  const fallbackLlmProvider = cleanString(input.fallback_llm_provider);
+  const fallbackLlmEffort = cleanString(input.fallback_llm_effort);
   const allowChatSkills = normalizeStringArray(input.allow_chat_skills);
 
   return [
@@ -99,7 +109,20 @@ export function buildMetabotInfoPayloads(input: MetabotInfoPayloadInput): Metabo
       step: 'llm',
       path: '/info/llm',
       contentType: 'application/json',
-      payload: JSON.stringify({ primaryProvider: llmId || null, fallbackProvider: fallbackLlmId || null }),
+      // Brains are model-level since 2026-08: primaryProvider/fallbackProvider
+      // keep their names for backward compatibility but now carry the MODEL id
+      // (legacy pins carry a provider key and still restore fine); the new
+      // primary*/fallback* fields add the provider hint and effort.
+      payload: JSON.stringify({
+        primaryProvider: llmId || null,
+        primaryModel: llmId || null,
+        ...(llmProvider ? { primaryModelProvider: llmProvider } : {}),
+        ...(llmEffort ? { primaryEffort: llmEffort } : {}),
+        fallbackProvider: fallbackLlmId || null,
+        fallbackModel: fallbackLlmId || null,
+        ...(fallbackLlmProvider ? { fallbackModelProvider: fallbackLlmProvider } : {}),
+        ...(fallbackLlmEffort ? { fallbackEffort: fallbackLlmEffort } : {}),
+      }),
     },
     {
       step: 'chatSkills',

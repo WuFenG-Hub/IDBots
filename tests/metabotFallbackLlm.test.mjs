@@ -31,13 +31,13 @@ test('resolveFallbackLlmId returns fallback only when set and different from pri
 
 test('/info/llm payload maps fallback_llm_id to fallbackProvider', () => {
   const step = buildMetabotInfoPayloads({ llm_id: 'openai', fallback_llm_id: 'ollama' })[2];
-  assert.deepEqual(JSON.parse(step.payload), { primaryProvider: 'openai', fallbackProvider: 'ollama' });
+  assert.deepEqual(JSON.parse(step.payload), { primaryProvider: 'openai', primaryModel: 'openai', fallbackProvider: 'ollama', fallbackModel: 'ollama' });
 
   const empty = buildMetabotInfoPayloads({ llm_id: 'openai', fallback_llm_id: '  ' })[2];
-  assert.deepEqual(JSON.parse(empty.payload), { primaryProvider: 'openai', fallbackProvider: null });
+  assert.deepEqual(JSON.parse(empty.payload), { primaryProvider: 'openai', primaryModel: 'openai', fallbackProvider: null, fallbackModel: null });
 
   const missing = buildMetabotInfoPayloads({ llm_id: 'openai' })[2];
-  assert.deepEqual(JSON.parse(missing.payload), { primaryProvider: 'openai', fallbackProvider: null });
+  assert.deepEqual(JSON.parse(missing.payload), { primaryProvider: 'openai', primaryModel: 'openai', fallbackProvider: null, fallbackModel: null });
 });
 
 test('runWithLlmFallback retries with fallback when primary config resolution fails', async () => {

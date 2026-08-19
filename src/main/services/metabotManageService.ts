@@ -195,7 +195,9 @@ export interface ManagedMetabotSummary {
   type: 'twin' | 'worker' | 'welcome';
   enabled: boolean;
   llm_id: string | null;
+  llm_effort: string | null;
   fallback_llm_id: string | null;
+  fallback_llm_effort: string | null;
   role: string;
   soul: string;
   goal: string | null;
@@ -210,6 +212,8 @@ export interface ManagedMetabotSummary {
 export interface LlmProviderOption {
   id: string;
   label: string;
+  /** Models this provider offers (model-level brains pick from these). */
+  models?: Array<{ id: string; name: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -724,7 +728,9 @@ export function listMetabotsForManagement(store: MetabotStore): ManagedMetabotSu
     type: m.metabot_type,
     enabled: m.enabled,
     llm_id: m.llm_id ?? null,
+    llm_effort: m.llm_effort ?? null,
     fallback_llm_id: m.fallback_llm_id ?? null,
+    fallback_llm_effort: m.fallback_llm_effort ?? null,
     role: boundText(m.role),
     soul: boundText(m.soul),
     goal: boundText(m.goal) || null,
@@ -742,18 +748,31 @@ const providerLabel = (key: string) => key.charAt(0).toUpperCase() + key.slice(1
 
 /**
  * Configured LLM providers a new/edited bot may use: enabled and (for non-ollama)
- * carrying an API key. Mirrors the renderer's MetaBotCreateForm option filter so
- * the Twin offers the exact same brains the manual form does.
+ * carrying an API key, with each provider's models. Mirrors the renderer's
+ * model-catalog filter (including custom-* providers) so the Twin offers the
+ * exact same brains the manual picker does.
  */
 export function listConfiguredLlmProviders(
-  providers: Record<string, { enabled?: boolean; apiKey?: string } | undefined> | undefined,
+  providers: Record<string, {
+    enabled?: boolean;
+    apiKey?: string;
+    name?: string;
+    models?: Array<{ id?: string; name?: string }> | undefined;
+  } | undefined> | undefined,
 ): LlmProviderOption[] {
   if (!providers) return [];
   const configured: LlmProviderOption[] = [];
   for (const [key, p] of Object.entries(providers)) {
     if (!p?.enabled) continue;
     if (providerRequiresApiKey(key) && !(p.apiKey ?? '').trim()) continue;
-    configured.push({ id: key, label: providerLabel(key) });
+    const models = (p.models ?? [])
+      .filter((model) => typeof model?.id === 'string' && model.id.trim())
+      .map((model) => ({ id: model.id as string, name: (model.name ?? '').trim() || (model.id as string) }));
+    configured.push({
+      id: key,
+      label: (p.name ?? '').trim() || providerLabel(key),
+      ...(models.length > 0 ? { models } : {}),
+    });
   }
   return configured;
 }

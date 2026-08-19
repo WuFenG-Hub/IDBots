@@ -3,6 +3,30 @@ import assert from 'node:assert/strict';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import MetaBotCreateForm from '../src/renderer/components/metabots/MetaBotCreateForm';
+import { configService } from '../src/renderer/services/config';
+import type { AppConfig } from '../src/renderer/config';
+
+// The model+effort picker reads the live app_config; seed the in-memory
+// singleton so the catalog has providers in the Node test environment.
+(configService as unknown as { config: AppConfig }).config = {
+  ...(configService.getConfig() as AppConfig),
+  providers: {
+    openai: {
+      enabled: true,
+      apiKey: 'sk-test',
+      baseUrl: 'https://api.openai.com/v1',
+      apiFormat: 'openai',
+      models: [{ id: 'gpt-5.2', name: 'GPT-5.2' }],
+    },
+    ollama: {
+      enabled: true,
+      apiKey: '',
+      baseUrl: 'http://localhost:11434',
+      apiFormat: 'openai',
+      models: [{ id: 'llama3', name: 'Llama 3' }],
+    },
+  } as AppConfig['providers'],
+};
 
 const llmOptions = [
   { id: 'openai', label: 'Openai' },
@@ -27,8 +51,8 @@ test('MetaBot create form renders only name, primary LLM and fallback LLM fields
   const markup = renderCreateFormMarkup();
 
   assert.match(markup, /<input[^>]*id="metabot-name"/);
-  assert.match(markup, /<select[^>]*id="metabot-llm"/);
-  assert.match(markup, /<select[^>]*id="metabot-fallback-llm"/);
+  assert.match(markup, /<button[^>]*id="metabot-llm"/);
+  assert.match(markup, /<button[^>]*id="metabot-fallback-llm"/);
 
   // Fields deferred to the edit view must not render in the minimal create form.
   assert.doesNotMatch(markup, /id="metabot-role"/);
@@ -42,29 +66,19 @@ test('MetaBot create form renders only name, primary LLM and fallback LLM fields
   assert.doesNotMatch(markup, /data-slot="metabot-homepage-control-row"/);
 });
 
-test('MetaBot create form fallback LLM select offers None plus every provider', () => {
+test('MetaBot create form fallback brain starts unset behind a setup button', () => {
   const markup = renderCreateFormMarkup();
-  const selectMatch = markup.match(/<select[^>]*id="metabot-fallback-llm"[\s\S]*?<\/select>/);
-  assert.ok(selectMatch, 'fallback select should render');
-
-  const options = selectMatch[0].match(/<option[^>]*>/g) ?? [];
-  // 1 None option + one per provider.
-  assert.equal(options.length, llmOptions.length + 1);
-  assert.match(options[0], /value=""/);
-  assert.match(selectMatch[0], /value="openai"/);
-  assert.match(selectMatch[0], /value="ollama"/);
+  // Fallback is optional: until configured it renders as a single setup
+  // button (seeding from the primary brain), not a picker.
+  const setupMatch = markup.match(/<button[^>]*id="metabot-fallback-llm"[^>]*>/);
+  assert.ok(setupMatch, 'fallback setup button should render');
+  assert.doesNotMatch(markup, /<select[^>]*id="metabot-fallback-llm"/);
 });
 
-test('MetaBot create form primary LLM select lists providers without a None entry', () => {
+test('MetaBot create form primary brain uses the model+effort picker, not a select', () => {
   const markup = renderCreateFormMarkup();
-  const selectMatch = markup.match(/<select[^>]*id="metabot-llm"[\s\S]*?<\/select>/);
-  assert.ok(selectMatch, 'primary select should render');
-
-  const options = selectMatch[0].match(/<option[^>]*>/g) ?? [];
-  // 1 placeholder option + one per provider (primary LLM stays required).
-  assert.equal(options.length, llmOptions.length + 1);
-  assert.match(options[0], /value=""/);
-  assert.match(selectMatch[0], /value="openai"/);
+  assert.match(markup, /<button[^>]*id="metabot-llm"/);
+  assert.doesNotMatch(markup, /<select[^>]*id="metabot-llm"/);
 });
 
 test('MetaBot create form shows model-settings guidance when no LLM is available', () => {

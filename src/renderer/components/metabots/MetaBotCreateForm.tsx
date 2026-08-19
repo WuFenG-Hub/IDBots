@@ -9,12 +9,19 @@
 
 import React, { useState } from 'react';
 import { i18nService } from '../../services/i18n';
+import { configService } from '../../services/config';
+import { isLlmEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
+import ModelEffortPicker from '../ModelEffortPicker';
 import type { LlmOption } from './MetaBotEditTabs';
 
 export interface MetaBotCreateFormValues {
   name: string;
   llm_id: string;
+  llm_provider: string;
+  llm_effort: string;
   fallback_llm_id: string;
+  fallback_llm_provider: string;
+  fallback_llm_effort: string;
 }
 
 interface MetaBotCreateFormProps {
@@ -37,7 +44,15 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
   onRequestModelSettings,
   onCheckNameExists,
 }) => {
-  const [values, setValues] = useState<MetaBotCreateFormValues>({ name: '', llm_id: '', fallback_llm_id: '' });
+  const [values, setValues] = useState<MetaBotCreateFormValues>({
+    name: '',
+    llm_id: '',
+    llm_provider: '',
+    llm_effort: '',
+    fallback_llm_id: '',
+    fallback_llm_provider: '',
+    fallback_llm_effort: '',
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [nameDuplicate, setNameDuplicate] = useState(false);
@@ -83,7 +98,11 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
       await onSave({
         name: values.name.trim(),
         llm_id: values.llm_id.trim(),
+        llm_provider: values.llm_provider.trim(),
+        llm_effort: values.llm_effort.trim(),
         fallback_llm_id: values.fallback_llm_id.trim(),
+        fallback_llm_provider: values.fallback_llm_provider.trim(),
+        fallback_llm_effort: values.fallback_llm_effort.trim(),
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : i18nService.t('metabotSaveFailed'));
@@ -157,19 +176,21 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
             </div>
           ) : (
             <>
-              <select
+              <ModelEffortPicker
                 id="metabot-llm"
-                value={values.llm_id}
-                onChange={(e) => handleChange('llm_id', e.target.value)}
-                className={inputClass}
-              >
-                <option value="">{i18nService.t('metabotLlmIdPlaceholder')}</option>
-                {llmOptions.map((opt) => (
-                  <option key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+                value={{
+                  modelId: values.llm_id || null,
+                  providerKey: values.llm_provider || null,
+                  effort: isLlmEffortLevel(values.llm_effort) ? values.llm_effort : null,
+                }}
+                onChange={(selection) => {
+                  handleChange('llm_id', selection.modelId ?? '');
+                  handleChange('llm_provider', selection.providerKey ?? '');
+                  handleChange('llm_effort', selection.effort ?? '');
+                }}
+                placeholder={i18nService.t('metabotLlmIdPlaceholder')}
+                globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
+              />
               <p className={hintClass}>
                 {i18nService.t('metabotLlmRequired')}
               </p>
@@ -184,19 +205,50 @@ const MetaBotCreateForm: React.FC<MetaBotCreateFormProps> = ({
             {i18nService.t('metabotFallbackLlmLabel')}
           </label>
           <div className="min-w-0">
-            <select
-              id="metabot-fallback-llm"
-              value={values.fallback_llm_id}
-              onChange={(e) => handleChange('fallback_llm_id', e.target.value)}
-              className={inputClass}
-            >
-              <option value="">{i18nService.t('metabotFallbackLlmNone')}</option>
-              {llmOptions.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+            {values.fallback_llm_id.trim() ? (
+              <div className="flex items-center gap-2 flex-wrap">
+                <ModelEffortPicker
+                  id="metabot-fallback-llm"
+                  value={{
+                    modelId: values.fallback_llm_id || null,
+                    providerKey: values.fallback_llm_provider || null,
+                    effort: (isLlmEffortLevel(values.fallback_llm_effort) ? values.fallback_llm_effort : null) as LlmEffortLevel | null,
+                  }}
+                  onChange={(selection) => {
+                    handleChange('fallback_llm_id', selection.modelId ?? '');
+                    handleChange('fallback_llm_provider', selection.providerKey ?? '');
+                    handleChange('fallback_llm_effort', selection.effort ?? '');
+                  }}
+                  globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    handleChange('fallback_llm_id', '');
+                    handleChange('fallback_llm_provider', '');
+                    handleChange('fallback_llm_effort', '');
+                  }}
+                  className="px-2 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                >
+                  {i18nService.t('metabotFallbackLlmNone')}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                id="metabot-fallback-llm"
+                onClick={() => {
+                  // Seed the fallback with the primary brain as a starting point.
+                  handleChange('fallback_llm_id', values.llm_id);
+                  handleChange('fallback_llm_provider', values.llm_provider);
+                  handleChange('fallback_llm_effort', values.llm_effort);
+                }}
+                disabled={!values.llm_id.trim()}
+                className="px-3 py-1.5 rounded-xl border dark:border-claude-darkBorder border-claude-border text-sm dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {i18nService.t('metabotFallbackLlmSetup')}
+              </button>
+            )}
             <p className={hintClass}>
               {i18nService.t('metabotFallbackLlmHint')}
             </p>

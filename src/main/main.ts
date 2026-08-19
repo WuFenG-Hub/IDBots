@@ -10255,6 +10255,8 @@ if (!gotTheLock) {
         boss_id: profile.bio.boss_id ?? null,
         boss_global_metaid: (input?.boss_global_metaid ?? '').trim() || (profile.bio.boss_global_metaid ?? null),
         llm_id: profile.bio.llm_id ?? null,
+        llm_provider: profile.bio.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(profile.bio.llm_effort),
         tools: profile.bio.tools ?? [],
         skills: profile.bio.skills ?? [],
         allow_chat_skills: profile.bio.allowChatSkills ?? [],

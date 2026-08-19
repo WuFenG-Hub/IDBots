@@ -30,6 +30,8 @@ export interface ModelEffortValue {
 interface ModelEffortPickerProps {
   value: ModelEffortValue;
   onChange: (value: ModelEffortValue) => void;
+  /** Applied to the trigger button (stable selector for tests/a11y). */
+  id?: string;
   dropdownDirection?: 'up' | 'down';
   /** Icon-only trigger for compact toolbars (Bot Browser); the model name still shows in the tooltip. */
   compact?: boolean;
@@ -56,6 +58,7 @@ const effortLabel = (effort: LlmEffortLevel | null): string =>
 const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   value,
   onChange,
+  id,
   dropdownDirection = 'down',
   compact = false,
   disabled = false,
@@ -150,6 +153,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
     <div ref={containerRef} className="relative">
       <button
         type="button"
+        id={id}
         onClick={openPicker}
         disabled={disabled}
         className={compact

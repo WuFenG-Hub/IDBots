@@ -104,6 +104,10 @@ async function provisionProviderConfig(result: LlmRelayBootstrapResult): Promise
 async function createOrAdoptWelcomeBot(existingBots: Array<{ id: number; name?: string }>): Promise<number | null> {
   const existing = existingBots.find((bot) => bot.name === WELCOME_BOT_NAME);
   if (existing) return existing.id;
+  // Bind the welcome bot to a concrete model of the free provider (the
+  // provider's first model) instead of the legacy provider-key brain.
+  const freeModels = configService.getConfig().providers?.[LLM_FREE_PROVIDER_KEY]?.models ?? [];
+  const welcomeModelId = freeModels[0]?.id;
   const result = await window.electron.idbots.addMetaBot({
     name: WELCOME_BOT_NAME,
     avatar: welcomeBotAvatarUrl,
@@ -112,7 +116,8 @@ async function createOrAdoptWelcomeBot(existingBots: Array<{ id: number; name?: 
     goal: WELCOME_BOT_GOAL,
     bio: WELCOME_BOT_BIO,
     metabot_type: 'welcome',
-    llm_id: LLM_FREE_PROVIDER_KEY,
+    llm_id: welcomeModelId ?? LLM_FREE_PROVIDER_KEY,
+    llm_provider: welcomeModelId ? LLM_FREE_PROVIDER_KEY : undefined,
   });
   if (result?.success && result.metabot?.id) {
     return result.metabot.id;

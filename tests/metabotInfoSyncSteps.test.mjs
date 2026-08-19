@@ -92,7 +92,9 @@ test('sync plans expose protocol payload content for profile steps', () => {
   assert.equal(byKey.get('llm').contentType, 'application/json');
   assert.deepEqual(JSON.parse(byKey.get('llm').payload), {
     primaryProvider: 'codex',
+    primaryModel: 'codex',
     fallbackProvider: 'ollama',
+    fallbackModel: 'ollama',
   });
 
   assert.equal(byKey.get('chatSkills').contentType, 'application/json');
@@ -421,7 +423,9 @@ test('full sync plan with skipEmptyInfoSteps omits empty bio/persona/chatSkills/
   );
   assert.deepEqual(JSON.parse(steps.find((step) => step.key === 'llm').payload), {
     primaryProvider: 'openai',
+    primaryModel: 'openai',
     fallbackProvider: null,
+    fallbackModel: null,
   });
 
   // Without the flag the full plan keeps publishing every step (edit plan relies on this).
@@ -457,7 +461,9 @@ test('full sync plan with skipEmptyInfoSteps keeps steps that have content', () 
   );
   assert.deepEqual(JSON.parse(steps.find((step) => step.key === 'llm').payload), {
     primaryProvider: 'openai',
+    primaryModel: 'openai',
     fallbackProvider: 'ollama',
+    fallbackModel: 'ollama',
   });
 });
 

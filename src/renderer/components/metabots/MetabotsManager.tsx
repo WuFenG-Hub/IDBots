@@ -4,7 +4,7 @@ import { ArrowLeftIcon, MagnifyingGlassIcon, PlusCircleIcon, ArrowPathIcon } fro
 import { setPreferredMetabotId } from '../../store/slices/coworkSlice';
 import { i18nService } from '../../services/i18n';
 import { configService } from '../../services/config';
-import { ALL_PROVIDER_KEYS } from '../../config';
+import { buildModelGroupsFromConfig } from '../../services/modelCatalog';
 import type { Metabot } from '../../types/metabot';
 import type { Skill } from '../../types/skill';
 import MetaBotEditTabs, {
@@ -87,8 +87,6 @@ const hasEditSyncRemaining = (remaining: EditSyncRemaining): boolean =>
 const syncStepKeyToFlag = (step: string): keyof Omit<EditSyncRemaining, 'metabotId'> | undefined =>
   EDIT_SYNC_STEP_FLAG_PAIRS.find(([k]) => k === step)?.[1];
 
-const providerRequiresApiKey = (provider: string) => provider !== 'ollama';
-const providerLabel = (key: string) => key.charAt(0).toUpperCase() + key.slice(1);
 const sortMetabotsByCreatedAtAsc = (metabots: Metabot[]) =>
   [...metabots].sort((a, b) => a.created_at - b.created_at || a.id - b.id);
 const parseOptionalBossId = (value: string): number | null => {
@@ -110,7 +108,11 @@ const buildEditFormValues = (editMetabot: Metabot): MetaBotEditValues => ({
   boss_id: editMetabot.boss_id != null ? String(editMetabot.boss_id) : '',
   boss_global_metaid: editMetabot.boss_global_metaid || '',
   llm_id: editMetabot.llm_id || '',
+  llm_provider: editMetabot.llm_provider || '',
+  llm_effort: editMetabot.llm_effort || '',
   fallback_llm_id: editMetabot.fallback_llm_id || '',
+  fallback_llm_provider: editMetabot.fallback_llm_provider || '',
+  fallback_llm_effort: editMetabot.fallback_llm_effort || '',
   allow_chat_skills: editMetabot.allow_chat_skills || [],
   a2a_max_incoming_turns: normalizeA2AMaxIncomingTurnsOption(editMetabot.a2a_max_incoming_turns),
   a2a_bye_cooldown_ms: normalizeA2AByeCooldownMsOption(editMetabot.a2a_bye_cooldown_ms),
@@ -294,7 +296,11 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const result = await window.electron.idbots.createMetaBotOnChain({
       name: values.name.trim(),
       llm_id: values.llm_id.trim() || null,
+      llm_provider: values.llm_provider.trim() || null,
+      llm_effort: values.llm_effort.trim() || null,
       fallback_llm_id: values.fallback_llm_id.trim() || null,
+      fallback_llm_provider: values.fallback_llm_provider.trim() || null,
+      fallback_llm_effort: values.fallback_llm_effort.trim() || null,
     });
     if (!result.success || !result.metabot) {
       setCreateChainStatus('error');
@@ -353,9 +359,13 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
     const nextLlmRaw = scopedValues.llm_id.trim();
     // fallback_llm_id is a first-class Basic-tab field; only send it when the
     // Basic tab owns it (other tabs keep it pinned to the current DB value).
+    const nextLlmProviderRaw = scopedValues.llm_provider.trim();
+    const nextLlmEffortRaw = scopedValues.llm_effort.trim();
     const valuesFallbackLlm = scopedValues.fallback_llm_id;
     const hasFallbackLlmValue = valuesFallbackLlm !== undefined;
     const nextFallbackLlmRaw = hasFallbackLlmValue ? (valuesFallbackLlm ?? '').trim() : '';
+    const nextFallbackLlmProviderRaw = hasFallbackLlmValue ? scopedValues.fallback_llm_provider.trim() : '';
+    const nextFallbackLlmEffortRaw = hasFallbackLlmValue ? scopedValues.fallback_llm_effort.trim() : '';
     const nextAllowChatSkills = normalizeAllowChatSkills(scopedValues.allow_chat_skills);
     const nextA2aMaxIncomingTurns = normalizeA2AMaxIncomingTurnsOption(scopedValues.a2a_max_incoming_turns);
     const nextA2aByeCooldownMs = normalizeA2AByeCooldownMsOption(scopedValues.a2a_bye_cooldown_ms);
@@ -377,7 +387,12 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       nextBioRaw === (current.bio || current.background || '').trim() &&
       nextBossGlobalMetaId === ((current.boss_global_metaid ?? '').trim() || null) &&
       nextLlmRaw === (current.llm_id || '').trim() &&
-      (!hasFallbackLlmValue || nextFallbackLlmRaw === (current.fallback_llm_id || '').trim()) &&
+      nextLlmProviderRaw === (current.llm_provider || '').trim() &&
+      nextLlmEffortRaw === (current.llm_effort || '') &&
+      (!hasFallbackLlmValue
+        || (nextFallbackLlmRaw === (current.fallback_llm_id || '').trim()
+          && nextFallbackLlmProviderRaw === (current.fallback_llm_provider || '').trim()
+          && nextFallbackLlmEffortRaw === (current.fallback_llm_effort || ''))) &&
       JSON.stringify(nextAllowChatSkills) === JSON.stringify(normalizeAllowChatSkills(current.allow_chat_skills)) &&
       nextA2aMaxIncomingTurns === normalizeA2AMaxIncomingTurnsOption(current.a2a_max_incoming_turns) &&
       nextA2aByeCooldownMs === normalizeA2AByeCooldownMsOption(current.a2a_bye_cooldown_ms) &&
@@ -400,7 +415,15 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
-      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
+      llm_provider: nextLlmProviderRaw || null,
+      llm_effort: nextLlmEffortRaw || null,
+      ...(hasFallbackLlmValue
+        ? {
+          fallback_llm_id: nextFallbackLlmRaw || null,
+          fallback_llm_provider: nextFallbackLlmProviderRaw || null,
+          fallback_llm_effort: nextFallbackLlmEffortRaw || null,
+        }
+        : {}),
       allow_chat_skills: nextAllowChatSkills,
       a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
       a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
@@ -423,7 +446,15 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
       boss_id: nextBossId,
       boss_global_metaid: nextBossGlobalMetaId,
       llm_id: nextLlmRaw || null,
-      ...(hasFallbackLlmValue ? { fallback_llm_id: nextFallbackLlmRaw || null } : {}),
+      llm_provider: nextLlmProviderRaw || null,
+      llm_effort: nextLlmEffortRaw || null,
+      ...(hasFallbackLlmValue
+        ? {
+          fallback_llm_id: nextFallbackLlmRaw || null,
+          fallback_llm_provider: nextFallbackLlmProviderRaw || null,
+          fallback_llm_effort: nextFallbackLlmEffortRaw || null,
+        }
+        : {}),
       allow_chat_skills: nextAllowChatSkills,
       a2a_max_incoming_turns: nextA2aMaxIncomingTurns,
       a2a_bye_cooldown_ms: nextA2aByeCooldownMs,
@@ -477,16 +508,14 @@ const MetabotsManager: React.FC<MetabotsManagerProps> = ({
   }, []);
 
   const llmOptions = useMemo((): LlmOption[] => {
-    const config = configService.getConfig();
-    const providers = (config.providers ?? {}) as Record<string, { enabled?: boolean; apiKey?: string }>;
-    const configured: LlmOption[] = [];
-    for (const key of ALL_PROVIDER_KEYS) {
-      const p = providers[key];
-      if (!p?.enabled) continue;
-      if (providerRequiresApiKey(key) && !(p.apiKey ?? '').trim()) continue;
-      configured.push({ id: key, label: providerLabel(key) });
-    }
-    return configured;
+    // Dynamic catalog: every usable provider from app_config — built-in AND
+    // custom-* providers added on the Settings > Models page. The picker lists
+    // models; this provider-level list remains for empty-state detection and
+    // any provider-key fallback UI.
+    return buildModelGroupsFromConfig(configService.getConfig()).map((group) => ({
+      id: group.id,
+      label: group.name,
+    }));
   }, [settingsClosedTrigger]);
 
   if (viewMode === 'add') {
