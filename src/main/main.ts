@@ -105,6 +105,7 @@ import {
   listConfiguredLlmProviders,
   listMetabotsForManagement,
   requireMetabotLlmIdForCreate,
+  normalizeMetabotLlmEffort,
   assertCanCreateMetabot,
   updateMetaBotCore,
   type MetabotManageDeps,
@@ -9803,6 +9804,8 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     allow_chat_skills?: string[];
   }) => {
     try {
@@ -9840,6 +9843,8 @@ if (!gotTheLock) {
         boss_id: input.boss_id ?? null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(input.llm_effort),
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
@@ -9865,7 +9870,11 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     fallback_llm_id?: string | null;
+    fallback_llm_provider?: string | null;
+    fallback_llm_effort?: string | null;
     allow_chat_skills?: string[];
     a2a_max_incoming_turns?: number | null;
     a2a_bye_cooldown_ms?: number | null;
@@ -9920,6 +9929,8 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker' | 'welcome';
   }) => {
@@ -9957,6 +9968,8 @@ if (!gotTheLock) {
         boss_id: null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(input.llm_effort),
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
@@ -9991,8 +10004,14 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
-    /** Optional fallback LLM provider key (unlike llm_id it is never required). */
+    /** Provider key the brain model was picked from. */
+    llm_provider?: string | null;
+    /** Reasoning effort for the primary brain (off/low/high/max). */
+    llm_effort?: string | null;
+    /** Optional fallback brain (unlike llm_id it is never required). */
     fallback_llm_id?: string | null;
+    fallback_llm_provider?: string | null;
+    fallback_llm_effort?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker';
     homepage?: string | null;

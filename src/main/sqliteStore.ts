@@ -1664,6 +1664,10 @@ export class SqliteStore {
     // One-shot migration: normalize metabot_type, collapse duplicate twins, and
     // promote the earliest bot when no twin exists (unique-Twin backfill).
     this.migrateMetabotTwinBackfill();
+    // Migration: add model-level LLM brain columns (provider disambiguation +
+    // reasoning effort for both brains). Runs after every table-rebuilding
+    // migration so the ALTERs always land on the final metabots table.
+    this.migrateMetabotLlmBrainColumns();
     // Migration: persist user-identity bootstrap state (subsidy + per-pin sync status)
     // so chain setup can be resumed/retried idempotently after failures.
     this.migrateUserIdentitySetupColumns();
@@ -2941,6 +2945,43 @@ export class SqliteStore {
       this.save();
     } catch (error) {
       console.warn('migrateMetabotFallbackLlmId:', error);
+    }
+  }
+
+  /**
+   * Migration: model-level LLM brains. llm_id/fallback_llm_id move from
+   * storing a provider key to storing a model id (legacy provider-key values
+   * keep resolving at call time and are NOT rewritten); the new columns pin
+   * the provider the model was picked from (id-collision disambiguation) and
+   * the per-brain reasoning effort (off/low/high/max, NULL = model default).
+   *
+   * The columns are deliberately absent from the fresh-database CREATE TABLE
+   * DDL and always land via this ALTER: the earlier one-shot rebuild
+   * migrations (info-pinid / chat-pubkey / welcome-type) re-create the table
+   * from an explicit column list and would drop columns they do not know
+   * about. Running last keeps one source of truth for both fresh and legacy
+   * databases.
+   */
+  private migrateMetabotLlmBrainColumns(): void {
+    try {
+      const colsResult = this.db.exec('PRAGMA table_info(metabots)');
+      let columns = (colsResult[0]?.values?.map((row) => row[1]) || []) as string[];
+      let changed = false;
+      const addColumn = (name: string) => {
+        if (columns.includes(name)) return;
+        this.db.run(`ALTER TABLE metabots ADD COLUMN ${name} TEXT`);
+        columns = [...columns, name];
+        changed = true;
+      };
+      addColumn('llm_provider');
+      addColumn('llm_effort');
+      addColumn('fallback_llm_provider');
+      addColumn('fallback_llm_effort');
+      if (changed) {
+        this.save();
+      }
+    } catch (error) {
+      console.warn('migrateMetabotLlmBrainColumns:', error);
     }
   }
 

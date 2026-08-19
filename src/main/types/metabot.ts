@@ -37,9 +37,21 @@ export interface Metabot {
   boss_global_metaid: string | null;
   /** Pin id of the signed /info/owner binding; null = no signed binding (legacy unsigned claim). */
   owner_binding_pinid: string | null;
+  /**
+   * Primary LLM brain. New rows store a model id; legacy rows may still hold a
+   * provider key (resolved to the provider's default model at call time).
+   */
   llm_id: string | null;
-  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  /** Provider key the brain model was picked from; disambiguates colliding model ids. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max); null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain; same value semantics as llm_id (model id or legacy provider key). */
   fallback_llm_id?: string | null;
+  /** Provider key for the fallback brain model. */
+  fallback_llm_provider?: string | null;
+  /** Reasoning effort for the fallback brain; null = model default. */
+  fallback_llm_effort?: string | null;
   /** Allowed tool ids; stored as JSON array in DB */
   tools: string[];
   /** Allowed skill ids; stored as JSON array in DB */
@@ -85,8 +97,16 @@ export interface MetabotInsert {
   boss_global_metaid?: string | null;
   owner_binding_pinid?: string | null;
   llm_id?: string | null;
-  /** Optional fallback LLM provider key. */
+  /** Provider key the brain model was picked from. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain; null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain (model id or legacy provider key). */
   fallback_llm_id?: string | null;
+  /** Provider key for the fallback brain model. */
+  fallback_llm_provider?: string | null;
+  /** Reasoning effort for the fallback brain; null = model default. */
+  fallback_llm_effort?: string | null;
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];
@@ -121,8 +141,16 @@ export interface MetabotUpdate {
   boss_global_metaid?: string | null;
   owner_binding_pinid?: string | null;
   llm_id?: string | null;
-  /** Optional fallback LLM provider key. */
+  /** Provider key the brain model was picked from. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain; null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain (model id or legacy provider key). */
   fallback_llm_id?: string | null;
+  /** Provider key for the fallback brain model. */
+  fallback_llm_provider?: string | null;
+  /** Reasoning effort for the fallback brain; null = model default. */
+  fallback_llm_effort?: string | null;
   tools?: string[];
   skills?: string[];
   allow_chat_skills?: string[];

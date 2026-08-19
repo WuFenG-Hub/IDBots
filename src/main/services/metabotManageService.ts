@@ -15,6 +15,7 @@ import type { MetabotStore } from '../metabotStore';
 import type { Metabot } from '../types/metabot';
 import { getMetabotLimitError } from '../shared/metabotLimit';
 import { normalizeMetabotLlmId } from './llmFallback';
+import { toLlmEffortLevel } from '../libs/llmEffort';
 
 // ---------------------------------------------------------------------------
 // Input shapes (mirror the IPC handler payloads; local to avoid cross-module coupling)
@@ -32,8 +33,14 @@ export interface CreateMetaBotOnChainInput {
   boss_id?: number | null;
   boss_global_metaid?: string | null;
   llm_id?: string | null;
-  /** Optional fallback LLM provider key (never required). */
+  /** Provider key the brain model was picked from (id-collision disambiguation). */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max); null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain (model id or legacy provider key; never required). */
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   allow_chat_skills?: string[];
   metabot_type?: 'twin' | 'worker';
   homepage?: string | null;
@@ -53,7 +60,11 @@ export interface UpdateMetaBotInput {
   boss_id?: number | null;
   boss_global_metaid?: string | null;
   llm_id?: string | null;
+  llm_provider?: string | null;
+  llm_effort?: string | null;
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   allow_chat_skills?: string[];
   a2a_max_incoming_turns?: number | null;
   a2a_bye_cooldown_ms?: number | null;
@@ -205,13 +216,21 @@ export interface LlmProviderOption {
 // Small shared helpers (also reused by main.ts)
 // ---------------------------------------------------------------------------
 
-/** Validate + normalize the required primary LLM provider key for creation. */
+/** Validate + normalize the required primary LLM brain value for creation. */
 export function requireMetabotLlmIdForCreate(value: unknown): string {
   const llmId = typeof value === 'string' ? value.trim() : '';
   if (!llmId) {
     throw new Error('LLM Brain is required when creating a MetaBot');
   }
   return llmId;
+}
+
+/**
+ * Normalize a brain reasoning-effort value for storage onto the app-wide
+ * off/low/high/max ladder (see llmEffort.ts); null/unknown means "model default".
+ */
+export function normalizeMetabotLlmEffort(value: unknown): string | null {
+  return toLlmEffortLevel(value);
 }
 
 /** Throw the limit-reached error when the machine already holds the max bot count. */
@@ -302,7 +321,11 @@ export async function createMetaBotOnChainCore(
       boss_id: null,
       boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
       llm_id: llmId,
+      llm_provider: normalizeMetabotLlmId(input.llm_provider),
+      llm_effort: normalizeMetabotLlmEffort(input.llm_effort),
       fallback_llm_id: fallbackLlmId,
+      fallback_llm_provider: normalizeMetabotLlmId(input.fallback_llm_provider),
+      fallback_llm_effort: normalizeMetabotLlmEffort(input.fallback_llm_effort),
       tools: [],
       skills: [],
       allow_chat_skills: input.allow_chat_skills ?? [],
@@ -391,10 +414,26 @@ export function applyMetabotUpdateLocal(
         input.boss_global_metaid === undefined
           ? undefined
           : ((input.boss_global_metaid ?? '').trim() || null),
+      llm_provider:
+        input.llm_provider === undefined
+          ? undefined
+          : normalizeMetabotLlmId(input.llm_provider),
+      llm_effort:
+        input.llm_effort === undefined
+          ? undefined
+          : normalizeMetabotLlmEffort(input.llm_effort),
       fallback_llm_id:
         input.fallback_llm_id === undefined
           ? undefined
           : normalizeMetabotLlmId(input.fallback_llm_id),
+      fallback_llm_provider:
+        input.fallback_llm_provider === undefined
+          ? undefined
+          : normalizeMetabotLlmId(input.fallback_llm_provider),
+      fallback_llm_effort:
+        input.fallback_llm_effort === undefined
+          ? undefined
+          : normalizeMetabotLlmEffort(input.fallback_llm_effort),
     });
     return { success: true, metabot };
   } catch (error) {

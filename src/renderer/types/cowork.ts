@@ -320,6 +320,8 @@ export interface CoworkSession {
   permissionMode?: CoworkPermissionMode;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   /** Accumulated token/cost usage (computed by the main process, not persisted). */
   usageStats?: CoworkUsageStats | null;
 }
@@ -609,6 +611,8 @@ export interface CoworkSessionSummary {
   browserTitle?: string | null;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 

@@ -630,6 +630,8 @@ export interface CoworkSession {
   permissionMode?: CoworkPermissionMode;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   /** Source session id when this session was created by forking another session. */
   parentSessionId?: string | null;
   /** The source session's message id this fork was created from. */
@@ -675,6 +677,8 @@ export interface CoworkSessionSummary {
   browserTitle?: string | null;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   hiddenFromSessionList?: boolean;
 }
 
@@ -1104,6 +1108,11 @@ export class CoworkStore implements MemoryBackend {
       if (!sessionColumns.includes('model')) {
         // Per-session model override (NULL = inherit the global default model).
         this.db.run('ALTER TABLE cowork_sessions ADD COLUMN model TEXT;');
+        changed = true;
+      }
+      if (!sessionColumns.includes('effort')) {
+        // Per-session reasoning effort (off/low/high/max; NULL = model default chain).
+        this.db.run('ALTER TABLE cowork_sessions ADD COLUMN effort TEXT;');
         changed = true;
       }
       if (!sessionColumns.includes('peer_global_metaid')) {
@@ -2777,15 +2786,17 @@ export class CoworkStore implements MemoryBackend {
     peerGlobalMetaId: string | null = null,
     peerName: string | null = null,
     peerAvatar: string | null = null,
-    permissionMode: CoworkPermissionMode = 'default'
+    permissionMode: CoworkPermissionMode = 'default',
+    model: string | null = null,
+    effort: string | null = null
   ): CoworkSession {
     const id = uuidv4();
     const now = Date.now();
 
     this.db.run(`
-      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, created_at, updated_at)
-      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, now, now]);
+      INSERT INTO cowork_sessions (id, title, claude_session_id, status, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id, pinned, session_type, peer_global_metaid, peer_name, peer_avatar, permission_mode, model, effort, created_at, updated_at)
+      VALUES (?, ?, NULL, 'idle', ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [id, title, cwd, systemPrompt, executionMode, JSON.stringify(activeSkillIds), metabotId, sessionType, peerGlobalMetaId, peerName, peerAvatar, permissionMode, model, effort, now, now]);
 
     this.upsertConversationMapping({
       channel: 'cowork_ui',
@@ -2816,6 +2827,8 @@ export class CoworkStore implements MemoryBackend {
       peerName,
       peerAvatar,
       permissionMode,
+      model,
+      effort,
     };
   }
 
@@ -2872,13 +2885,14 @@ export class CoworkStore implements MemoryBackend {
       parent_session_id?: string | null;
       fork_point_message_id?: string | null;
       model?: string | null;
+      effort?: string | null;
       created_at: number;
       updated_at: number;
     }
 
     const row = this.getOne<SessionRow>(`
       SELECT id, title, claude_session_id, status, pinned, cwd, system_prompt, execution_mode, active_skill_ids, metabot_id,
-             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, created_at, updated_at
+             session_type, peer_global_metaid, peer_name, peer_avatar, browser_uri, browser_title, hidden_from_session_list, permission_mode, parent_session_id, fork_point_message_id, model, effort, created_at, updated_at
       FROM cowork_sessions
       WHERE id = ?
     `, [id]);
@@ -2931,6 +2945,7 @@ export class CoworkStore implements MemoryBackend {
       parentSessionId: row.parent_session_id ?? null,
       forkPointMessageId: row.fork_point_message_id ?? null,
       model: row.model ?? null,
+      effort: row.effort ?? null,
       metabotName,
       metabotAvatar,
     };
@@ -3126,13 +3141,24 @@ export class CoworkStore implements MemoryBackend {
    * Per-session model override. null clears the override so the session falls
    * back to the global default model again. The choice only affects this
    * session — other (running or idle) cowork sessions are untouched.
+   * `effort` (optional) updates the per-session reasoning effort in the same
+   * write; undefined leaves the stored effort untouched.
    */
-  setSessionModel(id: string, model: string | null): void {
-    this.db.run('UPDATE cowork_sessions SET model = ?, updated_at = ? WHERE id = ?', [
-      model,
-      Date.now(),
-      id,
-    ]);
+  setSessionModel(id: string, model: string | null, effort?: string | null): void {
+    if (effort === undefined) {
+      this.db.run('UPDATE cowork_sessions SET model = ?, updated_at = ? WHERE id = ?', [
+        model,
+        Date.now(),
+        id,
+      ]);
+    } else {
+      this.db.run('UPDATE cowork_sessions SET model = ?, effort = ?, updated_at = ? WHERE id = ?', [
+        model,
+        effort,
+        Date.now(),
+        id,
+      ]);
+    }
     this.saveDb();
   }
 
@@ -3207,6 +3233,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       model?: string | null;
+      effort?: string | null;
       created_at: number;
       updated_at: number;
       activity_at?: number | null;
@@ -3230,6 +3257,7 @@ export class CoworkStore implements MemoryBackend {
         s.browser_title,
         s.hidden_from_session_list,
         s.model,
+        s.effort,
         s.created_at,
         s.updated_at,
         -- Sort by the LAST USER MESSAGE time (fixed once a turn is sent), not
@@ -3275,6 +3303,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       model: row.model ?? null,
+      effort: row.effort ?? null,
     }));
   }
 
@@ -3372,6 +3401,7 @@ export class CoworkStore implements MemoryBackend {
       browser_title?: string | null;
       hidden_from_session_list?: number | null;
       model?: string | null;
+      effort?: string | null;
       archived_at: number;
       created_at: number;
       updated_at: number;
@@ -3384,7 +3414,7 @@ export class CoworkStore implements MemoryBackend {
     const rows = this.getAll<ArchivedSessionRow>(`
       SELECT
         s.id, s.title, s.status, s.pinned, s.metabot_id, s.session_type, s.peer_name,
-        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model,
+        s.browser_uri, s.browser_title, s.hidden_from_session_list, s.model, s.effort,
         s.archived_at, s.created_at, s.updated_at
       FROM cowork_sessions s
       WHERE ${clauses.join(' AND ')}
@@ -3407,6 +3437,7 @@ export class CoworkStore implements MemoryBackend {
       browserTitle: row.browser_title ?? null,
       hiddenFromSessionList: Boolean(row.hidden_from_session_list),
       model: row.model ?? null,
+      effort: row.effort ?? null,
     }));
   }
 

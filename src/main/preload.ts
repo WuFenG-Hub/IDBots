@@ -811,6 +811,8 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
     }) => ipcRenderer.invoke('idbots:addMetaBot', input),
@@ -879,7 +881,11 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       fallback_llm_id?: string | null;
+      fallback_llm_provider?: string | null;
+      fallback_llm_effort?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
       homepage?: string | null;
@@ -933,6 +939,8 @@ contextBridge.exposeInMainWorld('electron', {
       background?: string | null;
       boss_id?: number | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
     }) => ipcRenderer.invoke('metabot:create', input),
     update: (id: number, input: {
       name?: string;
@@ -948,7 +956,11 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       fallback_llm_id?: string | null;
+      fallback_llm_provider?: string | null;
+      fallback_llm_effort?: string | null;
       homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),

@@ -54,7 +54,11 @@ interface MetabotRow {
   boss_global_metaid: string | null;
   owner_binding_pinid?: string | null;
   llm_id: string | null;
+  llm_provider?: string | null;
+  llm_effort?: string | null;
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   tools: string;
   skills: string;
   allow_chat_skills: string;
@@ -128,7 +132,11 @@ function rowToMetabot(row: MetabotRow): Metabot {
     boss_global_metaid: row.boss_global_metaid ?? null,
     owner_binding_pinid: row.owner_binding_pinid ?? null,
     llm_id: row.llm_id ?? null,
+    llm_provider: row.llm_provider ?? null,
+    llm_effort: row.llm_effort ?? null,
     fallback_llm_id: row.fallback_llm_id ?? null,
+    fallback_llm_provider: row.fallback_llm_provider ?? null,
+    fallback_llm_effort: row.fallback_llm_effort ?? null,
     tools: parseJsonArray(row.tools),
     skills: parseJsonArray(row.skills),
     allow_chat_skills: parseJsonArray(row.allow_chat_skills),
@@ -409,6 +417,10 @@ export class MetabotStore {
       input.owner_binding_pinid ?? null,
       input.llm_id ?? null,
       input.fallback_llm_id ?? null,
+      input.llm_provider ?? null,
+      input.llm_effort ?? null,
+      input.fallback_llm_provider ?? null,
+      input.fallback_llm_effort ?? null,
       toolsJson,
       skillsJson,
       allowChatSkillsJson,
@@ -421,8 +433,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar_blob, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, llm_provider, llm_effort, fallback_llm_provider, fallback_llm_effort, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     } else {
@@ -430,8 +442,8 @@ export class MetabotStore {
         `INSERT INTO metabots (
           wallet_id, mvc_address, btc_address, doge_address, public_key, chat_public_key, chat_public_key_pin_id,
           name, avatar, enabled, metaid, globalmetaid, metabot_info_pinid, metabot_type, created_by,
-          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, tools, skills, allow_chat_skills, homepage, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          role, soul, goal, bio, background, boss_id, boss_global_metaid, owner_binding_pinid, llm_id, fallback_llm_id, llm_provider, llm_effort, fallback_llm_provider, fallback_llm_effort, tools, skills, allow_chat_skills, homepage, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         params
       );
     }
@@ -474,7 +486,11 @@ export class MetabotStore {
       boss_global_metaid: input.boss_global_metaid ?? null,
       owner_binding_pinid: input.owner_binding_pinid ?? null,
       llm_id: input.llm_id ?? null,
+      llm_provider: input.llm_provider ?? null,
+      llm_effort: input.llm_effort ?? null,
       fallback_llm_id: input.fallback_llm_id ?? null,
+      fallback_llm_provider: input.fallback_llm_provider ?? null,
+      fallback_llm_effort: input.fallback_llm_effort ?? null,
       tools: input.tools ?? [],
       skills: input.skills ?? [],
       allow_chat_skills: input.allow_chat_skills ?? [],
@@ -522,6 +538,18 @@ export class MetabotStore {
     const homepage = input.homepage !== undefined ? input.homepage : existing.homepage;
     const fallbackLlmId =
       input.fallback_llm_id !== undefined ? input.fallback_llm_id : (existing.fallback_llm_id ?? null);
+    const llmProvider =
+      input.llm_provider !== undefined ? input.llm_provider : (existing.llm_provider ?? null);
+    const llmEffort =
+      input.llm_effort !== undefined ? input.llm_effort : (existing.llm_effort ?? null);
+    const fallbackLlmProvider =
+      input.fallback_llm_provider !== undefined
+        ? input.fallback_llm_provider
+        : (existing.fallback_llm_provider ?? null);
+    const fallbackLlmEffort =
+      input.fallback_llm_effort !== undefined
+        ? input.fallback_llm_effort
+        : (existing.fallback_llm_effort ?? null);
     // Canonicalize selectable A2A chat limits on write; undefined keeps the stored value.
     const a2aMaxIncomingTurns =
       input.a2a_max_incoming_turns !== undefined
@@ -546,7 +574,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar_blob = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, llm_provider = ?, llm_effort = ?, fallback_llm_provider = ?, fallback_llm_effort = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -574,6 +602,10 @@ export class MetabotStore {
           input.owner_binding_pinid !== undefined ? input.owner_binding_pinid : existing.owner_binding_pinid,
           input.llm_id !== undefined ? input.llm_id : existing.llm_id,
           fallbackLlmId,
+          llmProvider,
+          llmEffort,
+          fallbackLlmProvider,
+          fallbackLlmEffort,
           toolsJson,
           skillsJson,
           allowChatSkillsJson,
@@ -590,7 +622,7 @@ export class MetabotStore {
         `UPDATE metabots SET
           wallet_id = ?, mvc_address = ?, btc_address = ?, doge_address = ?, public_key = ?, chat_public_key = ?, chat_public_key_pin_id = ?,
           name = ?, avatar = ?, enabled = ?, metaid = ?, globalmetaid = ?, metabot_info_pinid = ?, metabot_type = ?, created_by = ?,
-          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
+          role = ?, soul = ?, goal = ?, bio = ?, background = ?, boss_id = ?, boss_global_metaid = ?, owner_binding_pinid = ?, llm_id = ?, fallback_llm_id = ?, llm_provider = ?, llm_effort = ?, fallback_llm_provider = ?, fallback_llm_effort = ?, tools = ?, skills = ?, allow_chat_skills = ?, a2a_max_incoming_turns = ?, a2a_bye_cooldown_ms = ?, a2a_auto_reply_enabled = ?, homepage = ?, updated_at = ?
         WHERE id = ?`,
         [
           input.wallet_id ?? existing.wallet_id,
@@ -618,6 +650,10 @@ export class MetabotStore {
           input.owner_binding_pinid !== undefined ? input.owner_binding_pinid : existing.owner_binding_pinid,
           input.llm_id !== undefined ? input.llm_id : existing.llm_id,
           fallbackLlmId,
+          llmProvider,
+          llmEffort,
+          fallbackLlmProvider,
+          fallbackLlmEffort,
           toolsJson,
           skillsJson,
           allowChatSkillsJson,

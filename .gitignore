@@ -271,3 +271,4 @@ man_base_data_pebble/
 # dev-only isolated user-data dirs for "npm run electron:dev:fresh" (new-user simulation)
 .dev-userdata-fresh/
 .dev-appdata-fresh/
+!tests/metabotLlmBrainMigration.test.mjs
