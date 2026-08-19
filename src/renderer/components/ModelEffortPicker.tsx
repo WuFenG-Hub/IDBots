@@ -1,0 +1,281 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, CheckIcon, CpuChipIcon } from '@heroicons/react/24/outline';
+import { i18nService } from '../services/i18n';
+import { configService } from '../services/config';
+import {
+  buildModelGroupsFromConfig,
+  resolveBrainModelInGroups,
+  type CatalogProviderGroup,
+  type LlmEffortLevel,
+} from '../services/modelCatalog';
+
+/**
+ * Shared "model + reasoning effort" picker (DSH ui-model-selection style).
+ *
+ * A three-pane popover: the root pane holds a Model row and an Effort row;
+ * each drills into its own list. The model list groups every usable provider
+ * from app_config — built-in AND custom-* providers — but the user only ever
+ * picks a model; the provider rides along implicitly. The effort ladder is
+ * the app-wide off/low/high/max vocabulary (null = model default).
+ */
+
+export interface ModelEffortValue {
+  /** Selected model id; null when nothing has been chosen yet. */
+  modelId: string | null;
+  /** Provider key the model was picked from (disambiguates colliding model ids). */
+  providerKey?: string | null;
+  effort: LlmEffortLevel | null;
+}
+
+interface ModelEffortPickerProps {
+  value: ModelEffortValue;
+  onChange: (value: ModelEffortValue) => void;
+  dropdownDirection?: 'up' | 'down';
+  /** Icon-only trigger for compact toolbars (Bot Browser); the model name still shows in the tooltip. */
+  compact?: boolean;
+  disabled?: boolean;
+  /** Trigger label when no model is selected/resolvable. */
+  placeholder?: string;
+  /** Global default model id, used to resolve legacy provider-key brains for display. */
+  globalDefaultModel?: string | null;
+}
+
+type Pane = 'root' | 'model' | 'effort';
+
+const EFFORT_OPTIONS: Array<{ value: LlmEffortLevel | null; labelKey: string; descKey: string }> = [
+  { value: null, labelKey: 'modelPickerEffortDefault', descKey: 'modelPickerEffortDefaultDesc' },
+  { value: 'off', labelKey: 'modelPickerEffortOff', descKey: 'modelPickerEffortOffDesc' },
+  { value: 'low', labelKey: 'modelPickerEffortLow', descKey: 'modelPickerEffortLowDesc' },
+  { value: 'high', labelKey: 'modelPickerEffortHigh', descKey: 'modelPickerEffortHighDesc' },
+  { value: 'max', labelKey: 'modelPickerEffortMax', descKey: 'modelPickerEffortMaxDesc' },
+];
+
+const effortLabel = (effort: LlmEffortLevel | null): string =>
+  effort == null ? i18nService.t('modelPickerEffortDefault') : i18nService.t(`modelPickerEffort${effort[0].toUpperCase()}${effort.slice(1)}`);
+
+const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
+  value,
+  onChange,
+  dropdownDirection = 'down',
+  compact = false,
+  disabled = false,
+  placeholder,
+  globalDefaultModel = null,
+}) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const [pane, setPane] = useState<Pane>('root');
+  const containerRef = React.useRef<HTMLDivElement>(null);
+
+  // Catalog freshness: rebuild when the popover opens and whenever the
+  // Settings dialog closes (providers may have been added/edited there).
+  const [settingsClosedTrigger, setSettingsClosedTrigger] = useState(0);
+  useEffect(() => {
+    const handler = () => setSettingsClosedTrigger((n) => n + 1);
+    window.addEventListener('app:settingsClosed', handler);
+    return () => window.removeEventListener('app:settingsClosed', handler);
+  }, []);
+
+  const groups = useMemo((): CatalogProviderGroup[] => {
+    void isOpen;
+    void settingsClosedTrigger;
+    return buildModelGroupsFromConfig(configService.getConfig());
+  }, [isOpen, settingsClosedTrigger]);
+
+  const resolved = useMemo(
+    () => resolveBrainModelInGroups(groups, value.modelId, value.providerKey, globalDefaultModel),
+    [groups, value.modelId, value.providerKey, globalDefaultModel],
+  );
+
+  const currentModelName = resolved
+    ? resolved.model.name
+    : value.modelId ?? placeholder ?? i18nService.t('modelPickerChooseModel');
+  const currentEffort = value.effort ?? null;
+
+  React.useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+        setPane('root');
+      }
+    };
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen]);
+
+  const openPicker = () => {
+    if (disabled) return;
+    setIsOpen((open) => !open);
+    setPane('root');
+  };
+
+  const handleModelSelect = (providerKey: string, modelId: string) => {
+    onChange({ modelId, providerKey, effort: currentEffort });
+    // Back to the root pane so the effort can follow in the same interaction.
+    setPane('root');
+  };
+
+  const handleEffortSelect = (effort: LlmEffortLevel | null) => {
+    onChange({
+      modelId: resolved?.model.id ?? value.modelId,
+      providerKey: resolved?.providerKey ?? value.providerKey ?? null,
+      effort,
+    });
+    setIsOpen(false);
+    setPane('root');
+  };
+
+  if (groups.length === 0) {
+    return (
+      <div
+        className="px-3 py-1.5 rounded-xl dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkTextSecondary text-claude-textSecondary text-sm"
+        title={i18nService.t('modelPickerNoModels')}
+      >
+        {compact ? <CpuChipIcon className="h-4 w-4" /> : i18nService.t('modelPickerNoModels')}
+      </div>
+    );
+  }
+
+  const dropdownPositionClass = dropdownDirection === 'up' ? 'bottom-full mb-1' : 'top-full mt-1';
+  const paneTitle = pane === 'model'
+    ? i18nService.t('modelPickerModelLabel')
+    : pane === 'effort'
+      ? i18nService.t('modelPickerEffortLabel')
+      : '';
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={openPicker}
+        disabled={disabled}
+        className={compact
+          ? `shrink-0 inline-flex items-center p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text' : ''}`
+          : `flex items-center gap-2 px-3 py-1.5 rounded-xl dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover' : ''}`
+        }
+        title={`${currentModelName} · ${effortLabel(currentEffort)}`}
+        aria-label={`${i18nService.t('modelPickerModelLabel')}: ${currentModelName}, ${i18nService.t('modelPickerEffortLabel')}: ${effortLabel(currentEffort)}`}
+      >
+        {compact ? (
+          <CpuChipIcon className="h-4 w-4" />
+        ) : (
+          <>
+            <span className="font-medium text-sm truncate max-w-44">{currentModelName}</span>
+            {!resolved && value.modelId && (
+              <span className="text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
+            )}
+            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5">
+              {effortLabel(currentEffort)}
+            </span>
+          </>
+        )}
+        <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+      </button>
+
+      {isOpen && (
+        <div
+          className={`absolute ${dropdownPositionClass} left-0 w-72 dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
+        >
+          {pane !== 'root' && (
+            <div className="flex items-center gap-2 px-3 py-2 dark:border-claude-darkBorder border-b border-claude-border">
+              <button
+                type="button"
+                onClick={() => setPane('root')}
+                className="p-1 rounded-lg dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkTextSecondary text-claude-textSecondary cursor-pointer"
+                aria-label={i18nService.t('cancel')}
+              >
+                <ChevronLeftIcon className="h-4 w-4" />
+              </button>
+              <span className="text-sm font-medium dark:text-claude-darkText text-claude-text">{paneTitle}</span>
+            </div>
+          )}
+
+          {pane === 'root' && (
+            <div className="py-1">
+              <button
+                type="button"
+                onClick={() => setPane('model')}
+                className="w-full px-4 py-2.5 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover flex items-center justify-between gap-2 transition-colors cursor-pointer"
+              >
+                <div className="flex flex-col min-w-0">
+                  <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('modelPickerModelLabel')}</span>
+                  <span className="text-sm dark:text-claude-darkText text-claude-text truncate">
+                    {currentModelName}
+                    {!resolved && value.modelId && (
+                      <span className="ml-1 text-xs dark:text-red-400 text-red-500">{i18nService.t('modelPickerUnavailable')}</span>
+                    )}
+                  </span>
+                </div>
+                <ChevronRightIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setPane('effort')}
+                className="w-full px-4 py-2.5 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover flex items-center justify-between gap-2 transition-colors cursor-pointer"
+              >
+                <div className="flex flex-col min-w-0">
+                  <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t('modelPickerEffortLabel')}</span>
+                  <span className="text-sm dark:text-claude-darkText text-claude-text truncate">{effortLabel(currentEffort)}</span>
+                </div>
+                <ChevronRightIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+              </button>
+            </div>
+          )}
+
+          {pane === 'model' && (
+            <div className="max-h-72 overflow-y-auto py-1">
+              {groups.map((group) => (
+                <div key={group.id} role="group" aria-label={group.name}>
+                  <div className="px-4 pt-2 pb-1 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                    {group.name}
+                  </div>
+                  {group.models.map((model) => {
+                    const selected = resolved?.providerKey === group.id && resolved.model.id === model.id;
+                    return (
+                      <button
+                        type="button"
+                        key={model.id}
+                        onClick={() => handleModelSelect(group.id, model.id)}
+                        className={`w-full px-4 py-2 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text flex items-center justify-between gap-2 transition-colors cursor-pointer ${selected ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
+                      >
+                        <span className="text-sm truncate">{model.name}</span>
+                        {selected && <CheckIcon className="h-4 w-4 shrink-0 text-claude-accent" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {pane === 'effort' && (
+            <div className="max-h-72 overflow-y-auto py-1">
+              {EFFORT_OPTIONS.map((option) => {
+                const selected = (value.effort ?? null) === option.value;
+                return (
+                  <button
+                    type="button"
+                    key={option.value ?? 'default'}
+                    onClick={() => handleEffortSelect(option.value)}
+                    className={`w-full px-4 py-2 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover flex items-center justify-between gap-2 transition-colors cursor-pointer ${selected ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
+                  >
+                    <div className="flex flex-col">
+                      <span className="text-sm dark:text-claude-darkText text-claude-text">{i18nService.t(option.labelKey)}</span>
+                      <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">{i18nService.t(option.descKey)}</span>
+                    </div>
+                    {selected && <CheckIcon className="h-4 w-4 shrink-0 text-claude-accent" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default ModelEffortPicker;

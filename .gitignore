@@ -258,6 +258,8 @@ man_base_data_pebble/
 !tests/appUpdateResumableDownload.test.mjs
 !tests/deepseekResponses.test.mjs
 !tests/deepseekReasoningRoundtrip.test.mjs
+!tests/llmEffort.test.mjs
+!tests/modelCatalog.test.ts
 !tests/avatarSource.test.mjs
 
 !tests/metabotSettingsService.test.mjs
