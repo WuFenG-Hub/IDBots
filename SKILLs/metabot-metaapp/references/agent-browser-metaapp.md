@@ -42,7 +42,7 @@ MetaApp ZIP 里的资源必须用相对路径。
 <a href="metaapp://6ea8a0bd0bac9a9c6cf4e035e9ce0a18e3a89f390c355dcc43074010fbee7ee7i0">Open MetaApp</a>
 ```
 
-但自定义 MetaApp 运行在 iframe 里时，点击不会自动冒泡到宿主 Browser，所以要接下面这个 helper。
+Bot Browser 在服务 MetaApp HTML 时会自动注入链接拦截脚本：`metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://` 锚点的点击会自动经宿主 Browser 导航，普通静态链接不需要任何额外脚本。只有当应用还要调用 bridge request API（`browser.actor.current`、`metaid.pin.write`、`metafile.upload`、`browser.llm.complete`、compose 流程）或需要程序化导航时，才需要下面这个 helper。
 
 ## 4. AgentBrowser Helper
 
@@ -211,7 +211,7 @@ const upload = await window.AgentBrowser.request({
 
 ## 8. MetaFile 图片解析
 
-当 MetaApp 要渲染远端图片字段（Bot homepage 头像、MetaApp icon / cover / gallery / section 缩略图）时，**除非宿主运行时明确声明原生支持 `metafile://` 图片**，否则必须先把 MetaFile 引用解析成浏览器可访问的图片 URL，再赋给 `<img src>`。
+Bot Browser 原生支持 `metafile://` 图片：静态 HTML 属性（`<img>`、`<video>`、`<audio>`、`<source>` 的 `src` / `srcset` / `poster`）可以直接写 `metafile://`，宿主在服务前会把它改写成可访问的内容 URL。改写只覆盖服务时已存在于 HTML 里的属性；**当 JavaScript 在运行时动态赋值图片（`img.src = ...`）时，改写不生效**，此时必须按下面的解析顺序把 MetaFile 引用解析成浏览器可访问的 URL。
 
 ### 解析顺序
 

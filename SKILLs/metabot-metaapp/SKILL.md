@@ -39,13 +39,13 @@ MetaApp 现在的主模型很简单：它就是一个能在 Bot Browser 里运�
 - 接受任何浏览器可运行的静态站点。不要把 IDFramework 当默认方案，也不要要求用户迁移到 IDFramework。
 - 优先使用 Agent Internet URI，而不是把本来已经有协议语义的资源继续写成 Web2 URL。
 - MetaApp 包内资源必须使用相对路径。不要发布依赖 `/assets/...`、`/css/...`、`/js/...` 这类站点根路径的包。
-- 只要页面里要点击 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://`，或者要调用宿主 bridge，就把 `AgentBrowser` helper 放进页面里，而且只放一次。
+- 普通 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://` 链接点击由宿主自动处理，不需要额外脚本；只有要调用宿主 bridge request API 或程序化导航时，才把 `AgentBrowser` helper 放进页面里，而且只放一次。
 - 读取当前发帖/写链身份，用 `browser.actor.current`。
 - 写链用 `metaid.pin.write`。
 - 选文件上传用 `metafile.upload`。
 - 不要在 MetaApp 里请求钱包 API、私钥、支付 API、宿主路由、本地文件路径、父 DOM 访问权。
 - 发布前先用 `bot_browser_preview_local` 预览，确认应用在内置浏览器里能跑。
-- 渲染远端图片字段（头像、icon、cover、gallery）时，先把 `metafile://` / 裸 pin id 解析成可访问 URL，详见 [agent-browser-metaapp.md](references/agent-browser-metaapp.md) §8。
+- 静态 HTML 属性里的图片可以直接写 `metafile://`（宿主服务前自动改写）；JavaScript 运行时动态赋值的图片才需要解析成可访问 URL，详见 [agent-browser-metaapp.md](references/agent-browser-metaapp.md) §8。
 - homepage 上的 Message 按钮用宿主拥有的 compose 流程，详见 [agent-browser-metaapp.md](references/agent-browser-metaapp.md) §9。
 
 写前端或审查前端实现前，先读 [agent-browser-metaapp.md](references/agent-browser-metaapp.md)。
@@ -171,7 +171,7 @@ node "$SKILLS_ROOT/metabot-metaapp/scripts/index.js" \
 - 包根有 `APP.md`（纯自然语言的应用自述），且与当前代码一致
 - Agent Internet 资源链接优先使用 `metaid://`、`pin://`、`metaapp://`、`metafile://`、`map://`
 - 页面需要 bridge 时，`AgentBrowser` helper 已接入
-- 远端图片字段（`metafile://`、裸 pin id）已解析成可访问 URL，没有把未解析的 `metafile://` 直接放进 `<img src>`（除非运行时原生支持）
+- 静态 HTML `src` / `srcset` / `poster` 属性可直接使用 `metafile://`（宿主自动改写）；JavaScript 动态赋值的图片字段已解析成可访问 URL
 - 系统提供 `metafileContentBaseUrl` / `manApiBaseUrl` 时，优先用配置值而不是公共 fallback
 - homepage 的 Message 按钮用无参 `browser.privateChat.compose`；`browser.simplemsg.compose` 只在显式收件人 + 非空 content 时用
 - `{ opened: true }` 只表示确认 UI 已打开，不是已发送

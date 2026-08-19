@@ -5,6 +5,9 @@ import http from 'http';
 import path from 'path';
 import AdmZip from 'adm-zip';
 import {
+  createDefaultBrowserConfig,
+  preparePreviewHtml,
+  resolveBrowserConfig,
   resolveMetaAppPinToRecord,
   type BrowserCommandResult as CoreBrowserCommandResult,
   type MetaAppGalleryRecord,
@@ -42,6 +45,10 @@ type BotBrowserMetaAppCacheServiceOptions = {
   cacheRoot: string;
   fetch?: FetchLike;
   now?: () => number;
+  // Rewrite base for metafile:// subresource references in served preview
+  // HTML. Defaults to core defaults resolved against process.env, matching the
+  // host browser config resolution.
+  resolveMetafileContentBaseUrl?: () => string | Promise<string>;
 };
 
 type ArtifactManifest = {
@@ -423,6 +430,11 @@ export function createBotBrowserMetaAppCacheService(
   const now = options.now ?? Date.now;
   const fetchImpl = options.fetch ?? (globalThis.fetch as unknown as FetchLike | undefined);
   const hasInjectedFetch = Boolean(options.fetch);
+  const resolveMetafileContentBaseUrl = options.resolveMetafileContentBaseUrl
+    ?? ((): string => resolveBrowserConfig(
+      { browser: { ...createDefaultBrowserConfig(), localMode: true } },
+      process.env,
+    ).metafileContentBaseUrl);
 
   let server: http.Server | null = null;
   let baseUrl: string | null = null;
@@ -646,8 +658,16 @@ export function createBotBrowserMetaAppCacheService(
 
     try {
       const filePath = await resolveAssetPath(session, requestPath.assetPath);
-      const body = await fs.readFile(filePath);
+      let body: Buffer | string = await fs.readFile(filePath);
       const contentType = MIME_TYPES[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+      if (/^text\/html\b/iu.test(contentType)) {
+        const prepared = preparePreviewHtml({
+          body,
+          contentType,
+          metafileContentBaseUrl: await resolveMetafileContentBaseUrl(),
+        });
+        body = typeof prepared === 'string' ? prepared : prepared.toString('utf8');
+      }
       writeHttpResponse(res, method, 200, body, { 'Content-Type': contentType });
     } catch {
       writeHttpResponse(res, method, 404, 'Not Found', { 'Content-Type': 'text/plain; charset=utf-8' });
