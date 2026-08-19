@@ -5,9 +5,11 @@
 //
 // Official DeepSeek rides the first-party dsh-llm-deepseek adapter
 // ('deepseek-official' route), which owns a native off/low/high/max ladder on
-// the chat-completions wire and validates it itself. Product mapping (aligned
-// to that ladder, 2026-08-19): 快速→off (thinking disabled), 标准→low,
-// 深度→high, 极限→max. The value rides session/ensure each turn.
+// the chat-completions wire and validates it itself. Since 2026-08-19 the
+// app-wide effort vocabulary IS that ladder (see llmEffort.ts), so the four
+// canonical values pass through one-to-one. Legacy five-step values
+// (快速=low, 标准=medium, xhigh) can still arrive here from older stores and
+// keep their historical alignment: low/minimal→off, medium→low, xhigh→max.
 //
 // Everything else stays on the pi-ai route, where effort is NOT passed:
 // pi-ai models' thinking keeps the provider default (the historical behavior
@@ -36,15 +38,17 @@ export function mapDshReasoningEffort(
   if (!normalized) return undefined;
   if (normalized === 'none' || normalized === 'disabled') return 'off';
   if (dialect === 'deepseek-native') {
-    // The dsh-llm-deepseek adapter ladder (chat-completions wire):
-    //   快速 / low / minimal → off    (thinking disabled)
-    //   标准 / medium        → low
-    //   深度 / high          → high
-    //   极限 / max / xhigh   → max
-    if (normalized === 'low' || normalized === 'minimal') return 'off';
+    // Canonical ladder (llmEffort.ts): identity mapping —
+    //   off → off, low → low, high → high, max → max.
+    // Legacy five-step values keep their historical alignment:
+    //   minimal → off, medium → low, xhigh → max.
+    if (normalized === 'off' || normalized === 'low' || normalized === 'high' || normalized === 'max') {
+      return normalized;
+    }
+    if (normalized === 'minimal') return 'off';
     if (normalized === 'medium') return 'low';
-    if (normalized === 'high') return 'high';
-    if (normalized === 'max' || normalized === 'xhigh') return 'max';
+    if (normalized === 'xhigh') return 'max';
+    return undefined;
   }
   if (DSH_REASONING_EFFORTS.has(normalized)) return normalized;
   return undefined;

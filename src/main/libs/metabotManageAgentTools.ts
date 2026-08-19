@@ -100,8 +100,14 @@ function formatProviders(providers: LlmProviderOption[]): string {
   if (providers.length === 0) {
     return 'Available LLM providers: NONE (the user has no model provider configured yet — ask them to add one in Settings > Model Providers first).';
   }
-  const lines = providers.map((p) => `- ${p.id} (label: ${p.label})`);
-  return `Available LLM providers (pass the id as llm_id):\n${lines.join('\n')}`;
+  const lines = providers.map((p) => {
+    const models = (p.models ?? []).map((m) => m.id).join(', ');
+    return `- ${p.id} (label: ${p.label}${models ? `; models: ${models}` : '; no models configured'})`;
+  });
+  return [
+    'Available LLM providers and their models (pass a MODEL id as llm_id, optionally with llm_provider set to the provider id and llm_effort as off/low/high/max):',
+    ...lines,
+  ].join('\n');
 }
 
 function formatBotLine(m: ManagedMetabotSummary): string {
@@ -109,8 +115,8 @@ function formatBotLine(m: ManagedMetabotSummary): string {
   bits.push(`id=${m.id}`);
   bits.push(m.type);
   bits.push(m.enabled ? 'enabled' : 'disabled');
-  if (m.llm_id) bits.push(`llm=${m.llm_id}`);
-  if (m.fallback_llm_id) bits.push(`fallback=${m.fallback_llm_id}`);
+  if (m.llm_id) bits.push(`llm=${m.llm_id}${m.llm_effort ? ` effort=${m.llm_effort}` : ''}`);
+  if (m.fallback_llm_id) bits.push(`fallback=${m.fallback_llm_id}${m.fallback_llm_effort ? ` effort=${m.fallback_llm_effort}` : ''}`);
   if (m.role) bits.push(`role=${m.role}`);
   const extra: string[] = [];
   if (m.bio) extra.push(`bio=${truncate(m.bio, 80)}`);
@@ -268,11 +274,27 @@ export function buildMetabotManageAgentTools(deps: {
       llm_id: z
         .string()
         .min(1)
-        .describe('LLM brain provider id for the new bot (required) — one of the ids metabot_list reports as available.'),
+        .describe('LLM brain for the new bot (required) — a MODEL id from the metabot_list provider/model report.'),
+      llm_provider: z
+        .string()
+        .optional()
+        .describe('Provider id the model belongs to (from metabot_list). Pass when the same model id appears under multiple providers.'),
+      llm_effort: z
+        .enum(['off', 'low', 'high', 'max'])
+        .optional()
+        .describe('Reasoning effort for the primary brain. Omit to follow the model default.'),
       fallback_llm_id: z
         .string()
         .optional()
-        .describe('Optional secondary provider key retried once if the primary LLM fails.'),
+        .describe('Optional fallback brain model id, used when the primary brain is unavailable or fails.'),
+      fallback_llm_provider: z
+        .string()
+        .optional()
+        .describe('Provider id for the fallback brain model.'),
+      fallback_llm_effort: z
+        .enum(['off', 'low', 'high', 'max'])
+        .optional()
+        .describe('Reasoning effort for the fallback brain. Omit to follow the model default.'),
       role: z.string().optional().describe('Optional short role/title (e.g. "Translator").'),
       soul: z.string().optional().describe('Optional persona/soul description guiding the bot\'s behavior.'),
       goal: z.string().optional().describe('Optional goal statement.'),
@@ -285,7 +307,11 @@ export function buildMetabotManageAgentTools(deps: {
     async (args: {
       name: string;
       llm_id: string;
+      llm_provider?: string;
+      llm_effort?: string;
       fallback_llm_id?: string;
+      fallback_llm_provider?: string;
+      fallback_llm_effort?: string;
       role?: string;
       soul?: string;
       goal?: string;
@@ -305,7 +331,11 @@ export function buildMetabotManageAgentTools(deps: {
       const createInput: {
         name: string;
         llm_id: string;
+        llm_provider?: string;
+        llm_effort?: string;
         fallback_llm_id: string | null;
+        fallback_llm_provider?: string;
+        fallback_llm_effort?: string;
         role?: string;
         soul?: string;
         goal?: string;
@@ -315,7 +345,11 @@ export function buildMetabotManageAgentTools(deps: {
       } = {
         name,
         llm_id: llmId,
+        ...(args.llm_provider ? { llm_provider: asString(args.llm_provider) } : {}),
+        ...(args.llm_effort ? { llm_effort: asString(args.llm_effort) } : {}),
         fallback_llm_id: args.fallback_llm_id ? asString(args.fallback_llm_id) : null,
+        ...(args.fallback_llm_provider ? { fallback_llm_provider: asString(args.fallback_llm_provider) } : {}),
+        ...(args.fallback_llm_effort ? { fallback_llm_effort: asString(args.fallback_llm_effort) } : {}),
         role: args.role,
         soul: args.soul,
         goal: args.goal,
@@ -364,8 +398,12 @@ export function buildMetabotManageAgentTools(deps: {
       role: z.string().optional().describe('New role/title.'),
       soul: z.string().optional().describe('New persona/soul description.'),
       goal: z.string().optional().describe('New goal statement.'),
-      llm_id: z.string().optional().describe('New primary LLM provider id (from metabot_list available providers).'),
-      fallback_llm_id: z.string().optional().describe('New secondary provider key, or empty string to clear.'),
+      llm_id: z.string().optional().describe('New primary brain — a MODEL id from the metabot_list provider/model report.'),
+      llm_provider: z.string().optional().describe('Provider id the primary brain model belongs to; empty string clears it.'),
+      llm_effort: z.enum(['off', 'low', 'high', 'max']).optional().describe('New reasoning effort for the primary brain; omit to keep, null/empty resets to the model default.'),
+      fallback_llm_id: z.string().optional().describe('New fallback brain model id, or empty string to clear.'),
+      fallback_llm_provider: z.string().optional().describe('Provider id for the fallback brain model; empty string clears it.'),
+      fallback_llm_effort: z.enum(['off', 'low', 'high', 'max']).optional().describe('New reasoning effort for the fallback brain; omit to keep, null/empty resets to the model default.'),
       allow_chat_skills: z
         .array(z.string())
         .optional()
@@ -446,7 +484,11 @@ export function buildMetabotManageAgentTools(deps: {
         'soul',
         'goal',
         'llm_id',
+        'llm_provider',
+        'llm_effort',
         'fallback_llm_id',
+        'fallback_llm_provider',
+        'fallback_llm_effort',
         'allow_chat_skills',
         'a2a_max_incoming_turns',
         'a2a_bye_cooldown_ms',

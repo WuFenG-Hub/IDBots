@@ -362,7 +362,7 @@ contextBridge.exposeInMainWorld('electron', {
     ipcRenderer.invoke('get-recent-cwds', limit),
   cowork: {
     // Session management
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser' }) =>
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; effort?: string | null }) =>
       ipcRenderer.invoke('cowork:session:start', options),
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) =>
       ipcRenderer.invoke('cowork:session:continue', options),
@@ -416,7 +416,12 @@ contextBridge.exposeInMainWorld('electron', {
       ipcRenderer.invoke('cowork:session:listArchived', options),
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) =>
       ipcRenderer.invoke('cowork:session:pin', options),
-    setSessionModel: (options: { sessionId: string; model: string | null }) =>
+    setSessionModel: (options: {
+      sessionId: string;
+      model: string | null;
+      /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+      effort?: string | null;
+    }) =>
       ipcRenderer.invoke('cowork:session:setModel', options),
     renameSession: (options: { sessionId: string; title: string }) =>
       ipcRenderer.invoke('cowork:session:rename', options),
@@ -811,6 +816,8 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
     }) => ipcRenderer.invoke('idbots:addMetaBot', input),
@@ -879,7 +886,11 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       fallback_llm_id?: string | null;
+      fallback_llm_provider?: string | null;
+      fallback_llm_effort?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker';
       homepage?: string | null;
@@ -933,6 +944,8 @@ contextBridge.exposeInMainWorld('electron', {
       background?: string | null;
       boss_id?: number | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
     }) => ipcRenderer.invoke('metabot:create', input),
     update: (id: number, input: {
       name?: string;
@@ -948,7 +961,11 @@ contextBridge.exposeInMainWorld('electron', {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       fallback_llm_id?: string | null;
+      fallback_llm_provider?: string | null;
+      fallback_llm_effort?: string | null;
       homepage?: string | null;
     }) => ipcRenderer.invoke('metabot:update', id, input),
     setEnabled: (id: number, enabled: boolean) => ipcRenderer.invoke('metabot:setEnabled', id, enabled),

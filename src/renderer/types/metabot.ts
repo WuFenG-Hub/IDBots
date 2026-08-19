@@ -22,9 +22,18 @@ export interface Metabot {
   boss_global_metaid: string | null;
   /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
   owner_binding_pinid?: string | null;
+  /** Primary LLM brain: model id (new) or legacy provider key. */
   llm_id: string | null;
-  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  /** Provider key the brain model was picked from; disambiguates colliding model ids. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max); null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain; same value semantics as llm_id. */
   fallback_llm_id?: string | null;
+  /** Provider key for the fallback brain model. */
+  fallback_llm_provider?: string | null;
+  /** Reasoning effort for the fallback brain; null = model default. */
+  fallback_llm_effort?: string | null;
   tools: string[];
   skills: string[];
   allow_chat_skills: string[];

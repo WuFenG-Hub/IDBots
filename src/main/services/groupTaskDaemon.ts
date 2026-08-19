@@ -28,7 +28,7 @@ import type {
   OpenTeamMembershipStore,
 } from '../openTeamMembershipStore';
 import { MetaIDExperienceStore } from '../metaidExperienceStore';
-import { normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import { isMentioned } from './groupChatMentionUtils';
 import { isNonAnswerAssistantReply } from '../libs/coworkAssistantReply';
 import {
@@ -792,7 +792,14 @@ export type GroupTaskDaemonPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' },
+  options?: {
+    llmProvider?: string | null;
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    effort?: 'off' | 'low' | 'high' | 'max' | null;
+    fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+    thinking?: 'enabled' | 'disabled';
+  },
 ) => Promise<string>;
 
 export type GroupTaskDaemonSendFn = (
@@ -2375,9 +2382,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const directive = [systemPromptParts.volatileContext, buildOwnerReportDirective(store, task)]
         .filter(Boolean)
         .join('\n\n');
-      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
-      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      const brain = metabotBrainOptions(bot);
+      const llmId = brain.llmId ?? undefined;
+      const fallbackLlmId = brain.fallbackLlmId;
+      const report = (await deps.performChat(systemPrompt, directive, llmId, {
+        llmProvider: brain.llmProvider,
+        fallbackLlmId,
+        fallbackLlmProvider: brain.fallbackLlmProvider,
+        effort: brain.effort,
+        fallbackEffort: brain.fallbackEffort,
+        thinking: 'enabled',
+      })).trim();
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('owner report turn produced no report');
       }
@@ -2539,9 +2554,17 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const directive = [systemPromptParts.volatileContext, buildCheckpointReportDirective(store, task, checkpoint)]
         .filter(Boolean)
         .join('\n\n');
-      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
-      const report = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      const brain = metabotBrainOptions(bot);
+      const llmId = brain.llmId ?? undefined;
+      const fallbackLlmId = brain.fallbackLlmId;
+      const report = (await deps.performChat(systemPrompt, directive, llmId, {
+        llmProvider: brain.llmProvider,
+        fallbackLlmId,
+        fallbackLlmProvider: brain.fallbackLlmProvider,
+        effort: brain.effort,
+        fallbackEffort: brain.fallbackEffort,
+        thinking: 'enabled',
+      })).trim();
       if (!report || NO_REPLY_PATTERN.test(report)) {
         throw new Error('checkpoint report turn produced no message');
       }
@@ -3446,10 +3469,18 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       const directive = [systemPromptParts.volatileContext, remoteStatusBlock, buildPlanningDirective(db, task, promptMembers)]
         .filter(Boolean)
         .join('\n\n');
-      const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-      const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
+      const brain = metabotBrainOptions(bot);
+      const llmId = brain.llmId ?? undefined;
+      const fallbackLlmId = brain.fallbackLlmId;
       // Plain LLM path: the chair is planning here, not executing skills.
-      let reply = (await deps.performChat(systemPrompt, directive, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+      let reply = (await deps.performChat(systemPrompt, directive, llmId, {
+        llmProvider: brain.llmProvider,
+        fallbackLlmId,
+        fallbackLlmProvider: brain.fallbackLlmProvider,
+        effort: brain.effort,
+        fallbackEffort: brain.fallbackEffort,
+        thinking: 'enabled',
+      })).trim();
       if (!reply || NO_REPLY_PATTERN.test(reply)) {
         throw new Error('planning turn produced no usable plan');
       }
@@ -3564,8 +3595,9 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       routing.prompt && routing.activeSkillIds.length > 0 && deps.runSkillTurn,
     );
 
-    const llmId = normalizeMetabotLlmId(bot.llm_id) ?? undefined;
-    const fallbackLlmId = normalizeMetabotLlmId(bot.fallback_llm_id);
+    const brain = metabotBrainOptions(bot);
+    const llmId = brain.llmId ?? undefined;
+    const fallbackLlmId = brain.fallbackLlmId;
     const session = ensureTaskSession(coworkStore, task, bot.id, bot.name);
     let orchestrationAttemptId: string | null = null;
     if (member.role === 'worker' && deps.orchestrationBridge) {
@@ -3626,7 +3658,14 @@ export function createGroupTaskDaemonLoop(deps: GroupTaskDaemonDeps): GroupTaskD
       // The runner appends the assistant message to the session itself.
     } else {
       try {
-        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, { fallbackLlmId, thinking: 'enabled' })).trim();
+        reply = (await deps.performChat(baseSystemPrompt, userMessage, llmId, {
+          llmProvider: brain.llmProvider,
+          fallbackLlmId,
+          fallbackLlmProvider: brain.fallbackLlmProvider,
+          effort: brain.effort,
+          fallbackEffort: brain.fallbackEffort,
+          thinking: 'enabled',
+        })).trim();
       } catch (error) {
         failCanonicalAttempt(error);
         throw error;

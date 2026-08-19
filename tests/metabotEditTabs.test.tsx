@@ -11,6 +11,23 @@ import {
   composeHomepageForSave,
   type HomepageSectionValues,
 } from '../src/renderer/components/metabots/MetaBotHomepageSection';
+import { configService } from '../src/renderer/services/config';
+import type { AppConfig } from '../src/renderer/config';
+
+// The model+effort picker reads the live app_config; seed the in-memory
+// singleton so the catalog has providers in the Node test environment.
+(configService as unknown as { config: AppConfig }).config = {
+  ...(configService.getConfig() as AppConfig),
+  providers: {
+    codex: {
+      enabled: true,
+      apiKey: 'sk-test',
+      baseUrl: 'https://codex.example.com/v1',
+      apiFormat: 'openai',
+      models: [{ id: 'codex-mini', name: 'Codex Mini' }],
+    },
+  } as AppConfig['providers'],
+};
 
 const baseInitialValues: Partial<MetaBotEditValues> = {
   name: 'Alice Bot',
@@ -112,7 +129,7 @@ test('Chat Settings panel hosts the allow-chat-skills editor and Advanced panel 
 });
 
 test('tab field and sync group mappings pin each editable field to its tab', () => {
-  assert.deepEqual(EDIT_TAB_FIELDS.basic, ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'fallback_llm_id']);
+  assert.deepEqual(EDIT_TAB_FIELDS.basic, ['name', 'avatar', 'bio', 'metabot_type', 'boss_global_metaid', 'llm_id', 'llm_provider', 'llm_effort', 'fallback_llm_id', 'fallback_llm_provider', 'fallback_llm_effort']);
   assert.deepEqual(EDIT_TAB_FIELDS.persona, ['role', 'soul', 'goal']);
   assert.deepEqual(EDIT_TAB_FIELDS.chatSettings, ['allow_chat_skills', 'a2a_max_incoming_turns', 'a2a_bye_cooldown_ms', 'a2a_auto_reply_enabled']);
   assert.deepEqual(EDIT_TAB_FIELDS.advanced, ['homepage_source', 'homepage_metafile_uri', 'homepage_metafile_content_type', 'homepage_metaapp_pin']);

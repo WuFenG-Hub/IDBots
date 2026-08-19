@@ -13,6 +13,7 @@ import {
 import { normalizeProviderApiFormat, buildOpenAIChatCompletionsURL, type AnthropicApiFormat } from './coworkFormatTransform';
 import { buildOpenAIResponsesURL } from './coworkOpenAICompatProxy';
 import { resolveCoworkModelLimits, type CoworkModelLimits } from './coworkModelLimits';
+import { toLlmEffortLevel } from './llmEffort';
 
 type ProviderModel = {
   id: string;
@@ -203,10 +204,13 @@ export function resolveAutomationModelOverride(modelId?: string | null): string 
 /**
  * Resolve which provider and model to use. When overrideModelId is provided (e.g. MetaBot's llm_id),
  * find the enabled provider that offers that model; otherwise use app default or first available.
+ * An optional providerHint (the provider key the model was picked from, stored alongside model-level
+ * brains) is preferred when the same model id is offered by multiple enabled providers.
  */
 function resolveMatchedProvider(
   appConfig: AppConfig,
-  overrideModelId?: string | null
+  overrideModelId?: string | null,
+  providerHint?: string | null
 ): { matched: MatchedProvider | null; error?: string } {
   const providers = appConfig.providers ?? {};
   const requestedOverride = overrideModelId?.trim() || null;
@@ -239,6 +243,20 @@ function resolveMatchedProvider(
     ? null
     : appConfig.model?.defaultProvider?.trim().toLowerCase() || null;
   let providerEntry: [string, ProviderConfig] | undefined;
+  // Model-level brain with an explicit provider hint: prefer that provider's
+  // exact model match over the config-order scan below (model ids can collide
+  // across providers, e.g. a custom relay mirroring an official catalog).
+  const providerHintKey = requestedOverride && providerHint?.trim()
+    ? providerHint.trim().toLowerCase()
+    : null;
+  if (providerHintKey) {
+    providerEntry = Object.entries(providers).find(
+      ([name, provider]) =>
+        name.toLowerCase() === providerHintKey
+        && provider?.enabled
+        && provider.models?.some((model) => model.id === modelId)
+    ) as [string, ProviderConfig] | undefined;
+  }
   if (defaultProviderKey) {
     providerEntry = Object.entries(providers).find(
       ([name, provider]) =>
@@ -374,7 +392,8 @@ function resolveFallbackModelId(
 export function resolveApiConfigForModel(
   modelId?: string | null,
   target: OpenAICompatProxyTarget = 'local',
-  sessionKey?: string | null
+  sessionKey?: string | null,
+  providerHint?: string | null
 ): ApiConfigResolution {
   const sqliteStore = getStore();
   if (!sqliteStore) {
@@ -384,7 +403,7 @@ export function resolveApiConfigForModel(
   if (!appConfig) {
     return { config: null, error: 'Application config not found.' };
   }
-  const { matched, error } = resolveMatchedProvider(appConfig, modelId ?? undefined);
+  const { matched, error } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined);
   if (!matched) {
     return { config: null, error };
   }
@@ -509,11 +528,14 @@ export interface DshProviderRouteInfo {
   apiFormat: 'anthropic' | 'openai' | 'responses' | 'native';
 }
 
-export function resolveDshProviderRoute(modelId?: string | null): DshProviderRouteInfo | null {
+export function resolveDshProviderRoute(
+  modelId?: string | null,
+  providerHint?: string | null
+): DshProviderRouteInfo | null {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config');
   if (!appConfig) return null;
-  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined);
+  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined);
   if (!matched) return null;
   return {
     provider: matched.providerName,
@@ -589,14 +611,17 @@ export function getPersistedCoworkPermissionMode(): CoworkPermissionMode {
 }
 
 /**
- * Global default effort level for cowork sessions ('low'|'medium'|'high'|
- * 'max'), or null for auto. Persisted in app_config like permission mode.
+ * Global default effort level for cowork sessions, normalized onto the
+ * app-wide off/low/high/max ladder (see llmEffort.ts). Values written by the
+ * pre-2026-08 five-step selector (low=快速, medium=标准) are converted at
+ * this read boundary; null means auto / model default. Persisted in
+ * app_config like permission mode.
  */
 export function getPersistedCoworkEffortLevel(): string | null {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<{ coworkEffortLevel?: unknown }>('app_config');
   const level = appConfig?.coworkEffortLevel;
-  return (typeof level === 'string' && level) ? level : null;
+  return toLlmEffortLevel(level);
 }
 
 /**
@@ -647,7 +672,14 @@ export function resolveModelOptions(modelId?: string | null): {
     if (!provider?.models) continue;
     const model = provider.models.find((m) => m.id === modelId);
     if (model?.options) {
-      return model.options;
+      // Normalize the stored default onto the app-wide off/low/high/max ladder
+      // so legacy five-step values (low=快速, medium=标准) keep their meaning.
+      return {
+        ...model.options,
+        ...(model.options.reasoningEffort !== undefined
+          ? { reasoningEffort: toLlmEffortLevel(model.options.reasoningEffort) ?? undefined }
+          : {}),
+      };
     }
   }
   return null;

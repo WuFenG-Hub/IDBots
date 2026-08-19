@@ -70,3 +70,76 @@ test('non-DeepSeek provider key keeps existing provider-default resolution', () 
   assert.equal(result.error, undefined);
   assert.equal(result.config?.model, 'qwen3-coder-plus');
 });
+
+test('model id with provider hint resolves to the hinted provider on id collision', () => {
+  const config = {
+    model: { defaultModel: 'm1', availableModels: [] },
+    providers: {
+      'custom-relay': {
+        enabled: true,
+        apiKey: 'rk-test',
+        baseUrl: 'https://relay.example.com/anthropic',
+        apiFormat: 'anthropic',
+        models: [{ id: 'deepseek-v4-pro' }],
+      },
+      deepseek: {
+        enabled: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiFormat: 'anthropic',
+        models: [{ id: 'deepseek-v4-pro' }],
+      },
+    },
+  };
+
+  // Without a hint, config order wins (custom-relay is declared first).
+  const byOrder = withAppConfig(config, () => resolveApiConfigForModel('deepseek-v4-pro'));
+  assert.equal(byOrder.config?.provider, 'custom-relay');
+
+  // The stored brain provider hint overrides config order.
+  const byHint = withAppConfig(config, () =>
+    resolveApiConfigForModel('deepseek-v4-pro', 'local', null, 'deepseek'));
+  assert.equal(byHint.config?.provider, 'deepseek');
+  assert.equal(byHint.config?.model, 'deepseek-v4-pro');
+
+  // A stale hint (provider removed) falls back to the config-order scan.
+  const staleHint = withAppConfig(config, () =>
+    resolveApiConfigForModel('deepseek-v4-pro', 'local', null, 'gone'));
+  assert.equal(staleHint.config?.provider, 'custom-relay');
+});
+
+test('getPersistedCoworkEffortLevel converts legacy five-step values onto the four-step ladder', () => {
+  const { getPersistedCoworkEffortLevel } = claudeSettings;
+  const read = (coworkEffortLevel) =>
+    withAppConfig({ coworkEffortLevel }, () => getPersistedCoworkEffortLevel());
+
+  assert.equal(read('low'), 'off', 'legacy 快速(low) means thinking off');
+  assert.equal(read('medium'), 'low', 'legacy 标准(medium) maps to low');
+  assert.equal(read('high'), 'high');
+  assert.equal(read('max'), 'max');
+  assert.equal(read('off'), 'off');
+  assert.equal(read(null), null);
+  assert.equal(read(undefined), null);
+  assert.equal(read('turbo'), null);
+});
+
+test('resolveModelOptions normalizes legacy reasoningEffort defaults', () => {
+  const { resolveModelOptions } = claudeSettings;
+  const config = {
+    model: { defaultModel: 'm1', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: true,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com',
+        apiFormat: 'anthropic',
+        models: [
+          { id: 'm1', options: { reasoningEffort: 'medium', thinking: { type: 'enabled' } } },
+        ],
+      },
+    },
+  };
+  const options = withAppConfig(config, () => resolveModelOptions('m1'));
+  assert.equal(options?.reasoningEffort, 'low', 'legacy medium default becomes low');
+  assert.deepEqual(options?.thinking, { type: 'enabled' });
+});

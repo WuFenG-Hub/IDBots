@@ -31,7 +31,12 @@ class BrowserCoworkService {
       .join('\n\n') || undefined;
   }
 
-  async start(prompt: string, metabotId?: number | null, cwd?: string): Promise<CoworkSession | null> {
+  async start(
+    prompt: string,
+    metabotId?: number | null,
+    cwd?: string,
+    modelEffort?: { model?: string | null; effort?: string | null },
+  ): Promise<CoworkSession | null> {
     if (this.starting) return null;
     const cowork = window.electron?.cowork;
     if (!cowork) return null;
@@ -50,6 +55,8 @@ class BrowserCoworkService {
         sessionType: 'browser',
         ...(typeof metabotId === 'number' ? { metabotId } : {}),
         ...(cwd?.trim() ? { cwd: cwd.trim() } : {}),
+        ...(modelEffort?.model ? { model: modelEffort.model } : {}),
+        ...(modelEffort && modelEffort.effort !== undefined ? { effort: modelEffort.effort } : {}),
       });
       if (result?.success && result.session) {
         store.dispatch(setBrowserSession(result.session));

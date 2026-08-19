@@ -14,7 +14,7 @@ import {
   ecdhEncrypt,
 } from './metaWebCrypto';
 import { performChatCompletionForOrchestrator } from './cognitiveChatCompletion';
-import { normalizeMetabotLlmId } from './llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './llmFallback';
 import type { CoworkRunner } from '../libs/coworkRunner';
 import { PrivateChatOrderCowork, type OrderCoworkRequest } from './privateChatOrderCowork';
 import { appendA2AGuidanceToSystemPrompt } from './a2aGuidance';
@@ -198,7 +198,15 @@ type PrivateChatPerformChatFn = (
   systemPrompt: string,
   userMessage: string,
   llmId?: string | null,
-  options?: { signal?: AbortSignal; fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }
+  options?: {
+    signal?: AbortSignal;
+    llmProvider?: string | null;
+    fallbackLlmId?: string | null;
+    fallbackLlmProvider?: string | null;
+    effort?: 'off' | 'low' | 'high' | 'max' | null;
+    fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+    thinking?: 'enabled' | 'disabled';
+  }
 ) => Promise<string>;
 type GetMetaIDCognitionPromptBlockFn = (input: {
   observerGlobalMetaID: string;
@@ -1226,7 +1234,19 @@ export async function sendSellerOrderAcknowledgement(params: {
   paymentTxid?: string | null;
   orderPinId?: string | null;
   orderTxid?: string | null;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }) => Promise<string>;
+  performChat: (
+    systemPrompt: string,
+    userMessage: string,
+    llmId?: string | null,
+    options?: {
+      llmProvider?: string | null;
+      fallbackLlmId?: string | null;
+      fallbackLlmProvider?: string | null;
+      effort?: 'off' | 'low' | 'high' | 'max' | null;
+      fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+      thinking?: 'enabled' | 'disabled';
+    },
+  ) => Promise<string>;
   sendEncryptedMsg: (text: string) => Promise<{ pinId?: string | null; txids?: string[] | null }>;
   serviceOrderLifecycle?: Pick<ServiceOrderLifecycleService, 'markSellerOrderFirstResponseSent'> | null;
   emitLog?: (msg: string) => void;
@@ -2059,7 +2079,19 @@ interface RatingFlowParams {
   sellerGlobalMetaId: string;
   sharedSecretForReply: string;
   createPin: (metabotStore: MetabotStore, metabot_id: number, payload: MetaidDataPayload) => Promise<{ txids: string[]; pinId?: string }>;
-  performChat: (systemPrompt: string, userMessage: string, llmId?: string | null, options?: { fallbackLlmId?: string | null; thinking?: 'enabled' | 'disabled' }) => Promise<string>;
+  performChat: (
+    systemPrompt: string,
+    userMessage: string,
+    llmId?: string | null,
+    options?: {
+      llmProvider?: string | null;
+      fallbackLlmId?: string | null;
+      fallbackLlmProvider?: string | null;
+      effort?: 'off' | 'low' | 'high' | 'max' | null;
+      fallbackEffort?: 'off' | 'low' | 'high' | 'max' | null;
+      thinking?: 'enabled' | 'disabled';
+    },
+  ) => Promise<string>;
   serviceOrderLifecycle?: ServiceOrderLifecycleService | null;
   emitLog: (msg: string) => void;
   emitToRenderer?: (channel: string, data: unknown) => void;
@@ -4357,10 +4389,11 @@ async function processOne(
     }
     const promptMemoryContext = [memoryContext, cognitionContext].filter(Boolean).join('\n\n');
 
-    const llmId = normalizeMetabotLlmId(metabot.llm_id);
-    const fallbackLlmId = normalizeMetabotLlmId(metabot.fallback_llm_id);
+    const brain = metabotBrainOptions(metabot);
+    const llmId = brain.llmId;
+    const fallbackLlmId = brain.fallbackLlmId;
     if (llmId) {
-      emitLog(`[PrivateChat] Auto-reply with MetaBot(${metabot.name}) llm_id=${llmId}`);
+      emitLog(`[PrivateChat] Auto-reply with MetaBot(${metabot.name}) llm_id=${llmId}${brain.effort ? ` effort=${brain.effort}` : ''}`);
     } else {
       emitLog(`[PrivateChat] MetaBot(${metabot.name}) llm_id is empty, fallback to default app LLM.`);
     }
@@ -4527,7 +4560,11 @@ async function processOne(
           await waitBeforePrivateChatReply(conversationAnalysis.incomingTurnCount);
           reply = await performChat(systemPromptWithExperience, plaintext, llmId, {
             signal: guidanceTurn.abortController.signal,
+            llmProvider: brain.llmProvider,
             fallbackLlmId,
+            fallbackLlmProvider: brain.fallbackLlmProvider,
+            effort: brain.effort,
+            fallbackEffort: brain.fallbackEffort,
             thinking: 'enabled',
           });
         }

@@ -105,6 +105,7 @@ import {
   listConfiguredLlmProviders,
   listMetabotsForManagement,
   requireMetabotLlmIdForCreate,
+  normalizeMetabotLlmEffort,
   assertCanCreateMetabot,
   updateMetaBotCore,
   type MetabotManageDeps,
@@ -206,7 +207,7 @@ import {
   performChatCompletionForOrchestrator,
   type ChatMessage,
 } from './services/cognitiveChatCompletion';
-import { normalizeMetabotLlmId } from './services/llmFallback';
+import { metabotBrainOptions, normalizeMetabotLlmId } from './services/llmFallback';
 import { startDreamService, stopDreamService, getDreamService } from './services/dreamService';
 import { DreamStore } from './dreamStore';
 import { MessageFeedbackStore } from './messageFeedbackStore';
@@ -7335,6 +7336,9 @@ if (!gotTheLock) {
     metabotId?: number | null;
     sessionType?: 'standard' | 'browser';
     permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+    /** Pending model+effort picked in the home composer; undefined = bot brain / defaults. */
+    model?: string | null;
+    effort?: string | null;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7386,7 +7390,11 @@ if (!gotTheLock) {
         null,
         null,
         null,
-        options.permissionMode ?? 'default'
+        options.permissionMode ?? 'default',
+        options.model?.trim() || null,
+        // undefined effort keeps the tiered defaults (bot brain → global);
+        // an explicit '' pick means "model default" and is persisted as null.
+        options.effort === undefined ? null : (options.effort?.trim() || null)
       );
       const runner = getCoworkRunner();
 
@@ -7415,7 +7423,11 @@ if (!gotTheLock) {
         confirmationMode: 'modal',
         permissionMode: resolvedPermissionMode,
         autoApproveTools: getPersistedAutoApproveTools(),
-        effortOverride: getPersistedCoworkEffortLevel(),
+        // Explicit picker pick (even "Default") seeds the session; otherwise the
+        // persisted global effort applies.
+        effortOverride: options.effort !== undefined
+          ? (options.effort?.trim() || null)
+          : getPersistedCoworkEffortLevel(),
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
@@ -7870,12 +7882,17 @@ if (!gotTheLock) {
             llmId: metabot.llm_id ?? undefined,
             performChat: async (systemPrompt, userMessage, llmId, options) => {
               // throwOnEmptyContent makes an empty completion throw inside the
-              // fallback-wrapped attempt, so the configured fallback LLM gets
+              // fallback-wrapped attempt, so the configured fallback brain gets
               // a chance (runWithLlmFallback only retries on throw); when the
               // fallback is also empty the error reaches the outer retry loop.
+              const brain = metabotBrainOptions(metabot);
               return performChatCompletionForOrchestrator(systemPrompt, userMessage, llmId, {
                 ...options,
-                fallbackLlmId: normalizeMetabotLlmId(metabot.fallback_llm_id),
+                llmProvider: brain.llmProvider ?? undefined,
+                fallbackLlmId: brain.fallbackLlmId,
+                fallbackLlmProvider: brain.fallbackLlmProvider ?? undefined,
+                effort: brain.effort ?? undefined,
+                fallbackEffort: brain.fallbackEffort ?? undefined,
                 throwOnEmptyContent: true,
               });
             },
@@ -8343,12 +8360,23 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:setModel', async (_event, options: { sessionId: string; model: string | null }) => {
+  ipcMain.handle('cowork:session:setModel', async (_event, options: {
+    sessionId: string;
+    model: string | null;
+    /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+    effort?: string | null;
+  }) => {
     return withSqliteRecovery('cowork:session:setModel', async () => {
       try {
         const model = options.model?.trim() || null;
+        const effort = options.effort === undefined ? undefined : (options.effort?.trim() || null);
         const coworkStoreInstance = getCoworkStore();
-        coworkStoreInstance.setSessionModel(options.sessionId, model);
+        coworkStoreInstance.setSessionModel(options.sessionId, model, effort);
+        if (effort !== undefined) {
+          // Live-switch the in-flight session's effort so the next turn uses
+          // it without waiting for a session reload (mirrors setEffortOverride).
+          getCoworkRunner().setEffortOverride(options.sessionId, effort);
+        }
         return { success: true, model };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;
@@ -9824,6 +9852,8 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     allow_chat_skills?: string[];
   }) => {
     try {
@@ -9861,6 +9891,8 @@ if (!gotTheLock) {
         boss_id: input.boss_id ?? null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(input.llm_effort),
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
@@ -9886,7 +9918,11 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     fallback_llm_id?: string | null;
+    fallback_llm_provider?: string | null;
+    fallback_llm_effort?: string | null;
     allow_chat_skills?: string[];
     a2a_max_incoming_turns?: number | null;
     a2a_bye_cooldown_ms?: number | null;
@@ -9941,6 +9977,8 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker' | 'welcome';
   }) => {
@@ -9978,6 +10016,8 @@ if (!gotTheLock) {
         boss_id: null,
         boss_global_metaid: (input.boss_global_metaid ?? '').trim() || null,
         llm_id: llmId,
+        llm_provider: input.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(input.llm_effort),
         tools: [],
         skills: [],
         allow_chat_skills: input.allow_chat_skills ?? [],
@@ -10012,8 +10052,14 @@ if (!gotTheLock) {
     boss_id?: number | null;
     boss_global_metaid?: string | null;
     llm_id?: string | null;
-    /** Optional fallback LLM provider key (unlike llm_id it is never required). */
+    /** Provider key the brain model was picked from. */
+    llm_provider?: string | null;
+    /** Reasoning effort for the primary brain (off/low/high/max). */
+    llm_effort?: string | null;
+    /** Optional fallback brain (unlike llm_id it is never required). */
     fallback_llm_id?: string | null;
+    fallback_llm_provider?: string | null;
+    fallback_llm_effort?: string | null;
     allow_chat_skills?: string[];
     metabot_type?: 'twin' | 'worker';
     homepage?: string | null;
@@ -10257,6 +10303,8 @@ if (!gotTheLock) {
         boss_id: profile.bio.boss_id ?? null,
         boss_global_metaid: (input?.boss_global_metaid ?? '').trim() || (profile.bio.boss_global_metaid ?? null),
         llm_id: profile.bio.llm_id ?? null,
+        llm_provider: profile.bio.llm_provider ?? null,
+        llm_effort: normalizeMetabotLlmEffort(profile.bio.llm_effort),
         tools: profile.bio.tools ?? [],
         skills: profile.bio.skills ?? [],
         allow_chat_skills: profile.bio.allowChatSkills ?? [],

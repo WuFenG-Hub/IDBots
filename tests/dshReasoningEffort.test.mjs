@@ -46,24 +46,26 @@ test('mapDshReasoningEffort: generic dialect passes UI levels through as DSH ids
 })
 
 // The first-party dsh-llm-deepseek adapter ladder (off/low/high/max on the
-// chat-completions wire): the UI ladder aligns onto it one-to-one except the
-// missing medium step (标准→low, 深度→high).
+// chat-completions wire). Since the app-wide effort vocabulary was aligned
+// onto that ladder (2026-08-19), the four canonical values map one-to-one;
+// only legacy five-step values (medium, xhigh, minimal) keep their historical
+// alignment (标准→low, 极限→max, 快速-minimal→off).
 test('mapDshReasoningEffort: deepseek-native dialect aligns onto the adapter ladder', () => {
   const { mapDshReasoningEffort } = loadMapper()
-  assert.equal(mapDshReasoningEffort('low', undefined, 'deepseek-native'), 'off', '快速 → off')
-  assert.equal(mapDshReasoningEffort('minimal', undefined, 'deepseek-native'), 'off')
+  assert.equal(mapDshReasoningEffort('off', undefined, 'deepseek-native'), 'off')
+  assert.equal(mapDshReasoningEffort('low', undefined, 'deepseek-native'), 'low', '低 → low')
+  assert.equal(mapDshReasoningEffort('high', undefined, 'deepseek-native'), 'high', '高 → high')
+  assert.equal(mapDshReasoningEffort('max', undefined, 'deepseek-native'), 'max', '最高 → max (true wire max)')
+  // Legacy five-step values keep their historical alignment.
   assert.equal(mapDshReasoningEffort('medium', undefined, 'deepseek-native'), 'low', '标准 → low')
-  assert.equal(mapDshReasoningEffort('high', undefined, 'deepseek-native'), 'high', '深度 → high')
-  assert.equal(mapDshReasoningEffort('max', undefined, 'deepseek-native'), 'max', '极限 → max (true wire max)')
+  assert.equal(mapDshReasoningEffort('minimal', undefined, 'deepseek-native'), 'off')
   assert.equal(mapDshReasoningEffort('xhigh', undefined, 'deepseek-native'), 'max')
   assert.equal(mapDshReasoningEffort('MAX', undefined, 'deepseek-native'), 'max')
-  // 'off' is a legal DSH id on this dialect too (model default may store it).
-  assert.equal(mapDshReasoningEffort('off', undefined, 'deepseek-native'), 'off')
 })
 
-test('mapDshReasoningEffort: DeepSeek 快速 wins over model thinking-enabled default', () => {
+test('mapDshReasoningEffort: explicit low effort rides with thinking default enabled', () => {
   const { mapDshReasoningEffort } = loadMapper()
-  assert.equal(mapDshReasoningEffort('low', { type: 'enabled' }, 'deepseek-native'), 'off')
+  assert.equal(mapDshReasoningEffort('low', { type: 'enabled' }, 'deepseek-native'), 'low')
 })
 
 test('mapDshReasoningEffort: thinking disabled forces off', () => {

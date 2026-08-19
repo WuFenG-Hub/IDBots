@@ -320,6 +320,8 @@ export interface CoworkSession {
   permissionMode?: CoworkPermissionMode;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   /** Accumulated token/cost usage (computed by the main process, not persisted). */
   usageStats?: CoworkUsageStats | null;
 }
@@ -609,6 +611,8 @@ export interface CoworkSessionSummary {
   browserTitle?: string | null;
   /** Per-session model override (null = inherit the global default model). */
   model?: string | null;
+  /** Per-session reasoning effort (off/low/high/max; null = follow the model default chain). */
+  effort?: string | null;
   serviceOrderSummary?: CoworkServiceOrderSummary | null;
 }
 
@@ -624,6 +628,10 @@ export interface CoworkStartOptions {
   sessionType?: 'standard' | 'browser';
   /** Permission mode for this session. Defaults to 'default'. */
   permissionMode?: CoworkPermissionMode;
+  /** Pending model picked in the home composer; undefined = bot brain / defaults. */
+  model?: string | null;
+  /** Pending effort (off/low/high/max); undefined = tiered defaults, '' = model default. */
+  effort?: string | null;
 }
 
 // Continue session options

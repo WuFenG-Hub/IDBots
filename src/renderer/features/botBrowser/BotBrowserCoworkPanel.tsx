@@ -6,7 +6,8 @@ import MarkdownContent from '../../components/MarkdownContent';
 import CoworkPromptInput, { type CoworkPromptInputRef } from '../../components/cowork/CoworkPromptInput';
 import FolderSelectorPopover from '../../components/cowork/FolderSelectorPopover';
 import MetaBotSelector, { type MetaBotForSelector } from '../../components/cowork/MetaBotSelector';
-import ModelSelector from '../../components/ModelSelector';
+import ModelEffortPicker from '../../components/ModelEffortPicker';
+import { convertLegacyEffortLevel } from '../../services/modelCatalog';
 import { SkillsButton, ActiveSkillBadge } from '../../components/skills';
 import { RootState } from '../../store';
 import { toggleActiveSkill } from '../../store/slices/skillSlice';
@@ -27,7 +28,7 @@ const formatRelativeTime = (timestamp: number): string => {
   return `${days}d`;
 };
 
-type PanelMetabot = MetaBotForSelector & { llm_id?: string | null };
+type PanelMetabot = MetaBotForSelector & { llm_id?: string | null; llm_provider?: string | null; llm_effort?: string | null };
 
 /**
  * Minimal rendering contract for the side panel: user messages and final
@@ -125,6 +126,13 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
 
   const effectiveMetabotId = selectedMetabotId ?? metabots[0]?.id ?? null;
   const selectedMetabot = metabots.find((m) => m.id === effectiveMetabotId) ?? null;
+  // Pending model+effort for the session about to start from this panel;
+  // nulls = follow the selected bot's brain (its model and effort).
+  const [pendingModelEffort, setPendingModelEffort] = useState<{
+    modelId: string | null;
+    providerKey?: string | null;
+    effort: string | null;
+  } | null>(null);
 
   useEffect(() => {
     const list = listRef.current;
@@ -138,7 +146,11 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
     if (currentSession) {
       await browserCoworkService.send(prompt);
     } else {
-      await browserCoworkService.start(prompt, effectiveMetabotId, workingDirectory || undefined);
+      await browserCoworkService.start(prompt, effectiveMetabotId, workingDirectory || undefined, {
+        model: pendingModelEffort?.modelId ?? undefined,
+        effort: pendingModelEffort?.effort ?? undefined,
+      });
+      setPendingModelEffort(null);
     }
   };
 
@@ -242,7 +254,25 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
           </div>
         ) : null}
         <div className="flex shrink-0 items-center gap-0.5">
-          <ModelSelector dropdownDirection="up" restrictToLlmId={selectedMetabot?.llm_id ?? null} compact />
+          <ModelEffortPicker
+            dropdownDirection="up"
+            compact
+            value={{
+              modelId: pendingModelEffort?.modelId ?? selectedMetabot?.llm_id ?? null,
+              providerKey: pendingModelEffort?.modelId == null
+                ? (selectedMetabot?.llm_provider ?? null)
+                : (pendingModelEffort?.providerKey ?? null),
+              effort: (pendingModelEffort?.effort
+                ?? (selectedMetabot?.llm_effort ? convertLegacyEffortLevel(selectedMetabot.llm_effort) : null)) as ReturnType<typeof convertLegacyEffortLevel>,
+            }}
+            onChange={(value) => {
+              setPendingModelEffort({
+                modelId: value.modelId,
+                providerKey: value.providerKey ?? null,
+                effort: value.effort,
+              });
+            }}
+          />
           <button
             type="button"
             onClick={() => void handleAddFile()}
@@ -292,7 +322,6 @@ const BotBrowserCoworkPanel: React.FC<BotBrowserCoworkPanelProps> = ({ onShowSki
         showFolderSelector={false}
         showModelSelector={false}
         showAttachmentButton={false}
-        restrictToLlmId={selectedMetabot?.llm_id ?? null}
       />
 
       {showHistory ? (

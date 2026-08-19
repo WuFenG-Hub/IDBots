@@ -47,6 +47,10 @@ export interface MetaidBioProfile {
   /** Deprecated legacy value from old `/info/bio` JSON background field. */
   background: string | null;
   llm_id: string | null;
+  /** Provider key the restored brain model was picked from (new pins only). */
+  llm_provider: string | null;
+  /** Reasoning effort for the restored primary brain (new pins only). */
+  llm_effort: string | null;
   tools: string[];
   skills: string[];
   allowChatSkills: string[];
@@ -145,6 +149,8 @@ const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
     bio: null,
     background: null,
     llm_id: null,
+    llm_provider: null,
+    llm_effort: null,
     tools: [],
     skills: [],
     allowChatSkills: [],
@@ -165,6 +171,8 @@ const parseLegacyMetaidBio = (bio: unknown): MetaidBioProfile => {
     bio: normalizeOptionalString(raw.bio ?? raw.background),
     background: normalizeOptionalString(raw.background),
     llm_id: normalizeOptionalString(raw.llm ?? raw.llm_id),
+    llm_provider: null,
+    llm_effort: null,
     tools: normalizeStringArray(raw.tools),
     skills: normalizeStringArray(raw.skills),
     allowChatSkills: normalizeStringArray(raw.allowChatSkills ?? raw.allow_chat_skills),
@@ -207,15 +215,24 @@ const emptyPersonaPayload = (): {
   return { present: false, role: '', soul: '', goal: null };
 };
 
-const parseLlmPayload = (payload: unknown): { present: boolean; primaryProvider: string | null } => {
+interface LlmPayloadParse {
+  present: boolean;
+  primaryProvider: string | null;
+  primaryModelProvider: string | null;
+  primaryEffort: string | null;
+}
+
+const parseLlmPayload = (payload: unknown): LlmPayloadParse => {
   const raw = parseJsonObject(payload);
   return {
     present: true,
     primaryProvider: raw ? normalizeOptionalString(raw.primaryProvider) : null,
+    primaryModelProvider: raw ? normalizeOptionalString(raw.primaryModelProvider) : null,
+    primaryEffort: raw ? normalizeOptionalString(raw.primaryEffort) : null,
   };
 };
 
-const emptyLlmPayload = (): { present: boolean; primaryProvider: string | null } => ({ present: false, primaryProvider: null });
+const emptyLlmPayload = (): LlmPayloadParse => ({ present: false, primaryProvider: null, primaryModelProvider: null, primaryEffort: null });
 
 const parseChatSkillsPayload = (payload: unknown): { present: boolean; allowChatSkills: string[] } => {
   const raw = parseJsonObject(payload);
@@ -266,6 +283,8 @@ export function parseMetaidRestoreProfileInfo(info: MetaidAddressInfo): Pick<Met
     soul: persona.present ? persona.soul : legacy.soul,
     goal: persona.present ? persona.goal : legacy.goal,
     llm_id: llm.present ? llm.primaryProvider : legacy.llm_id,
+    llm_provider: llm.present ? llm.primaryModelProvider : legacy.llm_provider,
+    llm_effort: llm.present ? llm.primaryEffort : legacy.llm_effort,
     allowChatSkills: chatSkills.present ? chatSkills.allowChatSkills : legacy.allowChatSkills,
   };
 

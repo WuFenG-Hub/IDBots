@@ -573,9 +573,18 @@ interface Metabot {
   boss_global_metaid: string | null;
   /** Pin id of the signed /info/owner binding; null means unsigned legacy claim or no owner. */
   owner_binding_pinid?: string | null;
+  /** Primary LLM brain: model id (new) or legacy provider key. */
   llm_id: string | null;
-  /** Optional fallback LLM provider key; the chat runtime retries once with it when the primary LLM fails. */
+  /** Provider key the brain model was picked from; disambiguates colliding model ids. */
+  llm_provider?: string | null;
+  /** Reasoning effort for the primary brain (off/low/high/max); null = model default. */
+  llm_effort?: string | null;
+  /** Optional fallback brain; same value semantics as llm_id (model id or legacy provider key). */
   fallback_llm_id?: string | null;
+  /** Provider key for the fallback brain model. */
+  fallback_llm_provider?: string | null;
+  /** Reasoning effort for the fallback brain; null = model default. */
+  fallback_llm_effort?: string | null;
   tools: string[];
   skills: string[];
   allow_chat_skills: string[];
@@ -602,6 +611,8 @@ interface MetabotCreateInput {
   boss_id?: number | null;
   boss_global_metaid?: string | null;
   llm_id?: string | null;
+  llm_provider?: string | null;
+  llm_effort?: string | null;
   allow_chat_skills?: string[];
 }
 
@@ -619,7 +630,11 @@ interface MetabotUpdateInput {
   boss_id?: number | null;
   boss_global_metaid?: string | null;
   llm_id?: string | null;
+  llm_provider?: string | null;
+  llm_effort?: string | null;
   fallback_llm_id?: string | null;
+  fallback_llm_provider?: string | null;
+  fallback_llm_effort?: string | null;
   allow_chat_skills?: string[];
   a2a_max_incoming_turns?: number | null;
   a2a_bye_cooldown_ms?: number | null;
@@ -929,7 +944,7 @@ interface IElectronAPI {
     onStateChanged: (callback: (state: WindowState) => void) => () => void;
   };
   cowork: {
-    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser' }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
+    startSession: (options: { prompt: string; cwd?: string; systemPrompt?: string; title?: string; activeSkillIds?: string[]; metabotId?: number | null; sessionType?: 'standard' | 'browser'; model?: string | null; effort?: string | null }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     continueSession: (options: { sessionId: string; prompt: string; systemPrompt?: string; activeSkillIds?: string[] }) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     submitInput: (input: CoworkSubmitInput) => Promise<CoworkSubmitInputResult>;
     stopSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
@@ -953,7 +968,12 @@ interface IElectronAPI {
     unarchiveSession: (sessionId: string) => Promise<{ success: boolean; error?: string }>;
     listArchivedSessions: (options?: { metabotId?: number | null; query?: string; searchContent?: boolean; sessionType?: 'standard' | 'a2a' | 'browser' | 'group_task'; limit?: number; offset?: number }) => Promise<{ success: boolean; sessions?: CoworkSessionSummary[]; total?: number; error?: string }>;
     setSessionPinned: (options: { sessionId: string; pinned: boolean }) => Promise<{ success: boolean; error?: string }>;
-    setSessionModel: (options: { sessionId: string; model: string | null }) => Promise<{ success: boolean; model?: string | null; error?: string }>;
+    setSessionModel: (options: {
+      sessionId: string;
+      model: string | null;
+      /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+      effort?: string | null;
+    }) => Promise<{ success: boolean; model?: string | null; error?: string }>;
     renameSession: (options: { sessionId: string; title: string }) => Promise<{ success: boolean; error?: string }>;
     getSession: (sessionId: string) => Promise<{ success: boolean; session?: CoworkSession; error?: string }>;
     refreshPeerProfile: (input: { sessionId: string; force?: boolean }) => Promise<{ success: boolean; changed?: boolean; error?: string }>;
@@ -1214,6 +1234,8 @@ interface IElectronAPI {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       allow_chat_skills?: string[];
       metabot_type?: 'twin' | 'worker' | 'welcome';
     }) => Promise<{
@@ -1351,7 +1373,11 @@ interface IElectronAPI {
       boss_id?: number | null;
       boss_global_metaid?: string | null;
       llm_id?: string | null;
+      llm_provider?: string | null;
+      llm_effort?: string | null;
       fallback_llm_id?: string | null;
+      fallback_llm_provider?: string | null;
+      fallback_llm_effort?: string | null;
       allow_chat_skills?: string[];
       a2a_max_incoming_turns?: number | null;
       a2a_bye_cooldown_ms?: number | null;
