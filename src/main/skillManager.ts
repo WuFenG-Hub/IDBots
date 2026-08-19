@@ -1658,6 +1658,12 @@ export class SkillManager {
     this.notifySkillsChanged();
   }
 
+  /** Immediate rescan after install_skill so the new skill is usable on this turn. */
+  reloadAfterInstall(): void {
+    this.startWatching();
+    this.notifySkillsChanged();
+  }
+
   private scheduleNotify(): void {
     if (this.notifyTimer) {
       clearTimeout(this.notifyTimer);

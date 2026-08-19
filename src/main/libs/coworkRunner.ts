@@ -108,6 +108,7 @@ import type {
 import {
   buildBotBrowserAgentTools,
   buildBotBrowserScreenshotTool,
+  buildSearchMetaAppsAgentTools,
   type BotBrowserControl,
 } from './botBrowserAgentTools';
 import {
@@ -135,6 +136,10 @@ import {
   buildMetabotManageAgentTools,
   type MetabotManageControl,
 } from './metabotManageAgentTools';
+import {
+  buildSkillAgentTools,
+  type SkillToolControl,
+} from './skillAgentTools';
 import {
   buildSandboxRequest,
   collectSkillFilesForSandbox,
@@ -276,6 +281,9 @@ const READ_ONLY_TOOL_NAMES = new Set([
   'todowrite', 'taskget', 'tasklist',
   'project_query',  // local Projects metadata lookup; no side effects
   'websearch', 'webfetch',  // informational only; network policy handled separately
+  'search_metaapps',
+  'metabot_getinfo',
+  'metabot_list',
 ]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
 const ENABLE_SDK_WEB_TOOLS_ENV = 'IDBOTS_ENABLE_SDK_WEB_TOOLS';
@@ -1507,12 +1515,19 @@ export interface CoworkRunnerOptions {
   visionRelay?: VisionRelayControl;
   /**
    * When set, Twin cowork sessions get the metabot_manage tools (metabot_list,
-   * metabot_create, metabot_update, metabot_delete) backed by the shared core
-   * functions in services/metabotManageService.ts — the same code the manual
-   * UI uses. Registered only for Twin sessions (isTwinSession gate); Worker
-   * bots never see these tools.
+   * metabot_create, metabot_update, metabot_delete, metabot_getinfo) backed by
+   * the shared core functions in services/metabotManageService.ts — the same
+   * code the manual UI uses. Ordinary Chat sessions get a reduced suite
+   * (metabot_update chat_skill_op + metabot_getinfo) so a Worker can whitelist
+   * a just-installed skill onto itself.
    */
   metabotManage?: MetabotManageControl;
+  /**
+   * When set, every cowork session gets skill_tool (extract_metaapp /
+   * install_skill / list_installed_skills) so a bot can install a skill from
+   * an on-chain MetaApp APP.md without leaving ordinary Chat.
+   */
+  skillTools?: SkillToolControl;
   /**
    * Grace period (ms) after the last SDK event before a local turn whose
    * delivered inputs remain unsettled is treated as stalled (the interrupted
@@ -1557,6 +1572,7 @@ export class CoworkRunner extends EventEmitter {
   private metaFileUpload?: MetaFileUploadControl;
   private visionRelay?: VisionRelayControl;
   private metabotManage?: MetabotManageControl;
+  private skillTools?: SkillToolControl;
   private readonly localTurnStallTimeoutMs: number;
   private readonly dshTurnStallTimeoutMs: number;
   private loadClaudeSdk: typeof loadClaudeSdk;
@@ -1656,6 +1672,7 @@ export class CoworkRunner extends EventEmitter {
     this.metaFileUpload = options?.metaFileUpload;
     this.visionRelay = options?.visionRelay;
     this.metabotManage = options?.metabotManage;
+    this.skillTools = options?.skillTools;
     this.localTurnStallTimeoutMs = Math.max(
       0,
       options?.localTurnStallTimeoutMs ?? COWORK_LOCAL_TURN_STALL_TIMEOUT_MS
@@ -7117,6 +7134,26 @@ export class CoworkRunner extends EventEmitter {
       memoryTools.push(
         ...buildBotBrowserAgentTools({ tool, controlBotBrowser: this.controlBotBrowser, sessionId })
       );
+    } else if (this.controlBotBrowser?.searchMetaApps) {
+      // Ordinary Chat (and every non-browser surface) gets search_metaapps so
+      // a bot can discover on-chain skill MetaApps without Bot Browser tools.
+      memoryTools.push(
+        ...buildSearchMetaAppsAgentTools({
+          tool,
+          searchMetaApps: this.controlBotBrowser.searchMetaApps,
+          listMetaAppForks: this.controlBotBrowser.listMetaAppForks,
+          nextStep: 'install',
+        })
+      );
+    }
+    if (this.skillTools) {
+      memoryTools.push(
+        ...buildSkillAgentTools({
+          tool,
+          control: this.skillTools,
+          getWorkspaceDir: () => this.store.getSession(sessionId)?.cwd || process.cwd(),
+        })
+      );
     }
     // Bot Browser screenshot is registered for EVERY cowork surface (not only
     // browser sessions) so any MetaBot can capture the active tab. When the
@@ -7187,14 +7224,11 @@ export class CoworkRunner extends EventEmitter {
         })
       );
     }
-    // MetaBot management tools are registered for Twin sessions (full
-    // list/create/update/delete suite — the Twin acts as the user's operator
-    // over the local bot roster) and for the built-in Welcome Bot's sessions
-    // during initial setup (reduced list/create suite so it can create the
-    // user's first Twin Bot on request). Every tool delegates to
-    // services/metabotManageService.ts — the same code the manual UI IPC
-    // handlers call — so bot-assisted management is identical to
-    // hand-editing. Worker bots never see these tools.
+    // MetaBot management tools:
+    // - Twin: full list/create/update/delete + metabot_getinfo
+    // - Welcome Bot (initial setup): list/create only
+    // - Ordinary Chat (Worker): metabot_update (chat_skill_op) + metabot_getinfo
+    //   so the skill-install loop can whitelist a skill onto the current bot.
     const welcomeSession = this.isWelcomeSession(sessionId);
     if (this.metabotManage && (this.isTwinSession(sessionId) || welcomeSession)) {
       memoryTools.push(
@@ -7202,6 +7236,14 @@ export class CoworkRunner extends EventEmitter {
           tool,
           control: this.metabotManage,
           viewer: welcomeSession ? 'welcome' : 'twin',
+        })
+      );
+    } else if (this.metabotManage) {
+      memoryTools.push(
+        ...buildMetabotManageAgentTools({
+          tool,
+          control: this.metabotManage,
+          viewer: 'standard',
         })
       );
     }

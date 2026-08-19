@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const require = Module.createRequire(import.meta.url);
-const { buildBotBrowserAgentTools, buildBotBrowserScreenshotTool, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
+const { buildBotBrowserAgentTools, buildBotBrowserScreenshotTool, buildSearchMetaAppsAgentTools, formatBotBrowserTabs } = require('../dist-electron/main/libs/botBrowserAgentTools.js');
 
 function makeHarness(overrides = {}) {
   const calls = { execute: [], openUri: [], forkMetaApp: [], search: [] };
@@ -386,6 +386,19 @@ test('search_metaapps forks mode requires a valid pinId', async () => {
 test('search_metaapps is not registered when the host has no search support', () => {
   const { byName } = makeHarness({ withoutSearch: true });
   assert.equal(byName.search_metaapps, undefined);
+});
+
+test('search_metaapps on the install surface points at skill_tool extract_metaapp', async () => {
+  const tools = buildSearchMetaAppsAgentTools({
+    tool: (name, description, schema, handler) => ({ name, description, handler }),
+    searchMetaApps: async () => ({ items: [SEARCH_CANDIDATE], hasMore: false }),
+    nextStep: 'install',
+  });
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+  const result = await byName.search_metaapps.handler({ query: '视频' });
+  assert.match(result.content[0].text, /skill_tool/);
+  assert.match(result.content[0].text, /extract_metaapp/);
+  assert.doesNotMatch(result.content[0].text, /bot_browser_open_uri/);
 });
 
 // --- bot_browser_screenshot (Phase 2: clip + format) ---
