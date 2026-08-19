@@ -8702,6 +8702,34 @@ export class CoworkRunner extends EventEmitter {
     }
   }
 
+  /**
+   * Prepend the volatile per-turn head (local time, memory projections,
+   * browser tabs, remote services) to a sandbox-bound prompt. The guest runs
+   * the SDK inside the VM and cannot see host-side state, so without this the
+   * sandbox path silently skipped the context both local and DSH turns get.
+   * The guest's own memoryEnabled flag only gates its tool registration, so
+   * there is no double injection. Per-turn dedup applies as on the local path.
+   */
+  private async buildSandboxPromptWithVolatileHead(
+    activeSession: ActiveSession,
+    prompt: string
+  ): Promise<string> {
+    const { sessionId } = activeSession;
+    const systemPromptProfile = this.getSystemPromptProfileForSession(sessionId);
+    const localTimePrompt = this.buildLocalTimeContextPrompt(systemPromptProfile.localTimeMode, sessionId);
+    const volatileBlocks = await this.buildVolatileContextPrompt(
+      sessionId,
+      prompt,
+      this.isSessionMemoryEnabled(sessionId, activeSession),
+      systemPromptProfile,
+      activeSession.disableRemoteServicesPrompt
+    );
+    const volatileHead = [localTimePrompt, volatileBlocks]
+      .filter((section) => section?.trim())
+      .join('\n\n');
+    return volatileHead ? `${volatileHead}\n\n${prompt}` : prompt;
+  }
+
   private async runClaudeCodeInSandbox(
     activeSession: ActiveSession,
     prompt: string,
@@ -8770,7 +8798,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     const input: Record<string, unknown> = {
-      prompt,
+      prompt: await this.buildSandboxPromptWithVolatileHead(activeSession, prompt),
       cwd: cwdMapping.guestPath,
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,
@@ -9321,7 +9349,7 @@ export class CoworkRunner extends EventEmitter {
     };
 
     const input: Record<string, unknown> = {
-      prompt,
+      prompt: await this.buildSandboxPromptWithVolatileHead(activeSession, prompt),
       cwd: cwdMapping.guestPath,
       workspaceRoot: cwdMapping.guestPath,
       hostWorkspaceRoot: cwdMapping.hostPath,
