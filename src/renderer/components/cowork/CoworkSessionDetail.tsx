@@ -3891,9 +3891,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               onManageSkills={onManageSkills}
               size="large"
               showModelSelector={true}
-              sessionKernel={currentSession.claudeSessionId
-                ? (currentSession.claudeSessionId.startsWith('dsh:') ? 'dsh' : 'claude')
-                : undefined}
               modelEffortValue={sessionModelEffortValue}
               onModelEffortChange={handleSessionModelEffortChange}
               contextUsage={currentSession.contextUsage}
