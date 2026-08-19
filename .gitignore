@@ -227,6 +227,8 @@ man_base_data_pebble/
 !tests/visionRelayService.test.mjs
 !tests/visionRelayAgentTools.test.mjs
 !tests/visionVideoRelay.test.mjs
+!tests/mediaToolsService.test.mjs
+!tests/mediaToolsAgentTools.test.mjs
 !tests/metaAppManagerBundledSync.test.mjs
 !tests/markdownContentBotBrowserUri.test.tsx
 !tests/browserIframeBridgeScript.test.ts
