@@ -216,6 +216,11 @@ const resolveProviderFromAppOrEnv = (
 export function buildImageSkillEnvOverrides(input: {
   activeSkillIds?: string[];
   metabotLlmId?: string | null;
+  /** Provider key the bot's brain model was picked from. Brains are
+   *  model-level since 2026-08 (llm_id holds a MODEL id), so the image
+   *  provider mapping keys on the provider — llm_id remains only as the
+   *  legacy fallback for rows that still store a provider key. */
+  metabotLlmProvider?: string | null;
   appConfig?: AppConfig | null;
   processEnv?: NodeJS.ProcessEnv;
 }): Record<string, string> {
@@ -225,7 +230,8 @@ export function buildImageSkillEnvOverrides(input: {
 
   const processEnv = input.processEnv ?? process.env;
   const appConfig = input.appConfig ?? null;
-  const mappedProvider = METABOT_PROVIDER_MAPPING[normalizeString(input.metabotLlmId).toLowerCase()];
+  const brainProviderKey = normalizeString(input.metabotLlmProvider || input.metabotLlmId).toLowerCase();
+  const mappedProvider = METABOT_PROVIDER_MAPPING[brainProviderKey];
   const orderedProviders: ImageProviderId[] = [];
 
   if (mappedProvider) {

@@ -235,8 +235,8 @@ export function buildMetabotManageAgentTools(deps: {
       'Use BEFORE creating a bot (to show the user which LLM brains they can pick from) and to resolve a bot the user names by its display name into a metabot_id before updating or deleting it.',
       'When NOT to use: do not call this just to identify yourself (you already know your own identity); and do not call it in a tight loop — call once, then act on the returned ids.',
       isWelcomeViewer
-        ? 'Rules: provider ids in the available-provider list are the values metabot_create expects as llm_id. While you are the Welcome Bot no Twin Bot exists yet — the first bot you create becomes the user\'s Twin Bot.'
-        : 'Rules: the metabot_id returned here is the exact value metabot_update and metabot_delete expect. The Twin is the single bot whose type is "twin". Provider ids in the available-provider list are the values metabot_create expects as llm_id.',
+        ? 'Rules: model ids in the available-provider list are the values metabot_create expects as llm_id (optionally with llm_provider set to the provider id when the same model id exists under several providers). While you are the Welcome Bot no Twin Bot exists yet — the first bot you create becomes the user\'s Twin Bot.'
+        : 'Rules: the metabot_id returned here is the exact value metabot_update and metabot_delete expect. The Twin is the single bot whose type is "twin". Model ids in the available-provider list are the values metabot_create expects as llm_id (optionally with llm_provider set to the provider id when the same model id exists under several providers).',
       'Returns one line per bot plus the available LLM provider list.',
     ].join(' '),
     {},
@@ -258,7 +258,7 @@ export function buildMetabotManageAgentTools(deps: {
       ? [
           `Create the user's first local MetaBot end-to-end: generate its on-chain wallet, register its identity on-chain, and add it to My Bots. ${audience}`,
           'Use when the user asks to create / set up their first Bot or Twin (e.g. "帮我创建第一个 Bot", "create my first bot", "帮我建一个数字分身"). While no Twin Bot exists the new bot automatically becomes the user\'s first Twin Bot (their personal on-chain digital twin); if a Twin already exists the new bot is a Worker.',
-          'When NOT to use: do not create a bot without first collecting a name from the user — ask what they want to call their Bot if they did not say; and do not create a bot with an llm_id you made up — call metabot_list first and use one of the reported provider ids (when several are configured, confirm the choice with the user briefly; when only the free MetaID provider exists, just use it).',
+          'When NOT to use: do not create a bot without first collecting a name from the user — ask what they want to call their Bot if they did not say; and do not create a bot with an llm_id you made up — call metabot_list first and use one of the reported model ids (optionally with llm_provider set to the provider id; when several are configured, confirm the choice with the user briefly; when only the free MetaID provider exists, just use its model).',
           'Rules: name and llm_id are required; everything else (fallback_llm_id, role, soul, goal, bio, avatar) is optional — the user can fill persona details in later by hand in My Bots. Creation is chain-first — it can take a few seconds and may publish partially; the result reports txids and any partial status.',
           'Returns the created bot id/name/type, its on-chain globalMetaID, and any partial-publish or subsidy notes.',
         ].join(' ')
