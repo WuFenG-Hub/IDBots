@@ -1353,12 +1353,13 @@ export class SkillManager {
       IDBOTS_RPC_TOKEN: getMetaidRpcToken(),
     };
     let metabotLlmId: string | null = null;
+    let metabotLlmProvider: string | null = null;
     if (context?.metabotId != null) {
       envOverrides.IDBOTS_METABOT_ID = String(context.metabotId);
       try {
         const db = this.getStore().getDatabase();
         const row = db.exec(
-          `SELECT mw.mnemonic AS mnemonic, mw.path AS path, m.name AS name, m.globalmetaid AS globalmetaid, m.llm_id AS llm_id
+          `SELECT mw.mnemonic AS mnemonic, mw.path AS path, m.name AS name, m.globalmetaid AS globalmetaid, m.llm_id AS llm_id, m.llm_provider AS llm_provider
            FROM metabots m
            JOIN metabot_wallets mw ON mw.id = m.wallet_id
            WHERE m.id = ?
@@ -1372,6 +1373,7 @@ export class SkillManager {
           const metabotName = typeof values[2] === 'string' ? values[2].trim() : '';
           const globalmetaid = typeof values[3] === 'string' ? values[3].trim() : '';
           metabotLlmId = typeof values[4] === 'string' ? values[4].trim() || null : null;
+          metabotLlmProvider = typeof values[5] === 'string' ? values[5].trim() || null : null;
           if (mnemonic) envOverrides.IDBOTS_METABOT_MNEMONIC = mnemonic;
           if (walletPath) envOverrides.IDBOTS_METABOT_PATH = walletPath;
           if (metabotName) envOverrides.IDBOTS_TWIN_NAME = metabotName;
@@ -1385,6 +1387,7 @@ export class SkillManager {
     const imageEnvOverrides = buildImageSkillEnvOverrides({
       activeSkillIds: [skill.id],
       metabotLlmId,
+      metabotLlmProvider,
       appConfig: this.getStore().get('app_config'),
       processEnv: process.env,
     });

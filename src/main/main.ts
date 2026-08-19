@@ -2736,7 +2736,13 @@ function getBotBrowserBridgeServiceForWindow(ownerWindow: BrowserWindow | null):
           })),
           {
             llmId: metabot.llm_id,
+            // Model-level brains need the provider hint: the same model id can
+            // exist under several providers, and without the hint the config
+            // scan picks the first enabled provider offering it (wrong upstream
+            // for id-collision cases like deepseek-v4-flash on opencode).
+            llmProvider: metabot.llm_provider ?? null,
             fallbackLlmId: metabot.fallback_llm_id,
+            fallbackLlmProvider: metabot.fallback_llm_provider ?? null,
             signal: controller.signal,
             maxTokens: payload.options?.maxOutputTokens,
             temperature: payload.options?.temperature,
@@ -4716,6 +4722,7 @@ const getCoworkRunner = () => {
           buildImageSkillEnvOverrides({
             activeSkillIds: skillIds,
             metabotLlmId: metabot?.llm_id ?? null,
+            metabotLlmProvider: metabot?.llm_provider ?? null,
             appConfig: getStore().get('app_config'),
             processEnv: process.env,
           })

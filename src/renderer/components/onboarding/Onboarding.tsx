@@ -84,7 +84,12 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
   const [apiFormat, setApiFormat] = useState<'anthropic' | 'openai' | 'responses'>(DEFAULT_ONBOARDING_API_FORMAT);
   const [llmError, setLlmError] = useState('');
   const [validating, setValidating] = useState(false);
+  /** Twin brain MODEL id (new semantics; the provider key rides
+   *  selectedLlmProvider). Falls back to the provider key only when the
+   *  provider reports no models — call-time resolution still handles it. */
   const [selectedLlmId, setSelectedLlmId] = useState<string | null>(null);
+  /** Provider key the selected brain model was picked from. */
+  const [selectedLlmProvider, setSelectedLlmProvider] = useState<string | null>(null);
   const [twinName, setTwinName] = useState('');
   const [twinAvatar, setTwinAvatar] = useState('');
   const [twinError, setTwinError] = useState('');
@@ -155,7 +160,11 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
         api: { key, baseUrl: effectiveBaseUrl },
         providers: nextProviders,
       });
-      setSelectedLlmId(provider);
+      // Bind the Twin to the provider's FIRST model (model-level brains since
+      // 2026-08); the provider key rides llm_provider for id-collision
+      // disambiguation. Provider key as llm_id is only the no-models fallback.
+      setSelectedLlmId(models[0]?.id ?? provider);
+      setSelectedLlmProvider(provider);
       setStep(2);
     } catch (err) {
       setLlmError(err instanceof Error ? err.message : i18nService.t('connectionFailed'));
@@ -191,6 +200,7 @@ const Onboarding: React.FC<OnboardingProps> = ({ onComplete, onClose }) => {
         metabot_type: 'twin',
         boss_id: 0,
         llm_id: selectedLlmId ?? null,
+        llm_provider: selectedLlmProvider ?? undefined,
       });
       if (!result.success || !result.metabot) {
         setAddBotError(result.error || 'Failed to create MetaBot');
