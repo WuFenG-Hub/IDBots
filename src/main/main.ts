@@ -4861,6 +4861,9 @@ const getCoworkRunner = () => {
       requestIMSessionReset: (sessionId: string): boolean => {
         return imGatewayManager?.requestSessionReset(sessionId) ?? false;
       },
+      isIMSession: (sessionId: string): boolean => {
+        return imGatewayManager?.isIMSession(sessionId) ?? false;
+      },
       controlBotBrowser: {
         openUri: (input) => sendBotBrowserOpenUri(input),
         execute: (command) => getBotBrowserTabBridge().execute(command),

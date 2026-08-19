@@ -798,6 +798,11 @@ export class IMGatewayManager extends EventEmitter {
     return this.coworkHandler?.requestSessionReset(coworkSessionId) ?? false;
   }
 
+  /** Whether the cowork session is IM-managed; false when no handler is bound. */
+  isIMSession(coworkSessionId: string): boolean {
+    return this.coworkHandler?.isIMSession(coworkSessionId) ?? false;
+  }
+
   private handleMetabotRouteChange(prevConfig: IMGatewayConfig, nextConfig: IMGatewayConfig): void {
     for (const platform of MANAGED_IM_PLATFORMS) {
       const prevResolved = this.resolveRouteMetabotId(platform, prevConfig);
