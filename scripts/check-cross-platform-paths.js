@@ -184,9 +184,15 @@ function runStaticChecks() {
   );
 
   checkFileContains(
+    'src/main/libs/skillRoots.ts',
+    ['IDBOTS_SKILLS_ROOT', 'SKILLS_ROOT', 'userData'],
+    'writable skill installs always land in userData SKILLs'
+  );
+
+  checkFileContains(
     'src/main/services/skillSyncService.ts',
-    ['IDBOTS_SKILLS_ROOT', 'SKILLS_ROOT'],
-    'skill sync honors skills root env overrides'
+    ['resolveWritableSkillsRoot('],
+    'skill sync installs into the writable user-data skills root'
   );
 
   checkFileContains(

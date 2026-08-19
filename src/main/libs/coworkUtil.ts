@@ -9,6 +9,7 @@ import type { OpenAICompatProxyTarget } from './coworkOpenAICompatProxy';
 import { getInternalApiBaseURL } from './coworkOpenAICompatProxy';
 import { coworkLog } from './coworkLogger';
 import { resolveElectronExecutablePath } from './runtimePaths';
+import { resolveWritableSkillsRoot } from './skillRoots';
 import { getMetaidRpcTokenFilePath, METAID_RPC_AUTHFILE_ENV } from '../services/metaidRpcEndpoint';
 import { isSqliteWasmBoundsError } from '../sqliteRecovery';
 
@@ -1021,39 +1022,11 @@ async function resolveSystemProxy(targetUrl: string): Promise<string | null> {
 }
 
 /**
- * Get SKILLs directory path (handles both development and production)
+ * Writable SKILLs directory (userData/SKILLs in both development and production).
+ * Bundled/source SKILLs stay readable via SkillManager.getAllSkillRoots().
  */
 export function getSkillsRoot(): string {
-  const envRoots = [process.env.IDBOTS_SKILLS_ROOT, process.env.SKILLS_ROOT]
-    .map((value) => value?.trim())
-    .filter((value): value is string => Boolean(value));
-  if (envRoots.length > 0) {
-    return resolve(envRoots[0]);
-  }
-
-  if (app.isPackaged) {
-    // In production, SKILLs are copied to userData
-    return join(app.getPath('userData'), 'SKILLs');
-  }
-
-  // In development, __dirname can vary with bundling output (e.g. dist-electron/ or dist-electron/libs/).
-  // Resolve from several stable anchors and pick the first existing SKILLs directory.
-  const candidates = [
-    ...envRoots,
-    join(app.getAppPath(), 'SKILLs'),
-    join(process.cwd(), 'SKILLs'),
-    join(__dirname, '..', 'SKILLs'),
-    join(__dirname, '..', '..', 'SKILLs'),
-  ];
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
-    }
-  }
-
-  // Final fallback for first-run dev environments where SKILLs may not exist yet.
-  return join(app.getAppPath(), 'SKILLs');
+  return resolveWritableSkillsRoot();
 }
 
 /**
