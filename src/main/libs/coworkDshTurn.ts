@@ -36,8 +36,6 @@ export interface DshTurnProviderRoute {
   apiFormat: 'openai' | 'responses' | 'anthropic'
   baseUrl: string
   apiKey: string
-  /** Env var name the credential rides to the runtime child under. */
-  apiKeyEnvName?: string
   model: string
   contextWindow?: number
   maxOutputTokens?: number
@@ -53,6 +51,19 @@ const DSH_WEBSEARCH_API_KEY_ENV = 'IDBOTS_DSH_DEEPSEEK_WEBSEARCH_KEY'
 /** Model serving the auxiliary search call (cheap + fast; search quality is
  *  provider-side, the model only formats the query — official DSH default). */
 const DSH_WEBSEARCH_MODEL = 'deepseek-v4-flash'
+
+/** Stable per-route credential env var name. The runtime child env is fixed
+ *  at spawn while the route table is a cross-session UNION, so every route
+ *  MUST read its own env name — a single shared name (the pre-fix
+ *  IDBOTS_DSH_API_KEY) carried only the key of whichever provider last
+ *  restarted the runtime, and every other route then sent that foreign key
+ *  upstream (opencode/deepseek cross-provider 401 "Invalid API key" while
+ *  the very same key worked via curl). dsh-credentials only accepts refs
+ *  matching /^[A-Za-z_][A-Za-z0-9_]*$/, so provider-key characters outside
+ *  [A-Za-z0-9_] collapse to '_' (route-key collisions would already merge
+ *  in the config generator's own sanitization, so this stays unique). */
+export const dshProviderApiKeyEnv = (providerKey: string): string =>
+  `IDBOTS_DSH_KEY_${String(providerKey).replace(/[^A-Za-z0-9_]/g, '_').toUpperCase()}`
 
 /** Hostname of a URL string, '' when it does not parse (regex, not URL — an
  *  invalid base can never throw here; port/userinfo are not provider shapes). */
@@ -391,7 +402,13 @@ export class DshTurnHub {
   private lastConfigJson: string | undefined
   /** Provider routes accumulated across sessions — the runtime serves a UNION
    * so a new provider never rewrites (and restarts over) an existing one. */
-  private providersSeen = new Map<string, DshProviderRoute & { apiKeyEnvName?: string }>()
+  private providersSeen = new Map<string, DshProviderRoute>()
+  /** Credential for every seen provider route, keyed by route key: the child
+   * env must carry EACH route's key under its own env name, not just the
+   * current turn's (see dshProviderApiKeyEnv). A rotated key overwrites the
+   * entry; the config diff then restarts the runtime (at quiescence) so the
+   * child picks the new value up. */
+  private routeApiKeys = new Map<string, { envName: string; apiKey: string }>()
   /** MCP servers accumulated the same way: user-level (not per-session), and a
    * removal keeps serving until the runtime restarts — same trade as providers. */
   private mcpServersSeen = new Map<string, DshMcpServerDefinition>()
@@ -404,6 +421,10 @@ export class DshTurnHub {
 
   private async ensureKernel(input: DshTurnInput): Promise<DshKernel> {
     this.providersSeen.set(input.provider.key, providerRouteOf(input.provider))
+    this.routeApiKeys.set(input.provider.key, {
+      envName: dshProviderApiKeyEnv(input.provider.key),
+      apiKey: input.provider.apiKey,
+    })
     for (const server of this.opts.mcpServersProvider?.() ?? []) {
       const name = String(server?.name ?? '').trim()
       if (name) this.mcpServersSeen.set(name, server)
@@ -431,9 +452,14 @@ export class DshTurnHub {
       } : {}),
       extraEntries: [...(this.opts.extraEntries ?? []), ...(this.opts.extraEntriesProvider?.() ?? [])],
       env: {
-        // The credential rides the child env under the route's apiKeyEnv name —
-        // it never enters the generated config file on disk.
-        [input.provider.apiKeyEnvName ?? 'IDBOTS_DSH_API_KEY']: input.provider.apiKey,
+        // Every seen route's credential rides the child env under ITS OWN
+        // name (credentials never enter the generated config file on disk).
+        // Accumulating all of them — not just the current turn's — keeps the
+        // shared runtime able to serve every unioned route no matter which
+        // provider last triggered the (re)spawn.
+        ...Object.fromEntries(
+          [...this.routeApiKeys.values()].map(({ envName, apiKey }) => [envName, apiKey])
+        ),
         // The web-search credential rides a DEDICATED name so it survives
         // provider switches (the route key above is swapped on every ensure).
         ...(this.webSearchSeen ? { [DSH_WEBSEARCH_API_KEY_ENV]: this.webSearchSeen.apiKey } : {}),
@@ -570,7 +596,10 @@ function providerRouteOf(provider: DshTurnProviderRoute): DshProviderRoute {
     key: provider.key,
     apiFormat: provider.apiFormat,
     baseUrl: provider.baseUrl,
-    apiKeyEnv: provider.apiKeyEnvName ?? 'IDBOTS_DSH_API_KEY',
+    // Per-route credential name (see dshProviderApiKeyEnv): the runtime reads
+    // process.env under exactly this name, and the child env carries every
+    // seen route's key under its own name.
+    apiKeyEnv: dshProviderApiKeyEnv(provider.key),
     // 'deepseek-official' is the dsh-llm-deepseek adapter's route key — the
     // generator mounts it on its first-party adapter instead of pi-ai.
     native: provider.key === 'deepseek-official',
