@@ -1001,8 +1001,8 @@ export class SkillManager {
       '## Skills (mandatory)',
       'Before replying: scan <available_skills> <description> entries.',
       '- If the current turn explicitly asks to open/use/start a local app or MetaApp, prefer app routing over skill routing; generic confirmations ("好的" / "确定" / "继续") are not app requests.',
-      '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location> with the Read tool, and follow it; if none clearly applies, do not read any SKILL.md.',
-      '- Execute skills only via Read + Bash as documented in each SKILL.md; never call a "Skill" tool — it is not wired to this registry.',
+      '- Select the one clearly-applicable skill (the most specific if several), read its SKILL.md at <location>, and follow it; if none clearly applies, do not read any SKILL.md.',
+      '- Execute skills only via the file-read and shell tools as documented in each SKILL.md; never call a "Skill" tool — it is not wired to this registry.',
       '- A skill command that exits with code 0 is successful: do not bypass it with ad-hoc fallback logic. If it fails, diagnose and retry within the same skill workflow before considering alternatives.',
       '- Resolve relative paths in a SKILL.md against its own directory (dirname(<location>)), not the workspace root; prefer precompiled JavaScript entrypoints (scripts/*.js or scripts/dist/*.js) over npx ts-node unless absolutely required.',
       '- Never read more than one skill up front; read another only if the first one explicitly references it.',
@@ -1050,7 +1050,7 @@ export class SkillManager {
       '- Enabled `superpowers-*` skills are an IDBots-native engineering workflow for Cowork sessions.',
       '- If the user explicitly asks to use superpowers, prefer the matching `superpowers-*` skill when one clearly applies.',
       '- User instructions, repository instructions, and app policy override skill instructions.',
-      '- In IDBots, use `Read + Bash` to follow skill instructions. Do not call a `Skill` tool.',
+      '- In IDBots, follow skill instructions with file reads and shell commands. Do not call a `Skill` tool.',
       ...routingHints,
     ].join('\n');
   }

@@ -4306,14 +4306,14 @@ export class CoworkRunner extends EventEmitter {
           '- Confirmation channel: plain text only (no modal).',
           '- Before any delete operation, ask for explicit text confirmation first.',
           '- Wait for explicit confirmation text before proceeding.',
-          '- Do not use AskUserQuestion in this session.',
+          '- Do not use the ask-user question tool in this session.',
         ]
       : [
-          '- Confirmation channel: AskUserQuestion modal.',
-          '- For every delete operation, you must call AskUserQuestion before executing any tool action.',
-          '- A direct user instruction is not enough for safety confirmation; AskUserQuestion approval is still required.',
+          '- Confirmation channel: the ask-user question tool (shown as a modal).',
+          '- For every delete operation, you must ask via the ask-user question tool before executing any tool action.',
+          '- A direct user instruction is not enough for safety confirmation; approval through the question tool is still required.',
           '- Never use normal assistant text as the confirmation channel in modal mode.',
-          '- Continue only when AskUserQuestion returns explicit allow.',
+          '- Continue only when the question tool returns explicit allow.',
           '- Under bypassPermissions only, low-risk confirmations (e.g. deleting merged branches/worktrees) may mark every question with header "auto-confirm" to auto-approve without a modal; keep high-risk confirmations unmarked so they still ask.',
         ];
 
@@ -6529,7 +6529,7 @@ export class CoworkRunner extends EventEmitter {
     '',
     '- Create a file with `write`; inspect it first with `read`; modify it with `edit`.',
     '- Track multi-step work with `todo_write` as you go.',
-    '- Use the search tools for information you do not have; never invent results.',
+    '- Use whatever search capability is available (a search tool when present, otherwise shell tools like curl/grep) for information you do not have; never invent results.',
     '- A file or change only exists after the corresponding tool returned success. Never claim work you did not perform.',
     '- After acting, report the outcome briefly. Pure questions may be answered directly.',
   ].join('\n');
