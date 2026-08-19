@@ -289,6 +289,38 @@ const READ_ONLY_TOOL_NAMES = new Set([
 ]);
 const BLOCKED_BUILTIN_WEB_TOOLS = new Set(['websearch', 'webfetch']);
 const ENABLE_SDK_WEB_TOOLS_ENV = 'IDBOTS_ENABLE_SDK_WEB_TOOLS';
+/**
+ * Built-in CLI tools exposed to cowork sessions (SDK `tools` whitelist). The
+ * claude_code preset registers every CLI built-in (~27 schemas ≈ 21k tokens,
+ * re-sent on EVERY request), including CLI-autonomy features a cowork session
+ * never uses — Workflow alone is ~19k chars, and Cron*, Monitor,
+ * ScheduleWakeup, SendMessage, PushNotification, ReportFindings, DesignSync,
+ * EnterWorktree, NotebookEdit have no host counterpart (scheduled tasks are
+ * host-scheduled, see scheduledTaskStore). Keep only what the cowork UI and
+ * permission flow actually surface: core file/shell tools, subagent + task
+ * tracking (the todo panel runs on TaskCreate/TaskUpdate via
+ * todoFeatureEnabled), and Grep/Glob (native CLI builds only provide them
+ * when explicitly listed, per SDK docs).
+ * Skill stays out: the Skill tool is policy-denied (denyUnsupportedSkillTool)
+ * and `skills: []` hides the user's ~/.claude plugin listing from context.
+ * WebSearch/WebFetch are appended only when IDBOTS_ENABLE_SDK_WEB_TOOLS opts
+ * in — they are policy-denied otherwise (shouldBlockBuiltinWebTool).
+ */
+const COWORK_BUILTIN_TOOLS: readonly string[] = [
+  'Agent',
+  'Bash',
+  'Edit',
+  'Glob',
+  'Grep',
+  'Read',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'Write',
+];
 const SAFETY_APPROVAL_ALLOW_OPTION = '允许本次操作';
 const SAFETY_APPROVAL_DENY_OPTION = '拒绝本次操作';
 const DELETE_COMMAND_RE = /\b(rm|rmdir|unlink|del|erase|remove-item)\b/i;
@@ -7736,6 +7768,17 @@ export class CoworkRunner extends EventEmitter {
       // main message stream; full transcripts are read post-hoc via
       // getSubagentMessages.
       agentProgressSummaries: true,
+      // Restrict the built-in tool set to what cowork sessions actually use
+      // (see COWORK_BUILTIN_TOOLS): the preset default registers ~27 schemas
+      // (~21k tokens) on every request, most of it CLI-autonomy features.
+      tools: isSdkBuiltinWebToolsEnabled()
+        ? [...COWORK_BUILTIN_TOOLS, 'WebFetch', 'WebSearch']
+        : [...COWORK_BUILTIN_TOOLS],
+      // Hide the user's ~/.claude plugin skills from the model's listing: the
+      // Skill tool is policy-denied in cowork sessions, so the injected
+      // "skills available for the Skill tool" block (~6k chars with plugins
+      // installed) is dead weight. IDBots skills route via <available_skills>.
+      skills: [],
       // Isolate from the user's Claude Code settings files: their env blocks
       // (e.g. ANTHROPIC_BASE_URL in ~/.claude/settings.json) would otherwise
       // override the provider environment we pass per session.
@@ -8001,6 +8044,14 @@ export class CoworkRunner extends EventEmitter {
     const usedResumeForThisRun = Boolean(activeSession.claudeSessionId);
     if (usedResumeForThisRun) {
       options.resume = activeSession.claudeSessionId;
+    } else {
+      // Hand the CLI the host-generated session title so it skips its own
+      // AI title-generation request for new sessions (one less LLM round-trip
+      // per cowork session; the renderer already generates the UI title).
+      const sessionTitle = this.store.getSession(sessionId)?.title?.trim();
+      if (sessionTitle) {
+        options.title = sessionTitle;
+      }
     }
     activeSession.contextOverflowRetryAllowed = !isRetry && usedResumeForThisRun;
     let contextOverflowExceptionRetryAllowed = !isRetry && usedResumeForThisRun;
