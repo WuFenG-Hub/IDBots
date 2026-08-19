@@ -35,6 +35,11 @@ interface ModelEffortPickerProps {
   dropdownDirection?: 'up' | 'down';
   /** Icon-only trigger for compact toolbars (Bot Browser); the model name still shows in the tooltip. */
   compact?: boolean;
+  /**
+   * Visual chrome. `toolbar` is the borderless composer chip; `field` is a
+   * full-width form control that matches MetaBot edit/create inputs.
+   */
+  variant?: 'toolbar' | 'field';
   disabled?: boolean;
   /** Trigger label when no model is selected/resolvable. */
   placeholder?: string;
@@ -61,6 +66,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   id,
   dropdownDirection = 'down',
   compact = false,
+  variant = 'toolbar',
   disabled = false,
   placeholder,
   globalDefaultModel = null,
@@ -131,10 +137,14 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
     setPane('root');
   };
 
+  const isField = variant === 'field' && !compact;
+
   if (groups.length === 0) {
     return (
       <div
-        className="px-3 py-1.5 rounded-xl dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkTextSecondary text-claude-textSecondary text-sm"
+        className={isField
+          ? 'w-full px-3 py-2 text-sm rounded-xl border dark:border-claude-darkBorder border-claude-border dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkTextSecondary text-claude-textSecondary'
+          : 'px-3 py-1.5 rounded-xl dark:bg-claude-darkSurface bg-claude-surface dark:text-claude-darkTextSecondary text-claude-textSecondary text-sm'}
         title={i18nService.t('modelPickerNoModels')}
       >
         {compact ? <CpuChipIcon className="h-4 w-4" /> : i18nService.t('modelPickerNoModels')}
@@ -149,22 +159,38 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
       ? i18nService.t('modelPickerEffortLabel')
       : '';
 
+  const triggerClassName = compact
+    ? `shrink-0 inline-flex items-center p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text' : ''}`
+    : isField
+      ? `flex items-center justify-between gap-2 w-full px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border hover:border-claude-accent/50 focus:outline-none focus:ring-2 focus:ring-claude-accent transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'border-claude-accent ring-2 ring-claude-accent' : ''}`
+      : `flex items-center gap-2 px-3 py-1.5 rounded-xl dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover' : ''}`;
+
   return (
-    <div ref={containerRef} className="relative">
+    <div ref={containerRef} className={isField ? 'relative w-full' : 'relative'}>
       <button
         type="button"
         id={id}
         onClick={openPicker}
         disabled={disabled}
-        className={compact
-          ? `shrink-0 inline-flex items-center p-1.5 rounded-lg dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:hover:text-claude-darkText hover:text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover dark:text-claude-darkText text-claude-text' : ''}`
-          : `flex items-center gap-2 px-3 py-1.5 rounded-xl dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed ${isOpen ? 'dark:bg-claude-darkSurfaceHover bg-claude-surfaceHover' : ''}`
-        }
+        className={triggerClassName}
         title={`${currentModelName} · ${effortLabel(currentEffort)}`}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
         aria-label={`${i18nService.t('modelPickerModelLabel')}: ${currentModelName}, ${i18nService.t('modelPickerEffortLabel')}: ${effortLabel(currentEffort)}`}
       >
         {compact ? (
           <CpuChipIcon className="h-4 w-4" />
+        ) : isField ? (
+          <>
+            <span className="min-w-0 flex-1 text-left font-medium truncate">{currentModelName}</span>
+            {!resolved && value.modelId && (
+              <span className="text-xs dark:text-red-400 text-red-500 shrink-0">{i18nService.t('modelPickerUnavailable')}</span>
+            )}
+            <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5 shrink-0">
+              {effortLabel(currentEffort)}
+            </span>
+            <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+          </>
         ) : (
           <>
             <span className="font-medium text-sm truncate max-w-44">{currentModelName}</span>
@@ -174,14 +200,17 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
             <span className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary border dark:border-claude-darkBorder border-claude-border rounded-md px-1.5 py-0.5">
               {effortLabel(currentEffort)}
             </span>
+            <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
           </>
         )}
-        <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+        {compact ? (
+          <ChevronDownIcon className="h-4 w-4 shrink-0 dark:text-claude-darkTextSecondary text-claude-textSecondary" />
+        ) : null}
       </button>
 
       {isOpen && (
         <div
-          className={`absolute ${dropdownPositionClass} left-0 w-72 dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
+          className={`absolute ${dropdownPositionClass} left-0 ${isField ? 'right-0' : 'w-72'} dark:bg-claude-darkSurface bg-claude-surface rounded-xl popover-enter shadow-popover z-50 dark:border-claude-darkBorder border-claude-border border overflow-hidden`}
         >
           {pane !== 'root' && (
             <div className="flex items-center gap-2 px-3 py-2 dark:border-claude-darkBorder border-b border-claude-border">
