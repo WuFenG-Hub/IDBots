@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, CheckIcon, CpuChipIcon } from '@heroicons/react/24/outline';
+import { ChevronDownIcon, ChevronLeftIcon, ChevronRightIcon, CheckIcon, Cog6ToothIcon, CpuChipIcon } from '@heroicons/react/24/outline';
 import { i18nService } from '../services/i18n';
 import { configService } from '../services/config';
 import {
@@ -45,6 +45,8 @@ interface ModelEffortPickerProps {
   placeholder?: string;
   /** Global default model id, used to resolve legacy provider-key brains for display. */
   globalDefaultModel?: string | null;
+  /** Opens Settings > Models from a sticky footer on the model list pane. */
+  onManageModels?: () => void;
 }
 
 type Pane = 'root' | 'model' | 'effort';
@@ -70,6 +72,7 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
   disabled = false,
   placeholder,
   globalDefaultModel = null,
+  onManageModels,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [pane, setPane] = useState<Pane>('root');
@@ -135,6 +138,12 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
     });
     setIsOpen(false);
     setPane('root');
+  };
+
+  const handleManageModels = () => {
+    setIsOpen(false);
+    setPane('root');
+    onManageModels?.();
   };
 
   const isField = variant === 'field' && !compact;
@@ -259,29 +268,43 @@ const ModelEffortPicker: React.FC<ModelEffortPickerProps> = ({
           )}
 
           {pane === 'model' && (
-            <div className="max-h-72 overflow-y-auto py-1">
-              {groups.map((group) => (
-                <div key={group.id} role="group" aria-label={group.name}>
-                  <div className="px-4 pt-2 pb-1 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
-                    {group.name}
+            <>
+              <div className="max-h-72 overflow-y-auto py-1">
+                {groups.map((group) => (
+                  <div key={group.id} role="group" aria-label={group.name}>
+                    <div className="px-4 pt-2 pb-1 text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                      {group.name}
+                    </div>
+                    {group.models.map((model) => {
+                      const selected = resolved?.providerKey === group.id && resolved.model.id === model.id;
+                      return (
+                        <button
+                          type="button"
+                          key={model.id}
+                          onClick={() => handleModelSelect(group.id, model.id)}
+                          className={`w-full px-4 py-2 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text flex items-center justify-between gap-2 transition-colors cursor-pointer ${selected ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
+                        >
+                          <span className="text-sm truncate">{model.name}</span>
+                          {selected && <CheckIcon className="h-4 w-4 shrink-0 text-claude-accent" />}
+                        </button>
+                      );
+                    })}
                   </div>
-                  {group.models.map((model) => {
-                    const selected = resolved?.providerKey === group.id && resolved.model.id === model.id;
-                    return (
-                      <button
-                        type="button"
-                        key={model.id}
-                        onClick={() => handleModelSelect(group.id, model.id)}
-                        className={`w-full px-4 py-2 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover dark:text-claude-darkText text-claude-text flex items-center justify-between gap-2 transition-colors cursor-pointer ${selected ? 'dark:bg-claude-darkSurfaceHover/50 bg-claude-surfaceHover/50' : ''}`}
-                      >
-                        <span className="text-sm truncate">{model.name}</span>
-                        {selected && <CheckIcon className="h-4 w-4 shrink-0 text-claude-accent" />}
-                      </button>
-                    );
-                  })}
+                ))}
+              </div>
+              {onManageModels && (
+                <div className="shrink-0 border-t dark:border-claude-darkBorder border-claude-border">
+                  <button
+                    type="button"
+                    onClick={handleManageModels}
+                    className="w-full px-4 py-2.5 text-left dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover flex items-center gap-2 transition-colors cursor-pointer"
+                  >
+                    <Cog6ToothIcon className="h-4 w-4 shrink-0 text-claude-accent" />
+                    <span className="text-sm text-claude-accent">{i18nService.t('modelPickerManageModels')}</span>
+                  </button>
                 </div>
-              ))}
-            </div>
+              )}
+            </>
           )}
 
           {pane === 'effort' && (
