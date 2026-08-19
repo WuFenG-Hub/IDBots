@@ -196,7 +196,7 @@ test('CoworkRunner uses MetaBot DeepSeek automation model for local service exec
   );
   assert.match(
     source,
-    /getSessionAutomationModelOverride/,
+    /getSessionAutomationBrain/,
     'CoworkRunner should inspect the session MetaBot before local execution',
   );
   assert.match(

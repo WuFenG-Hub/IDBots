@@ -112,6 +112,7 @@ import {
   type MetabotManageDeps,
 } from './services/metabotManageService';
 import { deleteBootstrapDoc } from './libs/welcomeBootstrap';
+import { migrateLegacyLlmBrainValues } from './services/llmBrainMigration';
 import { getOfficialSkillsStatus, installOfficialSkill, syncAllOfficialSkills, getCommunitySkillsStatus } from './services/skillSyncService';
 import {
   startMetaWebListener,
@@ -5693,6 +5694,11 @@ function getMetabotManageDeps(): MetabotManageDeps {
       }
     },
     getOwnerGlobalMetaId: () => getUserIdentityStore().get()?.globalmetaid ?? null,
+    // Provider catalog for legacy provider-key validation on brain writes.
+    getLlmProviders: () =>
+      getStore()?.get<{
+        providers?: Record<string, { enabled?: boolean; models?: Array<{ id?: string }> } | undefined>;
+      }>('app_config')?.providers,
   };
 }
 
@@ -13277,6 +13283,23 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     startupLog('setStoreGetter begin');
     setStoreGetter(() => store);
     startupLog('setStoreGetter done');
+
+    // One-time legacy llm_id value migration (provider ids -> model ids) so
+    // upgraded users' bots keep running. Runs after stores are ready, before
+    // any bot turn; goes through the store update path (no raw SQL) and never
+    // publishes on-chain pins (the next intentional edit re-publishes /info/llm).
+    try {
+      migrateLegacyLlmBrainValues({
+        metabotStore: getMetabotStore(),
+        getAppConfig: () => getStore()?.get<{
+          model?: { defaultModel?: string };
+          providers?: Record<string, { enabled?: boolean; models?: Array<{ id?: string }> }>;
+        }>('app_config') ?? null,
+      });
+    } catch (error) {
+      console.error('[llm-brain-migration] failed (non-fatal):', error);
+    }
+    startupLog('llm brain migration done');
 
     const manager = getSkillManager();
     startupLog('sync bundled skills begin');

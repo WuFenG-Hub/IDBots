@@ -140,6 +140,15 @@ export interface MetabotManageDeps {
   onAfterDelete?: (deletedMetabot: Metabot) => Promise<void> | void;
   /** Active owner GlobalMetaID; used for the owner-binding identity check. */
   getOwnerGlobalMetaId?: () => string | null;
+  /**
+   * Read the configured LLM providers (app_config.providers) for the legacy
+   * provider-key write guard. When absent/unreadable the guard is skipped
+   * rather than blocking the write.
+   */
+  getLlmProviders?: () => Record<string, {
+    enabled?: boolean;
+    models?: Array<{ id?: string }>;
+  } | undefined> | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +239,36 @@ export function requireMetabotLlmIdForCreate(value: unknown): string {
 }
 
 /**
+ * Write-time guard against re-introducing legacy-shaped brain values:
+ * `llm_id` / `fallback_llm_id` hold a MODEL id; a value equal to a provider
+ * KEY (e.g. 'opencode') is the pre-migration legacy shape and silently
+ * misresolves. Returns an actionable error message, or null when the value is
+ * acceptable — including when the provider catalog is unavailable (the guard
+ * never blocks a write it cannot judge) or when the value is a genuine model
+ * id that happens to equal a provider key.
+ */
+export function legacyLlmProviderKeyError(
+  field: 'llm_id' | 'fallback_llm_id',
+  value: unknown,
+  providers: Record<string, { enabled?: boolean; models?: Array<{ id?: string }> } | undefined> | undefined,
+): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  if (!trimmed || !providers) return null;
+  for (const provider of Object.values(providers)) {
+    if (provider?.models?.some((model) => model?.id === trimmed)) return null;
+  }
+  const needle = trimmed.toLowerCase();
+  for (const [key, provider] of Object.entries(providers)) {
+    if (key.toLowerCase() !== needle) continue;
+    const providerField = field === 'llm_id' ? 'llm_provider' : 'fallback_llm_provider';
+    const firstModel = provider?.models?.find((model) => typeof model?.id === 'string' && model.id)?.id;
+    const example = firstModel ? ` (e.g. '${firstModel}')` : '';
+    return `${field} '${trimmed}' is a provider id; pass a MODEL id${example} with ${providerField}='${key}'`;
+  }
+  return null;
+}
+
+/**
  * Normalize a brain reasoning-effort value for storage onto the app-wide
  * off/low/high/max ladder (see llmEffort.ts); null/unknown means "model default".
  */
@@ -291,6 +330,12 @@ export async function createMetaBotOnChainCore(
     assertCanCreateMetabot(store);
     const llmId = requireMetabotLlmIdForCreate(input.llm_id);
     const fallbackLlmId = normalizeMetabotLlmId(input.fallback_llm_id);
+    // Reject legacy provider-key-shaped brain values (see legacyLlmProviderKeyError).
+    const providers = deps.getLlmProviders?.();
+    const primaryKeyError = legacyLlmProviderKeyError('llm_id', llmId, providers);
+    if (primaryKeyError) throw new Error(primaryKeyError);
+    const fallbackKeyError = legacyLlmProviderKeyError('fallback_llm_id', fallbackLlmId, providers);
+    if (fallbackKeyError) throw new Error(fallbackKeyError);
 
     // 1. Generate wallet (in-memory)
     const walletResult = await createWallet();
@@ -412,7 +457,7 @@ export function applyMetabotUpdateLocal(
   store: MetabotStore,
   id: number,
   input: UpdateMetaBotInput,
-  deps: Pick<MetabotManageDeps, 'getOwnerGlobalMetaId'>,
+  deps: Pick<MetabotManageDeps, 'getOwnerGlobalMetaId' | 'getLlmProviders'>,
 ): UpdateMetaBotLocalResult {
   try {
     // Owner claims must belong to the local user identity; anything else is an
@@ -425,6 +470,16 @@ export function applyMetabotUpdateLocal(
           return { success: false, error: 'OWNER_IDENTITY_MISMATCH' };
         }
       }
+    }
+    // Reject legacy provider-key-shaped brain values (see legacyLlmProviderKeyError).
+    const providers = deps.getLlmProviders?.();
+    const primaryKeyError = legacyLlmProviderKeyError('llm_id', input.llm_id, providers);
+    if (primaryKeyError) {
+      return { success: false, error: primaryKeyError };
+    }
+    const fallbackKeyError = legacyLlmProviderKeyError('fallback_llm_id', input.fallback_llm_id, providers);
+    if (fallbackKeyError) {
+      return { success: false, error: fallbackKeyError };
     }
     const metabot = store.updateMetabot(id, {
       ...input,

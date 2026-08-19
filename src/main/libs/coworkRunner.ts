@@ -4578,6 +4578,8 @@ export class CoworkRunner extends EventEmitter {
    * model+effort) and cowork UI sessions that never picked a session override.
    */
   private getSessionAutomationBrain(sessionId: string): {
+    metabotId: number;
+    botName: string | null;
     modelId: string;
     providerKey: string | null;
     effort: LlmEffortLevel | null;
@@ -4593,6 +4595,8 @@ export class CoworkRunner extends EventEmitter {
     const modelId = metabot?.llm_id?.trim();
     if (!modelId) return null;
     return {
+      metabotId,
+      botName: metabot?.name?.trim() || null,
       modelId,
       providerKey: metabot?.llm_provider?.trim() || null,
       effort: toLlmEffortLevel(metabot?.llm_effort),
@@ -5992,15 +5996,18 @@ export class CoworkRunner extends EventEmitter {
     const sessionModel = this.store.getSession(sessionId)?.model?.trim() || null
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId)
     const automationModelOverride = sessionModel || brain?.modelId || null
+    // Bot context lets the resolution last-resort warning name the offending bot.
+    const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined
     let route = resolveDshProviderRoute(
       automationModelOverride,
       sessionModel ? null : (brain?.providerKey ?? null),
+      brainContext,
     )
     if (!route && automationModelOverride) {
       // Primary brain unavailable: the bot's fallback brain (model+effort)
       // takes over before the global default route.
       const fallbackRoute = brain?.fallbackModelId
-        ? resolveDshProviderRoute(brain.fallbackModelId, brain.fallbackProviderKey)
+        ? resolveDshProviderRoute(brain.fallbackModelId, brain.fallbackProviderKey, brainContext)
         : null
       if (fallbackRoute) {
         coworkLog('INFO', 'resolveSessionDshRoute', 'Primary brain did not resolve; using the fallback brain', {
@@ -7428,8 +7435,10 @@ export class CoworkRunner extends EventEmitter {
     const brain = sessionModel ? null : this.getSessionAutomationBrain(sessionId);
     const automationModelOverride = sessionModel || brain?.modelId || null;
     let brainEffort: LlmEffortLevel | null = brain?.effort ?? null;
+    // Bot context lets the resolution last-resort warning name the offending bot.
+    const brainContext = brain ? { botId: brain.metabotId, botName: brain.botName } : undefined;
     let apiConfigResolution = automationModelOverride
-      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId, brain?.providerKey ?? null)
+      ? resolveApiConfigForModel(automationModelOverride, 'local', sessionId, brain?.providerKey ?? null, brainContext)
       : { config: getCurrentApiConfig('local') };
     let apiConfig = apiConfigResolution.config;
     if (!apiConfig && automationModelOverride) {
@@ -7438,7 +7447,7 @@ export class CoworkRunner extends EventEmitter {
       // before the global default — A2A/group-task sessions follow the metabot
       // edit page's brain pair wherever possible.
       const fallbackResolution = brain?.fallbackModelId
-        ? resolveApiConfigForModel(brain.fallbackModelId, 'local', sessionId, brain.fallbackProviderKey)
+        ? resolveApiConfigForModel(brain.fallbackModelId, 'local', sessionId, brain.fallbackProviderKey, brainContext)
         : null;
       if (fallbackResolution?.config) {
         coworkLog('INFO', 'runClaudeCodeLocal', 'Primary brain did not resolve; using the fallback brain', {

@@ -175,6 +175,12 @@ type MatchedProvider = {
   apiFormat: AnthropicApiFormat;
 };
 
+/** Optional caller context so the default-route fallback warning can name the offending bot. */
+export interface LlmResolutionContext {
+  botId?: number | string | null;
+  botName?: string | null;
+}
+
 function getEffectiveProviderApiFormat(providerName: string, apiFormat: unknown): AnthropicApiFormat {
   if (providerName === 'openai' || providerName === 'gemini') {
     return 'openai';
@@ -192,6 +198,13 @@ function providerRequiresApiKey(providerName: string): boolean {
 const DEEPSEEK_PROVIDER_KEY = 'deepseek';
 const DEEPSEEK_AUTOMATION_MODEL_ID = 'deepseek-v4-flash';
 
+/**
+ * Defense-in-depth for pre-migration metabots.llm_id values, which held
+ * PROVIDER ids: 'deepseek' maps to the automation-preferred flash model.
+ * Any OTHER provider key is handled generically by Fallback 1 in
+ * resolveMatchedProvider (provider's first/default model), and the startup
+ * migration (services/llmBrainMigration) rewrites legacy values to model ids.
+ */
 export function resolveAutomationModelOverride(modelId?: string | null): string | null {
   const normalized = modelId?.trim();
   if (!normalized) return null;
@@ -210,7 +223,8 @@ export function resolveAutomationModelOverride(modelId?: string | null): string 
 function resolveMatchedProvider(
   appConfig: AppConfig,
   overrideModelId?: string | null,
-  providerHint?: string | null
+  providerHint?: string | null,
+  context?: LlmResolutionContext
 ): { matched: MatchedProvider | null; error?: string } {
   const providers = appConfig.providers ?? {};
   const requestedOverride = overrideModelId?.trim() || null;
@@ -331,6 +345,25 @@ function resolveMatchedProvider(
   }
 
   if (!providerEntry) {
+    // Last-resort safety net: a legacy/unresolvable override (e.g. a stale
+    // provider key or a removed model id left in metabots.llm_id) must never
+    // dead-end a bot turn. Re-resolve with NO override — the same default
+    // route a session without an llm_id gets (default model -> first enabled
+    // provider's first model) — and warn. Only the genuine no-enabled-
+    // providers case keeps the hard error below.
+    if (requestedOverride) {
+      const defaultRoute = resolveMatchedProvider(appConfig);
+      if (defaultRoute.matched) {
+        const botLabel = context?.botId != null
+          ? `bot ${context.botId}${context.botName ? ` (${context.botName})` : ''}: `
+          : '';
+        console.warn(
+          `[llm-brain] ${botLabel}unresolvable llm_id '${requestedOverride}', using default route ` +
+          `(model '${defaultRoute.matched.modelId}', provider '${defaultRoute.matched.providerName}')`
+        );
+        return defaultRoute;
+      }
+    }
     return { matched: null, error: `No enabled provider found for model: ${modelId}` };
   }
 
@@ -393,7 +426,8 @@ export function resolveApiConfigForModel(
   modelId?: string | null,
   target: OpenAICompatProxyTarget = 'local',
   sessionKey?: string | null,
-  providerHint?: string | null
+  providerHint?: string | null,
+  context?: LlmResolutionContext
 ): ApiConfigResolution {
   const sqliteStore = getStore();
   if (!sqliteStore) {
@@ -403,7 +437,7 @@ export function resolveApiConfigForModel(
   if (!appConfig) {
     return { config: null, error: 'Application config not found.' };
   }
-  const { matched, error } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined);
+  const { matched, error } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined, context);
   if (!matched) {
     return { config: null, error };
   }
@@ -530,12 +564,13 @@ export interface DshProviderRouteInfo {
 
 export function resolveDshProviderRoute(
   modelId?: string | null,
-  providerHint?: string | null
+  providerHint?: string | null,
+  context?: LlmResolutionContext
 ): DshProviderRouteInfo | null {
   const sqliteStore = getStore();
   const appConfig = sqliteStore?.get<AppConfig>('app_config');
   if (!appConfig) return null;
-  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined);
+  const { matched } = resolveMatchedProvider(appConfig, modelId ?? undefined, providerHint ?? undefined, context);
   if (!matched) return null;
   return {
     provider: matched.providerName,

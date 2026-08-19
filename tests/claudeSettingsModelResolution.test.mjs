@@ -71,6 +71,132 @@ test('non-DeepSeek provider key keeps existing provider-default resolution', () 
   assert.equal(result.config?.model, 'qwen3-coder-plus');
 });
 
+test('ANY enabled provider key resolves to that provider first/default model (opencode)', () => {
+  const providers = {
+    opencode: {
+      enabled: true,
+      apiKey: 'sk-test',
+      baseUrl: 'https://opencode.example.com/anthropic',
+      apiFormat: 'anthropic',
+      models: [{ id: 'oc-flash' }, { id: 'oc-pro' }],
+    },
+  };
+
+  // Global default not offered by the provider -> the provider's FIRST model.
+  const firstModel = withAppConfig({
+    model: { defaultModel: 'elsewhere-model', availableModels: [] },
+    providers,
+  }, () => resolveApiConfigForModel('opencode'));
+  assert.equal(firstModel.error, undefined);
+  assert.equal(firstModel.config?.provider, 'opencode');
+  assert.equal(firstModel.config?.model, 'oc-flash');
+
+  // Global default offered by the provider -> the default model wins
+  // (same Fallback-1 rule the startup migration uses).
+  const defaultModel = withAppConfig({
+    model: { defaultModel: 'oc-pro', availableModels: [] },
+    providers,
+  }, () => resolveApiConfigForModel('opencode'));
+  assert.equal(defaultModel.error, undefined);
+  assert.equal(defaultModel.config?.model, 'oc-pro');
+});
+
+test('unresolvable override falls back to the default route with a warning (never dead-ends)', () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const result = withAppConfig({
+      model: { defaultModel: 'm-default', availableModels: [] },
+      providers: {
+        deepseek: {
+          enabled: true,
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          apiFormat: 'anthropic',
+          models: [{ id: 'm-default' }],
+        },
+      },
+    }, () => resolveApiConfigForModel('removed-model-id'));
+
+    assert.equal(result.error, undefined, 'must not fail the turn');
+    assert.equal(result.config?.model, 'm-default', 'falls back to the global default route');
+    assert.equal(result.config?.provider, 'deepseek');
+    assert.ok(
+      warnings.some((m) => m.includes("[llm-brain] unresolvable llm_id 'removed-model-id', using default route")),
+      `warning missing: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('unresolvable override with no enabled providers still errors', () => {
+  const result = withAppConfig({
+    model: { defaultModel: 'm-default', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: false,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiFormat: 'anthropic',
+        models: [{ id: 'm-default' }],
+      },
+    },
+  }, () => resolveApiConfigForModel('removed-model-id'));
+
+  assert.equal(result.config, null);
+  assert.match(result.error ?? '', /No enabled provider found/);
+});
+
+test('resolveDshProviderRoute falls back to the default route and names the bot in the warning', () => {
+  const { resolveDshProviderRoute } = claudeSettings;
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(String(message));
+  try {
+    const route = withAppConfig({
+      model: { defaultModel: 'm-default', availableModels: [] },
+      providers: {
+        deepseek: {
+          enabled: true,
+          apiKey: 'sk-test',
+          baseUrl: 'https://api.deepseek.com/anthropic',
+          apiFormat: 'anthropic',
+          models: [{ id: 'm-default' }],
+        },
+      },
+    }, () => resolveDshProviderRoute('opencode-gone', null, { botId: 7, botName: 'Lucy' }));
+
+    assert.ok(route, 'DSH route must resolve (never null-without-fallback)');
+    assert.equal(route.model, 'm-default');
+    assert.equal(route.provider, 'deepseek');
+    assert.ok(
+      warnings.some((m) => m.includes("[llm-brain] bot 7 (Lucy): unresolvable llm_id 'opencode-gone', using default route")),
+      `bot-named warning missing: ${JSON.stringify(warnings)}`,
+    );
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('resolveDshProviderRoute still returns null when no enabled provider exists', () => {
+  const { resolveDshProviderRoute } = claudeSettings;
+  const route = withAppConfig({
+    model: { defaultModel: 'm-default', availableModels: [] },
+    providers: {
+      deepseek: {
+        enabled: false,
+        apiKey: 'sk-test',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiFormat: 'anthropic',
+        models: [{ id: 'm-default' }],
+      },
+    },
+  }, () => resolveDshProviderRoute('opencode-gone'));
+  assert.equal(route, null);
+});
+
 test('model id with provider hint resolves to the hinted provider on id collision', () => {
   const config = {
     model: { defaultModel: 'm1', availableModels: [] },
