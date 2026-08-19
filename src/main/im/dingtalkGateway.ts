@@ -18,6 +18,7 @@ import {
 import { uploadMediaToDingTalk, detectMediaType, getOapiAccessToken } from './dingtalkMedia';
 import { parseMediaMarkers } from './dingtalkMediaParser';
 import { createUtf8JsonBody, JSON_UTF8_CONTENT_TYPE, stringifyAsciiJson } from './jsonEncoding';
+import { tApp } from '../libs/appLanguage';
 
 const DINGTALK_API = 'https://api.dingtalk.com';
 
@@ -729,7 +730,7 @@ export class DingTalkGateway extends EventEmitter {
         await this.onMessageCallback(message, replyFn);
       } catch (error: any) {
         console.error(`[DingTalk Gateway] Error in message callback: ${error.message}`);
-        await replyFn(`❌ 处理消息时出错: ${error.message}`);
+        await replyFn(tApp(`❌ 处理消息时出错: ${error.message}`, `❌ Error while processing the message: ${error.message}`));
       }
     }
   }

@@ -12,6 +12,7 @@ import type { CoworkStore, CoworkMessage } from '../coworkStore';
 import type { IMStore } from './imStore';
 import { resolveSessionWorkingDirectory } from '../libs/botWorkspace';
 import type { IMMessage, IMPlatform, IMMediaAttachment } from './types';
+import { tApp } from '../libs/appLanguage';
 
 interface MessageAccumulator {
   messages: CoworkMessage[];
@@ -34,6 +35,7 @@ const PERMISSION_CONFIRM_TIMEOUT_MS = 60_000;
 const IM_ALLOW_RESPONSE_RE = /^(允许|同意|yes|y)$/i;
 const IM_DENY_RESPONSE_RE = /^(拒绝|不同意|no|n)$/i;
 const IM_ALLOW_OPTION_LABEL = '允许本次操作';
+const IM_ALLOW_OPTION_LABEL_EN = 'Allow this operation';
 
 export interface IMCoworkHandlerOptions {
   coworkRunner: CoworkRunner;
@@ -570,9 +572,11 @@ export class IMCoworkHandler extends EventEmitter {
       : '';
 
     return [
-      `检测到需要安全确认的操作（工具: ${request.toolName}）。`,
-      questionText ? `说明: ${questionText}` : '说明: 当前操作涉及删除或访问任务目录外路径。',
-      '请在 60 秒内回复“允许”或“拒绝”。',
+      tApp(`检测到需要安全确认的操作（工具: ${request.toolName}）。`, `A safety confirmation is required (tool: ${request.toolName}).`),
+      questionText
+        ? tApp(`说明: ${questionText}`, `Details: ${questionText}`)
+        : tApp('说明: 当前操作涉及删除或访问任务目录外路径。', 'Details: this operation deletes files or accesses a path outside the task directory.'),
+      tApp('请在 60 秒内回复“允许”或“拒绝”。', 'Reply with "yes" or "no" within 60 seconds.'),
     ].join('\n');
   }
 
@@ -600,7 +604,7 @@ export class IMCoworkHandler extends EventEmitter {
         : [];
       const preferredOption = options.find((option) => {
         const label = typeof option?.label === 'string' ? option.label : '';
-        return label.includes(IM_ALLOW_OPTION_LABEL);
+        return label.includes(IM_ALLOW_OPTION_LABEL) || label.includes(IM_ALLOW_OPTION_LABEL_EN);
       });
       const fallbackOption = options[0];
       const selectedLabel = typeof preferredOption?.label === 'string'
@@ -627,12 +631,12 @@ export class IMCoworkHandler extends EventEmitter {
       .trim()
       .replace(/[。！!,.，\s]+$/g, '');
     if (!normalizedReply) {
-      return '当前有待确认操作，请回复“允许”或“拒绝”（60 秒内）。';
+      return tApp('当前有待确认操作，请回复“允许”或“拒绝”（60 秒内）。', 'A confirmation is pending. Reply with "yes" or "no" (within 60 seconds).');
     }
 
     if (!this.coworkRunner.isSessionActive(pending.sessionId)) {
       this.clearPendingPermissionByKey(key);
-      return '该确认请求已过期，请重新发送任务。';
+      return tApp('该确认请求已过期，请重新发送任务。', 'This confirmation request expired. Please send the task again.');
     }
 
     if (IM_DENY_RESPONSE_RE.test(normalizedReply)) {
@@ -641,11 +645,11 @@ export class IMCoworkHandler extends EventEmitter {
         behavior: 'deny',
         message: 'Operation denied by IM user confirmation.',
       });
-      return '已拒绝本次操作，任务未继续执行。';
+      return tApp('已拒绝本次操作，任务未继续执行。', 'This operation was denied and the task did not continue.');
     }
 
     if (!IM_ALLOW_RESPONSE_RE.test(normalizedReply)) {
-      return '当前有待确认操作，请回复“允许”或“拒绝”（60 秒内）。';
+      return tApp('当前有待确认操作，请回复“允许”或“拒绝”（60 秒内）。', 'A confirmation is pending. Reply with "yes" or "no" (within 60 seconds).');
     }
 
     this.clearPendingPermissionByKey(key);

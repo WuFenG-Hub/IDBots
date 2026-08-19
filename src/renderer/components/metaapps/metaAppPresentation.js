@@ -27,8 +27,11 @@ export function filterCommunityMetaApps(apps, query) {
   });
 }
 
-export function buildUseMetaAppPrompt(app) {
+export function buildUseMetaAppPrompt(app, language = 'zh') {
   const name = String(app?.name || '').trim() || 'MetaApp';
+  if (language === 'en') {
+    return `Please help me use the local MetaApp ${name}. Open it if needed, and continue helping me complete the task with this app.`;
+  }
   return `请帮我使用本地元应用 ${name}。如果需要，请直接打开它，并基于这个应用继续协助我完成任务。`;
 }
 

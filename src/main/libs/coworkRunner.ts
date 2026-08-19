@@ -51,6 +51,7 @@ import {
   KNOWLEDGE_PROMPT_MAX_ITEMS,
   type KnowledgePromptEntry,
 } from './knowledgePromptBlocks';
+import { tApp } from './appLanguage';
 import { COWORK_CONTEXT_SAFETY_NET_RATIO, getCoworkContextBudget, isContextWindowExceededError, shouldIncludeCoworkContextMessage } from './coworkContextBudget';
 import { tryAutoAnswerLowRiskQuestion } from './coworkPermissionRisk';
 import type { CoworkContextUsage, CoworkUsageStats } from './coworkContextUsage';
@@ -323,7 +324,9 @@ const COWORK_BUILTIN_TOOLS: readonly string[] = [
   'Write',
 ];
 const SAFETY_APPROVAL_ALLOW_OPTION = '允许本次操作';
+const SAFETY_APPROVAL_ALLOW_OPTION_EN = 'Allow this operation';
 const SAFETY_APPROVAL_DENY_OPTION = '拒绝本次操作';
+const SAFETY_APPROVAL_DENY_OPTION_EN = 'Deny this operation';
 const DELETE_COMMAND_RE = /\b(rm|rmdir|unlink|del|erase|remove-item)\b/i;
 const FIND_DELETE_COMMAND_RE = /\bfind\b[\s\S]*\s-delete\b/i;
 const GIT_CLEAN_COMMAND_RE = /\bgit\s+clean\b/i;
@@ -4844,16 +4847,16 @@ export class CoworkRunner extends EventEmitter {
     return {
       questions: [
         {
-          header: '安全确认',
+          header: tApp('安全确认', 'Safety confirmation'),
           question,
           options: [
             {
-              label: SAFETY_APPROVAL_ALLOW_OPTION,
-              description: '仅允许当前这一次操作继续执行。',
+              label: tApp(SAFETY_APPROVAL_ALLOW_OPTION, SAFETY_APPROVAL_ALLOW_OPTION_EN),
+              description: tApp('仅允许当前这一次操作继续执行。', 'Allow only this one operation to continue.'),
             },
             {
-              label: SAFETY_APPROVAL_DENY_OPTION,
-              description: '拒绝当前操作，保持文件安全边界。',
+              label: tApp(SAFETY_APPROVAL_DENY_OPTION, SAFETY_APPROVAL_DENY_OPTION_EN),
+              description: tApp('拒绝当前操作，保持文件安全边界。', 'Deny this operation and keep the file safety boundary.'),
             },
           ],
         },
@@ -4890,7 +4893,7 @@ export class CoworkRunner extends EventEmitter {
       .split('|||')
       .map((value) => value.trim())
       .filter(Boolean)
-      .includes(SAFETY_APPROVAL_ALLOW_OPTION);
+      .some((value) => value === SAFETY_APPROVAL_ALLOW_OPTION || value === SAFETY_APPROVAL_ALLOW_OPTION_EN);
   }
 
   private async requestSafetyApproval(
@@ -4928,8 +4931,11 @@ export class CoworkRunner extends EventEmitter {
       const commandPreview = toolName === 'Bash'
         ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
         : '';
-      const deleteDetail = commandPreview ? ` 命令: ${commandPreview}` : '';
-      const deleteQuestion = `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`;
+      const deleteDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : '';
+      const deleteQuestion = tApp(
+        `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
+        `Tool "${toolName}" will delete files. Safety policy requires a human confirmation. Allow this operation?${deleteDetail}`
+      );
       const approved = await this.requestSafetyApproval(
         sessionId,
         signal,
@@ -6652,10 +6658,13 @@ export class CoworkRunner extends EventEmitter {
         const commandPreview = normalized === 'bash'
           ? this.truncateCommandPreview(this.extractToolCommand(toolInput))
           : ''
-        const deleteDetail = commandPreview ? ` 命令: ${commandPreview}` : ''
+        const deleteDetail = commandPreview ? tApp(` 命令: ${commandPreview}`, ` Command: ${commandPreview}`) : ''
         return {
           decision: 'ask',
-          reason: `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
+          reason: tApp(
+            `工具 "${toolName}" 将执行删除操作。根据安全策略，删除必须人工确认。是否允许本次操作？${deleteDetail}`,
+            `Tool "${toolName}" will delete files. Safety policy requires a human confirmation. Allow this operation?${deleteDetail}`
+          ),
         }
       }
       // Read guards (GT#12 parity with the Claude path's canUseTool block):

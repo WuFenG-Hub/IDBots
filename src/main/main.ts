@@ -30,6 +30,7 @@ import { SkillManager } from './skillManager';
 import { MetaAppManager } from './metaAppManager';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { getCurrentApiConfig, resolveCurrentApiConfig, resolveCurrentModelLimits, setStoreGetter, getPersistedAutoApproveTools, getPersistedCoworkPermissionMode, getPersistedCoworkEffortLevel, setPersistedCoworkPreference } from './libs/claudeSettings';
+import { getOsLocale, setAppLanguageStoreGetter, tApp } from './libs/appLanguage';
 import { loadClaudeSdk, prewarmClaudeSdk } from './libs/claudeSdk';
 import { flattenSubagentTranscriptMessages } from './libs/coworkSubagentTranscript';
 import { saveCoworkApiConfig } from './libs/coworkConfigStore';
@@ -2227,7 +2228,7 @@ const downloadMetafileWithDialog = async (
   const defaultName = sanitizeAttachmentFileName(options?.fileName || 'metafile');
   const ownerWindow = BrowserWindow.fromWebContents(webContents);
   const saveOptions = {
-    title: '保存交付文件',
+    title: tApp('保存交付文件', 'Save delivery file'),
     defaultPath: path.join(app.getPath('downloads'), defaultName),
   };
   const saveResult = ownerWindow
@@ -3830,6 +3831,7 @@ const getSqliteRecoveryCoordinator = (): SQLiteRecoveryCoordinator<SqliteStore> 
         store = null;
         storeInitPromise = null;
         setStoreGetter(() => store);
+        setAppLanguageStoreGetter(() => store);
       },
       closeStore: (storeToClose) => {
         try {
@@ -3848,6 +3850,7 @@ const getSqliteRecoveryCoordinator = (): SQLiteRecoveryCoordinator<SqliteStore> 
       publishStore: (nextStore) => {
         store = nextStore;
         setStoreGetter(() => store);
+        setAppLanguageStoreGetter(() => store);
       },
       stopServices: async () => {
         sqliteRecoveryRestartState = await stopSqliteBackedServicesForRecovery();
@@ -6735,7 +6738,7 @@ if (!gotTheLock) {
   });
 
   ipcMain.handle('app:getVersion', () => app.getVersion());
-  ipcMain.handle('app:getSystemLocale', () => app.getLocale());
+  ipcMain.handle('app:getSystemLocale', () => getOsLocale());
   ipcMain.handle('startup:rendererInitialized', () => {
     startupLog('renderer initialization complete');
     return {
@@ -13276,6 +13279,7 @@ ipcMain.handle('gigSquare:sendOrder', async (_event, params: {
     // Inject store getter into claudeSettings
     startupLog('setStoreGetter begin');
     setStoreGetter(() => store);
+    setAppLanguageStoreGetter(() => store);
     startupLog('setStoreGetter done');
 
     const manager = getSkillManager();

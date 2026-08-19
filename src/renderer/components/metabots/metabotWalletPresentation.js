@@ -1,9 +1,9 @@
 import Decimal from 'decimal.js';
 
 const SECTION_DEFS = [
-  { key: "nativeAssets", title: "原生币" },
-  { key: "mrc20Assets", title: "MRC20 Token" },
-  { key: "mvcFtAssets", title: "MVC Token" },
+  { key: "nativeAssets", titleKey: "metabotWalletNativeAssets" },
+  { key: "mrc20Assets", titleKey: "metabotWalletMrc20Assets" },
+  { key: "mvcFtAssets", titleKey: "metabotWalletMvcFtAssets" },
 ];
 function toItems(value) {
   return Array.isArray(value) ? value : [];
@@ -19,7 +19,7 @@ export function buildWalletAssetsSectionsViewModel({ assets, loading, error }) {
       else if (items.length === 0) state = "empty";
       return {
         key: section.key,
-        title: section.title,
+        titleKey: section.titleKey,
         state,
         items,
       };

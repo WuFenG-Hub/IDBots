@@ -123,7 +123,7 @@ test('A2A non-chain ordinary messages render as internal status instead of chat 
   );
 
   assert.match(markup, /本地执行结果，还没有发到链上。/);
-  assert.match(markup, /内部状态/);
+  assert.match(markup, /内部状态|Internal status/);
   assert.doesNotMatch(markup, /Local Bot/);
   assert.doesNotMatch(markup, /rounded-2xl/);
 });
@@ -330,10 +330,10 @@ test('A2A upload notice renders an order-scoped resend digital delivery action',
     }, true),
     true
   );
-  assert.match(markup, /再次发送数字成果/);
+  assert.match(markup, /再次发送数字成果|Resend digital delivery/);
   assert.match(markup, new RegExp(`data-order-txid="${orderTxid}"`));
   assert.doesNotMatch(markup, /\[ORDER_STATUS:/);
-  assert.match(markup, /内部状态/);
+  assert.match(markup, /内部状态|Internal status/);
 });
 
 test('A2A upload notice hides resend action when it is not tied to a seller order', () => {
@@ -389,7 +389,7 @@ test('A2A delivery image keeps metafile text and renders image preview for .jpg'
   assert.match(markup, /<img[^>]*src="https:\/\/file\.metaid\.io\/metafile-indexer\/api\/v1\/files\/accelerate\/content\/aabbccddeeff00112233445566778899i0"/);
   assert.match(markup, /PINID/);
   assert.match(markup, /aabbccddeeff00112233445566778899i0/);
-  assert.match(markup, /下载文件/);
+  assert.match(markup, /下载文件|Download file/);
   assert.match(markup, METAID_ACCELERATE_CONTENT_API_RE);
   assert.doesNotMatch(markup, METAID_CONTENT_API_RE);
   assert.doesNotMatch(markup, /metafile-indexer\/content\/aabbccddeeff00112233445566778899i0/);
@@ -416,7 +416,7 @@ test('A2A delivery renders embedded player for .mp4 metafile', () => {
   assert.match(markup, /<source[^>]*src="https:\/\/file\.metaid\.io\/metafile-indexer\/api\/v1\/files\/accelerate\/content\/ffeeddccbbaa99887766554433221100i0"/);
   assert.doesNotMatch(markup, /<source[^>]*src="https:\/\/file\.metaid\.io\/metafile-indexer\/api\/v1\/files\/content\/ffeeddccbbaa99887766554433221100i0"/);
   assert.match(markup, /PINID/);
-  assert.match(markup, /下载文件/);
+  assert.match(markup, /下载文件|Download file/);
 });
 
 test('A2A delivery previews modern image and video metafile extensions', () => {
@@ -461,7 +461,7 @@ test('A2A delivery renders embedded player for .mp3 metafile', () => {
   assert.match(markup, /<source[^>]*src="https:\/\/file\.metaid\.io\/metafile-indexer\/api\/v1\/files\/accelerate\/content\/11223344556677889900aabbccddeeffi0"/);
   assert.doesNotMatch(markup, /src="https:\/\/file\.metaid\.io\/metafile-indexer\/api\/v1\/files\/content\/11223344556677889900aabbccddeeffi0"/);
   assert.match(markup, /PINID/);
-  assert.match(markup, /下载文件/);
+  assert.match(markup, /下载文件|Download file/);
 });
 
 test('A2A metafile parser keeps accelerate URL primary and content URL fallback', () => {
@@ -613,7 +613,7 @@ test('A2A delivery renders pin id and download button for unsupported metafile e
   );
 
   assert.match(markup, /PINID/);
-  assert.match(markup, /下载文件/);
+  assert.match(markup, /下载文件|Download file/);
   assert.match(markup, /metafile:\/\/cafebabefeed00112233445566778899i0\.pdf/);
 });
 
@@ -633,6 +633,6 @@ test('A2A delivery renders pin id and download button for metafile without exten
   );
 
   assert.match(markup, /PINID/);
-  assert.match(markup, /下载文件/);
+  assert.match(markup, /下载文件|Download file/);
   assert.match(markup, /metafile:\/\/8899aabbccddeeff0011223344556677i0/);
 });

@@ -2,6 +2,7 @@ import { app, Tray, Menu, nativeImage, BrowserWindow } from 'electron';
 import path from 'path';
 import { APP_NAME } from './appConstants';
 import type { SqliteStore } from './sqliteStore';
+import { inferLanguageFromLocale, getOsLocale } from './libs/appLanguage';
 
 let tray: Tray | null = null;
 let contextMenu: Menu | null = null;
@@ -27,15 +28,22 @@ function getTrayIconPath(): string {
 }
 
 function getLabels(store: SqliteStore): { showWindow: string; newTask: string; settings: string; quit: string } {
+  let lang: 'zh' | 'en' = 'en';
   try {
-    const config = store.get<{ language?: string }>('app_config');
-    const lang = config?.language === 'en' ? 'en' : 'zh';
-    return lang === 'en'
-      ? { showWindow: 'Open IDBots', newTask: 'New Task', settings: 'Settings', quit: 'Quit' }
-      : { showWindow: '打开 IDBots', newTask: '新建任务', settings: '设置', quit: '退出' };
+    const config = store.get<{ language?: string; language_initialized?: boolean }>('app_config');
+    if (config?.language_initialized === true && (config.language === 'zh' || config.language === 'en')) {
+      lang = config.language;
+    } else if (config?.language === 'en') {
+      lang = 'en';
+    } else {
+      lang = inferLanguageFromLocale(getOsLocale());
+    }
   } catch {
-    return { showWindow: '打开 IDBots', newTask: '新建任务', settings: '设置', quit: '退出' };
+    lang = 'en';
   }
+  return lang === 'en'
+    ? { showWindow: 'Open IDBots', newTask: 'New Task', settings: 'Settings', quit: 'Quit' }
+    : { showWindow: '打开 IDBots', newTask: '新建任务', settings: '设置', quit: '退出' };
 }
 
 function buildContextMenu(getWindow: () => BrowserWindow | null, store: SqliteStore): Menu {

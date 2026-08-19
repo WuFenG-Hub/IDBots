@@ -17,6 +17,7 @@ import {
   IMMessage,
   DEFAULT_XIAOMIFENG_STATUS,
 } from './types';
+import { tApp } from '../libs/appLanguage';
 
 // ==================== Constants ====================
 
@@ -748,7 +749,7 @@ export class XiaomifengGateway extends EventEmitter {
       } catch (error: any) {
         console.error(`[Xiaomifeng Gateway] Error in message callback: ${error.message}`);
         try {
-          await replyFn(`处理消息时出错: ${error.message}`);
+          await replyFn(tApp(`处理消息时出错: ${error.message}`, `Error while processing the message: ${error.message}`));
         } catch (replyError: any) {
           console.error(`[Xiaomifeng Gateway] Failed to send error reply: ${replyError.message}`);
         }

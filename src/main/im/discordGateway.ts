@@ -22,6 +22,7 @@ import {
   DEFAULT_DISCORD_STATUS,
 } from './types';
 import { parseMediaMarkers, stripMediaMarkers } from './dingtalkMediaParser';
+import { tApp } from '../libs/appLanguage';
 
 export class DiscordGateway extends EventEmitter {
   private client: Client | null = null;
@@ -406,7 +407,7 @@ export class DiscordGateway extends EventEmitter {
           await this.onMessageCallback(imMessage, replyFn);
         } catch (error: any) {
           console.error(`[Discord Gateway] Error in message callback: ${error.message}`);
-          await replyFn(`处理消息时出错: ${error.message}`);
+          await replyFn(tApp(`处理消息时出错: ${error.message}`, `Error while processing the message: ${error.message}`));
         }
       }
     } catch (error: any) {
