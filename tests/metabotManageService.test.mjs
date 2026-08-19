@@ -18,6 +18,7 @@ const {
   listMetabotsForManagement,
   listConfiguredLlmProviders,
   requireMetabotLlmIdForCreate,
+  legacyLlmProviderKeyError,
   assertCanCreateMetabot,
   applyChatSkillOp,
 } = require('../dist-electron/main/services/metabotManageService.js');
@@ -99,6 +100,8 @@ const mockDeps = (store, overrides = {}) => ({
     })),
   onAfterMutation: overrides.onAfterMutation ?? (() => {}),
   getOwnerGlobalMetaId: overrides.getOwnerGlobalMetaId ?? (() => 'owner_gmid'),
+  // Default: provider catalog unavailable -> the legacy provider-key guard is skipped.
+  getLlmProviders: overrides.getLlmProviders ?? (() => undefined),
 });
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,118 @@ test('requireMetabotLlmIdForCreate throws on empty and trims valid input', () =>
   assert.throws(() => requireMetabotLlmIdForCreate('  '), /LLM Brain is required/);
   assert.throws(() => requireMetabotLlmIdForCreate(undefined), /LLM Brain is required/);
   assert.equal(requireMetabotLlmIdForCreate('  deepseek  '), 'deepseek');
+});
+
+// ---------------------------------------------------------------------------
+// legacy provider-key write guard (R3)
+// ---------------------------------------------------------------------------
+
+const GUARD_PROVIDERS = {
+  deepseek: { enabled: true, models: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-pro' }] },
+  opencode: { enabled: true, models: [{ id: 'deepseek-v4-flash' }] },
+};
+const withProviders = () => GUARD_PROVIDERS;
+
+test('legacyLlmProviderKeyError flags provider keys with an actionable message', () => {
+  assert.equal(
+    legacyLlmProviderKeyError('llm_id', 'opencode', GUARD_PROVIDERS),
+    "llm_id 'opencode' is a provider id; pass a MODEL id (e.g. 'deepseek-v4-flash') with llm_provider='opencode'",
+  );
+  // Provider-key matching is case-insensitive.
+  assert.match(legacyLlmProviderKeyError('llm_id', ' OpenCode ', GUARD_PROVIDERS), /provider id/);
+  // Fallback field names its own provider column.
+  assert.match(
+    legacyLlmProviderKeyError('fallback_llm_id', 'deepseek', GUARD_PROVIDERS),
+    /fallback_llm_id 'deepseek' is a provider id; pass a MODEL id \(e\.g\. 'deepseek-v4-flash'\) with fallback_llm_provider='deepseek'/,
+  );
+});
+
+test('legacyLlmProviderKeyError accepts model ids, empty values, and unknown catalogs', () => {
+  assert.equal(legacyLlmProviderKeyError('llm_id', 'deepseek-v4-pro', GUARD_PROVIDERS), null);
+  assert.equal(legacyLlmProviderKeyError('llm_id', 'some-model', GUARD_PROVIDERS), null);
+  assert.equal(legacyLlmProviderKeyError('llm_id', '', GUARD_PROVIDERS), null);
+  assert.equal(legacyLlmProviderKeyError('llm_id', null, GUARD_PROVIDERS), null);
+  // No provider catalog -> the guard never blocks a write it cannot judge.
+  assert.equal(legacyLlmProviderKeyError('llm_id', 'opencode', undefined), null);
+  // A genuine model id that happens to equal a provider key stays writable.
+  assert.equal(
+    legacyLlmProviderKeyError('llm_id', 'ollama', { ollama: { enabled: true, models: [{ id: 'ollama' }] } }),
+    null,
+  );
+});
+
+test('createMetaBotOnChainCore: rejects provider-key-shaped llm_id without creating', async () => {
+  const store = await openStore();
+  let walletCalls = 0;
+  const deps = mockDeps(store, {
+    getLlmProviders: withProviders,
+    createWallet: async () => { walletCalls += 1; return fakeWallet(2000); },
+  });
+  const res = await createMetaBotOnChainCore({ name: 'LegacyBrain', llm_id: 'opencode' }, deps);
+  assert.equal(res.success, false);
+  assert.match(res.error, /llm_id 'opencode' is a provider id; pass a MODEL id/);
+  assert.match(res.error, /llm_provider='opencode'/);
+  assert.equal(store.listMetabots().length, 0);
+  assert.equal(walletCalls, 0, 'rejected before wallet creation');
+});
+
+test('createMetaBotOnChainCore: rejects provider-key-shaped fallback_llm_id', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store, { getLlmProviders: withProviders });
+  const res = await createMetaBotOnChainCore(
+    { name: 'LegacyFallback', llm_id: 'deepseek-v4-pro', fallback_llm_id: 'deepseek' },
+    deps,
+  );
+  assert.equal(res.success, false);
+  assert.match(res.error, /fallback_llm_id 'deepseek' is a provider id/);
+  assert.equal(store.listMetabots().length, 0);
+});
+
+test('createMetaBotOnChainCore: accepts model ids with the guard active', async () => {
+  const store = await openStore();
+  const deps = mockDeps(store, { getLlmProviders: withProviders });
+  const res = await createMetaBotOnChainCore(
+    { name: 'ModernBrain', llm_id: 'deepseek-v4-flash', llm_provider: 'opencode', fallback_llm_id: 'deepseek-v4-pro' },
+    deps,
+  );
+  assert.equal(res.success, true);
+  assert.equal(res.metabot.llm_id, 'deepseek-v4-flash');
+  assert.equal(res.metabot.fallback_llm_id, 'deepseek-v4-pro');
+});
+
+test('applyMetabotUpdateLocal: rejects provider-key-shaped llm_id and keeps the stored value', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'Guarded', llm_id: 'deepseek-v4-pro' });
+  const res = applyMetabotUpdateLocal(store, m.id, { llm_id: 'opencode' }, {
+    getOwnerGlobalMetaId: () => 'owner_gmid',
+    getLlmProviders: withProviders,
+  });
+  assert.equal(res.success, false);
+  assert.match(res.error, /llm_id 'opencode' is a provider id; pass a MODEL id \(e\.g\. 'deepseek-v4-flash'\) with llm_provider='opencode'/);
+  assert.equal(store.getMetabotById(m.id).llm_id, 'deepseek-v4-pro', 'stored value unchanged');
+});
+
+test('applyMetabotUpdateLocal: rejects provider-key-shaped fallback_llm_id', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'GuardedFallback' });
+  const res = applyMetabotUpdateLocal(store, m.id, { fallback_llm_id: 'deepseek' }, {
+    getOwnerGlobalMetaId: () => 'owner_gmid',
+    getLlmProviders: withProviders,
+  });
+  assert.equal(res.success, false);
+  assert.match(res.error, /fallback_llm_id 'deepseek' is a provider id/);
+});
+
+test('applyMetabotUpdateLocal: accepts model ids and brain clearing with the guard active', async () => {
+  const store = await openStore();
+  const m = seedMetabot(store, { name: 'GuardedOk', llm_id: 'deepseek-v4-pro' });
+  const deps = { getOwnerGlobalMetaId: () => 'owner_gmid', getLlmProviders: withProviders };
+  const okModel = applyMetabotUpdateLocal(store, m.id, { llm_id: 'deepseek-v4-flash', llm_provider: 'opencode' }, deps);
+  assert.equal(okModel.success, true);
+  assert.equal(okModel.metabot.llm_id, 'deepseek-v4-flash');
+  // Clearing the fallback brain (null) is not a provider key.
+  const okClear = applyMetabotUpdateLocal(store, m.id, { fallback_llm_id: null }, deps);
+  assert.equal(okClear.success, true);
 });
 
 test('assertCanCreateMetabot is a no-op under the limit', () => {
