@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import AdmZip from 'adm-zip';
 
-import { createBotBrowserMetaAppCacheService } from '../src/main/services/botBrowserMetaAppCacheService.ts';
+import { createBotBrowserMetaAppCacheService, metaAppPreviewHtmlPreparationAvailable } from '../src/main/services/botBrowserMetaAppCacheService.ts';
 import { fetchContentWithFallback } from '../src/main/services/localIndexerProxy.ts';
 import {
   assertMetaAppZipDownloadIntegrity,
@@ -120,6 +120,74 @@ test('Bot Browser MetaApp cache resolver downloads, caches, and serves a MetaAPP
     assert.equal(emptyStats.data.artifactCount, 0);
     assert.equal(emptyStats.data.pinRecordCount, 0);
     assert.equal(emptyStats.data.activePreviewSessionCount, 0);
+  } finally {
+    await service.stop();
+    await rm(cacheRoot, { recursive: true, force: true });
+  }
+});
+
+test('Bot Browser MetaApp cache serves prepared preview HTML with Agent Internet URI support', async (t) => {
+  if (!metaAppPreviewHtmlPreparationAvailable()) t.skip('requires agent-browser-core >= 0.5.3');
+  const cacheRoot = await mkdtemp(path.join(os.tmpdir(), 'idbots-bot-browser-cache-'));
+  const metaAppPinId = 'd5'.repeat(32) + 'i0';
+  const codePinId = 'a1'.repeat(32) + 'i0';
+  const imagePinId = 'f4'.repeat(32) + 'i0';
+  const zip = new AdmZip();
+  zip.addFile('index.html', Buffer.from(
+    `<!doctype html><html><head></head><body><a href="metaapp://${metaAppPinId}">self</a><img src="metafile://${imagePinId}"></body></html>`,
+    'utf8',
+  ));
+  const zipBuffer = zip.toBuffer();
+  const service = createBotBrowserMetaAppCacheService({
+    cacheRoot,
+    resolveMetafileContentBaseUrl: () => 'https://content.example.test/files',
+    fetch: async (url) => {
+      if (String(url).endsWith(`/pin/${metaAppPinId}`)) {
+        return new Response(JSON.stringify({
+          code: 0,
+          data: {
+            pin: {
+              path: '/protocols/metaapp',
+              ownerGlobalMetaId: 'idq1publisher',
+              timestamp: 1_700_000_000,
+              contentSummary: JSON.stringify({
+                title: 'URI Homepage',
+                appName: 'uri-homepage',
+                runtime: 'browser',
+                version: '1.0.0',
+                indexFile: 'index.html',
+                contentType: 'application/zip',
+                codeType: 'application/zip',
+                content: `metafile://${codePinId}.zip`,
+              }),
+            },
+          },
+        }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      if (String(url).includes(codePinId)) {
+        return new Response(zipBuffer, {
+          status: 200,
+          headers: { 'content-type': 'application/zip' },
+        });
+      }
+      return new Response('not found', { status: 404 });
+    },
+  });
+
+  try {
+    const resolved = await service.resolveMetaAppPin(metaAppPinId);
+    assert.equal(resolved.ok, true);
+
+    const preview = await fetch(resolved.data.runUrl);
+    assert.equal(preview.status, 200);
+    const html = await preview.text();
+    assert.ok(html.includes(`href="metaapp://${metaAppPinId}"`), 'internal href should stay an Agent Internet URI');
+    assert.ok(html.includes(`src="https://content.example.test/files/${imagePinId}"`), 'metafile img src should be rewritten against the configured base');
+    assert.match(html, /__agentBrowserPreviewBridge/);
+    assert.match(html, /__agentBrowserPreviewStorageShim/);
   } finally {
     await service.stop();
     await rm(cacheRoot, { recursive: true, force: true });
