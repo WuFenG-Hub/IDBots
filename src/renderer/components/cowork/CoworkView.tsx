@@ -10,10 +10,10 @@ import { metaAppService } from '../../services/metaApp';
 import { skillService } from '../../services/skill';
 import { quickActionService } from '../../services/quickAction';
 import { i18nService } from '../../services/i18n';
+import { convertLegacyEffortLevel, type LlmEffortLevel } from '../../services/modelCatalog';
 import CoworkPromptInput, { type CoworkPromptInputRef } from './CoworkPromptInput';
 import CoworkSessionDetail from './CoworkSessionDetail';
 import BootstrapShortcuts from './BootstrapShortcuts';
-import ModelSelector from '../ModelSelector';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
 import WindowTitleBar from '../window/WindowTitleBar';
@@ -70,7 +70,18 @@ const CoworkView: React.FC<CoworkViewProps> = ({
     (id: number | null) => dispatch(setNewTaskMetabotId(id)),
     [dispatch],
   );
-  const [selectedMetabotLlmId, setSelectedMetabotLlmId] = useState<string | null>(null);
+  const [selectedMetabotBrain, setSelectedMetabotBrain] = useState<{
+    llm_id: string | null;
+    llm_provider?: string | null;
+    llm_effort?: string | null;
+  } | null>(null);
+  // Pending model+effort for the session about to be started from this home
+  // view. nulls = follow the selected bot's brain (its model and effort).
+  const [pendingModelEffort, setPendingModelEffort] = useState<{
+    modelId: string | null;
+    providerKey?: string | null;
+    effort: string | null;
+  } | null>(null);
   // Permission mode is a global preference persisted in app_config; the new
   // task composer shows and updates the same value every session/Bot uses.
   const [permissionMode, setPermissionModeState] = useState<CoworkPermissionMode>(
@@ -219,14 +230,19 @@ const CoworkView: React.FC<CoworkViewProps> = ({
   useEffect(() => {
     const id = selectedMetabotId;
     if (id == null) {
-      setSelectedMetabotLlmId(null);
+      setSelectedMetabotBrain(null);
       return;
     }
     let cancelled = false;
     const fetchMetaBot = async () => {
       const result = await window.electron?.metabot?.get?.(id);
       if (cancelled || !result?.success || !result.metabot) return;
-      setSelectedMetabotLlmId(result.metabot.llm_id ?? null);
+      const metabot = result.metabot;
+      setSelectedMetabotBrain({
+        llm_id: metabot.llm_id ?? null,
+        llm_provider: metabot.llm_provider ?? null,
+        llm_effort: metabot.llm_effort ?? null,
+      });
     };
     void fetchMetaBot();
     return () => { cancelled = true; };
@@ -366,6 +382,7 @@ const CoworkView: React.FC<CoworkViewProps> = ({
       // so they don't persist to next session
       dispatch(clearActiveSkills());
       dispatch(clearSelection());
+      setPendingModelEffort(null);
 
       const combinedSystemPrompt = await buildCombinedSystemPrompt(skillPrompt);
 
@@ -394,6 +411,10 @@ const CoworkView: React.FC<CoworkViewProps> = ({
         activeSkillIds: sessionSkillIds,
         metabotId: selectedMetabotId,
         permissionMode,
+        // Pending picker selection from the home composer; empty pick falls
+        // back to the selected bot's brain (its model and effort).
+        model: pendingModelEffort?.modelId ?? undefined,
+        effort: pendingModelEffort?.effort ?? undefined,
       });
 
       // Stop immediately if user cancelled while startup request was in flight.
@@ -597,7 +618,6 @@ const CoworkView: React.FC<CoworkViewProps> = ({
               {updateBadge}
             </div>
           )}
-          <ModelSelector restrictToLlmId={selectedMetabotLlmId} />
         </div>
         <WindowTitleBar inline />
       </div>
@@ -670,6 +690,23 @@ const CoworkView: React.FC<CoworkViewProps> = ({
               await coworkService.updateConfig({ workingDirectory: dir });
             }}
             showFolderSelector={true}
+            showModelSelector={true}
+            modelEffortValue={{
+              modelId: pendingModelEffort?.modelId ?? selectedMetabotBrain?.llm_id ?? null,
+              providerKey: pendingModelEffort?.modelId == null
+                ? (selectedMetabotBrain?.llm_provider ?? null)
+                : (pendingModelEffort?.providerKey ?? null),
+              effort: (pendingModelEffort?.effort
+                ?? (selectedMetabotBrain?.llm_effort ? convertLegacyEffortLevel(selectedMetabotBrain.llm_effort) : null)
+                ?? convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null)) as LlmEffortLevel | null,
+            }}
+            onModelEffortChange={(value) => {
+              setPendingModelEffort({
+                modelId: value.modelId,
+                providerKey: value.providerKey ?? null,
+                effort: value.effort,
+              });
+            }}
             onManageSkills={() => onShowSkills?.()}
             showPermissionModeSelector={true}
             permissionMode={permissionMode}

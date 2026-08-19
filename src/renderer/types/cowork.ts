@@ -628,6 +628,10 @@ export interface CoworkStartOptions {
   sessionType?: 'standard' | 'browser';
   /** Permission mode for this session. Defaults to 'default'. */
   permissionMode?: CoworkPermissionMode;
+  /** Pending model picked in the home composer; undefined = bot brain / defaults. */
+  model?: string | null;
+  /** Pending effort (off/low/high/max); undefined = tiered defaults, '' = model default. */
+  effort?: string | null;
 }
 
 // Continue session options

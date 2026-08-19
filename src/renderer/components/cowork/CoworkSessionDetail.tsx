@@ -2,6 +2,8 @@ import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMe
 import { useSelector } from 'react-redux';
 import { RootState } from '../../store';
 import { i18nService } from '../../services/i18n';
+import type { ModelEffortValue } from '../ModelEffortPicker';
+import { convertLegacyEffortLevel } from '../../services/modelCatalog';
 import type {
   CoworkMessage,
   CoworkMessageMetadata,
@@ -9,11 +11,9 @@ import type {
   CoworkServiceOrderSummary,
 } from '../../types/cowork';
 import type { Skill } from '../../types/skill';
-import type { Model } from '../../store/slices/modelSlice';
 import type { SettingsOpenOptions } from '../Settings';
 import CoworkPromptInput from './CoworkPromptInput';
 import PermissionModeSelector from './PermissionModeSelector';
-import EffortSelector from './EffortSelector';
 import SubagentPanel from './SubagentPanel';
 import TodoPanel from './TodoPanel';
 import UsageStatsChip from './UsageStatsChip';
@@ -2389,7 +2389,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   }, [currentSession?.messages]);
   const skills = useSelector((state: RootState) => state.skill.skills);
   const currentModelId = useSelector((state: RootState) => state.model.selectedModel?.id);
-  const availableModels = useSelector((state: RootState) => state.model.availableModels);
   // Per-session model override (picked in this conversation's model selector).
   // Optimistic local state on top of the persisted currentSession.model; reset
   // when switching sessions.
@@ -2398,24 +2397,29 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
     setSessionModelOverride(null);
   }, [currentSession?.id]);
   const sessionModelId = sessionModelOverride ?? currentSession?.model ?? null;
-  const sessionModelObject = sessionModelId
-    ? availableModels.find((model) => model.id === sessionModelId) ?? null
-    : null;
-  const handleSessionModelChange = async (model: Model) => {
+  // Per-session effort picked in the composer's model+effort picker. Optimistic
+  // local state on top of the persisted currentSession.effort; reset when
+  // switching sessions.
+  const [sessionEffortOverride, setSessionEffortOverride] = useState<string | null>(null);
+  useEffect(() => {
+    setSessionEffortOverride(null);
+  }, [currentSession?.id]);
+  const handleSessionModelEffortChange = async (value: ModelEffortValue) => {
     if (!currentSession) return;
-    setSessionModelOverride(model.id);
+    setSessionModelOverride(value.modelId);
+    setSessionEffortOverride(value.effort ?? '');
     try {
-      await window.electron?.cowork?.setSessionModel({ sessionId: currentSession.id, model: model.id });
+      await window.electron?.cowork?.setSessionModel({
+        sessionId: currentSession.id,
+        model: value.modelId,
+        effort: value.effort ?? '',
+      });
     } catch (modelError) {
       console.error('Failed to set session model:', modelError);
       setSessionModelOverride(null);
+      setSessionEffortOverride(null);
     }
   };
-  // Effort is a global preference persisted in app_config; initialize from the
-  // persisted value so every session/Bot shows the same selection.
-  const [effortOverride, setEffortOverride] = useState<string | null>(
-    configService.getConfig().coworkEffortLevel ?? null
-  );
   const [branchActionError, setBranchActionError] = useState<string | null>(null);
   const detailRootRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -2447,7 +2451,22 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
   const [renameValue, setRenameValue] = useState('');
   const renameInputRef = useRef<HTMLInputElement>(null);
   const ignoreNextBlurRef = useRef(false);
-  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
+  const [sessionMetabot, setSessionMetabot] = useState<{ name: string; avatar: string | null; llm_id: string | null; llm_provider?: string | null; llm_effort?: string | null; globalmetaid: string | null; metabot_type: string } | null>(null);
+  // Picker value: session pick wins, else the bound bot's brain (model id or
+  // legacy provider key — the picker resolves legacy keys for display), else
+  // nothing (global default). Effort mirrors the runtime tiering:
+  // session pick > bot brain effort > global default > model default.
+  const sessionUsesBrainModel = sessionModelId == null && Boolean(sessionMetabot?.llm_id);
+  const sessionModelEffortValue: ModelEffortValue = {
+    modelId: sessionModelId ?? sessionMetabot?.llm_id ?? null,
+    providerKey: sessionUsesBrainModel ? (sessionMetabot?.llm_provider ?? null) : null,
+    effort: (() => {
+      if (sessionEffortOverride != null) return (sessionEffortOverride || null) as ModelEffortValue['effort'];
+      if (currentSession?.effort) return convertLegacyEffortLevel(currentSession.effort);
+      if (sessionMetabot?.llm_effort) return convertLegacyEffortLevel(sessionMetabot.llm_effort);
+      return convertLegacyEffortLevel(configService.getConfig().coworkEffortLevel ?? null);
+    })(),
+  };
   // Whether any local Twin Bot exists yet. Drives the Welcome Bot's handoff
   // hint (no Twin → keep nudging) and its retirement banner (Twin exists →
   // offer to retire). Refreshed when a turn settles so a Twin created mid-chat
@@ -3790,17 +3809,6 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
                 disableControls={resolvedExecutionMode === 'sandbox'}
               />
               <TodoPanel messages={currentSession.messages} />
-              <EffortSelector
-                sessionId={currentSession.id}
-                currentEffort={effortOverride}
-                onEffortChange={(effort) => {
-                  setEffortOverride(effort);
-                  // Global preference: persist so all sessions/Bots + future
-                  // restarts keep the same effort level.
-                  void configService.updateConfig({ coworkEffortLevel: effort });
-                  void coworkService.setEffort(currentSession.id, effort);
-                }}
-              />
               <PermissionModeSelector
                 sessionId={currentSession.id}
                 currentMode={currentSession.permissionMode ?? 'default'}
@@ -3886,9 +3894,8 @@ const CoworkSessionDetail: React.FC<CoworkSessionDetailProps> = ({
               sessionKernel={currentSession.claudeSessionId
                 ? (currentSession.claudeSessionId.startsWith('dsh:') ? 'dsh' : 'claude')
                 : undefined}
-              restrictToLlmId={sessionMetabot?.llm_id ?? undefined}
-              modelValue={sessionModelObject}
-              onModelChange={handleSessionModelChange}
+              modelEffortValue={sessionModelEffortValue}
+              onModelEffortChange={handleSessionModelEffortChange}
               contextUsage={currentSession.contextUsage}
               suggestedPrompts={!isStreaming && latestPromptSuggestion ? [latestPromptSuggestion] : undefined}
             />

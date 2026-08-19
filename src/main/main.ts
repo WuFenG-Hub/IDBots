@@ -7315,6 +7315,9 @@ if (!gotTheLock) {
     metabotId?: number | null;
     sessionType?: 'standard' | 'browser';
     permissionMode?: 'default' | 'plan' | 'acceptEdits' | 'bypassPermissions';
+    /** Pending model+effort picked in the home composer; undefined = bot brain / defaults. */
+    model?: string | null;
+    effort?: string | null;
   }) => {
     return withSqliteRecovery('cowork:session:start', async () => {
     try {
@@ -7366,7 +7369,11 @@ if (!gotTheLock) {
         null,
         null,
         null,
-        options.permissionMode ?? 'default'
+        options.permissionMode ?? 'default',
+        options.model?.trim() || null,
+        // undefined effort keeps the tiered defaults (bot brain → global);
+        // an explicit '' pick means "model default" and is persisted as null.
+        options.effort === undefined ? null : (options.effort?.trim() || null)
       );
       const runner = getCoworkRunner();
 
@@ -7395,7 +7402,11 @@ if (!gotTheLock) {
         confirmationMode: 'modal',
         permissionMode: resolvedPermissionMode,
         autoApproveTools: getPersistedAutoApproveTools(),
-        effortOverride: getPersistedCoworkEffortLevel(),
+        // Explicit picker pick (even "Default") seeds the session; otherwise the
+        // persisted global effort applies.
+        effortOverride: options.effort !== undefined
+          ? (options.effort?.trim() || null)
+          : getPersistedCoworkEffortLevel(),
       }).catch(error => {
         console.error('Cowork session error:', error);
       });
@@ -8323,12 +8334,23 @@ if (!gotTheLock) {
     });
   });
 
-  ipcMain.handle('cowork:session:setModel', async (_event, options: { sessionId: string; model: string | null }) => {
+  ipcMain.handle('cowork:session:setModel', async (_event, options: {
+    sessionId: string;
+    model: string | null;
+    /** Optional per-session effort (off/low/high/max); undefined leaves it unchanged. */
+    effort?: string | null;
+  }) => {
     return withSqliteRecovery('cowork:session:setModel', async () => {
       try {
         const model = options.model?.trim() || null;
+        const effort = options.effort === undefined ? undefined : (options.effort?.trim() || null);
         const coworkStoreInstance = getCoworkStore();
-        coworkStoreInstance.setSessionModel(options.sessionId, model);
+        coworkStoreInstance.setSessionModel(options.sessionId, model, effort);
+        if (effort !== undefined) {
+          // Live-switch the in-flight session's effort so the next turn uses
+          // it without waiting for a session reload (mirrors setEffortOverride).
+          getCoworkRunner().setEffortOverride(options.sessionId, effort);
+        }
         return { success: true, model };
       } catch (error) {
         if (isSqliteWasmBoundsError(error)) throw error;

@@ -2,20 +2,20 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useSelector, useDispatch } from 'react-redux';
 import { PaperAirplaneIcon, StopIcon, FolderIcon } from '@heroicons/react/24/solid';
 import { PaperClipIcon, XMarkIcon, SparklesIcon } from '@heroicons/react/24/outline';
-import ModelSelector from '../ModelSelector';
+import ModelEffortPicker, { type ModelEffortValue } from '../ModelEffortPicker';
 import ContextUsageRing from '../ContextUsageRing';
 import FolderSelectorPopover from './FolderSelectorPopover';
 import PermissionModeSelector from './PermissionModeSelector';
 import { SkillsButton, ActiveSkillBadge } from '../skills';
 import KernelSelector from './KernelSelector';
 import { i18nService } from '../../services/i18n';
+import { configService } from '../../services/config';
 import { skillService } from '../../services/skill';
 import { RootState } from '../../store';
 import { setDraftPrompt, setSessionDraft } from '../../store/slices/coworkSlice';
 import { setSkills, toggleActiveSkill } from '../../store/slices/skillSlice';
 import { Skill } from '../../types/skill';
 import type { CoworkContextUsage, CoworkPermissionMode } from '../../types/cowork';
-import type { Model } from '../../store/slices/modelSlice';
 import { getCompactFolderName } from '../../utils/path';
 import {
   createVersionedComposerField,
@@ -155,11 +155,9 @@ interface CoworkPromptInputProps {
   showModelSelector?: boolean;
   /** Show the built-in attachment (paperclip) button. Hosts with their own attachment button can hide it. */
   showAttachmentButton?: boolean;
-  /** When set, restrict model choices to this LLM provider (e.g. from MetaBot llm_id). */
-  restrictToLlmId?: string | null;
-  /** Controlled per-session model: display value (null = fall back to the global default) + change handler. */
-  modelValue?: Model | null;
-  onModelChange?: (model: Model) => void;
+  /** Controlled per-session model+effort value for the picker (null = fall back to defaults). */
+  modelEffortValue?: ModelEffortValue | null;
+  onModelEffortChange?: (value: ModelEffortValue) => void;
   /** Estimated context-window usage of the current conversation; shows a ring indicator when provided. */
   contextUsage?: CoworkContextUsage | null;
   onManageSkills?: () => void;
@@ -191,9 +189,8 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
       showFolderSelector = false,
       showModelSelector = false,
       showAttachmentButton = true,
-      restrictToLlmId,
-      modelValue = null,
-      onModelChange,
+      modelEffortValue = null,
+      onModelEffortChange,
       contextUsage,
       onManageSkills,
       suggestedPrompts,
@@ -851,11 +848,11 @@ const CoworkPromptInput = React.forwardRef<CoworkPromptInputRef, CoworkPromptInp
                   </>
                 )}
                 {showModelSelector && (
-                  <ModelSelector
+                  <ModelEffortPicker
                     dropdownDirection="up"
-                    restrictToLlmId={restrictToLlmId}
-                    value={onModelChange ? modelValue : null}
-                    onChange={onModelChange}
+                    value={modelEffortValue ?? { modelId: null, providerKey: null, effort: null }}
+                    onChange={(value) => onModelEffortChange?.(value)}
+                    globalDefaultModel={configService.getConfig().model?.defaultModel ?? null}
                   />
                 )}
                 {showAttachmentButton ? (

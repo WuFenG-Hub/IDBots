@@ -5134,7 +5134,9 @@ export class CoworkRunner extends EventEmitter {
       autoApprove: options.autoApprove ?? false,
       disableMemoryUpdates: Boolean(options.disableMemoryUpdates),
       permissionMode: options.permissionMode ?? session.permissionMode ?? 'default',
-      effortOverride: options.effortOverride ?? null,
+      // Caller-provided seed (picker pick / global default) wins; otherwise
+      // hydrate the session's persisted effort so restarts keep the choice.
+      effortOverride: options.effortOverride ?? session.effort ?? null,
       thinkingOverride: null,
       autoApproveTools: new Set(
         (options.autoApproveTools ?? []).map((name) => name.trim().toLowerCase()).filter(Boolean)
