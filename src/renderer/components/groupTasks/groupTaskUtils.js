@@ -6,6 +6,18 @@
 
 export const ACTIVE_GROUP_TASK_STATUSES = ['planning', 'executing', 'review'];
 
+const STATUS_LABEL_KEYS = {
+  planning: 'groupTasksStatusPlanning',
+  executing: 'groupTasksStatusExecuting',
+  review: 'groupTasksStatusReview',
+  done: 'groupTasksStatusDone',
+  cancelled: 'groupTasksStatusCancelled',
+};
+
+export function groupTaskStatusLabelKey(status) {
+  return STATUS_LABEL_KEYS[status] ?? 'groupTasksStatusPlanning';
+}
+
 export function isActiveGroupTaskStatus(status) {
   return ACTIVE_GROUP_TASK_STATUSES.includes(status);
 }
@@ -144,26 +156,64 @@ export function groupTaskStatusBadgeClass(status) {
 }
 
 /**
- * Format a group-task timestamp for display. Accepts sqlite datetime('now')
+ * Parse a group-task timestamp into a Date. Accepts sqlite datetime('now')
  * text ('YYYY-MM-DD HH:MM:SS', UTC), epoch numbers, or null. On-chain
  * chain_timestamp is in SECONDS; smaller numbers (< 1e12) are treated as
  * seconds, larger ones as milliseconds.
  */
-export function formatGroupTaskTime(value) {
-  if (value == null || value === '') return '';
+export function toGroupTaskDate(value) {
+  if (value == null || value === '') return null;
   let date;
   if (typeof value === 'number' && Number.isFinite(value)) {
     const ms = value < 1e12 ? value * 1000 : value;
     date = new Date(ms);
   } else {
     const text = String(value).trim();
-    if (!text) return '';
+    if (!text) return null;
     // sqlite datetime('now') is UTC without a timezone marker.
     const normalized = text.includes('T') ? text : `${text.replace(' ', 'T')}Z`;
     date = new Date(normalized);
   }
-  if (Number.isNaN(date.getTime())) return '';
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+/**
+ * Format a group-task timestamp for display. Accepts sqlite datetime('now')
+ * text ('YYYY-MM-DD HH:MM:SS', UTC), epoch numbers, or null. On-chain
+ * chain_timestamp is in SECONDS; smaller numbers (< 1e12) are treated as
+ * seconds, larger ones as milliseconds.
+ */
+export function formatGroupTaskTime(value) {
+  const date = toGroupTaskDate(value);
+  if (!date) return '';
   return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+/**
+ * Compact relative time matching the local/A2A chat list (`19h`, `2d`).
+ * `unit`/`count` let the UI build an i18n tooltip. Pass `now` in tests.
+ */
+export function formatGroupTaskRelativeTime(value, now = Date.now()) {
+  const date = toGroupTaskDate(value);
+  if (!date) return { compact: '', unit: 'empty', count: 0 };
+  const diff = now - date.getTime();
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (minutes < 1) {
+    return { compact: 'now', unit: 'now', count: 0 };
+  }
+  if (minutes < 60) {
+    return { compact: `${minutes}m`, unit: 'minutes', count: minutes };
+  }
+  if (hours < 24) {
+    return { compact: `${hours}h`, unit: 'hours', count: hours };
+  }
+  if (days === 1) {
+    return { compact: '1d', unit: 'yesterday', count: 1 };
+  }
+  return { compact: `${days}d`, unit: 'days', count: days };
 }
 
 /**

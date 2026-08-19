@@ -103,6 +103,7 @@ const Sidebar: React.FC<SidebarProps> = ({
   const currentSessionId = useSelector((state: RootState) => state.cowork.currentSessionId);
   const unreadSessionIds = useSelector((state: RootState) => state.cowork.unreadSessionIds);
   const groupTasks = useSelector((state: RootState) => state.groupTasks.tasks);
+  const selectedGroupTaskId = useSelector((state: RootState) => state.groupTasks.selectedTaskId);
   const scheduledTasks = useSelector((state: RootState) => state.scheduledTask.tasks);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const dispatch = useDispatch();
@@ -437,6 +438,7 @@ const Sidebar: React.FC<SidebarProps> = ({
             {taskRecordTab === 'group' ? (
               <GroupTaskSidebarList
                 tasks={groupTasks}
+                selectedTaskId={selectedGroupTaskId}
                 onSelectTask={handleSelectGroupTask}
                 onTogglePin={handleToggleGroupTaskPin}
                 onRename={handleRenameGroupTask}

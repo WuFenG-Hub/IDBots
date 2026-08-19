@@ -282,11 +282,18 @@ class GroupTaskService {
 
   private toSummary(task: GroupTaskDetail): GroupTaskSummary {
     const members = task.members ?? [];
+    const previews = members.map((member) => ({
+      name: (member.name ?? member.displayName ?? '').trim(),
+      avatar: member.avatar ?? null,
+      role: member.role,
+      metabotId: member.metabotId,
+    }));
     return {
       ...task,
       memberCount: members.length,
       chairName: members.find((member) => member.role === 'chair')?.name ?? null,
-      memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
+      memberNames: previews.map((member) => member.name).filter(Boolean),
+      members: previews,
     };
   }
 }

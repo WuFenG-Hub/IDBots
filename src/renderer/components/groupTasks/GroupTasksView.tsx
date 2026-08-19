@@ -11,11 +11,18 @@ import OpenTeamCollabsSection from './OpenTeamCollabsSection';
 import OpenTeamCollabDetailView from './OpenTeamCollabDetailView';
 import {
   filterGroupTasksByTab,
-  formatGroupTaskTime,
+  formatGroupTaskRelativeTime,
   groupTaskStatusBadgeClass,
+  groupTaskStatusLabelKey,
   shortGroupId,
 } from './groupTaskUtils';
 import GroupTaskItemMenu, { PushPinIcon } from './GroupTaskItemMenu';
+import {
+  GroupTaskHoverCard,
+  GroupTaskMemberAvatarRow,
+  groupTaskMemberPreviews,
+  relativeTimeTitle,
+} from './GroupTaskListMeta';
 import { UserGroupIcon, EllipsisHorizontalIcon } from '@heroicons/react/24/outline';
 import SidebarToggleIcon from '../icons/SidebarToggleIcon';
 import ComposeIcon from '../icons/ComposeIcon';
@@ -29,24 +36,14 @@ interface GroupTasksViewProps {
   updateBadge?: React.ReactNode;
 }
 
-const STATUS_LABEL_KEYS: Record<string, string> = {
-  planning: 'groupTasksStatusPlanning',
-  executing: 'groupTasksStatusExecuting',
-  review: 'groupTasksStatusReview',
-  done: 'groupTasksStatusDone',
-  cancelled: 'groupTasksStatusCancelled',
-};
-
-export function groupTaskStatusLabelKey(status: string): string {
-  return STATUS_LABEL_KEYS[status] ?? 'groupTasksStatusPlanning';
-}
-
 const FILTER_TABS: Array<{ id: GroupTaskListTab; labelKey: string }> = [
   { id: 'active', labelKey: 'groupTasksFilterActive' },
   { id: 'done', labelKey: 'groupTasksFilterDone' },
   { id: 'cancelled', labelKey: 'groupTasksFilterCancelled' },
   { id: 'all', labelKey: 'groupTasksFilterAll' },
 ];
+
+export { groupTaskStatusLabelKey } from './groupTaskUtils';
 
 interface GroupTaskListItemProps {
   task: GroupTaskSummary;
@@ -63,8 +60,11 @@ const GroupTaskListItem: React.FC<GroupTaskListItemProps> = ({
   onRename,
   onArchive,
 }) => {
+  const [hoverRect, setHoverRect] = useState<DOMRect | null>(null);
   const displayTitle = task.displayName?.trim() || task.title;
   const actionLabel = i18nService.t('coworkSessionActions');
+  const members = groupTaskMemberPreviews(task);
+  const relative = formatGroupTaskRelativeTime(task.updatedAt ?? task.createdAt);
 
   const handleCopyGroupId = () => {
     const value = task.groupId?.trim() || `#${task.id}`;
@@ -97,6 +97,11 @@ const GroupTaskListItem: React.FC<GroupTaskListItemProps> = ({
             event.stopPropagation();
             api.openMenuAt(event.clientX, event.clientY);
           }}
+          onMouseEnter={(event) => {
+            if (api.isRenaming) return;
+            setHoverRect(event.currentTarget.getBoundingClientRect());
+          }}
+          onMouseLeave={() => setHoverRect(null)}
         >
           <div className="flex items-center gap-3">
             <div className="flex-1 min-w-0">
@@ -123,15 +128,19 @@ const GroupTaskListItem: React.FC<GroupTaskListItemProps> = ({
                   {i18nService.t(groupTaskStatusLabelKey(task.status))}
                 </span>
               </div>
-              <div className="mt-1 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary truncate">
-                {task.chairName ? `${task.chairName} (${i18nService.t('groupTasksChairBadge')})` : ''}
-                {task.memberNames.length > 0 ? ` · ${task.memberNames.join(', ')}` : ''}
-                {task.groupId ? ` · ${shortGroupId(task.groupId)}` : ''}
+              <div className="mt-1 flex items-center gap-2 text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
+                <GroupTaskMemberAvatarRow members={members} />
+                {task.groupId ? (
+                  <span className="shrink-0 truncate">{shortGroupId(task.groupId)}</span>
+                ) : null}
               </div>
             </div>
             <div className="shrink-0 text-right text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary">
-              <div>{task.memberCount} {i18nService.t('groupTasksMembers')}</div>
-              <div className="mt-0.5">{formatGroupTaskTime(task.updatedAt ?? task.createdAt)}</div>
+              {relative.compact ? (
+                <div title={relativeTimeTitle(relative.unit, relative.count)}>
+                  {relative.compact}
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -164,6 +173,7 @@ const GroupTaskListItem: React.FC<GroupTaskListItemProps> = ({
 
           {api.renderMenu()}
           {api.renderArchiveConfirm()}
+          {!api.isRenaming ? <GroupTaskHoverCard task={task} anchorRect={hoverRect} /> : null}
         </div>
       )}
     </GroupTaskItemMenu>

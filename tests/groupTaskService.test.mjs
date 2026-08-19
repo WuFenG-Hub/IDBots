@@ -535,6 +535,9 @@ test('listGroupTaskSummaries enriches with member count and chair/member names',
     assert.equal(summaries[0].memberCount, 3);
     assert.equal(summaries[0].chairName, 'Twin Bot');
     assert.deepEqual(summaries[0].memberNames.slice().sort(), ['Coder Bot', 'Designer Bot', 'Twin Bot']);
+    assert.equal(summaries[0].members.length, 3);
+    assert.ok(summaries[0].members.some((member) => member.role === 'chair' && member.name === 'Twin Bot'));
+    assert.ok(summaries[0].members.every((member) => 'avatar' in member));
     assert.equal((await listGroupTaskSummaries({ status: 'executing' })).length, 0);
   } finally {
     h.cleanup();
