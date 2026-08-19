@@ -619,6 +619,48 @@ export interface GroupTaskSummary extends GroupTask {
   memberCount: number;
   chairName: string | null;
   memberNames: string[];
+  members: GroupTaskMemberPreview[];
+}
+
+export interface GroupTaskMemberPreview {
+  name: string;
+  avatar: string | null;
+  role: GroupTaskMember['role'];
+  metabotId: number | null;
+}
+
+function buildMetabotAvatarMap(metabotIds: Array<number | null | undefined>): Map<number, string | null> {
+  const map = new Map<number, string | null>();
+  try {
+    const metabotStore = getMetabotStore();
+    for (const id of metabotIds) {
+      if (id == null || map.has(id)) continue;
+      map.set(id, metabotStore.getMetabotById(id)?.avatar ?? null);
+    }
+  } catch {
+    return map;
+  }
+  return map;
+}
+
+function toTaskSummary(
+  task: GroupTask,
+  members: GroupTaskMember[],
+  avatarById: Map<number, string | null>,
+): GroupTaskSummary {
+  const previews: GroupTaskMemberPreview[] = members.map((member) => ({
+    name: (member.name ?? member.displayName ?? '').trim(),
+    avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
+    role: member.role,
+    metabotId: member.metabotId,
+  }));
+  return {
+    ...task,
+    memberCount: members.length,
+    chairName: members.find((member) => member.role === 'chair')?.name ?? null,
+    memberNames: previews.map((member) => member.name).filter(Boolean),
+    members: previews,
+  };
 }
 
 /** listGroupTasks enriched with member count + chair/member names (IPC list surface). */
@@ -628,15 +670,10 @@ export async function listGroupTaskSummaries(
   const store = getGroupTaskStore();
   // The UI list hides archived tasks and sorts pinned ones first; internal
   // callers (listGroupTasks) still see the full set.
-  return store.listTasks({ ...filter, includeArchived: false }).map((task) => {
-    const members = store.listMembers(task.id);
-    return {
-      ...task,
-      memberCount: members.length,
-      chairName: members.find((member) => member.role === 'chair')?.name ?? null,
-      memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
-    };
-  });
+  const tasks = store.listTasks({ ...filter, includeArchived: false });
+  const membersByTask = tasks.map((task) => store.listMembers(task.id));
+  const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
+  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
 }
 
 /** Archived tasks (Settings restore panel), newest archive first. */
@@ -644,15 +681,10 @@ export async function listArchivedGroupTasks(
   options?: { offset?: number; limit?: number },
 ): Promise<GroupTaskSummary[]> {
   const store = getGroupTaskStore();
-  return store.listArchivedTasks(options).map((task) => {
-    const members = store.listMembers(task.id);
-    return {
-      ...task,
-      memberCount: members.length,
-      chairName: members.find((member) => member.role === 'chair')?.name ?? null,
-      memberNames: members.map((member) => member.name).filter((name): name is string => Boolean(name)),
-    };
-  });
+  const tasks = store.listArchivedTasks(options);
+  const membersByTask = tasks.map((task) => store.listMembers(task.id));
+  const avatarById = buildMetabotAvatarMap(membersByTask.flat().map((member) => member.metabotId));
+  return tasks.map((task, index) => toTaskSummary(task, membersByTask[index] ?? [], avatarById));
 }
 
 export async function countArchivedGroupTasks(): Promise<number> {
@@ -696,6 +728,8 @@ export async function unarchiveGroupTask(taskId: number): Promise<GroupTask> {
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Local MetaBot avatar data URL when this member maps to a metabots row. */
+  avatar?: string | null;
   /** Round-4 (show summary): epoch seconds of the member's last chain speech. */
   lastSpeakAt: number | null;
   /** P1-4: epoch seconds of the member's last `[WORKING]` tag message. */
@@ -883,6 +917,7 @@ export async function getGroupTask(
   // HITL: all human checkpoints (open + past), oldest first — loaded once and
   // reused for the detail payload and the open-checkpoint decision summary.
   const checkpoints = store.listCheckpoints(id);
+  const avatarById = buildMetabotAvatarMap(members.map((member) => member.metabotId));
   const membersWithStatus: GroupTaskMemberSummary[] = members.map((member) => {
     const gmid = (member.globalmetaid ?? '').trim().toLowerCase();
     const lastSpeakAt = gmid ? (speakMap.get(gmid) ?? null) : null;
@@ -894,6 +929,7 @@ export async function getGroupTask(
     const invite = inviteByGmid.get(gmid);
     return {
       ...member,
+      avatar: member.metabotId != null ? (avatarById.get(member.metabotId) ?? null) : null,
       lastSpeakAt,
       lastWorkingAt: lastWorkingAt != null ? lastWorkingAt * 1000 : null,
       workStatus: computeGroupTaskMemberWorkStatus({

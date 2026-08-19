@@ -481,6 +481,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
   const hintClass = 'text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-1';
   const inputChromeClass = 'px-3 py-2 text-sm rounded-xl dark:bg-claude-darkBg bg-claude-bg dark:text-claude-darkText text-claude-text border dark:border-claude-darkBorder border-claude-border focus:outline-none focus:ring-2 focus:ring-claude-accent';
   const inputClass = `w-full ${inputChromeClass}`;
+  const clearActionClass = 'shrink-0 px-3 py-2 text-xs rounded-xl border dark:border-claude-darkBorder border-claude-border text-red-500 dark:text-red-400 dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors whitespace-nowrap';
 
   const renderPanelError = (tab: MetaBotEditTabKey) => {
     const message = tabErrors[tab];
@@ -682,11 +683,11 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
               >
                 {i18nService.t('metabotGetOwnerMetaId')}
               </button>
-              {values.boss_global_metaid.trim() && (
+                  {values.boss_global_metaid.trim() && (
                 <button
                   type="button"
                   onClick={() => handleChange('boss_global_metaid', '')}
-                  className="shrink-0 px-3 py-2 text-xs rounded-xl border dark:border-claude-darkBorder border-claude-border text-red-500 dark:text-red-400 dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors whitespace-nowrap"
+                  className={clearActionClass}
                 >
                   {i18nService.t('metabotClearOwner')}
                 </button>
@@ -733,6 +734,7 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             ) : (
               <ModelEffortPicker
                 id="metabot-llm"
+                variant="field"
                 value={{
                   modelId: values.llm_id || null,
                   providerKey: values.llm_provider || null,
@@ -756,21 +758,24 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
             </label>
             <div className="min-w-0">
               {values.fallback_llm_id.trim() ? (
-                <div className="flex items-center gap-2 flex-wrap">
-                  <ModelEffortPicker
-                    id="metabot-fallback-llm"
-                    value={{
-                      modelId: values.fallback_llm_id || null,
-                      providerKey: values.fallback_llm_provider || null,
-                      effort: brainEffortOf(values.fallback_llm_effort),
-                    }}
-                    onChange={(selection) => {
-                      handleChange('fallback_llm_id', selection.modelId ?? '');
-                      handleChange('fallback_llm_provider', selection.providerKey ?? '');
-                      handleChange('fallback_llm_effort', selection.effort ?? '');
-                    }}
-                    globalDefaultModel={globalDefaultModel}
-                  />
+                <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <ModelEffortPicker
+                      id="metabot-fallback-llm"
+                      variant="field"
+                      value={{
+                        modelId: values.fallback_llm_id || null,
+                        providerKey: values.fallback_llm_provider || null,
+                        effort: brainEffortOf(values.fallback_llm_effort),
+                      }}
+                      onChange={(selection) => {
+                        handleChange('fallback_llm_id', selection.modelId ?? '');
+                        handleChange('fallback_llm_provider', selection.providerKey ?? '');
+                        handleChange('fallback_llm_effort', selection.effort ?? '');
+                      }}
+                      globalDefaultModel={globalDefaultModel}
+                    />
+                  </div>
                   <button
                     type="button"
                     onClick={() => {
@@ -778,9 +783,9 @@ const MetaBotEditTabs: React.FC<MetaBotEditTabsProps> = ({
                       handleChange('fallback_llm_provider', '');
                       handleChange('fallback_llm_effort', '');
                     }}
-                    className="px-2 py-1 text-xs rounded-lg border dark:border-claude-darkBorder border-claude-border dark:text-claude-darkTextSecondary text-claude-textSecondary dark:hover:bg-claude-darkSurfaceHover hover:bg-claude-surfaceHover transition-colors"
+                    className={clearActionClass}
                   >
-                    {i18nService.t('metabotFallbackLlmNone')}
+                    {i18nService.t('metabotClearOwner')}
                   </button>
                 </div>
               ) : (

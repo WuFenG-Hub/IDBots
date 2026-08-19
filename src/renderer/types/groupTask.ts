@@ -182,6 +182,8 @@ export interface GroupTaskAcceptanceSummary {
 }
 
 export interface GroupTaskMemberSummary extends GroupTaskMember {
+  /** Local MetaBot avatar data URL when this member maps to a metabots row. */
+  avatar?: string | null;
   /** Epoch seconds of the member's last chain speech (round-4). */
   lastSpeakAt?: number | null;
   /** Epoch ms of the member's last `[WORKING]` tag message (P1-4). */
@@ -238,6 +240,15 @@ export interface GroupTaskSummary extends GroupTask {
   memberCount: number;
   chairName: string | null;
   memberNames: string[];
+  /** Per-member preview for list avatars and the hover summary. */
+  members: GroupTaskMemberPreview[];
+}
+
+export interface GroupTaskMemberPreview {
+  name: string;
+  avatar: string | null;
+  role: GroupTaskMemberRole;
+  metabotId: number | null;
 }
 
 export interface GroupChatTranscriptMessage {

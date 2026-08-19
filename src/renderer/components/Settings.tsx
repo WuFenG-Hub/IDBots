@@ -29,6 +29,7 @@ import { groupTaskStatusLabelKey } from './groupTasks/GroupTasksView';
 import IMSettings from './im/IMSettings';
 import EmailSkillConfig from './skills/EmailSkillConfig';
 import MemorySettings from './settings/MemorySettings';
+import KernelSelector from './cowork/KernelSelector';
 import SkillMcpManager from './skills/SkillMcpManager';
 import ProjectsManager from './projects/ProjectsManager';
 import P2PConfigPanel from './p2p/P2PConfigPanel';
@@ -3009,6 +3010,21 @@ const Settings: React.FC<SettingsProps> = ({ onClose, initialTab, notice }) => {
                   {i18nService.t('feeRateLoading')}
                 </p>
               )}
+            </div>
+
+            <div>
+              <h4 className="text-sm font-medium dark:text-claude-darkText text-claude-text mb-1">
+                {i18nService.t('appKernel')}
+              </h4>
+              <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mb-4">
+                {i18nService.t('appKernelDesc')}
+              </p>
+              <div className="rounded-xl dark:bg-claude-darkSurfaceMuted bg-claude-surfaceMuted px-3 py-2.5">
+                <KernelSelector />
+              </div>
+              <p className="text-xs dark:text-claude-darkTextSecondary text-claude-textSecondary mt-2">
+                {i18nService.t('appKernelRestartHint')}
+              </p>
             </div>
           </div>
         );
